@@ -1,0 +1,2 @@
+[console_scripts]
+travian = travian_api.cli:app
