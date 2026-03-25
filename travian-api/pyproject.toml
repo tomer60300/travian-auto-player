@@ -30,6 +30,7 @@ dependencies = [
     "lxml>=4.9.0",
     "tenacity>=8.2.0",
     "rich>=13.0.0",  # For better CLI output
+    "pyyaml>=6.0",   # For build plan files
 ]
 
 [project.optional-dependencies]

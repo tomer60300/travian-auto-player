@@ -94,6 +94,7 @@ class VideoRewardService:
         reward_type: str,
         tick_delay_ms: int = 3000,
         wait_before_claim_s: float = 1.0,
+        **extra_params,
     ) -> VideoRewardResult:
         """
         Claim a video reward by simulating ATG ad playback.
@@ -135,6 +136,16 @@ class VideoRewardService:
                 open_endpoint = endpoint
                 if resource:
                     open_body["resource"] = resource
+            elif reward_type == "buildingUpgrade":
+                # buildingUpgrade requires villageId, slotId, buildingId
+                for key in ("villageId", "slotId", "buildingId"):
+                    if key in extra_params:
+                        open_body[key] = extra_params[key]
+                if not all(k in open_body for k in ("villageId", "slotId", "buildingId")):
+                    return VideoRewardResult(
+                        False, reward_type,
+                        "buildingUpgrade requires villageId, slotId, buildingId params"
+                    )
             
             open_data = await self.http_client.post_json(
                 f"/api/v1/videofeature/open/{open_endpoint}", open_body,
@@ -250,6 +261,12 @@ class VideoRewardService:
                     f"Server rejected: {ends_data.get('error')} - {ends_data.get('message', '')}",
                     str(ends_data),
                 )
+
+            # For buildingUpgrade: follow the redirectTo URL to actually start the build
+            redirect_to = ends_data.get("redirectTo")
+            if redirect_to and reward_type == "buildingUpgrade":
+                logger.info(f"Following buildingUpgrade redirect: {redirect_to}")
+                await self.http_client.get_html(redirect_to, skip_reauth=True)
 
             logger.info(f"Reward claimed successfully! Type: {reward_type}")
             return VideoRewardResult(
