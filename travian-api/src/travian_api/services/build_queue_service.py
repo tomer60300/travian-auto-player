@@ -1,0 +1,394 @@
+"""Priority Build Queue Service.
+
+Reads a build plan file and executes upgrades in priority order,
+waiting for resources and empty construction queue.
+
+Plan file format (YAML):
+```yaml
+village: 75483          # village ID
+plan:
+  - building: Cropland   # building name (partial match OK)
+    target: 3            # target level
+    priority: 1          # 1=highest, 5=lowest
+  - building: Cranny
+    target: 3
+    priority: 2
+  - building: Residence
+    target: 5
+    priority: 2
+  - building: Clay Pit
+    target: 3
+    priority: 3
+```
+
+Execution rules:
+- Process priorities 1..5 in order
+- Within same priority: first building whose conditions are met goes first
+- Conditions: queue empty + enough resources
+- After starting a build, wait for it to finish before next
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import yaml
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional, Dict, Any, Callable
+
+from ..clients.http_client import HttpClient
+from ..exceptions import TravianError
+from ..logging_config import get_logger
+from .building_service import BuildingService
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class BuildPlanItem:
+    """Single item in the build plan."""
+    building: str       # Building name (partial match)
+    target: int         # Target level
+    priority: int       # 1=highest, 5=lowest
+    slot_id: int = 0    # Resolved slot ID (filled at runtime)
+    current_level: int = 0
+    status: str = "pending"  # pending | building | done | skipped
+
+
+@dataclass
+class BuildPlan:
+    """Full build plan for a village."""
+    village_id: int
+    items: List[BuildPlanItem]
+    
+    @classmethod
+    def from_file(cls, path: str | Path) -> "BuildPlan":
+        """Load build plan from YAML file."""
+        with open(path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+        
+        village_id = data.get('village', data.get('village_id', 0))
+        items = []
+        for entry in data.get('plan', []):
+            items.append(BuildPlanItem(
+                building=entry['building'],
+                target=entry.get('target', entry.get('level', 1)),
+                priority=entry.get('priority', 5),
+            ))
+        
+        return cls(village_id=village_id, items=items)
+    
+    def pending_items(self) -> List[BuildPlanItem]:
+        """Get items not yet done, sorted by priority."""
+        return sorted(
+            [i for i in self.items if i.status == "pending"],
+            key=lambda x: x.priority
+        )
+    
+    def next_priority(self) -> Optional[int]:
+        """Get the next priority level to process."""
+        pending = self.pending_items()
+        return pending[0].priority if pending else None
+
+
+class BuildQueueService:
+    """Executes a build plan with priority ordering."""
+    
+    def __init__(self, http_client: HttpClient):
+        self.http_client = http_client
+        self.building_service = BuildingService(http_client)
+        self._on_status: Optional[Callable[[str], None]] = None
+    
+    def on_status(self, callback: Callable[[str], None]):
+        """Set status callback for progress reporting."""
+        self._on_status = callback
+    
+    def _report(self, msg: str):
+        """Report status."""
+        logger.info(msg)
+        if self._on_status:
+            self._on_status(msg)
+    
+    async def resolve_slots(self, plan: BuildPlan):
+        """Resolve building names to slot IDs."""
+        if plan.village_id:
+            await self.http_client.get_html(f"/dorf1.php?newdid={plan.village_id}")
+        
+        buildings = await self.building_service.get_village_buildings()
+        
+        for item in plan.items:
+            search = item.building.lower()
+            # Find matching building
+            for b in buildings:
+                if search in b.name.lower():
+                    # Check if this building's level matches (we want the one at target-1)
+                    if b.level == item.target - 1:
+                        item.slot_id = b.slot_id
+                        item.current_level = b.level
+                        break
+                    elif item.slot_id == 0:
+                        # Take first match as fallback
+                        item.slot_id = b.slot_id
+                        item.current_level = b.level
+            
+            if item.slot_id == 0:
+                self._report(f"WARNING: Could not find '{item.building}' in village")
+                item.status = "skipped"
+            elif item.current_level >= item.target:
+                self._report(f"SKIP: {item.building} already at level {item.current_level} (target {item.target})")
+                item.status = "done"
+            else:
+                self._report(f"FOUND: {item.building} at slot {item.slot_id} (Lv{item.current_level} -> {item.target})")
+    
+    async def check_resources(self, slot_id: int) -> Dict[str, Any]:
+        """Check if resources are sufficient for upgrade.
+        
+        Returns dict with:
+            can_build: bool
+            missing: dict of resource shortages
+            costs: dict of upgrade costs
+        """
+        detail = await self.building_service.get_building_detail(slot_id)
+        resources = await self.building_service.get_resources()
+        
+        costs = detail.costs or {}
+        current = {
+            'lumber': resources.lumber,
+            'clay': resources.clay,
+            'iron': resources.iron,
+            'crop': resources.crop,
+        }
+        
+        missing = {}
+        for res, needed in costs.items():
+            if res in current and current[res] < needed:
+                missing[res] = needed - current[res]
+        
+        return {
+            'can_build': len(missing) == 0 and detail.checksum is not None,
+            'has_checksum': detail.checksum is not None,
+            'missing': missing,
+            'costs': costs,
+            'current': current,
+        }
+    
+    async def is_queue_empty(self) -> bool:
+        """Check if construction queue is empty."""
+        queue = await self.building_service.get_construction_queue()
+        return len(queue) == 0
+    
+    async def get_queue_remaining(self) -> int:
+        """Get seconds remaining on current construction. 0 if empty."""
+        queue = await self.building_service.get_construction_queue()
+        if not queue:
+            return 0
+        return max(q.remaining_seconds for q in queue) if queue else 0
+    
+    async def execute_plan(
+        self,
+        plan: BuildPlan,
+        poll_interval_s: int = 30,
+        max_wait_s: int = 7200,  # 2 hours max
+        dry_run: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute build plan in priority order.
+        
+        Args:
+            plan: Build plan to execute
+            poll_interval_s: How often to check conditions (seconds)
+            max_wait_s: Max time to wait for conditions to be met
+            dry_run: If True, only report what would happen
+            
+        Returns:
+            List of results per build item
+        """
+        results = []
+        
+        # Resolve building slots
+        await self.resolve_slots(plan)
+        
+        # Dry run: just show the plan in order, check resources
+        if dry_run:
+            for prio in sorted(set(i.priority for i in plan.items)):
+                items = [i for i in plan.items if i.priority == prio and i.status == "pending"]
+                if not items:
+                    continue
+                self._report(f"\n--- Priority {prio} ({len(items)} items) ---")
+                for item in items:
+                    check = await self.check_resources(item.slot_id)
+                    ready = "READY" if check['can_build'] else f"WAITING (missing: {check['missing']})"
+                    self._report(f"  {item.building} Lv{item.current_level}->{item.target} "
+                                f"(slot {item.slot_id}, cost: {check['costs']}) [{ready}]")
+                    results.append({
+                        'building': item.building,
+                        'slot_id': item.slot_id,
+                        'level': f"{item.current_level} -> {item.target}",
+                        'status': 'dry_run',
+                        'ready': check['can_build'],
+                        'missing': check['missing'],
+                    })
+            return results
+        
+        while True:
+            next_prio = plan.next_priority()
+            if next_prio is None:
+                self._report("All items completed!")
+                break
+            
+            # Get all items at this priority level
+            prio_items = [i for i in plan.items 
+                         if i.priority == next_prio and i.status == "pending"]
+            
+            if not prio_items:
+                break
+            
+            self._report(f"\n--- Processing priority {next_prio} ({len(prio_items)} items) ---")
+            
+            # Find first item whose conditions are met
+            built_one = False
+            waited = 0
+            
+            while not built_one and waited < max_wait_s:
+                # First check: is queue empty?
+                queue_empty = await self.is_queue_empty()
+                
+                if not queue_empty:
+                    remaining = await self.get_queue_remaining()
+                    self._report(f"Queue busy ({remaining}s remaining). Waiting...")
+                    wait_time = min(remaining + 5, poll_interval_s)
+                    await asyncio.sleep(wait_time)
+                    waited += wait_time
+                    continue
+                
+                # Queue is empty — check which item has resources
+                for item in prio_items:
+                    if item.status != "pending":
+                        continue
+                    
+                    check = await self.check_resources(item.slot_id)
+                    
+                    if check['can_build']:
+                        self._report(f"BUILDING: {item.building} Lv{item.current_level} -> {item.target}"
+                                     f" (slot {item.slot_id}, costs: {check['costs']})")
+                        
+                        if dry_run:
+                            self._report("  (dry run - would build)")
+                            item.status = "done"
+                            results.append({
+                                'building': item.building,
+                                'slot_id': item.slot_id,
+                                'level': f"{item.current_level} -> {item.target}",
+                                'status': 'dry_run',
+                            })
+                            built_one = True
+                            break
+                        
+                        # Actually upgrade
+                        result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False)
+                        
+                        if result.success:
+                            item.status = "done"
+                            self._report(f"  Started! Time: {result.construction_time}")
+                            results.append({
+                                'building': item.building,
+                                'slot_id': item.slot_id,
+                                'level': f"{item.current_level} -> {item.target}",
+                                'status': 'started',
+                                'time': result.construction_time,
+                            })
+                            built_one = True
+                        else:
+                            self._report(f"  FAILED: {result.raw_response[:100]}")
+                            # If blocked by gold guard, it means queue wasn't actually empty
+                            if 'BLOCKED' in (result.raw_response or ''):
+                                break  # Re-check queue
+                            item.status = "skipped"
+                            results.append({
+                                'building': item.building,
+                                'slot_id': item.slot_id,
+                                'status': 'failed',
+                                'error': result.raw_response[:200],
+                            })
+                        break
+                    else:
+                        missing_str = ', '.join(f"{k}: {v}" for k, v in check['missing'].items())
+                        if not check['has_checksum']:
+                            self._report(f"  {item.building}: no checksum (requirements not met?)")
+                        # Don't spam — only log first time
+                
+                if not built_one:
+                    self._report(f"No items ready at priority {next_prio}. "
+                                f"Waiting {poll_interval_s}s for resources...")
+                    await asyncio.sleep(poll_interval_s)
+                    waited += poll_interval_s
+            
+            if not built_one:
+                self._report(f"Timeout waiting for priority {next_prio} items")
+                for item in prio_items:
+                    if item.status == "pending":
+                        item.status = "skipped"
+                break
+        
+        return results
+    
+    async def execute_plan_continuous(
+        self,
+        plan: BuildPlan,
+        poll_interval_s: int = 30,
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute entire plan continuously — waits for each build to finish
+        before starting next.
+        
+        This is the main entry point for the auto-builder.
+        """
+        all_results = []
+        
+        await self.resolve_slots(plan)
+        
+        while True:
+            pending = plan.pending_items()
+            if not pending:
+                self._report("Build plan complete!")
+                break
+            
+            next_prio = pending[0].priority
+            prio_items = [i for i in pending if i.priority == next_prio]
+            
+            self._report(f"\n=== Priority {next_prio}: {len(prio_items)} items ===")
+            for pi in prio_items:
+                self._report(f"  {pi.building} Lv{pi.current_level} -> {pi.target} (slot {pi.slot_id})")
+            
+            # Wait for queue to be empty
+            while not await self.is_queue_empty():
+                remaining = await self.get_queue_remaining()
+                self._report(f"Waiting for queue ({remaining}s)...")
+                wait = min(remaining + 5, 60)
+                await asyncio.sleep(wait)
+            
+            # Try each item at this priority
+            built = False
+            for item in prio_items:
+                check = await self.check_resources(item.slot_id)
+                if check['can_build']:
+                    result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False)
+                    if result.success:
+                        self._report(f"STARTED: {item.building} Lv{item.current_level}->{item.target} ({result.construction_time})")
+                        item.status = "done"
+                        all_results.append({
+                            'building': item.building,
+                            'level': f"{item.current_level}->{item.target}",
+                            'status': 'started',
+                            'time': result.construction_time,
+                        })
+                        built = True
+                        break
+            
+            if not built:
+                # No resources for any item at this priority — wait and retry
+                self._report(f"Insufficient resources for priority {next_prio} items. Waiting {poll_interval_s}s...")
+                await asyncio.sleep(poll_interval_s)
+        
+        return all_results

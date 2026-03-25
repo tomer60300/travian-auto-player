@@ -20,6 +20,7 @@ from .config import Settings
 from .clients.http_client import HttpClient
 from .services.auth_service import AuthService
 from .services.building_service import BuildingService
+from .services.build_queue_service import BuildQueueService, BuildPlan
 from .services.military_service import MilitaryService
 from .services.reports_service import ReportsService
 from .services.target_resolver import TargetResolver
@@ -365,6 +366,74 @@ def reports_show(
             else:
                 console.print(f"Type: {rtype}")
                 console.print(detail)
+    _run(_do())
+
+
+# -- Build Queue ---------------------------------------------------------------
+queue_app = typer.Typer(name="queue", help="Priority build queue commands")
+app.add_typer(queue_app)
+
+
+@queue_app.command("run")
+def queue_run(
+    plan_file: str = typer.Argument(..., help="Path to YAML build plan file"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Only show what would be built"),
+    poll: int = typer.Option(30, "--poll", help="Poll interval in seconds"),
+):
+    """Execute a build plan in priority order. Waits for resources and empty queue."""
+    async def _do():
+        s = _settings()
+        plan = BuildPlan.from_file(plan_file)
+        console.print(f"Loaded plan: village {plan.village_id}, {len(plan.items)} items")
+        for item in sorted(plan.items, key=lambda x: x.priority):
+            console.print(f"  P{item.priority}: {item.building} -> Lv{item.target}")
+
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            bqs = BuildQueueService(client)
+            bqs.on_status(lambda msg: console.print(f"  {msg}"))
+
+            if dry_run:
+                results = await bqs.execute_plan(plan, poll_interval_s=poll, dry_run=True)
+            else:
+                results = await bqs.execute_plan_continuous(plan, poll_interval_s=poll)
+
+            console.print(f"\n[bold]Results:[/bold]")
+            for r in results:
+                status = r.get('status', '?')
+                color = 'green' if status == 'started' else 'yellow' if status == 'dry_run' else 'red'
+                console.print(f"  [{color}]{r['building']} {r.get('level','')} - {status}[/{color}]"
+                              f"  {r.get('time','')}")
+    _run(_do())
+
+
+@queue_app.command("validate")
+def queue_validate(
+    plan_file: str = typer.Argument(..., help="Path to YAML build plan file"),
+):
+    """Validate a build plan file and check current building levels."""
+    async def _do():
+        s = _settings()
+        plan = BuildPlan.from_file(plan_file)
+        console.print(f"Village: {plan.village_id}")
+        console.print(f"Items: {len(plan.items)}")
+
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            bqs = BuildQueueService(client)
+            bqs.on_status(lambda msg: console.print(f"  {msg}"))
+            await bqs.resolve_slots(plan)
+
+            console.print(f"\nPlan status:")
+            for p in sorted(set(i.priority for i in plan.items)):
+                items = [i for i in plan.items if i.priority == p]
+                console.print(f"\n  Priority {p}:")
+                for i in items:
+                    status_color = 'green' if i.status == 'done' else 'red' if i.status == 'skipped' else 'yellow'
+                    console.print(f"    [{status_color}]{i.building}[/{status_color}]"
+                                  f" slot={i.slot_id} Lv{i.current_level}->{i.target} [{i.status}]")
     _run(_do())
 
 
