@@ -51,8 +51,8 @@ def main_callback(
         _password_override = password
 
 
-def _settings() -> Settings:
-    """Build settings from .env + CLI overrides."""
+def _settings(interactive: bool = True) -> Settings:
+    """Build settings from .env + CLI overrides. Prompts for missing values if interactive."""
     s = Settings()
     if _server_override:
         s.base_url = _server_override.rstrip("/")
@@ -61,15 +61,37 @@ def _settings() -> Settings:
     if _password_override:
         s.password = _password_override
     
-    # Validate all three auth params are present
-    missing = []
-    if not s.base_url:
-        missing.append("server (--server or TRAVIAN_BASE_URL)")
-    if not s.username:
-        missing.append("username (--username or TRAVIAN_USERNAME)")
-    if not s.password:
-        missing.append("password (--password or TRAVIAN_PASSWORD)")
-    if missing:
+    # Check what's missing
+    missing_server = not s.base_url
+    missing_username = not s.username
+    missing_password = not s.password
+    
+    if not any([missing_server, missing_username, missing_password]):
+        return s
+    
+    # If interactive (TTY), prompt for missing values
+    if interactive and sys.stdin.isatty():
+        if missing_server:
+            s.base_url = typer.prompt("Server URL (e.g. https://ts1.x1.europe.travian.com)").rstrip("/")
+        if missing_username:
+            s.username = typer.prompt("Username/email")
+        if missing_password:
+            s.password = typer.prompt("Password", hide_input=True)
+        
+        # Offer to save to .env
+        if any([missing_server, missing_username, missing_password]):
+            save = typer.confirm("Save credentials to .env?", default=True)
+            if save:
+                _save_env(s)
+    else:
+        # Non-interactive: fail with guidance
+        missing = []
+        if missing_server:
+            missing.append("server (--server or TRAVIAN_BASE_URL)")
+        if missing_username:
+            missing.append("username (--username or TRAVIAN_USERNAME)")
+        if missing_password:
+            missing.append("password (--password or TRAVIAN_PASSWORD)")
         console.print(f"[red]Missing required auth config:[/red]")
         for m in missing:
             console.print(f"  - {m}")
@@ -77,6 +99,31 @@ def _settings() -> Settings:
         raise typer.Exit(1)
     
     return s
+
+
+def _save_env(s: Settings) -> None:
+    """Save settings to .env file."""
+    from pathlib import Path
+    env_path = Path(".env")
+    
+    # Read existing .env if it exists (preserve other settings)
+    existing = {}
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, val = line.partition("=")
+                existing[key.strip()] = val.strip()
+    
+    # Update with new values
+    existing["TRAVIAN_BASE_URL"] = s.base_url
+    existing["TRAVIAN_USERNAME"] = s.username
+    existing["TRAVIAN_PASSWORD"] = s.password
+    
+    # Write back
+    lines = [f"{k}={v}" for k, v in existing.items()]
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print(f"[green]Saved to {env_path.resolve()}[/green]")
 
 
 def _run(coro):
