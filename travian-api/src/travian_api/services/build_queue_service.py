@@ -442,6 +442,9 @@ class BuildQueueService:
                     detail = await self.building_service.get_building_detail(item.slot_id, village_id=vid) if use_video else None
 
                     result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False, village_id=vid)
+                    if not result.success:
+                        self._report(f"  UPGRADE FAILED: {item.building} (slot {item.slot_id}) - {result.raw_response[:200] if result.raw_response else 'unknown error'}")
+                        continue
                     if result.success:
                         next_level = item.current_level + 1
                         self._report(f"STARTED: {item.building} Lv{item.current_level}->{next_level} ({result.construction_time})")
