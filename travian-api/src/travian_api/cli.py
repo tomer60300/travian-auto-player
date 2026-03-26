@@ -537,12 +537,24 @@ def queue_validate(
             bqs.on_status(lambda msg: console.print(f"  {msg}"))
             await bqs.resolve_slots(plan)
 
-            console.print(f"\nPlan status:")
-            for p in sorted(set(i.priority for i in plan.items)):
-                items = [i for i in plan.items if i.priority == p]
+            # Show skipped items separately
+            skipped = [i for i in plan.items if i.status == "skipped"]
+            active = [i for i in plan.items if i.status != "skipped"]
+
+            if skipped:
+                console.print(f"\n[red]Skipped ({len(skipped)}):[/red]")
+                for i in skipped:
+                    reason = f"expect '{i.expect}' mismatch" if i.expect else "not found"
+                    console.print(f"  [red]X[/red] slot={i.slot_id} target={i.target} ({reason})")
+
+            console.print(f"\nBuild plan ({len(active)} items):")
+            for p in sorted(set(i.priority for i in active)):
+                items = [i for i in active if i.priority == p]
+                if not items:
+                    continue
                 console.print(f"\n  Priority {p}:")
                 for i in items:
-                    status_color = 'green' if i.status == 'done' else 'red' if i.status == 'skipped' else 'yellow'
+                    status_color = 'green' if i.status == 'done' else 'yellow'
                     console.print(f"    [{status_color}]{i.building}[/{status_color}]"
                                   f" slot={i.slot_id} Lv{i.current_level}->{i.target} [{i.status}]")
     _run(_do())
