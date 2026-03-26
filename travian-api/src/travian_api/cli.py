@@ -489,6 +489,7 @@ def queue_run(
     dry_run: bool = typer.Option(False, "--dry-run", help="Only show what would be built"),
     poll: int = typer.Option(30, "--poll", help="Poll interval in seconds"),
     use_video: bool = typer.Option(False, "--use-video", help="Claim buildingUpgrade video reward after each upgrade (~33s extra)"),
+    verbose: bool = typer.Option(False, "--verbose", help="Show current resources and detailed cost breakdown"),
 ):
     """Execute a build plan in priority order. Waits for resources and empty queue."""
     async def _do():
@@ -508,7 +509,7 @@ def queue_run(
             if dry_run:
                 results = await bqs.execute_plan(plan, poll_interval_s=poll, dry_run=True)
             else:
-                results = await bqs.execute_plan_continuous(plan, poll_interval_s=poll, use_video=use_video)
+                results = await bqs.execute_plan_continuous(plan, poll_interval_s=poll, use_video=use_video, verbose=verbose)
 
             console.print(f"\n[bold]Results:[/bold]")
             for r in results:
