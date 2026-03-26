@@ -177,6 +177,58 @@ def _parse_troops_table(table) -> Dict[str, int]:
     return troops
 
 
+def _parse_troops_losses(table) -> Dict[str, int]:
+    """
+    Parse troop losses from a troop table.
+
+    Losses are in the third tbody (class 'units last') or a tbody with class 'losses'.
+    Loss values are typically negative or shown as casualties.
+    """
+    losses = {}
+    tbodies = table.find_all('tbody', class_='units')
+    if len(tbodies) < 2:
+        return losses
+
+    # Unit keys from first tbody
+    header_tbody = tbodies[0]
+    unit_keys = []
+    for td in header_tbody.find_all('td', class_='uniticon'):
+        img = td.find('img', class_=re.compile(r'\bunit\b'))
+        if img:
+            cls_list = img.get('class', [])
+            uid = next((c for c in cls_list if re.match(r'^u\d+$|^uhero$', c)), None)
+            alt = img.get('alt', '').strip()
+            unit_keys.append(uid or alt)
+        else:
+            unit_keys.append(None)
+
+    # Third tbody (index 2) or tbody with 'last' class = losses
+    loss_tbody = None
+    if len(tbodies) >= 3:
+        loss_tbody = tbodies[2]
+    else:
+        loss_tbody = table.find('tbody', class_='last')
+
+    if not loss_tbody:
+        return losses
+
+    loss_row = loss_tbody.find('tr')
+    if not loss_row:
+        return losses
+
+    loss_cells = loss_row.find_all('td', class_='unit')
+    for key, cell in zip(unit_keys, loss_cells):
+        if key is None:
+            continue
+        raw = cell.get_text(strip=True).replace(',', '')
+        # Losses may appear as negative numbers or plain numbers
+        cleaned = raw.lstrip('-')
+        if cleaned.isdigit() and int(cleaned) > 0:
+            losses[key] = int(cleaned)
+
+    return losses
+
+
 def _extract_player_village(soup: BeautifulSoup, role: str) -> Dict[str, Any]:
     """Extract player + village info from a role div (attacker/defender)."""
     info: Dict[str, Any] = {
@@ -296,9 +348,11 @@ def parse_battle_report(html: str) -> BattleReportData:
     attacker_info = _extract_player_village(soup, 'attacker')
     defender_info = _extract_player_village(soup, 'defender')
 
-    # Troops per role
+    # Troops and losses per role
     attacker_troops: Dict[str, int] = {}
     defender_troops: Dict[str, int] = {}
+    attacker_losses: Dict[str, int] = {}
+    defender_losses: Dict[str, int] = {}
 
     attacker_role = soup.find('div', class_=re.compile(r'\brole\s+attacker\b'))
     if attacker_role:
@@ -306,6 +360,9 @@ def parse_battle_report(html: str) -> BattleReportData:
             t = _parse_troops_table(table)
             if t:
                 attacker_troops.update(t)
+            l = _parse_troops_losses(table)
+            if l:
+                attacker_losses.update(l)
 
     defender_role = soup.find('div', class_=re.compile(r'\brole\s+defender\b'))
     if defender_role:
@@ -313,6 +370,9 @@ def parse_battle_report(html: str) -> BattleReportData:
             t = _parse_troops_table(table)
             if t:
                 defender_troops.update(t)
+            l = _parse_troops_losses(table)
+            if l:
+                defender_losses.update(l)
 
     # Battle result — from div.outcome elements
     # e.g. "Attacker with no losses" = attacker won
@@ -368,37 +428,84 @@ def parse_battle_report(html: str) -> BattleReportData:
         defender_troops=defender_troops,
         battle_result=battle_result,
         bounty=bounty,
-        attacker_losses={},
-        defender_losses={},
+        attacker_losses=attacker_losses,
+        defender_losses=defender_losses,
     )
+
+
+# Scout unit IDs as they appear in HTML class attributes (e.g. class="unit u4")
+# u4 = Equites Legati (Romans), u8 = Scout (Teutons), u12 = Pathfinder (Gauls)
+SCOUT_UNIT_IDS = {'u4', 'u8', 'u12'}
+
+
+def _has_troop_losses(soup: BeautifulSoup) -> bool:
+    """Check if the report shows troop losses (indicates a battle, not a scout)."""
+    # Loss rows in troop tables have class 'losses' or contain struck-through numbers
+    for tbody in soup.find_all('tbody', class_='units last'):
+        for td in tbody.find_all('td', class_='unit'):
+            text = td.get_text(strip=True).replace(',', '')
+            if text.lstrip('-').isdigit() and int(text) != 0:
+                return True
+    # Also check for casualty rows explicitly
+    for span in soup.find_all('span', class_='casualty'):
+        return True
+    return False
+
+
+def _get_attacker_unit_ids(soup: BeautifulSoup) -> set:
+    """Extract set of unit IDs (e.g. {'u4'}) from the attacker's troop table."""
+    unit_ids = set()
+    attacker_role = soup.find('div', class_=re.compile(r'\brole\s+attacker\b'))
+    if not attacker_role:
+        return unit_ids
+    for table in attacker_role.find_all('table'):
+        troops = _parse_troops_table(table)
+        for uid, count in troops.items():
+            if count > 0:
+                unit_ids.add(uid)
+    return unit_ids
 
 
 def parse_individual_report(html: str) -> Dict[str, Any]:
     """
     Detect report type and parse accordingly.
 
+    Detection strategy:
+    - Scout reports: additionalInformation with Resources row AND attacker troops
+      are exclusively scout units (u4/u8/u12) or empty
+    - Battle reports: have attacker/defender roles with non-scout troops or losses
+    - Battle reports with bounty: additionalInformation has a resourceWrapper but
+      attacker used combat troops — bounty is parsed as stolen resources
+
     Returns dict with keys: type, data
     """
-    # Determine type by icon or content
-    # Scout reports have the additionalInformation table with Resources row
     soup = BeautifulSoup(html, 'html.parser')
 
-    # Scout reports: have additionalInformation table with "Resources" th
-    # AND the attacker only has scouts (u14) or no visible troops
-    # Battle reports: have actual troop losses or no additionalInformation with resources
+    has_attacker = bool(soup.find('div', class_=re.compile(r'\brole\s+attacker\b')))
+    has_defender = bool(soup.find('div', class_=re.compile(r'\brole\s+defender\b')))
+
+    # Check for additionalInformation table with Resources header
     ai_table = soup.find('table', class_='additionalInformation')
     has_resources_row = False
     if ai_table:
         for th in ai_table.find_all('th'):
-            if th.get_text(strip=True).lower() in ('resources', 'information'):
+            header_text = th.get_text(strip=True).lower()
+            if header_text == 'resources':
                 has_resources_row = True
                 break
 
-    if has_resources_row:
-        return {'type': 'scout', 'data': parse_scout_report(html)}
+    if has_resources_row and (has_attacker or has_defender):
+        # Both scout reports and battle-with-bounty have resources in additionalInformation.
+        # Distinguish by checking what troops the attacker sent.
+        attacker_units = _get_attacker_unit_ids(soup)
+        is_scout_only = (not attacker_units) or attacker_units.issubset(SCOUT_UNIT_IDS)
+        has_losses = _has_troop_losses(soup)
 
-    has_attacker = bool(soup.find('div', class_=re.compile(r'\brole\s+attacker\b')))
-    has_defender = bool(soup.find('div', class_=re.compile(r'\brole\s+defender\b')))
+        if is_scout_only and not has_losses:
+            return {'type': 'scout', 'data': parse_scout_report(html)}
+        else:
+            # Battle with bounty — parse as battle (bounty captured in parse_battle_report)
+            return {'type': 'battle', 'data': parse_battle_report(html)}
 
     if has_attacker or has_defender:
         return {'type': 'battle', 'data': parse_battle_report(html)}

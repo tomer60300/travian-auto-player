@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import io
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 
 # Force UTF-8 output on Windows so non-ASCII village names display correctly
 if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
@@ -24,6 +24,7 @@ from .services.build_queue_service import BuildQueueService, BuildPlan
 from .services.military_service import MilitaryService
 from .services.reports_service import ReportsService
 from .services.target_resolver import TargetResolver
+from .services.video_reward_service import VideoRewardService, REWARD_TYPES
 
 app = typer.Typer(name="travian", help="Travian Legends API - Game automation library and CLI", add_completion=False)
 console = Console(highlight=False)
@@ -434,6 +435,137 @@ def queue_validate(
                     status_color = 'green' if i.status == 'done' else 'red' if i.status == 'skipped' else 'yellow'
                     console.print(f"    [{status_color}]{i.building}[/{status_color}]"
                                   f" slot={i.slot_id} Lv{i.current_level}->{i.target} [{i.status}]")
+    _run(_do())
+
+
+# ── Video Rewards ─────────────────────────────────────────────────────
+video_app = typer.Typer(name="video", help="Video reward commands")
+app.add_typer(video_app)
+
+PRODUCTION_REWARDS = [
+    "lumberProductionBonus",
+    "clayProductionBonus",
+    "ironProductionBonus",
+    "cropProductionBonus",
+]
+
+
+@video_app.command("available")
+def video_available():
+    """Check which video rewards are currently available."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            vrs = VideoRewardService(client)
+            try:
+                rewards = await vrs.get_available_rewards()
+            finally:
+                await vrs.close()
+
+            if not rewards:
+                console.print("[yellow]No reward data returned[/yellow]")
+                return
+
+            table = Table(title="Video Rewards")
+            table.add_column("Reward", style="cyan")
+            table.add_column("Available", justify="center")
+            table.add_column("Active", justify="center")
+
+            for key in PRODUCTION_REWARDS:
+                available = rewards.get(key, False)
+                active = rewards.get(key.replace("ProductionBonus", "_active"), False)
+                avail_str = "[green]yes[/green]" if available else "[red]no[/red]"
+                active_str = "[yellow]active[/yellow]" if active else "-"
+                table.add_row(key, avail_str, active_str)
+
+            console.print(table)
+    _run(_do())
+
+
+@video_app.command("claim")
+def video_claim(
+    reward_type: str = typer.Argument(..., help=f"Reward type: {', '.join(REWARD_TYPES.keys())}"),
+    village_id: Optional[int] = typer.Option(None, "--village-id", help="Village ID (for buildingUpgrade)"),
+    slot_id: Optional[int] = typer.Option(None, "--slot-id", help="Slot ID (for buildingUpgrade)"),
+    building_id: Optional[int] = typer.Option(None, "--building-id", help="Building ID (for buildingUpgrade)"),
+):
+    """Claim a video reward. Takes ~33 seconds due to ATG timing requirements."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            vrs = VideoRewardService(client)
+            try:
+                extra: Dict[str, Any] = {}
+                if reward_type == "buildingUpgrade":
+                    if not all([village_id, slot_id, building_id]):
+                        console.print("[red]buildingUpgrade requires --village-id, --slot-id, --building-id[/red]")
+                        raise typer.Exit(1)
+                    extra = {"villageId": village_id, "slotId": slot_id, "buildingId": building_id}
+
+                console.print(f"Claiming [cyan]{reward_type}[/cyan] — this takes ~33 seconds...")
+                from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TextColumn("{task.completed}/{task.total}s"),
+                    console=console,
+                ) as progress:
+                    task = progress.add_task("Simulating video", total=33)
+                    # Run claim in background, update progress in parallel
+                    claim_task = asyncio.ensure_future(vrs.claim_reward(reward_type, **extra))
+                    for i in range(33):
+                        if claim_task.done():
+                            progress.update(task, completed=33)
+                            break
+                        await asyncio.sleep(1)
+                        progress.update(task, advance=1)
+                    result = await claim_task
+
+                if result.success:
+                    console.print(f"[green]✓ {result.message}[/green]")
+                else:
+                    console.print(f"[red]✗ {result.message}[/red]")
+                    if result.raw:
+                        console.print(f"  Raw: {result.raw[:200]}")
+            finally:
+                await vrs.close()
+    _run(_do())
+
+
+@video_app.command("claim-all")
+def video_claim_all():
+    """Claim all available production boost rewards in sequence."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            vrs = VideoRewardService(client)
+            try:
+                rewards = await vrs.get_available_rewards()
+                available = [r for r in PRODUCTION_REWARDS if rewards.get(r, False)]
+
+                if not available:
+                    console.print("[yellow]No production rewards available[/yellow]")
+                    return
+
+                console.print(f"Found {len(available)} available reward(s): {', '.join(available)}")
+                for i, rtype in enumerate(available, 1):
+                    console.print(f"\n[{i}/{len(available)}] Claiming [cyan]{rtype}[/cyan] (~33s)...")
+                    result = await vrs.claim_reward(rtype)
+                    if result.success:
+                        console.print(f"  [green]✓ {result.message}[/green]")
+                    else:
+                        console.print(f"  [red]✗ {result.message}[/red]")
+
+                console.print(f"\n[bold]Done — processed {len(available)} rewards[/bold]")
+            finally:
+                await vrs.close()
     _run(_do())
 
 
