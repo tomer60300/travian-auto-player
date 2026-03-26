@@ -380,6 +380,7 @@ def queue_run(
     plan_file: str = typer.Argument(..., help="Path to YAML build plan file"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Only show what would be built"),
     poll: int = typer.Option(30, "--poll", help="Poll interval in seconds"),
+    use_video: bool = typer.Option(False, "--use-video", help="Claim buildingUpgrade video reward after each upgrade (~33s extra)"),
 ):
     """Execute a build plan in priority order. Waits for resources and empty queue."""
     async def _do():
@@ -387,7 +388,8 @@ def queue_run(
         plan = BuildPlan.from_file(plan_file)
         console.print(f"Loaded plan: village {plan.village_id}, {len(plan.items)} items")
         for item in sorted(plan.items, key=lambda x: x.priority):
-            console.print(f"  P{item.priority}: {item.building} -> Lv{item.target}")
+            label = f"slot {item.slot}" if item.slot else item.building
+            console.print(f"  P{item.priority}: {label} -> Lv{item.target}")
 
         async with HttpClient(s) as client:
             auth = AuthService(client, s)
@@ -398,7 +400,7 @@ def queue_run(
             if dry_run:
                 results = await bqs.execute_plan(plan, poll_interval_s=poll, dry_run=True)
             else:
-                results = await bqs.execute_plan_continuous(plan, poll_interval_s=poll)
+                results = await bqs.execute_plan_continuous(plan, poll_interval_s=poll, use_video=use_video)
 
             console.print(f"\n[bold]Results:[/bold]")
             for r in results:
