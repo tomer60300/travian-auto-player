@@ -428,7 +428,7 @@ class BuildQueueService:
                     missing = check.get('missing', {})
                     costs_str = ' '.join(f"{k}={v}" for k, v in costs.items()) if costs else 'unknown'
                     missing_str = ' '.join(f"{k}={v}" for k, v in missing.items()) if missing else 'none'
-                    self._report(f"  {item.building} (slot {item.slot_id}): needs [{costs_str}] — missing [{missing_str}]")
+                    self._report(f"  {item.building} (slot {item.slot_id}): needs [{costs_str}] | missing [{missing_str}]")
                 if check['can_build']:
                     # Get building detail for gid (needed for video reward)
                     detail = await self.building_service.get_building_detail(item.slot_id, village_id=vid) if use_video else None
@@ -459,11 +459,11 @@ class BuildQueueService:
                                     if vr.success:
                                         self._report(f"  VIDEO: Speed-up applied!")
                                     else:
-                                        self._report(f"  VIDEO: Failed — {vr.message}")
+                                        self._report(f"  VIDEO: Failed - {vr.message}")
                                 finally:
                                     await vrs.close()
                             except Exception as e:
-                                self._report(f"  VIDEO: Error — {e}")
+                                self._report(f"  VIDEO: Error - {e}")
 
                         # Multi-level: update current_level, only mark done when target reached
                         item.current_level = next_level
