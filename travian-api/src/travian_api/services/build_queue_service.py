@@ -422,13 +422,18 @@ class BuildQueueService:
             # Try each item at this priority
             built = False
             for item in prio_items:
-                check = await self.check_resources(item.slot_id, village_id=vid)
+                try:
+                    check = await self.check_resources(item.slot_id, village_id=vid)
+                except Exception as e:
+                    if verbose:
+                        self._report(f"  {item.building} (slot {item.slot_id}): error checking resources - {e}")
+                    continue
                 if verbose and not check['can_build']:
                     costs = check.get('costs', {})
                     missing = check.get('missing', {})
-                    costs_str = ' '.join(f"{k}={v}" for k, v in costs.items()) if costs else 'unknown'
-                    missing_str = ' '.join(f"{k}={v}" for k, v in missing.items()) if missing else 'none'
-                    self._report(f"  {item.building} (slot {item.slot_id}): needs [{costs_str}] | missing [{missing_str}]")
+                    costs_str = ', '.join(f"{k}={v}" for k, v in costs.items()) if costs else 'unknown'
+                    missing_str = ', '.join(f"{k}={v}" for k, v in missing.items()) if missing else 'none'
+                    self._report(f"  {item.building} (slot {item.slot_id}): costs({costs_str}) missing({missing_str})")
                 if check['can_build']:
                     # Get building detail for gid (needed for video reward)
                     detail = await self.building_service.get_building_detail(item.slot_id, village_id=vid) if use_video else None
