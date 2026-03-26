@@ -175,19 +175,24 @@ class BuildingService:
             elif '&buildmaster' not in upgrade_url:
                 upgrade_url += '&buildmaster'
             
+            # Add village context if needed
+            if village_id and f'newdid={village_id}' not in upgrade_url:
+                sep = '&' if '?' in upgrade_url else '?'
+                upgrade_url += f'{sep}newdid={village_id}'
+            
             # Perform upgrade by GET request to the URL
             response_html = await self.http_client.get_html(upgrade_url, skip_reauth=True)
             
             # Success detection: after upgrade, server redirects to dorf1/dorf2 page
             # which shows the construction queue with the new item.
-            # Check for the building in the queue OR check that no error dialog appeared.
             import re
             has_queue_item = bool(re.search(r'showCancelBuildingDialog', response_html))
             has_error_dialog = bool(re.search(r'class="errorMessage"', response_html))
-            # Also check for specific error messages
             not_enough = 'notEnough' in response_html or 'not_enough' in response_html
+            # Also check for buildDuration (queue timer) as alternative success indicator
+            has_build_duration = bool(re.search(r'buildDuration|underConstruction', response_html))
             
-            success = has_queue_item and not has_error_dialog and not not_enough
+            success = (has_queue_item or has_build_duration) and not has_error_dialog and not not_enough
             
             return UpgradeResult(
                 success=success,
