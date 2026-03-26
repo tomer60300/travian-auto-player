@@ -72,35 +72,181 @@ travian auth status
 # List all buildings in your village
 travian building list
 
-# List only specific building types (e.g., type 1 = Woodcutter)
-travian building list --building-type 1
+# Show current resources
+travian building resources
 
-# Upgrade a building at slot 15
-travian building upgrade 15
+# Show construction queue
+travian building queue
+
+# Upgrade a building by slot ID (refuses if queue occupied — gold guard)
+travian building upgrade --slot-id 15
+
+# Allow gold spend (master builder) if queue is occupied
+travian building upgrade --slot-id 15 --allow-gold
 ```
 
 #### Military Operations
 
 ```bash
-# Send 5 scouts to coordinates (100, 200)
-travian military scout "100,200" --scouts 5
+# Send scouts to coordinates
+travian military scout --x 100 --y 200 --amount 5
 
-# Send raid with specific troops
-travian military raid "50,-30" --troops "t1=10,t2=5,t3=2"
+# Scout type: resources (default) or defenses
+travian military scout --x 100 --y 200 --amount 3 --type defenses
+
+# Send a raid with specific troops
+travian military raid --x 50 --y -30 --troop t1=10 --troop t2=5
 ```
 
 #### Reports
 
 ```bash
 # List recent reports (last 24 hours)
-travian reports list --max-age 24
+travian reports list --max-age-hours 24
 
 # Show detailed report content
 travian reports show <report-id>
-
-# Filter by report type
-travian reports list --report-type scout
 ```
+
+#### Video Rewards
+
+```bash
+# Check which video rewards are available
+travian video available
+
+# Claim a specific production boost (~33 seconds)
+travian video claim ironProductionBonus
+
+# Claim all available production boosts in sequence
+travian video claim-all
+
+# Claim building upgrade speedup (requires IDs)
+travian video claim buildingUpgrade --village-id 75483 --slot-id 3 --building-id 8
+```
+
+Available reward types: `lumberProductionBonus`, `clayProductionBonus`, `ironProductionBonus`, `cropProductionBonus`, `buildingUpgrade`
+
+#### Auto-Builder (Build Queue)
+
+The build queue system lets you define a build plan in YAML and execute it automatically. It chains upgrades, waits for resources, respects construction queues, and never spends gold.
+
+**Step 1: Find your building slots**
+
+```bash
+travian building list
+```
+
+Output:
+```
+┌─────────────────────────────────────┐
+│ Slot │ Name       │ GID │ Level    │
+├──────┼────────────┼─────┼──────────┤
+│    3 │ Clay Pit   │   8 │       2  │
+│    5 │ Clay Pit   │   8 │       3  │
+│    8 │ Clay Pit   │   8 │       3  │
+│   12 │ Clay Pit   │   8 │       6  │
+│   19 │ Cranny     │  23 │       1  │
+│   ...│            │     │          │
+└──────┴────────────┴─────┴──────────┘
+```
+
+**Step 2: Create your plan file (`plan.yaml`)**
+
+```yaml
+village: 75483
+plan:
+  # --- Priority 1: upgrade first ---
+  
+  # Upgrade Clay Pit at slot 3 from Lv2 → Lv5 (chains: 2→3→4→5)
+  - slot: 3
+    target: 5
+    priority: 1
+
+  # Upgrade Clay Pit at slot 5 from Lv3 → Lv5 (chains: 3→4→5)
+  - slot: 5
+    target: 5
+    priority: 1
+
+  # --- Priority 2: upgrade after all P1 items are done ---
+  
+  # Unique buildings can use name instead of slot
+  - building: Cranny
+    target: 5
+    priority: 2
+
+  # --- Priority 3: low priority ---
+  
+  - building: Residence
+    target: 10
+    priority: 3
+```
+
+**Plan YAML format:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `village` | Yes | Village ID (find it in the game URL or `travian auth login` output) |
+| `plan` | Yes | List of build items |
+
+**Per-item fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `slot` | One of `slot` or `building` | Slot ID (1-40). **Use for resource fields** — when you have multiple of the same building (4 Clay Pits, 6 Croplands, etc.) |
+| `building` | One of `slot` or `building` | Building name (partial, case-insensitive). Use for unique buildings like Cranny, Residence, Barracks. If multiple match, picks the lowest level one below target. |
+| `target` | Yes | Target level. The builder will chain all upgrades needed (e.g. Lv2 → Lv5 = three upgrades) |
+| `priority` | No (default: 5) | 1 = build first, 5 = build last. Same priority items: whichever has resources first |
+
+**Step 3: Validate your plan**
+
+```bash
+travian queue validate plan.yaml
+```
+
+This shows resolved slots, current levels, and whether anything is already done or missing.
+
+**Step 4: Run it**
+
+```bash
+# Dry run — show what would happen without building
+travian queue run plan.yaml --dry-run
+
+# Run for real
+travian queue run plan.yaml
+
+# Run with video speedup after each build (~33s extra per upgrade)
+travian queue run plan.yaml --use-video
+
+# Custom poll interval (check resources every 60s instead of 30s)
+travian queue run plan.yaml --poll 60
+```
+
+**How it works:**
+
+1. Resolves all slots and checks current levels
+2. Processes priority 1 items first, then 2, etc.
+3. For each item: waits for empty construction queue → checks resources → starts upgrade
+4. **Multi-level chaining**: if Clay Pit is Lv2 and target is 5, it upgrades 2→3, waits for completion, 3→4, waits, 4→5 — automatically
+5. Same-priority items: builds whichever has enough resources first
+6. **Gold guard**: never spends gold. If the queue is occupied, it waits instead of using the master builder
+7. **Video speedup** (`--use-video`): after each upgrade starts, claims the `buildingUpgrade` video reward to cut construction time
+
+**Example: End up with Clay Pits at 5, 5, 3, 6**
+
+Starting state: Clay Pits at Lv2 (slot 3), Lv3 (slot 5), Lv3 (slot 8), Lv6 (slot 12)
+
+```yaml
+village: 75483
+plan:
+  - slot: 3
+    target: 5
+    priority: 1
+  - slot: 5
+    target: 5
+    priority: 1
+```
+
+Result: slots 3 and 5 get upgraded to Lv5. Slots 8 and 12 are untouched.
 
 ### 3. Library Usage
 
@@ -252,10 +398,9 @@ travian-api/
 
 ## Known Limitations
 
-- **Video Rewards**: Construction speed-up via ads requires complex ATG network simulation (not implemented)
 - **Movement Cancellation**: Troop movement cancellation requires UI interaction (not implemented)  
 - **Report Deletion**: Bulk report operations need form submission handling (not implemented)
-- **Multiple Villages**: Currently focused on single village operations
+- **Video Reward Availability**: `buildingUpgrade` reward may be disabled on some accounts (cooldown or server restriction)
 
 ## Contributing
 
