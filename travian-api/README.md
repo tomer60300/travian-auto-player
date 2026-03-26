@@ -20,6 +20,17 @@ A Python library and CLI for automating Travian Legends gameplay. Async-first, m
 git clone <repository-url>
 cd travian-api
 pip install -e .
+travian-setup
+```
+
+`travian-setup` checks if the `travian` command is on your PATH. If not, it offers to add it automatically (no admin needed on Windows). You only need to run this once.
+
+If `travian-setup` isn't found either, run it as: `python -m travian_api._post_install`
+
+**Alternative**: skip all of that and always use `python -m travian_api` instead of `travian`:
+```bash
+python -m travian_api auth login
+python -m travian_api queue run plan.yaml
 ```
 
 ### First run
