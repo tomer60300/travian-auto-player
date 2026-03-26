@@ -69,9 +69,12 @@ class BuildPlan:
     
     @classmethod
     def from_file(cls, path: str | Path) -> "BuildPlan":
-        """Load build plan from YAML file."""
+        """Load build plan from YAML file. Tabs are converted to spaces automatically."""
         with open(path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f)
+            raw = f.read()
+        # YAML forbids tabs for indentation — silently convert to 2 spaces
+        raw = raw.replace('\t', '  ')
+        data = yaml.safe_load(raw)
         
         village_id = data.get('village', data.get('village_id', 0))
         items = []
