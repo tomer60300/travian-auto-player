@@ -117,10 +117,7 @@ class BuildQueueService:
     
     async def resolve_slots(self, plan: BuildPlan):
         """Resolve building names to slot IDs."""
-        if plan.village_id:
-            await self.http_client.get_html(f"/dorf1.php?newdid={plan.village_id}")
-        
-        buildings = await self.building_service.get_village_buildings()
+        buildings = await self.building_service.get_village_buildings(village_id=plan.village_id or None)
         
         for item in plan.items:
             if item.slot:
@@ -164,16 +161,16 @@ class BuildQueueService:
             else:
                 self._report(f"FOUND: {item.building} at slot {item.slot_id} (Lv{item.current_level} -> {item.target})")
     
-    async def check_resources(self, slot_id: int) -> Dict[str, Any]:
+    async def check_resources(self, slot_id: int, village_id: Optional[int] = None) -> Dict[str, Any]:
         """Check if resources are sufficient for upgrade.
-        
+
         Returns dict with:
             can_build: bool
             missing: dict of resource shortages
             costs: dict of upgrade costs
         """
-        detail = await self.building_service.get_building_detail(slot_id)
-        resources = await self.building_service.get_resources()
+        detail = await self.building_service.get_building_detail(slot_id, village_id=village_id)
+        resources = await self.building_service.get_resources(village_id=village_id)
         
         costs = detail.costs or {}
         current = {
@@ -196,14 +193,14 @@ class BuildQueueService:
             'current': current,
         }
     
-    async def is_queue_empty(self) -> bool:
+    async def is_queue_empty(self, village_id: Optional[int] = None) -> bool:
         """Check if construction queue is empty."""
-        queue = await self.building_service.get_construction_queue()
+        queue = await self.building_service.get_construction_queue(village_id=village_id)
         return len(queue) == 0
-    
-    async def get_queue_remaining(self) -> int:
+
+    async def get_queue_remaining(self, village_id: Optional[int] = None) -> int:
         """Get seconds remaining on current construction. 0 if empty."""
-        queue = await self.building_service.get_construction_queue()
+        queue = await self.building_service.get_construction_queue(village_id=village_id)
         if not queue:
             return 0
         return max(q.remaining_seconds for q in queue) if queue else 0
@@ -241,7 +238,7 @@ class BuildQueueService:
                     continue
                 self._report(f"\n--- Priority {prio} ({len(items)} items) ---")
                 for item in items:
-                    check = await self.check_resources(item.slot_id)
+                    check = await self.check_resources(item.slot_id, village_id=plan.village_id or None)
                     ready = "READY" if check['can_build'] else f"WAITING (missing: {check['missing']})"
                     self._report(f"  {item.building} Lv{item.current_level}->{item.target} "
                                 f"(slot {item.slot_id}, cost: {check['costs']}) [{ready}]")
@@ -274,12 +271,13 @@ class BuildQueueService:
             built_one = False
             waited = 0
             
+            vid = plan.village_id or None
             while not built_one and waited < max_wait_s:
                 # First check: is queue empty?
-                queue_empty = await self.is_queue_empty()
-                
+                queue_empty = await self.is_queue_empty(village_id=vid)
+
                 if not queue_empty:
-                    remaining = await self.get_queue_remaining()
+                    remaining = await self.get_queue_remaining(village_id=vid)
                     self._report(f"Queue busy ({remaining}s remaining). Waiting...")
                     wait_time = min(remaining + 5, poll_interval_s)
                     await asyncio.sleep(wait_time)
@@ -291,12 +289,12 @@ class BuildQueueService:
                     if item.status != "pending":
                         continue
                     
-                    check = await self.check_resources(item.slot_id)
-                    
+                    check = await self.check_resources(item.slot_id, village_id=vid)
+
                     if check['can_build']:
                         self._report(f"BUILDING: {item.building} Lv{item.current_level} -> {item.target}"
                                      f" (slot {item.slot_id}, costs: {check['costs']})")
-                        
+
                         if dry_run:
                             self._report("  (dry run - would build)")
                             item.status = "done"
@@ -308,9 +306,9 @@ class BuildQueueService:
                             })
                             built_one = True
                             break
-                        
+
                         # Actually upgrade
-                        result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False)
+                        result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False, village_id=vid)
                         
                         if result.success:
                             item.status = "done"
@@ -375,6 +373,7 @@ class BuildQueueService:
             use_video: If True, claim buildingUpgrade video reward after each upgrade
         """
         all_results = []
+        vid = plan.village_id or None
 
         await self.resolve_slots(plan)
 
@@ -392,8 +391,8 @@ class BuildQueueService:
                 self._report(f"  {pi.building} Lv{pi.current_level} -> {pi.target} (slot {pi.slot_id})")
 
             # Wait for queue to be empty
-            while not await self.is_queue_empty():
-                remaining = await self.get_queue_remaining()
+            while not await self.is_queue_empty(village_id=vid):
+                remaining = await self.get_queue_remaining(village_id=vid)
                 self._report(f"Waiting for queue ({remaining}s)...")
                 wait = min(remaining + 5, 60)
                 await asyncio.sleep(wait)
@@ -401,12 +400,12 @@ class BuildQueueService:
             # Try each item at this priority
             built = False
             for item in prio_items:
-                check = await self.check_resources(item.slot_id)
+                check = await self.check_resources(item.slot_id, village_id=vid)
                 if check['can_build']:
                     # Get building detail for gid (needed for video reward)
-                    detail = await self.building_service.get_building_detail(item.slot_id) if use_video else None
+                    detail = await self.building_service.get_building_detail(item.slot_id, village_id=vid) if use_video else None
 
-                    result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False)
+                    result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False, village_id=vid)
                     if result.success:
                         next_level = item.current_level + 1
                         self._report(f"STARTED: {item.building} Lv{item.current_level}->{next_level} ({result.construction_time})")

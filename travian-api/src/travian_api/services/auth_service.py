@@ -11,7 +11,7 @@ from typing import Optional
 from ..clients.http_client import HttpClient
 from ..config import Settings
 from ..exceptions import AuthError, TravianError
-from ..models.auth import LoginRequest, LoginResponse, AuthStatus, AuthState
+from ..models.auth import LoginRequest, LoginResponse, AuthStatus, AuthState, Village
 
 
 class AuthService:
@@ -76,15 +76,31 @@ class AuthService:
             # Enrich with player data from GraphQL
             try:
                 player_data = await self.http_client.post_json("/api/v1/graphql", {
-                    "query": "{ ownPlayer { name tribeId village { id name x y } } }"
+                    "query": "{ ownPlayer { name tribeId villages { id name x y isMainVillage } } }"
                 })
                 own_player = player_data.get("data", {}).get("ownPlayer", {})
                 if own_player:
                     self._auth_state.player_name = own_player.get("name", "Unknown")
                     self._auth_state.tribe_id = own_player.get("tribeId", 0)
-                    village = own_player.get("village", {})
-                    if village and village.get("id"):
-                        self._auth_state.village_id = village["id"]
+                    villages_data = own_player.get("villages", [])
+                    if villages_data:
+                        self._auth_state.villages = [
+                            Village(
+                                id=v["id"],
+                                name=v.get("name", ""),
+                                x=v.get("x", 0),
+                                y=v.get("y", 0),
+                                is_main_village=v.get("isMainVillage", False),
+                            )
+                            for v in villages_data if v.get("id")
+                        ]
+                        # Set village_id to main village if not already set from JWT
+                        if not self._auth_state.village_id:
+                            main = next((v for v in self._auth_state.villages if v.is_main_village), None)
+                            if main:
+                                self._auth_state.village_id = main.id
+                            elif self._auth_state.villages:
+                                self._auth_state.village_id = self._auth_state.villages[0].id
             except Exception:
                 pass  # GraphQL enrichment is best-effort
             
@@ -211,6 +227,7 @@ class AuthService:
                 "player_name": auth_state.player_name,
                 "tribe_id": auth_state.tribe_id,
                 "village_id": auth_state.village_id,
+                "villages": [v.model_dump() for v in auth_state.villages],
                 "cached_at": int(time.time())
             }
             
@@ -231,12 +248,16 @@ class AuthService:
             jwt = cache_data.get("jwt", "")
             
             if jwt and self._is_jwt_valid(jwt):
+                villages = [
+                    Village(**v) for v in cache_data.get("villages", [])
+                ]
                 self._auth_state = AuthState(
                     jwt=jwt,
                     expires_at=cache_data.get("expires_at", 0),
                     player_name=cache_data.get("player_name", "Unknown"),
                     tribe_id=cache_data.get("tribe_id", 0),
-                    village_id=cache_data.get("village_id", 0)
+                    village_id=cache_data.get("village_id", 0),
+                    villages=villages,
                 )
                 
                 # Set cookie in HTTP client

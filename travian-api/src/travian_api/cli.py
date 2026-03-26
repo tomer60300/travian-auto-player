@@ -100,7 +100,13 @@ def auth_login():
             console.print("[green]OK - Logged in![/green]")
             console.print(f"  Player: {result.player_name}")
             console.print(f"  Tribe:  {result.tribe_id} (1=Roman, 2=Teuton, 3=Gaul)")
-            console.print(f"  Village: {result.village_id}")
+            if result.villages:
+                console.print(f"  Villages ({len(result.villages)}):")
+                for v in result.villages:
+                    main_tag = " [cyan](main)[/cyan]" if v.is_main_village else ""
+                    console.print(f"    {v.id}  {v.name}  ({v.x}|{v.y}){main_tag}")
+            else:
+                console.print(f"  Village: {result.village_id}")
     _run(_do())
 
 
@@ -120,13 +126,63 @@ def auth_token():
     _run(_do())
 
 
+# ── Village ──────────────────────────────────────────────────────────
+village_app = typer.Typer(name="village", help="Village management commands")
+app.add_typer(village_app)
+
+
+@village_app.command("list")
+def village_list():
+    """List all player villages."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            result = await auth.login()
+
+            if not result.villages:
+                console.print("No village data available")
+                return
+
+            table = Table(title="Villages")
+            table.add_column("ID", style="cyan", justify="right")
+            table.add_column("Name", style="green")
+            table.add_column("X", justify="right")
+            table.add_column("Y", justify="right")
+            table.add_column("Main", justify="center")
+
+            for v in result.villages:
+                main = "[cyan]yes[/cyan]" if v.is_main_village else ""
+                table.add_row(str(v.id), v.name, str(v.x), str(v.y), main)
+
+            console.print(table)
+    _run(_do())
+
+
+@village_app.command("switch")
+def village_switch(
+    village_id: int = typer.Argument(..., help="Village ID to switch to"),
+):
+    """Switch active village context (via newdid)."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            await client.get_html(f"/dorf1.php?newdid={village_id}")
+            console.print(f"[green]Switched to village {village_id}[/green]")
+    _run(_do())
+
+
 # ── Building ─────────────────────────────────────────────────────────
 building_app = typer.Typer(name="building", help="Building management commands")
 app.add_typer(building_app)
 
 
 @building_app.command("list")
-def building_list():
+def building_list(
+    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Village ID (default: current village)"),
+):
     """List all village buildings."""
     async def _do():
         s = _settings()
@@ -134,7 +190,7 @@ def building_list():
             auth = AuthService(client, s)
             await auth.login()
             bs = BuildingService(client)
-            buildings = await bs.get_village_buildings()
+            buildings = await bs.get_village_buildings(village_id=village_id)
 
             table = Table(title="Village Buildings")
             table.add_column("Slot", style="cyan", justify="right")
@@ -153,6 +209,7 @@ def building_list():
 def building_upgrade(
     slot_id: int = typer.Option(..., "--slot-id", "-s", help="Building slot ID (1-40)"),
     allow_gold: bool = typer.Option(False, "--allow-gold", help="Allow spending gold (master builder). Default: REFUSE if queue occupied."),
+    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Village ID (default: current village)"),
 ):
     """Upgrade a building by slot ID. Refuses if queue occupied (would cost gold) unless --allow-gold."""
     async def _do():
@@ -161,7 +218,7 @@ def building_upgrade(
             auth = AuthService(client, s)
             await auth.login()
             bs = BuildingService(client)
-            result = await bs.upgrade_building(slot_id, allow_gold=allow_gold)
+            result = await bs.upgrade_building(slot_id, allow_gold=allow_gold, village_id=village_id)
             if result.success:
                 console.print(f"[green]✓ Upgrade started![/green]")
                 console.print(f"  {result.building_name}: Level {result.old_level} → {result.new_level}")
@@ -173,7 +230,9 @@ def building_upgrade(
 
 
 @building_app.command("resources")
-def building_resources():
+def building_resources(
+    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Village ID (default: current village)"),
+):
     """Show current village resources."""
     async def _do():
         s = _settings()
@@ -181,7 +240,7 @@ def building_resources():
             auth = AuthService(client, s)
             await auth.login()
             bs = BuildingService(client)
-            res = await bs.get_resources()
+            res = await bs.get_resources(village_id=village_id)
             console.print(f"  Lumber: [yellow]{res.lumber:>6}[/yellow] / {res.max_lumber}")
             console.print(f"  Clay:   [yellow]{res.clay:>6}[/yellow] / {res.max_clay}")
             console.print(f"  Iron:   [yellow]{res.iron:>6}[/yellow] / {res.max_iron}")
@@ -191,7 +250,9 @@ def building_resources():
 
 
 @building_app.command("queue")
-def building_queue():
+def building_queue(
+    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Village ID (default: current village)"),
+):
     """Show construction queue."""
     async def _do():
         s = _settings()
@@ -199,7 +260,7 @@ def building_queue():
             auth = AuthService(client, s)
             await auth.login()
             bs = BuildingService(client)
-            queue = await bs.get_construction_queue()
+            queue = await bs.get_construction_queue(village_id=village_id)
             if not queue:
                 console.print("Queue is empty")
             else:
