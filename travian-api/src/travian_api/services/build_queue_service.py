@@ -375,6 +375,7 @@ class BuildQueueService:
         plan: BuildPlan,
         poll_interval_s: int = 30,
         use_video: bool = False,
+        verbose: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Execute entire plan continuously — waits for each build to finish
@@ -386,6 +387,7 @@ class BuildQueueService:
             plan: Build plan to execute
             poll_interval_s: How often to check conditions (seconds)
             use_video: If True, claim buildingUpgrade video reward after each upgrade
+            verbose: If True, show current resources and detailed cost breakdown
         """
         all_results = []
         vid = plan.village_id or None
@@ -412,10 +414,21 @@ class BuildQueueService:
                 wait = min(remaining + 5, 60)
                 await asyncio.sleep(wait)
 
+            # Show current resources if verbose
+            if verbose:
+                resources = await self.building_service.get_resources(village_id=vid)
+                self._report(f"  Resources: L={resources.lumber} C={resources.clay} I={resources.iron} Cr={resources.crop} (free crop: {resources.free_crop})")
+
             # Try each item at this priority
             built = False
             for item in prio_items:
                 check = await self.check_resources(item.slot_id, village_id=vid)
+                if verbose and not check['can_build']:
+                    costs = check.get('costs', {})
+                    missing = check.get('missing', {})
+                    costs_str = ' '.join(f"{k}={v}" for k, v in costs.items()) if costs else 'unknown'
+                    missing_str = ' '.join(f"{k}={v}" for k, v in missing.items()) if missing else 'none'
+                    self._report(f"  {item.building} (slot {item.slot_id}): needs [{costs_str}] — missing [{missing_str}]")
                 if check['can_build']:
                     # Get building detail for gid (needed for video reward)
                     detail = await self.building_service.get_building_detail(item.slot_id, village_id=vid) if use_video else None
