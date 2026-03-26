@@ -37,12 +37,13 @@ class BuildingService:
             TravianError: If request fails
         """
         buildings = []
-        
+        newdid = f"?newdid={village_id}" if village_id else ""
+
         try:
             # Get resource fields from dorf1.php
-            dorf1_html = await self.http_client.get_html("/dorf1.php")
+            dorf1_html = await self.http_client.get_html(f"/dorf1.php{newdid}")
             resource_fields = parse_dorf1(dorf1_html)
-            
+
             for field in resource_fields:
                 buildings.append(Building(
                     slot_id=field['slot_id'],
@@ -50,9 +51,9 @@ class BuildingService:
                     name=field['name'],
                     level=field['level']
                 ))
-            
+
             # Get village buildings from dorf2.php
-            dorf2_html = await self.http_client.get_html("/dorf2.php")
+            dorf2_html = await self.http_client.get_html(f"/dorf2.php{newdid}")
             village_buildings = parse_dorf2(dorf2_html)
             
             for building in village_buildings:
@@ -92,17 +93,18 @@ class BuildingService:
         except Exception as e:
             raise TravianError(f"Failed to get building detail for slot {slot_id}: {e}") from e
     
-    async def find_building(self, name_or_gid: str | int) -> Optional[Building]:
+    async def find_building(self, name_or_gid: str | int, village_id: Optional[int] = None) -> Optional[Building]:
         """
         Find a building by name or GID.
-        
+
         Args:
             name_or_gid: Building name (partial match) or GID number
-            
+            village_id: Village ID (switches village if set)
+
         Returns:
             First matching Building or None
         """
-        buildings = await self.get_village_buildings()
+        buildings = await self.get_village_buildings(village_id=village_id)
         
         if isinstance(name_or_gid, int):
             # Search by GID
@@ -118,7 +120,7 @@ class BuildingService:
         
         return None
     
-    async def upgrade_building(self, slot_id: int, allow_gold: bool = False) -> UpgradeResult:
+    async def upgrade_building(self, slot_id: int, allow_gold: bool = False, village_id: Optional[int] = None) -> UpgradeResult:
         """
         Upgrade a building.
         
@@ -139,7 +141,7 @@ class BuildingService:
         try:
             # SAFETY CHECK: Check construction queue BEFORE upgrading
             # If queue is occupied and allow_gold is False, REFUSE.
-            queue = await self.get_construction_queue()
+            queue = await self.get_construction_queue(village_id=village_id)
             if queue and not allow_gold:
                 queue_names = ", ".join(f"{q.name} Lv{q.level}" for q in queue)
                 return UpgradeResult(
@@ -157,7 +159,7 @@ class BuildingService:
                 )
             
             # Get building details to extract checksum and upgrade URL
-            building_detail = await self.get_building_detail(slot_id)
+            building_detail = await self.get_building_detail(slot_id, village_id=village_id)
             
             if not building_detail.checksum:
                 raise TravianError(f"No upgrade available for building in slot {slot_id}")
@@ -212,25 +214,29 @@ class BuildingService:
                 raw_response=str(e)
             )
     
-    async def get_construction_queue(self) -> List[QueueItem]:
+    async def get_construction_queue(self, village_id: Optional[int] = None) -> List[QueueItem]:
         """
         Get current construction queue.
-        
+
+        Args:
+            village_id: Village ID (switches village if set)
+
         Returns:
             List of QueueItem objects
-            
+
         Raises:
             TravianError: If request fails
         """
         try:
+            newdid = f"?newdid={village_id}" if village_id else ""
             # Construction queue is typically shown on dorf1 or dorf2
             # Try dorf2 first as it usually has the buildingList
-            dorf2_html = await self.http_client.get_html("/dorf2.php")
+            dorf2_html = await self.http_client.get_html(f"/dorf2.php{newdid}")
             queue = parse_construction_queue(dorf2_html)
-            
+
             if not queue:
                 # Try dorf1 as fallback
-                dorf1_html = await self.http_client.get_html("/dorf1.php")
+                dorf1_html = await self.http_client.get_html(f"/dorf1.php{newdid}")
                 queue = parse_construction_queue(dorf1_html)
             
             return queue
@@ -255,24 +261,28 @@ class BuildingService:
         
         raise NotImplementedError("Video reward flow not yet implemented")
     
-    async def get_resources(self) -> Resources:
+    async def get_resources(self, village_id: Optional[int] = None) -> Resources:
         """
         Get current village resources.
-        
+
+        Args:
+            village_id: Village ID (switches village if set)
+
         Returns:
             Resources object
-            
+
         Raises:
             TravianError: If request fails
         """
         try:
+            newdid = f"?newdid={village_id}" if village_id else ""
             # Resources are typically shown on dorf1 and dorf2
-            dorf1_html = await self.http_client.get_html("/dorf1.php")
+            dorf1_html = await self.http_client.get_html(f"/dorf1.php{newdid}")
             resources = parse_resources(dorf1_html)
-            
+
             # If not found, try dorf2
             if not any([resources.lumber, resources.clay, resources.iron, resources.crop]):
-                dorf2_html = await self.http_client.get_html("/dorf2.php")
+                dorf2_html = await self.http_client.get_html(f"/dorf2.php{newdid}")
                 resources = parse_resources(dorf2_html)
             
             return resources

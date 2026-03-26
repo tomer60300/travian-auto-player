@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -68,14 +68,25 @@ class LoginResponse(BaseModel):
         return self.redirectTo
 
 
+class Village(BaseModel):
+    """A player village."""
+
+    id: int = Field(..., description="Village ID")
+    name: str = Field(default="", description="Village name")
+    x: int = Field(default=0, description="X coordinate")
+    y: int = Field(default=0, description="Y coordinate")
+    is_main_village: bool = Field(default=False, description="Whether this is the main village")
+
+
 class AuthState(BaseModel):
     """Authentication state with JWT and player info."""
-    
+
     jwt: str = Field(..., description="JWT token")
     expires_at: int = Field(default=0, description="JWT expiration timestamp")
     player_name: str = Field(default="Unknown", description="Player name")
     tribe_id: int = Field(default=0, description="Tribe ID (1=Romans, 2=Teutons, 3=Gauls)")
-    village_id: int = Field(default=0, description="Current village ID")
+    village_id: int = Field(default=0, description="Current/default village ID")
+    villages: List[Village] = Field(default_factory=list, description="All player villages")
 
 
 class JWTCache(BaseModel):
