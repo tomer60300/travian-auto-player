@@ -1,2 +1,3 @@
 [console_scripts]
 travian = travian_api.cli:app
+travian-setup = travian_api._post_install:main
