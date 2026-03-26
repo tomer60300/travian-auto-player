@@ -425,15 +425,18 @@ class BuildQueueService:
                 try:
                     check = await self.check_resources(item.slot_id, village_id=vid)
                 except Exception as e:
-                    if verbose:
-                        self._report(f"  {item.building} (slot {item.slot_id}): error checking resources - {e}")
+                    self._report(f"  {item.building} (slot {item.slot_id}): error checking - {e}")
                     continue
-                if verbose and not check['can_build']:
+                if verbose:
                     costs = check.get('costs', {})
                     missing = check.get('missing', {})
-                    costs_str = ', '.join(f"{k}={v}" for k, v in costs.items()) if costs else 'unknown'
-                    missing_str = ', '.join(f"{k}={v}" for k, v in missing.items()) if missing else 'none'
-                    self._report(f"  {item.building} (slot {item.slot_id}): costs({costs_str}) missing({missing_str})")
+                    can = check.get('can_build', False)
+                    costs_str = ', '.join(f"{k}={v}" for k, v in costs.items()) if costs else 'n/a'
+                    if can:
+                        self._report(f"  {item.building} (slot {item.slot_id}): READY costs({costs_str})")
+                    else:
+                        missing_str = ', '.join(f"{k}={v}" for k, v in missing.items()) if missing else 'none'
+                        self._report(f"  {item.building} (slot {item.slot_id}): costs({costs_str}) missing({missing_str})")
                 if check['can_build']:
                     # Get building detail for gid (needed for video reward)
                     detail = await self.building_service.get_building_detail(item.slot_id, village_id=vid) if use_video else None
