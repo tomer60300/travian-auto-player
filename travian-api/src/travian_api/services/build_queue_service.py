@@ -163,6 +163,10 @@ class BuildQueueService:
                     item.slot_id = matches[0].slot_id
                     item.current_level = matches[0].level
 
+            # Skip further checks if already marked (e.g. mismatch)
+            if item.status == "skipped":
+                continue
+
             if item.slot_id == 0:
                 self._report(f"WARNING: Could not find '{item.building}' in village")
                 item.status = "skipped"
