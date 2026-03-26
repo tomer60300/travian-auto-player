@@ -55,6 +55,7 @@ class BuildPlanItem:
     target: int         # Target level
     priority: int       # 1=highest, 5=lowest
     slot: int = 0       # Explicit slot ID from YAML (0 = resolve by name)
+    expect: str = ""    # Optional: expected building name for slot (safety guard)
     slot_id: int = 0    # Resolved slot ID (filled at runtime)
     current_level: int = 0
     status: str = "pending"  # pending | building | done | skipped
@@ -80,6 +81,7 @@ class BuildPlan:
                 target=entry.get('target', entry.get('level', 1)),
                 priority=entry.get('priority', 5),
                 slot=entry.get('slot', 0),
+                expect=entry.get('expect', ''),
             ))
         
         return cls(village_id=village_id, items=items)
@@ -128,6 +130,12 @@ class BuildQueueService:
                         item.current_level = b.level
                         if not item.building:
                             item.building = b.name
+                        # Safety guard: if 'expect' is set, verify the building name matches
+                        if item.expect and item.expect.lower() not in b.name.lower():
+                            self._report(
+                                f"MISMATCH: slot {item.slot} is '{b.name}' but expected '{item.expect}'. Skipping!"
+                            )
+                            item.status = "skipped"
                         break
             else:
                 # Resolve by name — find matches, pick lowest level below target

@@ -159,11 +159,13 @@ plan:
   
   # Upgrade Clay Pit at slot 3 from Lv2 → Lv5 (chains: 2→3→4→5)
   - slot: 3
+    expect: Clay Pit    # safety guard: skip if slot 3 isn't a Clay Pit
     target: 5
     priority: 1
 
   # Upgrade Clay Pit at slot 5 from Lv3 → Lv5 (chains: 3→4→5)
   - slot: 5
+    expect: Clay Pit
     target: 5
     priority: 1
 
@@ -194,6 +196,7 @@ plan:
 |-------|----------|-------------|
 | `slot` | One of `slot` or `building` | Slot ID (1-40). **Use for resource fields** — when you have multiple of the same building (4 Clay Pits, 6 Croplands, etc.) |
 | `building` | One of `slot` or `building` | Building name (partial, case-insensitive). Use for unique buildings like Cranny, Residence, Barracks. If multiple match, picks the lowest level one below target. |
+| `expect` | No | Safety guard for `slot` items. If set, verifies the building at that slot matches the name (partial, case-insensitive). **Skips the item if it doesn't match** — prevents upgrading the wrong building if slots change. |
 | `target` | Yes | Target level. The builder will chain all upgrades needed (e.g. Lv2 → Lv5 = three upgrades) |
 | `priority` | No (default: 5) | 1 = build first, 5 = build last. Same priority items: whichever has resources first |
 
