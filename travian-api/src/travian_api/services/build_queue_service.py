@@ -7,9 +7,12 @@ Plan file format (YAML):
 ```yaml
 village: 75483          # village ID
 plan:
-  - building: Cropland   # building name (partial match OK)
-    target: 3            # target level
-    priority: 1          # 1=highest, 5=lowest
+  # By slot (preferred for resource fields with duplicates)
+  - slot: 3
+    target: 5
+    priority: 1
+
+  # By name (still works for unique buildings)
   - building: Cranny
     target: 3
     priority: 2
@@ -48,9 +51,10 @@ logger = get_logger(__name__)
 @dataclass
 class BuildPlanItem:
     """Single item in the build plan."""
-    building: str       # Building name (partial match)
+    building: str       # Building name (partial match), empty if slot specified
     target: int         # Target level
     priority: int       # 1=highest, 5=lowest
+    slot: int = 0       # Explicit slot ID from YAML (0 = resolve by name)
     slot_id: int = 0    # Resolved slot ID (filled at runtime)
     current_level: int = 0
     status: str = "pending"  # pending | building | done | skipped
@@ -72,9 +76,10 @@ class BuildPlan:
         items = []
         for entry in data.get('plan', []):
             items.append(BuildPlanItem(
-                building=entry['building'],
+                building=entry.get('building', ''),
                 target=entry.get('target', entry.get('level', 1)),
                 priority=entry.get('priority', 5),
+                slot=entry.get('slot', 0),
             ))
         
         return cls(village_id=village_id, items=items)
@@ -118,20 +123,38 @@ class BuildQueueService:
         buildings = await self.building_service.get_village_buildings()
         
         for item in plan.items:
-            search = item.building.lower()
-            # Find matching building
-            for b in buildings:
-                if search in b.name.lower():
-                    # Check if this building's level matches (we want the one at target-1)
-                    if b.level == item.target - 1:
-                        item.slot_id = b.slot_id
+            if item.slot:
+                # Slot explicitly specified — just look up current level
+                item.slot_id = item.slot
+                for b in buildings:
+                    if b.slot_id == item.slot:
                         item.current_level = b.level
+                        if not item.building:
+                            item.building = b.name
                         break
-                    elif item.slot_id == 0:
-                        # Take first match as fallback
-                        item.slot_id = b.slot_id
-                        item.current_level = b.level
-            
+            else:
+                # Resolve by name — find matches, pick lowest level below target
+                search = item.building.lower()
+                matches = [b for b in buildings if search in b.name.lower()]
+                below_target = [b for b in matches if b.level < item.target]
+
+                if len(matches) > 1:
+                    logger.warning(
+                        f"Multiple matches for '{item.building}': "
+                        f"{', '.join(f'slot {b.slot_id} Lv{b.level}' for b in matches)}. "
+                        f"Consider using 'slot:' instead of 'building:' in your plan."
+                    )
+
+                if below_target:
+                    # Pick the one with the lowest level (most work to do)
+                    best = min(below_target, key=lambda b: b.level)
+                    item.slot_id = best.slot_id
+                    item.current_level = best.level
+                elif matches:
+                    # All at or above target
+                    item.slot_id = matches[0].slot_id
+                    item.current_level = matches[0].level
+
             if item.slot_id == 0:
                 self._report(f"WARNING: Could not find '{item.building}' in village")
                 item.status = "skipped"
@@ -191,6 +214,7 @@ class BuildQueueService:
         poll_interval_s: int = 30,
         max_wait_s: int = 7200,  # 2 hours max
         dry_run: bool = False,
+        use_video: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Execute build plan in priority order.
@@ -337,58 +361,95 @@ class BuildQueueService:
         self,
         plan: BuildPlan,
         poll_interval_s: int = 30,
+        use_video: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Execute entire plan continuously — waits for each build to finish
         before starting next.
-        
+
         This is the main entry point for the auto-builder.
+
+        Args:
+            plan: Build plan to execute
+            poll_interval_s: How often to check conditions (seconds)
+            use_video: If True, claim buildingUpgrade video reward after each upgrade
         """
         all_results = []
-        
+
         await self.resolve_slots(plan)
-        
+
         while True:
             pending = plan.pending_items()
             if not pending:
                 self._report("Build plan complete!")
                 break
-            
+
             next_prio = pending[0].priority
             prio_items = [i for i in pending if i.priority == next_prio]
-            
+
             self._report(f"\n=== Priority {next_prio}: {len(prio_items)} items ===")
             for pi in prio_items:
                 self._report(f"  {pi.building} Lv{pi.current_level} -> {pi.target} (slot {pi.slot_id})")
-            
+
             # Wait for queue to be empty
             while not await self.is_queue_empty():
                 remaining = await self.get_queue_remaining()
                 self._report(f"Waiting for queue ({remaining}s)...")
                 wait = min(remaining + 5, 60)
                 await asyncio.sleep(wait)
-            
+
             # Try each item at this priority
             built = False
             for item in prio_items:
                 check = await self.check_resources(item.slot_id)
                 if check['can_build']:
+                    # Get building detail for gid (needed for video reward)
+                    detail = await self.building_service.get_building_detail(item.slot_id) if use_video else None
+
                     result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False)
                     if result.success:
-                        self._report(f"STARTED: {item.building} Lv{item.current_level}->{item.target} ({result.construction_time})")
-                        item.status = "done"
+                        next_level = item.current_level + 1
+                        self._report(f"STARTED: {item.building} Lv{item.current_level}->{next_level} ({result.construction_time})")
                         all_results.append({
                             'building': item.building,
-                            'level': f"{item.current_level}->{item.target}",
+                            'level': f"{item.current_level}->{next_level}",
                             'status': 'started',
                             'time': result.construction_time,
                         })
+
+                        # Try video speedup
+                        if use_video and detail:
+                            try:
+                                from .video_reward_service import VideoRewardService
+                                vrs = VideoRewardService(self.http_client)
+                                try:
+                                    vr = await vrs.claim_reward(
+                                        'buildingUpgrade',
+                                        villageId=plan.village_id,
+                                        slotId=item.slot_id,
+                                        buildingId=detail.gid,
+                                    )
+                                    if vr.success:
+                                        self._report(f"  VIDEO: Speed-up applied!")
+                                    else:
+                                        self._report(f"  VIDEO: Failed — {vr.message}")
+                                finally:
+                                    await vrs.close()
+                            except Exception as e:
+                                self._report(f"  VIDEO: Error — {e}")
+
+                        # Multi-level: update current_level, only mark done when target reached
+                        item.current_level = next_level
+                        if item.current_level >= item.target:
+                            item.status = "done"
+                        # else: stays 'pending' for next level
+
                         built = True
                         break
-            
+
             if not built:
                 # No resources for any item at this priority — wait and retry
                 self._report(f"Insufficient resources for priority {next_prio} items. Waiting {poll_interval_s}s...")
                 await asyncio.sleep(poll_interval_s)
-        
+
         return all_results
