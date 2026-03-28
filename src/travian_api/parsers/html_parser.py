@@ -376,57 +376,73 @@ def parse_construction_queue(html: str) -> List[QueueItem]:
     soup = BeautifulSoup(html, 'html.parser')
     queue_items = []
     
-    # Find buildingList container
-    building_list = soup.find('div', {'id': 'buildingList'})
+    # Find buildingList container (class, not id — Travian uses class="buildingList")
+    building_list = soup.find('div', class_='buildingList')
     if not building_list:
         return queue_items
-    
-    # Look for construction items
-    for item in building_list.find_all('li', class_='buildingItem'):
+
+    # Look for construction items — <li> tags inside buildingList (may have no class)
+    for item in building_list.find_all('li'):
         # Extract event ID from cancel dialog onclick
         event_id = ""
         cancel_link = item.find('a', onclick=re.compile(r'showCancelBuildingDialog'))
         if cancel_link:
             onclick = cancel_link.get('onclick', '')
-            event_match = re.search(r'showCancelBuildingDialog\((\d+)', onclick)
+            event_match = re.search(r'showCancelBuildingDialog\(\s*(\d+)', onclick)
             if event_match:
                 event_id = event_match.group(1)
-        
-        # Extract building name
+
+        if not event_id:
+            continue  # Not a construction item
+
+        # Extract building name — try dedicated span first, fallback to first text node
         building_name = "Unknown"
         name_span = item.find('span', class_='buildingName')
         if name_span:
             building_name = name_span.get_text(strip=True)
-        
+        else:
+            # Fallback: first meaningful text in the <li>
+            item_text = item.get_text(strip=True)
+            name_match = re.match(r'^([A-Za-z ]+?)(?:Level|Lv)', item_text)
+            if name_match:
+                building_name = name_match.group(1).strip()
+
         # Extract target level
         target_level = 0
-        level_match = re.search(r'to level (\d+)', item.get_text())
+        level_match = re.search(r'(?:to )?[Ll]evel\s*(\d+)', item.get_text())
         if level_match:
             target_level = int(level_match.group(1))
-        
-        # Extract remaining time
+
+        # Extract remaining time from timer span (class="timer" with value= attribute)
         remaining_seconds = 0
-        timer_span = item.find('span', {'id': re.compile(r'timer\d+')})
+        timer_span = item.find('span', class_='timer', counting='down')
+        if not timer_span:
+            # Fallback: any timer span with a value attribute
+            timer_span = item.find('span', class_='timer')
         if timer_span:
-            timer_text = timer_span.get_text(strip=True)
-            # Parse time format (HH:MM:SS)
-            time_parts = timer_text.split(':')
-            if len(time_parts) == 3:
-                try:
-                    hours = int(time_parts[0])
-                    minutes = int(time_parts[1])
-                    seconds = int(time_parts[2])
-                    remaining_seconds = hours * 3600 + minutes * 60 + seconds
-                except ValueError:
-                    pass
-        
-        if event_id:
-            queue_items.append(QueueItem(
-                event_id=event_id,
-                building_name=building_name,
-                target_level=target_level,
-                remaining_seconds=remaining_seconds,
-            ))
+            # Prefer the 'value' attribute (seconds) — most reliable
+            value_attr = timer_span.get('value', '')
+            if value_attr and value_attr.isdigit():
+                remaining_seconds = int(value_attr)
+            else:
+                # Fallback: parse text format (H:MM:SS)
+                timer_text = timer_span.get_text(strip=True)
+                time_parts = timer_text.split(':')
+                if len(time_parts) == 3:
+                    try:
+                        hours = int(time_parts[0])
+                        minutes = int(time_parts[1])
+                        seconds = int(time_parts[2])
+                        remaining_seconds = hours * 3600 + minutes * 60 + seconds
+                    except ValueError:
+                        pass
+
+        queue_items.append(QueueItem(
+            event_id=event_id,
+            building_name=building_name,
+            target_level=target_level,
+            remaining_seconds=remaining_seconds,
+        ))
     
     return queue_items
 

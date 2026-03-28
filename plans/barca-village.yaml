@@ -1,0 +1,72 @@
+village: 41699
+
+plan:
+  # ── Priority 1: All Cropland to level 2 ──
+  - slot: 15
+    expect: Cropland
+    target: 2
+    priority: 1
+
+  # ── Priority 2: All Woodcutter to level 2 ──
+  # (all already at Lv2+, will be marked done immediately)
+
+  # ── Priority 3: All Clay Pit to level 2 ──
+  - slot: 18
+    expect: Clay Pit
+    target: 2
+    priority: 3
+
+  # ── Priority 4: 1 Cropland to level 3 ──
+  - slot: 2
+    expect: Cropland
+    target: 3
+    priority: 4
+
+  # ── Priority 5: 2 Woodcutter to level 3 ──
+  - slot: 1
+    expect: Woodcutter
+    target: 3
+    priority: 5
+
+  - slot: 3
+    expect: Woodcutter
+    target: 3
+    priority: 5
+
+  # ── Priority 6: 2 Clay Pit to level 3 ──
+  - slot: 6
+    expect: Clay Pit
+    target: 3
+    priority: 6
+
+  - slot: 18
+    expect: Clay Pit
+    target: 3
+    priority: 6
+
+  # ── Priority 7: 1 more Cropland to level 3 ──
+  - slot: 8
+    expect: Cropland
+    target: 3
+    priority: 7
+
+  # ── Priority 8: All remaining resources (Iron Mines) to level 2 ──
+  - slot: 4
+    expect: Iron Mine
+    target: 2
+    priority: 8
+
+  - slot: 7
+    expect: Iron Mine
+    target: 2
+    priority: 8
+
+  - slot: 10
+    expect: Iron Mine
+    target: 2
+    priority: 8
+
+  - slot: 11
+    expect: Iron Mine
+    target: 2
+    priority: 8
