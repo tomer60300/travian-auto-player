@@ -1,0 +1,18 @@
+# Credentials & secrets
+.env
+*.env.local
+
+# OS
+Thumbs.db
+.DS_Store
+nohup.out
+
+# IDE
+.vscode/
+.idea/
+
+# Agent/tool state
+.clawhub/
+.openclaw/
+.claude/
+memory/
