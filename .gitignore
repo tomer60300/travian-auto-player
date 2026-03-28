@@ -36,3 +36,7 @@ nohup.out
 .openclaw/
 .claude/
 memory/
+
+# Session logs & personal plans
+cli-log.md
+plans/*.yaml
