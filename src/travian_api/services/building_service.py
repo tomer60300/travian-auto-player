@@ -164,15 +164,16 @@ class BuildingService:
             if not building_detail.checksum:
                 raise TravianError(f"No upgrade available for building in slot {slot_id}")
             
-            # Construct upgrade URL — always use &buildmaster
-            # On Travian Plus accounts, the only button is "Construct with master builder"
-            # which uses &buildmaster. When the queue is empty, this is FREE (0 gold).
-            # When queue has an item, it uses the 2nd slot (costs 1 gold).
+            # Construct upgrade URL — use the section1 (normal) upgrade button URL.
+            # Do NOT add &buildmaster unless allow_gold is True (master builder costs gold
+            # when queue is occupied, and may silently fail on non-Plus accounts).
             upgrade_url = building_detail.upgrade_url
             if not upgrade_url:
                 dorf_page = "dorf1" if slot_id <= 18 else "dorf2"
-                upgrade_url = f"/{dorf_page}.php?id={slot_id}&gid={building_detail.gid}&action=build&checksum={building_detail.checksum}&buildmaster"
-            elif '&buildmaster' not in upgrade_url:
+                upgrade_url = f"/{dorf_page}.php?id={slot_id}&gid={building_detail.gid}&action=build&checksum={building_detail.checksum}"
+
+            # Only add &buildmaster when explicitly allowed (master builder / gold usage)
+            if allow_gold and '&buildmaster' not in upgrade_url:
                 upgrade_url += '&buildmaster'
             
             # Add village context if needed

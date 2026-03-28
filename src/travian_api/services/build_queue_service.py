@@ -483,6 +483,16 @@ class BuildQueueService:
                         # else: stays 'pending' for next level
 
                         built = True
+
+                        # Wait for the build to actually register in the queue,
+                        # then wait for it to finish before starting the next one.
+                        await asyncio.sleep(2)  # small grace period for server to register
+                        while not await self.is_queue_empty(village_id=vid):
+                            remaining = await self.get_queue_remaining(village_id=vid)
+                            self._report(f"Waiting for build to finish ({remaining}s remaining)...")
+                            wait = min(remaining + 5, 60)
+                            await asyncio.sleep(wait)
+
                         break
 
             if not built:
