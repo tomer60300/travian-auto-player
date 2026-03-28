@@ -1,0 +1,38 @@
+# Credentials & secrets
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Data files (scraped game data)
+*.csv
+*.json
+!pyproject.toml
+
+# Archives
+*.rar
+*.zip
+*.tar.gz
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+nohup.out
+
+# Agent/tool state
+.clawhub/
+.openclaw/
+.claude/
+memory/
