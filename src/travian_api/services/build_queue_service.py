@@ -136,8 +136,28 @@ class BuildQueueService:
                         item.current_level = b.level
                         if not item.building:
                             item.building = b.name
+                        # If slot is empty (gid=0) and a building name is provided, mark as construction
+                        if b.gid == 0 and item.building:
+                            name_to_gid = {v.lower(): k for k, v in BUILDING_NAMES.items()}
+                            search_lower = item.building.lower()
+                            gid = name_to_gid.get(search_lower, 0)
+                            if not gid:
+                                for bname, bgid in name_to_gid.items():
+                                    if search_lower in bname:
+                                        gid = bgid
+                                        break
+                            if gid:
+                                item.is_construction = True
+                                item.construct_gid = gid
+                                item.building = BUILDING_NAMES.get(gid, item.building)
+                                self._report(
+                                    f"CONSTRUCT: {item.building} (gid={gid}) on slot {item.slot_id} (target Lv{item.target})"
+                                )
+                            else:
+                                self._report(f"WARNING: Unknown building '{item.building}' for empty slot {item.slot}")
+                                item.status = "skipped"
                         # Safety guard: if 'expect' is set, verify the building name matches
-                        if item.expect and item.expect.lower() not in b.name.lower():
+                        elif item.expect and item.expect.lower() not in b.name.lower():
                             self._report(
                                 f"MISMATCH: slot {item.slot} is '{b.name}' but expected '{item.expect}'. Skipping!"
                             )
