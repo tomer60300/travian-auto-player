@@ -363,6 +363,76 @@ def parse_build_page(html: str, slot_id: int = 0) -> BuildingDetail:
     )
 
 
+def parse_empty_slot_buildings(html: str, slot_id: int = 0) -> List[Dict[str, Any]]:
+    """
+    Parse available buildings from an empty slot page (build.php?id={emptySlot}).
+
+    Each building is in a div.buildingWrapper with id="contract_building{gid}",
+    containing an h2 with the name, a #contract div with costs, and a button
+    with onclick containing the construction URL.
+
+    Args:
+        html: Raw HTML content from build.php for an empty slot
+        slot_id: Building slot ID
+
+    Returns:
+        List of dicts with keys: gid, name, checksum, build_url, costs
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    buildings = []
+
+    for wrapper in soup.find_all('div', class_='buildingWrapper'):
+        wrapper_id = wrapper.get('id', '')
+        gid_match = re.search(r'contract_building(\d+)', wrapper_id)
+        if not gid_match:
+            continue
+        gid = int(gid_match.group(1))
+
+        # Building name from h2
+        h2 = wrapper.find('h2')
+        name = clean_unicode(h2.get_text(strip=True)) if h2 else BUILDING_NAMES.get(gid, f'Unknown (gid={gid})')
+
+        # Construction URL from button onclick
+        build_url = ""
+        checksum = ""
+        btn = wrapper.find(['button', 'a'], onclick=re.compile(r'action=build'))
+        if btn:
+            url_match = re.search(r"window\.location\.href = '([^']+)'", btn.get('onclick', ''))
+            if url_match:
+                build_url = url_match.group(1).replace('&amp;', '&')
+            cs_match = re.search(r'checksum=([a-f0-9]+)', btn.get('onclick', ''))
+            if cs_match:
+                checksum = cs_match.group(1)
+
+        # Costs from #contract div within this wrapper
+        costs = {}
+        contract = wrapper.find(id='contract')
+        target = contract if contract else wrapper
+        resource_map = {'r1': 'lumber', 'r2': 'clay', 'r3': 'iron', 'r4': 'crop'}
+        for icon in target.find_all('i', class_=re.compile(r'r[1-4]')):
+            icon_class = ' '.join(icon.get('class', []))
+            for prefix, res_name in resource_map.items():
+                if prefix in icon_class:
+                    value_span = icon.find_next('span', class_='value')
+                    if value_span:
+                        val_text = clean_unicode(value_span.get_text(strip=True))
+                        val_match = re.search(r'[\d,]+', val_text)
+                        if val_match:
+                            costs[res_name] = int(val_match.group().replace(',', ''))
+                    break
+
+        buildings.append({
+            'gid': gid,
+            'name': name,
+            'checksum': checksum,
+            'build_url': build_url,
+            'costs': costs,
+            'can_build': bool(build_url),
+        })
+
+    return buildings
+
+
 def parse_construction_queue(html: str) -> List[QueueItem]:
     """
     Parse construction queue from buildingList div.

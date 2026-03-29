@@ -25,6 +25,7 @@ from .services.military_service import MilitaryService
 from .services.reports_service import ReportsService
 from .services.target_resolver import TargetResolver
 from .services.video_reward_service import VideoRewardService, REWARD_TYPES
+from .constants import BUILDING_NAMES
 
 app = typer.Typer(name="travian", help="Travian Legends API - Game automation library and CLI", add_completion=False)
 console = Console(highlight=False)
@@ -272,6 +273,44 @@ def building_upgrade(
                 console.print(f"  Construction time: {result.construction_time}")
             else:
                 console.print(f"[red]✗ Upgrade failed[/red]")
+                console.print(f"  {result.raw_response[:200] if result.raw_response else 'Unknown error'}")
+    _run(_do())
+
+
+@building_app.command("construct")
+def building_construct(
+    slot_id: int = typer.Option(..., "--slot-id", "-s", help="Empty building slot ID (19-40)"),
+    building: str = typer.Option(..., "--building", "-b", help="Building name to construct (e.g. 'Cranny', 'Embassy')"),
+    allow_gold: bool = typer.Option(False, "--allow-gold", help="Allow spending gold (master builder)."),
+    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Village ID (default: current village)"),
+):
+    """Construct a new building on an empty slot."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            bs = BuildingService(client)
+
+            # Resolve building name to GID
+            name_to_gid = {v.lower(): k for k, v in BUILDING_NAMES.items()}
+            search = building.lower()
+            gid = name_to_gid.get(search, 0)
+            if not gid:
+                for bname, bgid in name_to_gid.items():
+                    if search in bname:
+                        gid = bgid
+                        break
+            if not gid:
+                console.print(f"[red]Unknown building: {building}[/red]")
+                raise typer.Exit(1)
+
+            result = await bs.construct_building(slot_id, gid, allow_gold=allow_gold, village_id=village_id)
+            if result.success:
+                console.print(f"[green]Construction started![/green]")
+                console.print(f"  {result.building_name} on slot {slot_id}")
+            else:
+                console.print(f"[red]Construction failed[/red]")
                 console.print(f"  {result.raw_response[:200] if result.raw_response else 'Unknown error'}")
     _run(_do())
 

@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any, Callable
 
 from ..clients.http_client import HttpClient
+from ..constants import BUILDING_NAMES
 from ..exceptions import TravianError
 from ..logging_config import get_logger
 from .building_service import BuildingService
@@ -59,6 +60,8 @@ class BuildPlanItem:
     slot_id: int = 0    # Resolved slot ID (filled at runtime)
     current_level: int = 0
     status: str = "pending"  # pending | building | done | skipped
+    is_construction: bool = False  # True if building needs to be constructed (empty slot)
+    construct_gid: int = 0        # GID of building to construct
 
 
 @dataclass
@@ -168,25 +171,92 @@ class BuildQueueService:
                 continue
 
             if item.slot_id == 0:
-                self._report(f"WARNING: Could not find '{item.building}' in village")
-                item.status = "skipped"
+                # Building not found — try to resolve as new construction on empty slot
+                name_to_gid = {v.lower(): k for k, v in BUILDING_NAMES.items()}
+                search_lower = item.building.lower()
+                gid = name_to_gid.get(search_lower, 0)
+                if not gid:
+                    # Partial match
+                    for bname, bgid in name_to_gid.items():
+                        if search_lower in bname:
+                            gid = bgid
+                            break
+
+                if gid:
+                    # Find first empty slot (gid=0) in village buildings (19-40)
+                    empty_slots = [b for b in buildings if b.gid == 0 and b.slot_id >= 19]
+                    # Exclude slots already claimed by other construction items in this plan
+                    claimed = {i.slot_id for i in plan.items if i.is_construction and i.slot_id > 0}
+                    empty_slots = [b for b in empty_slots if b.slot_id not in claimed]
+
+                    if empty_slots:
+                        chosen = empty_slots[0]
+                        item.slot_id = chosen.slot_id
+                        item.is_construction = True
+                        item.construct_gid = gid
+                        item.current_level = 0
+                        item.building = BUILDING_NAMES.get(gid, item.building)
+                        self._report(
+                            f"CONSTRUCT: {item.building} (gid={gid}) on empty slot {item.slot_id} (target Lv{item.target})"
+                        )
+                    else:
+                        self._report(f"WARNING: No empty slots available for '{item.building}'")
+                        item.status = "skipped"
+                else:
+                    self._report(f"WARNING: Could not find '{item.building}' in village or building list")
+                    item.status = "skipped"
             elif item.current_level >= item.target:
                 self._report(f"SKIP: {item.building} already at level {item.current_level} (target {item.target})")
                 item.status = "done"
             else:
                 self._report(f"FOUND: {item.building} at slot {item.slot_id} (Lv{item.current_level} -> {item.target})")
     
-    async def check_resources(self, slot_id: int, village_id: Optional[int] = None) -> Dict[str, Any]:
-        """Check if resources are sufficient for upgrade.
+    async def check_resources(self, slot_id: int, village_id: Optional[int] = None,
+                              construct_gid: int = 0) -> Dict[str, Any]:
+        """Check if resources are sufficient for upgrade or construction.
+
+        Args:
+            slot_id: Building slot ID
+            village_id: Village ID
+            construct_gid: If > 0, check resources for constructing this building GID on an empty slot
 
         Returns dict with:
             can_build: bool
             missing: dict of resource shortages
             costs: dict of upgrade costs
         """
+        if construct_gid:
+            # New construction — fetch available buildings for the empty slot
+            available = await self.building_service.get_available_buildings(slot_id, village_id=village_id)
+            resources = await self.building_service.get_resources(village_id=village_id)
+            target_building = None
+            for b in available:
+                if b['gid'] == construct_gid:
+                    target_building = b
+                    break
+            costs = target_building['costs'] if target_building else {}
+            can_construct = bool(target_building and target_building['can_build'])
+            current = {
+                'lumber': resources.lumber,
+                'clay': resources.clay,
+                'iron': resources.iron,
+                'crop': resources.crop,
+            }
+            missing = {}
+            for res, needed in costs.items():
+                if res in current and current[res] < needed:
+                    missing[res] = needed - current[res]
+            return {
+                'can_build': can_construct and len(missing) == 0,
+                'has_checksum': can_construct,
+                'missing': missing,
+                'costs': costs,
+                'current': current,
+            }
+
         detail = await self.building_service.get_building_detail(slot_id, village_id=village_id)
         resources = await self.building_service.get_resources(village_id=village_id)
-        
+
         costs = detail.costs or {}
         current = {
             'lumber': resources.lumber,
@@ -194,12 +264,12 @@ class BuildQueueService:
             'iron': resources.iron,
             'crop': resources.crop,
         }
-        
+
         missing = {}
         for res, needed in costs.items():
             if res in current and current[res] < needed:
                 missing[res] = needed - current[res]
-        
+
         return {
             'can_build': len(missing) == 0 and detail.checksum is not None,
             'has_checksum': detail.checksum is not None,
@@ -253,9 +323,13 @@ class BuildQueueService:
                     continue
                 self._report(f"\n--- Priority {prio} ({len(items)} items) ---")
                 for item in items:
-                    check = await self.check_resources(item.slot_id, village_id=plan.village_id or None)
+                    check = await self.check_resources(
+                        item.slot_id, village_id=plan.village_id or None,
+                        construct_gid=item.construct_gid if item.is_construction else 0,
+                    )
                     ready = "READY" if check['can_build'] else f"WAITING (missing: {check['missing']})"
-                    self._report(f"  {item.building} Lv{item.current_level}->{item.target} "
+                    action = "CONSTRUCT " if item.is_construction else ""
+                    self._report(f"  {action}{item.building} Lv{item.current_level}->{item.target} "
                                 f"(slot {item.slot_id}, cost: {check['costs']}) [{ready}]")
                     results.append({
                         'building': item.building,
@@ -304,7 +378,10 @@ class BuildQueueService:
                     if item.status != "pending":
                         continue
                     
-                    check = await self.check_resources(item.slot_id, village_id=vid)
+                    check = await self.check_resources(
+                        item.slot_id, village_id=vid,
+                        construct_gid=item.construct_gid if item.is_construction else 0,
+                    )
 
                     if check['can_build']:
                         self._report(f"BUILDING: {item.building} Lv{item.current_level} -> {item.target}"
@@ -322,8 +399,13 @@ class BuildQueueService:
                             built_one = True
                             break
 
-                        # Actually upgrade
-                        result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False, village_id=vid)
+                        # Actually upgrade or construct
+                        if item.is_construction:
+                            result = await self.building_service.construct_building(
+                                item.slot_id, item.construct_gid, allow_gold=False, village_id=vid,
+                            )
+                        else:
+                            result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False, village_id=vid)
                         
                         if result.success:
                             item.status = "done"
@@ -423,7 +505,10 @@ class BuildQueueService:
             built = False
             for item in prio_items:
                 try:
-                    check = await self.check_resources(item.slot_id, village_id=vid)
+                    check = await self.check_resources(
+                        item.slot_id, village_id=vid,
+                        construct_gid=item.construct_gid if item.is_construction else 0,
+                    )
                 except Exception as e:
                     self._report(f"  {item.building} (slot {item.slot_id}): error checking - {e}")
                     continue
@@ -439,11 +524,17 @@ class BuildQueueService:
                         self._report(f"  {item.building} (slot {item.slot_id}): costs({costs_str}) missing({missing_str})")
                 if check['can_build']:
                     # Get building detail for gid (needed for video reward)
-                    detail = await self.building_service.get_building_detail(item.slot_id, village_id=vid) if use_video else None
+                    detail = await self.building_service.get_building_detail(item.slot_id, village_id=vid) if use_video and not item.is_construction else None
 
-                    result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False, village_id=vid)
+                    if item.is_construction:
+                        result = await self.building_service.construct_building(
+                            item.slot_id, item.construct_gid, allow_gold=False, village_id=vid,
+                        )
+                    else:
+                        result = await self.building_service.upgrade_building(item.slot_id, allow_gold=False, village_id=vid)
                     if not result.success:
-                        self._report(f"  UPGRADE FAILED: {item.building} (slot {item.slot_id}) - {result.raw_response[:200] if result.raw_response else 'unknown error'}")
+                        action = "CONSTRUCT" if item.is_construction else "UPGRADE"
+                        self._report(f"  {action} FAILED: {item.building} (slot {item.slot_id}) - {result.raw_response[:200] if result.raw_response else 'unknown error'}")
                         continue
                     if result.success:
                         next_level = item.current_level + 1
@@ -478,6 +569,10 @@ class BuildQueueService:
 
                         # Multi-level: update current_level, only mark done when target reached
                         item.current_level = next_level
+                        if item.is_construction:
+                            # After construction, building exists — switch to upgrade mode
+                            item.is_construction = False
+                            item.construct_gid = 0
                         if item.current_level >= item.target:
                             item.status = "done"
                         # else: stays 'pending' for next level
