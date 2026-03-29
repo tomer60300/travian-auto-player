@@ -229,7 +229,7 @@ plan:
 | `building` | One of `slot` or `building` | Building name (partial, case-insensitive). For unique buildings like Cranny, Barracks. If multiple match, picks the lowest level below target. |
 | `expect` | No | Safety guard for `slot` items. Verifies the building name matches (partial). **Skips with a warning if it doesn't match.** |
 | `target` | Yes | Target level. Auto-chains: Lv2 with target 5 → upgrades 2→3→4→5 |
-| `priority` | No (default: 5) | 1 = build first, 5 = last. Same priority: whichever has resources first |
+| `priority` | No (default: 5) | Any positive integer. 1 = build first, higher = later. Same priority: whichever has resources first |
 
 #### Step 3: Validate
 
