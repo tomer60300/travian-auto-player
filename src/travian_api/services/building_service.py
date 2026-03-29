@@ -8,11 +8,12 @@ from ..clients.http_client import HttpClient
 from ..exceptions import TravianError, BuildingNotFoundError
 from ..models.buildings import Building, BuildingDetail, QueueItem, Resources, UpgradeResult
 from ..parsers.html_parser import (
-    parse_dorf1, 
-    parse_dorf2, 
+    parse_dorf1,
+    parse_dorf2,
     parse_resources,
     parse_build_page,
-    parse_construction_queue
+    parse_construction_queue,
+    parse_empty_slot_buildings,
 )
 from ..constants import BUILDING_NAMES
 
@@ -143,7 +144,7 @@ class BuildingService:
             # If queue is occupied and allow_gold is False, REFUSE.
             queue = await self.get_construction_queue(village_id=village_id)
             if queue and not allow_gold:
-                queue_names = ", ".join(f"{q.name} Lv{q.level}" for q in queue)
+                queue_names = ", ".join(f"{q.building_name} Lv{q.target_level}" for q in queue)
                 return UpgradeResult(
                     success=False,
                     village_id=0,
@@ -220,6 +221,115 @@ class BuildingService:
                 raw_response=str(e)
             )
     
+    async def get_available_buildings(self, slot_id: int, village_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Get available buildings for an empty slot.
+
+        Args:
+            slot_id: Empty building slot ID (19-40)
+            village_id: Village ID (switches village if set)
+
+        Returns:
+            List of available building dicts with gid, name, checksum, build_url, costs, can_build
+        """
+        url = f"/build.php?id={slot_id}"
+        if village_id:
+            url = f"/build.php?newdid={village_id}&id={slot_id}"
+        html = await self.http_client.get_html(url)
+        return parse_empty_slot_buildings(html, slot_id=slot_id)
+
+    async def construct_building(self, slot_id: int, building_gid: int, allow_gold: bool = False, village_id: Optional[int] = None) -> UpgradeResult:
+        """
+        Construct a new building on an empty slot.
+
+        Args:
+            slot_id: Empty building slot ID (19-40)
+            building_gid: GID of the building to construct
+            allow_gold: If True, allow spending gold on master builder
+            village_id: Village ID (switches village if set)
+
+        Returns:
+            UpgradeResult object
+        """
+        try:
+            # Gold guard — same as upgrade_building
+            queue = await self.get_construction_queue(village_id=village_id)
+            if queue and not allow_gold:
+                queue_names = ", ".join(f"{q.building_name} Lv{q.target_level}" for q in queue)
+                return UpgradeResult(
+                    success=False,
+                    village_id=0,
+                    building_id=slot_id,
+                    building_name="Unknown",
+                    old_level=0,
+                    new_level=0,
+                    construction_time="",
+                    reward_used=False,
+                    raw_response=f"BLOCKED: Construction queue already has [{queue_names}]. "
+                                 f"Use allow_gold=True to override.",
+                )
+
+            # Fetch available buildings for this empty slot
+            available = await self.get_available_buildings(slot_id, village_id=village_id)
+            target = None
+            for b in available:
+                if b['gid'] == building_gid:
+                    target = b
+                    break
+
+            if not target:
+                available_names = ", ".join(f"{b['name']} (gid={b['gid']})" for b in available if b['can_build'])
+                return UpgradeResult(
+                    success=False, village_id=0, building_id=slot_id,
+                    building_name=BUILDING_NAMES.get(building_gid, f'gid={building_gid}'),
+                    old_level=0, new_level=0, construction_time="", reward_used=False,
+                    raw_response=f"Building gid={building_gid} not available on slot {slot_id}. "
+                                 f"Available: {available_names}",
+                )
+
+            if not target['can_build']:
+                return UpgradeResult(
+                    success=False, village_id=0, building_id=slot_id,
+                    building_name=target['name'],
+                    old_level=0, new_level=0, construction_time="", reward_used=False,
+                    raw_response=f"{target['name']} requirements not met (no construct button).",
+                )
+
+            build_url = target['build_url']
+            if village_id and f'newdid={village_id}' not in build_url:
+                sep = '&' if '?' in build_url else '?'
+                build_url += f'{sep}newdid={village_id}'
+
+            response_html = await self.http_client.get_html(build_url, skip_reauth=True)
+
+            import re
+            has_queue_item = bool(re.search(r'showCancelBuildingDialog', response_html))
+            has_build_duration = bool(re.search(r'buildDuration|underConstruction', response_html))
+            has_error = bool(re.search(r'class="errorMessage"', response_html))
+            not_enough = 'notEnough' in response_html or 'not_enough' in response_html
+
+            success = (has_queue_item or has_build_duration) and not has_error and not not_enough
+
+            return UpgradeResult(
+                success=success,
+                village_id=0,
+                building_id=slot_id,
+                building_name=target['name'],
+                old_level=0,
+                new_level=1 if success else 0,
+                construction_time="",
+                reward_used=False,
+                raw_response="" if success else response_html[:500],
+            )
+
+        except Exception as e:
+            return UpgradeResult(
+                success=False, village_id=0, building_id=slot_id,
+                building_name=BUILDING_NAMES.get(building_gid, 'Unknown'),
+                old_level=0, new_level=0, construction_time="", reward_used=False,
+                raw_response=str(e),
+            )
+
     async def get_construction_queue(self, village_id: Optional[int] = None) -> List[QueueItem]:
         """
         Get current construction queue.
