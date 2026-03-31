@@ -35,6 +35,16 @@ from .common import (
     VillageInfo,
     PlayerInfo,
 )
+from .farm_list import (
+    FarmList,
+    FarmListSlot,
+    FarmListSendResult,
+    LastRaid,
+    RaidedResources,
+    SlotTarget,
+    SlotTroop,
+    MapTileInfo,
+)
 
 __all__ = [
     # Auth models
@@ -75,4 +85,14 @@ __all__ = [
     "Coordinates",
     "VillageInfo",
     "PlayerInfo",
+
+    # Farm list models
+    "FarmList",
+    "FarmListSlot",
+    "FarmListSendResult",
+    "LastRaid",
+    "RaidedResources",
+    "SlotTarget",
+    "SlotTroop",
+    "MapTileInfo",
 ]

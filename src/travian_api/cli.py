@@ -25,6 +25,8 @@ from .services.military_service import MilitaryService
 from .services.reports_service import ReportsService
 from .services.target_resolver import TargetResolver
 from .services.video_reward_service import VideoRewardService, REWARD_TYPES
+from .services.farm_list_service import FarmListService
+from .services.auto_scout_service import AutoScoutService
 from .constants import BUILDING_NAMES
 
 app = typer.Typer(name="travian", help="Travian Legends API - Game automation library and CLI", add_completion=False)
@@ -804,6 +806,528 @@ def video_claim_all():
                 console.print(f"\n[bold]Done — processed {len(available)} rewards[/bold]")
             finally:
                 await vrs.close()
+    _run(_do())
+
+
+# ── Farm List ────────────────────────────────────────────────────────
+farm_app = typer.Typer(name="farm", help="Farm list management and raiding commands")
+app.add_typer(farm_app)
+
+
+def _raid_icon(icon: int) -> str:
+    """Map lastRaid.icon to a coloured label."""
+    return {
+        1: "[green]no loss[/green]",
+        2: "[yellow]some loss[/yellow]",
+        3: "[red]all dead[/red]",
+    }.get(icon, "[dim]—[/dim]")
+
+
+def _capacity_bar(raided: int, max_cap: int) -> str:
+    """Show raided/capacity with colour."""
+    if max_cap == 0:
+        return "[dim]—[/dim]"
+    pct = raided / max_cap
+    colour = "green" if pct > 0.7 else "yellow" if pct > 0.3 else "red"
+    return f"[{colour}]{raided}/{max_cap}[/{colour}]"
+
+
+def _time_ago(unix_ts: int | None) -> str:
+    """Convert unix timestamp to human-readable time-ago string."""
+    if not unix_ts:
+        return "[dim]never[/dim]"
+    import time
+    diff = int(time.time()) - unix_ts
+    if diff < 60:
+        return f"{diff}s ago"
+    if diff < 3600:
+        return f"{diff // 60}m ago"
+    if diff < 86400:
+        return f"{diff // 3600}h {(diff % 3600) // 60}m ago"
+    return f"{diff // 86400}d ago"
+
+
+@farm_app.command("list")
+def farm_list_cmd():
+    """List all farm lists with summary info."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            fls = FarmListService(client)
+            lists = await fls.get_all_farm_lists()
+
+            if not lists:
+                console.print("[yellow]No farm lists found[/yellow]")
+                return
+
+            table = Table(title="Farm Lists")
+            table.add_column("ID", style="cyan", justify="right")
+            table.add_column("Name", style="green")
+            table.add_column("Slots", justify="right")
+            table.add_column("Running", justify="center")
+            table.add_column("Last Started", justify="right")
+            table.add_column("Village ID", justify="right")
+
+            for fl in lists:
+                running = (
+                    f"[yellow]{fl.running_raids_amount}[/yellow]"
+                    if fl.running_raids_amount
+                    else "[dim]0[/dim]"
+                )
+                table.add_row(
+                    str(fl.id),
+                    fl.name,
+                    str(fl.slots_amount),
+                    running,
+                    _time_ago(fl.last_started_time),
+                    str(fl.owner_village.id),
+                )
+            console.print(table)
+    _run(_do())
+
+
+@farm_app.command("show")
+def farm_show(
+    list_id: int = typer.Argument(..., help="Farm list ID"),
+):
+    """Show a farm list with smart raid intelligence per target."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            fls = FarmListService(client)
+            fl = await fls.get_farm_list(list_id)
+
+            # Header
+            troops = fl.owner_village.get_available_troops()
+            console.print(f"\n[bold]{fl.name}[/bold]  (id={fl.id})")
+            console.print(
+                f"  Village: {fl.owner_village.id}  |  "
+                f"Running raids: {fl.running_raids_amount}  |  "
+                f"Slots: {fl.slots_amount}"
+            )
+            console.print(
+                f"  Available troops: t1={troops.t1} t2={troops.t2} t3={troops.t3} "
+                f"t4={troops.t4} t5={troops.t5} t6={troops.t6}"
+            )
+
+            if not fl.slots:
+                console.print("[yellow]  No targets in this list[/yellow]")
+                return
+
+            # Smart table
+            table = Table(title="Targets", show_lines=True)
+            table.add_column("#", style="dim", justify="right")
+            table.add_column("Target", style="cyan")
+            table.add_column("Pop", justify="right")
+            table.add_column("Dist", justify="right")
+            table.add_column("Troops", justify="right")
+            table.add_column("Last Raid", justify="right")
+            table.add_column("Raided/Cap", justify="right")
+            table.add_column("Result")
+            table.add_column("Status")
+            table.add_column("Total", justify="right")
+
+            for i, slot in enumerate(fl.slots, 1):
+                t = slot.target
+                name = f"{t.name}\n({t.x}|{t.y})" if t.name else f"({t.x}|{t.y})"
+
+                # Troop composition (non-zero only)
+                troop_parts = []
+                for ti in range(1, 11):
+                    val = getattr(slot.troop, f"t{ti}", 0)
+                    if val:
+                        troop_parts.append(f"t{ti}={val}")
+                troop_str = " ".join(troop_parts) if troop_parts else "[dim]—[/dim]"
+
+                # Last raid info
+                lr = slot.last_raid
+                last_raid_time = _time_ago(lr.time if lr else None)
+                capacity = _capacity_bar(
+                    lr.raided_resources.total if lr else 0,
+                    lr.booty_max if lr else 0,
+                )
+                result = _raid_icon(lr.icon if lr else 0)
+
+                # Status: running / spying / active / inactive
+                if slot.is_running:
+                    status = "[yellow]raiding...[/yellow]"
+                elif slot.is_spying:
+                    status = "[blue]scouting...[/blue]"
+                elif not slot.is_active:
+                    status = "[red]inactive[/red]"
+                else:
+                    status = "[green]ready[/green]"
+
+                # Total booty
+                tb = slot.total_booty
+                total_str = f"{tb.booty:,}\n({tb.raids} raids)" if tb.raids else "[dim]—[/dim]"
+
+                table.add_row(
+                    str(i),
+                    name,
+                    str(t.population),
+                    f"{slot.distance:.1f}",
+                    troop_str,
+                    last_raid_time,
+                    capacity,
+                    result,
+                    status,
+                    total_str,
+                )
+
+            console.print(table)
+    _run(_do())
+
+
+@farm_app.command("send")
+def farm_send(
+    list_id: int = typer.Argument(..., help="Farm list ID to send"),
+    confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+):
+    """Send all active targets in a farm list."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            fls = FarmListService(client)
+
+            fl = await fls.get_farm_list(list_id)
+            active = fl.active_slots
+            if not active:
+                console.print("[yellow]No active targets to send[/yellow]")
+                return
+
+            console.print(
+                f"Farm list: [bold]{fl.name}[/bold]  —  "
+                f"{len(active)} active targets"
+            )
+            if not confirm:
+                if not typer.confirm("Send raids?"):
+                    console.print("Cancelled.")
+                    return
+
+            result = await fls.send_farm_list(list_id)
+            if result.targets and result.targets[0].error == "plus.error_goldclub":
+                console.print(
+                    "[red]Gold Club is not active — sending via farm list API is blocked.[/red]\n"
+                    "Manage lists (create/add targets) still works without Gold Club."
+                )
+                return
+
+            console.print(
+                f"[green]Sent![/green]  "
+                f"Success: {result.success_count}  Failed: {result.fail_count}"
+            )
+            for t in result.targets:
+                icon = "[green]ok[/green]" if t.status == "success" else f"[red]{t.error}[/red]"
+                console.print(f"  Slot {t.id}: {icon}")
+    _run(_do())
+
+
+@farm_app.command("create")
+def farm_create(
+    name: str = typer.Option(..., "--name", "-n", help="Farm list name"),
+    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Source village ID"),
+):
+    """Create a new farm list."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            state = await auth.login()
+            fls = FarmListService(client)
+            vid = village_id or state.village_id
+            list_id = await fls.create_farm_list(vid, name)
+            console.print(f"[green]Created farm list '{name}' (id={list_id})[/green]")
+    _run(_do())
+
+
+@farm_app.command("add-target")
+def farm_add_target(
+    list_id: int = typer.Argument(..., help="Farm list ID"),
+    x: int = typer.Option(..., "--x", help="Target X coordinate"),
+    y: int = typer.Option(..., "--y", help="Target Y coordinate"),
+    troop: List[str] = typer.Option([], "--troop", "-t", help="Troop spec: t1=5"),
+    force: bool = typer.Option(False, "--force", help="Force add even if duplicate"),
+):
+    """Add a target to a farm list."""
+    troops = {f"t{i}": 0 for i in range(1, 11)}
+    for spec in troop:
+        parts = spec.split("=")
+        if len(parts) == 2:
+            troops[parts[0]] = int(parts[1])
+
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            fls = FarmListService(client)
+            await fls.add_slot(list_id, x=x, y=y, units=troops, force=force)
+            console.print(f"[green]Added target ({x},{y}) to list {list_id}[/green]")
+    _run(_do())
+
+
+@farm_app.command("delete")
+def farm_delete(
+    list_id: int = typer.Argument(..., help="Farm list ID to delete"),
+    confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+):
+    """Delete a farm list."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            fls = FarmListService(client)
+
+            if not confirm:
+                fl = await fls.get_farm_list(list_id)
+                if not typer.confirm(f"Delete '{fl.name}' ({fl.slots_amount} slots)?"):
+                    console.print("Cancelled.")
+                    return
+
+            await fls.delete_farm_list(list_id)
+            console.print(f"[green]Deleted farm list {list_id}[/green]")
+    _run(_do())
+
+
+# ── Auto-Scout ───────────────────────────────────────────────────────
+scout_app = typer.Typer(name="scout", help="Auto-scout commands — scan map and send scouts")
+app.add_typer(scout_app)
+
+
+@scout_app.command("scan")
+def scout_scan(
+    radius: int = typer.Option(10, "--radius", "-r", help="Scan radius from village"),
+    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Source village ID (default: main)"),
+    max_pop: Optional[int] = typer.Option(None, "--max-pop", help="Max population filter"),
+    min_pop: Optional[int] = typer.Option(None, "--min-pop", help="Min population filter"),
+    no_player: bool = typer.Option(False, "--no-player", help="Only show unoccupied villages"),
+    show_oases: bool = typer.Option(False, "--show-oases", help="Include oases in results"),
+    enrich: bool = typer.Option(True, "--enrich/--no-enrich", help="Fetch population details (slower)"),
+    limit: int = typer.Option(50, "--limit", "-l", help="Max results to show"),
+):
+    """Scan the map around your village and show potential targets."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            state = await auth.login()
+            svc = AutoScoutService(client)
+            svc.on_status(lambda msg: console.print(f"  {msg}"))
+
+            # Determine center
+            vid = village_id or state.village_id
+            center_village = next(
+                (v for v in state.villages if v.id == vid), None
+            )
+            if not center_village:
+                console.print(f"[red]Village {vid} not found[/red]")
+                return
+
+            cx, cy = center_village.x, center_village.y
+            console.print(
+                f"Scanning from [cyan]{center_village.name}[/cyan] "
+                f"({cx}|{cy}) radius={radius}"
+            )
+
+            # Scan
+            tiles = await svc.scan_map(cx, cy, radius)
+
+            # Filter out own villages
+            own_village_ids = {v.id for v in state.villages}
+            tiles = [t for t in tiles if t.village_id not in own_village_ids]
+
+            # Filter non-oasis villages with actual village IDs
+            if not show_oases:
+                tiles = [t for t in tiles if not t.is_oasis]
+            tiles = [t for t in tiles if t.village_id > 0]
+
+            # Enrich with population data
+            if enrich and tiles:
+                console.print(f"  Enriching {len(tiles)} tiles with details...")
+                tiles = await svc.enrich_tiles(tiles)
+
+            # Apply filters
+            from travian_api.services.auto_scout_service import AutoScoutService as _AS
+            tiles = svc.filter_targets(
+                tiles,
+                max_population=max_pop,
+                min_population=min_pop,
+                only_no_player=no_player,
+                exclude_oases=not show_oases,
+            )
+
+            if not tiles:
+                console.print("[yellow]No targets found matching filters[/yellow]")
+                return
+
+            tiles = tiles[:limit]
+            console.print(f"\n[bold]Found {len(tiles)} targets:[/bold]")
+
+            table = Table(title="Scan Results")
+            table.add_column("#", style="dim", justify="right")
+            table.add_column("Coords", style="cyan")
+            table.add_column("Name")
+            table.add_column("Pop", justify="right")
+            table.add_column("Dist", justify="right")
+            table.add_column("Player")
+            table.add_column("Tribe")
+
+            for i, t in enumerate(tiles, 1):
+                table.add_row(
+                    str(i),
+                    f"({t.x}|{t.y})",
+                    t.village_name or "[dim]—[/dim]",
+                    str(t.population) if t.population else "[dim]?[/dim]",
+                    f"{t.distance:.1f}",
+                    t.player_name or "[dim]—[/dim]",
+                    t.tribe or "[dim]—[/dim]",
+                )
+            console.print(table)
+    _run(_do())
+
+
+@scout_app.command("auto")
+def scout_auto(
+    radius: int = typer.Option(10, "--radius", "-r", help="Scan radius"),
+    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Source village ID"),
+    max_pop: Optional[int] = typer.Option(None, "--max-pop", help="Max population filter"),
+    min_pop: Optional[int] = typer.Option(None, "--min-pop", help="Min population filter"),
+    scout_type: str = typer.Option("resources", "--type", "-t", help="Scout type: resources or defenses"),
+    amount: int = typer.Option(1, "--amount", "-n", help="Number of scouts per target"),
+    exclude: Optional[str] = typer.Option(None, "--exclude", "-e", help="Exclude file (one coord per line: x,y)"),
+    no_player: bool = typer.Option(False, "--no-player", help="Only scout unoccupied villages"),
+    show_oases: bool = typer.Option(False, "--show-oases", help="Include oases"),
+    limit: int = typer.Option(20, "--limit", "-l", help="Max targets to scout"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be scouted without sending"),
+    confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+    delay: float = typer.Option(1.0, "--delay", help="Seconds between scout sends"),
+):
+    """Scan the map, filter targets, and send scouts automatically."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            state = await auth.login()
+            svc = AutoScoutService(client)
+            svc.on_status(lambda msg: console.print(f"  {msg}"))
+
+            vid = village_id or state.village_id
+            center_village = next(
+                (v for v in state.villages if v.id == vid), None
+            )
+            if not center_village:
+                console.print(f"[red]Village {vid} not found[/red]")
+                return
+
+            cx, cy = center_village.x, center_village.y
+            console.print(
+                f"Auto-Scout from [cyan]{center_village.name}[/cyan] "
+                f"({cx}|{cy}) r={radius} type={scout_type} amount={amount}"
+            )
+
+            # Parse exclude list
+            exclude_coords: set = set()
+            if exclude:
+                from pathlib import Path
+                p = Path(exclude)
+                if p.exists():
+                    for line in p.read_text().splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            parts = line.replace("|", ",").split(",")
+                            if len(parts) == 2:
+                                try:
+                                    exclude_coords.add((int(parts[0]), int(parts[1])))
+                                except ValueError:
+                                    pass
+                    console.print(f"  Loaded {len(exclude_coords)} excluded coordinates")
+                else:
+                    console.print(f"[yellow]Exclude file not found: {exclude}[/yellow]")
+
+            # Scan
+            tiles = await svc.scan_map(cx, cy, radius)
+
+            # Remove own villages
+            own_ids = {v.id for v in state.villages}
+            tiles = [t for t in tiles if t.village_id not in own_ids]
+            if not show_oases:
+                tiles = [t for t in tiles if not t.is_oasis]
+            tiles = [t for t in tiles if t.village_id > 0]
+
+            # Enrich
+            if tiles:
+                console.print(f"  Enriching {len(tiles)} tiles...")
+                tiles = await svc.enrich_tiles(tiles)
+
+            # Filter
+            tiles = svc.filter_targets(
+                tiles,
+                max_population=max_pop,
+                min_population=min_pop,
+                exclude_coords=exclude_coords,
+                only_no_player=no_player,
+                exclude_oases=not show_oases,
+            )
+
+            if not tiles:
+                console.print("[yellow]No targets found matching filters[/yellow]")
+                return
+
+            tiles = tiles[:limit]
+            console.print(f"\n[bold]{len(tiles)} targets to scout:[/bold]")
+
+            # Show targets table
+            table = Table()
+            table.add_column("#", style="dim", justify="right")
+            table.add_column("Coords", style="cyan")
+            table.add_column("Name")
+            table.add_column("Pop", justify="right")
+            table.add_column("Dist", justify="right")
+            table.add_column("Player")
+
+            for i, t in enumerate(tiles, 1):
+                table.add_row(
+                    str(i),
+                    f"({t.x}|{t.y})",
+                    t.village_name or "[dim]—[/dim]",
+                    str(t.population) if t.population else "[dim]?[/dim]",
+                    f"{t.distance:.1f}",
+                    t.player_name or "[dim]—[/dim]",
+                )
+            console.print(table)
+
+            if dry_run:
+                console.print("[yellow]DRY RUN — no scouts sent[/yellow]")
+                return
+
+            if not confirm:
+                if not typer.confirm(f"Send {amount} scout(s) to {len(tiles)} targets?"):
+                    console.print("Cancelled.")
+                    return
+
+            # Send scouts
+            results = await svc.send_scouts_to_targets(
+                targets=tiles,
+                scout_amount=amount,
+                scout_type=scout_type,
+                village_id=vid,
+                tribe_id=state.tribe_id,
+                delay_between=delay,
+            )
+
+            # Summary
+            sent = sum(1 for r in results if r["success"])
+            console.print(
+                f"\n[bold]Results: {sent}/{len(results)} scouts sent[/bold]"
+            )
     _run(_do())
 
 
