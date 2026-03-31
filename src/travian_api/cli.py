@@ -543,8 +543,10 @@ def queue_run(
             pathlib.Path(log_file).parent.mkdir(parents=True, exist_ok=True)
             _log_fh = open(log_file, "a", encoding="utf-8")
 
-        def _status_callback(msg: str):
-            """Print to console AND append to log file with timestamp."""
+        def _log(msg: str):
+            """Print to console AND append to log file with timestamp.
+            Every piece of information flows through this single function —
+            nothing can happen unlogged."""
             console.print(f"  {msg}")
             if _log_fh:
                 from datetime import datetime
@@ -552,35 +554,61 @@ def queue_run(
                 _log_fh.write(f"[{ts}] {msg}\n")
                 _log_fh.flush()  # flush immediately so nothing is lost on crash/kill
 
-        _status_callback(f"Loaded plan: village {plan.village_id}, {len(plan.items)} items")
+        # Install a Python logging handler that mirrors everything the
+        # travian_api loggers emit (HTTP errors, retries, warnings) into
+        # the same log file.  This catches low-level network issues that
+        # never reach _report().
+        if _log_fh:
+            import logging as _logging
+            class _FileHandler(_logging.Handler):
+                def emit(self, record):
+                    from datetime import datetime
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    _log_fh.write(f"[{ts}] [LOG/{record.levelname}] {record.getMessage()}\n")
+                    _log_fh.flush()
+            _fh = _FileHandler()
+            _fh.setLevel(_logging.DEBUG)
+            _logging.getLogger("travian_api").addHandler(_fh)
+
+        _log(f"Loaded plan: village {plan.village_id}, {len(plan.items)} items")
+        _log(f"Plan file: {plan_file}")
+        _log(f"Options: dry_run={dry_run}, poll={poll}s, use_video={use_video}, verbose={verbose}")
         for item in sorted(plan.items, key=lambda x: x.priority):
             label = f"slot {item.slot}" if item.slot else item.building
-            _status_callback(f"  P{item.priority}: {label} -> Lv{item.target}")
+            _log(f"  P{item.priority}: {label} -> Lv{item.target}")
 
         try:
             async with HttpClient(s) as client:
+                _log("Connecting to Travian server...")
                 auth = AuthService(client, s)
                 await auth.login()
+                _log("Login successful.")
+
                 bqs = BuildQueueService(client)
-                bqs.on_status(_status_callback)
+                bqs.on_status(_log)
 
                 if dry_run:
+                    _log("Mode: DRY RUN")
                     results = await bqs.execute_plan(plan, poll_interval_s=poll, dry_run=True)
                 else:
+                    _log("Mode: LIVE EXECUTION")
                     results = await bqs.execute_plan_continuous(plan, poll_interval_s=poll, use_video=use_video, verbose=verbose)
 
-                console.print(f"\n[bold]Results:[/bold]")
+                _log("=== RESULTS ===")
                 for r in results:
                     status = r.get('status', '?')
                     color = 'green' if status == 'started' else 'yellow' if status == 'dry_run' else 'red'
-                    line = f"  [{color}]{r['building']} {r.get('level','')} - {status}[/{color}]  {r.get('time','')}"
-                    console.print(line)
-                    if _log_fh:
-                        from datetime import datetime
-                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        _log_fh.write(f"[{ts}] RESULT: {r['building']} {r.get('level','')} - {status} {r.get('time','')}\n")
-                        _log_fh.flush()
+                    console.print(f"  [{color}]{r['building']} {r.get('level','')} - {status}[/{color}]  {r.get('time','')}")
+                    _log(f"RESULT: {r['building']} {r.get('level','')} - {status} {r.get('time','')}")
+
+        except KeyboardInterrupt:
+            _log("INTERRUPTED: Received Ctrl+C / SIGINT. Shutting down gracefully.")
+            raise
+        except Exception as e:
+            _log(f"FATAL ERROR: {type(e).__name__}: {e}")
+            raise
         finally:
+            _log("Session ended.")
             if _log_fh:
                 _log_fh.close()
     _run(_do())
