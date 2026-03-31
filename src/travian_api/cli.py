@@ -529,33 +529,60 @@ def queue_run(
     poll: int = typer.Option(30, "--poll", help="Poll interval in seconds"),
     use_video: bool = typer.Option(False, "--use-video", help="Claim buildingUpgrade video reward after each upgrade (~33s extra)"),
     verbose: bool = typer.Option(False, "--verbose", help="Show current resources and detailed cost breakdown"),
+    log_file: Optional[str] = typer.Option(None, "--log-file", help="Path to a log file. All status messages are appended in real-time."),
 ):
     """Execute a build plan in priority order. Waits for resources and empty queue."""
     async def _do():
         s = _settings()
         plan = BuildPlan.from_file(plan_file)
-        console.print(f"Loaded plan: village {plan.village_id}, {len(plan.items)} items")
+
+        # Open log file handle (stays open for the entire run)
+        _log_fh = None
+        if log_file:
+            import os, pathlib
+            pathlib.Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+            _log_fh = open(log_file, "a", encoding="utf-8")
+
+        def _status_callback(msg: str):
+            """Print to console AND append to log file with timestamp."""
+            console.print(f"  {msg}")
+            if _log_fh:
+                from datetime import datetime
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                _log_fh.write(f"[{ts}] {msg}\n")
+                _log_fh.flush()  # flush immediately so nothing is lost on crash/kill
+
+        _status_callback(f"Loaded plan: village {plan.village_id}, {len(plan.items)} items")
         for item in sorted(plan.items, key=lambda x: x.priority):
             label = f"slot {item.slot}" if item.slot else item.building
-            console.print(f"  P{item.priority}: {label} -> Lv{item.target}")
+            _status_callback(f"  P{item.priority}: {label} -> Lv{item.target}")
 
-        async with HttpClient(s) as client:
-            auth = AuthService(client, s)
-            await auth.login()
-            bqs = BuildQueueService(client)
-            bqs.on_status(lambda msg: console.print(f"  {msg}"))
+        try:
+            async with HttpClient(s) as client:
+                auth = AuthService(client, s)
+                await auth.login()
+                bqs = BuildQueueService(client)
+                bqs.on_status(_status_callback)
 
-            if dry_run:
-                results = await bqs.execute_plan(plan, poll_interval_s=poll, dry_run=True)
-            else:
-                results = await bqs.execute_plan_continuous(plan, poll_interval_s=poll, use_video=use_video, verbose=verbose)
+                if dry_run:
+                    results = await bqs.execute_plan(plan, poll_interval_s=poll, dry_run=True)
+                else:
+                    results = await bqs.execute_plan_continuous(plan, poll_interval_s=poll, use_video=use_video, verbose=verbose)
 
-            console.print(f"\n[bold]Results:[/bold]")
-            for r in results:
-                status = r.get('status', '?')
-                color = 'green' if status == 'started' else 'yellow' if status == 'dry_run' else 'red'
-                console.print(f"  [{color}]{r['building']} {r.get('level','')} - {status}[/{color}]"
-                              f"  {r.get('time','')}")
+                console.print(f"\n[bold]Results:[/bold]")
+                for r in results:
+                    status = r.get('status', '?')
+                    color = 'green' if status == 'started' else 'yellow' if status == 'dry_run' else 'red'
+                    line = f"  [{color}]{r['building']} {r.get('level','')} - {status}[/{color}]  {r.get('time','')}"
+                    console.print(line)
+                    if _log_fh:
+                        from datetime import datetime
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        _log_fh.write(f"[{ts}] RESULT: {r['building']} {r.get('level','')} - {status} {r.get('time','')}\n")
+                        _log_fh.flush()
+        finally:
+            if _log_fh:
+                _log_fh.close()
     _run(_do())
 
 
