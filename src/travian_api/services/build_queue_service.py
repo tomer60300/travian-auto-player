@@ -494,6 +494,17 @@ class BuildQueueService:
         all_results = []
         vid = plan.village_id or None
 
+        # Wait for any in-progress build to finish before resolving levels.
+        # If we read levels while a build is in the queue, we'd get the
+        # pre-upgrade level, causing an off-by-one drift for the entire run.
+        if not await self.is_queue_empty(village_id=vid):
+            self._report("Waiting for in-progress build to finish before resolving plan...")
+            while not await self.is_queue_empty(village_id=vid):
+                remaining = await self.get_queue_remaining(village_id=vid)
+                self._report(f"  Queue not empty ({remaining}s remaining)...")
+                wait = min(remaining + 5, 60)
+                await asyncio.sleep(wait)
+
         await self.resolve_slots(plan)
 
         while True:
@@ -587,15 +598,10 @@ class BuildQueueService:
                             except Exception as e:
                                 self._report(f"  VIDEO: Error - {e}")
 
-                        # Multi-level: update current_level, only mark done when target reached
-                        item.current_level = next_level
                         if item.is_construction:
                             # After construction, building exists — switch to upgrade mode
                             item.is_construction = False
                             item.construct_gid = 0
-                        if item.current_level >= item.target:
-                            item.status = "done"
-                        # else: stays 'pending' for next level
 
                         built = True
 
@@ -607,6 +613,30 @@ class BuildQueueService:
                             self._report(f"Waiting for build to finish ({remaining}s remaining)...")
                             wait = min(remaining + 5, 60)
                             await asyncio.sleep(wait)
+
+                        # Re-read actual level from server (authoritative source of truth).
+                        # This prevents drift when a plan is restarted mid-build or the
+                        # server state diverges from the in-memory tracker.
+                        actual_level = next_level  # fallback
+                        try:
+                            buildings = await self.building_service.get_village_buildings(village_id=vid)
+                            for b in buildings:
+                                if b.slot_id == item.slot_id:
+                                    actual_level = b.level
+                                    break
+                        except Exception as e:
+                            self._report(f"  WARNING: Could not re-read level from server: {e}")
+
+                        if actual_level != next_level:
+                            self._report(
+                                f"  LEVEL SYNC: Server reports Lv{actual_level} "
+                                f"(tracker expected Lv{next_level}). Using server value."
+                            )
+
+                        item.current_level = actual_level
+                        if item.current_level >= item.target:
+                            item.status = "done"
+                        # else: stays 'pending' for next level
 
                         break
 
