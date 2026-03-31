@@ -174,7 +174,45 @@ def parse_dorf2(html: str) -> List[Dict[str, Any]]:
             'classes': classes,
             'href': href
         })
-    
+
+    # Also parse buildingSlot divs that have data-aid/data-gid/data-name but
+    # whose <a> child has no href (e.g. the wall slot).
+    parsed_slots = {b['slot_id'] for b in buildings}
+    for div in soup.find_all('div', class_='buildingSlot'):
+        data_aid = div.get('data-aid')
+        data_gid = div.get('data-gid')
+        data_name = div.get('data-name')
+        if not (data_aid and data_gid and data_name):
+            continue
+        slot_id = int(data_aid)
+        if slot_id < 19 or slot_id in parsed_slots:
+            continue
+        parsed_slots.add(slot_id)
+        gid = int(data_gid)
+        level = 0
+        child_a = div.find('a', attrs={'data-level': True})
+        if child_a:
+            try:
+                level = int(child_a['data-level'])
+            except (ValueError, KeyError):
+                pass
+        if level == 0:
+            label = div.find('div', class_='labelLayer')
+            if label:
+                try:
+                    level = int(label.get_text(strip=True))
+                except ValueError:
+                    pass
+        building_name = data_name if data_name else BUILDING_NAMES.get(gid, f'Unknown (gid={gid})')
+        buildings.append({
+            'slot_id': slot_id,
+            'gid': gid,
+            'name': building_name,
+            'level': level,
+            'classes': ' '.join(div.get('class', [])),
+            'href': ''
+        })
+
     return buildings
 
 
