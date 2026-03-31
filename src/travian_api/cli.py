@@ -128,7 +128,28 @@ def _save_env(s: Settings) -> None:
 
 
 def _run(coro):
-    """Run an async coroutine synchronously."""
+    """Run an async coroutine synchronously.
+
+    Installs signal handlers so that SIGTERM (from TaskStop / kill) is
+    converted into a KeyboardInterrupt, which propagates through the
+    async stack and triggers the 'finally' cleanup in queue_run.
+    Without this, killing the bash wrapper leaves the Python child
+    process running as a zombie.
+    """
+    import signal
+    import sys
+
+    def _sigterm_handler(signum, frame):
+        """Convert SIGTERM into KeyboardInterrupt so cleanup runs."""
+        raise KeyboardInterrupt(f"Received signal {signum}")
+
+    # SIGTERM on Unix/Windows-Git-Bash, SIGBREAK on native Windows
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+    try:
+        signal.signal(signal.SIGBREAK, _sigterm_handler)  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        pass  # SIGBREAK only exists on Windows
+
     return asyncio.run(coro)
 
 
