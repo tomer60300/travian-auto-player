@@ -636,7 +636,9 @@ class BuildQueueService:
                         item.current_level = actual_level
                         if item.current_level >= item.target:
                             item.status = "done"
-                        # else: stays 'pending' for next level
+                            self._report(f"  DONE: {item.building} reached Lv{item.current_level} (target was {item.target})")
+                        else:
+                            self._report(f"  PROGRESS: {item.building} now Lv{item.current_level}, continuing to Lv{item.target}")
 
                         break
 
