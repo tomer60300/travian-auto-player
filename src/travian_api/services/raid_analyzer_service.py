@@ -454,7 +454,7 @@ def reconstruct_state(
 
         d = data if isinstance(data, dict) else data.model_dump()
 
-        # Populate identity from any report
+        # Populate identity from parsed data or GQL fallback
         if rtype == "scout":
             target = d.get("target", {})
             state.village_name = target.get("village_name") or state.village_name
@@ -465,6 +465,11 @@ def reconstruct_state(
             state.village_name = defender.get("village_name") or state.village_name
             state.player_name = defender.get("player_name") or state.player_name
             state.village_id = defender.get("village_id") or state.village_id
+
+        # GQL fallback for identity fields
+        state.village_name = state.village_name or report.get("_gql_vname", "")
+        state.player_name = state.player_name or report.get("_gql_pname", "")
+        state.village_id = state.village_id or report.get("_gql_vid", 0)
 
         entry = {"type": rtype, "data": d, "report_id": report_id, "timestamp": timestamp}
 
@@ -746,6 +751,8 @@ class RaidAnalyzerService:
             d = data if isinstance(data, dict) else data.model_dump()
 
             x, y = 0, 0
+
+            # First try HTML-embedded coordinates
             if rtype == "scout":
                 target = d.get("target", {})
                 coords = target.get("coordinates", {})
@@ -758,6 +765,11 @@ class RaidAnalyzerService:
                 y = coords.get("y", 0)
             else:
                 continue
+
+            # Fallback: use GQL coordinates stored during enrichment
+            if x == 0 and y == 0:
+                x = pr.get("_gql_x", 0)
+                y = pr.get("_gql_y", 0)
 
             if x == 0 and y == 0:
                 continue
@@ -918,6 +930,17 @@ class RaidAnalyzerService:
             gql_vid = village_meta.get("id", 0)
             gql_vname = village_meta.get("name", "")
             gql_pname = defender_meta.get("playerName", "")
+
+            # Store GQL coords as fallback for grouping (HTML often lacks them)
+            if gql_x or gql_y:
+                pr["_gql_x"] = gql_x
+                pr["_gql_y"] = gql_y
+            if gql_vid:
+                pr["_gql_vid"] = gql_vid
+            if gql_vname:
+                pr["_gql_vname"] = gql_vname
+            if gql_pname:
+                pr["_gql_pname"] = gql_pname
 
             # Use GraphQL timestamp if available (more reliable)
             gql_time = meta.get("time")
