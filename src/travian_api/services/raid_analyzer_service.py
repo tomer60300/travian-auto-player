@@ -306,7 +306,7 @@ def _score_with_unit(
         "profit": profit,
         "score": score,
         "round_trip_minutes": round(round_trip * 60),
-        "est_loot": round(loot),
+        "est_loot": round(eff_R),  # Show what we estimate is there
         "surviving": surviving,
     }
 
@@ -331,7 +331,11 @@ def calculate_score(
         return None  # no data at all
 
     R = state.estimated_raidable
-    if t_raid is not None:
+
+    # Only apply regeneration decay to DEPLETED targets (carry was not full).
+    # When confidence is "scouted" or "raided" (carry_full), R already
+    # reflects the real remaining amount — no guessing needed.
+    if state.raidable_confidence == "depleted" and t_raid is not None:
         eff_R = R * min(1.0, t_raid / T_REGEN)
     else:
         eff_R = float(R)
