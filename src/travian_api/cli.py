@@ -137,9 +137,15 @@ def _run(coro):
     async stack and triggers the 'finally' cleanup in queue_run.
     Without this, killing the bash wrapper leaves the Python child
     process running as a zombie.
+
+    On Windows, also starts a background thread that monitors the parent
+    process — if the parent (bash wrapper) dies, we self-terminate.
+    This covers the case where SIGTERM is not delivered to the child.
     """
     import signal
     import sys
+    import os
+    import threading
 
     def _sigterm_handler(signum, frame):
         """Convert SIGTERM into KeyboardInterrupt so cleanup runs."""
@@ -151,6 +157,40 @@ def _run(coro):
         signal.signal(signal.SIGBREAK, _sigterm_handler)  # type: ignore[attr-defined]
     except (AttributeError, OSError):
         pass  # SIGBREAK only exists on Windows
+
+    # Windows orphan prevention: monitor parent process.
+    # If bash wrapper is killed, Python child won't get SIGTERM on Windows.
+    # This daemon thread polls the parent PID and exits if it disappears.
+    if sys.platform == "win32":
+        _parent_pid = os.getppid()
+
+        def _watch_parent():
+            import ctypes
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            SYNCHRONIZE = 0x00100000
+            WAIT_OBJECT_0 = 0x00000000
+            INFINITE = 0xFFFFFFFF
+
+            # Open a handle to the parent process
+            handle = kernel32.OpenProcess(SYNCHRONIZE, False, _parent_pid)
+            if not handle:
+                # Can't open parent — fall back to polling
+                import time
+                while True:
+                    time.sleep(2)
+                    try:
+                        os.kill(_parent_pid, 0)  # check if alive
+                    except OSError:
+                        os._exit(1)
+                return
+
+            # Block until parent exits (efficient, no polling)
+            kernel32.WaitForSingleObject(handle, INFINITE)
+            kernel32.CloseHandle(handle)
+            os._exit(1)
+
+        t = threading.Thread(target=_watch_parent, daemon=True)
+        t.start()
 
     return asyncio.run(coro)
 
