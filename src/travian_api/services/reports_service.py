@@ -40,6 +40,7 @@ class ReportsService:
             List of ReportListItem objects
         """
         all_reports: List[ReportListItem] = []
+        first_page_size = None
 
         for page in range(1, max_pages + 1):
             try:
@@ -52,8 +53,9 @@ class ReportsService:
 
                 all_reports.extend(page_reports)
 
-                # If fewer than 30 reports, no more pages
-                if len(page_reports) < 30:
+                if first_page_size is None:
+                    first_page_size = len(page_reports)
+                elif len(page_reports) < first_page_size:
                     break
 
             except Exception as e:
@@ -91,6 +93,7 @@ class ReportsService:
         pages_fetched = 0
         pages_failed = 0
         failed_pages: List[int] = []
+        first_page_size: Optional[int] = None
         cutoff = None
         if max_age_hours is not None:
             cutoff = datetime.now() - timedelta(hours=max_age_hours)
@@ -107,8 +110,11 @@ class ReportsService:
 
                 all_reports.extend(page_reports)
 
-                # If fewer than 30 reports, no more pages
-                if len(page_reports) < 30:
+                # Detect page size from the first full page
+                if first_page_size is None:
+                    first_page_size = len(page_reports)
+                elif len(page_reports) < first_page_size:
+                    # Fewer reports than a full page → last page
                     break
 
                 # Stop when the last (oldest) report on the page is beyond cutoff
