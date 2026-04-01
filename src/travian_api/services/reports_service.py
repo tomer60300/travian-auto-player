@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from ..clients.http_client import HttpClient
 from ..exceptions import ReportError
@@ -62,6 +62,57 @@ class ReportsService:
 
         logger.info(f"Fetched {len(all_reports)} reports from {page} pages")
         return all_reports
+
+    async def fetch_reports_robust(
+        self,
+        max_age_hours: Optional[int] = None,
+        max_pages: int = 20,
+    ) -> Tuple[List[ReportListItem], int, int, List[int]]:
+        """
+        Fetch reports from /report/all pages with robust error handling.
+
+        Unlike fetch_reports(), this does NOT break on page errors —
+        it logs the error, skips the page, and continues.
+
+        Args:
+            max_age_hours: Only fetch reports newer than this (basic date filter)
+            max_pages: Maximum pages to scrape (30 reports/page)
+
+        Returns:
+            Tuple of (reports, pages_fetched, pages_failed, failed_page_numbers)
+        """
+        all_reports: List[ReportListItem] = []
+        pages_fetched = 0
+        pages_failed = 0
+        failed_pages: List[int] = []
+
+        for page in range(1, max_pages + 1):
+            try:
+                html = await self.client.get_html(f"/report/all?page={page}")
+                page_reports = parse_report_list(html)
+                pages_fetched += 1
+
+                if not page_reports:
+                    logger.debug(f"No reports on page {page}, stopping")
+                    break
+
+                all_reports.extend(page_reports)
+
+                # If fewer than 30 reports, no more pages
+                if len(page_reports) < 30:
+                    break
+
+            except Exception as e:
+                logger.error(f"Failed to fetch reports page {page}: {e}")
+                pages_failed += 1
+                failed_pages.append(page)
+                continue  # Continue to next page, do NOT break
+
+        logger.info(
+            f"Fetched {len(all_reports)} reports from {pages_fetched} pages "
+            f"({pages_failed} failed)"
+        )
+        return all_reports, pages_fetched, pages_failed, failed_pages
 
     async def fetch_report_detail(self, report_id: str) -> Dict[str, Any]:
         """
@@ -123,3 +174,88 @@ class ReportsService:
         except Exception as e:
             logger.warning(f"Failed to fetch report metadata: {e}")
             return {}
+
+    async def fetch_alliance_reports(
+        self,
+        max_pages: int = 10,
+    ) -> Tuple[List[ReportListItem], bool]:
+        """
+        Attempt to fetch alliance shared reports.
+
+        Tries multiple approaches:
+        1. HTML route /alliance/reports
+        2. GraphQL ownPlayer.alliance.reports
+        3. /report/all with alliance filter
+
+        Returns:
+            Tuple of (reports_list, success_bool)
+        """
+        # Approach 1: Try /alliance/reports HTML route
+        try:
+            html = await self.client.get_html("/alliance/reports")
+            reports = parse_report_list(html)
+            if reports:
+                logger.info(f"Alliance reports via /alliance/reports: {len(reports)} found")
+                return reports, True
+        except Exception as e:
+            logger.debug(f"Alliance reports route /alliance/reports failed: {e}")
+
+        # Approach 2: Try GraphQL
+        try:
+            query = """{
+                ownPlayer {
+                    alliance {
+                        reports { id time title }
+                    }
+                }
+            }"""
+            response = await self.client.post_json(
+                "/api/v1/graphql", {"query": query, "variables": {}}
+            )
+            data = response.get("data", {})
+            alliance_data = (data.get("ownPlayer") or {}).get("alliance") or {}
+            gql_reports = alliance_data.get("reports") or []
+            if gql_reports:
+                # Convert GraphQL reports to ReportListItem format
+                items = []
+                for r in gql_reports:
+                    items.append(ReportListItem(
+                        report_id=str(r.get("id", "")),
+                        icon_type=0,
+                        report_type="unknown",
+                        subject=r.get("title", ""),
+                        date_str="",
+                        is_read=True,
+                    ))
+                logger.info(f"Alliance reports via GraphQL: {len(items)} found")
+                return items, True
+        except Exception as e:
+            logger.debug(f"Alliance reports via GraphQL failed: {e}")
+
+        # Approach 3: Try /report/all with alliance filter parameter
+        try:
+            html = await self.client.get_html("/report/all?allianceReports=1&page=1")
+            reports = parse_report_list(html)
+            if reports:
+                # Fetch remaining pages
+                all_reports = list(reports)
+                for page in range(2, max_pages + 1):
+                    try:
+                        page_html = await self.client.get_html(
+                            f"/report/all?allianceReports=1&page={page}"
+                        )
+                        page_reports = parse_report_list(page_html)
+                        if not page_reports:
+                            break
+                        all_reports.extend(page_reports)
+                        if len(page_reports) < 30:
+                            break
+                    except Exception:
+                        break
+                logger.info(f"Alliance reports via filter param: {len(all_reports)} found")
+                return all_reports, True
+        except Exception as e:
+            logger.debug(f"Alliance reports via filter param failed: {e}")
+
+        logger.warning("Alliance reports: all discovery approaches failed")
+        return [], False
