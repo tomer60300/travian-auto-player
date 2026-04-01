@@ -421,6 +421,34 @@ def parse_battle_report(html: str) -> BattleReportData:
         if rw:
             bounty.update(_parse_resource_wrapper(rw))
 
+    # Carry fraction — how full were the returning troops
+    carry_used = 0
+    carry_max = 0
+    carry_full = False
+    if ai_table:
+        carry_div = ai_table.find('div', class_=re.compile(r'inlineIcon.*carry|carry.*inlineIcon'))
+        if not carry_div:
+            # Fallback: find any div with 'carry' in class within additionalInformation
+            for div in ai_table.find_all('div', class_=True):
+                classes = ' '.join(div.get('class', []))
+                if 'carry' in classes and 'inlineIcon' in classes:
+                    carry_div = div
+                    break
+        if carry_div:
+            carry_i = carry_div.find('i', class_=re.compile(r'carry'))
+            if carry_i:
+                carry_classes = ' '.join(carry_i.get('class', []))
+                carry_full = 'full' in carry_classes
+            carry_span = carry_div.find('span', class_='value')
+            if carry_span:
+                raw_carry = clean_unicode(carry_span.get_text(strip=True))
+                # Clean Unicode directional markers and non-digit/slash chars
+                cleaned = re.sub(r'[^\d/]', '', raw_carry)
+                parts = cleaned.split('/')
+                if len(parts) == 2:
+                    carry_used = int(parts[0]) if parts[0] else 0
+                    carry_max = int(parts[1]) if parts[1] else 0
+
     return BattleReportData(
         attacker=attacker_info,
         defender=defender_info,
@@ -430,6 +458,9 @@ def parse_battle_report(html: str) -> BattleReportData:
         bounty=bounty,
         attacker_losses=attacker_losses,
         defender_losses=defender_losses,
+        carry_used=carry_used,
+        carry_max=carry_max,
+        carry_full=carry_full,
     )
 
 
