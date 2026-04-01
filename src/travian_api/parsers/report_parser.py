@@ -465,8 +465,12 @@ def parse_battle_report(html: str) -> BattleReportData:
 
 
 # Scout unit IDs as they appear in HTML class attributes (e.g. class="unit u4")
-# u4 = Equites Legati (Romans), u8 = Scout (Teutons), u12 = Pathfinder (Gauls)
-SCOUT_UNIT_IDS = {'u4', 'u8', 'u12'}
+# HTML unit IDs use tribe offsets: Romans u1-u10, Teutons u11-u20, Gauls u21-u30
+# u4 = Equites Legati (Roman scout, tribe slot t4)
+# u14 = Scout (Teuton scout, tribe slot t4, offset u11+3)
+# u23 = Pathfinder (Gaul scout, tribe slot t3, offset u21+2)
+# Also include u44/u54/u64 for Egyptians/Huns/Spartans and hero
+SCOUT_UNIT_IDS = {'u4', 'u14', 'u23', 'u44', 'u54', 'u64', 'uhero'}
 
 
 def _has_troop_losses(soup: BeautifulSoup) -> bool:
