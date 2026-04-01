@@ -90,6 +90,13 @@ class AnalysisResult(BaseModel):
     excluded_alliances: List[str] = Field(default_factory=list)
     excluded_players: List[str] = Field(default_factory=list)
 
+    # Skip counters
+    skipped_needs_scout: int = 0
+    skipped_low_resources: int = 0
+    skipped_out_of_range: int = 0
+    skipped_alliance: int = 0
+    skipped_player: int = 0
+
     # Warnings
     warnings: List[str] = Field(default_factory=list)
 
