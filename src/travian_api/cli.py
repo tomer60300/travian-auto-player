@@ -604,7 +604,8 @@ def reports_analyze(
         async with HttpClient(s) as client:
             auth = AuthService(client, s)
             auth_state = await auth.login()
-            console.print(f"[green]Logged in as {auth_state.player_name}[/green]")
+            if not output_json:
+                console.print(f"[green]Logged in as {auth_state.player_name}[/green]")
 
             analyzer = RaidAnalyzerService(client, auth_state)
             analyzer_settings = AnalyzerSettings(
@@ -622,7 +623,8 @@ def reports_analyze(
                 output_json=output_json,
             )
 
-            console.print("[cyan]Analyzing reports...[/cyan]")
+            if not output_json:
+                console.print("[cyan]Analyzing reports...[/cyan]")
             result = await analyzer.analyze(analyzer_settings)
 
             if output_json:
