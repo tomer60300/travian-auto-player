@@ -8,6 +8,8 @@ A Python library and CLI for automating Travian Legends gameplay. Async-first, m
 - **🏘️ Multi-Village** — Full support for multiple villages per account
 - **🏗️ Auto-Builder** — YAML-based build queue with priorities, multi-level chaining, gold guard, and video speedup
 - **⚔️ Military** — Scouts, raids, attacks with village selection
+- **🌾 Farm Lists** — Full CRUD + smart raid intelligence (last raid, fatalities, capacity, distance, raid status)
+- **🔭 Auto-Scout** — Scan map, filter by population/distance/player, send scouts automatically with exclude lists
 - **📊 Reports** — Fetch and parse scout/battle reports with smart type detection
 - **🎬 Video Rewards** — Automated ATG ad simulation for production boosts and build speedups
 - **🛡️ Gold Guard** — Never spends gold unless you explicitly opt in
@@ -128,6 +130,230 @@ travian military scout --x 100 --y 200 --amount 5 --village-id 20031
 # Send a raid
 travian military raid --x 50 --y -30 --troop t1=10 --troop t2=5
 ```
+
+### Farm Lists
+
+Manage farm lists and trigger raids with full visibility into raid performance. Works without Gold Club for everything except sending.
+
+#### List all farm lists
+
+```bash
+travian farm list
+```
+
+```
+                              Farm Lists
+┌───────┬───────────────┬───────┬─────────┬──────────────┬────────────┐
+│    ID │ Name          │ Slots │ Running │ Last Started │ Village ID │
+├───────┼───────────────┼───────┼─────────┼──────────────┼────────────┤
+│ 10165 │ My Raid List  │     5 │    0    │       2h ago │      20030 │
+│ 10200 │ Inactive Farms│     3 │    0    │       never  │      20031 │
+└───────┴───────────────┴───────┴─────────┴──────────────┴────────────┘
+```
+
+#### Show farm list with raid intelligence
+
+The `farm show` command displays everything you need to make smart raiding decisions:
+
+```bash
+travian farm show 10165
+```
+
+```
+My Raid List  (id=10165)
+  Village: 20030  |  Running raids: 0  |  Slots: 5
+  Available troops: t1=490 t2=33 t3=141 t4=48 t5=31 t6=0
+
+                                    Targets
+┌───┬──────────┬─────┬──────┬────────┬──────────┬───────────┬───────────┬───────────┬──────────┐
+│ # │ Target   │ Pop │ Dist │ Troops │ Last Raid│ Raided/Cap│ Result    │ Status    │ Total    │
+├───┼──────────┼─────┼──────┼────────┼──────────┼───────────┼───────────┼───────────┼──────────┤
+│ 1 │ Village1 │  12 │  1.4 │  t1=5  │  15m ago │   450/600 │ no loss   │ ready     │   3,200  │
+│   │ (-162|…) │     │      │        │          │           │           │           │ (8 raids)│
+├───┼──────────┼─────┼──────┼────────┼──────────┼───────────┼───────────┼───────────┼──────────┤
+│ 2 │ Village2 │  45 │  3.2 │  t1=10 │   2h ago │   120/600 │ some loss │ raiding...│   1,500  │
+│   │ (-159|…) │     │      │  t4=1  │          │           │           │           │ (3 raids)│
+├───┼──────────┼─────┼──────┼────────┼──────────┼───────────┼───────────┼───────────┼──────────┤
+│ 3 │ Village3 │   8 │  5.0 │  t1=3  │    never │         — │ —         │ inactive  │        — │
+└───┴──────────┴─────┴──────┴────────┴──────────┴───────────┴───────────┴───────────┴──────────┘
+```
+
+**Columns explained:**
+
+| Column | Description |
+|--------|-------------|
+| **Pop** | Target village population |
+| **Dist** | Distance in fields from source village |
+| **Troops** | Troop composition assigned to this target (t1–t10) |
+| **Last Raid** | Time since last raid was sent |
+| **Raided/Cap** | Resources raided vs carry capacity. Colour-coded: green (>70%), yellow (30-70%), red (<30%) |
+| **Result** | Last raid outcome: `no loss` (green), `some loss` (yellow), `all dead` (red) |
+| **Status** | Current state: `ready`, `raiding...`, `scouting...`, or `inactive` |
+| **Total** | Cumulative resources raided and total raid count |
+
+#### Send a farm list
+
+```bash
+# Interactive — shows target count and asks for confirmation
+travian farm send 10165
+
+# Skip confirmation
+travian farm send 10165 --yes
+```
+
+> **Note:** Sending requires Gold Club. Without it, the API returns an error. All other farm list operations (create, add targets, view, delete) work without Gold Club.
+
+#### Create, add targets, delete
+
+```bash
+# Create a new farm list
+travian farm create --name "New Raid List"
+travian farm create --name "Village 2 List" --village-id 20031
+
+# Add a target with troop composition
+travian farm add-target 10165 --x -162 --y 167 -t t1=5
+travian farm add-target 10165 --x -159 --y 168 -t t1=3 -t t4=1
+
+# Force add (even if target exists in another list)
+travian farm add-target 10165 --x -162 --y 167 -t t1=5 --force
+
+# Delete a farm list
+travian farm delete 10165
+travian farm delete 10165 --yes  # skip confirmation
+```
+
+---
+
+### Auto-Scout
+
+Scan the map around your village, discover targets, filter by conditions, and send scouts automatically.
+
+#### Scan (preview only)
+
+Scan the map and display results without sending anything:
+
+```bash
+# Basic scan — enriches tiles with population and player data
+travian scout scan --radius 10
+
+# Filter by population
+travian scout scan --radius 15 --max-pop 50
+
+# Fast scan without tile enrichment (no population data)
+travian scout scan --radius 20 --no-enrich
+
+# Only show villages with no active player
+travian scout scan --radius 10 --no-player
+
+# Include oases in results
+travian scout scan --radius 10 --show-oases
+
+# Scan from a specific village
+travian scout scan --radius 10 --village-id 20031
+
+# Limit results
+travian scout scan --radius 20 --limit 30
+```
+
+```
+Scanning from Chieftain`s village (-161|166) radius=10
+  Scanning 1 map region(s) around (-161,166) r=10
+  Found 45 tiles with villages/oases in radius
+  Enriching 28 tiles with details...
+
+Found 15 targets:
+                                 Scan Results
+┌────┬────────────┬───────────────────────┬─────┬──────┬─────────────┬────────┐
+│  # │ Coords     │ Name                  │ Pop │ Dist │ Player      │ Tribe  │
+├────┼────────────┼───────────────────────┼─────┼──────┼─────────────┼────────┤
+│  1 │ (-162|167) │ KAK Köyü              │  12 │  1.4 │ KAK         │ Gauls  │
+│  2 │ (-159|168) │ CENGİZHAN80 Köyü      │  12 │  2.8 │ CENGİZHAN80 │ Gauls  │
+│  3 │ (-164|166) │ Bergen                │  42 │  3.0 │ Odin        │ Teuton │
+│ ...│            │                       │     │      │             │        │
+└────┴────────────┴───────────────────────┴─────┴──────┴─────────────┴────────┘
+```
+
+#### Auto-scout (scan + send)
+
+Scan, filter, and send scouts in one command:
+
+```bash
+# Scout all low-pop villages within radius 10 (resource scout)
+travian scout auto --radius 10 --max-pop 50 --amount 1 --type resources --yes
+
+# Scout with defenses type (reveal troops)
+travian scout auto --radius 10 --max-pop 30 --amount 2 --type defenses --yes
+
+# Dry run — show what would be scouted
+travian scout auto --radius 15 --max-pop 100 --dry-run
+
+# Use an exclude list to skip known targets
+travian scout auto --radius 10 --exclude exclude.txt --yes
+
+# Limit number of targets and add delay between sends
+travian scout auto --radius 20 --limit 10 --delay 2.0 --yes
+
+# Scout from a different village
+travian scout auto --radius 10 --village-id 20031 --amount 1 --yes
+```
+
+```
+Auto-Scout from Chieftain`s village (-161|166) r=10 type=resources amount=1
+  Scanning 1 map region(s) around (-161,166) r=10
+  Found 45 tiles with villages/oases in radius
+  Enriching 28 tiles...
+
+6 targets to scout:
+┌───┬────────────┬──────────────────┬─────┬──────┬─────────────┐
+│ # │ Coords     │ Name             │ Pop │ Dist │ Player      │
+├───┼────────────┼──────────────────┼─────┼──────┼─────────────┤
+│ 1 │ (-162|167) │ KAK Köyü         │  12 │  1.4 │ KAK         │
+│ 2 │ (-159|168) │ CENGİZHAN80 Köyü │  12 │  2.8 │ CENGİZHAN80 │
+│ ...│           │                  │     │      │             │
+└───┴────────────┴──────────────────┴─────┴──────┴─────────────┘
+  [1/6] Scouting (-162,167) KAK Köyü pop=12 dist=1.41
+    -> Scouts sent! Travel: 0:09:26
+  [2/6] Scouting (-159,168) CENGİZHAN80 Köyü pop=12 dist=2.83
+    -> Scouts sent! Travel: 0:18:51
+  ...
+  Done: 6/6 scouts sent successfully
+
+Results: 6/6 scouts sent
+```
+
+#### Exclude file format
+
+Create a text file with coordinates to skip (one per line):
+
+```
+# exclude.txt — coordinates to never scout
+# Format: x,y or x|y (pipe-separated also works)
+-162,167
+-159,168
+-164|166
+
+# Comments and blank lines are ignored
+```
+
+#### All auto-scout options
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--radius` | `-r` | 10 | Scan radius in fields from village center |
+| `--village-id` | `-v` | main village | Source village for scanning and sending scouts |
+| `--max-pop` | — | no limit | Max target population (filter out large villages) |
+| `--min-pop` | — | no limit | Min target population |
+| `--type` | `-t` | `resources` | Scout type: `resources` (reveal resources) or `defenses` (reveal troops) |
+| `--amount` | `-n` | 1 | Number of scouts to send per target |
+| `--exclude` | `-e` | none | Path to exclude file (coordinates to skip) |
+| `--no-player` | — | false | Only scout villages with no active player |
+| `--show-oases` | — | false | Include oases in scan results |
+| `--limit` | `-l` | 20 | Max number of targets to scout |
+| `--dry-run` | — | false | Show targets without sending scouts |
+| `--yes` | `-y` | false | Skip confirmation prompt |
+| `--delay` | — | 1.0 | Seconds between scout sends (rate limiting) |
+
+---
 
 ### Reports
 
@@ -299,12 +525,15 @@ travian-api/
 │   ├── models/
 │   │   ├── auth.py             # AuthState, Village
 │   │   ├── buildings.py        # Building, Resources, QueueItem, UpgradeResult
+│   │   ├── farm_list.py        # FarmList, FarmListSlot, MapTileInfo, LastRaid
 │   │   ├── military.py         # TroopSendResult, TargetInfo
 │   │   └── reports.py          # ReportListItem, ScoutReportData, BattleReportData
 │   ├── services/
 │   │   ├── auth_service.py     # Login, JWT, re-auth
+│   │   ├── auto_scout_service.py   # Map scanning, tile enrichment, scout dispatch
 │   │   ├── building_service.py # Buildings, resources, upgrades
 │   │   ├── build_queue_service.py  # Auto-builder engine
+│   │   ├── farm_list_service.py    # Farm list GraphQL + REST CRUD + send
 │   │   ├── military_service.py # Scout, raid, attack
 │   │   ├── reports_service.py  # Report fetching + GraphQL batch
 │   │   ├── target_resolver.py  # Coordinate/name resolution
@@ -342,10 +571,12 @@ travian-api/
 
 ## Known Limitations
 
+- **Farm List Send**: Requires Gold Club — the API blocks `farm-list/send` without it. All other operations (create, manage, view) work fine.
 - **Movement Cancellation**: Not implemented (requires UI interaction)
 - **Report Deletion**: Bulk operations not implemented
 - **Video `buildingUpgrade`**: May be disabled on some accounts (cooldown or server restriction)
 - **Single plan per run**: Each `queue run` targets one village. Run multiple plans for multiple villages.
+- **Auto-Scout enrichment**: Fetching population data requires one API call per tile. Large radius scans may be slow (use `--no-enrich` for fast scanning).
 
 ## Disclaimer
 
