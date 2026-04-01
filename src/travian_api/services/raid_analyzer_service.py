@@ -546,6 +546,7 @@ class RaidAnalyzerService:
         # ── Phase 1A: Fetch report list ────────────────────────────
         reports_list, pages_fetched, pages_failed, failed_pages = (
             await self.reports_service.fetch_reports_robust(
+                max_age_hours=settings.max_report_age_hours,
                 max_pages=settings.max_pages,
             )
         )

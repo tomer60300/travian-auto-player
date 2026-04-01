@@ -66,25 +66,34 @@ class ReportsService:
     async def fetch_reports_robust(
         self,
         max_age_hours: Optional[int] = None,
-        max_pages: int = 20,
+        max_pages: int = 100,
     ) -> Tuple[List[ReportListItem], int, int, List[int]]:
         """
         Fetch reports from /report/all pages with robust error handling.
 
-        Unlike fetch_reports(), this does NOT break on page errors —
-        it logs the error, skips the page, and continues.
+        Keeps fetching pages until:
+        - All reports on a page are older than *max_age_hours*, OR
+        - No more pages remain, OR
+        - *max_pages* safety cap is reached.
 
         Args:
-            max_age_hours: Only fetch reports newer than this (basic date filter)
-            max_pages: Maximum pages to scrape (30 reports/page)
+            max_age_hours: Stop fetching when the oldest report on a page
+                exceeds this age.  None = no age limit (use max_pages only).
+            max_pages: Hard safety cap on pages (default 100 = 3 000 reports).
 
         Returns:
             Tuple of (reports, pages_fetched, pages_failed, failed_page_numbers)
         """
+        from ..services.raid_analyzer_service import parse_report_date
+        from datetime import datetime, timedelta
+
         all_reports: List[ReportListItem] = []
         pages_fetched = 0
         pages_failed = 0
         failed_pages: List[int] = []
+        cutoff = None
+        if max_age_hours is not None:
+            cutoff = datetime.now() - timedelta(hours=max_age_hours)
 
         for page in range(1, max_pages + 1):
             try:
@@ -101,6 +110,16 @@ class ReportsService:
                 # If fewer than 30 reports, no more pages
                 if len(page_reports) < 30:
                     break
+
+                # Stop when the last (oldest) report on the page is beyond cutoff
+                if cutoff is not None:
+                    oldest_date = parse_report_date(page_reports[-1].date_str)
+                    if oldest_date and oldest_date < cutoff:
+                        logger.debug(
+                            f"Page {page}: oldest report ({oldest_date}) "
+                            f"exceeds max age, stopping"
+                        )
+                        break
 
             except Exception as e:
                 logger.error(f"Failed to fetch reports page {page}: {e}")
