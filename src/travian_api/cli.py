@@ -731,11 +731,14 @@ def reports_analyze(
                     f"  Last report processed: ID={result.last_report_id}"
                     f"{' @ ' + result.last_report_time.strftime('%H:%M') if result.last_report_time else ''}"
                 )
-            console.print(f"  Targets analyzed: {len(result.targets)} viable after filters")
-            if result.excluded_alliances:
-                console.print(f"  Excluded alliances: {', '.join(result.excluded_alliances)}")
-            if result.excluded_players:
-                console.print(f"  Excluded players: {', '.join(result.excluded_players)}")
+            console.print(f"  Targets: {len(result.targets)} viable")
+            console.print(
+                f"  Skipped: {result.skipped_needs_scout} need scouting | "
+                f"{result.skipped_low_resources} below {result.min_resources} res | "
+                f"{result.skipped_out_of_range} out of range | "
+                f"{result.skipped_alliance} allied"
+                f"{' (' + ', '.join(result.excluded_alliances) + ')' if result.excluded_alliances else ''}"
+            )
 
             # ── Warnings ───────────────────────────────────────
             if result.warnings:

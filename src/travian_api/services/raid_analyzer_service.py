@@ -311,94 +311,106 @@ def _score_with_unit(
     }
 
 
+# Scoring configuration
+RAID_COOLDOWN_H = 2.0
+OVER_RAID_PENALTY = 0.5
+CONF_CARRY_FULL = 1.5
+CONF_FRESH_INTEL = 1.3
+DEF_HEAVY_PEN = 0.2
+DEF_LIGHT_PEN = 0.6
+TRAP_BOOST = 1.1
+COMBAT_BUFFER_MIN = 10
+COMBAT_BUFFER_RATIO = 2
+TRAP_EXTRA_TROOPS = 15
+
+
 def calculate_score(
     state: TargetVillageState,
     my_x: int,
     my_y: int,
-    smithy_level: int,
-    hero_offense: int,
-    hero_strength: int,
+    smithy_level: int = 0,
+    hero_offense: int = 0,
+    hero_strength: int = 0,
 ) -> Optional[RaidRecommendation]:
-    """Score a target. Returns None if not viable."""
+    """Score a target. Returns None if target has no scout data or is not viable.
+
+    Scoring: (est * multipliers) / distance
+    Troop recommendation: ceil(est / carry) + combat buffer
+    """
     dist = state.distance
     if dist == 0:
+        return None
+
+    # Require confirmed scout data — no guessing
+    if state.raidable_confidence == "none":
+        return None
+    if state.raidable_confidence == "depleted":
+        return None  # needs re-scouting
+
+    est = state.estimated_raidable
+    if est < 1:
         return None
 
     t_scout = hours_since(state.last_scout_time)
     t_raid = hours_since(state.last_raid_time)
 
-    if t_scout is None and state.raidable_confidence == "none":
-        return None  # no data at all
+    # Defender analysis
+    def_n = sum(v for k, v in state.defenders.items() if k != "uhero")
+    is_defended = def_n > 0
+    has_traps = state.trap_capacity > 0
 
-    R = state.estimated_raidable
+    # Last raid carry ratio (from last_raid data — approximate)
+    last_carry_ratio = 0.0
 
-    # Only apply regeneration decay to DEPLETED targets (carry was not full).
-    # When confidence is "scouted" or "raided" (carry_full), R already
-    # reflects the real remaining amount — no guessing needed.
-    if state.raidable_confidence == "depleted" and t_raid is not None:
-        eff_R = R * min(1.0, t_raid / T_REGEN)
-    else:
-        eff_R = float(R)
+    # ── Score multipliers ──────────────────────────────────────
+    mult = 1.0
+    if last_carry_ratio >= 0.9:
+        mult *= CONF_CARRY_FULL
+    if t_scout is not None and t_scout < RAID_COOLDOWN_H:
+        mult *= CONF_FRESH_INTEL
+    if is_defended:
+        mult *= DEF_HEAVY_PEN if def_n > 20 else DEF_LIGHT_PEN
+    if has_traps:
+        mult *= TRAP_BOOST
+    if t_raid is not None and t_raid < RAID_COOLDOWN_H:
+        mult *= OVER_RAID_PENALTY
 
-    if eff_R < 1:
-        # Target is depleted — still return a zero-score recommendation
-        # so the user can see it in the table and decide to re-scout
-        return RaidRecommendation(
-            n_send=0,
-            unit_type="—",
-            send_label="SCOUT",
-            profit=0.0,
-            score=0.0,
-            mode="DEPLT",
-            round_trip_minutes=round(2 * dist / CLUB_SPEED * 60),
-            est_loot=0,
-        )
+    score = round((est * mult) / dist, 2)
 
-    # Try clubs
-    club_result = _score_with_unit(
-        state, eff_R,
-        CLUB_ATK, CLUB_CARRY, CLUB_COST, CLUB_SPEED, CLUB_UPKEEP,
-        smithy_level, hero_offense, hero_strength,
-        dist, t_scout, t_raid,
-    )
+    # ── Troop recommendation ───────────────────────────────────
+    buffer = 0
+    if is_defended:
+        buffer = max(COMBAT_BUFFER_MIN, def_n * COMBAT_BUFFER_RATIO)
+    if has_traps:
+        buffer += TRAP_EXTRA_TROOPS
 
-    # Try axes
-    axe_result = _score_with_unit(
-        state, eff_R,
-        AXE_ATK, AXE_CARRY, AXE_COST, AXE_SPEED, AXE_UPKEEP,
-        smithy_level, hero_offense, hero_strength,
-        dist, t_scout, t_raid,
-    )
+    clubs_needed = math.ceil(est / CLUB_CARRY) + buffer
+    axes_needed = math.ceil(est / AXE_CARRY) + buffer
 
-    # Pick whichever has higher score
-    best = None
-    unit_type = "CLUB"
-    if club_result and axe_result:
-        if axe_result["score"] > club_result["score"]:
-            best = axe_result
-            unit_type = "AXE"
-        else:
-            best = club_result
-            unit_type = "CLUB"
-    elif club_result:
-        best = club_result
-        unit_type = "CLUB"
-    elif axe_result:
-        best = axe_result
+    club_rt = round(2 * dist / CLUB_SPEED * 60)
+    axe_rt = round(2 * dist / AXE_SPEED * 60)
+
+    # Use AXE if defended or traps, CLUB otherwise
+    if is_defended or has_traps:
         unit_type = "AXE"
+        n_send = axes_needed
+        rt = axe_rt
+    else:
+        unit_type = "CLUB"
+        n_send = clubs_needed
+        rt = club_rt
 
-    if best is None:
-        return None
+    mode = "ATTACK" if has_traps else "RAID"
 
     return RaidRecommendation(
-        n_send=best["n_send"],
+        n_send=n_send,
         unit_type=unit_type,
-        send_label=f"{best['n_send']} {unit_type}",
-        profit=best["profit"],
-        score=best["score"],
-        mode="RAID",
-        round_trip_minutes=best["round_trip_minutes"],
-        est_loot=best["est_loot"],
+        send_label=f"{n_send} {unit_type}",
+        profit=float(est),
+        score=score,
+        mode=mode,
+        round_trip_minutes=rt,
+        est_loot=est,
     )
 
 
@@ -406,16 +418,30 @@ def calculate_score(
 # State reconstruction
 # ---------------------------------------------------------------------------
 
+WAREHOUSE_RATIO = 0.67  # fallback stealable fraction when carry icon not parsed
+
+
 def reconstruct_state(
     coord_key: Tuple[int, int],
     reports: List[Dict[str, Any]],
     my_player_name: str,
 ) -> TargetVillageState:
-    """Reconstruct target state from chronological reports.
+    """Reconstruct target state from reports.
+
+    Algorithm (matches reference implementation):
+    1. Find the newest RESOURCE scout (total > 10, not espionage-only)
+    2. The carry icon value IS the stealable amount directly
+    3. Sum ALL raid bounties that happened AFTER that scout
+    4. If ANY post-scout raid had stillLeft=false (carry NOT full) → est=0
+    5. remaining = stealable - totalTaken
 
     Each entry in *reports* has keys: type, data, report_id, timestamp.
     """
     state = TargetVillageState(x=coord_key[0], y=coord_key[1])
+
+    # Separate scouts and raids, newest first
+    scouts: List[Dict[str, Any]] = []
+    raids: List[Dict[str, Any]] = []
 
     for report in reports:
         rtype = report.get("type")
@@ -428,84 +454,127 @@ def reconstruct_state(
 
         d = data if isinstance(data, dict) else data.model_dump()
 
+        # Populate identity from any report
         if rtype == "scout":
             target = d.get("target", {})
             state.village_name = target.get("village_name") or state.village_name
             state.player_name = target.get("player_name") or state.player_name
             state.village_id = target.get("village_id") or state.village_id
-
-            res = d.get("resources", {})
-            steal = d.get("stealable_resources", {})
-            raidable = steal.get("raidable", 0)
-            if raidable == 0:
-                # Fallback: sum resources minus cranny
-                total_res = sum(res.get(k, 0) for k in ("lumber", "clay", "iron", "crop"))
-                cranny = steal.get("cranny", 0)
-                raidable = max(0, total_res - cranny)
-
-            state.estimated_raidable = raidable
-            state.raidable_confidence = "scouted"
-            state.last_scout_time = timestamp
-
-            troops = d.get("troops", {})
-            if troops:
-                state.defenders = {k: v for k, v in troops.items() if v > 0}
-                state.defender_source = "scout"
-                state.defender_timestamp = timestamp
-
-            buildings = d.get("buildings", [])
-            wl, wt = extract_wall_info(buildings)
-            if wl > 0:
-                state.wall_level = wl
-                state.wall_tribe = wt
-            tc = extract_trap_capacity(buildings)
-            if tc > 0:
-                state.trap_capacity = max(state.trap_capacity, tc)
-
         elif rtype == "battle":
             defender = d.get("defender", {})
             state.village_name = defender.get("village_name") or state.village_name
             state.player_name = defender.get("player_name") or state.player_name
             state.village_id = defender.get("village_id") or state.village_id
 
-            attacker = d.get("attacker", {})
-            is_my_attack = (attacker.get("player_name", "") == my_player_name)
-            result = d.get("battle_result", "unknown")
+        entry = {"type": rtype, "data": d, "report_id": report_id, "timestamp": timestamp}
 
-            if is_my_attack or result in ("victory", "draw"):
-                carry_full = d.get("carry_full", False)
-                bounty = d.get("bounty", {})
-                bounty_total = sum(bounty.get(k, 0) for k in ("lumber", "clay", "iron", "crop"))
-
-                if not carry_full:
-                    state.estimated_raidable = 0
-                    state.raidable_confidence = "depleted"
-                else:
-                    state.estimated_raidable = max(
-                        0, state.estimated_raidable - bounty_total,
-                    )
-                    state.raidable_confidence = "raided"
-
-                state.last_raid_time = timestamp
-                state.last_raid_bounty = bounty_total
-
-            # Update defenders from battle (surviving = troops - losses)
-            def_troops = d.get("defender_troops", {})
-            def_losses = d.get("defender_losses", {})
-            if def_troops:
-                surviving: Dict[str, int] = {}
-                for uid, count in def_troops.items():
-                    lost = def_losses.get(uid, 0)
-                    remaining = count - lost
-                    if remaining > 0:
-                        surviving[uid] = remaining
-                state.defenders = surviving
-                state.defender_source = "battle"
-                state.defender_timestamp = timestamp
+        if rtype == "scout":
+            scouts.append(entry)
+        elif rtype == "battle":
+            raids.append(entry)
 
         state.last_report_time = timestamp
         state.last_report_id = report_id
         state.report_count += 1
+
+    # Sort newest first
+    scouts.sort(key=lambda r: r.get("timestamp") or datetime.min, reverse=True)
+    raids.sort(key=lambda r: r.get("timestamp") or datetime.min, reverse=True)
+
+    # ── Find newest valid resource scout ──────────────────────
+    best_scout = None
+    for sc in scouts:
+        d = sc["data"]
+        res = d.get("resources", {})
+        total_res = sum(res.get(k, 0) for k in ("lumber", "clay", "iron", "crop"))
+        if total_res <= 10:
+            continue  # espionage-only scout, skip
+        best_scout = sc
+        break
+
+    if best_scout:
+        d = best_scout["data"]
+        res = d.get("resources", {})
+        steal = d.get("stealable_resources", {})
+        total_res = sum(res.get(k, 0) for k in ("lumber", "clay", "iron", "crop"))
+
+        # Carry icon value IS the stealable amount directly
+        stealable = steal.get("raidable", 0)
+        if stealable <= 0:
+            # Fallback: use total * WAREHOUSE_RATIO
+            stealable = round(total_res * WAREHOUSE_RATIO)
+
+        state.estimated_raidable = stealable
+        state.raidable_confidence = "scouted"
+        state.last_scout_time = best_scout["timestamp"]
+
+        # Defenders from scout
+        troops = d.get("troops", {})
+        if troops:
+            state.defenders = {k: v for k, v in troops.items() if v > 0}
+            state.defender_source = "scout"
+            state.defender_timestamp = best_scout["timestamp"]
+
+        # Wall / trap info from scout
+        buildings = d.get("buildings", [])
+        wl, wt = extract_wall_info(buildings)
+        if wl > 0:
+            state.wall_level = wl
+            state.wall_tribe = wt
+        tc = extract_trap_capacity(buildings)
+        if tc > 0:
+            state.trap_capacity = tc
+
+        # ── Sum post-scout raid bounties ──────────────────────
+        scout_time = best_scout["timestamp"] or datetime.min
+        total_taken = 0
+        depleted_by_raid = False
+
+        for raid in raids:
+            raid_time = raid.get("timestamp") or datetime.min
+            if raid_time <= scout_time:
+                continue  # raid was before scout, irrelevant
+
+            rd = raid["data"]
+            bounty = rd.get("bounty", {})
+            bounty_total = sum(bounty.get(k, 0) for k in ("lumber", "clay", "iron", "crop"))
+            total_taken += bounty_total
+
+            carry_full = rd.get("carry_full", False)
+            if not carry_full:
+                # Village was emptied by this raid
+                depleted_by_raid = True
+
+            # Track last raid
+            state.last_raid_time = raid_time
+            state.last_raid_bounty = bounty_total
+
+        if depleted_by_raid:
+            state.estimated_raidable = 0
+            state.raidable_confidence = "depleted"
+        else:
+            state.estimated_raidable = max(0, stealable - total_taken)
+            if total_taken > 0:
+                state.raidable_confidence = "raided"
+
+    # ── Update defenders from raids (most recent data wins) ───
+    for raid in raids:
+        rd = raid["data"]
+        def_troops = rd.get("defender_troops", {})
+        def_losses = rd.get("defender_losses", {})
+        if def_troops:
+            surviving: Dict[str, int] = {}
+            for uid, count in def_troops.items():
+                lost = def_losses.get(uid, 0)
+                remaining = count - lost
+                if remaining > 0:
+                    surviving[uid] = remaining
+            # Use newest raid's defender data
+            if not state.defender_timestamp or (raid["timestamp"] and raid["timestamp"] > state.defender_timestamp):
+                state.defenders = surviving
+                state.defender_source = "battle"
+                state.defender_timestamp = raid["timestamp"]
+        break  # newest raid only for defenders
 
     return state
 
@@ -620,10 +689,44 @@ class RaidAnalyzerService:
             if li:
                 pr["timestamp"] = parse_report_date(li.date_str) or now
 
-        # ── Phase 1D: GraphQL metadata for coordinates ─────────────
-        # Battle reports often lack coordinates in HTML — GraphQL
-        # provides defender village coords, player name, etc.
+        # ── Phase 1D: GraphQL metadata for coordinates + classification ──
+        # GQL title is the authoritative source for report type:
+        #   "scouts" → scout, "raids"/"attacks" → battle
+        # Also fills missing coordinates from GQL defender data.
         await self._enrich_reports_with_graphql(parsed_reports)
+
+        # Re-fetch and re-parse reports reclassified from battle→scout by GQL title.
+        # These need parse_scout_report() to extract resources/cranny/carry properly.
+        reclassified_ids = [
+            pr["report_id"] for pr in parsed_reports
+            if pr.get("type") == "scout" and pr.get("_original_type") == "battle"
+        ]
+        if reclassified_ids:
+            from ..parsers.report_parser import parse_scout_report
+            logger.info(
+                f"Re-parsing {len(reclassified_ids)} reports as scout "
+                f"(GQL title says scout, HTML parser said battle)"
+            )
+            sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
+            async def refetch_as_scout(rid: str):
+                async with sem:
+                    try:
+                        html = await self.client.get_html(f"/report?id={rid}")
+                        return rid, parse_scout_report(html)
+                    except Exception as e:
+                        logger.error(f"Re-parse scout {rid} failed: {e}")
+                        return rid, None
+
+            refetch_results = await asyncio.gather(
+                *[refetch_as_scout(rid) for rid in reclassified_ids]
+            )
+            re_map = {rid: data for rid, data in refetch_results if data is not None}
+
+            for pr in parsed_reports:
+                rid = pr.get("report_id", "")
+                if rid in re_map:
+                    pr["data"] = re_map[rid]
+                    pr["type"] = "scout"
 
         # ── Validate parsed reports ────────────────────────────────
         parse_warnings = self._validate_parsed_reports(parsed_reports)
@@ -681,11 +784,14 @@ class RaidAnalyzerService:
         scored: List[Tuple[TargetVillageState, RaidRecommendation]] = []
 
         for state in all_states:
-            if state.alliance_tag in settings.exclude_alliances:
+            if state.alliance_tag and state.alliance_tag in settings.exclude_alliances:
+                result.skipped_alliance += 1
                 continue
             if state.player_name in settings.exclude_players:
+                result.skipped_player += 1
                 continue
             if settings.radius and state.distance > settings.radius:
+                result.skipped_out_of_range += 1
                 continue
 
             rec = calculate_score(
@@ -695,8 +801,10 @@ class RaidAnalyzerService:
                 settings.hero_strength,
             )
             if rec is None:
+                result.skipped_needs_scout += 1
                 continue
             if rec.est_loot < settings.min_resources:
+                result.skipped_low_resources += 1
                 continue
 
             scored.append((state, rec))
@@ -815,6 +923,20 @@ class RaidAnalyzerService:
             gql_time = meta.get("time")
             if gql_time and isinstance(gql_time, (int, float)):
                 pr["timestamp"] = datetime.fromtimestamp(gql_time)
+
+            # Classify report type from GQL title (more reliable than HTML parsing)
+            gql_title = meta.get("title", "")
+            old_type = pr.get("type")
+            if " scouts " in gql_title:
+                if old_type != "scout":
+                    pr["_original_type"] = old_type
+                pr["type"] = "scout"
+                rtype = "scout"
+            elif " raids " in gql_title or " attacks " in gql_title:
+                if old_type != "battle":
+                    pr["_original_type"] = old_type
+                pr["type"] = "battle"
+                rtype = "battle"
 
             if rtype == "battle":
                 defender = d.get("defender", {})
