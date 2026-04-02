@@ -160,11 +160,11 @@ class FarmListSendResult(BaseModel):
 
     @property
     def success_count(self) -> int:
-        return sum(1 for t in self.targets if t.status == "success")
+        return sum(1 for t in self.targets if t.error == "")
 
     @property
     def fail_count(self) -> int:
-        return sum(1 for t in self.targets if t.status != "success")
+        return sum(1 for t in self.targets if t.error != "")
 
 
 class MapTileInfo(BaseModel):

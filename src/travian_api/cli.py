@@ -1262,7 +1262,7 @@ def farm_run(
                             for t in result.targets:
                                 status = (
                                     "[green]ok[/green]"
-                                    if t.status == "success"
+                                    if t.error == ""
                                     else f"[red]{t.error}[/red]"
                                 )
                                 console.print(f"  Slot {t.id}: {status}")

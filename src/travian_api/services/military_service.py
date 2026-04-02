@@ -174,16 +174,19 @@ class MilitaryService:
             result_html = await self.http_client.post_form(rally_url, final_data)
 
             # Success detection: after confirming, the server returns the rally point
-            # page which contains BOTH the send form AND troop movements.
-            # Key indicator: the action token from step 2 should NOT appear again
-            # (if it does, the form wasn't processed). Also check for active movements.
-            has_movements = 'troopMovement' in result_html or 'troop_details' in result_html
-            has_overview = 'tt=1' in result_html
-            # If the confirmation form reappeared with the SAME action token, it failed
+            # page. The key negative indicator is the confirmation form reappearing
+            # with the SAME action token (means it wasn't processed).
+            # Positive indicators: troop movements, rally overview, or simply
+            # a valid page without the form reappearing or an error message.
             action_token = final_data.get('action', '')
             form_reappeared = action_token and f'value="{action_token}"' in result_html
-            
-            success = (has_movements or has_overview) and not form_reappeared
+            has_error = bool(re.search(r'class="error[^"]*"', result_html))
+            # Only check for the confirmation dialog — troopSendForm is the
+            # normal send form that always appears on the rally point page
+            still_confirming = 'confirmSendTroops' in result_html
+
+            # Success = no form reappeared, no error div, and not stuck on confirmation
+            success = not form_reappeared and not has_error and not still_confirming
 
             # Try to extract travel time from the confirmation we parsed
             travel_time = ""

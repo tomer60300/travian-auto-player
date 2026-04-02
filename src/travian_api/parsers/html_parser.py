@@ -572,18 +572,24 @@ def parse_rally_point_troops(html: str) -> Dict[str, int]:
         Dictionary mapping troop types (t1-t10) to counts
     """
     troops = {}
-    
+
     # Find troop counts from the onclick links: .val(N) patterns near troop[tN] inputs
+    # Only count troops whose input field is NOT disabled (disabled = troops are out)
     for troop_num in range(1, 11):
         key = f't{troop_num}'
         troops[key] = 0
-        
+
+        # First check if the input is disabled
+        input_match = re.search(rf'name="troop\[{key}\]"[^>]*', html)
+        if input_match and 'disabled' in input_match.group(0):
+            continue  # Skip disabled troop types — they can't be sent
+
         # Pattern: troop[tN] input followed by an <a> with .val(NUMBER) in onclick
         pattern = rf"troop\[{key}\].*?\.val\((\d+)\)"
         match = re.search(pattern, html, re.DOTALL)
         if match:
             troops[key] = int(match.group(1))
-    
+
     return troops
 
 
