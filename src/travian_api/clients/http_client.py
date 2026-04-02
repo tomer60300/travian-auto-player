@@ -83,6 +83,7 @@ class HttpClient:
         
         self._navigator = PageNavigator(
             delay=self._human_delay,
+            headers=self._browser_headers,
             enabled=stealth_enabled and getattr(settings, 'stealth_navigate', True),
         )
         
@@ -98,6 +99,9 @@ class HttpClient:
                 'X-Version': settings.x_version,
             }
         )
+        
+        # Wire navigator back to this http_client (deferred to avoid circular init)
+        self._navigator.set_http_client(self)
         
         self._auth_callback: Optional[callable] = None
         

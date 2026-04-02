@@ -179,7 +179,7 @@ class BuildingService:
                     )
             
             # Stealth: navigate to building page before upgrading
-            await self.http_client.navigator.before_upgrade(self.http_client, slot_id, village_id)
+            await self.http_client.navigator.navigate_to_building(slot_id, village_id)
             
             # Get building details to extract checksum and upgrade URL
             building_detail = await self.get_building_detail(slot_id, village_id=village_id)
@@ -206,7 +206,7 @@ class BuildingService:
             
             # Stealth: human delay before clicking upgrade (decision time)
             from ..stealth.human_delay import ActionType
-            await self.http_client.human_delay.wait(ActionType.DECISION, f"deciding to upgrade {building_detail.name}")
+            await self.http_client.human_delay.wait(ActionType.BEFORE_ACTION, f"deciding to upgrade {building_detail.name}")
             
             # Perform upgrade by GET request to the URL
             response_html = await self.http_client.get_html(upgrade_url, skip_reauth=True)

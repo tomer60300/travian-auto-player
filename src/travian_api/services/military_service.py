@@ -98,7 +98,7 @@ class MilitaryService:
         """
         try:
             # Stealth: navigate to rally point first
-            await self.http_client.navigator.before_rally_point(self.http_client, village_id)
+            await self.http_client.navigator.navigate_to_rally_point(village_id)
             
             # Use newdid in the POST URL to set village context
             if village_id:
@@ -137,7 +137,7 @@ class MilitaryService:
 
             # ── Step 2: Parse confirmation page (with human delay for reading) ──
             from ..stealth.human_delay import HumanDelay, ActionType
-            await self.http_client.human_delay.wait(ActionType.READING, "reading troop confirmation")
+            await self.http_client.human_delay.wait(ActionType.BETWEEN_STEPS, "reading troop confirmation")
             
             confirm_fields = parse_troop_confirm_page(confirm_html)
             checksum = confirm_fields.pop('checksum', '')

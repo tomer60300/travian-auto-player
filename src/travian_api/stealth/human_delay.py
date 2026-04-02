@@ -1,157 +1,164 @@
-"""Human-like random delays between actions.
+"""Human-like delay patterns for different action types.
 
-Models the timing patterns of a real person playing Travian:
-- Reading a page (2-6s)
-- Deciding what to build (3-10s)
-- Clicking through menus (1-3s)
-- Pausing between raids (2-5s)
-- Occasional longer pauses (thinking, distracted)
-
-Uses a weighted random distribution that favors the middle of the range
-(normal distribution clamped to bounds), because humans don't uniformly
-distribute their action timing.
+Real players don't act at machine speed. This module provides
+context-aware delays that mimic human behavior:
+- Quick actions (clicking a link): 0.5-2s
+- Reading a page before acting: 2-6s
+- Thinking before a decision (attack, upgrade): 3-10s
+- Between steps in a multi-step flow: 1-4s
 """
 
 import asyncio
 import logging
 import random
 from enum import Enum
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
 class ActionType(Enum):
-    """Types of actions with different timing profiles."""
-    
-    # Quick actions — clicking a known button
-    CLICK = "click"
-    
-    # Page navigation — loading and scanning a page
+    """Types of actions for delay selection."""
     PAGE_LOAD = "page_load"
-    
-    # Decision making — choosing what to build/train
-    DECISION = "decision"
-    
-    # Between sequential operations (e.g., multiple raids)
-    SEQUENCE_STEP = "sequence_step"
-    
-    # Between major operations (e.g., build then raid)
+    BEFORE_ACTION = "before_action"
+    BETWEEN_STEPS = "between_steps"
+    QUICK_CLICK = "quick_click"
+    THINK = "think"
+    BETWEEN_RAIDS = "between_raids"
+    BETWEEN_SCOUTS = "between_scouts"
+    SESSION_START = "session_start"
     BETWEEN_TASKS = "between_tasks"
-    
-    # Reading reports/messages
-    READING = "reading"
-    
-    # Form filling (entering coordinates, troop counts)
-    FORM_FILL = "form_fill"
 
 
-# (min_s, typical_s, max_s) — typical is the center of the distribution
-_TIMING_PROFILES = {
-    ActionType.CLICK:          (0.3, 0.8, 2.0),
-    ActionType.PAGE_LOAD:      (1.5, 3.0, 6.0),
-    ActionType.DECISION:       (2.0, 5.0, 12.0),
-    ActionType.SEQUENCE_STEP:  (1.0, 2.5, 5.0),
-    ActionType.BETWEEN_TASKS:  (3.0, 8.0, 20.0),
-    ActionType.READING:        (2.0, 4.0, 8.0),
-    ActionType.FORM_FILL:      (1.0, 2.0, 4.0),
+# Delay ranges per action type: (min_s, max_s)
+_DELAY_RANGES = {
+    ActionType.PAGE_LOAD: (1.0, 4.0),
+    ActionType.BEFORE_ACTION: (2.0, 6.0),
+    ActionType.BETWEEN_STEPS: (1.5, 4.0),
+    ActionType.QUICK_CLICK: (0.5, 2.0),
+    ActionType.THINK: (3.0, 10.0),
+    ActionType.BETWEEN_RAIDS: (0.8, 2.5),
+    ActionType.BETWEEN_SCOUTS: (1.5, 4.0),
+    ActionType.SESSION_START: (3.0, 8.0),
+    ActionType.BETWEEN_TASKS: (2.0, 5.0),
 }
-
-# Probability of an extra "distraction" pause (checking phone, thinking, etc.)
-_DISTRACTION_CHANCE = 0.08  # 8% of actions get an extra 5-30s pause
 
 
 class HumanDelay:
-    """Generates human-like delays between actions.
+    """Provides human-like delays for different game actions.
     
-    Usage:
-        delay = HumanDelay()
-        await delay.wait(ActionType.PAGE_LOAD, "loading dorf1")
-        await delay.wait(ActionType.CLICK, "clicking upgrade")
+    Each delay is randomized within a range. The ranges are tuned to
+    match observed human behavior in browser games.
+    
+    Multiplier allows global speed adjustment:
+    - 1.0 = normal human speed
+    - 0.5 = faster (still looks human, just efficient)
+    - 2.0 = slower (very cautious)
     """
     
-    def __init__(self, speed_multiplier: float = 1.0, enabled: bool = True):
+    def __init__(self, multiplier: float = 1.0, speed_multiplier: float = None, enabled: bool = True):
         """
         Args:
-            speed_multiplier: 0.5 = twice as fast, 2.0 = twice as slow.
-                             Use 0.7-0.8 for experienced players, 1.2-1.5 for cautious.
-            enabled: If False, delays are skipped (for testing).
+            multiplier: Global speed multiplier (1.0 = normal)
+            speed_multiplier: Alias for multiplier (for backward compat)
+            enabled: If False, all delays return immediately
         """
-        self.speed_multiplier = max(0.1, speed_multiplier)
+        self.multiplier = max(0.1, speed_multiplier if speed_multiplier is not None else multiplier)
         self.enabled = enabled
     
+    async def page_load(self) -> float:
+        """Delay after loading a page (simulates reading/scanning).
+        
+        A real player glances at the page for 1-4 seconds before clicking.
+        """
+        return await self._delay(1.0, 4.0, "page_load")
+    
+    async def before_action(self) -> float:
+        """Delay before performing an action (upgrade, send troops, etc).
+        
+        Player reads the page, checks costs, then clicks the button.
+        """
+        return await self._delay(2.0, 6.0, "before_action")
+    
+    async def between_steps(self) -> float:
+        """Delay between steps in a multi-step flow.
+        
+        E.g., between step 1 (troop selection) and step 2 (confirmation).
+        """
+        return await self._delay(1.5, 4.0, "between_steps")
+    
+    async def quick_click(self) -> float:
+        """Delay for a quick, routine click (e.g., confirming a dialog).
+        
+        Player knows what to click, just needs to move mouse and click.
+        """
+        return await self._delay(0.5, 2.0, "quick_click")
+    
+    async def think(self) -> float:
+        """Delay for a decision-making pause.
+        
+        Player is deciding what to build, who to attack, etc.
+        """
+        return await self._delay(3.0, 10.0, "think")
+    
+    async def between_raids(self) -> float:
+        """Delay between sending individual raids from a farm list.
+        
+        Player clicks "send" for each target, waits for UI update.
+        """
+        return await self._delay(0.8, 2.5, "between_raids")
+    
+    async def between_scouts(self) -> float:
+        """Delay between sending scouts to different targets."""
+        return await self._delay(1.5, 4.0, "between_scouts")
+    
+    async def session_start(self) -> float:
+        """Delay at the start of a session (login → first action).
+        
+        Player logs in, looks at overview, checks messages, etc.
+        """
+        return await self._delay(3.0, 8.0, "session_start")
+    
     async def wait(self, action: ActionType, context: str = "") -> float:
-        """Wait a human-like duration for the given action type.
+        """Wait with a delay appropriate for the given action type.
         
         Args:
-            action: Type of action being performed
+            action: The type of action being performed
             context: Optional description for logging
             
         Returns:
             Actual seconds waited
         """
+        min_s, max_s = _DELAY_RANGES.get(action, (1.0, 3.0))
+        label = f"{action.value}" + (f" ({context})" if context else "")
+        return await self._delay(min_s, max_s, label)
+    
+    async def custom(self, min_s: float, max_s: float, label: str = "custom") -> float:
+        """Custom delay with specified range."""
+        return await self._delay(min_s, max_s, label)
+    
+    async def _delay(self, min_s: float, max_s: float, label: str) -> float:
+        """Internal: apply a random delay within range, scaled by multiplier."""
         if not self.enabled:
             return 0.0
         
-        delay = self._generate_delay(action)
+        actual_min = min_s * self.multiplier
+        actual_max = max_s * self.multiplier
         
-        # Apply speed multiplier
-        delay *= self.speed_multiplier
+        # Use a slightly skewed distribution — most delays cluster toward
+        # the lower end (humans are usually quick) with occasional longer pauses
+        delay = self._skewed_random(actual_min, actual_max)
         
-        # Occasional distraction pause
-        if random.random() < _DISTRACTION_CHANCE:
-            extra = random.uniform(5.0, 30.0)
-            logger.debug(f"Distraction pause: +{extra:.1f}s")
-            delay += extra
-        
-        if delay > 0.1:
-            if context:
-                logger.debug(f"Human delay {delay:.1f}s ({action.value}): {context}")
-            await asyncio.sleep(delay)
-        
+        logger.debug(f"Human delay ({label}): {delay:.2f}s")
+        await asyncio.sleep(delay)
         return delay
-    
-    async def wait_custom(self, min_s: float, max_s: float, context: str = "") -> float:
-        """Wait a random duration within a custom range.
-        
-        Args:
-            min_s: Minimum seconds
-            max_s: Maximum seconds
-            context: Optional description
-            
-        Returns:
-            Actual seconds waited
-        """
-        if not self.enabled:
-            return 0.0
-        
-        delay = self._gaussian_range(min_s, (min_s + max_s) / 2, max_s)
-        delay *= self.speed_multiplier
-        
-        if delay > 0.1:
-            if context:
-                logger.debug(f"Custom delay {delay:.1f}s: {context}")
-            await asyncio.sleep(delay)
-        
-        return delay
-    
-    def _generate_delay(self, action: ActionType) -> float:
-        """Generate a delay from the action's timing profile."""
-        min_s, typical_s, max_s = _TIMING_PROFILES[action]
-        return self._gaussian_range(min_s, typical_s, max_s)
     
     @staticmethod
-    def _gaussian_range(min_s: float, typical_s: float, max_s: float) -> float:
-        """Generate a value from a truncated normal distribution.
+    def _skewed_random(min_val: float, max_val: float) -> float:
+        """Generate a random value skewed toward the lower end.
         
-        Centers around `typical_s` with the range [min_s, max_s].
-        More realistic than uniform random — humans cluster around typical timing.
+        Uses a beta distribution (alpha=2, beta=5) mapped to [min, max].
+        This gives ~70% of values in the lower third of the range.
         """
-        # Standard deviation = 1/3 of the range from typical to boundary
-        range_below = typical_s - min_s
-        range_above = max_s - typical_s
-        sigma = max(range_below, range_above) / 3.0
-        
-        # Generate and clamp
-        value = random.gauss(typical_s, sigma)
-        return max(min_s, min(max_s, value))
+        # Beta(2, 5) has mean ~0.286, so most values are in lower range
+        skew = random.betavariate(2, 5)
+        return min_val + skew * (max_val - min_val)

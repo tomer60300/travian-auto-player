@@ -535,7 +535,7 @@ class BuildQueueService:
             # Stealth: human delay before checking what to build next
             try:
                 from ..stealth.human_delay import ActionType
-                await self.http_client.human_delay.wait(ActionType.DECISION, "reviewing build options")
+                await self.http_client.human_delay.wait(ActionType.THINK, "reviewing build options")
             except Exception:
                 pass
 
