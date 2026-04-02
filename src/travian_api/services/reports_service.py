@@ -202,85 +202,85 @@ class ReportsService:
 
     async def fetch_alliance_reports(
         self,
-        max_pages: int = 10,
+        max_age_hours: Optional[int] = None,
+        max_pages: int = 100,
     ) -> Tuple[List[ReportListItem], bool]:
         """
-        Attempt to fetch alliance shared reports.
+        Fetch alliance shared reports using /report/all?allianceReports=1.
 
-        Tries multiple approaches:
-        1. HTML route /alliance/reports
-        2. GraphQL ownPlayer.alliance.reports
-        3. /report/all with alliance filter
+        Uses the same robust pagination as fetch_reports_robust():
+        dynamic page size detection and age-based cutoff.
 
         Returns:
             Tuple of (reports_list, success_bool)
         """
-        # Approach 1: Try /alliance/reports HTML route
-        try:
-            html = await self.client.get_html("/alliance/reports")
-            reports = parse_report_list(html)
-            if reports:
-                logger.info(f"Alliance reports via /alliance/reports: {len(reports)} found")
-                return reports, True
-        except Exception as e:
-            logger.debug(f"Alliance reports route /alliance/reports failed: {e}")
+        from ..services.raid_analyzer_service import parse_report_date
+        from datetime import datetime, timedelta
 
-        # Approach 2: Try GraphQL
-        try:
-            query = """{
-                ownPlayer {
-                    alliance {
-                        reports { id time title }
-                    }
-                }
-            }"""
-            response = await self.client.post_json(
-                "/api/v1/graphql", {"query": query, "variables": {}}
-            )
-            data = response.get("data", {})
-            alliance_data = (data.get("ownPlayer") or {}).get("alliance") or {}
-            gql_reports = alliance_data.get("reports") or []
-            if gql_reports:
-                # Convert GraphQL reports to ReportListItem format
-                items = []
-                for r in gql_reports:
-                    items.append(ReportListItem(
-                        report_id=str(r.get("id", "")),
-                        icon_type=0,
-                        report_type="unknown",
-                        subject=r.get("title", ""),
-                        date_str="",
-                        is_read=True,
-                    ))
-                logger.info(f"Alliance reports via GraphQL: {len(items)} found")
-                return items, True
-        except Exception as e:
-            logger.debug(f"Alliance reports via GraphQL failed: {e}")
-
-        # Approach 3: Try /report/all with alliance filter parameter
+        # Test if the alliance report route works at all
         try:
             html = await self.client.get_html("/report/all?allianceReports=1&page=1")
-            reports = parse_report_list(html)
-            if reports:
-                # Fetch remaining pages
-                all_reports = list(reports)
-                for page in range(2, max_pages + 1):
-                    try:
-                        page_html = await self.client.get_html(
-                            f"/report/all?allianceReports=1&page={page}"
-                        )
-                        page_reports = parse_report_list(page_html)
-                        if not page_reports:
-                            break
-                        all_reports.extend(page_reports)
-                        if len(page_reports) < 30:
-                            break
-                    except Exception:
-                        break
-                logger.info(f"Alliance reports via filter param: {len(all_reports)} found")
-                return all_reports, True
+            first_page = parse_report_list(html)
+            if not first_page:
+                logger.warning("Alliance reports: route returned 0 reports")
+                return [], False
         except Exception as e:
-            logger.debug(f"Alliance reports via filter param failed: {e}")
+            logger.warning(f"Alliance reports: route failed — {e}")
+            return [], False
 
-        logger.warning("Alliance reports: all discovery approaches failed")
-        return [], False
+        # Route works — fetch all pages with same robust logic as personal reports
+        all_reports: List[ReportListItem] = list(first_page)
+        first_page_size = len(first_page)
+        pages_fetched = 1
+        pages_failed = 0
+
+        cutoff = None
+        if max_age_hours is not None:
+            cutoff = datetime.now() - timedelta(hours=max_age_hours)
+
+        # Check age cutoff on first page
+        if cutoff is not None:
+            oldest_date = parse_report_date(first_page[-1].date_str)
+            if oldest_date and oldest_date < cutoff:
+                logger.info(
+                    f"Alliance reports: {len(all_reports)} from 1 page (age cutoff hit)"
+                )
+                return all_reports, True
+
+        for page in range(2, max_pages + 1):
+            try:
+                page_html = await self.client.get_html(
+                    f"/report/all?allianceReports=1&page={page}"
+                )
+                page_reports = parse_report_list(page_html)
+                pages_fetched += 1
+
+                if not page_reports:
+                    break
+
+                all_reports.extend(page_reports)
+
+                # Dynamic page size: stop when page has fewer reports than first page
+                if len(page_reports) < first_page_size:
+                    break
+
+                # Age-based cutoff
+                if cutoff is not None:
+                    oldest_date = parse_report_date(page_reports[-1].date_str)
+                    if oldest_date and oldest_date < cutoff:
+                        logger.debug(
+                            f"Alliance page {page}: oldest report ({oldest_date}) "
+                            f"exceeds max age, stopping"
+                        )
+                        break
+
+            except Exception as e:
+                logger.error(f"Alliance reports page {page} failed: {e}")
+                pages_failed += 1
+                continue
+
+        logger.info(
+            f"Alliance reports: {len(all_reports)} from {pages_fetched} pages "
+            f"({pages_failed} failed)"
+        )
+        return all_reports, True

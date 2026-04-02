@@ -580,9 +580,19 @@ class RaidAnalyzerService:
 
         # ── Phase 1B: Alliance reports (optional) ──────────────────
         if settings.include_alliance_reports:
-            ally_reports, ally_ok = await self.reports_service.fetch_alliance_reports()
+            ally_reports, ally_ok = await self.reports_service.fetch_alliance_reports(
+                max_age_hours=settings.max_report_age_hours,
+                max_pages=settings.max_pages,
+            )
             if ally_ok:
-                reports_list.extend(ally_reports)
+                # Deduplicate: alliance reports may overlap with personal
+                existing_ids = {r.report_id for r in reports_list}
+                new_ally = [r for r in ally_reports if r.report_id not in existing_ids]
+                reports_list.extend(new_ally)
+                logger.info(
+                    f"Alliance reports: {len(ally_reports)} fetched, "
+                    f"{len(new_ally)} new (after dedup)"
+                )
             else:
                 warnings.append(
                     "Alliance reports unavailable — route not discovered. "
