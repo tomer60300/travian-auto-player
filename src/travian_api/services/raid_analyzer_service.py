@@ -621,10 +621,53 @@ class RaidAnalyzerService:
             result.analysis_duration_seconds = time.monotonic() - start
             return result
 
-        # ── Phase 1C: Fetch report details (parallel) ──────────────
-        report_ids = [r.report_id for r in filtered_list]
+        # ── Phase 1C: GQL metadata pre-filter ─────────────────────
+        # Fetch GQL metadata for ALL reports BEFORE HTML details.
+        # This gives us coordinates, timestamps, and title-based classification
+        # so we can filter to only in-range targets before the expensive HTML step.
+        all_report_ids = [r.report_id for r in filtered_list]
+        BATCH = 250
+        all_gql_meta: Dict[str, Dict[str, Any]] = {}
+        for i in range(0, len(all_report_ids), BATCH):
+            batch = all_report_ids[i:i + BATCH]
+            meta = await self.reports_service.fetch_report_batch_metadata(batch)
+            all_gql_meta.update(meta)
+
+        logger.info(f"GQL metadata: {len(all_gql_meta)}/{len(all_report_ids)} reports")
+
+        # Pre-filter: only keep reports whose target is within radius (or unknown)
+        source = self._resolve_source_village(settings.village_id)
+        pre_filtered_ids: List[str] = []
+        for rid in all_report_ids:
+            meta = all_gql_meta.get(rid)
+            if not meta:
+                # No GQL data — keep it (might be valid, will be filtered later)
+                pre_filtered_ids.append(rid)
+                continue
+            defender = meta.get("defender") or {}
+            village = defender.get("village") or {}
+            vx = village.get("x")
+            vy = village.get("y")
+            if vx is None or vy is None:
+                # No coords in GQL (e.g. oasis) — keep
+                pre_filtered_ids.append(rid)
+                continue
+            d = travian_distance(source.x, source.y, vx, vy)
+            if settings.radius and d > settings.radius:
+                continue  # Out of range — skip HTML fetch entirely
+            pre_filtered_ids.append(rid)
+
+        skipped_by_prefilter = len(all_report_ids) - len(pre_filtered_ids)
+        if skipped_by_prefilter:
+            logger.info(
+                f"GQL pre-filter: {skipped_by_prefilter} reports skipped "
+                f"(target out of radius {settings.radius}), "
+                f"{len(pre_filtered_ids)} remaining for HTML fetch"
+            )
+
+        # ── Phase 1D: Fetch HTML details (only in-range) ──────────
         parsed_reports, fetch_ok, fetch_fail, fail_ids = await self._fetch_all_details(
-            report_ids,
+            pre_filtered_ids,
         )
         result.reports_fetched_ok = fetch_ok
         result.reports_fetched_fail = fetch_fail
@@ -636,7 +679,7 @@ class RaidAnalyzerService:
                 f"{', '.join(fail_ids[:20])}{'...' if len(fail_ids) > 20 else ''}"
             )
 
-        # Attach timestamps from the list items
+        # Attach timestamps from list items and GQL
         list_lookup = {r.report_id: r for r in filtered_list}
         for pr in parsed_reports:
             rid = pr.get("report_id", "")
@@ -644,11 +687,9 @@ class RaidAnalyzerService:
             if li:
                 pr["timestamp"] = parse_report_date(li.date_str) or now
 
-        # ── Phase 1D: GraphQL metadata for coordinates + classification ──
-        # GQL title is the authoritative source for report type:
-        #   "scouts" → scout, "raids"/"attacks" → battle
-        # Also fills missing coordinates from GQL defender data.
-        await self._enrich_reports_with_graphql(parsed_reports)
+        # ── Phase 1E: Enrich with GQL metadata (coords + classification) ──
+        # Re-use the GQL metadata we already fetched — inject into parsed reports
+        await self._enrich_reports_with_graphql(parsed_reports, prefetched_meta=all_gql_meta)
 
         # Re-fetch and re-parse reports reclassified from battle→scout by GQL title.
         # These need parse_scout_report() to extract resources/cranny/carry properly.
@@ -839,24 +880,29 @@ class RaidAnalyzerService:
         return results, fetched_ok, fetched_fail, failed_ids
 
     async def _enrich_reports_with_graphql(
-        self, parsed_reports: List[Dict[str, Any]],
+        self,
+        parsed_reports: List[Dict[str, Any]],
+        prefetched_meta: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         """Supplement parsed report data with GraphQL metadata.
 
         Battle report HTML often lacks defender coordinates — the GraphQL
         endpoint provides them along with village ID, name, and player name.
-        """
-        report_ids = [pr.get("report_id", "") for pr in parsed_reports if pr.get("report_id")]
-        if not report_ids:
-            return
 
-        # Batch in groups of 250
-        BATCH = 250
-        all_meta: Dict[str, Dict[str, Any]] = {}
-        for i in range(0, len(report_ids), BATCH):
-            batch = report_ids[i:i + BATCH]
-            meta = await self.reports_service.fetch_report_batch_metadata(batch)
-            all_meta.update(meta)
+        If prefetched_meta is provided, skips the GQL fetch and uses it directly.
+        """
+        if prefetched_meta is not None:
+            all_meta = prefetched_meta
+        else:
+            report_ids = [pr.get("report_id", "") for pr in parsed_reports if pr.get("report_id")]
+            if not report_ids:
+                return
+            BATCH = 250
+            all_meta = {}
+            for i in range(0, len(report_ids), BATCH):
+                batch = report_ids[i:i + BATCH]
+                meta = await self.reports_service.fetch_report_batch_metadata(batch)
+                all_meta.update(meta)
 
         # Merge metadata into parsed reports
         for pr in parsed_reports:
