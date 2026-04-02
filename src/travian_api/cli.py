@@ -887,6 +887,29 @@ def _time_ago(unix_ts: int | None) -> str:
     return f"{diff // 86400}d ago"
 
 
+_TEUTON_TROOP_NAMES = {
+    "t1": "Club", "t2": "Spear", "t3": "Axe", "t4": "Scout",
+    "t5": "Paladin", "t6": "TK", "t7": "Ram", "t8": "Cat",
+    "t9": "Chief", "t10": "Settler",
+}
+
+
+def _format_troops(troop) -> str:
+    parts = []
+    for key, label in _TEUTON_TROOP_NAMES.items():
+        val = getattr(troop, key, 0)
+        if val > 0:
+            parts.append(f"{val}\u00d7{label}")
+    return " ".join(parts) if parts else "\u2014"
+
+
+def _format_ts(unix_ts) -> str:
+    if not unix_ts:
+        return "\u2014"
+    from datetime import datetime
+    return datetime.fromtimestamp(unix_ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
 @farm_app.command("list")
 def farm_list_cmd():
     """List all farm lists with summary info."""
@@ -905,24 +928,23 @@ def farm_list_cmd():
             table = Table(title="Farm Lists")
             table.add_column("ID", style="cyan", justify="right")
             table.add_column("Name", style="green")
+            table.add_column("Village", justify="right")
             table.add_column("Slots", justify="right")
-            table.add_column("Running", justify="center")
-            table.add_column("Last Started", justify="right")
-            table.add_column("Village ID", justify="right")
+            table.add_column("Last Sent", justify="right")
+            table.add_column("Raids", justify="right")
+            table.add_column("Booty", justify="right")
 
             for fl in lists:
-                running = (
-                    f"[yellow]{fl.running_raids_amount}[/yellow]"
-                    if fl.running_raids_amount
-                    else "[dim]0[/dim]"
-                )
+                total_raids = sum(s.total_booty.raids for s in fl.slots)
+                total_booty = sum(s.total_booty.booty for s in fl.slots)
                 table.add_row(
                     str(fl.id),
                     fl.name,
-                    str(fl.slots_amount),
-                    running,
-                    _time_ago(fl.last_started_time),
                     str(fl.owner_village.id),
+                    f"{len(fl.active_slots)}/{fl.slots_amount}",
+                    _format_ts(fl.last_started_time),
+                    str(total_raids),
+                    f"{total_booty:,}",
                 )
             console.print(table)
     _run(_do())
@@ -932,7 +954,7 @@ def farm_list_cmd():
 def farm_show(
     list_id: int = typer.Argument(..., help="Farm list ID"),
 ):
-    """Show a farm list with smart raid intelligence per target."""
+    """Show a farm list's slots with detailed raid intelligence."""
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -941,82 +963,56 @@ def farm_show(
             fls = FarmListService(client)
             fl = await fls.get_farm_list(list_id)
 
-            # Header
-            troops = fl.owner_village.get_available_troops()
-            console.print(f"\n[bold]{fl.name}[/bold]  (id={fl.id})")
             console.print(
-                f"  Village: {fl.owner_village.id}  |  "
-                f"Running raids: {fl.running_raids_amount}  |  "
-                f"Slots: {fl.slots_amount}"
-            )
-            console.print(
-                f"  Available troops: t1={troops.t1} t2={troops.t2} t3={troops.t3} "
-                f"t4={troops.t4} t5={troops.t5} t6={troops.t6}"
+                f"\n[bold]{fl.name}[/bold]  (ID {fl.id})  \u2014  Village {fl.owner_village.id}"
             )
 
             if not fl.slots:
                 console.print("[yellow]  No targets in this list[/yellow]")
                 return
 
-            # Smart table
-            table = Table(title="Targets", show_lines=True)
+            table = Table(title="Slots", show_lines=True)
             table.add_column("#", style="dim", justify="right")
-            table.add_column("Target", style="cyan")
+            table.add_column("Coords", style="cyan")
+            table.add_column("Name")
             table.add_column("Pop", justify="right")
             table.add_column("Dist", justify="right")
-            table.add_column("Troops", justify="right")
-            table.add_column("Last Raid", justify="right")
-            table.add_column("Raided/Cap", justify="right")
-            table.add_column("Result")
-            table.add_column("Status")
-            table.add_column("Total", justify="right")
+            table.add_column("Troops")
+            table.add_column("Active", justify="center")
+            table.add_column("Last Raid")
+            table.add_column("Total Booty", justify="right")
 
             for i, slot in enumerate(fl.slots, 1):
                 t = slot.target
-                name = f"{t.name}\n({t.x}|{t.y})" if t.name else f"({t.x}|{t.y})"
-
-                # Troop composition (non-zero only)
-                troop_parts = []
-                for ti in range(1, 11):
-                    val = getattr(slot.troop, f"t{ti}", 0)
-                    if val:
-                        troop_parts.append(f"t{ti}={val}")
-                troop_str = " ".join(troop_parts) if troop_parts else "[dim]—[/dim]"
+                active = "[green]yes[/green]" if slot.is_active else "[red]no[/red]"
 
                 # Last raid info
                 lr = slot.last_raid
-                last_raid_time = _time_ago(lr.time if lr else None)
-                capacity = _capacity_bar(
-                    lr.raided_resources.total if lr else 0,
-                    lr.booty_max if lr else 0,
-                )
-                result = _raid_icon(lr.icon if lr else 0)
-
-                # Status: running / spying / active / inactive
-                if slot.is_running:
-                    status = "[yellow]raiding...[/yellow]"
-                elif slot.is_spying:
-                    status = "[blue]scouting...[/blue]"
-                elif not slot.is_active:
-                    status = "[red]inactive[/red]"
+                if lr:
+                    raid_str = (
+                        f"{_raid_icon(lr.icon)}  "
+                        f"{lr.raided_resources.total} res  "
+                        f"{_time_ago(lr.time)}"
+                    )
                 else:
-                    status = "[green]ready[/green]"
+                    raid_str = "[dim]\u2014[/dim]"
 
                 # Total booty
                 tb = slot.total_booty
-                total_str = f"{tb.booty:,}\n({tb.raids} raids)" if tb.raids else "[dim]—[/dim]"
+                booty_str = (
+                    f"{tb.booty:,} ({tb.raids} raids)" if tb.raids else "[dim]\u2014[/dim]"
+                )
 
                 table.add_row(
                     str(i),
-                    name,
+                    f"({t.x}|{t.y})",
+                    t.name or "[dim]\u2014[/dim]",
                     str(t.population),
                     f"{slot.distance:.1f}",
-                    troop_str,
-                    last_raid_time,
-                    capacity,
-                    result,
-                    status,
-                    total_str,
+                    _format_troops(slot.troop),
+                    active,
+                    raid_str,
+                    booty_str,
                 )
 
             console.print(table)
@@ -1026,6 +1022,7 @@ def farm_show(
 @farm_app.command("send")
 def farm_send(
     list_id: int = typer.Argument(..., help="Farm list ID to send"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show plan without sending"),
     confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ):
     """Send all active targets in a farm list."""
@@ -1043,9 +1040,14 @@ def farm_send(
                 return
 
             console.print(
-                f"Farm list: [bold]{fl.name}[/bold]  —  "
+                f"Farm list: [bold]{fl.name}[/bold]  \u2014  "
                 f"{len(active)} active targets"
             )
+
+            if dry_run:
+                console.print("[yellow]DRY RUN \u2014 no raids sent[/yellow]")
+                return
+
             if not confirm:
                 if not typer.confirm("Send raids?"):
                     console.print("Cancelled.")
@@ -1054,7 +1056,7 @@ def farm_send(
             result = await fls.send_farm_list(list_id)
             if result.targets and result.targets[0].error == "plus.error_goldclub":
                 console.print(
-                    "[red]Gold Club is not active — sending via farm list API is blocked.[/red]\n"
+                    "[red]Gold Club is not active \u2014 sending via farm list API is blocked.[/red]\n"
                     "Manage lists (create/add targets) still works without Gold Club."
                 )
                 return
@@ -1134,6 +1136,269 @@ def farm_delete(
 
             await fls.delete_farm_list(list_id)
             console.print(f"[green]Deleted farm list {list_id}[/green]")
+    _run(_do())
+
+
+@farm_app.command("send-all")
+def farm_send_all(
+    lists: Optional[str] = typer.Option(None, "--lists", "-l", help="Comma-separated list IDs (default: all)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show plan without sending"),
+    confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+):
+    """Send all farm lists (or a subset by ID)."""
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            fls = FarmListService(client)
+
+            list_ids = None
+            if lists:
+                list_ids = [int(x.strip()) for x in lists.split(",")]
+
+            all_lists = await fls.get_all_farm_lists()
+            if list_ids:
+                all_lists = [fl for fl in all_lists if fl.id in list_ids]
+
+            if not all_lists:
+                console.print("[yellow]No farm lists found[/yellow]")
+                return
+
+            total_active = sum(len(fl.active_slots) for fl in all_lists)
+            console.print(
+                f"Sending {len(all_lists)} farm list(s) \u2014 "
+                f"{total_active} active targets total"
+            )
+            for fl in all_lists:
+                console.print(f"  {fl.id}: {fl.name} ({len(fl.active_slots)} active)")
+
+            if dry_run:
+                console.print("[yellow]DRY RUN \u2014 no raids sent[/yellow]")
+                return
+
+            if not confirm:
+                if not typer.confirm("Send all?"):
+                    console.print("Cancelled.")
+                    return
+
+            send_ids = [fl.id for fl in all_lists]
+            results = await fls.send_all_farm_lists(send_ids)
+            for lid, result in results.items():
+                if result.targets and result.targets[0].error == "plus.error_goldclub":
+                    console.print(f"  [red]List {lid}: Gold Club not active[/red]")
+                else:
+                    console.print(
+                        f"  List {lid}: Success={result.success_count} "
+                        f"Failed={result.fail_count}"
+                    )
+    _run(_do())
+
+
+@farm_app.command("run")
+def farm_run(
+    list_id: int = typer.Argument(..., help="Farm list ID"),
+    interval: int = typer.Option(300, "--interval", "-i", help="Seconds between sends"),
+    duration: int = typer.Option(0, "--duration", "-d", help="Total minutes (0=forever)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show plan without looping"),
+    verbose: bool = typer.Option(False, "--verbose", help="Show per-send slot details"),
+):
+    """Loop-send a farm list at a fixed interval."""
+    async def _do():
+        import time as _time
+        from datetime import datetime
+
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            fls = FarmListService(client)
+
+            fl = await fls.get_farm_list(list_id)
+            active_count = len(fl.active_slots)
+            console.print(
+                f'Starting farm loop \u2014 list "{fl.name}" (ID {fl.id}), '
+                f"{active_count} active slots, interval {interval}s"
+            )
+
+            if duration:
+                end_time = _time.time() + duration * 60
+                end_dt = datetime.fromtimestamp(end_time).strftime("%H:%M:%S")
+                console.print(f"Duration: {duration}m \u2014 ends at {end_dt}")
+            else:
+                end_time = None
+
+            if dry_run:
+                console.print("[yellow]DRY RUN \u2014 would loop with above settings[/yellow]")
+                return
+
+            total_success = 0
+            total_fail = 0
+            sends = 0
+            try:
+                while True:
+                    if end_time and _time.time() >= end_time:
+                        break
+                    try:
+                        result = await fls.send_farm_list(list_id)
+                        if result.targets and result.targets[0].error == "plus.error_goldclub":
+                            console.print(
+                                "[red]Gold Club not active \u2014 cannot send. Exiting.[/red]"
+                            )
+                            break
+                        sends += 1
+                        total_success += result.success_count
+                        total_fail += result.fail_count
+                        now = datetime.now().strftime("%H:%M:%S")
+                        next_dt = datetime.fromtimestamp(
+                            _time.time() + interval
+                        ).strftime("%H:%M:%S")
+                        total = result.success_count + result.fail_count
+                        console.print(
+                            f"[{now}] Sent: {result.success_count}/{total} | "
+                            f"Failed: {result.fail_count} | Next: {next_dt}"
+                        )
+                        if verbose:
+                            for t in result.targets:
+                                status = (
+                                    "[green]ok[/green]"
+                                    if t.status == "success"
+                                    else f"[red]{t.error}[/red]"
+                                )
+                                console.print(f"  Slot {t.id}: {status}")
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        now = datetime.now().strftime("%H:%M:%S")
+                        console.print(
+                            f"[yellow][{now}] Error: {e} \u2014 retrying next interval[/yellow]"
+                        )
+
+                    await asyncio.sleep(interval)
+
+            except KeyboardInterrupt:
+                pass
+
+            console.print(
+                f"\nFarm loop stopped. Sends: {sends} | "
+                f"Total success: {total_success} | Total failed: {total_fail}"
+            )
+    _run(_do())
+
+
+@farm_app.command("run-all")
+def farm_run_all(
+    lists: Optional[str] = typer.Option(None, "--lists", "-l", help="Comma-separated list IDs (default: all)"),
+    interval: int = typer.Option(300, "--interval", "-i", help="Seconds between sends"),
+    duration: int = typer.Option(0, "--duration", "-d", help="Total minutes (0=forever)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show plan without looping"),
+    verbose: bool = typer.Option(False, "--verbose", help="Show per-send details"),
+):
+    """Loop-send all farm lists at a fixed interval."""
+    async def _do():
+        import time as _time
+        from datetime import datetime
+
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            fls = FarmListService(client)
+
+            list_ids = None
+            if lists:
+                list_ids = [int(x.strip()) for x in lists.split(",")]
+
+            all_lists = await fls.get_all_farm_lists()
+            if list_ids:
+                all_lists = [fl for fl in all_lists if fl.id in list_ids]
+
+            if not all_lists:
+                console.print("[yellow]No farm lists found[/yellow]")
+                return
+
+            total_active = sum(len(fl.active_slots) for fl in all_lists)
+            send_ids = [fl.id for fl in all_lists]
+            console.print(
+                f"Starting farm loop \u2014 {len(all_lists)} lists, "
+                f"{total_active} active slots total, interval {interval}s"
+            )
+            for fl in all_lists:
+                console.print(f"  {fl.id}: {fl.name} ({len(fl.active_slots)} active)")
+
+            if duration:
+                end_time = _time.time() + duration * 60
+                end_dt = datetime.fromtimestamp(end_time).strftime("%H:%M:%S")
+                console.print(f"Duration: {duration}m \u2014 ends at {end_dt}")
+            else:
+                end_time = None
+
+            if dry_run:
+                console.print("[yellow]DRY RUN \u2014 would loop with above settings[/yellow]")
+                return
+
+            total_success = 0
+            total_fail = 0
+            sends = 0
+            try:
+                while True:
+                    if end_time and _time.time() >= end_time:
+                        break
+                    try:
+                        results = await fls.send_all_farm_lists(send_ids)
+                        gold_club_error = False
+                        round_success = 0
+                        round_fail = 0
+                        for lid, result in results.items():
+                            if (
+                                result.targets
+                                and result.targets[0].error == "plus.error_goldclub"
+                            ):
+                                gold_club_error = True
+                                break
+                            round_success += result.success_count
+                            round_fail += result.fail_count
+                            if verbose:
+                                console.print(
+                                    f"  List {lid}: ok={result.success_count} "
+                                    f"fail={result.fail_count}"
+                                )
+
+                        if gold_club_error:
+                            console.print(
+                                "[red]Gold Club not active \u2014 cannot send. Exiting.[/red]"
+                            )
+                            break
+
+                        sends += 1
+                        total_success += round_success
+                        total_fail += round_fail
+                        now = datetime.now().strftime("%H:%M:%S")
+                        next_dt = datetime.fromtimestamp(
+                            _time.time() + interval
+                        ).strftime("%H:%M:%S")
+                        total = round_success + round_fail
+                        console.print(
+                            f"[{now}] Sent: {round_success}/{total} | "
+                            f"Failed: {round_fail} | Next: {next_dt}"
+                        )
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        now = datetime.now().strftime("%H:%M:%S")
+                        console.print(
+                            f"[yellow][{now}] Error: {e} \u2014 retrying next interval[/yellow]"
+                        )
+
+                    await asyncio.sleep(interval)
+
+            except KeyboardInterrupt:
+                pass
+
+            console.print(
+                f"\nFarm loop stopped. Sends: {sends} | "
+                f"Total success: {total_success} | Total failed: {total_fail}"
+            )
     _run(_do())
 
 
