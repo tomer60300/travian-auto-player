@@ -129,6 +129,14 @@ class MilitaryService:
                         success=False, target_x=x, target_y=y,
                         raw_response="Step 1 error: No troops have been selected.",
                     )
+                # No confirmation form and no recognized error — the server
+                # returned a generic page (rate-limit, session issue, etc.).
+                # Do NOT fall through to Step 2; bail out immediately.
+                logger.warning(f"Step 1: No confirmation form for ({x},{y}), HTML length={len(confirm_html)}")
+                return TroopSendResult(
+                    success=False, target_x=x, target_y=y,
+                    raw_response=f"Step 1 error: No confirmation form returned (server returned {len(confirm_html)} bytes — possible rate limit or session issue)",
+                )
 
             # ── Step 2: Parse confirmation page ──
             confirm_fields = parse_troop_confirm_page(confirm_html)
@@ -208,7 +216,25 @@ class MilitaryService:
 
     def _extract_error(self, html: str) -> str:
         """Extract error message from HTML response."""
+        # Check class="error" divs
         match = re.search(r'class="error[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
         if match:
             return clean_unicode(re.sub(r'<[^>]+>', '', match.group(1)).strip())
+        # Check for common Travian error patterns outside error divs
+        for pattern in [
+            r"beginner.{0,5}s?\s*protection",
+            r"not enough troops",
+            r"no troops",
+            r"cannot (send|raid|attack)",
+            r"too many troops",
+            r"target.*not.*valid",
+            r"rate.?limit",
+        ]:
+            err_match = re.search(pattern, html, re.IGNORECASE)
+            if err_match:
+                # Extract surrounding text for context
+                start = max(0, err_match.start() - 20)
+                end = min(len(html), err_match.end() + 80)
+                snippet = re.sub(r'<[^>]+>', '', html[start:end]).strip()
+                return clean_unicode(snippet)
         return "Unknown error"

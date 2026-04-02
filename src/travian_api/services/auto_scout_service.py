@@ -269,6 +269,18 @@ class AutoScoutService:
                     scout_type=scout_type,
                     village_id=village_id,
                 )
+                # Retry once with backoff if we got a "no confirmation form" error
+                # (likely rate limit or transient server issue)
+                if not result.success and "No confirmation form" in result.raw_response:
+                    self._report(f"  -> Retrying after 3s (possible rate limit)...")
+                    await asyncio.sleep(3)
+                    result = await military.send_scouts(
+                        x=target.x,
+                        y=target.y,
+                        amount=scout_amount,
+                        scout_type=scout_type,
+                        village_id=village_id,
+                    )
                 status = "sent" if result.success else f"failed: {result.raw_response[:100]}"
                 results.append({
                     "x": target.x,
