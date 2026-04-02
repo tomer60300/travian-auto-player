@@ -25,16 +25,18 @@ $env:TRAVIAN_USERNAME='chetrit1311@gmail.com'; $env:TRAVIAN_PASSWORD='Password1'
 - [x] All Clay Pits to 4 ✓, All Woodcutters to 4 ✓
 - [x] All Croplands to 4 ✓ (slot 2,8 done Apr 1; rest done by Apr 2)
 - [x] Iron Mine slot 4,10 → 4 ✓
-- [building] Cropland slot 9 → 5 (finishing ~08:50 Apr 2)
-- [ ] Remaining Iron Mines (7,11) to 4
-- [ ] Remaining Croplands (12,13,15) to 4
+- [x] Cropland slot 9 → 5 ✓
+- [building] Iron Mine → 5 (finishing ~21:15 Apr 2)
+- [x] All Iron Mines to 4 ✓
+- [x] All Croplands to 4 ✓ (slot 8 at 5, slot 9 done)
 - [ ] All fields to level 5
 - Use dual queue: 1 field + 1 building always
 
 ### Priority 3: Infrastructure
 - [x] Warehouse → 3 ✓ (done Apr 2)
-- [building] Warehouse 3→4 (queued Apr 2 ~08:38)
-- [ ] Warehouse 4→6
+- [x] Warehouse 3→4 ✓
+- [building] Warehouse 4→5 (queued Apr 2 ~20:13, ~14h47m)
+- [ ] Warehouse 5→6
 - [ ] Granary 4→6
 - [ ] Main Building 7→10
 - [ ] Rally Point 1→3

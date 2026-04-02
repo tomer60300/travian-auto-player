@@ -1,164 +1,139 @@
-"""Human-like delay patterns for different action types.
+"""Human-like delay simulation.
 
-Real players don't act at machine speed. This module provides
-context-aware delays that mimic human behavior:
-- Quick actions (clicking a link): 0.5-2s
-- Reading a page before acting: 2-6s
-- Thinking before a decision (attack, upgrade): 3-10s
-- Between steps in a multi-step flow: 1-4s
+Real humans don't click instantly. They read pages, move their mouse,
+hesitate, get distracted. This module adds realistic random delays
+that mimic human interaction timing.
+
+Delay profiles:
+- page_read: 1-4s (scanning a page before acting)
+- click: 0.3-1.2s (time to find and click a button)
+- form_fill: 0.5-2.0s (filling in a form field)
+- between_actions: 2-8s (gap between major actions like upgrades)
+- between_raids: 1-5s (gap between sending raids in a farm list)
+- thinking: 5-20s (longer pause, simulating decision-making)
+- idle_browse: 30-120s (checking the game casually)
 """
 
 import asyncio
 import logging
 import random
 from enum import Enum
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-class ActionType(Enum):
-    """Types of actions for delay selection."""
-    PAGE_LOAD = "page_load"
-    BEFORE_ACTION = "before_action"
-    BETWEEN_STEPS = "between_steps"
-    QUICK_CLICK = "quick_click"
-    THINK = "think"
-    BETWEEN_RAIDS = "between_raids"
-    BETWEEN_SCOUTS = "between_scouts"
-    SESSION_START = "session_start"
-    BETWEEN_TASKS = "between_tasks"
-
-
-# Delay ranges per action type: (min_s, max_s)
-_DELAY_RANGES = {
-    ActionType.PAGE_LOAD: (1.0, 4.0),
-    ActionType.BEFORE_ACTION: (2.0, 6.0),
-    ActionType.BETWEEN_STEPS: (1.5, 4.0),
-    ActionType.QUICK_CLICK: (0.5, 2.0),
-    ActionType.THINK: (3.0, 10.0),
-    ActionType.BETWEEN_RAIDS: (0.8, 2.5),
-    ActionType.BETWEEN_SCOUTS: (1.5, 4.0),
-    ActionType.SESSION_START: (3.0, 8.0),
-    ActionType.BETWEEN_TASKS: (2.0, 5.0),
-}
+class DelayProfile(Enum):
+    """Named delay profiles with (min, max) ranges in seconds."""
+    PAGE_READ = (1.0, 4.0)
+    CLICK = (0.3, 1.2)
+    FORM_FILL = (0.5, 2.0)
+    BETWEEN_ACTIONS = (2.0, 8.0)
+    BETWEEN_RAIDS = (1.0, 5.0)
+    BETWEEN_SCOUTS = (1.5, 4.5)
+    THINKING = (5.0, 20.0)
+    IDLE_BROWSE = (30.0, 120.0)
+    VIDEO_TICK_JITTER = (-0.5, 0.5)  # jitter added to video tick timing
+    
+    # Navigation chain delays (simulating browsing between pages)
+    NAV_STEP = (0.8, 2.5)  # between pages in a navigation chain
 
 
 class HumanDelay:
-    """Provides human-like delays for different game actions.
+    """Generates human-like delays for various interaction types.
     
-    Each delay is randomized within a range. The ranges are tuned to
-    match observed human behavior in browser games.
+    Supports a global speed multiplier to make everything faster/slower.
+    multiplier=0.5 → half the delays (faster but riskier)
+    multiplier=2.0 → double the delays (slower but safer)
     
-    Multiplier allows global speed adjustment:
-    - 1.0 = normal human speed
-    - 0.5 = faster (still looks human, just efficient)
-    - 2.0 = slower (very cautious)
+    Also occasionally adds "distraction" delays — longer pauses that
+    simulate a human alt-tabbing, reading chat, etc.
     """
     
-    def __init__(self, multiplier: float = 1.0, speed_multiplier: float = None, enabled: bool = True):
+    def __init__(
+        self,
+        multiplier: float = 1.0,
+        distraction_chance: float = 0.05,
+        distraction_range: Tuple[float, float] = (10.0, 45.0),
+        enabled: bool = True,
+    ):
         """
         Args:
-            multiplier: Global speed multiplier (1.0 = normal)
-            speed_multiplier: Alias for multiplier (for backward compat)
-            enabled: If False, all delays return immediately
+            multiplier: Speed multiplier for all delays
+            distraction_chance: Probability of a random long pause (0.0-1.0)
+            distraction_range: (min, max) seconds for distraction pauses
+            enabled: If False, all delays are skipped
         """
-        self.multiplier = max(0.1, speed_multiplier if speed_multiplier is not None else multiplier)
+        self.multiplier = max(0.1, multiplier)
+        self.distraction_chance = distraction_chance
+        self.distraction_range = distraction_range
         self.enabled = enabled
     
-    async def page_load(self) -> float:
-        """Delay after loading a page (simulates reading/scanning).
-        
-        A real player glances at the page for 1-4 seconds before clicking.
-        """
-        return await self._delay(1.0, 4.0, "page_load")
-    
-    async def before_action(self) -> float:
-        """Delay before performing an action (upgrade, send troops, etc).
-        
-        Player reads the page, checks costs, then clicks the button.
-        """
-        return await self._delay(2.0, 6.0, "before_action")
-    
-    async def between_steps(self) -> float:
-        """Delay between steps in a multi-step flow.
-        
-        E.g., between step 1 (troop selection) and step 2 (confirmation).
-        """
-        return await self._delay(1.5, 4.0, "between_steps")
-    
-    async def quick_click(self) -> float:
-        """Delay for a quick, routine click (e.g., confirming a dialog).
-        
-        Player knows what to click, just needs to move mouse and click.
-        """
-        return await self._delay(0.5, 2.0, "quick_click")
-    
-    async def think(self) -> float:
-        """Delay for a decision-making pause.
-        
-        Player is deciding what to build, who to attack, etc.
-        """
-        return await self._delay(3.0, 10.0, "think")
-    
-    async def between_raids(self) -> float:
-        """Delay between sending individual raids from a farm list.
-        
-        Player clicks "send" for each target, waits for UI update.
-        """
-        return await self._delay(0.8, 2.5, "between_raids")
-    
-    async def between_scouts(self) -> float:
-        """Delay between sending scouts to different targets."""
-        return await self._delay(1.5, 4.0, "between_scouts")
-    
-    async def session_start(self) -> float:
-        """Delay at the start of a session (login → first action).
-        
-        Player logs in, looks at overview, checks messages, etc.
-        """
-        return await self._delay(3.0, 8.0, "session_start")
-    
-    async def wait(self, action: ActionType, context: str = "") -> float:
-        """Wait with a delay appropriate for the given action type.
+    async def wait(self, profile: DelayProfile, context: str = "") -> float:
+        """Wait for a human-like duration based on the profile.
         
         Args:
-            action: The type of action being performed
+            profile: Which delay profile to use
             context: Optional description for logging
             
         Returns:
             Actual seconds waited
         """
-        min_s, max_s = _DELAY_RANGES.get(action, (1.0, 3.0))
-        label = f"{action.value}" + (f" ({context})" if context else "")
-        return await self._delay(min_s, max_s, label)
-    
-    async def custom(self, min_s: float, max_s: float, label: str = "custom") -> float:
-        """Custom delay with specified range."""
-        return await self._delay(min_s, max_s, label)
-    
-    async def _delay(self, min_s: float, max_s: float, label: str) -> float:
-        """Internal: apply a random delay within range, scaled by multiplier."""
         if not self.enabled:
             return 0.0
         
-        actual_min = min_s * self.multiplier
-        actual_max = max_s * self.multiplier
+        min_s, max_s = profile.value
+        base_delay = random.uniform(min_s, max_s) * self.multiplier
         
-        # Use a slightly skewed distribution — most delays cluster toward
-        # the lower end (humans are usually quick) with occasional longer pauses
-        delay = self._skewed_random(actual_min, actual_max)
+        # Occasional distraction (random long pause)
+        distraction = 0.0
+        if random.random() < self.distraction_chance:
+            distraction = random.uniform(*self.distraction_range) * self.multiplier
+            logger.debug(f"Simulating distraction: +{distraction:.1f}s")
         
-        logger.debug(f"Human delay ({label}): {delay:.2f}s")
+        total = base_delay + distraction
+        
+        if total > 1.0 and context:
+            logger.debug(f"Human delay ({profile.name}): {total:.1f}s — {context}")
+        
+        await asyncio.sleep(total)
+        return total
+    
+    async def wait_range(self, min_s: float, max_s: float, context: str = "") -> float:
+        """Wait for a custom random duration (respects multiplier).
+        
+        Args:
+            min_s: Minimum seconds
+            max_s: Maximum seconds
+            context: Optional description for logging
+            
+        Returns:
+            Actual seconds waited
+        """
+        if not self.enabled:
+            return 0.0
+        
+        delay = random.uniform(min_s, max_s) * self.multiplier
+        
+        if delay > 1.0 and context:
+            logger.debug(f"Human delay (custom): {delay:.1f}s — {context}")
+        
         await asyncio.sleep(delay)
         return delay
     
-    @staticmethod
-    def _skewed_random(min_val: float, max_val: float) -> float:
-        """Generate a random value skewed toward the lower end.
+    def jitter(self, base_ms: int, profile: DelayProfile = DelayProfile.VIDEO_TICK_JITTER) -> int:
+        """Add jitter to a millisecond value.
         
-        Uses a beta distribution (alpha=2, beta=5) mapped to [min, max].
-        This gives ~70% of values in the lower third of the range.
+        Args:
+            base_ms: Base value in milliseconds
+            profile: Delay profile for jitter range
+            
+        Returns:
+            base_ms with random jitter added
         """
-        # Beta(2, 5) has mean ~0.286, so most values are in lower range
-        skew = random.betavariate(2, 5)
-        return min_val + skew * (max_val - min_val)
+        if not self.enabled:
+            return base_ms
+        
+        min_j, max_j = profile.value
+        jitter_ms = int(random.uniform(min_j, max_j) * 1000)
+        return max(100, base_ms + jitter_ms)  # never go below 100ms

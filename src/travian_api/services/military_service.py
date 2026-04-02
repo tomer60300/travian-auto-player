@@ -1,4 +1,4 @@
-"""Military service for Travian API."""
+"""Military service for Travian API — with stealth-aware delays."""
 from __future__ import annotations
 
 import re
@@ -9,6 +9,7 @@ from ..exceptions import TravianError, InvalidTargetError
 from ..models.military import TroopSendResult
 from ..parsers.html_parser import parse_rally_point_troops, parse_troop_confirm_page, clean_unicode
 from ..constants import EVENT_TYPES
+from ..stealth.human_delay import HumanDelay, DelayProfile
 from .target_resolver import TargetResolver
 
 import logging
@@ -116,6 +117,10 @@ class MilitaryService:
             form_data['eventType'] = str(event_type)
             form_data['ok'] = 'ok'
 
+            # Stealth: human-like delay before submitting troop form
+            delay = self.http_client.delay
+            await delay.wait(DelayProfile.FORM_FILL, "filling troop selection form")
+            
             logger.info(f"Step 1: Sending troop form to ({x},{y}) type={event_type} troops={troops}")
             confirm_html = await self.http_client.post_form(rally_url, form_data)
 
@@ -170,6 +175,9 @@ class MilitaryService:
             if scout_target:
                 final_data['troops[0][scoutTarget]'] = scout_target
 
+            # Stealth: human reads the confirmation page before clicking send
+            await delay.wait(DelayProfile.PAGE_READ, "reading troop confirmation")
+            
             logger.info(f"Step 2: Confirming with checksum={checksum}")
             result_html = await self.http_client.post_form(rally_url, final_data)
 

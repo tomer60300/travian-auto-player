@@ -1,132 +1,144 @@
-"""Session lifetime management with breaks.
+"""Session lifetime management.
 
-A real player doesn't stay logged in 24/7 with constant activity.
-This module tracks session duration and suggests breaks to avoid
-detection patterns like "active for 18 hours straight."
+Real players don't stay logged in 24/7 with constant activity. They:
+- Play for 30-90 minutes, then go AFK
+- Have irregular activity patterns (busy mornings, idle afternoons)
+- Sometimes leave the game tab open without doing anything
+- Come back after hours and need to refresh
 
-Also provides idle browsing during long waits (e.g., waiting for
-a build to finish) so the session looks like a player AFK-checking.
+This module tracks session age and activity patterns to:
+- Suggest breaks (caller decides when to actually pause)
+- Detect if the session has been "too active" for too long
+- Provide human-like session envelope metadata
 """
 
-import asyncio
 import logging
 import random
 import time
-from typing import Optional, TYPE_CHECKING
-
-from .human_delay import HumanDelay, ActionType
-
-if TYPE_CHECKING:
-    from .navigator import PageNavigator
-    from ..clients.http_client import HttpClient
+from dataclasses import dataclass, field
+from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SessionStats:
+    """Tracks session activity for pattern analysis."""
+    started_at: float = field(default_factory=time.monotonic)
+    last_action_at: float = 0
+    total_actions: int = 0
+    total_requests: int = 0
+    
+    @property
+    def session_age_s(self) -> float:
+        return time.monotonic() - self.started_at
+    
+    @property
+    def session_age_min(self) -> float:
+        return self.session_age_s / 60
+    
+    @property
+    def actions_per_minute(self) -> float:
+        age = self.session_age_min
+        return self.total_actions / age if age > 0 else 0
+    
+    def record_action(self) -> None:
+        self.total_actions += 1
+        self.last_action_at = time.monotonic()
+    
+    def record_request(self) -> None:
+        self.total_requests += 1
 
 
 class SessionManager:
     """Manages session lifetime and activity patterns.
     
-    Features:
-    - Tracks session start time and total active duration
-    - Suggests breaks after configurable active periods
-    - Performs idle browsing during long waits
-    - Randomizes activity patterns to avoid regularity
+    Usage:
+        sm = SessionManager()
+        sm.record_action()
+        
+        if sm.should_take_break():
+            # pause for a while
+            await asyncio.sleep(sm.suggested_break_duration())
+            sm.reset_session()
     """
     
     def __init__(
         self,
-        max_active_minutes: int = 120,
-        break_minutes: tuple = (5, 15),
-        idle_browse_interval_s: float = 300.0,
+        max_session_min: float = 90.0,
+        min_session_min: float = 30.0,
+        max_actions_per_min: float = 3.0,
+        break_min_s: float = 300.0,   # 5 min minimum break
+        break_max_s: float = 1800.0,  # 30 min maximum break
         enabled: bool = True,
     ):
         """
         Args:
-            max_active_minutes: Suggest a break after this many active minutes
-            break_minutes: (min, max) break duration in minutes
-            idle_browse_interval_s: Seconds between idle page visits during waits
-            enabled: If False, session management is disabled
+            max_session_min: Max session length before suggesting a break
+            min_session_min: Minimum session length before break is possible
+            max_actions_per_min: Actions/min threshold that triggers break suggestion
+            break_min_s: Minimum break duration in seconds
+            break_max_s: Maximum break duration in seconds
+            enabled: If False, never suggests breaks
         """
-        self.max_active_minutes = max_active_minutes
-        self.break_minutes = break_minutes
-        self.idle_browse_interval_s = idle_browse_interval_s
+        self.max_session_min = max_session_min
+        self.min_session_min = min_session_min
+        self.max_actions_per_min = max_actions_per_min
+        self.break_min_s = break_min_s
+        self.break_max_s = break_max_s
         self.enabled = enabled
         
-        self._session_start = time.monotonic()
-        self._last_idle_browse = time.monotonic()
-        self._total_requests = 0
-        self._break_count = 0
+        self._stats = SessionStats()
+        # Randomize the actual max session time for this session (±20%)
+        self._session_limit = max_session_min * random.uniform(0.8, 1.2)
     
     @property
-    def session_duration_minutes(self) -> float:
-        """Minutes since session started."""
-        return (time.monotonic() - self._session_start) / 60.0
+    def stats(self) -> SessionStats:
+        return self._stats
     
-    @property
+    def record_action(self) -> None:
+        """Record that a user-initiated action was performed."""
+        self._stats.record_action()
+    
+    def record_request(self) -> None:
+        """Record an HTTP request."""
+        self._stats.record_request()
+    
     def should_take_break(self) -> bool:
-        """Whether a break is recommended."""
-        if not self.enabled:
-            return False
-        return self.session_duration_minutes >= self.max_active_minutes
-    
-    async def take_break_if_needed(self) -> float:
-        """Take a break if session has been active too long.
+        """Check if the session should take a break.
         
-        Returns:
-            Seconds spent on break (0 if no break taken)
-        """
-        if not self.should_take_break:
-            return 0.0
-        
-        min_break, max_break = self.break_minutes
-        break_s = random.uniform(min_break * 60, max_break * 60)
-        
-        self._break_count += 1
-        logger.info(f"Session break #{self._break_count}: pausing {break_s/60:.1f} minutes "
-                    f"(active for {self.session_duration_minutes:.0f}min)")
-        
-        await asyncio.sleep(break_s)
-        
-        # Reset session timer after break
-        self._session_start = time.monotonic()
-        
-        return break_s
-    
-    async def idle_browse_if_due(
-        self,
-        navigator: "PageNavigator",
-        http_client: "HttpClient",
-        village_id: Optional[int] = None,
-    ) -> bool:
-        """Perform an idle page visit if enough time has passed.
-        
-        Call this during long polling loops (e.g., waiting for build to finish).
-        
-        Returns:
-            True if an idle browse was performed
+        Returns True if:
+        - Session has been active longer than the randomized limit
+        - OR action rate is suspiciously high for too long
         """
         if not self.enabled:
             return False
         
-        now = time.monotonic()
-        elapsed = now - self._last_idle_browse
+        # Too early for a break
+        if self._stats.session_age_min < self.min_session_min:
+            return False
         
-        # Add some randomness to the interval (±30%)
-        jittered_interval = self.idle_browse_interval_s * random.uniform(0.7, 1.3)
+        # Session too long
+        if self._stats.session_age_min >= self._session_limit:
+            logger.info(f"Session break suggested: {self._stats.session_age_min:.0f} min "
+                       f"(limit: {self._session_limit:.0f} min)")
+            return True
         
-        if elapsed >= jittered_interval:
-            await navigator.idle_browse(http_client, village_id)
-            self._last_idle_browse = time.monotonic()
+        # Too many actions per minute (sustained)
+        if (self._stats.session_age_min > 10 and 
+                self._stats.actions_per_minute > self.max_actions_per_min):
+            logger.info(f"Session break suggested: {self._stats.actions_per_minute:.1f} "
+                       f"actions/min (limit: {self.max_actions_per_min})")
             return True
         
         return False
     
-    def record_request(self) -> None:
-        """Record that a request was made."""
-        self._total_requests += 1
+    def suggested_break_duration(self) -> float:
+        """Suggest a break duration in seconds."""
+        return random.uniform(self.break_min_s, self.break_max_s)
     
-    def reset(self) -> None:
-        """Reset session tracking (e.g., after re-login)."""
-        self._session_start = time.monotonic()
-        self._last_idle_browse = time.monotonic()
-        self._total_requests = 0
+    def reset_session(self) -> None:
+        """Reset session stats (call after a break)."""
+        self._stats = SessionStats()
+        self._session_limit = self.max_session_min * random.uniform(0.8, 1.2)
+        logger.info("Session reset — new activity window started")

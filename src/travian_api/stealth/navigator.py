@@ -1,207 +1,167 @@
 """Page navigation simulation.
 
-Real players don't jump directly to build.php?id=15&action=build.
-They navigate: overview → village view → click building → upgrade.
+Real players don't jump directly to build.php?id=5&action=build.
+They browse: dorf1 → click the field → see the upgrade page → click upgrade.
 
-This module simulates natural navigation patterns so the request
-sequence looks like a human browsing the game.
+This module simulates that navigation chain by pre-loading pages a real
+player would visit before performing an action. This creates realistic
+server-side access logs and makes the action look organic.
+
+Navigation chains:
+- Upgrade resource field: dorf1.php → build.php?id=X (view) → upgrade
+- Upgrade building: dorf2.php → build.php?id=X (view) → upgrade
+- Send troops: dorf2.php → build.php?gid=16&tt=2 (rally point) → form
+- Check reports: dorf1.php → berichte.php
+- Map browse: karte.php
 """
 
 import logging
-from typing import Optional, TYPE_CHECKING
+import random
+from typing import List, Optional, TYPE_CHECKING
+
+from .human_delay import HumanDelay, DelayProfile
 
 if TYPE_CHECKING:
     from ..clients.http_client import HttpClient
 
-from .human_delay import HumanDelay
-from .headers import BrowserHeaders
-
 logger = logging.getLogger(__name__)
 
 
-# Navigation patterns: what pages a human would visit before each action
-_NAV_PATTERNS = {
-    # Upgrading a resource field (slot 1-18)
-    "upgrade_resource": ["/dorf1.php"],
-    
-    # Upgrading a village building (slot 19-40)
-    "upgrade_building": ["/dorf2.php"],
-    
-    # Sending troops (rally point)
-    "send_troops": ["/dorf2.php"],
-    
-    # Checking reports
-    "view_reports": ["/dorf1.php"],
-    
-    # Viewing map
-    "view_map": ["/dorf2.php"],
-}
+# Common navigation paths that a real player visits periodically.
+# Used for "idle browsing" simulation.
+_IDLE_PAGES = [
+    "/dorf1.php",
+    "/dorf2.php",
+    "/berichte.php",        # reports
+    "/statistiken.php",     # statistics
+    "/spieler.php",         # player profile
+    "/karte.php",           # map
+    "/nachrichten.php",     # messages
+    "/allianz.php",         # alliance
+]
 
 
 class PageNavigator:
-    """Simulates realistic page navigation before performing actions.
+    """Simulates realistic page navigation before actions.
     
-    Tracks which pages have been recently visited to avoid redundant
-    navigation (a human doesn't reload dorf1 if they're already there).
+    Wraps the HTTP client to add pre-navigation page loads,
+    creating a realistic browsing trail on the server.
     
     Usage:
-        navigator = PageNavigator(http_client, delay, headers)
-        await navigator.navigate_to_building(slot_id=15, village_id=41699)
-        # Now safe to call the actual upgrade
+        navigator = PageNavigator(http_client, delay)
+        await navigator.before_resource_upgrade(slot_id)  # loads dorf1 → build page
+        # ... then do the actual upgrade
     """
     
     def __init__(
         self,
-        http_client: "HttpClient" = None,
-        delay: HumanDelay = None,
-        headers: BrowserHeaders = None,
+        http_client: "HttpClient",
+        delay: HumanDelay,
         enabled: bool = True,
     ):
         self._http = http_client
-        self._delay = delay or HumanDelay()
-        self._headers = headers
+        self._delay = delay
         self.enabled = enabled
-        self._current_page: Optional[str] = None
-        self._current_village: Optional[int] = None
-        self._visited_pages: set = set()
+        self._last_dorf_visit: float = 0  # track when we last visited dorf pages
     
-    async def navigate_to_resource_view(self, village_id: Optional[int] = None) -> None:
-        """Navigate to the resource field view (dorf1.php).
+    async def before_resource_upgrade(self, slot_id: int, village_id: Optional[int] = None) -> None:
+        """Navigate as if clicking a resource field to upgrade.
         
-        Skips if we're already on dorf1 for this village.
+        Chain: dorf1.php → build.php?id=X
         """
         if not self.enabled:
             return
         
-        target = self._build_url("/dorf1.php", village_id)
+        newdid = f"?newdid={village_id}" if village_id else ""
         
-        if self._current_page == target:
-            logger.debug("Already on dorf1, skipping navigation")
-            return
+        # Visit dorf1 (resource overview)
+        logger.debug(f"Nav: visiting dorf1 before upgrading slot {slot_id}")
+        await self._http.get_html(f"/dorf1.php{newdid}")
+        await self._delay.wait(DelayProfile.NAV_STEP, "browsing resource fields")
         
-        await self._delay.page_load()
-        await self._visit(target)
-    
-    async def navigate_to_village_view(self, village_id: Optional[int] = None) -> None:
-        """Navigate to the village center view (dorf2.php).
-        
-        Skips if we're already on dorf2 for this village.
-        """
-        if not self.enabled:
-            return
-        
-        target = self._build_url("/dorf2.php", village_id)
-        
-        if self._current_page == target:
-            logger.debug("Already on dorf2, skipping navigation")
-            return
-        
-        await self._delay.page_load()
-        await self._visit(target)
-    
-    async def navigate_to_building(self, slot_id: int, village_id: Optional[int] = None) -> None:
-        """Navigate to a specific building page (as a human would).
-        
-        For resource fields (slot 1-18): dorf1 → build.php?id=X
-        For village buildings (slot 19-40): dorf2 → build.php?id=X
-        """
-        if not self.enabled:
-            return
-        
-        # First visit the appropriate overview page
-        if slot_id <= 18:
-            await self.navigate_to_resource_view(village_id)
-        else:
-            await self.navigate_to_village_view(village_id)
-        
-        # Then "click" on the building
-        await self._delay.quick_click()
-        build_url = self._build_url(f"/build.php?id={slot_id}", village_id)
-        await self._visit(build_url)
-    
-    async def navigate_to_rally_point(self, village_id: Optional[int] = None) -> None:
-        """Navigate to the rally point (for sending troops)."""
-        if not self.enabled:
-            return
-        
-        await self.navigate_to_village_view(village_id)
-        await self._delay.quick_click()
-        
-        url = self._build_url("/build.php?gid=16&tt=2", village_id)
-        await self._visit(url)
-    
-    async def idle_browse(self, http_client: "HttpClient" = None, village_id: Optional[int] = None) -> None:
-        """Perform an idle page visit during long waits.
-        
-        Called by SessionManager. Uses provided http_client or falls back to self._http.
-        """
-        client = http_client or self._http
-        if not client or not self.enabled:
-            return
-        
-        old_http = self._http
-        self._http = client
-        try:
-            await self.browse_randomly(village_id)
-        finally:
-            self._http = old_http
-    
-    async def browse_randomly(self, village_id: Optional[int] = None) -> None:
-        """Visit a random page to create natural browsing noise.
-        
-        Call this occasionally during long-running operations to
-        simulate a human checking different parts of the game.
-        """
-        if not self.enabled:
-            return
-        
-        import random
-        pages = [
-            "/dorf1.php",       # Resource overview
-            "/dorf2.php",       # Village center
-            "/statistiken.php", # Statistics
-            "/spieler.php",     # Player profile
-        ]
-        
-        page = random.choice(pages)
-        url = self._build_url(page, village_id)
-        
-        await self._delay.think()
-        await self._visit(url)
-        await self._delay.page_load()
-    
-    def set_http_client(self, http_client: "HttpClient") -> None:
-        """Set the HTTP client (for deferred initialization)."""
-        self._http = http_client
-    
-    def set_headers(self, headers: BrowserHeaders) -> None:
-        """Set the browser headers (for deferred initialization)."""
-        self._headers = headers
-    
-    def reset(self) -> None:
-        """Reset navigation state (e.g., after re-login)."""
-        self._current_page = None
-        self._current_village = None
-        self._visited_pages.clear()
-    
-    def clear_visited(self) -> None:
-        """Alias for reset — clears all visited page tracking."""
-        self.reset()
-    
-    def _build_url(self, path: str, village_id: Optional[int] = None) -> str:
-        """Build URL with optional village context."""
+        # Visit the specific build page (player clicks on the field)
+        url = f"/build.php?id={slot_id}"
         if village_id:
-            sep = "&" if "?" in path else "?"
-            return f"{path}{sep}newdid={village_id}"
-        return path
+            url = f"/build.php?newdid={village_id}&id={slot_id}"
+        await self._http.get_html(url)
+        await self._delay.wait(DelayProfile.PAGE_READ, "reading upgrade details")
     
-    async def _visit(self, url: str) -> None:
-        """Actually fetch a page (silently, just for the request pattern)."""
-        try:
-            logger.debug(f"Navigator: visiting {url}")
-            self._headers.update_last_page(url)
-            # Use get_html but we don't need the response — it's just for the pattern
-            await self._http.get_html(url)
-            self._current_page = url.split("?")[0]  # Track base path
-        except Exception as e:
-            logger.debug(f"Navigator: visit failed (non-critical): {e}")
+    async def before_building_upgrade(self, slot_id: int, village_id: Optional[int] = None) -> None:
+        """Navigate as if clicking a building to upgrade.
+        
+        Chain: dorf2.php → build.php?id=X
+        """
+        if not self.enabled:
+            return
+        
+        newdid = f"?newdid={village_id}" if village_id else ""
+        
+        # Visit dorf2 (village center)
+        logger.debug(f"Nav: visiting dorf2 before upgrading slot {slot_id}")
+        await self._http.get_html(f"/dorf2.php{newdid}")
+        await self._delay.wait(DelayProfile.NAV_STEP, "browsing village center")
+        
+        # Visit the specific build page
+        url = f"/build.php?id={slot_id}"
+        if village_id:
+            url = f"/build.php?newdid={village_id}&id={slot_id}"
+        await self._http.get_html(url)
+        await self._delay.wait(DelayProfile.PAGE_READ, "reading building details")
+    
+    async def before_troop_send(self, village_id: Optional[int] = None) -> None:
+        """Navigate as if going to the rally point to send troops.
+        
+        Chain: dorf2.php → build.php?gid=16&tt=2
+        """
+        if not self.enabled:
+            return
+        
+        newdid = f"?newdid={village_id}" if village_id else ""
+        
+        logger.debug("Nav: visiting dorf2 before troop send")
+        await self._http.get_html(f"/dorf2.php{newdid}")
+        await self._delay.wait(DelayProfile.NAV_STEP, "browsing to rally point")
+    
+    async def before_reports(self, village_id: Optional[int] = None) -> None:
+        """Navigate as if checking reports.
+        
+        Chain: dorf1.php (or wherever we are) → berichte.php
+        """
+        if not self.enabled:
+            return
+        
+        newdid = f"?newdid={village_id}" if village_id else ""
+        
+        logger.debug("Nav: visiting dorf1 before reports")
+        await self._http.get_html(f"/dorf1.php{newdid}")
+        await self._delay.wait(DelayProfile.NAV_STEP, "navigating to reports")
+    
+    async def idle_browse(self) -> None:
+        """Simulate idle browsing — visit 1-3 random pages.
+        
+        Call this periodically during long waits to make the session
+        look like a real player casually checking the game.
+        """
+        if not self.enabled:
+            return
+        
+        num_pages = random.randint(1, 3)
+        pages = random.sample(_IDLE_PAGES, min(num_pages, len(_IDLE_PAGES)))
+        
+        for page in pages:
+            logger.debug(f"Idle browse: {page}")
+            try:
+                await self._http.get_html(page)
+            except Exception:
+                pass  # don't crash on idle browse failures
+            await self._delay.wait(DelayProfile.IDLE_BROWSE, "idle browsing")
+    
+    async def visit_dorf(self, is_resource: bool, village_id: Optional[int] = None) -> None:
+        """Visit dorf1 or dorf2 depending on context."""
+        if not self.enabled:
+            return
+        
+        newdid = f"?newdid={village_id}" if village_id else ""
+        dorf = "dorf1" if is_resource else "dorf2"
+        await self._http.get_html(f"/{dorf}.php{newdid}")
+        await self._delay.wait(DelayProfile.PAGE_READ, f"viewing {dorf}")

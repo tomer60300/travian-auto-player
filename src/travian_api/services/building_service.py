@@ -16,6 +16,8 @@ from ..parsers.html_parser import (
     parse_empty_slot_buildings,
 )
 from ..constants import BUILDING_NAMES
+from ..stealth.navigator import PageNavigator
+from ..stealth.human_delay import HumanDelay, DelayProfile
 
 
 class BuildingService:
@@ -23,6 +25,11 @@ class BuildingService:
     
     def __init__(self, http_client: HttpClient):
         self.http_client = http_client
+        self._navigator = PageNavigator(
+            http_client,
+            http_client.delay,
+            enabled=getattr(http_client, 'stealth_enabled', False),
+        )
     
     async def get_village_buildings(self, village_id: Optional[int] = None) -> List[Building]:
         """
@@ -180,6 +187,13 @@ class BuildingService:
             
             # Stealth: navigate to building page before upgrading
             await self.http_client.navigator.navigate_to_building(slot_id, village_id)
+            
+            # Stealth: simulate browsing to the building page first
+            if getattr(self.http_client, 'stealth_enabled', False) and getattr(self.http_client.settings, 'stealth_navigate', True):
+                if slot_id <= 18:
+                    await self._navigator.before_resource_upgrade(slot_id, village_id=village_id)
+                else:
+                    await self._navigator.before_building_upgrade(slot_id, village_id=village_id)
             
             # Get building details to extract checksum and upgrade URL
             building_detail = await self.get_building_detail(slot_id, village_id=village_id)
