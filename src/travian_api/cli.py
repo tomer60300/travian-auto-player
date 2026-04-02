@@ -665,7 +665,7 @@ def reports_analyze(
 
                 from .services.raid_analyzer_service import hours_since
                 for i, (state, rec) in enumerate(result.targets, 1):
-                    coords = f"({state.x}|{state.y})"
+                    coords = f"x={state.x}&y={state.y}"
                     dist = f"{state.distance:.1f}"
                     est_loot = f"{rec.est_loot:,}"
                     score = f"{rec.score:.2f}"
