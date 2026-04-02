@@ -206,29 +206,33 @@ class ReportsService:
         max_pages: int = 100,
     ) -> Tuple[List[ReportListItem], bool]:
         """
-        Fetch alliance shared reports using /report/all?allianceReports=1.
+        Fetch alliance shared reports via /alliance/reports?filter=...
 
-        Uses the same robust pagination as fetch_reports_robust():
-        dynamic page size detection and age-based cutoff.
+        Uses battle+scout report type filters and robust pagination
+        with dynamic page size detection and age-based cutoff.
 
         Returns:
             Tuple of (reports_list, success_bool)
         """
         from ..services.raid_analyzer_service import parse_report_date
+        from ..parsers.report_parser import parse_alliance_report_list
         from datetime import datetime, timedelta
 
-        # Test if the alliance report route works at all
+        ALLIANCE_FILTER = "1,2,3,4,5,6,7,15,16,17,18,19"
+        base_url = f"/alliance/reports?filter={ALLIANCE_FILTER}"
+
+        # Test if the route works
         try:
-            html = await self.client.get_html("/report/all?allianceReports=1&page=1")
-            first_page = parse_report_list(html)
+            html = await self.client.get_html(base_url)
+            first_page = parse_alliance_report_list(html)
             if not first_page:
-                logger.warning("Alliance reports: route returned 0 reports")
+                logger.warning("Alliance reports: /alliance/reports returned 0 reports")
                 return [], False
         except Exception as e:
-            logger.warning(f"Alliance reports: route failed — {e}")
+            logger.warning(f"Alliance reports: /alliance/reports failed — {e}")
             return [], False
 
-        # Route works — fetch all pages with same robust logic as personal reports
+        # Route works — fetch all pages
         all_reports: List[ReportListItem] = list(first_page)
         first_page_size = len(first_page)
         pages_fetched = 1
@@ -239,7 +243,7 @@ class ReportsService:
             cutoff = datetime.now() - timedelta(hours=max_age_hours)
 
         # Check age cutoff on first page
-        if cutoff is not None:
+        if cutoff is not None and first_page:
             oldest_date = parse_report_date(first_page[-1].date_str)
             if oldest_date and oldest_date < cutoff:
                 logger.info(
@@ -250,9 +254,9 @@ class ReportsService:
         for page in range(2, max_pages + 1):
             try:
                 page_html = await self.client.get_html(
-                    f"/report/all?allianceReports=1&page={page}"
+                    f"{base_url}&page={page}"
                 )
-                page_reports = parse_report_list(page_html)
+                page_reports = parse_alliance_report_list(page_html)
                 pages_fetched += 1
 
                 if not page_reports:
@@ -269,8 +273,7 @@ class ReportsService:
                     oldest_date = parse_report_date(page_reports[-1].date_str)
                     if oldest_date and oldest_date < cutoff:
                         logger.debug(
-                            f"Alliance page {page}: oldest report ({oldest_date}) "
-                            f"exceeds max age, stopping"
+                            f"Alliance page {page}: oldest report exceeds max age, stopping"
                         )
                         break
 

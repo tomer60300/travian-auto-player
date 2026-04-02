@@ -88,6 +88,79 @@ def parse_report_list(html: str) -> List[ReportListItem]:
     return reports
 
 
+def parse_alliance_report_list(html: str) -> List[ReportListItem]:
+    """
+    Parse alliance report list page (/alliance/reports?filter=...).
+
+    Different structure from /report/all:
+      - No input[name="ids[]"] checkboxes
+      - Report ID in <a href="/report?id=XXX&aid=YYY">
+      - Same iReport icons and td.sub/td.dat classes
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    reports = []
+
+    for row in soup.find_all('tr'):
+        sub_cell = row.find('td', class_='sub')
+        if not sub_cell:
+            continue
+
+        # Extract report ID from link: /report?id=XXX&aid=YYY
+        report_id = ""
+        subject = ""
+        report_link = sub_cell.find('a', href=re.compile(r'/report\?id='))
+        if report_link:
+            href = report_link.get('href', '')
+            id_match = re.search(r'id=(\d+)', href)
+            if id_match:
+                report_id = id_match.group(1)
+            subject = clean_unicode(report_link.get_text(strip=True))
+
+        if not report_id:
+            continue
+
+        # Icon type
+        icon_type = 0
+        report_type = "unknown"
+        icon_img = row.find('img', class_=re.compile(r'iReport'))
+        if icon_img:
+            classes = ' '.join(icon_img.get('class', []))
+            type_match = re.search(r'iReport(\d+)', classes)
+            if type_match:
+                icon_type = int(type_match.group(1))
+                if 1 <= icon_type <= 8:
+                    report_type = "battle"
+                elif 11 <= icon_type <= 14:
+                    report_type = "trade"
+                elif 15 <= icon_type <= 19:
+                    report_type = "scout"
+                elif icon_type == 20:
+                    report_type = "reinforcement"
+                elif icon_type == 21:
+                    report_type = "adventure"
+                elif icon_type == 22:
+                    report_type = "settlement"
+                else:
+                    report_type = "misc"
+
+        # Date
+        date_str = ""
+        dat_cell = row.find('td', class_='dat')
+        if dat_cell:
+            date_str = clean_unicode(dat_cell.get_text(strip=True))
+
+        reports.append(ReportListItem(
+            report_id=report_id,
+            icon_type=icon_type,
+            report_type=report_type,
+            subject=subject,
+            date_str=date_str,
+            is_read=True,
+        ))
+
+    return reports
+
+
 def _parse_resource_wrapper(wrapper) -> Dict[str, int]:
     """
     Parse a resourceWrapper div.
