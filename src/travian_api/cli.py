@@ -1514,9 +1514,15 @@ def scout_auto(
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be scouted without sending"),
     confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
     delay: float = typer.Option(1.0, "--delay", help="Seconds between scout sends"),
+    interval: int = typer.Option(0, "--interval", "-i", help="Seconds between rounds (0=single run)"),
+    duration_min: int = typer.Option(0, "--duration", "-d", help="Total minutes to loop (0=forever, requires --interval)"),
+    check_available: bool = typer.Option(False, "--check-available", "-c", help="Check available scouts first, send only what you have, skip round if 0"),
 ):
     """Scan the map, filter targets, and send scouts automatically."""
     async def _do():
+        import time as _time
+        from datetime import datetime
+
         s = _settings()
         async with HttpClient(s) as client:
             auth = AuthService(client, s)
@@ -1536,6 +1542,7 @@ def scout_auto(
             console.print(
                 f"Auto-Scout from [cyan]{center_village.name}[/cyan] "
                 f"({cx}|{cy}) r={radius} type={scout_type} amount={amount}"
+                + (f" check-available={check_available}" if check_available else "")
             )
 
             # Parse exclude list
@@ -1557,82 +1564,179 @@ def scout_auto(
                 else:
                     console.print(f"[yellow]Exclude file not found: {exclude}[/yellow]")
 
-            # Scan
-            tiles = await svc.scan_map(cx, cy, radius)
+            looping = interval > 0
+            if looping:
+                console.print(f"Loop mode: interval {interval}s")
+                if duration_min:
+                    end_time = _time.time() + duration_min * 60
+                    end_dt = datetime.fromtimestamp(end_time).strftime("%H:%M:%S")
+                    console.print(f"Duration: {duration_min}m \u2014 ends at {end_dt}")
+                else:
+                    end_time = None
+                    console.print("Duration: forever (Ctrl+C to stop)")
+            else:
+                end_time = None
 
-            # Remove own villages
-            own_ids = {v.id for v in state.villages}
-            tiles = [t for t in tiles if t.village_id not in own_ids]
-            if not show_oases:
-                tiles = [t for t in tiles if not t.is_oasis]
-            tiles = [t for t in tiles if t.village_id > 0]
-
-            # Enrich
-            if tiles:
-                console.print(f"  Enriching {len(tiles)} tiles...")
-                tiles = await svc.enrich_tiles(tiles)
-
-            # Filter
-            tiles = svc.filter_targets(
-                tiles,
-                max_population=max_pop,
-                min_population=min_pop,
-                exclude_coords=exclude_coords,
-                only_no_player=no_player,
-                exclude_oases=not show_oases,
-            )
-
-            if not tiles:
-                console.print("[yellow]No targets found matching filters[/yellow]")
-                return
-
-            tiles = tiles[:limit]
-            console.print(f"\n[bold]{len(tiles)} targets to scout:[/bold]")
-
-            # Show targets table
-            table = Table()
-            table.add_column("#", style="dim", justify="right")
-            table.add_column("Coords", style="cyan")
-            table.add_column("Name")
-            table.add_column("Pop", justify="right")
-            table.add_column("Dist", justify="right")
-            table.add_column("Player")
-
-            for i, t in enumerate(tiles, 1):
-                table.add_row(
-                    str(i),
-                    f"({t.x}|{t.y})",
-                    t.village_name or "[dim]—[/dim]",
-                    str(t.population) if t.population else "[dim]?[/dim]",
-                    f"{t.distance:.1f}",
-                    t.player_name or "[dim]—[/dim]",
+            if dry_run and not looping:
+                # Single dry-run: scan once and show targets
+                tiles = await svc.scan_map(cx, cy, radius)
+                own_ids = {v.id for v in state.villages}
+                tiles = [t for t in tiles if t.village_id not in own_ids]
+                if not show_oases:
+                    tiles = [t for t in tiles if not t.is_oasis]
+                tiles = [t for t in tiles if t.village_id > 0]
+                if tiles:
+                    console.print(f"  Enriching {len(tiles)} tiles...")
+                    tiles = await svc.enrich_tiles(tiles)
+                tiles = svc.filter_targets(
+                    tiles,
+                    max_population=max_pop,
+                    min_population=min_pop,
+                    exclude_coords=exclude_coords,
+                    only_no_player=no_player,
+                    exclude_oases=not show_oases,
                 )
-            console.print(table)
-
-            if dry_run:
-                console.print("[yellow]DRY RUN — no scouts sent[/yellow]")
+                tiles = tiles[:limit]
+                if tiles:
+                    console.print(f"\n[bold]{len(tiles)} targets to scout:[/bold]")
+                    table = Table()
+                    table.add_column("#", style="dim", justify="right")
+                    table.add_column("Coords", style="cyan")
+                    table.add_column("Name")
+                    table.add_column("Pop", justify="right")
+                    table.add_column("Dist", justify="right")
+                    table.add_column("Player")
+                    for i, t in enumerate(tiles, 1):
+                        table.add_row(
+                            str(i),
+                            f"({t.x}|{t.y})",
+                            t.village_name or "[dim]\u2014[/dim]",
+                            str(t.population) if t.population else "[dim]?[/dim]",
+                            f"{t.distance:.1f}",
+                            t.player_name or "[dim]\u2014[/dim]",
+                        )
+                    console.print(table)
+                else:
+                    console.print("[yellow]No targets found matching filters[/yellow]")
+                console.print("[yellow]DRY RUN \u2014 no scouts sent[/yellow]")
                 return
 
-            if not confirm:
-                if not typer.confirm(f"Send {amount} scout(s) to {len(tiles)} targets?"):
-                    console.print("Cancelled.")
-                    return
+            if dry_run and looping:
+                console.print("[yellow]DRY RUN \u2014 would loop with above settings[/yellow]")
+                return
 
-            # Send scouts
-            results = await svc.send_scouts_to_targets(
-                targets=tiles,
-                scout_amount=amount,
-                scout_type=scout_type,
-                village_id=vid,
-                tribe_id=state.tribe_id,
-                delay_between=delay,
-            )
+            total_sent = 0
+            total_failed = 0
+            rounds = 0
+            try:
+                while True:
+                    if end_time and _time.time() >= end_time:
+                        break
 
-            # Summary
-            sent = sum(1 for r in results if r["success"])
-            console.print(
-                f"\n[bold]Results: {sent}/{len(results)} scouts sent[/bold]"
-            )
+                    try:
+                        now_str = datetime.now().strftime("%H:%M:%S")
+
+                        # Scan map each round (targets may change over time)
+                        tiles = await svc.scan_map(cx, cy, radius)
+                        own_ids = {v.id for v in state.villages}
+                        tiles = [t for t in tiles if t.village_id not in own_ids]
+                        if not show_oases:
+                            tiles = [t for t in tiles if not t.is_oasis]
+                        tiles = [t for t in tiles if t.village_id > 0]
+
+                        if tiles:
+                            tiles = await svc.enrich_tiles(tiles)
+
+                        tiles = svc.filter_targets(
+                            tiles,
+                            max_population=max_pop,
+                            min_population=min_pop,
+                            exclude_coords=exclude_coords,
+                            only_no_player=no_player,
+                            exclude_oases=not show_oases,
+                        )
+                        tiles = tiles[:limit]
+
+                        if not tiles:
+                            console.print(
+                                f"[{now_str}] No targets found this round"
+                            )
+                        else:
+                            if not looping and not confirm:
+                                # First single run — ask confirmation
+                                console.print(f"\n[bold]{len(tiles)} targets to scout:[/bold]")
+                                table = Table()
+                                table.add_column("#", style="dim", justify="right")
+                                table.add_column("Coords", style="cyan")
+                                table.add_column("Name")
+                                table.add_column("Pop", justify="right")
+                                table.add_column("Dist", justify="right")
+                                table.add_column("Player")
+                                for i, t in enumerate(tiles, 1):
+                                    table.add_row(
+                                        str(i),
+                                        f"({t.x}|{t.y})",
+                                        t.village_name or "[dim]\u2014[/dim]",
+                                        str(t.population) if t.population else "[dim]?[/dim]",
+                                        f"{t.distance:.1f}",
+                                        t.player_name or "[dim]\u2014[/dim]",
+                                    )
+                                console.print(table)
+                                if not typer.confirm(f"Send {amount} scout(s) to {len(tiles)} targets?"):
+                                    console.print("Cancelled.")
+                                    return
+
+                            results = await svc.send_scouts_to_targets(
+                                targets=tiles,
+                                scout_amount=amount,
+                                scout_type=scout_type,
+                                village_id=vid,
+                                tribe_id=state.tribe_id,
+                                delay_between=delay,
+                                check_available=check_available,
+                            )
+
+                            sent = sum(1 for r in results if r["success"])
+                            failed = len(results) - sent
+                            total_sent += sent
+                            total_failed += failed
+                            rounds += 1
+
+                            if looping:
+                                next_dt = datetime.fromtimestamp(
+                                    _time.time() + interval
+                                ).strftime("%H:%M:%S")
+                                console.print(
+                                    f"[{now_str}] Round {rounds}: "
+                                    f"Sent {sent}/{len(results)} | "
+                                    f"Failed: {failed} | Next: {next_dt}"
+                                )
+                            else:
+                                console.print(
+                                    f"\n[bold]Results: {sent}/{len(results)} scouts sent[/bold]"
+                                )
+
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as e:
+                        now_str = datetime.now().strftime("%H:%M:%S")
+                        console.print(
+                            f"[yellow][{now_str}] Error: {e} \u2014 retrying next interval[/yellow]"
+                        )
+
+                    if not looping:
+                        break
+
+                    await asyncio.sleep(interval)
+
+            except KeyboardInterrupt:
+                pass
+
+            if looping:
+                console.print(
+                    f"\nScout loop stopped. Rounds: {rounds} | "
+                    f"Total sent: {total_sent} | Total failed: {total_failed}"
+                )
     _run(_do())
 
 

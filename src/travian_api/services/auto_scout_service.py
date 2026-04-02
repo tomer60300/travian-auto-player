@@ -191,6 +191,22 @@ class AutoScoutService:
 
     # ── Scout sending ────────────────────────────────────────────────
 
+    async def get_available_scout_count(
+        self,
+        tribe_id: int = 2,
+        village_id: Optional[int] = None,
+    ) -> int:
+        """Query the rally point for how many scouts are currently available."""
+        from ..constants import SCOUT_UNITS
+        from ..services.military_service import MilitaryService
+        from ..services.target_resolver import TargetResolver
+
+        scout_unit = SCOUT_UNITS.get(tribe_id, "t4")
+        resolver = TargetResolver(self.http_client)
+        military = MilitaryService(self.http_client, resolver)
+        troops = await military.get_available_troops(village_id)
+        return troops.get(scout_unit, 0)
+
     async def send_scouts_to_targets(
         self,
         targets: List[MapTileInfo],
@@ -199,6 +215,7 @@ class AutoScoutService:
         village_id: Optional[int] = None,
         tribe_id: int = 2,
         delay_between: float = 0.5,
+        check_available: bool = False,
     ) -> List[Dict]:
         """
         Send scouts to a list of targets using the 2-step troop form.
@@ -210,6 +227,9 @@ class AutoScoutService:
             village_id: Source village ID
             tribe_id: Player tribe (1=Roman, 2=Teuton, 3=Gaul)
             delay_between: Seconds between sends to avoid rate limiting
+            check_available: If True, query available scouts first and only
+                             send to as many targets as scouts allow. If 0
+                             scouts are available, skip entirely.
         """
         from ..constants import SCOUT_UNITS
         from ..services.military_service import MilitaryService
@@ -218,6 +238,22 @@ class AutoScoutService:
         scout_unit = SCOUT_UNITS.get(tribe_id, "t4")
         resolver = TargetResolver(self.http_client)
         military = MilitaryService(self.http_client, resolver)
+
+        # Check available scouts and cap targets if requested
+        if check_available:
+            available = await military.get_available_troops(village_id)
+            scout_count = available.get(scout_unit, 0)
+            self._report(f"Available scouts ({scout_unit}): {scout_count}")
+            if scout_count == 0:
+                self._report("No scouts available — skipping this round")
+                return []
+            max_targets = scout_count // scout_amount
+            if max_targets < len(targets):
+                self._report(
+                    f"Scouts available for {max_targets}/{len(targets)} targets "
+                    f"({scout_count} scouts, {scout_amount} per target)"
+                )
+                targets = targets[:max_targets]
 
         results = []
         for i, target in enumerate(targets):
