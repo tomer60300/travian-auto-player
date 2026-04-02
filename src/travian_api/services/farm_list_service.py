@@ -255,7 +255,7 @@ class FarmListService:
                     FarmListSendTargetResult(
                         id=t.get("id", 0),
                         status=t.get("status", "unknown"),
-                        error=t.get("error", ""),
+                        error=t.get("error") or "",
                     )
                 )
         return FarmListSendResult(targets=targets)
