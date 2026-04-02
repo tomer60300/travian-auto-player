@@ -54,7 +54,7 @@ class HttpClient:
             enabled=stealth_on,
         )
         self._delay = HumanDelay(
-            multiplier=speed,
+            speed_factor=speed,
             enabled=stealth_on,
         )
         self._session_mgr = SessionManager(enabled=stealth_on)
@@ -145,7 +145,7 @@ class HttpClient:
         }
         headers['X-Version'] = self.settings.x_version
         
-        self._session_mgr.record_request()
+        self._session_mgr.record_action()
         
         try:
             masked_data = mask_sensitive_data(json.dumps(data))
@@ -196,7 +196,7 @@ class HttpClient:
         }
         headers['X-Version'] = self.settings.x_version
         
-        self._session_mgr.record_request()
+        self._session_mgr.record_action()
         
         try:
             form_str = urlencode(data)
@@ -239,7 +239,7 @@ class HttpClient:
         }
         headers['X-Version'] = self.settings.x_version
         
-        self._session_mgr.record_request()
+        self._session_mgr.record_action()
         
         try:
             logger.debug(f"GET {url}")

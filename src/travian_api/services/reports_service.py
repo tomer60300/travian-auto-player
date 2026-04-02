@@ -123,3 +123,4 @@ class ReportsService:
         except Exception as e:
             logger.warning(f"Failed to fetch report metadata: {e}")
             return {}
+

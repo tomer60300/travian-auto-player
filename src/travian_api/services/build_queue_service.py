@@ -44,7 +44,7 @@ from ..clients.http_client import HttpClient
 from ..constants import BUILDING_NAMES
 from ..exceptions import TravianError
 from ..logging_config import get_logger
-from ..stealth.human_delay import HumanDelay, DelayProfile
+from ..stealth.human_delay import HumanDelay, ActionType
 from .building_service import BuildingService
 
 logger = get_logger(__name__)
@@ -536,7 +536,7 @@ class BuildQueueService:
             # Stealth: human delay before checking what to build next
             try:
                 from ..stealth.human_delay import ActionType
-                await self.http_client.human_delay.wait(ActionType.THINK, "reviewing build options")
+                await self.http_client.delay.wait(ActionType.THINKING, "reviewing build options")
             except Exception:
                 pass
 
@@ -564,7 +564,7 @@ class BuildQueueService:
                 if check['can_build']:
                     # Stealth: simulate human browsing to the building before upgrading
                     delay = self.http_client.delay
-                    await delay.wait(DelayProfile.BETWEEN_ACTIONS, f"preparing to upgrade {item.building}")
+                    await delay.wait(ActionType.BETWEEN_ACTIONS, f"preparing to upgrade {item.building}")
                     
                     # Get building detail for gid (needed for video reward)
                     detail = await self.building_service.get_building_detail(item.slot_id, village_id=vid) if use_video and not item.is_construction else None
@@ -669,3 +669,4 @@ class BuildQueueService:
                 await asyncio.sleep(poll_interval_s)
 
         return all_results
+

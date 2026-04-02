@@ -9,7 +9,7 @@ from ..exceptions import TravianError, InvalidTargetError
 from ..models.military import TroopSendResult
 from ..parsers.html_parser import parse_rally_point_troops, parse_troop_confirm_page, clean_unicode
 from ..constants import EVENT_TYPES
-from ..stealth.human_delay import HumanDelay, DelayProfile
+from ..stealth.human_delay import HumanDelay, ActionType
 from .target_resolver import TargetResolver
 
 import logging
@@ -119,7 +119,7 @@ class MilitaryService:
 
             # Stealth: human-like delay before submitting troop form
             delay = self.http_client.delay
-            await delay.wait(DelayProfile.FORM_FILL, "filling troop selection form")
+            await delay.wait(ActionType.FORM_FILL, "filling troop selection form")
             
             logger.info(f"Step 1: Sending troop form to ({x},{y}) type={event_type} troops={troops}")
             confirm_html = await self.http_client.post_form(rally_url, form_data)
@@ -142,7 +142,7 @@ class MilitaryService:
 
             # ── Step 2: Parse confirmation page (with human delay for reading) ──
             from ..stealth.human_delay import HumanDelay, ActionType
-            await self.http_client.human_delay.wait(ActionType.BETWEEN_STEPS, "reading troop confirmation")
+            await self.http_client.delay.wait(ActionType.BETWEEN_ACTIONS, "reading troop confirmation")
             
             confirm_fields = parse_troop_confirm_page(confirm_html)
             checksum = confirm_fields.pop('checksum', '')
@@ -176,7 +176,7 @@ class MilitaryService:
                 final_data['troops[0][scoutTarget]'] = scout_target
 
             # Stealth: human reads the confirmation page before clicking send
-            await delay.wait(DelayProfile.PAGE_READ, "reading troop confirmation")
+            await delay.wait(ActionType.PAGE_READ, "reading troop confirmation")
             
             logger.info(f"Step 2: Confirming with checksum={checksum}")
             result_html = await self.http_client.post_form(rally_url, final_data)
@@ -228,3 +228,4 @@ class MilitaryService:
         if match:
             return clean_unicode(re.sub(r'<[^>]+>', '', match.group(1)).strip())
         return "Unknown error"
+

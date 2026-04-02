@@ -273,7 +273,9 @@ class FarmListService:
             results[lid] = await self.send_farm_list(lid)
             # Stealth: delay between farm list sends
             if i < len(list_ids) - 1:
-                await self.http_client.human_delay.wait_custom(
-                    2.0, 6.0, f"pause between farm list sends ({i+1}/{len(list_ids)})"
+                from ..stealth.human_delay import ActionType
+                await self.http_client.delay.wait(
+                    ActionType.FARM_SEND, f"pause between farm list sends ({i+1}/{len(list_ids)})"
                 )
         return results
+

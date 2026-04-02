@@ -352,3 +352,4 @@ class VideoRewardService:
         except Exception as e:
             logger.warning(f"Failed to check rewards: {e}")
             return {}
+

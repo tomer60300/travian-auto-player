@@ -334,3 +334,4 @@ class AutoScoutService:
             info.is_oasis = True
 
         return info
+
