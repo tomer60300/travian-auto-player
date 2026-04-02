@@ -200,26 +200,57 @@ def extract_trap_capacity(buildings: List[Dict[str, Any]]) -> int:
 # Scoring
 # ---------------------------------------------------------------------------
 
-def _score_with_unit(
+def calculate_score(
     state: TargetVillageState,
-    eff_R: float,
-    unit_atk: float,
-    unit_carry: int,
-    unit_cost: int,
-    unit_speed: int,
-    unit_upkeep: int,
-    smithy_level: int,
-    hero_offense: int,
-    hero_strength: int,
-    dist: float,
-    t_scout: Optional[float],
-    t_raid: Optional[float],
-) -> Optional[Dict[str, Any]]:
-    """Calculate score for a specific unit type against a target."""
-    atk_per_unit = smithy_stat(unit_atk, unit_upkeep, smithy_level)
+    my_x: int,
+    my_y: int,
+    smithy_level: int = 0,
+    hero_offense: int = 0,
+    hero_strength: int = 0,
+) -> Optional[RaidRecommendation]:
+    """Score a target using the raid dispatch formula.
 
-    DEF = 10.0  # base
+    Finds the smallest n (clubs to send) where:
+      OFF > DEF, profit > 0, surviving*60 >= eff_R
+
+    Score = (profit / round_trip) * C_scout * C_confirm
+    est_loot shows R (raw confirmed estimate), score uses eff_R.
+    """
+    dist = state.distance
+    if dist == 0:
+        return None
+
+    # Require confirmed scout data
+    if state.raidable_confidence == "none":
+        return None
+    if state.raidable_confidence == "depleted":
+        return None
+
+    R = state.estimated_raidable
+    if R < 1:
+        return None
+
+    t_scout = hours_since(state.last_scout_time)
+    t_raid = hours_since(state.last_raid_time)
+
+    # ── eff_R: resource estimate for dispatch ──────────────────
+    if t_raid is None:
+        eff_R = float(R)
+    else:
+        eff_R = R * min(1.0, t_raid / T_REGEN)
+
+    if eff_R < 1:
+        return None
+
+    # ── Attack power ───────────────────────────────────────────
+    club_atk = smithy_stat(CLUB_ATK, CLUB_UPKEEP, smithy_level)
+
+    # Quick check: single club always dies if atk < 83 and no defenders
+    # (still try, the loop handles it)
+
+    # ── Defense calculation ────────────────────────────────────
     N_def = 0
+    DEF = 10.0  # base
     for uid, count in state.defenders.items():
         if uid == "uhero":
             continue
@@ -228,10 +259,13 @@ def _score_with_unit(
             DEF += count * smithy_stat(def_inf, upk, 0)
             N_def += count
 
+    # Wall bonus
     if state.wall_level > 0 and state.wall_tribe in WALL_BASES:
         DEF *= WALL_BASES[state.wall_tribe] ** state.wall_level
 
     traps = state.trap_capacity
+
+    # ── Find optimal n_send ────────────────────────────────────
     best_n = None
     best_profit = 0.0
 
@@ -241,7 +275,7 @@ def _score_with_unit(
         if fighters <= 0:
             continue
 
-        OFF = (fighters * atk_per_unit + hero_strength) * (1 + hero_offense * 0.002)
+        OFF = (fighters * club_atk + hero_strength) * (1 + hero_offense * 0.002)
         if OFF <= DEF:
             continue
 
@@ -256,19 +290,24 @@ def _score_with_unit(
         combat_dead = round(fighters * loss_ratio)
         total_dead = combat_dead + trapped
         surviving = n - total_dead
+
         if surviving <= 0:
             continue
 
-        loot = min(surviving * unit_carry, eff_R)
-        profit = loot - total_dead * unit_cost
+        loot = min(surviving * CLUB_CARRY, eff_R)
+        profit = loot - total_dead * CLUB_COST
+
         if profit <= 0:
             continue
 
-        if surviving * unit_carry >= eff_R:
+        # All three conditions met: OFF > DEF, profit > 0
+        # Check if carry capacity covers eff_R
+        if surviving * CLUB_CARRY >= eff_R:
             best_n = n
             best_profit = profit
-            break
+            break  # smallest n that satisfies everything
 
+        # Store first profitable n, keep searching for full carry
         if best_n is None or profit > best_profit:
             best_n = n
             best_profit = profit
@@ -276,141 +315,42 @@ def _score_with_unit(
     if best_n is None:
         return None
 
-    # Recalculate final values at best_n
+    # ── Recalculate at best_n for final values ─────────────────
     n = best_n
     trapped = min(n, traps)
     fighters = n - trapped
-    OFF = (fighters * atk_per_unit + hero_strength) * (1 + hero_offense * 0.002)
+    OFF = (fighters * club_atk + hero_strength) * (1 + hero_offense * 0.002)
     total_units = fighters + N_def
     K = 1.5 if total_units <= 1000 else max(1.2578, min(1.5, 2 * (1.8592 - total_units ** 0.015)))
-    x_val = (DEF / OFF) ** K
-    loss_ratio = x_val / (1 + x_val)
+    x = (DEF / OFF) ** K
+    loss_ratio = x / (1 + x)
     combat_dead = round(fighters * loss_ratio)
     total_dead = combat_dead + trapped
     surviving = n - total_dead
-    loot = min(surviving * unit_carry, eff_R)
-    profit = loot - total_dead * unit_cost
+    loot = min(surviving * CLUB_CARRY, eff_R)
+    profit = loot - total_dead * CLUB_COST
 
-    # Confidence adjustments
+    # ── Confidence adjustments ─────────────────────────────────
     C_scout = T_SCOUT / (T_SCOUT + t_scout) if t_scout is not None else 0.5
     C_confirm = 1.2 if (t_raid is not None and t_scout is not None and t_raid < t_scout) else 1.0
 
-    round_trip = 2 * dist / unit_speed if unit_speed > 0 else 999
+    round_trip = 2 * dist / CLUB_SPEED
     if round_trip <= 0:
         return None
 
-    score = (profit / round_trip) * C_scout * C_confirm
+    score = round((profit / round_trip) * C_scout * C_confirm, 2)
 
-    return {
-        "n_send": n,
-        "profit": profit,
-        "score": score,
-        "round_trip_minutes": round(round_trip * 60),
-        "est_loot": round(eff_R),  # Show what we estimate is there
-        "surviving": surviving,
-    }
-
-
-# Scoring configuration
-RAID_COOLDOWN_H = 2.0
-OVER_RAID_PENALTY = 0.5
-CONF_CARRY_FULL = 1.5
-CONF_FRESH_INTEL = 1.3
-DEF_HEAVY_PEN = 0.2
-DEF_LIGHT_PEN = 0.6
-TRAP_BOOST = 1.1
-COMBAT_BUFFER_MIN = 10
-COMBAT_BUFFER_RATIO = 2
-TRAP_EXTRA_TROOPS = 15
-
-
-def calculate_score(
-    state: TargetVillageState,
-    my_x: int,
-    my_y: int,
-    smithy_level: int = 0,
-    hero_offense: int = 0,
-    hero_strength: int = 0,
-) -> Optional[RaidRecommendation]:
-    """Score a target. Returns None if target has no scout data or is not viable.
-
-    Scoring: (est * multipliers) / distance
-    Troop recommendation: ceil(est / carry) + combat buffer
-    """
-    dist = state.distance
-    if dist == 0:
-        return None
-
-    # Require confirmed scout data — no guessing
-    if state.raidable_confidence == "none":
-        return None
-    if state.raidable_confidence == "depleted":
-        return None  # needs re-scouting
-
-    est = state.estimated_raidable
-    if est < 1:
-        return None
-
-    t_scout = hours_since(state.last_scout_time)
-    t_raid = hours_since(state.last_raid_time)
-
-    # Defender analysis
-    def_n = sum(v for k, v in state.defenders.items() if k != "uhero")
-    is_defended = def_n > 0
-    has_traps = state.trap_capacity > 0
-
-    # Last raid carry ratio (from last_raid data — approximate)
-    last_carry_ratio = 0.0
-
-    # ── Score multipliers ──────────────────────────────────────
-    mult = 1.0
-    if last_carry_ratio >= 0.9:
-        mult *= CONF_CARRY_FULL
-    if t_scout is not None and t_scout < RAID_COOLDOWN_H:
-        mult *= CONF_FRESH_INTEL
-    if is_defended:
-        mult *= DEF_HEAVY_PEN if def_n > 20 else DEF_LIGHT_PEN
-    if has_traps:
-        mult *= TRAP_BOOST
-    if t_raid is not None and t_raid < RAID_COOLDOWN_H:
-        mult *= OVER_RAID_PENALTY
-
-    score = round((est * mult) / dist, 2)
-
-    # ── Troop recommendation ───────────────────────────────────
-    buffer = 0
-    if is_defended:
-        buffer = max(COMBAT_BUFFER_MIN, def_n * COMBAT_BUFFER_RATIO)
-    if has_traps:
-        buffer += TRAP_EXTRA_TROOPS
-
-    clubs_needed = math.ceil(est / CLUB_CARRY) + buffer
-    axes_needed = math.ceil(est / AXE_CARRY) + buffer
-
-    club_rt = round(2 * dist / CLUB_SPEED * 60)
-    axe_rt = round(2 * dist / AXE_SPEED * 60)
-
-    # Use AXE if defended or traps, CLUB otherwise
-    if is_defended or has_traps:
-        unit_type = "AXE"
-        n_send = axes_needed
-        rt = axe_rt
-    else:
-        unit_type = "CLUB"
-        n_send = clubs_needed
-        rt = club_rt
-
-    mode = "ATTACK" if has_traps else "RAID"
+    mode = "ATTACK" if traps > 0 else "RAID"
 
     return RaidRecommendation(
-        n_send=n_send,
-        unit_type=unit_type,
-        send_label=f"{n_send} {unit_type}",
-        profit=float(est),
+        n_send=n,
+        unit_type="CLUB",
+        send_label=f"{n} CLUB",
+        profit=profit,
         score=score,
         mode=mode,
-        round_trip_minutes=rt,
-        est_loot=est,
+        round_trip_minutes=round(round_trip * 60),
+        est_loot=R,  # Display raw confirmed estimate, not eff_R
     )
 
 
