@@ -269,6 +269,11 @@ class FarmListService:
             list_ids = [fl.id for fl in all_lists]
 
         results = {}
-        for lid in list_ids:
+        for i, lid in enumerate(list_ids):
             results[lid] = await self.send_farm_list(lid)
+            # Stealth: delay between farm list sends
+            if i < len(list_ids) - 1:
+                await self.http_client.human_delay.wait_custom(
+                    2.0, 6.0, f"pause between farm list sends ({i+1}/{len(list_ids)})"
+                )
         return results

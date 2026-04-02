@@ -532,6 +532,13 @@ class BuildQueueService:
                 resources = await self.building_service.get_resources(village_id=vid)
                 self._report(f"  Resources: L={resources.lumber} C={resources.clay} I={resources.iron} Cr={resources.crop} (free crop: {resources.free_crop})")
 
+            # Stealth: human delay before checking what to build next
+            try:
+                from ..stealth.human_delay import ActionType
+                await self.http_client.human_delay.wait(ActionType.DECISION, "reviewing build options")
+            except Exception:
+                pass
+
             # Try each item at this priority
             built = False
             for item in prio_items:
@@ -613,6 +620,15 @@ class BuildQueueService:
                             self._report(f"Waiting for build to finish ({remaining}s remaining)...")
                             wait = min(remaining + 5, 60)
                             await asyncio.sleep(wait)
+                            # Stealth: occasional idle browsing during long waits
+                            try:
+                                await self.http_client.session_manager.idle_browse_if_due(
+                                    self.http_client.navigator, self.http_client, village_id=vid
+                                )
+                                # Check if we should take a break
+                                await self.http_client.session_manager.take_break_if_needed()
+                            except Exception:
+                                pass  # stealth failures shouldn't break the builder
 
                         # Re-read actual level from server (authoritative source of truth).
                         # This prevents drift when a plan is restarted mid-build or the
