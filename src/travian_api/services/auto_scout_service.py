@@ -260,7 +260,10 @@ class AutoScoutService:
                 })
 
             if i < len(targets) - 1:
-                await asyncio.sleep(delay_between)
+                # Stealth: use human-like delay instead of fixed sleep
+                import random
+                jittered_delay = delay_between * random.uniform(0.7, 2.5)
+                await asyncio.sleep(jittered_delay)
 
         sent = sum(1 for r in results if r["success"])
         self._report(f"Done: {sent}/{len(targets)} scouts sent successfully")

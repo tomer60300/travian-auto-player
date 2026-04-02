@@ -38,20 +38,27 @@ _username_override: str = ""
 _password_override: str = ""
 
 
+# Global stealth override
+_stealth_override: Optional[bool] = None
+
+
 @app.callback()
 def main_callback(
     server: Optional[str] = typer.Option(None, "--server", "-s", help="Game server URL", envvar="TRAVIAN_BASE_URL"),
     username: Optional[str] = typer.Option(None, "--username", "-u", help="Account username/email"),
     password: Optional[str] = typer.Option(None, "--password", "-p", help="Account password"),
+    stealth: Optional[bool] = typer.Option(None, "--stealth/--no-stealth", help="Enable/disable stealth mode (anti-bot). Default: enabled"),
 ):
     """Global options applied before any command."""
-    global _server_override, _username_override, _password_override
+    global _server_override, _username_override, _password_override, _stealth_override
     if server:
         _server_override = server
     if username:
         _username_override = username
     if password:
         _password_override = password
+    if stealth is not None:
+        _stealth_override = stealth
 
 
 def _settings(interactive: bool = True) -> Settings:
@@ -63,6 +70,8 @@ def _settings(interactive: bool = True) -> Settings:
         s.username = _username_override
     if _password_override:
         s.password = _password_override
+    if _stealth_override is not None:
+        s.stealth = _stealth_override
     
     # Check what's missing
     missing_server = not s.base_url

@@ -90,11 +90,16 @@ class MilitaryService:
         village_id: Optional[int] = None,
     ) -> TroopSendResult:
         """
-        Two-step troop sending:
-        1. POST form to /build.php?gid=16&tt=2 -> confirmation page
-        2. Parse hidden fields + checksum, POST confirmation -> troops dispatched
+        Two-step troop sending with stealth:
+        1. Navigate to rally point (if stealth enabled)
+        2. POST form to /build.php?gid=16&tt=2 -> confirmation page
+        3. Human delay (reading confirmation)
+        4. Parse hidden fields + checksum, POST confirmation -> troops dispatched
         """
         try:
+            # Stealth: navigate to rally point first
+            await self.http_client.navigator.before_rally_point(self.http_client, village_id)
+            
             # Use newdid in the POST URL to set village context
             if village_id:
                 rally_url = f"/build.php?newdid={village_id}&gid=16&tt=2"
@@ -130,7 +135,10 @@ class MilitaryService:
                         raw_response="Step 1 error: No troops have been selected.",
                     )
 
-            # ── Step 2: Parse confirmation page ──
+            # ── Step 2: Parse confirmation page (with human delay for reading) ──
+            from ..stealth.human_delay import HumanDelay, ActionType
+            await self.http_client.human_delay.wait(ActionType.READING, "reading troop confirmation")
+            
             confirm_fields = parse_troop_confirm_page(confirm_html)
             checksum = confirm_fields.pop('checksum', '')
 

@@ -219,7 +219,10 @@ class VideoRewardService:
                     logger.warning(f"fc.php error at {ts}s: {e}")
 
                 if ts < total_duration:
-                    await asyncio.sleep(tick_delay_ms / 1000.0)
+                    # Stealth: add jitter to tick timing (±500ms)
+                    import random
+                    jittered_delay = (tick_delay_ms + random.randint(-500, 500)) / 1000.0
+                    await asyncio.sleep(max(2.0, jittered_delay))  # never below 2s
 
             # Phase 5: Get signature from xs.php
             logger.info("Requesting signature from xs.php")
@@ -244,9 +247,11 @@ class VideoRewardService:
             if not signature:
                 return VideoRewardResult(False, reward_type, "Empty signature from xs.php")
 
-            # Phase 6: Wait a bit then claim reward
-            logger.info(f"Waiting {wait_before_claim_s}s before claiming...")
-            await asyncio.sleep(wait_before_claim_s)
+            # Phase 6: Wait a bit then claim reward (with jitter)
+            import random
+            actual_wait = wait_before_claim_s + random.uniform(0.5, 2.5)
+            logger.info(f"Waiting {actual_wait:.1f}s before claiming...")
+            await asyncio.sleep(actual_wait)
 
             logger.info("Claiming reward via /videofeature/ends")
             ends_data = await self.http_client.post_json(
