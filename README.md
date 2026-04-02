@@ -83,6 +83,16 @@ TRAVIAN_PASSWORD=secret
 
 ## CLI Reference
 
+### Authentication
+
+```bash
+# Login and show player info
+travian auth login
+
+# Print the current JWT token (useful for debugging or external tools)
+travian auth token
+```
+
 ### Villages
 
 ```bash
@@ -115,6 +125,12 @@ travian building upgrade --slot-id 15 -v 20031
 
 # Allow gold spend if queue is occupied
 travian building upgrade --slot-id 15 --allow-gold
+
+# Construct a NEW building on an empty slot (slots 19-40)
+# (upgrade levels existing buildings; construct places new ones)
+travian building construct --slot-id 25 --building Cranny
+travian building construct --slot-id 25 --building Embassy -v 20031
+travian building construct --slot-id 25 --building Barracks --allow-gold
 ```
 
 ### Military
@@ -127,7 +143,7 @@ travian military scout --x 100 --y 200 --amount 3 --type defenses
 # Send from a specific village
 travian military scout --x 100 --y 200 --amount 5 --village-id 20031
 
-# Send a raid
+# Send a raid (uses currently active village -- switch first if needed)
 travian military raid --x 50 --y -30 --troop t1=10 --troop t2=5
 ```
 
@@ -199,6 +215,9 @@ travian farm send 10165
 
 # Skip confirmation
 travian farm send 10165 --yes
+
+# Dry run -- show what would be sent without actually sending
+travian farm send 10165 --dry-run
 ```
 
 > **Note:** Sending requires Gold Club. Without it, the API returns an error. All other farm list operations (create, add targets, view, delete) work without Gold Club.
@@ -222,6 +241,79 @@ travian farm delete 10165
 travian farm delete 10165 --yes  # skip confirmation
 ```
 
+#### Send all farm lists
+
+Send all farm lists at once (or a subset by ID):
+
+```bash
+# Send all farm lists
+travian farm send-all --yes
+
+# Send specific lists only
+travian farm send-all --lists 10165,10200 --yes
+
+# Dry run
+travian farm send-all --dry-run
+```
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--lists` | `-l` | all | Comma-separated list IDs to send (default: all lists) |
+| `--dry-run` | — | false | Show plan without sending |
+| `--yes` | `-y` | false | Skip confirmation prompt |
+
+> **Note:** Requires Gold Club, same as `farm send`.
+
+#### Loop-send a farm list
+
+Continuously send a farm list at a fixed interval. Runs until stopped with Ctrl+C or duration expires:
+
+```bash
+# Send farm list 10165 every 5 minutes (default), forever
+travian farm run 10165
+
+# Custom interval: every 3 minutes, for 2 hours
+travian farm run 10165 --interval 180 --duration 120
+
+# Dry run -- show config without starting loop
+travian farm run 10165 --dry-run
+
+# Show per-slot details on each send
+travian farm run 10165 --verbose
+```
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--interval` | `-i` | 300 | Seconds between sends |
+| `--duration` | `-d` | 0 | Total minutes to run (0 = forever, until Ctrl+C) |
+| `--dry-run` | — | false | Show plan without starting the loop |
+| `--verbose` | — | false | Show per-slot send details each round |
+
+> **Note:** Requires Gold Club. If Gold Club is not active, the loop exits immediately with an error.
+
+#### Loop-send all farm lists
+
+Like `farm run`, but sends all (or a subset of) farm lists each interval:
+
+```bash
+# Send all farm lists every 5 minutes, forever
+travian farm run-all
+
+# Send specific lists every 2 minutes, for 1 hour
+travian farm run-all --lists 10165,10200 --interval 120 --duration 60
+
+# Dry run
+travian farm run-all --dry-run
+```
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--lists` | `-l` | all | Comma-separated list IDs (default: all lists) |
+| `--interval` | `-i` | 300 | Seconds between sends |
+| `--duration` | `-d` | 0 | Total minutes to run (0 = forever) |
+| `--dry-run` | — | false | Show plan without starting the loop |
+| `--verbose` | — | false | Show per-list send details each round |
+
 ---
 
 ### Auto-Scout
@@ -238,6 +330,7 @@ travian scout scan --radius 10
 
 # Filter by population
 travian scout scan --radius 15 --max-pop 50
+travian scout scan --radius 15 --min-pop 5 --max-pop 50
 
 # Fast scan without tile enrichment (no population data)
 travian scout scan --radius 20 --no-enrich
@@ -358,8 +451,9 @@ Create a text file with coordinates to skip (one per line):
 ### Reports
 
 ```bash
-# List recent reports
-travian reports list --max-age-hours 24
+# List recent reports (default: last 24 hours, up to 5 pages)
+travian reports list
+travian reports list --max-age-hours 48 --max-pages 10
 
 # Show detailed report
 travian reports show <report-id>
@@ -479,6 +573,15 @@ travian queue run plan.yaml --use-video
 
 # Custom poll interval
 travian queue run plan.yaml --poll 60
+
+# With verbose output (show resources and cost breakdown)
+travian queue run plan.yaml --verbose
+
+# Log all output to a file
+travian queue run plan.yaml --log-file build.log
+
+# Combine all options
+travian queue run plan.yaml --use-video --poll 60 --verbose --log-file build.log
 ```
 
 #### How it works
@@ -571,7 +674,7 @@ travian-api/
 
 ## Known Limitations
 
-- **Farm List Send**: Requires Gold Club — the API blocks `farm-list/send` without it. All other operations (create, manage, view) work fine.
+- **Farm List Send**: Requires Gold Club — the API blocks `farm-list/send` without it. Commands display "Gold Club is not active" when missing. Loop commands (`farm run`, `farm run-all`) exit immediately on this error. All other operations (create, manage, view, delete) work fine.
 - **Movement Cancellation**: Not implemented (requires UI interaction)
 - **Report Deletion**: Bulk operations not implemented
 - **Video `buildingUpgrade`**: May be disabled on some accounts (cooldown or server restriction)
