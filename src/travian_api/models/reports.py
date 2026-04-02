@@ -69,7 +69,7 @@ class Report(BaseModel):
 
 class BattleReportData(BaseModel):
     """Parsed battle report data."""
-    
+
     attacker: Dict[str, Any] = Field(default_factory=dict, description="Attacker info")
     defender: Dict[str, Any] = Field(default_factory=dict, description="Defender info")
     attacker_troops: Dict[str, int] = Field(default_factory=dict, description="Attacker troops")
@@ -78,6 +78,9 @@ class BattleReportData(BaseModel):
     bounty: Dict[str, int] = Field(default_factory=dict, description="Resources stolen")
     attacker_losses: Dict[str, int] = Field(default_factory=dict, description="Attacker losses")
     defender_losses: Dict[str, int] = Field(default_factory=dict, description="Defender losses")
+    carry_used: int = Field(default=0, description="Resources actually carried")
+    carry_max: int = Field(default=0, description="Total carry capacity of surviving troops")
+    carry_full: bool = Field(default=False, description="True if troops were fully loaded")
     
     @field_validator("battle_result")
     @classmethod

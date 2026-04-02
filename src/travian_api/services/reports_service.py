@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from ..clients.http_client import HttpClient
 from ..exceptions import ReportError
@@ -40,6 +40,7 @@ class ReportsService:
             List of ReportListItem objects
         """
         all_reports: List[ReportListItem] = []
+        first_page_size = None
 
         for page in range(1, max_pages + 1):
             try:
@@ -52,8 +53,9 @@ class ReportsService:
 
                 all_reports.extend(page_reports)
 
-                # If fewer than 30 reports, no more pages
-                if len(page_reports) < 30:
+                if first_page_size is None:
+                    first_page_size = len(page_reports)
+                elif len(page_reports) < first_page_size:
                     break
 
             except Exception as e:
@@ -62,6 +64,80 @@ class ReportsService:
 
         logger.info(f"Fetched {len(all_reports)} reports from {page} pages")
         return all_reports
+
+    async def fetch_reports_robust(
+        self,
+        max_age_hours: Optional[int] = None,
+        max_pages: int = 100,
+    ) -> Tuple[List[ReportListItem], int, int, List[int]]:
+        """
+        Fetch reports from /report/all pages with robust error handling.
+
+        Keeps fetching pages until:
+        - All reports on a page are older than *max_age_hours*, OR
+        - No more pages remain, OR
+        - *max_pages* safety cap is reached.
+
+        Args:
+            max_age_hours: Stop fetching when the oldest report on a page
+                exceeds this age.  None = no age limit (use max_pages only).
+            max_pages: Hard safety cap on pages (default 100 = 3 000 reports).
+
+        Returns:
+            Tuple of (reports, pages_fetched, pages_failed, failed_page_numbers)
+        """
+        from ..services.raid_analyzer_service import parse_report_date
+        from datetime import datetime, timedelta
+
+        all_reports: List[ReportListItem] = []
+        pages_fetched = 0
+        pages_failed = 0
+        failed_pages: List[int] = []
+        first_page_size: Optional[int] = None
+        cutoff = None
+        if max_age_hours is not None:
+            cutoff = datetime.now() - timedelta(hours=max_age_hours)
+
+        for page in range(1, max_pages + 1):
+            try:
+                html = await self.client.get_html(f"/report/all?page={page}")
+                page_reports = parse_report_list(html)
+                pages_fetched += 1
+
+                if not page_reports:
+                    logger.debug(f"No reports on page {page}, stopping")
+                    break
+
+                all_reports.extend(page_reports)
+
+                # Detect page size from the first full page
+                if first_page_size is None:
+                    first_page_size = len(page_reports)
+                elif len(page_reports) < first_page_size:
+                    # Fewer reports than a full page → last page
+                    break
+
+                # Stop when the last (oldest) report on the page is beyond cutoff
+                if cutoff is not None:
+                    oldest_date = parse_report_date(page_reports[-1].date_str)
+                    if oldest_date and oldest_date < cutoff:
+                        logger.debug(
+                            f"Page {page}: oldest report ({oldest_date}) "
+                            f"exceeds max age, stopping"
+                        )
+                        break
+
+            except Exception as e:
+                logger.error(f"Failed to fetch reports page {page}: {e}")
+                pages_failed += 1
+                failed_pages.append(page)
+                continue  # Continue to next page, do NOT break
+
+        logger.info(
+            f"Fetched {len(all_reports)} reports from {pages_fetched} pages "
+            f"({pages_failed} failed)"
+        )
+        return all_reports, pages_fetched, pages_failed, failed_pages
 
     async def fetch_report_detail(self, report_id: str) -> Dict[str, Any]:
         """
@@ -123,3 +199,91 @@ class ReportsService:
         except Exception as e:
             logger.warning(f"Failed to fetch report metadata: {e}")
             return {}
+
+    async def fetch_alliance_reports(
+        self,
+        max_age_hours: Optional[int] = None,
+        max_pages: int = 100,
+    ) -> Tuple[List[ReportListItem], bool]:
+        """
+        Fetch alliance shared reports via /alliance/reports?filter=...
+
+        Uses battle+scout report type filters and robust pagination
+        with dynamic page size detection and age-based cutoff.
+
+        Returns:
+            Tuple of (reports_list, success_bool)
+        """
+        from ..services.raid_analyzer_service import parse_report_date
+        from ..parsers.report_parser import parse_alliance_report_list
+        from datetime import datetime, timedelta
+
+        ALLIANCE_FILTER = "1,2,3,4,5,6,7,15,16,17,18,19"
+        base_url = f"/alliance/reports?filter={ALLIANCE_FILTER}"
+
+        # Test if the route works
+        try:
+            html = await self.client.get_html(base_url)
+            first_page = parse_alliance_report_list(html)
+            if not first_page:
+                logger.warning("Alliance reports: /alliance/reports returned 0 reports")
+                return [], False
+        except Exception as e:
+            logger.warning(f"Alliance reports: /alliance/reports failed — {e}")
+            return [], False
+
+        # Route works — fetch all pages
+        all_reports: List[ReportListItem] = list(first_page)
+        first_page_size = len(first_page)
+        pages_fetched = 1
+        pages_failed = 0
+
+        cutoff = None
+        if max_age_hours is not None:
+            cutoff = datetime.now() - timedelta(hours=max_age_hours)
+
+        # Check age cutoff on first page
+        if cutoff is not None and first_page:
+            oldest_date = parse_report_date(first_page[-1].date_str)
+            if oldest_date and oldest_date < cutoff:
+                logger.info(
+                    f"Alliance reports: {len(all_reports)} from 1 page (age cutoff hit)"
+                )
+                return all_reports, True
+
+        for page in range(2, max_pages + 1):
+            try:
+                page_html = await self.client.get_html(
+                    f"{base_url}&page={page}"
+                )
+                page_reports = parse_alliance_report_list(page_html)
+                pages_fetched += 1
+
+                if not page_reports:
+                    break
+
+                all_reports.extend(page_reports)
+
+                # Dynamic page size: stop when page has fewer reports than first page
+                if len(page_reports) < first_page_size:
+                    break
+
+                # Age-based cutoff
+                if cutoff is not None:
+                    oldest_date = parse_report_date(page_reports[-1].date_str)
+                    if oldest_date and oldest_date < cutoff:
+                        logger.debug(
+                            f"Alliance page {page}: oldest report exceeds max age, stopping"
+                        )
+                        break
+
+            except Exception as e:
+                logger.error(f"Alliance reports page {page} failed: {e}")
+                pages_failed += 1
+                continue
+
+        logger.info(
+            f"Alliance reports: {len(all_reports)} from {pages_fetched} pages "
+            f"({pages_failed} failed)"
+        )
+        return all_reports, True

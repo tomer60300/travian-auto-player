@@ -88,6 +88,79 @@ def parse_report_list(html: str) -> List[ReportListItem]:
     return reports
 
 
+def parse_alliance_report_list(html: str) -> List[ReportListItem]:
+    """
+    Parse alliance report list page (/alliance/reports?filter=...).
+
+    Different structure from /report/all:
+      - No input[name="ids[]"] checkboxes
+      - Report ID in <a href="/report?id=XXX&aid=YYY">
+      - Same iReport icons and td.sub/td.dat classes
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    reports = []
+
+    for row in soup.find_all('tr'):
+        sub_cell = row.find('td', class_='sub')
+        if not sub_cell:
+            continue
+
+        # Extract report ID from link: /report?id=XXX&aid=YYY
+        report_id = ""
+        subject = ""
+        report_link = sub_cell.find('a', href=re.compile(r'/report\?id='))
+        if report_link:
+            href = report_link.get('href', '')
+            id_match = re.search(r'id=(\d+)', href)
+            if id_match:
+                report_id = id_match.group(1)
+            subject = clean_unicode(report_link.get_text(strip=True))
+
+        if not report_id:
+            continue
+
+        # Icon type
+        icon_type = 0
+        report_type = "unknown"
+        icon_img = row.find('img', class_=re.compile(r'iReport'))
+        if icon_img:
+            classes = ' '.join(icon_img.get('class', []))
+            type_match = re.search(r'iReport(\d+)', classes)
+            if type_match:
+                icon_type = int(type_match.group(1))
+                if 1 <= icon_type <= 8:
+                    report_type = "battle"
+                elif 11 <= icon_type <= 14:
+                    report_type = "trade"
+                elif 15 <= icon_type <= 19:
+                    report_type = "scout"
+                elif icon_type == 20:
+                    report_type = "reinforcement"
+                elif icon_type == 21:
+                    report_type = "adventure"
+                elif icon_type == 22:
+                    report_type = "settlement"
+                else:
+                    report_type = "misc"
+
+        # Date
+        date_str = ""
+        dat_cell = row.find('td', class_='dat')
+        if dat_cell:
+            date_str = clean_unicode(dat_cell.get_text(strip=True))
+
+        reports.append(ReportListItem(
+            report_id=report_id,
+            icon_type=icon_type,
+            report_type=report_type,
+            subject=subject,
+            date_str=date_str,
+            is_read=True,
+        ))
+
+    return reports
+
+
 def _parse_resource_wrapper(wrapper) -> Dict[str, int]:
     """
     Parse a resourceWrapper div.
@@ -421,6 +494,34 @@ def parse_battle_report(html: str) -> BattleReportData:
         if rw:
             bounty.update(_parse_resource_wrapper(rw))
 
+    # Carry fraction — how full were the returning troops
+    carry_used = 0
+    carry_max = 0
+    carry_full = False
+    if ai_table:
+        carry_div = ai_table.find('div', class_=re.compile(r'inlineIcon.*carry|carry.*inlineIcon'))
+        if not carry_div:
+            # Fallback: find any div with 'carry' in class within additionalInformation
+            for div in ai_table.find_all('div', class_=True):
+                classes = ' '.join(div.get('class', []))
+                if 'carry' in classes and 'inlineIcon' in classes:
+                    carry_div = div
+                    break
+        if carry_div:
+            carry_i = carry_div.find('i', class_=re.compile(r'carry'))
+            if carry_i:
+                carry_classes = ' '.join(carry_i.get('class', []))
+                carry_full = 'full' in carry_classes
+            carry_span = carry_div.find('span', class_='value')
+            if carry_span:
+                raw_carry = clean_unicode(carry_span.get_text(strip=True))
+                # Clean Unicode directional markers and non-digit/slash chars
+                cleaned = re.sub(r'[^\d/]', '', raw_carry)
+                parts = cleaned.split('/')
+                if len(parts) == 2:
+                    carry_used = int(parts[0]) if parts[0] else 0
+                    carry_max = int(parts[1]) if parts[1] else 0
+
     return BattleReportData(
         attacker=attacker_info,
         defender=defender_info,
@@ -430,12 +531,19 @@ def parse_battle_report(html: str) -> BattleReportData:
         bounty=bounty,
         attacker_losses=attacker_losses,
         defender_losses=defender_losses,
+        carry_used=carry_used,
+        carry_max=carry_max,
+        carry_full=carry_full,
     )
 
 
 # Scout unit IDs as they appear in HTML class attributes (e.g. class="unit u4")
-# u4 = Equites Legati (Romans), u8 = Scout (Teutons), u12 = Pathfinder (Gauls)
-SCOUT_UNIT_IDS = {'u4', 'u8', 'u12'}
+# HTML unit IDs use tribe offsets: Romans u1-u10, Teutons u11-u20, Gauls u21-u30
+# u4 = Equites Legati (Roman scout, tribe slot t4)
+# u14 = Scout (Teuton scout, tribe slot t4, offset u11+3)
+# u23 = Pathfinder (Gaul scout, tribe slot t3, offset u21+2)
+# Also include u44/u54/u64 for Egyptians/Huns/Spartans and hero
+SCOUT_UNIT_IDS = {'u4', 'u14', 'u23', 'u44', 'u54', 'u64', 'uhero'}
 
 
 def _has_troop_losses(soup: BeautifulSoup) -> bool:

@@ -580,6 +580,175 @@ def reports_show(
     _run(_do())
 
 
+@reports_app.command("analyze")
+def reports_analyze(
+    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Source village ID for distance calculations"),
+    min_resources: int = typer.Option(200, "--min-resources", "-m", help="Minimum estimated raidable resources"),
+    max_report_age: int = typer.Option(24, "--max-report-age", "-a", help="Maximum report age in hours"),
+    max_pages: int = typer.Option(20, "--max-pages", help="Max report list pages to scrape (30/page)"),
+    exclude_alliance: Optional[List[str]] = typer.Option(None, "--exclude-alliance", "-ea", help="Alliance tags to exclude (repeatable)"),
+    exclude_player: Optional[List[str]] = typer.Option(None, "--exclude-player", "-ep", help="Player names to exclude (repeatable)"),
+    smithy_level: int = typer.Option(0, "--smithy-level", "-sl", help="Your Clubswinger smithy upgrade level"),
+    hero_offense: int = typer.Option(0, "--hero-offense", "-ho", help="Hero offense bonus points"),
+    hero_strength: int = typer.Option(0, "--hero-strength", "-hs", help="Hero fighting strength"),
+    radius: Optional[float] = typer.Option(None, "--radius", help="Max distance filter"),
+    include_alliance_reports: bool = typer.Option(False, "--include-alliance-reports", help="Also fetch alliance shared reports"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON instead of table"),
+):
+    """Analyze reports and prioritize raid targets by score."""
+    from .models.raid_analyzer import AnalyzerSettings
+    from .services.raid_analyzer_service import RaidAnalyzerService, UNIT_DEF_TABLE
+
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            auth_state = await auth.login()
+            if not output_json:
+                console.print(f"[green]Logged in as {auth_state.player_name}[/green]")
+
+            analyzer = RaidAnalyzerService(client, auth_state)
+            analyzer_settings = AnalyzerSettings(
+                village_id=village_id,
+                min_resources=min_resources,
+                max_report_age_hours=max_report_age,
+                max_pages=max_pages,
+                exclude_alliances=exclude_alliance or [],
+                exclude_players=exclude_player or [],
+                smithy_level=smithy_level,
+                hero_offense=hero_offense,
+                hero_strength=hero_strength,
+                radius=radius,
+                include_alliance_reports=include_alliance_reports,
+                output_json=output_json,
+            )
+
+            if not output_json:
+                console.print("[cyan]Analyzing reports...[/cyan]")
+            result = await analyzer.analyze(analyzer_settings)
+
+            if output_json:
+                import json
+                out = result.model_dump(mode="json")
+                # Convert tuple targets to list of dicts
+                out["targets"] = [
+                    {"state": t[0].model_dump(mode="json"), "recommendation": t[1].model_dump(mode="json")}
+                    for t in result.targets
+                ]
+                console.print(json.dumps(out, indent=2, default=str))
+                return
+
+            # ── Rich table output ──────────────────────────────
+            if not result.targets:
+                console.print("[yellow]No viable raid targets found.[/yellow]")
+            else:
+                wide_console = Console(highlight=False, width=200)
+                table = Table(
+                    title="Raid Analysis Report",
+                    show_lines=False,
+                    pad_edge=False,
+                    expand=False,
+                )
+                table.add_column("#", style="dim", justify="right")
+                table.add_column("Village", no_wrap=True)
+                table.add_column("Player", no_wrap=True)
+                table.add_column("Coords", no_wrap=True)
+                table.add_column("Dist", justify="right")
+                table.add_column("Loot", justify="right")
+                table.add_column("Score", justify="right")
+                table.add_column("Defenders")
+                table.add_column("Scout", justify="right")
+                table.add_column("LastRaid", no_wrap=True)
+                table.add_column("Send", no_wrap=True)
+                table.add_column("Mode")
+                table.add_column("RT", justify="right")
+
+                from .services.raid_analyzer_service import hours_since
+                for i, (state, rec) in enumerate(result.targets, 1):
+                    coords = f"x={state.x}&y={state.y}"
+                    dist = f"{state.distance:.1f}"
+                    est_loot = f"{rec.est_loot:,}"
+                    score = f"{rec.score:.2f}"
+
+                    if not state.defenders:
+                        defenders_str = "[green]None[/green]"
+                    else:
+                        parts = []
+                        for uid, count in state.defenders.items():
+                            name = "Hero" if uid == "uhero" else UNIT_DEF_TABLE.get(uid, ("?",))[0]
+                            parts.append(f"{name}:{count}")
+                        defenders_str = "[red]" + ", ".join(parts) + "[/red]"
+
+                    scout_h = hours_since(state.last_scout_time)
+                    scout_str = f"{scout_h:.1f}h" if scout_h is not None else "Never"
+
+                    if state.last_raid_time:
+                        raid_h = hours_since(state.last_raid_time)
+                        last_raid_str = f"{state.last_raid_bounty:,}@{raid_h:.1f}h"
+                    else:
+                        last_raid_str = "Never"
+
+                    send = rec.send_label
+                    mode_str = f"[red]{rec.mode}[/red]" if rec.mode == "DEPLT" else rec.mode
+                    rt = f"{rec.round_trip_minutes}m"
+
+                    table.add_row(
+                        str(i), state.village_name or "?",
+                        state.player_name or "?", coords, dist,
+                        est_loot, score, defenders_str, scout_str,
+                        last_raid_str, send, mode_str, rt,
+                    )
+
+                wide_console.print(table)
+
+            # ── Summary footer ─────────────────────────────────
+            console.print()
+            console.print("[bold]Analysis Summary[/bold]")
+            console.print(f"  Generated: {result.generated_at.strftime('%Y-%m-%d %H:%M:%S')}")
+            console.print(f"  Analysis time: {result.analysis_duration_seconds:.1f}s")
+            console.print(
+                f"  Source village: {result.source_village_name} "
+                f"({result.source_x}|{result.source_y})  ID={result.source_village_id}"
+            )
+            console.print(
+                f"  Settings: radius={'unlimited' if not result.radius else result.radius}, "
+                f"min_resources={result.min_resources}, max_age={result.max_report_age_hours}h"
+            )
+            console.print(
+                f"  Reports: {result.total_reports_listed} listed -> "
+                f"{result.reports_fetched_ok} parsed, "
+                f"{result.reports_fetched_fail} failed, "
+                f"{result.reports_skipped_type} skipped (non-battle/scout)"
+            )
+            if result.failed_report_ids:
+                console.print(
+                    f"  [red]Failed report IDs: "
+                    f"{', '.join(result.failed_report_ids[:20])}"
+                    f"{'...' if len(result.failed_report_ids) > 20 else ''}[/red]"
+                )
+            if result.last_report_id:
+                console.print(
+                    f"  Last report processed: ID={result.last_report_id}"
+                    f"{' @ ' + result.last_report_time.strftime('%H:%M') if result.last_report_time else ''}"
+                )
+            console.print(f"  Targets: {len(result.targets)} viable")
+            console.print(
+                f"  Skipped: {result.skipped_needs_scout} need scouting | "
+                f"{result.skipped_low_resources} below {result.min_resources} res | "
+                f"{result.skipped_out_of_range} out of range | "
+                f"{result.skipped_alliance} allied"
+                f"{' (' + ', '.join(result.excluded_alliances) + ')' if result.excluded_alliances else ''}"
+            )
+
+            # ── Warnings ───────────────────────────────────────
+            if result.warnings:
+                console.print(f"\n[yellow]Warnings ({len(result.warnings)}):[/yellow]")
+                for w in result.warnings:
+                    console.print(f"  - {w}")
+
+    _run(_do())
+
+
 # -- Build Queue ---------------------------------------------------------------
 queue_app = typer.Typer(name="queue", help="Priority build queue commands")
 app.add_typer(queue_app)
