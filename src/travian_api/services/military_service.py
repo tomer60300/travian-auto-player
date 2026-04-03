@@ -118,7 +118,7 @@ class MilitaryService:
             form_data['ok'] = 'ok'
 
             # Stealth: human-like delay before submitting troop form
-            delay = self.http_client.delay
+            delay = self.http_client.human_delay
             await delay.wait(ActionType.FORM_FILL, "filling troop selection form")
             
             logger.info(f"Step 1: Sending troop form to ({x},{y}) type={event_type} troops={troops}")
@@ -141,8 +141,7 @@ class MilitaryService:
                     )
 
             # ── Step 2: Parse confirmation page (with human delay for reading) ──
-            from ..stealth.human_delay import HumanDelay, ActionType
-            await self.http_client.delay.wait(ActionType.BETWEEN_ACTIONS, "reading troop confirmation")
+            await self.http_client.human_delay.wait(ActionType.RAPID, "reading troop confirmation")
             
             confirm_fields = parse_troop_confirm_page(confirm_html)
             checksum = confirm_fields.pop('checksum', '')
@@ -176,7 +175,7 @@ class MilitaryService:
                 final_data['troops[0][scoutTarget]'] = scout_target
 
             # Stealth: human reads the confirmation page before clicking send
-            await delay.wait(ActionType.PAGE_READ, "reading troop confirmation")
+            await delay.wait(ActionType.PAGE_LOAD, "reading troop confirmation")
             
             logger.info(f"Step 2: Confirming with checksum={checksum}")
             result_html = await self.http_client.post_form(rally_url, final_data)

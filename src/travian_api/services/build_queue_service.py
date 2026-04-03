@@ -536,7 +536,7 @@ class BuildQueueService:
             # Stealth: human delay before checking what to build next
             try:
                 from ..stealth.human_delay import ActionType
-                await self.http_client.delay.wait(ActionType.THINKING, "reviewing build options")
+                await self.http_client.human_delay.wait(ActionType.DECISION, "reviewing build options")
             except Exception:
                 pass
 
@@ -563,8 +563,8 @@ class BuildQueueService:
                         self._report(f"  {item.building} (slot {item.slot_id}): costs({costs_str}) missing({missing_str})")
                 if check['can_build']:
                     # Stealth: simulate human browsing to the building before upgrading
-                    delay = self.http_client.delay
-                    await delay.wait(ActionType.BETWEEN_ACTIONS, f"preparing to upgrade {item.building}")
+                    delay = self.http_client.human_delay
+                    await delay.wait(ActionType.PRE_UPGRADE, f"preparing to upgrade {item.building}")
                     
                     # Get building detail for gid (needed for video reward)
                     detail = await self.building_service.get_building_detail(item.slot_id, village_id=vid) if use_video and not item.is_construction else None

@@ -179,11 +179,9 @@ class BuildingService:
                                      f"Use allow_gold=True to override.",
                     )
             
-            # Stealth: navigate to building page before upgrading
-            # Stealth: human-like delay before upgrading
+            # Stealth: simulate realistic navigation flow before upgrading
             if getattr(self.http_client, 'stealth_enabled', False):
-                from ..stealth.human_delay import ActionType
-                await self.http_client.delay.wait(ActionType.THINKING, f"deciding to upgrade slot {slot_id}")
+                await self.http_client.navigator.pre_upgrade_flow(slot_id, village_id)
             
             # Get building details to extract checksum and upgrade URL
             building_detail = await self.get_building_detail(slot_id, village_id=village_id)

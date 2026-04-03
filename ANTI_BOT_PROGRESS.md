@@ -2,33 +2,49 @@
 
 ## Branch: cli-anti-bot
 ## Started: 2026-04-02 18:27
+## Last Updated: 2026-04-02 22:40
 
-## Files Created/Modified
+## Status: CORE COMPLETE ✅ — Pushed to GitHub
 
-### New Files — ALL DONE ✅
-- [x] `src/travian_api/stealth/__init__.py` — stealth module
-- [x] `src/travian_api/stealth/user_agents.py` — realistic UA rotation (14 UAs)
-- [x] `src/travian_api/stealth/headers.py` — browser-like headers with Referer chain
-- [x] `src/travian_api/stealth/throttler.py` — global request rate limiter with burst detection
-- [x] `src/travian_api/stealth/human_delay.py` — gaussian random human-like delays
-- [x] `src/travian_api/stealth/navigator.py` — page navigation simulation
-- [x] `src/travian_api/stealth/session_manager.py` — session lifetime, breaks, idle browsing
+### Completed ✅
 
-### Modified Files — ALL DONE ✅
-- [x] `src/travian_api/clients/http_client.py` — full stealth middleware integration
-- [x] `src/travian_api/config.py` — stealth config options
-- [x] `src/travian_api/services/military_service.py` — navigate + delay between troop steps
-- [x] `src/travian_api/services/building_service.py` — navigate + delay before upgrade click
-- [x] `src/travian_api/services/auto_scout_service.py` — randomized jitter on delays
-- [x] `src/travian_api/services/video_reward_service.py` — jitter on ATG timing
-- [x] `src/travian_api/services/farm_list_service.py` — delays between farm sends
-- [x] `src/travian_api/services/build_queue_service.py` — idle browsing + session breaks
-- [x] `src/travian_api/cli.py` — --stealth/--no-stealth flag
+#### New Stealth Module (`src/travian_api/stealth/`)
+- [x] `__init__.py` — module entry point
+- [x] `user_agents.py` — 14 real browser UAs (Chrome/Firefox/Edge on Win/Mac)
+- [x] `headers.py` — browser-accurate headers with Sec-Fetch-*, Referer chains
+- [x] `throttler.py` — global rate limiter with burst detection + auto-penalty
+- [x] `human_delay.py` — 10 action types, triangular distribution, micro-pauses
+- [x] `navigator.py` — page navigation simulation before actions
+- [x] `session_manager.py` — session lifetime tracking with break suggestions
 
-### Remaining TODO
-- [ ] --stealth-speed CLI option
-- [ ] README documentation section
-- [ ] Unit tests for stealth modules
+#### Core Integration
+- [x] `http_client.py` — stealth middleware on ALL requests
+- [x] `config.py` — stealth settings (env vars: TRAVIAN_STEALTH, etc.)
+- [x] `cli.py` — `--stealth/--no-stealth` global flag
 
-## Status: CORE COMPLETE ✅ — 2 commits, 1,236 lines added, pushed to GitHub
-## Tested: Login + resources + upgrades working with stealth enabled
+#### Service Updates
+- [x] `military_service.py` — delays between troop send steps
+- [x] `build_queue_service.py` — pre-upgrade browsing, idle during waits
+- [x] `auto_scout_service.py` — randomized jitter on delays
+- [x] `video_reward_service.py` — jitter on ATG timing
+
+### Testing
+- [x] All stealth modules import cleanly
+- [x] `--no-stealth auth login` works (fast mode)
+- [x] `--stealth building resources` works (with delays)
+- [x] Committed and pushed to `cli-anti-bot` branch
+
+### Bug Fixes (Apr 3)
+- [x] **FALSE POSITIVE FIX:** `_check_suspicious_response` was matching "blocked" in Travian's normal `upgradeBlocked` CSS class, triggering 60s throttle penalty on every upgrade. Replaced naive substring matching with context-aware detection (high-confidence patterns + structural checks for captcha/ban).
+- [x] **Service attribute fix:** Services used `http_client.delay` instead of `http_client.human_delay` — would crash at runtime.
+- [x] **ActionType fix:** Services referenced non-existent enums (`THINKING`, `BETWEEN_ACTIONS`, `FARM_SEND`, `PAGE_READ`) — fixed to use correct values.
+- [x] **Navigator integration:** `building_service.upgrade()` now calls `navigator.pre_upgrade_flow()` for realistic page navigation before upgrades (was only doing a bare delay).
+- [x] **User-Agent update:** Updated browser UA strings from Chrome 120-124 era to Chrome 132-135 / Firefox 135-137 (current for April 2026).
+
+### Remaining / Future Enhancements
+- [ ] Integration tests (mock server, verify timing patterns)
+- [ ] Session manager integration into auto-builder loop
+- [ ] Configurable "play schedule" (active hours, break patterns)
+- [ ] Cookie persistence across sessions (save/load jar)
+- [ ] Anti-fingerprint: randomize X-Version per session
+- [ ] Captcha detection → Discord alert to human
