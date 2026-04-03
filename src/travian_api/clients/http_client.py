@@ -173,28 +173,60 @@ class HttpClient:
         
         Looks for captcha, rate limiting, or ban indicators.
         Adds throttle penalty if suspicious.
+        
+        IMPORTANT: Travian HTML contains words like "upgradeBlocked" (CSS class)
+        and "blocked" in normal game contexts. We must only flag patterns that
+        genuinely indicate anti-bot action, not normal game UI text.
         """
         if not self._stealth_enabled:
             return
         
-        suspicious_patterns = [
-            'captcha',
+        response_lower = response_text.lower()
+        
+        # Phase 1: High-confidence bot detection patterns (exact phrases)
+        # These should NEVER appear in normal game HTML
+        high_confidence_patterns = [
             'recaptcha',
             'bot-detection',
-            'rate limit',
-            'too many requests',
-            'blocked',
-            'banned',
             'suspicious activity',
+            'automated access',
+            'your ip has been',
+            'access denied',
         ]
         
-        response_lower = response_text.lower()
-        for pattern in suspicious_patterns:
+        for pattern in high_confidence_patterns:
             if pattern in response_lower:
-                logger.warning(f"SUSPICIOUS RESPONSE detected: '{pattern}' found in response")
-                # Add heavy penalty — slow way down
+                logger.warning(f"BOT DETECTION: '{pattern}' found in response")
+                self._throttler.add_penalty(120.0)
+                return
+        
+        # Phase 2: Medium-confidence patterns — only flag if they appear
+        # in a context that suggests anti-bot (not normal game UI)
+        # "blocked" in game HTML = "upgradeBlocked" CSS class (normal)
+        # "blocked" in error page = actual block (suspicious)
+        
+        # Check for captcha (but not in script/CSS references)
+        if 'captcha' in response_lower:
+            # Only flag if it looks like an actual captcha challenge, not a JS variable
+            if re.search(r'<(form|div|iframe)[^>]*captcha', response_lower):
+                logger.warning("BOT DETECTION: captcha form detected in response")
+                self._throttler.add_penalty(120.0)
+                return
+        
+        # HTTP 429 is handled separately in post_json/post_form/get_html
+        # "too many requests" as page text (not in normal game HTML)
+        if 'too many requests' in response_lower:
+            # Check it's not inside game text / script
+            if len(response_text) < 2000:  # error pages are short
+                logger.warning("BOT DETECTION: 'too many requests' in short response (likely error page)")
                 self._throttler.add_penalty(60.0)
-                break
+                return
+        
+        # "banned" — only if it's the main page content, not a player name or chat
+        if 'your account has been banned' in response_lower or 'you have been banned' in response_lower:
+            logger.warning("BOT DETECTION: ban message detected")
+            self._throttler.add_penalty(300.0)
+            return
     
     @retry(
         stop=stop_after_attempt(3),
