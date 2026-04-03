@@ -30,7 +30,10 @@ $env:TRAVIAN_USERNAME='chetrit1311@gmail.com'; $env:TRAVIAN_PASSWORD='Password1'
 - [x] All Iron Mines to 4 ✓
 - [x] All Croplands to 4 ✓ (slot 8 at 5, slot 9 at 4)
 - [x] Clay Pit → 5 ✓ (done Apr 2)
-- [building] Cropland → 5 (~35min remaining, Apr 3 ~06:25) — IN QUEUE
+- [x] Cropland slot 9 → 5 ✓ (done Apr 3)
+- [building] Woodcutter slot 1 → 5 (~29min remaining, finishes ~15:30 Apr 3) — IN FIELD QUEUE
+- [building] Clay Pit slot 6 → 5 (queued ~15:15 Apr 3) — IN FIELD QUEUE (allow-gold, Roman dual)
+- [building] Cranny slot 25 → 3 (queued ~15:00 Apr 3) — IN BUILDING QUEUE
 - [ ] All fields to level 5 — continue one at a time
 - Fields still at 4: Wood(1,3,14,17), Clay(6,16,18), Iron(7,10,11), Crop(2,9,12,13,15)
 - Use dual queue: 1 field + 1 building always
@@ -38,7 +41,7 @@ $env:TRAVIAN_USERNAME='chetrit1311@gmail.com'; $env:TRAVIAN_PASSWORD='Password1'
 ### Priority 3: Infrastructure
 - [x] Warehouse → 5 ✓ (done Apr 2)
 - [x] Granary 4→5 ✓ (done Apr 3)
-- [building] Main Building 7→8 (queued Apr 3 ~05:50, ~5h10m) — IN QUEUE
+- [x] Main Building → 8 ✓ (done Apr 3)
 - [ ] Warehouse 5→6
 - [ ] Granary 5→6
 - [ ] Main Building 8→10
@@ -77,7 +80,9 @@ $env:TRAVIAN_USERNAME='chetrit1311@gmail.com'; $env:TRAVIAN_PASSWORD='Password1'
 - **Deli kero** — Gaul, NEW attacker since Apr 1, 39 Haeduan + hero (BIGGER threat than A1!)
 - **donk** — raids with u11 troops (2-30 per raid), started Apr 2 overnight. Persistent — 8+ raids overnight
 - **Free ressources** — NEW attacker since Apr 2, hit with 50 u11 troops in one raid
-- **NextTimeSendSpies** — NEW attacker since Apr 3, 20 u11 troops, raided at 02:36
+- **NextTimeSendSpies** — NEW attacker since Apr 3, 20-50 u11 troops
+- **MyRa Köyü** — NEW attacker since Apr 3, attacks (not raids!) with 25 Haeduan
+- **Whiskey1** — NEW attacker since Apr 3, small raids with 3 u11 troops
 - **Tiski** (90|13) — Gaul, pop 140
 - **Palcic** (89|12) — Gaul, pop 332
 - **CGU** (97|11) — Gaul, pop 324
