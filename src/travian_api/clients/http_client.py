@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from pathlib import Path
 from typing import Any, Dict, Optional, Union
 from urllib.parse import urlencode, urljoin
 
@@ -77,6 +78,31 @@ class HttpClient:
         )
 
         self._auth_callback: Optional[callable] = None
+        self._cookie_file = Path(".travian_cookies.json")
+
+        # Load persisted cookies from file
+        self._load_cookies()
+
+    def _load_cookies(self) -> None:
+        """Load cookies from persistent file (same browser session across CLI invocations)."""
+        try:
+            if self._cookie_file.exists():
+                data = json.loads(self._cookie_file.read_text())
+                for name, value in data.items():
+                    self.client.cookies.set(name, value)
+                logger.debug(f"Loaded {len(data)} cookies from {self._cookie_file}")
+        except Exception:
+            pass  # Don't fail on cookie load errors
+
+    def _save_cookies(self) -> None:
+        """Save all cookies to persistent file."""
+        try:
+            cookies = self.get_cookies()
+            if cookies:
+                self._cookie_file.write_text(json.dumps(cookies, indent=2))
+                logger.debug(f"Saved {len(cookies)} cookies to {self._cookie_file}")
+        except Exception:
+            pass  # Don't fail on cookie save errors
 
     def _init_stealth(self, settings: Settings) -> None:
         """Initialize stealth/anti-bot components."""
@@ -162,7 +188,8 @@ class HttpClient:
         self._auth_callback = callback
 
     async def close(self) -> None:
-        """Close the HTTP client."""
+        """Close the HTTP client and persist cookies."""
+        self._save_cookies()
         await self.client.aclose()
         if self._curl_session is not None:
             await self._curl_session.close()
