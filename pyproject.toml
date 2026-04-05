@@ -31,6 +31,7 @@ dependencies = [
     "tenacity>=8.2.0",
     "rich>=13.0.0",  # For better CLI output
     "pyyaml>=6.0",   # For build plan files
+    "curl_cffi>=0.7.0",  # Chrome TLS fingerprint impersonation
 ]
 
 [project.optional-dependencies]
