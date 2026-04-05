@@ -534,6 +534,23 @@ class BuildQueueService:
                 resources = await self.building_service.get_resources(village_id=vid)
                 self._report(f"  Resources: L={resources.lumber} C={resources.clay} I={resources.iron} Cr={resources.crop} (free crop: {resources.free_crop})")
 
+            # Stealth: activity scheduling — check if we need a break
+            try:
+                scheduler = self.http_client.activity_scheduler
+                if not scheduler.can_continue():
+                    break_s = scheduler.next_break_duration()
+                    self._report(f"Activity limit reached. Taking a break for {break_s / 60:.0f} minutes...")
+                    await asyncio.sleep(break_s)
+                    scheduler.start_session()
+            except Exception:
+                pass
+
+            # Stealth: noise injection between build cycles
+            try:
+                await self.http_client.noise_injector.maybe_inject_noise(village_id=vid)
+            except Exception:
+                pass
+
             # Stealth: human delay before checking what to build next
             try:
                 from ..stealth.human_delay import ActionType
@@ -663,6 +680,12 @@ class BuildQueueService:
                             self._report(f"  PROGRESS: {item.building} now Lv{item.current_level}, continuing to Lv{item.target}")
 
                         break
+
+            # Log activity for scheduler tracking
+            try:
+                self.http_client.activity_scheduler.log_activity(poll_interval_s)
+            except Exception:
+                pass
 
             if not built:
                 # No resources for any item at this priority — wait and retry

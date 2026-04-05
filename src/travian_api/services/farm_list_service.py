@@ -135,9 +135,8 @@ class FarmListService:
 
     async def delete_farm_list(self, list_id: int) -> None:
         """Delete a farm list."""
-        await self.http_client.post_json(
+        await self.http_client.delete_json(
             f"/api/v1/farm-list/{list_id}",
-            {"abandoned": False},
         )
         logger.info(f"Deleted farm list {list_id}")
 
@@ -270,7 +269,24 @@ class FarmListService:
 
         results = {}
         for i, lid in enumerate(list_ids):
+            # Stealth: check activity scheduler before each send
+            try:
+                scheduler = self.http_client.activity_scheduler
+                if not scheduler.can_continue():
+                    logger.info("Activity limit reached during farm sends. Stopping.")
+                    break
+                scheduler.log_activity(5.0)
+            except Exception:
+                pass
+
             results[lid] = await self.send_farm_list(lid)
+
+            # Stealth: noise injection between farm list sends
+            try:
+                await self.http_client.noise_injector.maybe_inject_noise()
+            except Exception:
+                pass
+
             # Stealth: delay between farm list sends
             if i < len(list_ids) - 1:
                 from ..stealth.human_delay import ActionType

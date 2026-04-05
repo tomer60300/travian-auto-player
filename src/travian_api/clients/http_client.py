@@ -85,6 +85,8 @@ class HttpClient:
         from ..stealth.throttler import RequestThrottler
         from ..stealth.human_delay import HumanDelay
         from ..stealth.navigator import PageNavigator
+        from ..stealth.noise import NoiseInjector
+        from ..stealth.scheduler import ActivityScheduler
 
         self._ua_rotator = UserAgentRotator()
         self._browser_headers = BrowserHeaders(self._ua_rotator, settings.base_url)
@@ -103,6 +105,18 @@ class HttpClient:
             http_client=self,
             human_delay=self._human_delay,
             enabled=settings.stealth and settings.stealth_navigate,
+        )
+        self._noise_injector = NoiseInjector(
+            navigator=self._navigator,
+            human_delay=self._human_delay,
+            noise_rate=settings.stealth_noise_rate,
+            enabled=settings.stealth,
+        )
+        self._activity_scheduler = ActivityScheduler(
+            max_daily_hours=settings.stealth_max_daily_hours,
+            max_continuous_hours=settings.stealth_max_continuous_hours,
+            min_break_minutes=settings.stealth_min_break_minutes,
+            enabled=settings.stealth,
         )
 
     async def _ensure_curl_session(self) -> Any:
@@ -130,6 +144,14 @@ class HttpClient:
     @property
     def navigator(self) -> "PageNavigator":
         return self._navigator
+
+    @property
+    def noise_injector(self) -> "NoiseInjector":
+        return self._noise_injector
+
+    @property
+    def activity_scheduler(self) -> "ActivityScheduler":
+        return self._activity_scheduler
 
     @property
     def browser_headers(self) -> "BrowserHeaders":

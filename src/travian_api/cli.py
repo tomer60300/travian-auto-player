@@ -40,6 +40,8 @@ _password_override: str = ""
 
 # Global stealth override
 _stealth_override: Optional[bool] = None
+_noise_rate_override: Optional[float] = None
+_max_hours_override: Optional[float] = None
 
 
 @app.callback()
@@ -48,9 +50,12 @@ def main_callback(
     username: Optional[str] = typer.Option(None, "--username", "-u", help="Account username/email"),
     password: Optional[str] = typer.Option(None, "--password", "-p", help="Account password"),
     stealth: Optional[bool] = typer.Option(None, "--stealth/--no-stealth", help="Enable/disable stealth mode (anti-bot). Default: enabled"),
+    noise_rate: Optional[float] = typer.Option(None, "--noise-rate", help="Noise injection probability 0.0-1.0 (default: 0.15)"),
+    max_hours: Optional[float] = typer.Option(None, "--max-hours", help="Maximum daily active hours (default: 10.0)"),
 ):
     """Global options applied before any command."""
     global _server_override, _username_override, _password_override, _stealth_override
+    global _noise_rate_override, _max_hours_override
     if server:
         _server_override = server
     if username:
@@ -59,6 +64,10 @@ def main_callback(
         _password_override = password
     if stealth is not None:
         _stealth_override = stealth
+    if noise_rate is not None:
+        _noise_rate_override = noise_rate
+    if max_hours is not None:
+        _max_hours_override = max_hours
 
 
 def _settings(interactive: bool = True) -> Settings:
@@ -72,7 +81,11 @@ def _settings(interactive: bool = True) -> Settings:
         s.password = _password_override
     if _stealth_override is not None:
         s.stealth = _stealth_override
-    
+    if _noise_rate_override is not None:
+        s.stealth_noise_rate = _noise_rate_override
+    if _max_hours_override is not None:
+        s.stealth_max_daily_hours = _max_hours_override
+
     # Check what's missing
     missing_server = not s.base_url
     missing_username = not s.username
