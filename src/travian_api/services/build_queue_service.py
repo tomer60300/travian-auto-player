@@ -45,6 +45,7 @@ from ..constants import BUILDING_NAMES
 from ..exceptions import TravianError
 from ..logging_config import get_logger
 from ..stealth.human_delay import HumanDelay, ActionType
+from ..stealth.timing import HumanTiming
 from .building_service import BuildingService
 
 logger = get_logger(__name__)
@@ -390,7 +391,7 @@ class BuildQueueService:
                     remaining = await self.get_queue_remaining(village_id=vid)
                     self._report(f"Queue busy ({remaining}s remaining). Waiting...")
                     wait_time = min(remaining + 5, poll_interval_s)
-                    await asyncio.sleep(wait_time)
+                    await asyncio.sleep(HumanTiming.micro_jitter(wait_time, jitter_pct=0.15))
                     waited += wait_time
                     continue
                 
@@ -461,7 +462,7 @@ class BuildQueueService:
                 if not built_one:
                     self._report(f"No items ready at priority {next_prio}. "
                                 f"Waiting {poll_interval_s}s for resources...")
-                    await asyncio.sleep(poll_interval_s)
+                    await asyncio.sleep(HumanTiming.micro_jitter(poll_interval_s, jitter_pct=0.2))
                     waited += poll_interval_s
             
             if not built_one:
@@ -504,7 +505,7 @@ class BuildQueueService:
                 remaining = await self.get_queue_remaining(village_id=vid)
                 self._report(f"  Queue not empty ({remaining}s remaining)...")
                 wait = min(remaining + 5, 60)
-                await asyncio.sleep(wait)
+                await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.15))
 
         await self.resolve_slots(plan)
 
@@ -526,7 +527,7 @@ class BuildQueueService:
                 remaining = await self.get_queue_remaining(village_id=vid)
                 self._report(f"Waiting for queue ({remaining}s)...")
                 wait = min(remaining + 5, 60)
-                await asyncio.sleep(wait)
+                await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.15))
 
             # Show current resources if verbose
             if verbose:
@@ -619,12 +620,12 @@ class BuildQueueService:
 
                         # Wait for the build to actually register in the queue,
                         # then wait for it to finish before starting the next one.
-                        await asyncio.sleep(2)  # small grace period for server to register
+                        await asyncio.sleep(HumanTiming.reaction_time())  # grace period for server to register
                         while not await self.is_queue_empty(village_id=vid):
                             remaining = await self.get_queue_remaining(village_id=vid)
                             self._report(f"Waiting for build to finish ({remaining}s remaining)...")
                             wait = min(remaining + 5, 60)
-                            await asyncio.sleep(wait)
+                            await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.15))
                             # Stealth: occasional idle browsing during long waits
                             try:
                                 await self.http_client.session_manager.idle_browse_if_due(
@@ -666,7 +667,7 @@ class BuildQueueService:
             if not built:
                 # No resources for any item at this priority — wait and retry
                 self._report(f"Insufficient resources for priority {next_prio} items. Waiting {poll_interval_s}s...")
-                await asyncio.sleep(poll_interval_s)
+                await asyncio.sleep(HumanTiming.delay(poll_interval_s))
 
         return all_results
 
