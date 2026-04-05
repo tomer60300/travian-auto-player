@@ -56,6 +56,34 @@ class PageNavigator:
         self._current_page = path
         return html
     
+    async def warm_up(self, village_id: Optional[int] = None) -> None:
+        """Post-login warm-up sequence. Loads pages a real player would visit.
+
+        Simulates: login -> resource overview -> village center -> maybe stats -> back
+        This prevents "login -> immediate API blast" detection patterns.
+        """
+        if not self.enabled:
+            return
+
+        logger.debug("Running post-login warm-up sequence")
+        newdid = f"?newdid={village_id}" if village_id else ""
+
+        # 1. Resource overview (dorf1) — already the landing page after login
+        await self._visit(f"/dorf1.php{newdid}", "checking resource overview after login")
+
+        # 2. Village center
+        await self._visit(f"/dorf2.php{newdid}", "looking at village buildings")
+
+        # 3. Optional: curiosity browsing (20% chance each)
+        if random.random() < 0.2:
+            await self._visit("/statistiken.php", "checking statistics")
+        if random.random() < 0.1:
+            await self._visit("/spieler.php", "checking own profile")
+
+        # 4. Return to resource overview (common human pattern)
+        await self._visit(f"/dorf1.php{newdid}", "returning to resource overview")
+        logger.debug("Warm-up sequence complete")
+
     async def navigate_to_resource_field(
         self, slot_id: int, village_id: Optional[int] = None
     ) -> None:

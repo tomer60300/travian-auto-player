@@ -107,7 +107,15 @@ class AuthService:
             # Cache JWT if configured
             if self._jwt_cache_path:
                 await self._cache_jwt(self._auth_state)
-                
+
+            # Stealth: post-login warm-up sequence (loads pages a human would visit)
+            if self.settings.stealth:
+                try:
+                    village_id = self._auth_state.village_id or None
+                    await self.http_client.navigator.warm_up(village_id=village_id)
+                except Exception:
+                    pass  # Warm-up failure shouldn't block login
+
             return self._auth_state
             
         except Exception as e:
