@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import useAuthStore from './stores/authStore'
 import Layout from './components/Layout'
@@ -12,8 +13,56 @@ import FarmLists from './pages/FarmLists'
 import AutoScout from './pages/AutoScout'
 import BuildQueue from './pages/BuildQueue'
 
+function LoadingScreen() {
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'var(--bg-base)',
+        gap: '1rem',
+      }}
+    >
+      <span
+        style={{
+          fontFamily: "'Cinzel Decorative', serif",
+          fontSize: '1.4rem',
+          color: 'var(--accent-gold)',
+        }}
+      >
+        Travian Auto Player
+      </span>
+      <div
+        style={{
+          width: '32px',
+          height: '32px',
+          border: '3px solid var(--border)',
+          borderTopColor: 'var(--accent-gold)',
+          borderRadius: '50%',
+          animation: 'spin 0.8s linear infinite',
+        }}
+      />
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  )
+}
+
 export default function App() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const initialCheckDone = useAuthStore((s) => s.initialCheckDone)
+  const checkAuth = useAuthStore((s) => s.checkAuth)
+
+  useEffect(() => {
+    checkAuth()
+  }, [checkAuth])
+
+  // Don't render routes until we know if the token is valid
+  if (!initialCheckDone) {
+    return <LoadingScreen />
+  }
 
   return (
     <Routes>

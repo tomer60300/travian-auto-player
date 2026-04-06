@@ -5,22 +5,22 @@ import useGameStore from '../stores/gameStore'
 import ToastContainer from './Toast'
 
 const navItems = [
-  { to: '/', label: 'Dashboard', icon: '⌂' },
-  { to: '/buildings', label: 'Buildings', icon: '🏛' },
-  { to: '/military', label: 'Military', icon: '⚔' },
-  { to: '/reports', label: 'Reports', icon: '📜' },
-  { to: '/video', label: 'Video Rewards', icon: '🎬' },
-  { to: '/farm', label: 'Farm Lists', icon: '🌾' },
-  { to: '/scout', label: 'Auto Scout', icon: '🔭' },
-  { to: '/queue', label: 'Build Queue', icon: '📋' },
+  { to: '/', label: 'Dashboard', icon: '\u2302' },
+  { to: '/buildings', label: 'Buildings', icon: '\uD83C\uDFDB' },
+  { to: '/military', label: 'Military', icon: '\u2694' },
+  { to: '/reports', label: 'Reports', icon: '\uD83D\uDCDC' },
+  { to: '/video', label: 'Video Rewards', icon: '\uD83C\uDFAC' },
+  { to: '/farm', label: 'Farm Lists', icon: '\uD83C\uDF3E' },
+  { to: '/scout', label: 'Auto Scout', icon: '\uD83D\uDD2D' },
+  { to: '/queue', label: 'Build Queue', icon: '\uD83D\uDCCB' },
 ]
 
 export default function Layout() {
   const navigate = useNavigate()
   const user = useAuthStore((s) => s.user)
   const logout = useAuthStore((s) => s.logout)
-  const fetchUser = useAuthStore((s) => s.fetchUser)
   const connected = useGameStore((s) => s.connected)
+  const statusChecked = useGameStore((s) => s.statusChecked)
   const serverUrl = useGameStore((s) => s.serverUrl)
   const playerName = useGameStore((s) => s.playerName)
   const checkStatus = useGameStore((s) => s.checkStatus)
@@ -28,16 +28,19 @@ export default function Layout() {
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
+  // Check Travian connection status once on mount
   useEffect(() => {
-    if (!user) fetchUser()
-    checkStatus()
-  }, [])
+    if (!statusChecked) {
+      checkStatus()
+    }
+  }, [statusChecked, checkStatus])
 
+  // Redirect to /connect only AFTER status check completes and confirms not connected
   useEffect(() => {
-    if (!connected) {
+    if (statusChecked && !connected) {
       navigate('/connect', { replace: true })
     }
-  }, [connected, navigate])
+  }, [statusChecked, connected, navigate])
 
   const handleLogout = () => {
     logout()
@@ -51,6 +54,38 @@ export default function Layout() {
 
   const sidebarWidth = 220
   const topBarHeight = 56
+
+  // Show loading while checking connection status
+  if (!statusChecked) {
+    return (
+      <div
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: 'var(--bg-base)',
+          gap: '1rem',
+        }}
+      >
+        <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+          Checking connection...
+        </span>
+        <div
+          style={{
+            width: '28px',
+            height: '28px',
+            border: '3px solid var(--border)',
+            borderTopColor: 'var(--accent-gold)',
+            borderRadius: '50%',
+            animation: 'spin 0.8s linear infinite',
+          }}
+        />
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    )
+  }
 
   return (
     <div style={{ minHeight: '100vh', backgroundColor: 'var(--bg-base)' }}>
@@ -73,7 +108,6 @@ export default function Layout() {
           zIndex: 100,
         }}
       >
-        {/* Left: Logo + mobile toggle */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           {connected && (
             <button
@@ -88,7 +122,7 @@ export default function Layout() {
               }}
               className="sidebar-toggle"
             >
-              ☰
+              {'\u2630'}
             </button>
           )}
           <span
@@ -104,7 +138,6 @@ export default function Layout() {
           </span>
         </div>
 
-        {/* Center: Connection info */}
         <div
           style={{
             display: 'flex',
@@ -138,7 +171,6 @@ export default function Layout() {
           )}
         </div>
 
-        {/* Right: User + logout */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           {user && (
             <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
@@ -158,7 +190,6 @@ export default function Layout() {
       {/* Sidebar */}
       {connected && (
         <>
-          {/* Mobile overlay */}
           {sidebarOpen && (
             <div
               onClick={() => setSidebarOpen(false)}
@@ -217,7 +248,6 @@ export default function Layout() {
               ))}
             </nav>
 
-            {/* Bottom: disconnect + status */}
             <div
               style={{
                 padding: '0.75rem 1rem',
@@ -273,7 +303,6 @@ export default function Layout() {
         <Outlet />
       </main>
 
-      {/* Responsive styles */}
       <style>{`
         @media (max-width: 768px) {
           .sidebar-toggle {

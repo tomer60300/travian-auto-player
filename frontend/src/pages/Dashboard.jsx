@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import useGameStore from '../stores/gameStore'
 import VillageSelector from '../components/VillageSelector'
@@ -223,23 +223,30 @@ export default function Dashboard() {
   const fetchBuildings = useGameStore((s) => s.fetchBuildings)
   const fetchQueue = useGameStore((s) => s.fetchQueue)
 
+  const [loading, setLoading] = useState(true)
   const intervalRef = useRef(null)
 
   useEffect(() => {
-    fetchResources()
-    fetchBuildings()
-    fetchQueue()
+    let cancelled = false
+    async function loadData() {
+      // Fetch sequentially to avoid overwhelming the stealth-limited backend
+      await fetchResources()
+      if (cancelled) return
+      await fetchQueue()
+      if (cancelled) return
+      setLoading(false)
+    }
+    loadData()
 
     intervalRef.current = setInterval(() => {
       fetchResources()
-    }, 30000)
+    }, 60000) // 60s refresh — gentler on stealth backend
 
     return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
-      }
+      cancelled = true
+      if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [fetchResources, fetchBuildings, fetchQueue])
+  }, [])
 
   return (
     <div style={{ padding: '1.5rem', maxWidth: '960px', margin: '0 auto' }}>
@@ -255,12 +262,30 @@ export default function Dashboard() {
         <VillageSelector />
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-        <ResourceBar resources={resources} />
-        <ConstructionQueueSummary queue={constructionQueue} />
-        <QuickActions />
-        <PlayerInfoCard />
-      </div>
+      {loading ? (
+        <div className="card" style={{ padding: '3rem', textAlign: 'center' }}>
+          <div
+            style={{
+              width: '28px',
+              height: '28px',
+              border: '3px solid var(--border)',
+              borderTopColor: 'var(--accent-gold)',
+              borderRadius: '50%',
+              animation: 'spin 0.8s linear infinite',
+              margin: '0 auto 1rem',
+            }}
+          />
+          <span style={{ color: 'var(--text-secondary)' }}>Loading village data...</span>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          <ResourceBar resources={resources} />
+          <ConstructionQueueSummary queue={constructionQueue} />
+          <QuickActions />
+          <PlayerInfoCard />
+        </div>
+      )}
     </div>
   )
 }

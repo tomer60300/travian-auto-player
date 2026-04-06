@@ -3,6 +3,7 @@ import api from '../api';
 
 const useGameStore = create((set, get) => ({
   connected: false,
+  statusChecked: false,
   serverUrl: null,
   playerName: null,
   tribeId: null,
@@ -12,7 +13,6 @@ const useGameStore = create((set, get) => ({
   buildings: [],
   constructionQueue: [],
 
-  // Travian connection
   connect: async (serverUrl, username, password) => {
     const res = await api.post('/travian/connect', {
       server_url: serverUrl,
@@ -22,6 +22,7 @@ const useGameStore = create((set, get) => ({
     const data = res.data;
     set({
       connected: true,
+      statusChecked: true,
       serverUrl: data.server_url,
       playerName: data.player_name,
       tribeId: data.tribe_id,
@@ -53,20 +54,24 @@ const useGameStore = create((set, get) => ({
       if (data.connected) {
         set({
           connected: true,
+          statusChecked: true,
           serverUrl: data.server_url,
           playerName: data.player_name,
           tribeId: data.tribe_id,
           activeVillageId: data.active_village_id,
           villages: data.villages,
         });
+      } else {
+        set({ connected: false, statusChecked: true });
       }
-    } catch {}
+    } catch {
+      set({ connected: false, statusChecked: true });
+    }
   },
 
   switchVillage: async (villageId) => {
-    const res = await api.post('/villages/switch', { village_id: villageId });
+    await api.post('/villages/switch', { village_id: villageId });
     set({ activeVillageId: villageId });
-    // Refresh data for new village
     await Promise.all([get().fetchResources(), get().fetchBuildings()]);
   },
 

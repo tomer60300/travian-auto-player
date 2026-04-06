@@ -8,6 +8,12 @@ export default function Connect() {
   const navigate = useNavigate()
   const toast = useToast()
   const connect = useGameStore((s) => s.connect)
+  const connected = useGameStore((s) => s.connected)
+
+  // If already connected (e.g., navigated here directly), go to dashboard
+  useEffect(() => {
+    if (connected) navigate('/', { replace: true })
+  }, [connected, navigate])
 
   // Saved servers state
   const [servers, setServers] = useState([])
