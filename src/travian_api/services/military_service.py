@@ -196,12 +196,15 @@ class MilitaryService:
             action_token = final_data.get('action', '')
             form_reappeared = action_token and f'value="{action_token}"' in result_html
             has_error = bool(re.search(r'class="error[^"]*"', result_html))
-            # Only check for the confirmation dialog — troopSendForm is the
-            # normal send form that always appears on the rally point page
-            still_confirming = 'confirmSendTroops' in result_html
+            has_troop_movement = 'troopMovement' in result_html
 
-            # Success = no form reappeared, no error div, and not stuck on confirmation
-            success = not form_reappeared and not has_error and not still_confirming
+            # Success: the old action token was consumed (not reappearing),
+            # no error divs, and ideally we see troop movements on the page.
+            # Note: 'confirmSendTroops' always appears as a button on the
+            # rally point page — it does NOT indicate we're stuck confirming.
+            success = not form_reappeared and not has_error
+            if has_troop_movement:
+                success = True
 
             # Try to extract travel time from the confirmation we parsed
             travel_time = ""

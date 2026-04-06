@@ -28,8 +28,9 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         show_oases: showOases,
         limit,
       })
-      onScanComplete(res.data)
-      toast.success(`Scan complete: ${res.data.length} targets found`)
+      const tiles = res.data.tiles ?? res.data
+      onScanComplete(tiles)
+      toast.success(`Scan complete: ${tiles.length} targets found`)
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Scan failed')
     } finally {

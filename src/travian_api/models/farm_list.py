@@ -20,8 +20,8 @@ class RaidedResources(BaseModel):
 
 class LastRaid(BaseModel):
     """Last raid information for a farm list slot."""
-    report_object_id: str = Field(default="", alias="reportObjectId")
-    auth_key: str = Field(default="", alias="authKey")
+    report_object_id: Optional[str] = Field(default="", alias="reportObjectId")
+    auth_key: Optional[str] = Field(default="", alias="authKey")
     time: Optional[int] = None
     raided_resources: RaidedResources = Field(
         default_factory=RaidedResources, alias="raidedResources"

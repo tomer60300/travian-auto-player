@@ -121,7 +121,7 @@ class AutoScoutService:
         return self._parse_tile_details(x, y, html)
 
     async def enrich_tiles(
-        self, tiles: List[MapTileInfo], concurrency: int = 5
+        self, tiles: List[MapTileInfo], concurrency: int = 15
     ) -> List[MapTileInfo]:
         """
         Enrich tiles with population/tribe/player from tile-details API.

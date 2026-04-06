@@ -60,7 +60,7 @@ export default function App() {
     <ErrorBoundary>
       <Suspense fallback={<PageLoader />}>
         <Routes>
-          <Route path="/login" element={<GuardedPage><Login /></GuardedPage>} />
+          <Route path="/login" element={isAuthenticated ? <Navigate to="/connect" replace /> : <GuardedPage><Login /></GuardedPage>} />
           <Route path="/connect" element={isAuthenticated ? <GuardedPage><Connect /></GuardedPage> : <Navigate to="/login" replace />} />
           <Route element={isAuthenticated ? <Layout /> : <Navigate to="/login" replace />}>
             <Route path="/" element={<GuardedPage><Dashboard /></GuardedPage>} />
