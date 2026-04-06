@@ -120,7 +120,11 @@ const useGameStore = create((set, get) => ({
   fetchBuildings: async () => {
     try {
       const res = await api.get('/buildings');
-      set({ buildings: Array.isArray(res.data) ? res.data : [] });
+      // API returns { village_id, buildings: [...] } or possibly a plain array
+      const arr = Array.isArray(res.data) ? res.data
+        : Array.isArray(res.data?.buildings) ? res.data.buildings
+        : [];
+      set({ buildings: arr });
     } catch (e) {
       console.warn('fetchBuildings failed:', e);
       get()._handleFetchError(e);
@@ -130,7 +134,11 @@ const useGameStore = create((set, get) => ({
   fetchQueue: async () => {
     try {
       const res = await api.get('/buildings/queue');
-      set({ constructionQueue: Array.isArray(res.data) ? res.data : [] });
+      // API returns { village_id, queue: [...] } or possibly a plain array
+      const arr = Array.isArray(res.data) ? res.data
+        : Array.isArray(res.data?.queue) ? res.data.queue
+        : [];
+      set({ constructionQueue: arr });
     } catch (e) {
       console.warn('fetchQueue failed:', e);
       get()._handleFetchError(e);
