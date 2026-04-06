@@ -35,47 +35,30 @@ function raidResultLabel(result) {
 // ---------------------------------------------------------------------------
 //  Transform WS messages for WebSocketPanel
 // ---------------------------------------------------------------------------
+let _farmMsgId = 0
 function transformWsMessage(data) {
+  const id = ++_farmMsgId
   const ts = new Date()
+  const base = { id, timestamp: ts }
   switch (data.type) {
     case 'info':
-      return {
-        type: 'info',
-        text: data.list_names
-          ? `Connected: ${data.list_count} list(s) - ${data.list_names.join(', ')}`
-          : data.message || 'Info',
-        timestamp: ts,
-      }
+      return { ...base, type: 'info', text: data.list_names
+        ? `Connected: ${data.list_count} list(s) - ${data.list_names.join(', ')}`
+        : data.message || 'Info' }
     case 'cycle_start':
-      return {
-        type: 'info',
-        text: `Cycle ${data.cycle} started`,
-        timestamp: ts,
-      }
+      return { ...base, type: 'info', text: `Cycle ${data.cycle} started` }
     case 'result':
-      return {
-        type: data.success ? 'success' : 'error',
-        text: data.success
-          ? `Sent to ${data.slot || '???'}: ${data.message || 'OK'}`
-          : `Failed ${data.slot || '???'}: ${data.message || 'error'}`,
-        timestamp: ts,
-      }
+      return { ...base, type: data.success ? 'success' : 'error', text: data.success
+        ? `Sent to ${data.slot || '???'}: ${data.message || 'OK'}`
+        : `Failed ${data.slot || '???'}: ${data.message || 'error'}` }
     case 'cycle_end':
-      return {
-        type: 'info',
-        text: `Cycle ${data.cycle} finished - sent: ${data.sent ?? 0}, failed: ${data.failed ?? 0}`,
-        timestamp: ts,
-      }
+      return { ...base, type: 'info', text: `Cycle ${data.cycle} finished - sent: ${data.sent ?? 0}, failed: ${data.failed ?? 0}` }
     case 'error':
-      return { type: 'error', text: data.message || 'Unknown error', timestamp: ts }
+      return { ...base, type: 'error', text: data.message || 'Unknown error' }
     case 'complete':
-      return {
-        type: 'success',
-        text: `Completed after ${data.total_cycles ?? '?'} cycle(s)`,
-        timestamp: ts,
-      }
+      return { ...base, type: 'success', text: `Completed after ${data.total_cycles ?? '?'} cycle(s)` }
     default:
-      return { type: 'info', text: JSON.stringify(data), timestamp: ts }
+      return { ...base, type: 'info', text: JSON.stringify(data) }
   }
 }
 
@@ -695,7 +678,7 @@ export default function FarmLists() {
         message={`Are you sure you want to delete "${deleteConfirm?.name}"? This cannot be undone.`}
         confirmText="Delete"
         variant="danger"
-        onConfirm={() => deleteConfirm && handleDelete(deleteConfirm.id)}
+        onConfirm={() => { if (deleteConfirm?.id) handleDelete(deleteConfirm.id) }}
         onCancel={() => setDeleteConfirm(null)}
       />
     </div>

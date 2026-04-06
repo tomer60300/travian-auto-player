@@ -48,7 +48,7 @@ function ConstructionQueuePanel({ queue }) {
       </h3>
       <div className="flex flex-col gap-2">
         {queue.map((item, idx) => (
-          <div key={idx} className="surface-row">
+          <div key={item.event_id ?? `${item.building_name}-${idx}`} className="surface-row">
             <span className="text-sm text-primary">
               {item.building_name || item.name || 'Building'} {'\u2192'} Level{' '}
               {item.target_level ?? item.level ?? '?'}

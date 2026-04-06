@@ -58,8 +58,8 @@ export default function WebSocketPanel({ messages = [], status = 'disconnected',
             No messages yet...
           </div>
         ) : (
-          messages.map((msg, i) => (
-            <div key={i} className={`ws-panel-line ${typeClassMap[msg.type] || 'text-primary'}`}>
+          messages.map((msg) => (
+            <div key={msg.id ?? `${msg.timestamp}-${msg.text?.slice(0, 20)}`} className={`ws-panel-line ${typeClassMap[msg.type] || 'text-primary'}`}>
               <span className="ws-panel-time">
                 [{formatTime(msg.timestamp)}]
               </span>

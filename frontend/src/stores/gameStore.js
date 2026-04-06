@@ -48,7 +48,7 @@ const useGameStore = create((set, get) => ({
   },
 
   disconnect: async () => {
-    try { await api.delete('/travian/disconnect'); } catch {}
+    try { await api.delete('/travian/disconnect'); } catch (e) { console.warn('Disconnect failed:', e) }
     set({
       connected: false,
       serverUrl: null,

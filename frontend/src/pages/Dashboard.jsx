@@ -58,8 +58,8 @@ function ConstructionQueueSummary({ queue }) {
         {'\uD83D\uDD28'} Construction Queue
       </h3>
       <div className="flex flex-col gap-2">
-        {queue.map((item) => (
-          <div key={item.event_id ?? item.building_name ?? Math.random()} className="surface-row">
+        {queue.map((item, idx) => (
+          <div key={item.event_id ?? `${item.building_name}-${item.target_level}-${idx}`} className="surface-row">
             <span className="text-sm text-primary">
               {item.building_name || item.name || 'Building'} {'\u2192'} Level{' '}
               {item.target_level ?? item.level ?? '?'}
@@ -155,7 +155,9 @@ export default function Dashboard() {
     loadData()
 
     intervalRef.current = setInterval(() => {
-      fetchResourcesRef.current()
+      if (document.visibilityState === 'visible') {
+        fetchResourcesRef.current()
+      }
     }, 60000)
 
     return () => {

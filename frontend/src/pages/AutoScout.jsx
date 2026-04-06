@@ -302,8 +302,9 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   const activeVillageId = useGameStore((s) => s.activeVillageId)
   const toast = useToast()
 
+  const msgIdRef = useRef(0)
   const addMessage = useCallback((type, text) => {
-    setMessages((prev) => [...prev, { type, text, timestamp: Date.now() }])
+    setMessages((prev) => [...prev, { id: ++msgIdRef.current, type, text, timestamp: Date.now() }])
   }, [])
 
   const handleClear = () => setMessages([])

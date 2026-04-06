@@ -16,8 +16,19 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
+      const hadToken = !!localStorage.getItem('token');
       localStorage.removeItem('token');
-      // Let React routing handle the redirect — no full page reload
+
+      // If there was a token and it's now rejected, force the auth store
+      // to update. Import is dynamic to avoid circular deps.
+      if (hadToken) {
+        import('./stores/authStore').then(({ default: useAuthStore }) => {
+          const state = useAuthStore.getState();
+          if (state.isAuthenticated) {
+            state.logout();
+          }
+        });
+      }
     }
     return Promise.reject(error);
   }

@@ -277,7 +277,9 @@ export default function BuildQueue() {
   // Cleanup WS + timers on unmount
   useEffect(() => {
     return () => {
-      timersRef.current.forEach(id => clearInterval(id))
+      timersRef.current.forEach(({ type, id }) =>
+        type === 'interval' ? clearInterval(id) : clearTimeout(id)
+      )
       timersRef.current = []
       if (wsRef.current) {
         try { wsRef.current.close() } catch {}
@@ -329,10 +331,11 @@ export default function BuildQueue() {
     setWsStatus('connected')
     setRunning(true)
 
+    let msgId = Date.now()
     const addMessage = (type, text) => {
       setWsMessages((prev) => [
         ...prev,
-        { type, text, timestamp: new Date().toISOString() },
+        { id: ++msgId, type, text, timestamp: new Date().toISOString() },
       ])
     }
 
@@ -393,10 +396,10 @@ export default function BuildQueue() {
         clearInterval(waitForOpen)
       }
     }, 100)
-    timersRef.current.push(waitForOpen)
+    timersRef.current.push({ type: 'interval', id: waitForOpen })
 
     const safetyTimeout = setTimeout(() => clearInterval(waitForOpen), 10000)
-    timersRef.current.push(safetyTimeout)
+    timersRef.current.push({ type: 'timeout', id: safetyTimeout })
   }, [yamlContent, pollInterval, useVideo, verbose])
 
   const handleStop = () => {
