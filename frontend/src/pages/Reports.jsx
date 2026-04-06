@@ -151,10 +151,12 @@ function RaidTargetAnalyzer() {
   const [excludePlayers, setExcludePlayers] = useState('')
   const [analyzing, setAnalyzing] = useState(false)
   const [results, setResults] = useState(null)
+  const [analyzeError, setAnalyzeError] = useState(null)
 
   async function handleAnalyze() {
     setAnalyzing(true)
     setResults(null)
+    setAnalyzeError(null)
     try {
       const res = await api.post('/reports/analyze', {
         min_resources: minResources,
@@ -163,11 +165,19 @@ function RaidTargetAnalyzer() {
         radius: radius ? Number(radius) : null,
         exclude_alliances: excludeAlliances.split(',').map(s => s.trim()).filter(Boolean),
         exclude_players: excludePlayers.split(',').map(s => s.trim()).filter(Boolean),
-      }, { timeout: 120000 })
+      }, { timeout: 180000 })
       setResults(res.data)
       toast.success(`Found ${res.data.total_targets ?? 0} raid target(s)`)
     } catch (err) {
-      const message = err.response?.data?.detail || err.response?.data?.message || 'Analysis failed'
+      const status = err.response?.status
+      const detail = err.response?.data?.detail || err.response?.data?.message
+      let message = 'Analysis failed'
+      if (status === 403) message = 'Not connected to Travian. Please reconnect first.'
+      else if (status === 502 || status === 503) message = detail || 'Server error — the analysis timed out or Travian is not responding. Try reducing Max Pages.'
+      else if (status === 401) message = 'Session expired. Please log in again.'
+      else if (detail) message = detail
+      else if (err.code === 'ECONNABORTED') message = 'Request timed out. Try reducing Max Pages to 1-5.'
+      setAnalyzeError(message)
       toast.error(message)
     } finally {
       setAnalyzing(false)
@@ -223,10 +233,20 @@ function RaidTargetAnalyzer() {
         </div>
       </div>
 
-      <button className="btn-primary flex items-center gap-2" onClick={handleAnalyze} disabled={analyzing}>
-        {analyzing && <span className="spinner spinner-sm" />}
-        {analyzing ? 'Analyzing...' : 'Analyze'}
-      </button>
+      <div className="flex items-center gap-4">
+        <button className="btn-primary flex items-center gap-2" onClick={handleAnalyze} disabled={analyzing}>
+          {analyzing && <span className="spinner spinner-sm" />}
+          {analyzing ? 'Analyzing... (this may take 30-60s)' : 'Analyze'}
+        </button>
+        {analyzing && <span className="text-xs text-secondary">Scanning reports with stealth delays...</span>}
+      </div>
+
+      {/* Error display */}
+      {analyzeError && (
+        <div className="error-box mt-4">
+          {analyzeError}
+        </div>
+      )}
 
       {/* Results */}
       {results && (
