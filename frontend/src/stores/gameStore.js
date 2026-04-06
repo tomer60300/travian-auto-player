@@ -92,18 +92,14 @@ const useGameStore = create((set, get) => ({
     await Promise.all([get().fetchResources(), get().fetchBuildings()]);
   },
 
-  // Helper: if a 403 means "not connected to Travian", mark disconnected
+  // Helper: if a 403 means "not connected to Travian", verify with checkStatus
   _handleFetchError: (e) => {
     const status = e.response?.status;
     if (status === 403) {
       const current = useGameStore.getState();
       if (current.connected) {
-        set({
-          connected: false,
-          resources: null,
-          buildings: [],
-          constructionQueue: [],
-        });
+        // Don't immediately disconnect — verify the session is actually gone
+        get().checkStatus();
       }
     }
   },

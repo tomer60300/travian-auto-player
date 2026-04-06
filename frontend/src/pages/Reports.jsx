@@ -10,6 +10,7 @@ function getReportTypeLabel(type) {
   if (lower.includes('battle') || lower.includes('attack') || lower.includes('raid')) return 'Battle'
   if (lower.includes('trade') || lower.includes('merchant')) return 'Trade'
   if (lower.includes('reinforce')) return 'Reinf.'
+  if (lower.includes('adventure')) return 'Adventure'
   return type
 }
 
@@ -20,12 +21,15 @@ function getReportTypeIcon(type) {
   if (lower.includes('battle') || lower.includes('attack') || lower.includes('raid')) return '[B]'
   if (lower.includes('trade') || lower.includes('merchant')) return '[T]'
   if (lower.includes('reinforce')) return '[R]'
+  if (lower.includes('adventure')) return '[A]'
   return '[?]'
 }
 
 function formatDate(dateStr) {
   if (!dateStr) return '-'
+  // Travian dates like "today, 14:57" or "05.04.26, 13:36" aren't ISO parseable
   const d = new Date(dateStr)
+  if (isNaN(d.getTime())) return dateStr // return as-is if not parseable
   return d.toLocaleDateString(undefined, {
     month: 'short',
     day: 'numeric',
@@ -426,7 +430,8 @@ export default function Reports() {
 
           {/* Rows */}
           {reports.map((report) => {
-            const id = report.id || report.report_id
+            const id = report.report_id || report.id
+            const rtype = report.report_type || report.type
             const isExpanded = expandedId === id
 
             return (
@@ -436,14 +441,14 @@ export default function Reports() {
                   onClick={() => toggleReport(id)}
                 >
                   <span className="text-xs text-secondary">
-                    {formatDate(report.date || report.time || report.timestamp)}
+                    {report.date_str || formatDate(report.date || report.time || report.timestamp)}
                   </span>
                   <span
                     className="text-xs font-semibold text-gold"
-                    title={report.type}
+                    title={rtype}
                   >
-                    {getReportTypeIcon(report.type)}{' '}
-                    {getReportTypeLabel(report.type)}
+                    {getReportTypeIcon(rtype)}{' '}
+                    {getReportTypeLabel(rtype)}
                   </span>
                   <span
                     className="text-sm text-primary truncate"
@@ -453,12 +458,12 @@ export default function Reports() {
                   </span>
                   <span
                     className={`text-xs text-right ${
-                      report.read === false || report.unread
+                      report.is_read === false
                         ? 'text-gold font-semibold'
                         : 'text-secondary'
                     }`}
                   >
-                    {report.read === false || report.unread ? 'Unread' : 'Read'}
+                    {report.is_read === false ? 'Unread' : 'Read'}
                   </span>
                 </div>
 
