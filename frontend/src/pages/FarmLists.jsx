@@ -695,7 +695,7 @@ export default function FarmLists() {
         message={`Are you sure you want to delete "${deleteConfirm?.name}"? This cannot be undone.`}
         confirmText="Delete"
         variant="danger"
-        onConfirm={() => handleDelete(deleteConfirm.id)}
+        onConfirm={() => deleteConfirm && handleDelete(deleteConfirm.id)}
         onCancel={() => setDeleteConfirm(null)}
       />
     </div>

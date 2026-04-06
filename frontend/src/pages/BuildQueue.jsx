@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import api from '../api'
 import { createWebSocket } from '../ws'
 import WebSocketPanel from '../components/WebSocketPanel'
@@ -272,6 +272,19 @@ export default function BuildQueue() {
   const [wsStatus, setWsStatus] = useState('disconnected')
   const [running, setRunning] = useState(false)
   const wsRef = useRef(null)
+  const timersRef = useRef([])
+
+  // Cleanup WS + timers on unmount
+  useEffect(() => {
+    return () => {
+      timersRef.current.forEach(id => clearInterval(id))
+      timersRef.current = []
+      if (wsRef.current) {
+        try { wsRef.current.close() } catch {}
+        wsRef.current = null
+      }
+    }
+  }, [])
 
   // Confirm dialog
   const [showConfirm, setShowConfirm] = useState(false)
@@ -362,7 +375,7 @@ export default function BuildQueue() {
 
     wsRef.current = ws
 
-    // Send config once connected
+    // Send config once connected, with tracked cleanup
     const waitForOpen = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         clearInterval(waitForOpen)
@@ -380,9 +393,10 @@ export default function BuildQueue() {
         clearInterval(waitForOpen)
       }
     }, 100)
+    timersRef.current.push(waitForOpen)
 
-    // Safety cleanup for the interval
-    setTimeout(() => clearInterval(waitForOpen), 10000)
+    const safetyTimeout = setTimeout(() => clearInterval(waitForOpen), 10000)
+    timersRef.current.push(safetyTimeout)
   }, [yamlContent, pollInterval, useVideo, verbose])
 
   const handleStop = () => {

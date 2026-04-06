@@ -74,7 +74,7 @@ export default function Layout() {
           {connected && (
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="sidebar-toggle bg-transparent border-none text-primary text-xl cursor-pointer hidden"
+              className="sidebar-toggle bg-transparent border-none text-primary text-xl cursor-pointer md:hidden"
             >
               {'☰'}
             </button>

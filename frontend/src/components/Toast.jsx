@@ -1,7 +1,7 @@
 import { create } from 'zustand'
-import { useEffect } from 'react'
 
 let toastId = 0
+const timers = new Map()
 
 export const useToastStore = create((set) => ({
   toasts: [],
@@ -11,17 +11,22 @@ export const useToastStore = create((set) => ({
     set((state) => ({
       toasts: [...state.toasts, { id, type, message, timestamp: Date.now() }],
     }))
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      timers.delete(id)
       set((state) => ({
         toasts: state.toasts.filter((t) => t.id !== id),
       }))
     }, 4000)
+    timers.set(id, timer)
   },
 
-  removeToast: (id) =>
+  removeToast: (id) => {
+    const timer = timers.get(id)
+    if (timer) { clearTimeout(timer); timers.delete(id) }
     set((state) => ({
       toasts: state.toasts.filter((t) => t.id !== id),
-    })),
+    }))
+  },
 }))
 
 export function useToast() {

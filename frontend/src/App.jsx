@@ -1,9 +1,9 @@
 import { useEffect, lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import useAuthStore from './stores/authStore'
+import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/Layout'
 
-// Route-based code splitting — each page is a separate chunk
 const Login = lazy(() => import('./pages/Login'))
 const Connect = lazy(() => import('./pages/Connect'))
 const Dashboard = lazy(() => import('./pages/Dashboard'))
@@ -32,6 +32,16 @@ function PageLoader() {
   )
 }
 
+function GuardedPage({ children }) {
+  return (
+    <ErrorBoundary>
+      <Suspense fallback={<PageLoader />}>
+        {children}
+      </Suspense>
+    </ErrorBoundary>
+  )
+}
+
 export default function App() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const initialCheckDone = useAuthStore((s) => s.initialCheckDone)
@@ -46,22 +56,24 @@ export default function App() {
   }
 
   return (
-    <Suspense fallback={<PageLoader />}>
-      <Routes>
-        <Route path="/login" element={!isAuthenticated ? <Login /> : <Navigate to="/" replace />} />
-        <Route path="/connect" element={isAuthenticated ? <Connect /> : <Navigate to="/login" replace />} />
-        <Route element={isAuthenticated ? <Layout /> : <Navigate to="/login" replace />}>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/buildings" element={<Buildings />} />
-          <Route path="/military" element={<Military />} />
-          <Route path="/reports" element={<Reports />} />
-          <Route path="/video" element={<VideoRewards />} />
-          <Route path="/farm" element={<FarmLists />} />
-          <Route path="/scout" element={<AutoScout />} />
-          <Route path="/queue" element={<BuildQueue />} />
-        </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </Suspense>
+    <ErrorBoundary>
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
+          <Route path="/login" element={<GuardedPage><Login /></GuardedPage>} />
+          <Route path="/connect" element={isAuthenticated ? <GuardedPage><Connect /></GuardedPage> : <Navigate to="/login" replace />} />
+          <Route element={isAuthenticated ? <Layout /> : <Navigate to="/login" replace />}>
+            <Route path="/" element={<GuardedPage><Dashboard /></GuardedPage>} />
+            <Route path="/buildings" element={<GuardedPage><Buildings /></GuardedPage>} />
+            <Route path="/military" element={<GuardedPage><Military /></GuardedPage>} />
+            <Route path="/reports" element={<GuardedPage><Reports /></GuardedPage>} />
+            <Route path="/video" element={<GuardedPage><VideoRewards /></GuardedPage>} />
+            <Route path="/farm" element={<GuardedPage><FarmLists /></GuardedPage>} />
+            <Route path="/scout" element={<GuardedPage><AutoScout /></GuardedPage>} />
+            <Route path="/queue" element={<GuardedPage><BuildQueue /></GuardedPage>} />
+          </Route>
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
+    </ErrorBoundary>
   )
 }

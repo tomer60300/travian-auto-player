@@ -58,8 +58,8 @@ function ConstructionQueueSummary({ queue }) {
         {'\uD83D\uDD28'} Construction Queue
       </h3>
       <div className="flex flex-col gap-2">
-        {queue.map((item, idx) => (
-          <div key={idx} className="surface-row">
+        {queue.map((item) => (
+          <div key={item.event_id ?? item.building_name ?? Math.random()} className="surface-row">
             <span className="text-sm text-primary">
               {item.building_name || item.name || 'Building'} {'\u2192'} Level{' '}
               {item.target_level ?? item.level ?? '?'}
@@ -140,11 +140,12 @@ export default function Dashboard() {
 
   const [loading, setLoading] = useState(true)
   const intervalRef = useRef(null)
+  const fetchResourcesRef = useRef(fetchResources)
+  fetchResourcesRef.current = fetchResources
 
   useEffect(() => {
     let cancelled = false
     async function loadData() {
-      // Fetch sequentially to avoid overwhelming the stealth-limited backend
       await fetchResources()
       if (cancelled) return
       await fetchQueue()
@@ -154,8 +155,8 @@ export default function Dashboard() {
     loadData()
 
     intervalRef.current = setInterval(() => {
-      fetchResources()
-    }, 60000) // 60s refresh — gentler on stealth backend
+      fetchResourcesRef.current()
+    }, 60000)
 
     return () => {
       cancelled = true

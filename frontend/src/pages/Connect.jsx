@@ -8,6 +8,7 @@ export default function Connect() {
   const navigate = useNavigate()
   const toast = useToast()
   const connect = useGameStore((s) => s.connect)
+  const connectFromSaved = useGameStore((s) => s.connectFromSaved)
   const connected = useGameStore((s) => s.connected)
 
   // If already connected (e.g., navigated here directly), go to dashboard
@@ -51,16 +52,7 @@ export default function Connect() {
   async function handleQuickConnect(server) {
     setConnectingServerId(server.id)
     try {
-      const res = await api.post(`/travian/servers/${server.id}/connect`)
-      const data = res.data
-      useGameStore.setState({
-        connected: true,
-        serverUrl: data.server_url,
-        playerName: data.player_name,
-        tribeId: data.tribe_id,
-        activeVillageId: data.active_village_id,
-        villages: data.villages,
-      })
+      await connectFromSaved(server.id)
       toast.success(`Connected to ${server.label || server.server_url}`)
       navigate('/')
     } catch (err) {

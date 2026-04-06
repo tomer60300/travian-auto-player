@@ -27,7 +27,22 @@ const useGameStore = create((set, get) => ({
       playerName: data.player_name,
       tribeId: data.tribe_id,
       activeVillageId: data.active_village_id,
-      villages: data.villages,
+      villages: Array.isArray(data.villages) ? data.villages : [],
+    });
+    return data;
+  },
+
+  connectFromSaved: async (serverId) => {
+    const res = await api.post(`/travian/servers/${serverId}/connect`);
+    const data = res.data;
+    set({
+      connected: true,
+      statusChecked: true,
+      serverUrl: data.server_url,
+      playerName: data.player_name,
+      tribeId: data.tribe_id,
+      activeVillageId: data.active_village_id,
+      villages: Array.isArray(data.villages) ? data.villages : [],
     });
     return data;
   },
@@ -51,7 +66,7 @@ const useGameStore = create((set, get) => ({
     try {
       const res = await api.get('/travian/status');
       const data = res.data;
-      if (data.connected) {
+      if (data && data.connected) {
         set({
           connected: true,
           statusChecked: true,
@@ -59,7 +74,7 @@ const useGameStore = create((set, get) => ({
           playerName: data.player_name,
           tribeId: data.tribe_id,
           activeVillageId: data.active_village_id,
-          villages: data.villages,
+          villages: Array.isArray(data.villages) ? data.villages : [],
         });
       } else {
         set({ connected: false, statusChecked: true });
@@ -78,22 +93,24 @@ const useGameStore = create((set, get) => ({
   fetchResources: async () => {
     try {
       const res = await api.get('/buildings/resources');
-      set({ resources: res.data });
-    } catch {}
+      if (res.data && typeof res.data === 'object' && !Array.isArray(res.data)) {
+        set({ resources: res.data });
+      }
+    } catch (e) { console.warn('Store fetch failed:', e) }
   },
 
   fetchBuildings: async () => {
     try {
       const res = await api.get('/buildings');
-      set({ buildings: res.data });
-    } catch {}
+      set({ buildings: Array.isArray(res.data) ? res.data : [] });
+    } catch (e) { console.warn('Store fetch failed:', e) }
   },
 
   fetchQueue: async () => {
     try {
       const res = await api.get('/buildings/queue');
-      set({ constructionQueue: res.data });
-    } catch {}
+      set({ constructionQueue: Array.isArray(res.data) ? res.data : [] });
+    } catch (e) { console.warn('Store fetch failed:', e) }
   },
 }));
 
