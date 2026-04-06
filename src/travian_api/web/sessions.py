@@ -25,6 +25,7 @@ from travian_api.services.military_service import MilitaryService
 from travian_api.services.reports_service import ReportsService
 from travian_api.services.target_resolver import TargetResolver
 from travian_api.services.video_reward_service import VideoRewardService
+from travian_api.services.raid_analyzer_service import RaidAnalyzerService
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User
 
@@ -74,6 +75,9 @@ class TravianSession:
         self.scout_service = AutoScoutService(self.http_client)
         self.video_service = VideoRewardService(self.http_client)
 
+        # ── Lazy services (need auth_state) ──────────────────────────
+        self._raid_analyzer: Optional[RaidAnalyzerService] = None
+
         # ── State ─────────────────────────────────────────────────────
         self.auth_state: Optional[AuthState] = None
         self.active_village_id: Optional[int] = None
@@ -90,7 +94,14 @@ class TravianSession:
         self.active_village_id = self.auth_state.village_id
         self.player_name = self.auth_state.player_name
         self.tribe_id = self.auth_state.tribe_id
+        self._raid_analyzer = RaidAnalyzerService(self.http_client, self.auth_state)
         return self.auth_state
+
+    @property
+    def raid_analyzer(self) -> RaidAnalyzerService:
+        if self._raid_analyzer is None:
+            raise RuntimeError("Not connected — raid analyzer unavailable")
+        return self._raid_analyzer
 
     async def disconnect(self) -> None:
         """Clean up HTTP client and release resources."""

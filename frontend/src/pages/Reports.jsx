@@ -137,6 +137,152 @@ function ReportDetail({ detail, loading }) {
   )
 }
 
+function RaidTargetAnalyzer() {
+  const toast = useToast()
+  const [minResources, setMinResources] = useState(200)
+  const [analyzerMaxAge, setAnalyzerMaxAge] = useState(24)
+  const [analyzerMaxPages, setAnalyzerMaxPages] = useState(20)
+  const [radius, setRadius] = useState('')
+  const [excludeAlliances, setExcludeAlliances] = useState('')
+  const [excludePlayers, setExcludePlayers] = useState('')
+  const [analyzing, setAnalyzing] = useState(false)
+  const [results, setResults] = useState(null)
+
+  async function handleAnalyze() {
+    setAnalyzing(true)
+    setResults(null)
+    try {
+      const res = await api.post('/reports/analyze', {
+        min_resources: minResources,
+        max_report_age_hours: analyzerMaxAge,
+        max_pages: analyzerMaxPages,
+        radius: radius ? Number(radius) : null,
+        exclude_alliances: excludeAlliances.split(',').map(s => s.trim()).filter(Boolean),
+        exclude_players: excludePlayers.split(',').map(s => s.trim()).filter(Boolean),
+      }, { timeout: 120000 })
+      setResults(res.data)
+      toast.success(`Found ${res.data.total_targets ?? 0} raid target(s)`)
+    } catch (err) {
+      const message = err.response?.data?.detail || err.response?.data?.message || 'Analysis failed'
+      toast.error(message)
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
+  const confidenceClass = (c) => {
+    if (!c) return 'text-secondary'
+    if (c === 'high') return 'text-green'
+    if (c === 'medium') return 'text-gold'
+    return 'text-secondary'
+  }
+
+  return (
+    <div className="card mb-6">
+      <h3 className="heading-gold text-base mb-4">Raid Target Analyzer</h3>
+
+      <div className="flex items-end gap-4 flex-wrap mb-4">
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-semibold text-secondary">Min Resources</label>
+          <input type="number" className="input-field w-30" min="0" value={minResources}
+            onChange={(e) => setMinResources(Number(e.target.value))} disabled={analyzing} />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-semibold text-secondary">Max Report Age (hrs)</label>
+          <input type="number" className="input-field w-30" min="1" value={analyzerMaxAge}
+            onChange={(e) => setAnalyzerMaxAge(Number(e.target.value))} disabled={analyzing} />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-semibold text-secondary">Max Pages</label>
+          <input type="number" className="input-field w-30" min="1" value={analyzerMaxPages}
+            onChange={(e) => setAnalyzerMaxPages(Number(e.target.value))} disabled={analyzing} />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-semibold text-secondary">Radius (optional)</label>
+          <input type="number" className="input-field w-30" min="1" value={radius}
+            onChange={(e) => setRadius(e.target.value)} disabled={analyzing} />
+        </div>
+      </div>
+
+      <div className="flex items-end gap-4 flex-wrap mb-4">
+        <div className="flex flex-col gap-1.5 flex-1" style={{ minWidth: '200px' }}>
+          <label className="text-sm font-semibold text-secondary">Exclude Alliances (comma-separated)</label>
+          <input type="text" className="input-field" value={excludeAlliances}
+            onChange={(e) => setExcludeAlliances(e.target.value)} disabled={analyzing}
+            placeholder="e.g. NATO, ALLY2" />
+        </div>
+        <div className="flex flex-col gap-1.5 flex-1" style={{ minWidth: '200px' }}>
+          <label className="text-sm font-semibold text-secondary">Exclude Players (comma-separated)</label>
+          <input type="text" className="input-field" value={excludePlayers}
+            onChange={(e) => setExcludePlayers(e.target.value)} disabled={analyzing}
+            placeholder="e.g. player1, player2" />
+        </div>
+      </div>
+
+      <button className="btn-primary flex items-center gap-2" onClick={handleAnalyze} disabled={analyzing}>
+        {analyzing && <span className="spinner spinner-sm" />}
+        {analyzing ? 'Analyzing...' : 'Analyze'}
+      </button>
+
+      {/* Results */}
+      {results && (
+        <div className="mt-4">
+          <div className="text-sm text-secondary mb-2">
+            Source: <span className="text-gold">{results.source_village}</span>{' '}
+            {results.source_coords} — {results.total_targets} target(s)
+          </div>
+
+          {results.targets && results.targets.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="data-table w-full text-sm">
+                <thead>
+                  <tr>
+                    <th className="text-left">Village</th>
+                    <th className="text-left">Player</th>
+                    <th className="text-right">Pop</th>
+                    <th className="text-right">Distance</th>
+                    <th className="text-right">Est. Loot</th>
+                    <th className="text-left">Troops</th>
+                    <th className="text-right">Score</th>
+                    <th className="text-left">Confidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.targets.map((t, idx) => {
+                    const st = t.state || {}
+                    const rec = t.recommendation || {}
+                    return (
+                      <tr key={idx}>
+                        <td className="text-primary">
+                          {st.village_name || '-'}{' '}
+                          <span className="text-secondary text-xs">({st.x}, {st.y})</span>
+                        </td>
+                        <td className="text-secondary">{st.player_name || '-'}</td>
+                        <td className="text-right text-secondary">{st.population ?? '-'}</td>
+                        <td className="text-right text-secondary">{st.distance != null ? st.distance.toFixed(1) : '-'}</td>
+                        <td className="text-right text-gold">{st.estimated_raidable ?? rec.est_loot ?? '-'}</td>
+                        <td className="text-primary">
+                          {rec.n_send ?? '-'} {rec.unit_type || ''}
+                        </td>
+                        <td className="text-right text-gold font-semibold">{rec.score != null ? rec.score.toFixed(1) : '-'}</td>
+                        <td className={confidenceClass(st.raidable_confidence)}>
+                          {st.raidable_confidence || '-'}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-secondary text-sm">No targets found matching the criteria.</p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Reports() {
   const toast = useToast()
   const connected = useGameStore((s) => s.connected)
@@ -217,6 +363,9 @@ export default function Reports() {
   return (
     <div className="p-6">
       <h2 className="heading-gold text-2xl mb-6">Reports</h2>
+
+      {/* Raid Target Analyzer */}
+      <RaidTargetAnalyzer />
 
       {/* Filters */}
       <div className="card mb-6">

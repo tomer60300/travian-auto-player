@@ -10,6 +10,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from travian_api.web.sessions import session_manager, TravianSession
 from travian_api.web.ws.manager import ws_manager
+from travian_api.web.routes.military import _send_scouts_safe
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,8 @@ async def auto_scout_ws(websocket: WebSocket):
                         break
 
                     try:
-                        result = await session.military_service.send_scouts(
+                        result = await _send_scouts_safe(
+                            session=session,
                             x=target.x,
                             y=target.y,
                             amount=amount,

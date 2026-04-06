@@ -151,6 +151,12 @@ export default function Layout() {
                 <span className="text-secondary">Connected</span>
               </div>
               <button
+                onClick={() => navigate('/connect')}
+                className="btn-secondary btn-sm btn-full mb-2"
+              >
+                Switch Server
+              </button>
+              <button
                 onClick={handleDisconnect}
                 className="btn-danger btn-sm btn-full"
               >

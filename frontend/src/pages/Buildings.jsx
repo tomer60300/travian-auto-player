@@ -47,17 +47,23 @@ function ConstructionQueuePanel({ queue }) {
         {'\uD83D\uDD28'} Construction Queue
       </h3>
       <div className="flex flex-col gap-2">
-        {queue.map((item, idx) => (
-          <div key={item.event_id ?? `${item.building_name}-${idx}`} className="surface-row">
-            <span className="text-sm text-primary">
-              {item.building_name || item.name || 'Building'} {'\u2192'} Level{' '}
-              {item.target_level ?? item.level ?? '?'}
-            </span>
-            <span className="text-xs text-warning font-mono">
-              {formatTimeRemaining(item.time_remaining ?? item.seconds_remaining)}
-            </span>
-          </div>
-        ))}
+        {queue.map((item, idx) => {
+          const remaining = item.remaining_seconds ?? item.time_remaining ?? item.seconds_remaining
+          const doneAt = new Date(Date.now() + (remaining || 0) * 1000)
+          const doneStr = doneAt.toLocaleTimeString('en-US', { hour12: false })
+          return (
+            <div key={item.event_id ?? `${item.building_name}-${idx}`} className="surface-row">
+              <span className="text-sm text-primary">
+                {item.building_name || item.name || 'Building'} {'\u2192'} Level{' '}
+                {item.target_level ?? item.level ?? '?'}
+              </span>
+              <span className="text-xs text-warning font-mono">
+                {formatTimeRemaining(remaining)}
+                <span className="text-xs text-secondary ml-2">Done at {doneStr}</span>
+              </span>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
