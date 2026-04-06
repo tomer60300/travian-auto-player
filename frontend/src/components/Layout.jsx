@@ -13,6 +13,7 @@ const navItems = [
   { to: '/farm', label: 'Farm Lists', icon: '🌾' },
   { to: '/scout', label: 'Auto Scout', icon: '🔭' },
   { to: '/queue', label: 'Build Queue', icon: '📋' },
+  { to: '/logs', label: 'Activity Log', icon: '📊' },
 ]
 
 export default function Layout() {

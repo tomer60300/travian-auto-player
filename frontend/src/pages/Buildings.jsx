@@ -189,6 +189,8 @@ function BuildingDetailPanel({
 
 export default function Buildings() {
   const buildings = useGameStore((s) => s.buildings)
+  const buildingsLoading = useGameStore((s) => s.buildingsLoading)
+  const buildingsError = useGameStore((s) => s.buildingsError)
   const constructionQueue = useGameStore((s) => s.constructionQueue)
   const fetchBuildings = useGameStore((s) => s.fetchBuildings)
   const fetchQueue = useGameStore((s) => s.fetchQueue)
@@ -307,7 +309,17 @@ export default function Buildings() {
         <h3 className="heading-gold text-base mb-3">
           Building Slots
         </h3>
-        {buildingList.length === 0 ? (
+        {buildingsLoading ? (
+          <div className="flex items-center gap-3 py-4">
+            <div className="spinner spinner-sm" />
+            <p className="text-secondary text-sm">Loading buildings...</p>
+          </div>
+        ) : buildingsError ? (
+          <div className="py-4">
+            <p className="text-warning text-sm mb-2">{buildingsError}</p>
+            <button className="btn-secondary btn-sm" onClick={fetchBuildings}>Retry</button>
+          </div>
+        ) : buildingList.length === 0 ? (
           <p className="text-secondary text-sm">
             No building data available. Make sure you are connected.
           </p>

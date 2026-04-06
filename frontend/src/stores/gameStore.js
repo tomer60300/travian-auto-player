@@ -11,6 +11,8 @@ const useGameStore = create((set, get) => ({
   activeVillageId: null,
   resources: null,
   buildings: [],
+  buildingsLoading: false,
+  buildingsError: null,
   constructionQueue: [],
 
   connect: async (serverUrl, username, password) => {
@@ -92,7 +94,8 @@ const useGameStore = create((set, get) => ({
 
   // Helper: if a 403 means "not connected to Travian", mark disconnected
   _handleFetchError: (e) => {
-    if (e.response?.status === 403) {
+    const status = e.response?.status;
+    if (status === 403) {
       const current = useGameStore.getState();
       if (current.connected) {
         set({
@@ -118,15 +121,19 @@ const useGameStore = create((set, get) => ({
   },
 
   fetchBuildings: async () => {
+    set({ buildingsLoading: true, buildingsError: null });
     try {
       const res = await api.get('/buildings');
       // API returns { village_id, buildings: [...] } or possibly a plain array
       const arr = Array.isArray(res.data) ? res.data
         : Array.isArray(res.data?.buildings) ? res.data.buildings
         : [];
-      set({ buildings: arr });
+      set({ buildings: arr, buildingsLoading: false });
     } catch (e) {
       console.warn('fetchBuildings failed:', e);
+      const status = e.response?.status;
+      const detail = e.response?.data?.detail || 'Failed to load buildings';
+      set({ buildingsLoading: false, buildingsError: typeof detail === 'string' ? detail : 'Failed to load buildings' });
       get()._handleFetchError(e);
     }
   },

@@ -14,6 +14,7 @@ const VideoRewards = lazy(() => import('./pages/VideoRewards'))
 const FarmLists = lazy(() => import('./pages/FarmLists'))
 const AutoScout = lazy(() => import('./pages/AutoScout'))
 const BuildQueue = lazy(() => import('./pages/BuildQueue'))
+const Logs = lazy(() => import('./pages/Logs'))
 
 function LoadingScreen() {
   return (
@@ -70,6 +71,7 @@ export default function App() {
             <Route path="/farm" element={<GuardedPage><FarmLists /></GuardedPage>} />
             <Route path="/scout" element={<GuardedPage><AutoScout /></GuardedPage>} />
             <Route path="/queue" element={<GuardedPage><BuildQueue /></GuardedPage>} />
+            <Route path="/logs" element={<GuardedPage><Logs /></GuardedPage>} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

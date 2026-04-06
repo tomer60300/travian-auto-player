@@ -1,0 +1,157 @@
+import { useState, useEffect, useRef } from 'react'
+import useLogStore from '../stores/logStore'
+
+const LEVEL_CLASS = {
+  info: 'text-primary',
+  success: 'text-success',
+  warning: 'text-warning',
+  error: 'text-danger',
+}
+
+const SOURCE_LABELS = {
+  api: 'API',
+  auth: 'Auth',
+  game: 'Game',
+  military: 'Military',
+  farm: 'Farm',
+  scout: 'Scout',
+  queue: 'Queue',
+  video: 'Video',
+  reports: 'Reports',
+  ws: 'WS',
+}
+
+const ALL_SOURCES = Object.keys(SOURCE_LABELS)
+
+function formatTime(ts) {
+  const d = new Date(ts)
+  return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    + '.' + String(d.getMilliseconds()).padStart(3, '0')
+}
+
+export default function Logs() {
+  const entries = useLogStore((s) => s.entries)
+  const clear = useLogStore((s) => s.clear)
+
+  const [autoScroll, setAutoScroll] = useState(true)
+  const [filterSource, setFilterSource] = useState('all')
+  const [filterLevel, setFilterLevel] = useState('all')
+  const [search, setSearch] = useState('')
+  const [expandedId, setExpandedId] = useState(null)
+  const scrollRef = useRef(null)
+
+  useEffect(() => {
+    if (autoScroll && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  }, [entries, autoScroll])
+
+  const filtered = entries.filter((e) => {
+    if (filterSource !== 'all' && e.source !== filterSource) return false
+    if (filterLevel !== 'all' && e.level !== filterLevel) return false
+    if (search) {
+      const q = search.toLowerCase()
+      return (
+        e.message.toLowerCase().includes(q) ||
+        (e.detail && String(e.detail).toLowerCase().includes(q)) ||
+        e.source.toLowerCase().includes(q)
+      )
+    }
+    return true
+  })
+
+  return (
+    <div className="p-6 max-w-6xl mx-auto">
+      <div className="flex justify-between items-center mb-4 flex-wrap gap-3">
+        <h2 className="heading-gold text-2xl">Activity Log</h2>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-secondary">{filtered.length} / {entries.length} entries</span>
+          <button onClick={clear} className="btn-danger btn-xs">Clear All</button>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <div className="card p-3 mb-4 flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-secondary">Source:</label>
+          <select
+            value={filterSource}
+            onChange={(e) => setFilterSource(e.target.value)}
+            className="input-field text-xs py-1 px-2 w-auto"
+          >
+            <option value="all">All</option>
+            {ALL_SOURCES.map((s) => (
+              <option key={s} value={s}>{SOURCE_LABELS[s]}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-secondary">Level:</label>
+          <select
+            value={filterLevel}
+            onChange={(e) => setFilterLevel(e.target.value)}
+            className="input-field text-xs py-1 px-2 w-auto"
+          >
+            <option value="all">All</option>
+            <option value="info">Info</option>
+            <option value="success">Success</option>
+            <option value="warning">Warning</option>
+            <option value="error">Error</option>
+          </select>
+        </div>
+
+        <div className="flex items-center gap-2 flex-1 min-w-[150px]">
+          <label className="text-xs text-secondary">Search:</label>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="input-field text-xs py-1 px-2"
+            placeholder="Filter messages..."
+          />
+        </div>
+
+        <label className="flex items-center gap-1 text-xs text-secondary cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={autoScroll}
+            onChange={(e) => setAutoScroll(e.target.checked)}
+            className="checkbox-gold"
+          />
+          Auto-scroll
+        </label>
+      </div>
+
+      {/* Log entries */}
+      <div
+        ref={scrollRef}
+        className="ws-panel"
+        style={{ maxHeight: 'calc(100vh - 280px)', minHeight: '300px' }}
+      >
+        {filtered.length === 0 ? (
+          <div className="text-secondary italic py-4 text-center">
+            {entries.length === 0 ? 'No activity yet. Navigate the app to see logs.' : 'No entries match your filters.'}
+          </div>
+        ) : (
+          filtered.map((entry) => (
+            <div
+              key={entry.id}
+              className={`ws-panel-line cursor-pointer ${LEVEL_CLASS[entry.level] || 'text-primary'}`}
+              onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
+            >
+              <span className="ws-panel-time shrink-0">[{formatTime(entry.timestamp)}]</span>
+              <span className="text-gold shrink-0 w-[60px] text-right">{SOURCE_LABELS[entry.source] || entry.source}</span>
+              <span className="flex-1 break-all">{entry.message}</span>
+              {entry.detail && expandedId === entry.id && (
+                <div className="w-full mt-1 pl-[140px] text-xs text-secondary break-all font-mono">
+                  {typeof entry.detail === 'object' ? JSON.stringify(entry.detail, null, 2) : String(entry.detail)}
+                </div>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
