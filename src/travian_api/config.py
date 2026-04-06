@@ -32,6 +32,20 @@ class Settings(BaseSettings):
     jwt_cache_file: str = Field(default=".jwt_cache.json")
     jwt_cache_path: str = Field(default="")
     
+    # Stealth / anti-bot settings
+    stealth: bool = Field(default=True, description="Enable stealth mode (human-like behavior)")
+    stealth_speed: float = Field(default=1.0, description="Speed multiplier: 0.5=fast, 1.0=normal, 2.0=cautious")
+    stealth_min_gap: float = Field(default=1.5, description="Min seconds between requests")
+    stealth_max_gap: float = Field(default=3.0, description="Max seconds between requests")
+    stealth_navigate: bool = Field(default=True, description="Simulate page navigation before actions")
+    stealth_burst_max: int = Field(default=20, description="Max requests per 60s window before cooldown")
+    stealth_burst_cooldown: float = Field(default=15.0, description="Cooldown seconds when burst limit hit")
+    stealth_noise_rate: float = Field(default=0.15, description="Noise injection probability (0.0-1.0)")
+    stealth_max_daily_hours: float = Field(default=10.0, description="Maximum daily active hours")
+    stealth_max_continuous_hours: float = Field(default=4.0, description="Max hours before forced break")
+    stealth_min_break_minutes: float = Field(default=30.0, description="Minimum break duration in minutes")
+    stealth_timing_variance: float = Field(default=0.4, description="Delay variance factor (0=tight, 1=very spread)")
+    
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

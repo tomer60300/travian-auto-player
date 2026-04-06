@@ -16,6 +16,7 @@ from ..parsers.html_parser import (
     parse_empty_slot_buildings,
 )
 from ..constants import BUILDING_NAMES
+from ..stealth.human_delay import HumanDelay, ActionType
 
 
 class BuildingService:
@@ -142,22 +143,45 @@ class BuildingService:
         try:
             # SAFETY CHECK: Check construction queue BEFORE upgrading
             # If queue is occupied and allow_gold is False, REFUSE.
+            # EXCEPTION: Romans have dual build queue — they can build one resource
+            # field (slot 1-18) and one building (slot 19-40) simultaneously without gold.
             queue = await self.get_construction_queue(village_id=village_id)
             if queue and not allow_gold:
-                queue_names = ", ".join(f"{q.building_name} Lv{q.target_level}" for q in queue)
-                return UpgradeResult(
-                    success=False,
-                    village_id=0,
-                    building_id=slot_id,
-                    building_name="Unknown",
-                    old_level=0,
-                    new_level=0,
-                    construction_time="",
-                    reward_used=False,
-                    raw_response=f"BLOCKED: Construction queue already has [{queue_names}]. "
-                                 f"Upgrading now would cost gold (master builder). "
-                                 f"Use allow_gold=True to override.",
-                )
+                # Check if Roman dual-queue allows this build
+                is_resource_field = slot_id <= 18
+                queue_has_resource = any(getattr(q, 'slot_id', 0) <= 18 for q in queue if hasattr(q, 'slot_id'))
+                queue_has_building = any(getattr(q, 'slot_id', 0) > 18 for q in queue if hasattr(q, 'slot_id'))
+                
+                # If we can't determine slot_ids from queue, fall back to queue length check
+                # Romans can have up to 2 items (1 resource + 1 building) without gold
+                if not any(hasattr(q, 'slot_id') for q in queue):
+                    # Can't determine queue slot types — check tribe from login cache
+                    # For now, allow if queue has only 1 item (might be Roman dual queue)
+                    roman_dual_ok = len(queue) < 2
+                else:
+                    # We know slot types — Roman can add if different category
+                    roman_dual_ok = (is_resource_field and not queue_has_resource) or \
+                                    (not is_resource_field and not queue_has_building)
+                
+                if not roman_dual_ok:
+                    queue_names = ", ".join(f"{q.building_name} Lv{q.target_level}" for q in queue)
+                    return UpgradeResult(
+                        success=False,
+                        village_id=0,
+                        building_id=slot_id,
+                        building_name="Unknown",
+                        old_level=0,
+                        new_level=0,
+                        construction_time="",
+                        reward_used=False,
+                        raw_response=f"BLOCKED: Construction queue already has [{queue_names}]. "
+                                     f"Upgrading now would cost gold (master builder). "
+                                     f"Use allow_gold=True to override.",
+                    )
+            
+            # Stealth: simulate realistic navigation flow before upgrading
+            if getattr(self.http_client, 'stealth_enabled', False):
+                await self.http_client.navigator.pre_upgrade_flow(slot_id, village_id)
             
             # Get building details to extract checksum and upgrade URL
             building_detail = await self.get_building_detail(slot_id, village_id=village_id)

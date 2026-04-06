@@ -229,10 +229,10 @@ class ReportsService:
                 logger.warning("Alliance reports: /alliance/reports returned 0 reports")
                 return [], False
         except Exception as e:
-            logger.warning(f"Alliance reports: /alliance/reports failed — {e}")
+            logger.warning(f"Alliance reports: /alliance/reports failed -- {e}")
             return [], False
 
-        # Route works — fetch all pages
+        # Route works -- fetch all pages
         all_reports: List[ReportListItem] = list(first_page)
         first_page_size = len(first_page)
         pages_fetched = 1

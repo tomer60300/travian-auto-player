@@ -1,0 +1,205 @@
+"""Page navigation simulation.
+
+A real player doesn't jump directly to build.php?id=15&action=build.
+They navigate: overview → dorf1/dorf2 → click building → click upgrade.
+
+This module simulates that navigation chain, making intermediate page
+requests with realistic timing to create a believable browsing pattern.
+"""
+
+import logging
+import random
+from typing import Optional, TYPE_CHECKING
+
+from .human_delay import HumanDelay, ActionType
+
+if TYPE_CHECKING:
+    from ..clients.http_client import HttpClient
+
+logger = logging.getLogger(__name__)
+
+
+class PageNavigator:
+    """Simulates realistic page navigation patterns.
+    
+    Before performing an action, navigates through the pages a human
+    would visit. The intermediate page loads aren't wasted — they help
+    maintain session state and cookies while creating natural traffic.
+    
+    Navigation chains:
+    - Upgrade resource field: dorf1.php → build.php?id=X → upgrade
+    - Upgrade building: dorf2.php → build.php?id=X → upgrade
+    - Send troops: dorf2.php → build.php?gid=16&tt=2 → confirm
+    - Check reports: dorf1.php → berichte.php
+    - View map: dorf1.php → karte.php
+    """
+    
+    def __init__(
+        self,
+        http_client: "HttpClient",
+        human_delay: HumanDelay,
+        enabled: bool = True,
+    ):
+        self._http = http_client
+        self._delay = human_delay
+        self.enabled = enabled
+        self._current_page: Optional[str] = None
+    
+    @property
+    def current_page(self) -> Optional[str]:
+        return self._current_page
+    
+    async def _visit(self, path: str, context: str = "") -> str:
+        """Visit a page with delay and tracking."""
+        await self._delay.wait(ActionType.PAGE_LOAD, context or f"visiting {path}")
+        html = await self._http.get_html(path, skip_reauth=True)
+        self._current_page = path
+        return html
+    
+    async def warm_up(self, village_id: Optional[int] = None) -> None:
+        """Post-login warm-up sequence. Loads pages a real player would visit.
+
+        Simulates: login -> resource overview -> village center -> maybe stats -> back
+        This prevents "login -> immediate API blast" detection patterns.
+        """
+        if not self.enabled:
+            return
+
+        logger.debug("Running post-login warm-up sequence")
+        newdid = f"?newdid={village_id}" if village_id else ""
+
+        # 1. Resource overview (dorf1) — already the landing page after login
+        await self._visit(f"/dorf1.php{newdid}", "checking resource overview after login")
+
+        # 2. Village center
+        await self._visit(f"/dorf2.php{newdid}", "looking at village buildings")
+
+        # 3. Optional: curiosity browsing (20% chance each)
+        if random.random() < 0.2:
+            await self._visit("/statistiken.php", "checking statistics")
+        if random.random() < 0.1:
+            await self._visit("/spieler.php", "checking own profile")
+
+        # 4. Return to resource overview (common human pattern)
+        await self._visit(f"/dorf1.php{newdid}", "returning to resource overview")
+        logger.debug("Warm-up sequence complete")
+
+    async def navigate_to_resource_field(
+        self, slot_id: int, village_id: Optional[int] = None
+    ) -> None:
+        """Navigate to a resource field (slot 1-18) as a human would.
+        
+        Chain: dorf1.php → build.php?id=X
+        """
+        if not self.enabled:
+            return
+        
+        newdid = f"?newdid={village_id}" if village_id else ""
+        
+        # Visit dorf1 first (resource field overview)
+        if self._current_page != f"/dorf1.php{newdid}":
+            await self._visit(f"/dorf1.php{newdid}", "viewing resource fields")
+        
+        # Small click delay before opening the field
+        await self._delay.wait(ActionType.CLICK, f"clicking field slot {slot_id}")
+    
+    async def navigate_to_building(
+        self, slot_id: int, village_id: Optional[int] = None
+    ) -> None:
+        """Navigate to a village building (slot 19-40) as a human would.
+        
+        Chain: dorf2.php → build.php?id=X
+        """
+        if not self.enabled:
+            return
+        
+        newdid = f"?newdid={village_id}" if village_id else ""
+        
+        # Visit dorf2 first (building overview)
+        if self._current_page != f"/dorf2.php{newdid}":
+            await self._visit(f"/dorf2.php{newdid}", "viewing village buildings")
+        
+        # Small click delay
+        await self._delay.wait(ActionType.CLICK, f"clicking building slot {slot_id}")
+    
+    async def navigate_to_rally_point(
+        self, village_id: Optional[int] = None
+    ) -> None:
+        """Navigate to rally point as a human would.
+        
+        Chain: dorf2.php → build.php?gid=16&tt=2
+        """
+        if not self.enabled:
+            return
+        
+        newdid = f"?newdid={village_id}" if village_id else ""
+        
+        # Visit dorf2 first
+        if self._current_page != f"/dorf2.php{newdid}":
+            await self._visit(f"/dorf2.php{newdid}", "viewing village")
+        
+        await self._delay.wait(ActionType.CLICK, "clicking rally point")
+    
+    async def navigate_to_reports(self) -> None:
+        """Navigate to reports page."""
+        if not self.enabled:
+            return
+        
+        # Optionally visit dorf1 first (50% chance)
+        if random.random() < 0.5 and self._current_page != "/dorf1.php":
+            await self._visit("/dorf1.php", "checking overview")
+        
+        await self._delay.wait(ActionType.CLICK, "clicking reports")
+    
+    async def idle_browse(self, village_id: Optional[int] = None) -> None:
+        """Simulate idle browsing — random page visits that a human might do.
+        
+        Call this occasionally during long waits to maintain session
+        and create background traffic noise.
+        """
+        if not self.enabled:
+            return
+        
+        newdid = f"?newdid={village_id}" if village_id else ""
+        
+        # Pick a random "idle" action
+        actions = [
+            (f"/dorf1.php{newdid}", "checking resources"),
+            (f"/dorf2.php{newdid}", "looking at village"),
+            ("/statistiken.php", "checking statistics"),
+            ("/spieler.php", "checking profile"),
+        ]
+        
+        path, desc = random.choice(actions)
+        await self._visit(path, f"idle browsing: {desc}")
+    
+    async def pre_upgrade_flow(
+        self, slot_id: int, village_id: Optional[int] = None
+    ) -> None:
+        """Full navigation flow before upgrading a building/field.
+        
+        Simulates: overview → slot page → (read costs) → upgrade click
+        """
+        if not self.enabled:
+            return
+        
+        if slot_id <= 18:
+            await self.navigate_to_resource_field(slot_id, village_id)
+        else:
+            await self.navigate_to_building(slot_id, village_id)
+        
+        # "Read" the building page (human checks costs/time)
+        await self._delay.wait(ActionType.DECISION, "reviewing upgrade costs")
+    
+    async def pre_send_troops_flow(
+        self, village_id: Optional[int] = None
+    ) -> None:
+        """Full navigation flow before sending troops.
+        
+        Simulates: dorf2 → rally point → fill form → send
+        """
+        if not self.enabled:
+            return
+        
+        await self.navigate_to_rally_point(village_id)
+        await self._delay.wait(ActionType.FORM_FILL, "filling troop form")

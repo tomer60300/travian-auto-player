@@ -1,4 +1,4 @@
-"""Military service for Travian API."""
+"""Military service for Travian API — with stealth-aware delays."""
 from __future__ import annotations
 
 import re
@@ -9,6 +9,7 @@ from ..exceptions import TravianError, InvalidTargetError
 from ..models.military import TroopSendResult
 from ..parsers.html_parser import parse_rally_point_troops, parse_troop_confirm_page, clean_unicode
 from ..constants import EVENT_TYPES
+from ..stealth.human_delay import HumanDelay, ActionType
 from .target_resolver import TargetResolver
 
 import logging
@@ -90,11 +91,16 @@ class MilitaryService:
         village_id: Optional[int] = None,
     ) -> TroopSendResult:
         """
-        Two-step troop sending:
-        1. POST form to /build.php?gid=16&tt=2 -> confirmation page
-        2. Parse hidden fields + checksum, POST confirmation -> troops dispatched
+        Two-step troop sending with stealth:
+        1. Navigate to rally point (if stealth enabled)
+        2. POST form to /build.php?gid=16&tt=2 -> confirmation page
+        3. Human delay (reading confirmation)
+        4. Parse hidden fields + checksum, POST confirmation -> troops dispatched
         """
         try:
+            # Stealth: navigate to rally point first
+            await self.http_client.navigator.navigate_to_rally_point(village_id)
+            
             # Use newdid in the POST URL to set village context
             if village_id:
                 rally_url = f"/build.php?newdid={village_id}&gid=16&tt=2"
@@ -111,6 +117,10 @@ class MilitaryService:
             form_data['eventType'] = str(event_type)
             form_data['ok'] = 'ok'
 
+            # Stealth: human-like delay before submitting troop form
+            delay = self.http_client.human_delay
+            await delay.wait(ActionType.FORM_FILL, "filling troop selection form")
+            
             logger.info(f"Step 1: Sending troop form to ({x},{y}) type={event_type} troops={troops}")
             confirm_html = await self.http_client.post_form(rally_url, form_data)
 
@@ -138,7 +148,9 @@ class MilitaryService:
                     raw_response=f"Step 1 error: No confirmation form returned (server returned {len(confirm_html)} bytes — possible rate limit or session issue)",
                 )
 
-            # ── Step 2: Parse confirmation page ──
+            # ── Step 2: Parse confirmation page (with human delay for reading) ──
+            await self.http_client.human_delay.wait(ActionType.RAPID, "reading troop confirmation")
+            
             confirm_fields = parse_troop_confirm_page(confirm_html)
             checksum = confirm_fields.pop('checksum', '')
 
@@ -170,6 +182,9 @@ class MilitaryService:
             if scout_target:
                 final_data['troops[0][scoutTarget]'] = scout_target
 
+            # Stealth: human reads the confirmation page before clicking send
+            await delay.wait(ActionType.PAGE_LOAD, "reading troop confirmation")
+            
             logger.info(f"Step 2: Confirming with checksum={checksum}")
             result_html = await self.http_client.post_form(rally_url, final_data)
 
@@ -241,3 +256,4 @@ class MilitaryService:
                 snippet = re.sub(r'<[^>]+>', '', html[start:end]).strip()
                 return clean_unicode(snippet)
         return "Unknown error"
+

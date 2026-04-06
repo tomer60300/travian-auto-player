@@ -308,7 +308,14 @@ class AutoScoutService:
                 })
 
             if i < len(targets) - 1:
-                await asyncio.sleep(delay_between)
+                # Stealth: heavy-tailed delay between scout sends
+                from ..stealth.timing import HumanTiming
+                await asyncio.sleep(HumanTiming.delay(delay_between))
+                # Stealth: occasional noise between scouts
+                try:
+                    await self.http_client.noise_injector.maybe_inject_noise()
+                except Exception:
+                    pass
 
         sent = sum(1 for r in results if r["success"])
         self._report(f"Done: {sent}/{len(targets)} scouts sent successfully")
@@ -379,3 +386,4 @@ class AutoScoutService:
             info.is_oasis = True
 
         return info
+
