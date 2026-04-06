@@ -118,6 +118,17 @@ async def analyze_reports(
                 "radius": body.radius,
             },
             "targets": targets,
+            # Diagnostics so the user understands why there may be 0 targets
+            "diagnostics": {
+                "total_reports_listed": getattr(result, "total_reports_listed", None),
+                "reports_skipped_type": getattr(result, "reports_skipped_type", None),
+                "reports_fetched_ok": getattr(result, "reports_fetched_ok", None),
+                "reports_fetched_fail": getattr(result, "reports_fetched_fail", None),
+                "pages_fetched": getattr(result, "pages_fetched", None),
+                "pages_failed": getattr(result, "pages_failed", None),
+                "analysis_duration_seconds": round(getattr(result, "analysis_duration_seconds", 0), 1),
+                "warnings": getattr(result, "warnings", []),
+            },
         }
 
     except TravianError as exc:

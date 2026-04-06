@@ -145,7 +145,7 @@ function RaidTargetAnalyzer() {
   const toast = useToast()
   const [minResources, setMinResources] = useState(200)
   const [analyzerMaxAge, setAnalyzerMaxAge] = useState(24)
-  const [analyzerMaxPages, setAnalyzerMaxPages] = useState(20)
+  const [analyzerMaxPages, setAnalyzerMaxPages] = useState(3)
   const [radius, setRadius] = useState('')
   const [excludeAlliances, setExcludeAlliances] = useState('')
   const [excludePlayers, setExcludePlayers] = useState('')
@@ -299,7 +299,24 @@ function RaidTargetAnalyzer() {
               </table>
             </div>
           ) : (
-            <p className="text-secondary text-sm">No targets found matching the criteria.</p>
+            <div className="text-secondary text-sm">
+              <p className="mb-2">No raidable targets found.</p>
+              <p className="text-xs">The analyzer needs <span className="text-gold">outgoing</span> scout and raid reports — where YOUR troops attacked or scouted another village. Incoming defense reports (others raiding you) cannot be used to score raid targets.</p>
+            </div>
+          )}
+
+          {/* Diagnostics */}
+          {results.diagnostics && (
+            <div className="mt-3 p-3 bg-surface rounded text-xs text-secondary">
+              <p className="font-semibold text-primary mb-1">Diagnostics</p>
+              <p>Reports scanned: {results.diagnostics.total_reports_listed ?? '-'} | Skipped (wrong type): {results.diagnostics.reports_skipped_type ?? '-'} | Fetched OK: {results.diagnostics.reports_fetched_ok ?? '-'} | Failed: {results.diagnostics.reports_fetched_fail ?? '-'}</p>
+              <p>Pages: {results.diagnostics.pages_fetched ?? '-'} fetched, {results.diagnostics.pages_failed ?? '-'} failed | Duration: {results.diagnostics.analysis_duration_seconds ?? '-'}s</p>
+              {results.diagnostics.warnings && results.diagnostics.warnings.length > 0 && (
+                <div className="mt-1 text-warning">
+                  {results.diagnostics.warnings.map((w, i) => <p key={i}>{w}</p>)}
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
