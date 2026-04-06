@@ -12,8 +12,12 @@ build/
 
 # Data files (scraped game data)
 *.csv
-*.json
+
+# JSON — only ignore game data JSONs at root, allow package manifests
+/*.json
 !pyproject.toml
+!frontend/package.json
+!frontend/package-lock.json
 
 # Archives
 *.rar
@@ -40,3 +44,10 @@ memory/
 # Session logs & personal plans
 cli-log.md
 plans/*.yaml
+
+# Web UI — generated / secrets / runtime
+.web_keys
+travian_web.db
+agent-logs/
+frontend/node_modules/
+src/travian_api/web/static/

@@ -1,0 +1,203 @@
+"""Per-user Travian session manager.
+
+Each logged-in web UI user who connects to a Travian server gets a completely
+independent set of service instances (Settings, HttpClient, AuthService, etc.)
+so that cookie jars, JWT tokens, and stealth state never leak between users.
+"""
+
+import asyncio
+import logging
+import tempfile
+from pathlib import Path
+from typing import Optional
+
+from fastapi import Depends, HTTPException, status
+
+from travian_api.clients.http_client import HttpClient
+from travian_api.config import Settings
+from travian_api.models.auth import AuthState
+from travian_api.services.auth_service import AuthService
+from travian_api.services.auto_scout_service import AutoScoutService
+from travian_api.services.build_queue_service import BuildQueueService
+from travian_api.services.building_service import BuildingService
+from travian_api.services.farm_list_service import FarmListService
+from travian_api.services.military_service import MilitaryService
+from travian_api.services.reports_service import ReportsService
+from travian_api.services.target_resolver import TargetResolver
+from travian_api.services.video_reward_service import VideoRewardService
+from travian_api.web.auth import get_current_user
+from travian_api.web.models.db import User
+
+logger = logging.getLogger(__name__)
+
+# Directory for per-session cookie/JWT files so users never collide.
+_SESSION_DATA_DIR = Path(tempfile.gettempdir()) / "travian_web_sessions"
+
+
+class TravianSession:
+    """Holds isolated service instances for one user's Travian connection."""
+
+    def __init__(self, user_id: int, server_url: str, username: str, password: str):
+        self.user_id = user_id
+        self.server_url = server_url
+
+        # ── Per-user data directory ───────────────────────────────────
+        self._data_dir = _SESSION_DATA_DIR / str(user_id)
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── Isolated Settings ─────────────────────────────────────────
+        # Start from a default Settings (reads .env / env-vars once) then
+        # override the per-user fields.  model_copy gives us a new Pydantic
+        # instance without triggering re-validation of untouched fields.
+        base_settings = Settings()
+        self.settings: Settings = base_settings.model_copy(update={
+            "base_url": server_url.rstrip("/"),
+            "username": username,
+            "password": password,
+            # Isolate JWT cache per user so files never collide
+            "jwt_cache_path": str(self._data_dir / "jwt_cache.json"),
+        })
+
+        # ── Isolated HTTP client ──────────────────────────────────────
+        self.http_client = HttpClient(self.settings)
+        # Override the cookie file so each user has their own jar.
+        self.http_client._cookie_file = self._data_dir / "cookies.json"
+
+        # ── Services (all share the same isolated http_client) ────────
+        self.auth_service = AuthService(self.http_client, self.settings)
+        self.building_service = BuildingService(self.http_client)
+        self.target_resolver = TargetResolver(self.http_client)
+        self.military_service = MilitaryService(self.http_client, self.target_resolver)
+        self.build_queue_service = BuildQueueService(self.http_client)
+        self.reports_service = ReportsService(self.http_client)
+        self.farm_service = FarmListService(self.http_client)
+        self.scout_service = AutoScoutService(self.http_client)
+        self.video_service = VideoRewardService(self.http_client)
+
+        # ── State ─────────────────────────────────────────────────────
+        self.auth_state: Optional[AuthState] = None
+        self.active_village_id: Optional[int] = None
+        self.player_name: Optional[str] = None
+        self.tribe_id: Optional[int] = None
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def connect(self) -> AuthState:
+        """Authenticate to the Travian server and populate state."""
+        self.auth_state = await self.auth_service.login()
+        self.active_village_id = self.auth_state.village_id
+        self.player_name = self.auth_state.player_name
+        self.tribe_id = self.auth_state.tribe_id
+        return self.auth_state
+
+    async def disconnect(self) -> None:
+        """Clean up HTTP client and release resources."""
+        try:
+            await self.http_client.close()
+        except Exception as e:
+            logger.warning("Error closing HTTP client for user %s: %s", self.user_id, e)
+
+    # ------------------------------------------------------------------
+    # Village helpers
+    # ------------------------------------------------------------------
+
+    def switch_village(self, village_id: int) -> None:
+        """Switch the active village context.
+
+        Raises ``ValueError`` if *village_id* doesn't belong to this player.
+        """
+        if self.auth_state:
+            for v in self.auth_state.villages:
+                if v.id == village_id:
+                    self.active_village_id = village_id
+                    return
+        raise ValueError(f"Village {village_id} not found for this player")
+
+
+class SessionManager:
+    """Manages all active Travian sessions, keyed by ``user_id``."""
+
+    def __init__(self) -> None:
+        self._sessions: dict[int, TravianSession] = {}
+        self._lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def connect(
+        self,
+        user_id: int,
+        server_url: str,
+        username: str,
+        password: str,
+    ) -> TravianSession:
+        """Create a new session and authenticate to Travian.
+
+        If the user already has an active session it is disconnected first.
+        """
+        await self.disconnect(user_id)
+
+        session = TravianSession(user_id, server_url, username, password)
+        await session.connect()
+
+        async with self._lock:
+            self._sessions[user_id] = session
+
+        logger.info(
+            "User %s connected to %s as %s",
+            user_id,
+            server_url,
+            session.player_name,
+        )
+        return session
+
+    async def disconnect(self, user_id: int) -> None:
+        """Disconnect and remove a user's session (no-op if none exists)."""
+        async with self._lock:
+            session = self._sessions.pop(user_id, None)
+        if session:
+            await session.disconnect()
+            logger.info("User %s disconnected from %s", user_id, session.server_url)
+
+    def get(self, user_id: int) -> Optional[TravianSession]:
+        """Return an active session for *user_id*, or ``None``."""
+        return self._sessions.get(user_id)
+
+    async def disconnect_all(self) -> None:
+        """Disconnect every session (call during application shutdown)."""
+        async with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for session in sessions:
+            await session.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# Global singleton
+# ---------------------------------------------------------------------------
+
+session_manager = SessionManager()
+
+
+# ---------------------------------------------------------------------------
+# FastAPI dependency
+# ---------------------------------------------------------------------------
+
+
+async def get_travian_session(
+    user: User = Depends(get_current_user),
+) -> TravianSession:
+    """FastAPI dependency returning the caller's active Travian session.
+
+    Raises HTTP 403 if the user hasn't connected to a Travian server yet.
+    """
+    session = session_manager.get(user.id)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not connected to a Travian server. Use POST /api/travian/connect first.",
+        )
+    return session
