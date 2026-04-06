@@ -38,6 +38,7 @@ export default function Logs() {
   const [filterLevel, setFilterLevel] = useState('all')
   const [search, setSearch] = useState('')
   const [expandedId, setExpandedId] = useState(null)
+  const [showDetail, setShowDetail] = useState(true)
   const scrollRef = useRef(null)
 
   useEffect(() => {
@@ -113,12 +114,11 @@ export default function Logs() {
         </div>
 
         <label className="flex items-center gap-1 text-xs text-secondary cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={autoScroll}
-            onChange={(e) => setAutoScroll(e.target.checked)}
-            className="checkbox-gold"
-          />
+          <input type="checkbox" checked={showDetail} onChange={(e) => setShowDetail(e.target.checked)} className="checkbox-gold" />
+          Show details
+        </label>
+        <label className="flex items-center gap-1 text-xs text-secondary cursor-pointer select-none">
+          <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} className="checkbox-gold" />
           Auto-scroll
         </label>
       </div>
@@ -134,22 +134,31 @@ export default function Logs() {
             {entries.length === 0 ? 'No activity yet. Navigate the app to see logs.' : 'No entries match your filters.'}
           </div>
         ) : (
-          filtered.map((entry) => (
+          filtered.map((entry) => {
+            const expanded = showDetail || expandedId === entry.id
+            const detailStr = entry.detail
+              ? (typeof entry.detail === 'object' ? JSON.stringify(entry.detail, null, 2) : String(entry.detail))
+              : null
+            return (
             <div
               key={entry.id}
-              className={`ws-panel-line cursor-pointer ${LEVEL_CLASS[entry.level] || 'text-primary'}`}
+              className={`cursor-pointer ${LEVEL_CLASS[entry.level] || 'text-primary'}`}
               onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
+              style={{ padding: '3px 0', borderBottom: '1px solid rgba(58,48,40,0.3)' }}
             >
-              <span className="ws-panel-time shrink-0">[{formatTime(entry.timestamp)}]</span>
-              <span className="text-gold shrink-0 w-[60px] text-right">{SOURCE_LABELS[entry.source] || entry.source}</span>
-              <span className="flex-1 break-all">{entry.message}</span>
-              {entry.detail && expandedId === entry.id && (
-                <div className="w-full mt-1 pl-[140px] text-xs text-secondary break-all font-mono">
-                  {typeof entry.detail === 'object' ? JSON.stringify(entry.detail, null, 2) : String(entry.detail)}
-                </div>
+              <div className="flex gap-2 items-start text-xs">
+                <span className="ws-panel-time shrink-0">[{formatTime(entry.timestamp)}]</span>
+                <span className="text-gold shrink-0 w-[55px] text-right">{SOURCE_LABELS[entry.source] || entry.source}</span>
+                <span className="flex-1 break-all">{entry.message}</span>
+              </div>
+              {detailStr && expanded && (
+                <pre className="mt-1 ml-[120px] text-xs text-secondary break-all whitespace-pre-wrap" style={{ maxHeight: '200px', overflowY: 'auto' }}>
+                  {detailStr}
+                </pre>
               )}
             </div>
-          ))
+            )
+          })
         )}
       </div>
     </div>

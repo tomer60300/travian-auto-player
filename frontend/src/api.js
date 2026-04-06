@@ -20,6 +20,15 @@ function logSource(url) {
   return 'api'
 }
 
+function summarizeData(data, maxLen) {
+  if (data === undefined || data === null) return null
+  try {
+    const str = typeof data === 'string' ? data : JSON.stringify(data)
+    if (str.length <= maxLen) return str
+    return str.slice(0, maxLen) + '...'
+  } catch { return '[unserializable]' }
+}
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
@@ -27,7 +36,8 @@ api.interceptors.request.use((config) => {
   }
   const method = (config.method || 'get').toUpperCase()
   const url = config.url || ''
-  useLogStore.getState().addLog('info', logSource(url), `${method} ${url}`)
+  const body = config.data ? summarizeData(config.data, 500) : null
+  useLogStore.getState().addLog('info', logSource(url), `>> ${method} ${url}`, body)
   return config
 })
 
@@ -38,14 +48,28 @@ api.interceptors.response.use(
     const method = (response.config.method || 'get').toUpperCase()
     const url = response.config.url || ''
     const status = response.status
-    useLogStore.getState().addLog('success', logSource(url), `${method} ${url} -> ${status}`)
+    const data = response.data
+
+    // Build detail summary
+    let detail = null
+    if (Array.isArray(data)) {
+      detail = `[${data.length} items]`
+      if (data.length > 0 && data.length <= 3) detail = summarizeData(data, 800)
+    } else if (data && typeof data === 'object') {
+      detail = summarizeData(data, 800)
+    }
+
+    useLogStore.getState().addLog('success', logSource(url), `<< ${method} ${url} ${status}`, detail)
     return response
   },
   (error) => {
     const url = error.config?.url || ''
+    const method = (error.config?.method || 'get').toUpperCase()
     const status = error.response?.status
-    const detail = error.response?.data?.detail || error.message
-    useLogStore.getState().addLog('error', logSource(url), `${(error.config?.method || 'get').toUpperCase()} ${url} -> ${status || 'ERR'}`, detail)
+    const detail = error.response?.data
+      ? summarizeData(error.response.data, 500)
+      : error.message
+    useLogStore.getState().addLog('error', logSource(url), `<< ${method} ${url} ${status || 'ERR'}`, detail)
 
     if (status === 401 && !logoutTriggered) {
       logoutTriggered = true

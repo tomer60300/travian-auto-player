@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
 let _id = 0
-const MAX_ENTRIES = 500
+const MAX_ENTRIES = 2000
 
 const useLogStore = create((set) => ({
   entries: [],
