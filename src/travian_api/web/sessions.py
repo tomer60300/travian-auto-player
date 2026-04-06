@@ -48,22 +48,31 @@ class TravianSession:
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
         # ── Isolated Settings ─────────────────────────────────────────
-        # Start from a default Settings (reads .env / env-vars once) then
-        # override the per-user fields.  model_copy gives us a new Pydantic
-        # instance without triggering re-validation of untouched fields.
+        # Start from a default Settings (reads .env for stealth config) then
+        # FORCE override all identity fields so .env credentials never leak
+        # between users.
         base_settings = Settings()
         self.settings: Settings = base_settings.model_copy(update={
             "base_url": server_url.rstrip("/"),
             "username": username,
             "password": password,
-            # Isolate JWT cache per user so files never collide
+            # Isolate JWT + cookie cache per user so files never collide
+            "jwt_cache_file": str(self._data_dir / "jwt_cache.json"),
             "jwt_cache_path": str(self._data_dir / "jwt_cache.json"),
         })
 
         # ── Isolated HTTP client ──────────────────────────────────────
         self.http_client = HttpClient(self.settings)
-        # Override the cookie file so each user has their own jar.
+
+        # CRITICAL: Cookie/session isolation for multi-user safety.
+        # HttpClient.__init__ loads cookies from the global .travian_cookies.json
+        # which may contain another user's session. We must:
+        # 1. Clear any cookies loaded from the global file
+        # 2. Set the per-user cookie file path
+        # 3. Load cookies from the per-user file instead
+        self.http_client.clear_cookies()
         self.http_client._cookie_file = self._data_dir / "cookies.json"
+        self.http_client._load_cookies()  # load from per-user file
 
         # ── Services (all share the same isolated http_client) ────────
         self.auth_service = AuthService(self.http_client, self.settings)
