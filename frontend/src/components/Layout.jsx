@@ -121,7 +121,7 @@ export default function Layout() {
           {sidebarOpen && (
             <div
               onClick={() => setSidebarOpen(false)}
-              className="sidebar-overlay fixed inset-0 bg-black/50 z-[149] hidden"
+              className="sidebar-overlay fixed inset-0 bg-black/50 z-[149] md:hidden"
             />
           )}
 

@@ -2,6 +2,7 @@ import axios from 'axios';
 
 const api = axios.create({
   baseURL: '/api',
+  timeout: 30000,
 });
 
 api.interceptors.request.use((config) => {
@@ -12,22 +13,26 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+let logoutTriggered = false;
+
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    if (error.response?.status === 401 && !logoutTriggered) {
       const hadToken = !!localStorage.getItem('token');
       localStorage.removeItem('token');
 
-      // If there was a token and it's now rejected, force the auth store
-      // to update. Import is dynamic to avoid circular deps.
       if (hadToken) {
-        import('./stores/authStore').then(({ default: useAuthStore }) => {
-          const state = useAuthStore.getState();
-          if (state.isAuthenticated) {
-            state.logout();
-          }
-        });
+        logoutTriggered = true;
+        import('./stores/authStore')
+          .then(({ default: useAuthStore }) => {
+            const state = useAuthStore.getState();
+            if (state.isAuthenticated) {
+              state.logout();
+            }
+          })
+          .catch(() => {})
+          .finally(() => { logoutTriggered = false; });
       }
     }
     return Promise.reject(error);

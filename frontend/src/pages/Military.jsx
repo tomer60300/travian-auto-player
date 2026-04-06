@@ -77,6 +77,10 @@ export default function Military() {
       toast.error('Please enter X and Y coordinates')
       return
     }
+    if (isNaN(parseInt(scoutX, 10)) || isNaN(parseInt(scoutY, 10))) {
+      toast.error('Coordinates must be valid numbers')
+      return
+    }
     setScoutConfirmOpen(true)
   }
 
@@ -106,6 +110,10 @@ export default function Military() {
   function handleRaidClick() {
     if (!raidX || !raidY) {
       toast.error('Please enter X and Y coordinates')
+      return
+    }
+    if (isNaN(parseInt(raidX, 10)) || isNaN(parseInt(raidY, 10))) {
+      toast.error('Coordinates must be valid numbers')
       return
     }
     if (Object.keys(troops).length === 0) {

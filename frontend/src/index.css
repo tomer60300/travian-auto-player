@@ -25,11 +25,12 @@ body {
 
 h1, h2, h3 { font-family: 'Cinzel', serif; }
 
-/* Scrollbar styling */
+/* Scrollbar styling — WebKit + Firefox */
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-track { background: var(--bg-surface); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--accent-gold); }
+* { scrollbar-width: thin; scrollbar-color: var(--border) var(--bg-surface); }
 
 /* Animations */
 @keyframes spin { to { transform: rotate(360deg); } }

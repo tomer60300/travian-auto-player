@@ -38,7 +38,7 @@ function SingleBar({ config, resources }) {
           </span>
         </span>
       </div>
-      <div className="h-1.5 bg-base rounded-sm overflow-hidden">
+      <div className="h-1.5 bg-base rounded-sm overflow-hidden" role="progressbar" aria-label={config.label} aria-valuenow={current} aria-valuemin={0} aria-valuemax={max}>
         <div
           className="h-full rounded-sm transition-[width] duration-500 ease-in-out"
           style={{ width: `${pct}%`, backgroundColor: barColor }}

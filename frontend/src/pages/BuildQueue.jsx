@@ -376,6 +376,12 @@ export default function BuildQueue() {
       }
     )
 
+    if (!ws) {
+      addMessage('error', 'No auth token — cannot connect')
+      setRunning(false)
+      setWsStatus('disconnected')
+      return
+    }
     wsRef.current = ws
 
     // Send config once connected, with tracked cleanup

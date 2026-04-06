@@ -297,10 +297,15 @@ export default function FarmLists() {
       }
     )
 
+    if (!ws) {
+      toast.error('No auth token — cannot connect')
+      setLoopRunning(false)
+      setWsStatus('disconnected')
+      return
+    }
+
     // Once open, send start action
-    const origOnOpen = ws.onopen
-    ws.onopen = (e) => {
-      origOnOpen?.(e)
+    ws.onopen = () => {
       setWsStatus('running')
       ws.send(JSON.stringify({ action: 'start' }))
     }

@@ -28,8 +28,11 @@ const useAuthStore = create((set, get) => ({
     try {
       const res = await api.get('/users/me');
       set({ user: res.data });
-    } catch {
-      get().logout();
+    } catch (e) {
+      // Only logout on auth failure, not network errors
+      if (e.response?.status === 401 || e.response?.status === 403) {
+        get().logout();
+      }
     }
   },
 

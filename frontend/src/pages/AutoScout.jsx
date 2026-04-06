@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useMemo } from 'react'
+import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import api from '../api'
 import { createWebSocket } from '../ws'
 import { useToast } from '../components/Toast'
@@ -302,6 +302,16 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   const activeVillageId = useGameStore((s) => s.activeVillageId)
   const toast = useToast()
 
+  // Clean up WebSocket on unmount
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) {
+        try { wsRef.current.close() } catch {}
+        wsRef.current = null
+      }
+    }
+  }, [])
+
   const msgIdRef = useRef(0)
   const addMessage = useCallback((type, text) => {
     setMessages((prev) => [...prev, { id: ++msgIdRef.current, type, text, timestamp: Date.now() }])
@@ -381,12 +391,16 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
       }
     )
 
+    if (!ws) {
+      addMessage('error', 'No auth token — cannot connect')
+      setRunning(false)
+      setWsStatus('disconnected')
+      return
+    }
     wsRef.current = ws
 
     // Send config after connection opens
-    const origOnOpen = ws.onopen
     ws.onopen = () => {
-      origOnOpen?.()
       setWsStatus('running')
       addMessage('info', 'Connected. Sending scout configuration...')
       ws.send(

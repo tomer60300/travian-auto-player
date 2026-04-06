@@ -10,6 +10,10 @@ export default class ErrorBoundary extends Component {
     return { hasError: true, error }
   }
 
+  componentDidCatch(error, errorInfo) {
+    console.error('ErrorBoundary caught:', error, errorInfo?.componentStack)
+  }
+
   handleReset = () => {
     this.setState({ hasError: false, error: null })
   }
@@ -28,7 +32,7 @@ export default class ErrorBoundary extends Component {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen flex items-center justify-center bg-base p-6">
+        <div className="min-h-screen flex items-center justify-center bg-base p-6" role="alert">
           <div className="card max-w-md w-full text-center">
             <h2 className="heading-gold text-xl mb-3">Something went wrong</h2>
             <p className="text-secondary text-sm mb-1">

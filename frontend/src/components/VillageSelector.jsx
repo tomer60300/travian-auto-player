@@ -10,7 +10,7 @@ export default function VillageSelector() {
   return (
     <select
       value={activeVillageId || ''}
-      onChange={(e) => switchVillage(Number(e.target.value))}
+      onChange={(e) => { const id = Number(e.target.value); if (id) switchVillage(id) }}
       className="input-field max-w-[260px] cursor-pointer bg-surface text-primary"
     >
       {villages.map((v) => (
