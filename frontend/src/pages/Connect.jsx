@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import api from '../api'
 import useGameStore from '../stores/gameStore'
 import { useToast } from '../components/Toast'
@@ -10,10 +10,13 @@ export default function Connect() {
   const connect = useGameStore((s) => s.connect)
   const connectFromSaved = useGameStore((s) => s.connectFromSaved)
   const connected = useGameStore((s) => s.connected)
+  const justConnectedRef = useRef(false)
 
-  // If already connected (e.g., navigated here directly), go to dashboard
+  // Redirect to dashboard only after a NEW connection is made on this page
   useEffect(() => {
-    if (connected) navigate('/', { replace: true })
+    if (connected && justConnectedRef.current) {
+      navigate('/', { replace: true })
+    }
   }, [connected, navigate])
 
   // Saved servers state
@@ -53,6 +56,7 @@ export default function Connect() {
     setConnectingServerId(server.id)
     try {
       await connectFromSaved(server.id)
+      justConnectedRef.current = true
       toast.success(`Connected to ${server.label || server.server_url}`)
       navigate('/')
     } catch (err) {
@@ -102,6 +106,7 @@ export default function Connect() {
     setFormLoading(true)
     try {
       await connect(serverUrl.trim(), travianUsername.trim(), travianPassword)
+      justConnectedRef.current = true
 
       if (saveCredentials) {
         try {
