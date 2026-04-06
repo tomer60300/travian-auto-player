@@ -61,53 +61,28 @@ export default function ConfirmDialog({
 
   return (
     <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 9000,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: 'rgba(0, 0, 0, 0.6)',
-      }}
+      className="dialog-overlay"
       onClick={(e) => {
         if (e.target === e.currentTarget) onCancel?.()
       }}
     >
       <div
         ref={dialogRef}
-        className="card"
-        style={{
-          minWidth: '320px',
-          maxWidth: '450px',
-          padding: '1.5rem',
-        }}
+        className="dialog-card"
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirm-title"
       >
         <h3
           id="confirm-title"
-          style={{
-            fontFamily: 'Cinzel, serif',
-            fontSize: '1.2rem',
-            marginBottom: '0.75rem',
-            color: 'var(--text-primary)',
-          }}
+          className="heading-gold text-lg mb-3"
         >
           {title}
         </h3>
-        <p
-          style={{
-            color: 'var(--text-secondary)',
-            fontSize: '0.9rem',
-            marginBottom: '1.5rem',
-            lineHeight: 1.5,
-          }}
-        >
+        <p className="text-secondary text-sm mb-6 leading-relaxed">
           {message}
         </p>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
+        <div className="flex justify-end gap-3">
           <button className="btn-secondary" onClick={onCancel}>
             {cancelText}
           </button>

@@ -39,20 +39,13 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
 
   return (
     <div className="card">
-      <h3
-        style={{
-          fontFamily: 'Cinzel, serif',
-          fontSize: '1.1rem',
-          marginBottom: '1rem',
-          color: 'var(--accent-gold)',
-        }}
-      >
+      <h3 className="heading-gold text-lg mb-4">
         Scan Configuration
       </h3>
 
       {/* Radius slider */}
-      <div style={{ marginBottom: '1rem' }}>
-        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.35rem' }}>
+      <div className="mb-4">
+        <label className="field-label-lg">
           Radius: {radius}
         </label>
         <input
@@ -61,18 +54,18 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
           max={50}
           value={radius}
           onChange={(e) => setRadius(Number(e.target.value))}
-          style={{ width: '100%', accentColor: 'var(--accent-gold)' }}
+          className="w-full checkbox-gold"
         />
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+        <div className="flex justify-between text-xs text-secondary">
           <span>5</span>
           <span>50</span>
         </div>
       </div>
 
       {/* Population range */}
-      <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
-        <div style={{ flex: 1 }}>
-          <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.35rem' }}>
+      <div className="flex gap-4 mb-4">
+        <div className="flex-1">
+          <label className="field-label-lg">
             Min Population
           </label>
           <input
@@ -83,8 +76,8 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             onChange={(e) => setMinPop(Number(e.target.value))}
           />
         </div>
-        <div style={{ flex: 1 }}>
-          <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.35rem' }}>
+        <div className="flex-1">
+          <label className="field-label-lg">
             Max Population
           </label>
           <input
@@ -98,40 +91,39 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       </div>
 
       {/* Checkboxes */}
-      <div style={{ display: 'flex', gap: '1.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', color: 'var(--text-primary)', cursor: 'pointer' }}>
+      <div className="flex gap-6 mb-4 flex-wrap">
+        <label className="check-label">
           <input
             type="checkbox"
             checked={noPlayer}
             onChange={(e) => setNoPlayer(e.target.checked)}
-            style={{ accentColor: 'var(--accent-gold)' }}
+            className="checkbox-gold"
           />
           Exclude player-owned villages
         </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.85rem', color: 'var(--text-primary)', cursor: 'pointer' }}>
+        <label className="check-label">
           <input
             type="checkbox"
             checked={showOases}
             onChange={(e) => setShowOases(e.target.checked)}
-            style={{ accentColor: 'var(--accent-gold)' }}
+            className="checkbox-gold"
           />
           Include oases
         </label>
       </div>
 
       {/* Result limit */}
-      <div style={{ marginBottom: '1.25rem' }}>
-        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.35rem' }}>
+      <div className="mb-5">
+        <label className="field-label-lg">
           Result Limit
         </label>
         <input
           type="number"
-          className="input-field"
+          className="input-field max-w-[150px]"
           value={limit}
           min={1}
           max={500}
           onChange={(e) => setLimit(Number(e.target.value))}
-          style={{ maxWidth: '150px' }}
         />
       </div>
 
@@ -149,37 +141,9 @@ function SortableHeader({ label, field, sortField, sortDir, onSort }) {
   return (
     <th
       onClick={() => onSort(field)}
-      style={{
-        padding: '0.6rem 0.75rem',
-        textAlign: 'left',
-        fontSize: '0.8rem',
-        color: active ? 'var(--accent-gold)' : 'var(--text-secondary)',
-        cursor: 'pointer',
-        userSelect: 'none',
-        whiteSpace: 'nowrap',
-        borderBottom: '1px solid var(--border)',
-        fontWeight: 600,
-      }}
+      className={`sortable ${active ? 'sort-active' : ''}`}
     >
       {label}{arrow}
-    </th>
-  )
-}
-
-function PlainHeader({ label }) {
-  return (
-    <th
-      style={{
-        padding: '0.6rem 0.75rem',
-        textAlign: 'left',
-        fontSize: '0.8rem',
-        color: 'var(--text-secondary)',
-        whiteSpace: 'nowrap',
-        borderBottom: '1px solid var(--border)',
-        fontWeight: 600,
-      }}
-    >
-      {label}
     </th>
   )
 }
@@ -243,55 +207,39 @@ function ScanResultsTable({ results, selected, setSelected }) {
   }, [results, sortField, sortDir])
 
   return (
-    <div className="card" style={{ padding: '1rem' }}>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '0.75rem',
-          flexWrap: 'wrap',
-          gap: '0.5rem',
-        }}
-      >
-        <h3
-          style={{
-            fontFamily: 'Cinzel, serif',
-            fontSize: '1.1rem',
-            margin: 0,
-            color: 'var(--accent-gold)',
-          }}
-        >
+    <div className="card">
+      <div className="flex justify-between items-center mb-3 flex-wrap gap-2">
+        <h3 className="heading-gold text-lg">
           Scan Results ({results.length} targets)
         </h3>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <button className="btn-secondary" style={{ fontSize: '0.8rem', padding: '0.3rem 0.75rem' }} onClick={toggleAll}>
+        <div className="flex gap-2 items-center">
+          <button className="btn-secondary btn-xs" onClick={toggleAll}>
             {allSelected ? 'Deselect All' : 'Select All'}
           </button>
-          <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center' }}>
+          <span className="text-xs text-secondary">
             {selected.size} selected
           </span>
         </div>
       </div>
 
-      <div style={{ overflowX: 'auto', maxHeight: '400px', overflowY: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-          <thead style={{ position: 'sticky', top: 0, backgroundColor: 'var(--bg-card)', zIndex: 1 }}>
+      <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+        <table className="data-table">
+          <thead className="sticky top-0 bg-card z-[1]">
             <tr>
-              <th style={{ padding: '0.6rem 0.75rem', borderBottom: '1px solid var(--border)', width: '40px' }}>
+              <th className="w-10">
                 <input
                   type="checkbox"
                   checked={allSelected}
                   onChange={toggleAll}
-                  style={{ accentColor: 'var(--accent-gold)' }}
+                  className="checkbox-gold"
                 />
               </th>
-              <PlainHeader label="Coords" />
-              <PlainHeader label="Village Name" />
+              <th>Coords</th>
+              <th>Village Name</th>
               <SortableHeader label="Population" field="population" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <SortableHeader label="Distance" field="distance" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <PlainHeader label="Player" />
-              <PlainHeader label="Type" />
+              <th>Player</th>
+              <th>Type</th>
             </tr>
           </thead>
           <tbody>
@@ -302,43 +250,33 @@ function ScanResultsTable({ results, selected, setSelected }) {
                 <tr
                   key={origIdx}
                   onClick={() => toggleRow(origIdx)}
-                  style={{
-                    cursor: 'pointer',
-                    backgroundColor: isSelected ? 'rgba(201, 168, 76, 0.08)' : 'transparent',
-                    transition: 'background-color 0.15s',
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!isSelected) e.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.03)'
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.backgroundColor = isSelected ? 'rgba(201, 168, 76, 0.08)' : 'transparent'
-                  }}
+                  className={`row-clickable ${isSelected ? 'row-selected' : ''}`}
                 >
-                  <td style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)' }}>
+                  <td>
                     <input
                       type="checkbox"
                       checked={isSelected}
                       onChange={() => toggleRow(origIdx)}
                       onClick={(e) => e.stopPropagation()}
-                      style={{ accentColor: 'var(--accent-gold)' }}
+                      className="checkbox-gold"
                     />
                   </td>
-                  <td style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)', fontSize: '0.85rem', fontFamily: 'monospace', color: 'var(--accent-gold)' }}>
+                  <td className="font-mono text-gold">
                     ({row.x}, {row.y})
                   </td>
-                  <td style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)', fontSize: '0.85rem' }}>
+                  <td>
                     {row.name || '---'}
                   </td>
-                  <td style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)', fontSize: '0.85rem' }}>
+                  <td>
                     {row.population ?? '---'}
                   </td>
-                  <td style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)', fontSize: '0.85rem', fontFamily: 'monospace' }}>
+                  <td className="font-mono">
                     {row.distance != null ? row.distance.toFixed(1) : '---'}
                   </td>
-                  <td style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)', fontSize: '0.85rem', color: row.player ? 'var(--text-primary)' : 'var(--text-secondary)', fontStyle: row.player ? 'normal' : 'italic' }}>
+                  <td className={row.player ? 'text-primary' : 'text-secondary italic'}>
                     {row.player || 'Unoccupied'}
                   </td>
-                  <td style={{ padding: '0.5rem 0.75rem', borderBottom: '1px solid var(--border)', fontSize: '0.85rem' }}>
+                  <td>
                     {row.type || '---'}
                   </td>
                 </tr>
@@ -473,23 +411,18 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
     addMessage('warning', 'Auto-scout stopped by user')
   }
 
+  const progressPct = progress ? (progress.index / progress.total) * 100 : 0
+
   return (
     <div className="card">
-      <h3
-        style={{
-          fontFamily: 'Cinzel, serif',
-          fontSize: '1.1rem',
-          marginBottom: '1rem',
-          color: 'var(--accent-gold)',
-        }}
-      >
+      <h3 className="heading-gold text-lg mb-4">
         Auto-Scout
       </h3>
 
-      <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
+      <div className="flex gap-4 mb-4 flex-wrap">
         {/* Scout amount */}
-        <div style={{ flex: '1 1 120px', minWidth: '120px' }}>
-          <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.35rem' }}>
+        <div className="flex-1 min-w-[120px]">
+          <label className="field-label-lg">
             Scouts per target
           </label>
           <input
@@ -504,8 +437,8 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
         </div>
 
         {/* Delay */}
-        <div style={{ flex: '1 1 120px', minWidth: '120px' }}>
-          <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.35rem' }}>
+        <div className="flex-1 min-w-[120px]">
+          <label className="field-label-lg">
             Delay between sends (s)
           </label>
           <input
@@ -521,12 +454,12 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
       </div>
 
       {/* Scout type radio */}
-      <div style={{ marginBottom: '1.25rem' }}>
-        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '0.5rem' }}>
+      <div className="mb-5">
+        <label className="field-label-lg mb-2">
           Scout type
         </label>
-        <div style={{ display: 'flex', gap: '1.5rem' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)', cursor: 'pointer' }}>
+        <div className="flex gap-6">
+          <label className="check-label">
             <input
               type="radio"
               name="scoutType"
@@ -534,11 +467,11 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
               checked={scoutType === 'resources'}
               onChange={() => setScoutType('resources')}
               disabled={running}
-              style={{ accentColor: 'var(--accent-gold)' }}
+              className="accent-radio"
             />
             Resources
           </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', color: 'var(--text-primary)', cursor: 'pointer' }}>
+          <label className="check-label">
             <input
               type="radio"
               name="scoutType"
@@ -546,7 +479,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
               checked={scoutType === 'defenses'}
               onChange={() => setScoutType('defenses')}
               disabled={running}
-              style={{ accentColor: 'var(--accent-gold)' }}
+              className="accent-radio"
             />
             Defenses
           </label>
@@ -554,7 +487,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
       </div>
 
       {/* Buttons */}
-      <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1rem' }}>
+      <div className="flex gap-3 mb-4">
         {!running ? (
           <button className="btn-primary" onClick={handleStart} disabled={selected.size === 0}>
             Start Auto-Scout ({selected.size} targets)
@@ -568,27 +501,15 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
 
       {/* Progress bar */}
       {progress && (
-        <div style={{ marginBottom: '1rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.35rem' }}>
+        <div className="mb-4">
+          <div className="flex justify-between text-xs text-secondary mb-1">
             <span>Scouting target {progress.index}/{progress.total}...</span>
-            <span>{Math.round((progress.index / progress.total) * 100)}%</span>
+            <span>{Math.round(progressPct)}%</span>
           </div>
-          <div
-            style={{
-              height: '6px',
-              backgroundColor: 'var(--bg-surface)',
-              borderRadius: '3px',
-              overflow: 'hidden',
-            }}
-          >
+          <div className="progress-track">
             <div
-              style={{
-                height: '100%',
-                width: `${(progress.index / progress.total) * 100}%`,
-                backgroundColor: 'var(--accent-gold)',
-                borderRadius: '3px',
-                transition: 'width 0.3s ease',
-              }}
+              className="progress-fill"
+              style={{ width: `${progressPct}%` }}
             />
           </div>
         </div>
@@ -616,20 +537,13 @@ export default function AutoScout() {
   }
 
   return (
-    <div style={{ padding: '1.5rem', maxWidth: '1100px', margin: '0 auto' }}>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '1.25rem',
-        }}
-      >
-        <h2 style={{ fontFamily: 'Cinzel, serif', fontSize: '1.5rem', margin: 0 }}>Auto Scout</h2>
+    <div className="p-6 max-w-[1100px] mx-auto">
+      <div className="flex justify-between items-center mb-5">
+        <h2 className="heading-gold text-2xl">Auto Scout</h2>
         <VillageSelector />
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+      <div className="flex flex-col gap-4">
         <ScanConfigPanel
           onScanComplete={handleScanComplete}
           scanning={scanning}
@@ -645,8 +559,8 @@ export default function AutoScout() {
         )}
 
         {scanResults && scanResults.length === 0 && (
-          <div className="card" style={{ textAlign: 'center', padding: '2rem' }}>
-            <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+          <div className="card text-center p-8">
+            <p className="text-secondary">
               No targets found matching your criteria. Try increasing the radius or adjusting filters.
             </p>
           </div>

@@ -57,23 +57,14 @@ plan:
   },
 }
 
-const statusBadgeStyle = (status) => {
-  const colors = {
-    pending: { bg: 'rgba(196, 129, 47, 0.15)', color: 'var(--warning)' },
-    done: { bg: 'rgba(74, 140, 74, 0.15)', color: 'var(--success)' },
-    error: { bg: 'rgba(179, 64, 64, 0.15)', color: 'var(--danger)' },
-    skipped: { bg: 'rgba(74, 124, 140, 0.15)', color: 'var(--info)' },
+function statusBadgeClass(status) {
+  const map = {
+    pending: 'status-badge-pending',
+    done: 'status-badge-done',
+    error: 'status-badge-error',
+    skipped: 'status-badge-skipped',
   }
-  const c = colors[status] || colors.pending
-  return {
-    display: 'inline-block',
-    padding: '0.15rem 0.5rem',
-    borderRadius: '0.25rem',
-    fontSize: '0.75rem',
-    fontWeight: 600,
-    backgroundColor: c.bg,
-    color: c.color,
-  }
+  return map[status] || 'status-badge-pending'
 }
 
 function YamlEditor({ value, onChange }) {
@@ -95,30 +86,9 @@ function YamlEditor({ value, onChange }) {
   }
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        border: '1px solid var(--border)',
-        borderRadius: '0.375rem',
-        overflow: 'hidden',
-        backgroundColor: '#0d0b09',
-        fontFamily: "'Courier New', Consolas, monospace",
-        fontSize: '0.85rem',
-        lineHeight: '1.6',
-      }}
-    >
+    <div className="yaml-editor">
       {/* Line numbers */}
-      <div
-        style={{
-          padding: '0.75rem 0.5rem',
-          textAlign: 'right',
-          color: 'var(--text-secondary)',
-          backgroundColor: '#161310',
-          userSelect: 'none',
-          minWidth: '2.5rem',
-          borderRight: '1px solid var(--border)',
-        }}
-      >
+      <div className="yaml-line-numbers">
         {Array.from({ length: lineCount }, (_, i) => (
           <div key={i}>{i + 1}</div>
         ))}
@@ -130,23 +100,7 @@ function YamlEditor({ value, onChange }) {
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={handleKeyDown}
         spellCheck={false}
-        style={{
-          flex: 1,
-          padding: '0.75rem',
-          background: 'transparent',
-          color: 'var(--text-primary)',
-          border: 'none',
-          outline: 'none',
-          resize: 'vertical',
-          minHeight: '280px',
-          fontFamily: 'inherit',
-          fontSize: 'inherit',
-          lineHeight: 'inherit',
-          tabSize: 2,
-          whiteSpace: 'pre',
-          overflowWrap: 'normal',
-          overflowX: 'auto',
-        }}
+        className="yaml-textarea"
       />
     </div>
   )
@@ -171,99 +125,46 @@ function BuildingReferencePanel() {
   }
 
   return (
-    <div className="card" style={{ padding: '1rem' }}>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '0.75rem',
-        }}
-      >
-        <h3
-          style={{
-            fontFamily: 'Cinzel, serif',
-            fontSize: '1rem',
-            color: 'var(--accent-gold)',
-            margin: 0,
-          }}
-        >
+    <div className="card">
+      <div className="flex justify-between items-center mb-3">
+        <h3 className="heading-gold text-base">
           Building Reference
         </h3>
         <button
-          className="btn-secondary"
+          className="btn-secondary btn-xs"
           onClick={fetchBuildings}
           disabled={loading}
-          style={{ fontSize: '0.8rem', padding: '0.3rem 0.75rem' }}
         >
           {loading ? 'Loading...' : 'Show Current Buildings'}
         </button>
       </div>
 
       {error && (
-        <div
-          style={{
-            color: 'var(--danger)',
-            fontSize: '0.85rem',
-            padding: '0.5rem',
-            backgroundColor: 'rgba(179, 64, 64, 0.1)',
-            borderRadius: '0.25rem',
-          }}
-        >
+        <div className="error-box">
           {error}
         </div>
       )}
 
       {buildings && Array.isArray(buildings) && buildings.length > 0 && (
-        <div style={{ overflowX: 'auto' }}>
-          <table
-            style={{
-              width: '100%',
-              borderCollapse: 'collapse',
-              fontSize: '0.8rem',
-            }}
-          >
+        <div className="overflow-x-auto">
+          <table className="data-table">
             <thead>
-              <tr
-                style={{
-                  borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-secondary)',
-                  textAlign: 'left',
-                }}
-              >
-                <th style={{ padding: '0.4rem 0.5rem' }}>Slot</th>
-                <th style={{ padding: '0.4rem 0.5rem' }}>Building</th>
-                <th style={{ padding: '0.4rem 0.5rem', textAlign: 'right' }}>Level</th>
+              <tr>
+                <th>Slot</th>
+                <th>Building</th>
+                <th className="text-right">Level</th>
               </tr>
             </thead>
             <tbody>
               {buildings.map((b, i) => (
-                <tr
-                  key={b.slot_id ?? i}
-                  style={{
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <td
-                    style={{
-                      padding: '0.35rem 0.5rem',
-                      color: 'var(--text-secondary)',
-                      fontFamily: 'monospace',
-                    }}
-                  >
+                <tr key={b.slot_id ?? i}>
+                  <td className="text-secondary font-mono">
                     {b.slot_id ?? b.id ?? i}
                   </td>
-                  <td style={{ padding: '0.35rem 0.5rem' }}>
+                  <td>
                     {b.name ?? b.building_name ?? '---'}
                   </td>
-                  <td
-                    style={{
-                      padding: '0.35rem 0.5rem',
-                      textAlign: 'right',
-                      color: 'var(--accent-gold)',
-                      fontFamily: 'monospace',
-                    }}
-                  >
+                  <td className="text-right text-gold font-mono">
                     {b.level ?? b.current_level ?? 0}
                   </td>
                 </tr>
@@ -274,7 +175,7 @@ function BuildingReferencePanel() {
       )}
 
       {buildings && Array.isArray(buildings) && buildings.length === 0 && (
-        <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', fontStyle: 'italic' }}>
+        <div className="text-secondary text-sm italic">
           No buildings found.
         </div>
       )}
@@ -286,29 +187,17 @@ function ValidationResults({ data }) {
   if (!data) return null
 
   return (
-    <div className="card" style={{ padding: '1rem' }}>
-      <h3
-        style={{
-          fontFamily: 'Cinzel, serif',
-          fontSize: '1rem',
-          color: 'var(--accent-gold)',
-          marginBottom: '0.75rem',
-        }}
-      >
+    <div className="card">
+      <h3 className="heading-gold text-base mb-3">
         Validation Results
       </h3>
 
       {data.messages && data.messages.length > 0 && (
-        <div style={{ marginBottom: '0.75rem' }}>
+        <div className="mb-3">
           {data.messages.map((msg, i) => (
             <div
               key={i}
-              style={{
-                fontSize: '0.8rem',
-                color: 'var(--text-secondary)',
-                padding: '0.2rem 0',
-                fontFamily: 'monospace',
-              }}
+              className="text-xs text-secondary py-0.5 font-mono"
             >
               {msg}
             </div>
@@ -317,77 +206,39 @@ function ValidationResults({ data }) {
       )}
 
       {data.items && data.items.length > 0 && (
-        <div style={{ overflowX: 'auto' }}>
-          <table
-            style={{
-              width: '100%',
-              borderCollapse: 'collapse',
-              fontSize: '0.8rem',
-            }}
-          >
+        <div className="overflow-x-auto">
+          <table className="data-table">
             <thead>
-              <tr
-                style={{
-                  borderBottom: '1px solid var(--border)',
-                  color: 'var(--text-secondary)',
-                  textAlign: 'left',
-                }}
-              >
-                <th style={{ padding: '0.4rem 0.5rem' }}>Building</th>
-                <th style={{ padding: '0.4rem 0.5rem', textAlign: 'center' }}>Slot</th>
-                <th style={{ padding: '0.4rem 0.5rem', textAlign: 'center' }}>Current</th>
-                <th style={{ padding: '0.4rem 0.5rem', textAlign: 'center' }}>Target</th>
-                <th style={{ padding: '0.4rem 0.5rem', textAlign: 'center' }}>Status</th>
+              <tr>
+                <th>Building</th>
+                <th className="text-center">Slot</th>
+                <th className="text-center">Current</th>
+                <th className="text-center">Target</th>
+                <th className="text-center">Status</th>
               </tr>
             </thead>
             <tbody>
               {data.items.map((item, i) => (
-                <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ padding: '0.35rem 0.5rem' }}>
+                <tr key={i}>
+                  <td>
                     {item.building}
                     {item.is_construction && (
-                      <span
-                        style={{
-                          marginLeft: '0.4rem',
-                          fontSize: '0.7rem',
-                          color: 'var(--warning)',
-                        }}
-                      >
+                      <span className="ml-1.5 text-xs text-warning">
                         (new)
                       </span>
                     )}
                   </td>
-                  <td
-                    style={{
-                      padding: '0.35rem 0.5rem',
-                      textAlign: 'center',
-                      fontFamily: 'monospace',
-                      color: 'var(--text-secondary)',
-                    }}
-                  >
+                  <td className="text-center font-mono text-secondary">
                     {item.slot_id ?? '---'}
                   </td>
-                  <td
-                    style={{
-                      padding: '0.35rem 0.5rem',
-                      textAlign: 'center',
-                      fontFamily: 'monospace',
-                    }}
-                  >
+                  <td className="text-center font-mono">
                     {item.current_level ?? '---'}
                   </td>
-                  <td
-                    style={{
-                      padding: '0.35rem 0.5rem',
-                      textAlign: 'center',
-                      fontFamily: 'monospace',
-                      color: 'var(--accent-gold)',
-                    }}
-                  >
+                  <td className="text-center font-mono text-gold">
                     {item.target}
                   </td>
-                  <td style={{ padding: '0.35rem 0.5rem', textAlign: 'center' }}>
-                    <span style={statusBadgeStyle(item.status)}>{item.status}</span>
+                  <td className="text-center">
+                    <span className={`status-badge ${statusBadgeClass(item.status)}`}>{item.status}</span>
                   </td>
                 </tr>
               ))}
@@ -546,48 +397,25 @@ export default function BuildQueue() {
   }
 
   return (
-    <div style={{ padding: '1.5rem', maxWidth: '960px', margin: '0 auto' }}>
+    <div className="p-6 max-w-[960px] mx-auto">
       {/* Header */}
-      <h2
-        style={{
-          fontFamily: 'Cinzel, serif',
-          fontSize: '1.5rem',
-          marginBottom: '1.25rem',
-        }}
-      >
+      <h2 className="heading-gold text-2xl mb-5">
         Build Queue
       </h2>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+      <div className="flex flex-col gap-4">
         {/* YAML Editor Panel */}
-        <div className="card" style={{ padding: '1rem' }}>
-          <div
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: '0.75rem',
-              flexWrap: 'wrap',
-              gap: '0.5rem',
-            }}
-          >
-            <h3
-              style={{
-                fontFamily: 'Cinzel, serif',
-                fontSize: '1rem',
-                color: 'var(--accent-gold)',
-                margin: 0,
-              }}
-            >
+        <div className="card">
+          <div className="flex justify-between items-center mb-3 flex-wrap gap-2">
+            <h3 className="heading-gold text-base">
               Build Plan (YAML)
             </h3>
-            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+            <div className="flex gap-1.5 flex-wrap">
               {Object.entries(TEMPLATES).map(([key, tpl]) => (
                 <button
                   key={key}
-                  className="btn-secondary"
+                  className="btn-secondary btn-xs"
                   onClick={() => handleTemplateInsert(key)}
-                  style={{ fontSize: '0.75rem', padding: '0.25rem 0.6rem' }}
                 >
                   {tpl.label}
                 </button>
@@ -596,13 +424,7 @@ export default function BuildQueue() {
           </div>
           <YamlEditor value={yamlContent} onChange={handleYamlChange} />
           {activeVillageId && (
-            <div
-              style={{
-                marginTop: '0.5rem',
-                fontSize: '0.75rem',
-                color: 'var(--text-secondary)',
-              }}
-            >
+            <div className="mt-2 text-xs text-secondary">
               Active village ID: {activeVillageId} (used when village_id is "auto")
             </div>
           )}
@@ -612,35 +434,13 @@ export default function BuildQueue() {
         <BuildingReferencePanel />
 
         {/* Execution Options */}
-        <div className="card" style={{ padding: '1rem' }}>
-          <h3
-            style={{
-              fontFamily: 'Cinzel, serif',
-              fontSize: '1rem',
-              color: 'var(--accent-gold)',
-              marginBottom: '0.75rem',
-            }}
-          >
+        <div className="card">
+          <h3 className="heading-gold text-base mb-3">
             Execution Options
           </h3>
-          <div
-            style={{
-              display: 'flex',
-              gap: '1.5rem',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-            }}
-          >
+          <div className="flex gap-6 items-center flex-wrap">
             {/* Poll Interval */}
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                fontSize: '0.85rem',
-                color: 'var(--text-secondary)',
-              }}
-            >
+            <label className="check-label-secondary gap-2">
               Poll interval (s):
               <input
                 type="number"
@@ -648,47 +448,28 @@ export default function BuildQueue() {
                 max={600}
                 value={pollInterval}
                 onChange={(e) => setPollInterval(Number(e.target.value) || 30)}
-                className="input-field"
-                style={{ width: '5rem', textAlign: 'center' }}
+                className="input-field w-20 text-center"
               />
             </label>
 
             {/* Use Video Rewards */}
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.4rem',
-                fontSize: '0.85rem',
-                color: 'var(--text-secondary)',
-                cursor: 'pointer',
-              }}
-            >
+            <label className="check-label-secondary">
               <input
                 type="checkbox"
                 checked={useVideo}
                 onChange={(e) => setUseVideo(e.target.checked)}
-                style={{ accentColor: 'var(--accent-gold)' }}
+                className="checkbox-gold"
               />
               Use video rewards
             </label>
 
             {/* Verbose Mode */}
-            <label
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.4rem',
-                fontSize: '0.85rem',
-                color: 'var(--text-secondary)',
-                cursor: 'pointer',
-              }}
-            >
+            <label className="check-label-secondary">
               <input
                 type="checkbox"
                 checked={verbose}
                 onChange={(e) => setVerbose(e.target.checked)}
-                style={{ accentColor: 'var(--accent-gold)' }}
+                className="checkbox-gold"
               />
               Verbose mode
             </label>
@@ -696,37 +477,25 @@ export default function BuildQueue() {
         </div>
 
         {/* Action Buttons */}
-        <div
-          style={{
-            display: 'flex',
-            gap: '0.75rem',
-            flexWrap: 'wrap',
-          }}
-        >
+        <div className="flex gap-3 flex-wrap">
           <button
-            className="btn-primary"
+            className="btn-primary min-w-[130px]"
             onClick={handleValidate}
             disabled={validating || !yamlContent.trim() || running}
-            style={{ minWidth: '130px' }}
           >
             {validating ? 'Validating...' : 'Validate Plan'}
           </button>
           <button
-            className="btn-primary"
+            className={`btn-primary min-w-[130px] ${validated && !running ? 'bg-success' : ''}`}
             onClick={handleExecute}
             disabled={!validated || running}
-            style={{
-              minWidth: '130px',
-              backgroundColor: validated && !running ? 'var(--success)' : undefined,
-            }}
           >
             Execute Plan
           </button>
           {running && (
             <button
-              className="btn-danger"
+              className="btn-danger min-w-[100px]"
               onClick={handleStop}
-              style={{ minWidth: '100px' }}
             >
               Stop
             </button>
@@ -739,14 +508,7 @@ export default function BuildQueue() {
         {/* Live Execution Panel */}
         {(wsMessages.length > 0 || running) && (
           <div>
-            <h3
-              style={{
-                fontFamily: 'Cinzel, serif',
-                fontSize: '1rem',
-                color: 'var(--accent-gold)',
-                marginBottom: '0.5rem',
-              }}
-            >
+            <h3 className="heading-gold text-base mb-2">
               Execution Log
             </h3>
             <WebSocketPanel

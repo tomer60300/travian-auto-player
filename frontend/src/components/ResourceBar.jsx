@@ -1,8 +1,15 @@
+const RESOURCE_COLORS = {
+  lumber: '#8B7355',
+  clay: '#C4A882',
+  iron: '#808080',
+  crop: '#6B8E23',
+}
+
 const resourceConfig = [
-  { key: 'lumber', label: 'Lumber', color: '#8B7355', icon: '🪵', maxKey: 'max_lumber', prodKey: 'lumber_per_hour' },
-  { key: 'clay', label: 'Clay', color: '#C4A882', icon: '🧱', maxKey: 'max_clay', prodKey: 'clay_per_hour' },
-  { key: 'iron', label: 'Iron', color: '#808080', icon: '⛏️', maxKey: 'max_iron', prodKey: 'iron_per_hour' },
-  { key: 'crop', label: 'Crop', color: '#6B8E23', icon: '🌾', maxKey: 'max_crop', prodKey: 'crop_per_hour' },
+  { key: 'lumber', label: 'Lumber', icon: '🪵', maxKey: 'max_lumber', prodKey: 'lumber_per_hour' },
+  { key: 'clay', label: 'Clay', icon: '🧱', maxKey: 'max_clay', prodKey: 'clay_per_hour' },
+  { key: 'iron', label: 'Iron', icon: '⛏️', maxKey: 'max_iron', prodKey: 'iron_per_hour' },
+  { key: 'crop', label: 'Crop', icon: '🌾', maxKey: 'max_crop', prodKey: 'crop_per_hour' },
 ]
 
 function formatNumber(n) {
@@ -15,37 +22,26 @@ function SingleBar({ config, resources }) {
   const max = resources[config.maxKey] ?? 1
   const production = resources[config.prodKey] ?? 0
   const pct = max > 0 ? Math.min((current / max) * 100, 100) : 0
+  const barColor = RESOURCE_COLORS[config.key]
 
   return (
-    <div style={{ marginBottom: '0.5rem' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
-        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+    <div className="mb-2">
+      <div className="flex justify-between items-center mb-1">
+        <span className="text-xs text-secondary flex items-center gap-1">
           <span>{config.icon}</span>
           <span>{config.label}</span>
         </span>
-        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+        <span className="text-xs text-secondary">
           {formatNumber(current)} / {formatNumber(max)}
-          <span style={{ marginLeft: '0.5rem', color: production >= 0 ? 'var(--success)' : 'var(--danger)' }}>
+          <span className={`ml-2 ${production >= 0 ? 'text-success' : 'text-danger'}`}>
             {production >= 0 ? '+' : ''}{formatNumber(production)}/hr
           </span>
         </span>
       </div>
-      <div
-        style={{
-          height: '6px',
-          backgroundColor: 'var(--bg-base)',
-          borderRadius: '3px',
-          overflow: 'hidden',
-        }}
-      >
+      <div className="h-1.5 bg-base rounded-sm overflow-hidden">
         <div
-          style={{
-            width: `${pct}%`,
-            height: '100%',
-            backgroundColor: config.color,
-            borderRadius: '3px',
-            transition: 'width 0.5s ease',
-          }}
+          className="h-full rounded-sm transition-[width] duration-500 ease-in-out"
+          style={{ width: `${pct}%`, backgroundColor: barColor }}
         />
       </div>
     </div>
@@ -56,23 +52,12 @@ export default function ResourceBar({ resources }) {
   if (!resources) return null
 
   return (
-    <div className="card" style={{ padding: '1rem' }}>
+    <div className="card p-4">
       {resourceConfig.map((cfg) => (
         <SingleBar key={cfg.key} config={cfg} resources={resources} />
       ))}
       {resources.free_crop != null && (
-        <div
-          style={{
-            marginTop: '0.5rem',
-            paddingTop: '0.5rem',
-            borderTop: '1px solid var(--border)',
-            fontSize: '0.8rem',
-            color: resources.free_crop > 0 ? 'var(--success)' : 'var(--danger)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.35rem',
-          }}
-        >
+        <div className={`mt-2 pt-2 border-t-default text-xs flex items-center gap-1 ${resources.free_crop > 0 ? 'text-success' : 'text-danger'}`}>
           <span>🌿</span>
           <span>Free Crop: {formatNumber(resources.free_crop)}</span>
         </div>

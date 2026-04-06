@@ -12,59 +12,33 @@ const REWARD_TYPES = [
   { key: 'cropProductionBonus', label: 'Crop Bonus', description: 'Increase crop production' },
 ]
 
-function Spinner({ size = 4, color = 'var(--accent-gold)' }) {
-  return (
-    <span
-      className="inline-block rounded-full animate-spin"
-      style={{
-        border: `2px solid ${color}`,
-        borderTopColor: 'transparent',
-        width: `${size * 0.25}rem`,
-        height: `${size * 0.25}rem`,
-      }}
-    />
-  )
-}
-
 function RewardCard({ reward, onClaim, claiming, result }) {
   return (
-    <div
-      className="card flex flex-col justify-between"
-      style={{ minHeight: '160px' }}
-    >
+    <div className="card flex flex-col justify-between min-h-[160px]">
       <div>
-        <h4
-          className="text-sm font-semibold mb-1"
-          style={{ color: 'var(--accent-gold)', fontFamily: 'Cinzel' }}
-        >
+        <h4 className="heading-gold text-sm font-semibold mb-1">
           {reward.label}
         </h4>
-        <p className="text-xs mb-3" style={{ color: 'var(--text-secondary)' }}>
+        <p className="text-xs text-secondary mb-3">
           {reward.description}
         </p>
       </div>
 
       <div className="flex flex-col gap-2">
         <button
-          className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
+          className="btn-primary btn-sm w-full flex items-center justify-center gap-2 text-sm"
           onClick={() => onClaim(reward.key)}
           disabled={claiming}
-          style={{ padding: '0.375rem 0.75rem' }}
         >
-          {claiming && <Spinner size={3} color="var(--bg-base)" />}
+          {claiming && <span className="spinner spinner-sm" />}
           {claiming ? 'Claiming...' : 'Claim'}
         </button>
 
         {result && (
           <div
-            className="text-xs px-2 py-1.5 rounded"
-            style={{
-              backgroundColor: result.success
-                ? 'rgba(74, 140, 74, 0.2)'
-                : 'rgba(179, 64, 64, 0.2)',
-              border: `1px solid ${result.success ? 'var(--success)' : 'var(--danger)'}`,
-              color: result.success ? '#8c8' : '#e88',
-            }}
+            className={`text-xs px-2 py-1.5 rounded result-box ${
+              result.success ? 'result-box-success' : 'result-box-danger'
+            }`}
           >
             {result.success ? (result.message || 'Claimed!') : (result.message || 'Failed')}
           </div>
@@ -184,9 +158,9 @@ export default function VideoRewards() {
   if (!connected) {
     return (
       <div className="p-6">
-        <h2 className="text-2xl mb-4" style={{ fontFamily: 'Cinzel', color: 'var(--accent-gold)' }}>Video Rewards</h2>
-        <div className="card" style={{ textAlign: 'center', padding: '2rem' }}>
-          <p style={{ color: 'var(--text-secondary)' }}>Connect to a Travian server to claim video rewards.</p>
+        <h2 className="heading-gold text-2xl mb-4">Video Rewards</h2>
+        <div className="card text-center p-8">
+          <p className="text-secondary">Connect to a Travian server to claim video rewards.</p>
         </div>
       </div>
     )
@@ -195,44 +169,33 @@ export default function VideoRewards() {
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-6 flex-wrap gap-4">
-        <h2 className="text-2xl" style={{ fontFamily: 'Cinzel', color: 'var(--accent-gold)' }}>Video Rewards</h2>
+        <h2 className="heading-gold text-2xl">Video Rewards</h2>
       </div>
 
       {/* Claim All Section */}
       <div className="card mb-6">
         <div className="flex items-center justify-between flex-wrap gap-4">
           <div>
-            <h3
-              className="text-base font-semibold"
-              style={{ fontFamily: 'Cinzel', color: 'var(--text-primary)' }}
-            >
+            <h3 className="text-base font-semibold text-primary">
               Claim All Production Boosts
             </h3>
-            <p className="text-xs mt-1" style={{ color: 'var(--text-secondary)' }}>
+            <p className="text-xs mt-1 text-secondary">
               Attempt to claim all available production boost rewards at once.
             </p>
           </div>
           <button
-            className="btn-primary flex items-center gap-2"
+            className="btn-primary flex items-center gap-2 whitespace-nowrap"
             onClick={handleClaimAll}
             disabled={claimingAll || claimingType !== null}
-            style={{ padding: '0.5rem 1.25rem', whiteSpace: 'nowrap' }}
           >
-            {claimingAll && <Spinner size={3} color="var(--bg-base)" />}
+            {claimingAll && <span className="spinner spinner-sm" />}
             {claimingAll ? 'Claiming All...' : 'Claim All'}
           </button>
         </div>
 
         {/* Progress */}
         {claimingAll && claimAllProgress && (
-          <div
-            className="text-xs mt-3 px-3 py-2 rounded"
-            style={{
-              backgroundColor: 'rgba(74, 124, 140, 0.15)',
-              border: '1px solid var(--info)',
-              color: 'var(--text-secondary)',
-            }}
-          >
+          <div className="text-xs mt-3 px-3 py-2 rounded result-box result-box-info">
             {claimAllProgress}
           </div>
         )}
@@ -240,14 +203,9 @@ export default function VideoRewards() {
         {/* Result */}
         {claimAllResult && (
           <div
-            className="text-sm mt-3 px-3 py-2 rounded"
-            style={{
-              backgroundColor: claimAllResult.success
-                ? 'rgba(74, 140, 74, 0.2)'
-                : 'rgba(179, 64, 64, 0.2)',
-              border: `1px solid ${claimAllResult.success ? 'var(--success)' : 'var(--danger)'}`,
-              color: claimAllResult.success ? '#8c8' : '#e88',
-            }}
+            className={`text-sm mt-3 px-3 py-2 rounded result-box ${
+              claimAllResult.success ? 'result-box-success' : 'result-box-danger'
+            }`}
           >
             {claimAllResult.message}
           </div>
@@ -255,12 +213,7 @@ export default function VideoRewards() {
       </div>
 
       {/* Reward Cards Grid */}
-      <div
-        className="grid gap-4"
-        style={{
-          gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
-        }}
-      >
+      <div className="reward-grid">
         {REWARD_TYPES.map((reward) => (
           <RewardCard
             key={reward.key}

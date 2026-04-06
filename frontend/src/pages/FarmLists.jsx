@@ -9,16 +9,16 @@ import useGameStore from '../stores/gameStore'
 // ---------------------------------------------------------------------------
 //  Raid result color helpers
 // ---------------------------------------------------------------------------
-function raidResultColor(result) {
-  if (!result) return 'var(--text-secondary)'
+function raidResultClass(result) {
+  if (!result) return 'text-secondary'
   const icon = (result.icon ?? result.status ?? '').toLowerCase()
   if (icon.includes('green') || icon === 'ok' || icon === 'success' || result.losses === 0)
-    return 'var(--success)'
+    return 'text-success'
   if (icon.includes('yellow') || icon === 'partial' || icon === 'some')
-    return 'var(--warning)'
+    return 'text-warning'
   if (icon.includes('red') || icon === 'dead' || icon === 'fail' || icon === 'total')
-    return 'var(--danger)'
-  return 'var(--text-secondary)'
+    return 'text-danger'
+  return 'text-secondary'
 }
 
 function raidResultLabel(result) {
@@ -77,32 +77,6 @@ function transformWsMessage(data) {
     default:
       return { type: 'info', text: JSON.stringify(data), timestamp: ts }
   }
-}
-
-// ---------------------------------------------------------------------------
-//  Shared style constants
-// ---------------------------------------------------------------------------
-const sectionTitle = {
-  fontFamily: 'Cinzel, serif',
-  fontSize: '1rem',
-  marginBottom: '0.75rem',
-  color: 'var(--accent-gold)',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '0.5rem',
-}
-
-const tableCell = {
-  padding: '0.5rem 0.75rem',
-  fontSize: '0.85rem',
-  borderBottom: '1px solid var(--border)',
-}
-
-const tableHeader = {
-  ...tableCell,
-  color: 'var(--text-secondary)',
-  fontWeight: 600,
-  whiteSpace: 'nowrap',
 }
 
 // ===========================================================================
@@ -375,35 +349,23 @@ export default function FarmLists() {
   const slots = detail?.slots ?? detail?.targets ?? []
 
   return (
-    <div style={{ padding: '1.5rem', maxWidth: '1100px', margin: '0 auto' }}>
+    <div className="p-6 max-w-[1100px] mx-auto">
       {/* Page title */}
-      <h2 style={{ fontFamily: 'Cinzel, serif', fontSize: '1.5rem', marginBottom: '1.25rem' }}>
+      <h2 className="heading-gold text-2xl mb-5">
         Farm Lists
       </h2>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+      <div className="flex flex-col gap-4">
         {/* =============================================================== */}
         {/*  SECTION 1 - Farm List Overview                                 */}
         {/* =============================================================== */}
-        <div className="card" style={{ padding: '1rem' }}>
-          <h3 style={sectionTitle}>Farm List Overview</h3>
+        <div className="card">
+          <h3 className="heading-gold text-base mb-3 flex items-center gap-2">Farm List Overview</h3>
 
           {/* Create new list form */}
-          <div
-            style={{
-              display: 'flex',
-              gap: '0.5rem',
-              alignItems: 'flex-end',
-              flexWrap: 'wrap',
-              marginBottom: '1rem',
-            }}
-          >
-            <div style={{ flex: '1 1 180px' }}>
-              <label
-                style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}
-              >
-                List Name
-              </label>
+          <div className="flex gap-2 items-end flex-wrap mb-4">
+            <div className="flex-1 min-w-[180px]">
+              <label className="field-label">List Name</label>
               <input
                 className="input-field"
                 placeholder="New farm list"
@@ -412,17 +374,12 @@ export default function FarmLists() {
                 onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
               />
             </div>
-            <div style={{ flex: '0 0 180px' }}>
-              <label
-                style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}
-              >
-                Village
-              </label>
+            <div className="w-[180px] shrink-0">
+              <label className="field-label">Village</label>
               <select
-                className="input-field"
+                className="input-field cursor-pointer"
                 value={newListVillage}
                 onChange={(e) => setNewListVillage(e.target.value)}
-                style={{ cursor: 'pointer' }}
               >
                 <option value="">-- Select --</option>
                 {(villages || []).map((v) => (
@@ -433,10 +390,9 @@ export default function FarmLists() {
               </select>
             </div>
             <button
-              className="btn-primary"
+              className="btn-primary h-[38px]"
               disabled={creating || !newListName.trim()}
               onClick={handleCreate}
-              style={{ height: '38px' }}
             >
               {creating ? 'Creating...' : 'Create List'}
             </button>
@@ -444,25 +400,25 @@ export default function FarmLists() {
 
           {/* Table of lists */}
           {loading ? (
-            <p style={{ color: 'var(--text-secondary)', fontStyle: 'italic', padding: '0.5rem 0' }}>
+            <p className="text-secondary italic py-2">
               Loading...
             </p>
           ) : lists.length === 0 ? (
-            <p style={{ color: 'var(--text-secondary)', fontStyle: 'italic', padding: '0.5rem 0' }}>
+            <p className="text-secondary italic py-2">
               No farm lists found. Create one above.
             </p>
           ) : (
             <>
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <div className="overflow-x-auto">
+                <table className="data-table">
                   <thead>
-                    <tr style={{ borderBottom: '2px solid var(--border)' }}>
-                      <th style={tableHeader}>Name</th>
-                      <th style={tableHeader}>Village</th>
-                      <th style={{ ...tableHeader, textAlign: 'center' }}>Slots</th>
-                      <th style={{ ...tableHeader, textAlign: 'center' }}>Running</th>
-                      <th style={{ ...tableHeader, textAlign: 'right' }}>Total Booty</th>
-                      <th style={{ ...tableHeader, textAlign: 'center' }}>Actions</th>
+                    <tr>
+                      <th>Name</th>
+                      <th>Village</th>
+                      <th className="text-center">Slots</th>
+                      <th className="text-center">Running</th>
+                      <th className="text-right">Total Booty</th>
+                      <th className="text-center">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -471,54 +427,38 @@ export default function FarmLists() {
                       return (
                         <tr
                           key={list.id}
+                          className={`row-clickable ${isSelected ? 'row-selected' : ''}`}
                           onClick={() => setSelectedListId(isSelected ? null : list.id)}
-                          style={{
-                            cursor: 'pointer',
-                            backgroundColor: isSelected
-                              ? 'rgba(201, 168, 76, 0.08)'
-                              : 'transparent',
-                            transition: 'background-color 0.15s',
-                          }}
-                          onMouseEnter={(e) => {
-                            if (!isSelected)
-                              e.currentTarget.style.backgroundColor = 'rgba(201, 168, 76, 0.04)'
-                          }}
-                          onMouseLeave={(e) => {
-                            if (!isSelected)
-                              e.currentTarget.style.backgroundColor = 'transparent'
-                          }}
                         >
-                          <td style={{ ...tableCell, color: 'var(--text-primary)', fontWeight: 600 }}>
+                          <td className="text-primary font-semibold">
                             {list.name}
                           </td>
-                          <td style={{ ...tableCell, color: 'var(--text-secondary)' }}>
+                          <td className="text-secondary">
                             {list.village_name || list.village || '---'}
                           </td>
-                          <td style={{ ...tableCell, textAlign: 'center' }}>
+                          <td className="text-center">
                             {list.slot_count ?? list.slots ?? '---'}
                           </td>
-                          <td style={{ ...tableCell, textAlign: 'center' }}>
+                          <td className="text-center">
                             {list.running_raids ?? list.raids ?? 0}
                           </td>
-                          <td style={{ ...tableCell, textAlign: 'right', color: 'var(--accent-gold)' }}>
+                          <td className="text-right text-gold">
                             {list.total_booty != null ? list.total_booty.toLocaleString() : '---'}
                           </td>
                           <td
-                            style={{ ...tableCell, textAlign: 'center' }}
+                            className="text-center"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <div style={{ display: 'flex', gap: '0.35rem', justifyContent: 'center' }}>
+                            <div className="flex gap-1.5 justify-center">
                               <button
-                                className="btn-primary"
-                                style={{ padding: '0.25rem 0.6rem', fontSize: '0.78rem' }}
+                                className="btn-primary btn-xs"
                                 disabled={sendingListId === list.id}
                                 onClick={() => handleSendList(list.id)}
                               >
                                 {sendingListId === list.id ? 'Sending...' : 'Send'}
                               </button>
                               <button
-                                className="btn-danger"
-                                style={{ padding: '0.25rem 0.6rem', fontSize: '0.78rem' }}
+                                className="btn-danger btn-xs"
                                 onClick={() => setDeleteConfirm(list)}
                               >
                                 Delete
@@ -533,7 +473,7 @@ export default function FarmLists() {
               </div>
 
               {/* Send All button */}
-              <div style={{ marginTop: '0.75rem', textAlign: 'right' }}>
+              <div className="mt-3 text-right">
                 <button
                   className="btn-secondary"
                   disabled={sendingAll || lists.length === 0}
@@ -550,36 +490,20 @@ export default function FarmLists() {
         {/*  SECTION 2 - Farm List Detail                                   */}
         {/* =============================================================== */}
         {selectedListId && (
-          <div className="card" style={{ padding: '1rem' }}>
-            <h3 style={sectionTitle}>
+          <div className="card">
+            <h3 className="heading-gold text-base mb-3 flex items-center gap-2">
               {detail?.name || 'List Detail'}
               {detailLoading && (
-                <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 400 }}>
+                <span className="text-sm text-secondary font-normal">
                   {' '}loading...
                 </span>
               )}
             </h3>
 
             {/* Add Target form */}
-            <div
-              style={{
-                display: 'flex',
-                gap: '0.5rem',
-                alignItems: 'flex-end',
-                flexWrap: 'wrap',
-                marginBottom: '1rem',
-                padding: '0.75rem',
-                backgroundColor: 'var(--bg-surface)',
-                borderRadius: '0.375rem',
-                border: '1px solid var(--border)',
-              }}
-            >
-              <div style={{ flex: '0 0 80px' }}>
-                <label
-                  style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}
-                >
-                  X
-                </label>
+            <div className="flex gap-2 items-end flex-wrap mb-4 p-3 bg-surface rounded-md border-default">
+              <div className="w-20 shrink-0">
+                <label className="field-label">X</label>
                 <input
                   className="input-field"
                   type="number"
@@ -588,12 +512,8 @@ export default function FarmLists() {
                   placeholder="0"
                 />
               </div>
-              <div style={{ flex: '0 0 80px' }}>
-                <label
-                  style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}
-                >
-                  Y
-                </label>
+              <div className="w-20 shrink-0">
+                <label className="field-label">Y</label>
                 <input
                   className="input-field"
                   type="number"
@@ -602,17 +522,7 @@ export default function FarmLists() {
                   placeholder="0"
                 />
               </div>
-              <label
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.35rem',
-                  fontSize: '0.85rem',
-                  color: 'var(--text-secondary)',
-                  cursor: 'pointer',
-                  paddingBottom: '0.3rem',
-                }}
-              >
+              <label className="check-label-secondary pb-1">
                 <input
                   type="checkbox"
                   checked={targetForce}
@@ -621,10 +531,9 @@ export default function FarmLists() {
                 Force
               </label>
               <button
-                className="btn-primary"
+                className="btn-primary h-[38px]"
                 disabled={addingTarget || targetX === '' || targetY === ''}
                 onClick={handleAddTarget}
-                style={{ height: '38px' }}
               >
                 {addingTarget ? 'Adding...' : 'Add Target'}
               </button>
@@ -632,21 +541,21 @@ export default function FarmLists() {
 
             {/* Slot table */}
             {slots.length === 0 ? (
-              <p style={{ color: 'var(--text-secondary)', fontStyle: 'italic', padding: '0.25rem 0' }}>
+              <p className="text-secondary italic py-1">
                 No targets in this list.
               </p>
             ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <div className="overflow-x-auto">
+                <table className="data-table">
                   <thead>
-                    <tr style={{ borderBottom: '2px solid var(--border)' }}>
-                      <th style={tableHeader}>Coords</th>
-                      <th style={tableHeader}>Target</th>
-                      <th style={{ ...tableHeader, textAlign: 'center' }}>Pop</th>
-                      <th style={{ ...tableHeader, textAlign: 'center' }}>Distance</th>
-                      <th style={tableHeader}>Troops</th>
-                      <th style={{ ...tableHeader, textAlign: 'center' }}>Active</th>
-                      <th style={tableHeader}>Last Raid</th>
+                    <tr>
+                      <th>Coords</th>
+                      <th>Target</th>
+                      <th className="text-center">Pop</th>
+                      <th className="text-center">Distance</th>
+                      <th>Troops</th>
+                      <th className="text-center">Active</th>
+                      <th>Last Raid</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -654,36 +563,31 @@ export default function FarmLists() {
                       const lastRaid = slot.lastRaid ?? slot.last_raid ?? null
                       return (
                         <tr key={slot.id ?? idx}>
-                          <td style={{ ...tableCell, fontFamily: 'monospace', color: 'var(--text-primary)' }}>
+                          <td className="font-mono text-primary">
                             ({slot.x ?? '?'}, {slot.y ?? '?'})
                           </td>
-                          <td style={{ ...tableCell, color: 'var(--text-primary)' }}>
+                          <td className="text-primary">
                             {slot.target_name ?? slot.name ?? '---'}
                           </td>
-                          <td style={{ ...tableCell, textAlign: 'center' }}>
+                          <td className="text-center">
                             {slot.population ?? '---'}
                           </td>
-                          <td style={{ ...tableCell, textAlign: 'center' }}>
+                          <td className="text-center">
                             {slot.distance != null ? slot.distance.toFixed(1) : '---'}
                           </td>
-                          <td style={{ ...tableCell, color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
+                          <td className="text-secondary text-xs">
                             {formatTroops(slot.troops)}
                           </td>
-                          <td style={{ ...tableCell, textAlign: 'center' }}>
+                          <td className="text-center">
                             <span
-                              style={{
-                                display: 'inline-block',
-                                width: '8px',
-                                height: '8px',
-                                borderRadius: '50%',
-                                backgroundColor:
-                                  slot.active ?? slot.enabled
-                                    ? 'var(--success)'
-                                    : 'var(--text-secondary)',
-                              }}
+                              className={`status-dot ${
+                                slot.active ?? slot.enabled
+                                  ? 'status-dot-success'
+                                  : ''
+                              }`}
                             />
                           </td>
-                          <td style={{ ...tableCell, color: raidResultColor(lastRaid) }}>
+                          <td className={raidResultClass(lastRaid)}>
                             {raidResultLabel(lastRaid)}
                           </td>
                         </tr>
@@ -699,46 +603,26 @@ export default function FarmLists() {
         {/* =============================================================== */}
         {/*  SECTION 3 - Loop Mode                                          */}
         {/* =============================================================== */}
-        <div className="card" style={{ padding: '1rem' }}>
-          <h3 style={sectionTitle}>Loop Send Mode</h3>
+        <div className="card">
+          <h3 className="heading-gold text-base mb-3 flex items-center gap-2">Loop Send Mode</h3>
 
           {/* List picker */}
-          <div style={{ marginBottom: '0.75rem' }}>
-            <label
-              style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.35rem' }}
-            >
+          <div className="mb-3">
+            <label className="field-label-lg">
               Select lists to include:
             </label>
             {lists.length === 0 ? (
-              <p style={{ color: 'var(--text-secondary)', fontStyle: 'italic', fontSize: '0.85rem' }}>
+              <p className="text-secondary italic text-sm">
                 No lists available.
               </p>
             ) : (
-              <div
-                style={{
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  gap: '0.5rem',
-                }}
-              >
+              <div className="flex flex-wrap gap-2">
                 {lists.map((list) => (
                   <label
                     key={list.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '0.35rem',
-                      padding: '0.35rem 0.7rem',
-                      backgroundColor: loopListIds.includes(list.id)
-                        ? 'rgba(201, 168, 76, 0.12)'
-                        : 'var(--bg-surface)',
-                      border: `1px solid ${loopListIds.includes(list.id) ? 'var(--accent-gold)' : 'var(--border)'}`,
-                      borderRadius: '0.375rem',
-                      cursor: loopRunning ? 'not-allowed' : 'pointer',
-                      fontSize: '0.85rem',
-                      color: 'var(--text-primary)',
-                      transition: 'all 0.15s',
-                    }}
+                    className={`loop-chip ${
+                      loopListIds.includes(list.id) ? 'loop-chip-active' : ''
+                    } ${loopRunning ? 'loop-chip-disabled' : ''}`}
                   >
                     <input
                       type="checkbox"
@@ -754,21 +638,9 @@ export default function FarmLists() {
           </div>
 
           {/* Interval & duration */}
-          <div
-            style={{
-              display: 'flex',
-              gap: '0.75rem',
-              alignItems: 'flex-end',
-              flexWrap: 'wrap',
-              marginBottom: '0.75rem',
-            }}
-          >
-            <div style={{ flex: '0 0 140px' }}>
-              <label
-                style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}
-              >
-                Interval (seconds)
-              </label>
+          <div className="flex gap-3 items-end flex-wrap mb-3">
+            <div className="w-[140px] shrink-0">
+              <label className="field-label">Interval (seconds)</label>
               <input
                 className="input-field"
                 type="number"
@@ -778,12 +650,8 @@ export default function FarmLists() {
                 disabled={loopRunning}
               />
             </div>
-            <div style={{ flex: '0 0 140px' }}>
-              <label
-                style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}
-              >
-                Duration (min, 0=forever)
-              </label>
+            <div className="w-[140px] shrink-0">
+              <label className="field-label">Duration (min, 0=forever)</label>
               <input
                 className="input-field"
                 type="number"
@@ -795,18 +663,16 @@ export default function FarmLists() {
             </div>
             {!loopRunning ? (
               <button
-                className="btn-primary"
+                className="btn-primary h-[38px]"
                 onClick={startLoop}
                 disabled={loopListIds.length === 0}
-                style={{ height: '38px' }}
               >
                 Start Loop
               </button>
             ) : (
               <button
-                className="btn-danger"
+                className="btn-danger h-[38px]"
                 onClick={stopLoop}
-                style={{ height: '38px' }}
               >
                 Stop Loop
               </button>

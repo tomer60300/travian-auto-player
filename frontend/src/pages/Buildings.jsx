@@ -31,77 +31,29 @@ function getBuildingCategory(slotId, building) {
   return 'infrastructure'
 }
 
-function getCategoryStyle(category) {
-  switch (category) {
-    case 'resource':
-      return {
-        borderLeft: '3px solid var(--success)',
-        backgroundColor: 'rgba(74, 140, 74, 0.06)',
-      }
-    case 'military':
-      return {
-        borderLeft: '3px solid var(--danger)',
-        backgroundColor: 'rgba(179, 64, 64, 0.06)',
-      }
-    case 'infrastructure':
-      return {
-        borderLeft: '3px solid var(--info)',
-        backgroundColor: 'rgba(74, 124, 140, 0.06)',
-      }
-    case 'empty':
-      return {
-        borderLeft: '3px dashed var(--text-secondary)',
-        backgroundColor: 'transparent',
-        opacity: 0.6,
-      }
-    default:
-      return {}
-  }
+const CATEGORY_TO_CLASS = {
+  resource: 'btype-resource',
+  military: 'btype-military',
+  infrastructure: 'btype-infra',
+  empty: 'btype-empty',
 }
 
 function ConstructionQueuePanel({ queue }) {
   if (!queue || queue.length === 0) return null
 
   return (
-    <div className="card" style={{ padding: '1rem', marginBottom: '1rem' }}>
-      <h3
-        style={{
-          fontFamily: 'Cinzel, serif',
-          fontSize: '1rem',
-          marginBottom: '0.75rem',
-          color: 'var(--accent-gold)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.5rem',
-        }}
-      >
+    <div className="card p-4 mb-4">
+      <h3 className="heading-gold text-base mb-3 flex items-center gap-2">
         {'\uD83D\uDD28'} Construction Queue
       </h3>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+      <div className="flex flex-col gap-2">
         {queue.map((item, idx) => (
-          <div
-            key={idx}
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              padding: '0.5rem 0.75rem',
-              backgroundColor: 'var(--bg-surface)',
-              borderRadius: '0.375rem',
-              border: '1px solid var(--border)',
-            }}
-          >
-            <span style={{ fontSize: '0.9rem', color: 'var(--text-primary)' }}>
+          <div key={idx} className="surface-row">
+            <span className="text-sm text-primary">
               {item.building_name || item.name || 'Building'} {'\u2192'} Level{' '}
               {item.target_level ?? item.level ?? '?'}
             </span>
-            <span
-              style={{
-                fontSize: '0.85rem',
-                color: 'var(--warning)',
-                fontFamily: 'monospace',
-              }}
-            >
+            <span className="text-xs text-warning font-mono">
               {formatTimeRemaining(item.time_remaining ?? item.seconds_remaining)}
             </span>
           </div>
@@ -132,75 +84,31 @@ function BuildingDetailPanel({
       detail.level === 0)
 
   return (
-    <div
-      className="card"
-      style={{
-        padding: '1rem',
-        marginBottom: '1rem',
-        border: '1px solid var(--accent-gold)',
-      }}
-    >
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '0.75rem',
-        }}
-      >
-        <h3
-          style={{
-            fontFamily: 'Cinzel, serif',
-            fontSize: '1rem',
-            color: 'var(--accent-gold)',
-            margin: 0,
-          }}
-        >
+    <div className="card p-4 mb-4 border-gold">
+      <div className="flex justify-between items-center mb-3">
+        <h3 className="heading-gold text-base">
           Slot {selectedSlot} {detail ? `- ${detail.name || 'Empty'}` : ''}
         </h3>
-        <button
-          onClick={onClose}
-          style={{
-            background: 'none',
-            border: 'none',
-            color: 'var(--text-secondary)',
-            cursor: 'pointer',
-            fontSize: '1.1rem',
-            padding: '0 0.25rem',
-          }}
-        >
+        <button className="btn-close" onClick={onClose}>
           {'\u2715'}
         </button>
       </div>
 
       {loading && (
-        <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-          Loading details...
-        </p>
+        <p className="text-secondary text-sm">Loading details...</p>
       )}
 
       {!loading && detail && !isEmptySlot && (
         <div>
-          <div style={{ marginBottom: '0.75rem' }}>
-            <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+          <div className="mb-3">
+            <span className="text-xs text-secondary">
               Current Level: {detail.level ?? '?'}
             </span>
           </div>
           {detail.upgrade_cost && (
-            <div
-              style={{
-                marginBottom: '0.75rem',
-                padding: '0.5rem',
-                backgroundColor: 'var(--bg-surface)',
-                borderRadius: '0.375rem',
-                fontSize: '0.8rem',
-                color: 'var(--text-secondary)',
-              }}
-            >
-              <div style={{ marginBottom: '0.25rem', fontWeight: 600 }}>
-                Upgrade Cost:
-              </div>
-              <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+            <div className="mb-3 p-2 bg-surface rounded-md text-xs text-secondary">
+              <div className="mb-1 font-semibold">Upgrade Cost:</div>
+              <div className="flex gap-3 flex-wrap">
                 {detail.upgrade_cost.lumber != null && (
                   <span>{'\uD83E\uDEB5'} {detail.upgrade_cost.lumber}</span>
                 )}
@@ -217,13 +125,7 @@ function BuildingDetailPanel({
             </div>
           )}
           {queueOccupied && (
-            <p
-              style={{
-                fontSize: '0.8rem',
-                color: 'var(--warning)',
-                marginBottom: '0.5rem',
-              }}
-            >
+            <p className="text-xs text-warning mb-2">
               {'\u26A0'} Queue is occupied. Upgrading may use gold to start immediately.
             </p>
           )}
@@ -235,22 +137,15 @@ function BuildingDetailPanel({
 
       {!loading && detail && isEmptySlot && (
         <div>
-          <p
-            style={{
-              fontSize: '0.85rem',
-              color: 'var(--text-secondary)',
-              marginBottom: '0.75rem',
-            }}
-          >
+          <p className="text-xs text-secondary mb-3">
             This slot is empty. Choose a building to construct:
           </p>
           {detail.available_buildings && detail.available_buildings.length > 0 ? (
             <>
               <select
-                className="input-field"
+                className="input-field mb-3"
                 value={selectedNewBuilding}
                 onChange={(e) => setSelectedNewBuilding(e.target.value)}
-                style={{ marginBottom: '0.75rem' }}
               >
                 <option value="">-- Select Building --</option>
                 {detail.available_buildings.map((b) => {
@@ -263,13 +158,7 @@ function BuildingDetailPanel({
                 })}
               </select>
               {queueOccupied && (
-                <p
-                  style={{
-                    fontSize: '0.8rem',
-                    color: 'var(--warning)',
-                    marginBottom: '0.5rem',
-                  }}
-                >
+                <p className="text-xs text-warning mb-2">
                   {'\u26A0'} Queue is occupied. Constructing may use gold.
                 </p>
               )}
@@ -282,7 +171,7 @@ function BuildingDetailPanel({
               </button>
             </>
           ) : (
-            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+            <p className="text-xs text-secondary">
               No buildings available for this slot.
             </p>
           )}
@@ -387,18 +276,9 @@ export default function Buildings() {
   const buildingList = Array.isArray(buildings) ? buildings : []
 
   return (
-    <div style={{ padding: '1.5rem', maxWidth: '960px', margin: '0 auto' }}>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '1.25rem',
-        }}
-      >
-        <h2 style={{ fontFamily: 'Cinzel, serif', fontSize: '1.5rem', margin: 0 }}>
-          Buildings
-        </h2>
+    <div className="p-6 max-w-4xl mx-auto">
+      <div className="flex justify-between items-center mb-5">
+        <h2 className="heading-gold text-2xl">Buildings</h2>
         <VillageSelector />
       </div>
 
@@ -417,27 +297,20 @@ export default function Buildings() {
         queueOccupied={queueOccupied}
       />
 
-      <div className="card" style={{ padding: '1rem' }}>
-        <h3
-          style={{
-            fontFamily: 'Cinzel, serif',
-            fontSize: '1rem',
-            marginBottom: '0.75rem',
-            color: 'var(--accent-gold)',
-          }}
-        >
+      <div className="card p-4">
+        <h3 className="heading-gold text-base mb-3">
           Building Slots
         </h3>
         {buildingList.length === 0 ? (
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+          <p className="text-secondary text-sm">
             No building data available. Make sure you are connected.
           </p>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+          <div className="flex flex-col gap-1">
             {buildingList.map((b) => {
               const slotId = b.slot_id ?? b.slot ?? b.id
               const category = getBuildingCategory(slotId, b)
-              const categoryStyle = getCategoryStyle(category)
+              const categoryClass = CATEGORY_TO_CLASS[category] || ''
               const isSelected = selectedSlot === slotId
               const isEmpty = category === 'empty'
 
@@ -445,66 +318,17 @@ export default function Buildings() {
                 <button
                   key={slotId}
                   onClick={() => handleSlotClick(slotId)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.75rem',
-                    padding: '0.6rem 0.75rem',
-                    background: isSelected
-                      ? 'rgba(201, 168, 76, 0.12)'
-                      : 'var(--bg-surface)',
-                    border: isSelected
-                      ? '1px solid var(--accent-gold)'
-                      : '1px solid var(--border)',
-                    borderRadius: '0.375rem',
-                    cursor: 'pointer',
-                    width: '100%',
-                    textAlign: 'left',
-                    color: 'var(--text-primary)',
-                    transition: 'background-color 0.15s, border-color 0.15s',
-                    ...categoryStyle,
-                  }}
-                  onMouseEnter={(e) => {
-                    if (!isSelected) {
-                      e.currentTarget.style.backgroundColor = 'rgba(201, 168, 76, 0.06)'
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (!isSelected) {
-                      e.currentTarget.style.backgroundColor =
-                        categoryStyle.backgroundColor || 'var(--bg-surface)'
-                    }
-                  }}
+                  className={`building-slot ${categoryClass}${isSelected ? ' row-selected' : ''}`}
                 >
-                  <span
-                    style={{
-                      fontSize: '0.75rem',
-                      color: 'var(--text-secondary)',
-                      minWidth: '2rem',
-                      textAlign: 'right',
-                    }}
-                  >
+                  <span className="text-xs text-secondary min-w-8 text-right">
                     #{slotId}
                   </span>
                   <span
-                    style={{
-                      flex: 1,
-                      fontSize: '0.9rem',
-                      fontWeight: isEmpty ? 400 : 500,
-                      fontStyle: isEmpty ? 'italic' : 'normal',
-                      color: isEmpty ? 'var(--text-secondary)' : 'var(--text-primary)',
-                    }}
+                    className={`flex-1 text-sm ${isEmpty ? 'italic text-secondary' : 'font-medium text-primary'}`}
                   >
                     {isEmpty ? 'Empty Slot' : b.name || 'Unknown'}
                   </span>
-                  <span
-                    style={{
-                      fontSize: '0.8rem',
-                      color: 'var(--text-secondary)',
-                      minWidth: '3.5rem',
-                      textAlign: 'right',
-                    }}
-                  >
+                  <span className="text-xs text-secondary min-w-14 text-right">
                     {isEmpty ? '---' : `Lvl ${b.level ?? '?'}`}
                   </span>
                 </button>
@@ -532,25 +356,8 @@ export default function Buildings() {
       />
 
       {actionLoading && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            backgroundColor: 'rgba(0, 0, 0, 0.3)',
-            zIndex: 8000,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <div
-            className="card"
-            style={{
-              padding: '1.5rem 2rem',
-              color: 'var(--text-secondary)',
-              fontSize: '0.9rem',
-            }}
-          >
+        <div className="loading-overlay">
+          <div className="card px-8 py-6 text-secondary text-sm">
             Processing...
           </div>
         </div>

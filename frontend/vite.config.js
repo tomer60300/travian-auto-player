@@ -7,6 +7,9 @@ export default defineConfig({
   build: {
     outDir: '../src/travian_api/web/static',
     emptyOutDir: true,
+    oxc: {
+      drop: ['console', 'debugger'],
+    },
   },
   server: {
     proxy: {

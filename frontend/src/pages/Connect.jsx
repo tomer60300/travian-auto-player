@@ -151,46 +151,31 @@ export default function Connect() {
   }
 
   return (
-    <div
-      className="min-h-screen px-4 py-8"
-      style={{ backgroundColor: 'var(--bg-base)' }}
-    >
+    <div className="min-h-screen px-4 py-8 bg-base">
       <div className="max-w-5xl mx-auto">
         {/* Header */}
-        <h1
-          className="text-2xl mb-6"
-          style={{ fontFamily: "'Cinzel', serif", color: 'var(--accent-gold)' }}
-        >
+        <h1 className="heading-gold text-2xl mb-6">
           Server Connection
         </h1>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Left: Saved Servers */}
           <div>
-            <h2
-              className="text-lg mb-4"
-              style={{ fontFamily: "'Cinzel', serif", color: 'var(--text-primary)' }}
-            >
+            <h2 className="text-lg mb-4 text-primary">
               Saved Servers
             </h2>
 
             {serversLoading ? (
               <div className="card flex items-center justify-center py-8">
-                <span
-                  className="inline-block w-6 h-6 rounded-full animate-spin"
-                  style={{
-                    border: '2px solid var(--accent-gold)',
-                    borderTopColor: 'transparent',
-                  }}
-                />
-                <span className="ml-3" style={{ color: 'var(--text-secondary)' }}>
+                <span className="spinner spinner-sm" />
+                <span className="ml-3 text-secondary">
                   Loading servers...
                 </span>
               </div>
             ) : servers.length === 0 ? (
               <div className="card text-center py-8">
-                <p style={{ color: 'var(--text-secondary)' }}>No saved servers yet</p>
-                <p className="text-sm mt-1" style={{ color: 'var(--text-secondary)', opacity: 0.7 }}>
+                <p className="text-secondary">No saved servers yet</p>
+                <p className="text-sm mt-1 text-secondary opacity-70">
                   Connect to a server and save your credentials for quick access
                 </p>
               </div>
@@ -201,49 +186,32 @@ export default function Connect() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         {server.label && (
-                          <div
-                            className="font-semibold text-sm mb-1"
-                            style={{ color: 'var(--accent-gold)' }}
-                          >
+                          <div className="font-semibold text-sm mb-1 text-gold">
                             {server.label}
                           </div>
                         )}
                         <div
-                          className="text-sm truncate"
-                          style={{ color: 'var(--text-primary)' }}
+                          className="text-sm truncate text-primary"
                           title={server.server_url}
                         >
                           {server.server_url}
                         </div>
-                        <div
-                          className="text-xs mt-1"
-                          style={{ color: 'var(--text-secondary)' }}
-                        >
+                        <div className="text-xs mt-1 text-secondary">
                           {server.username}
                         </div>
-                        <div
-                          className="text-xs mt-0.5"
-                          style={{ color: 'var(--text-secondary)', opacity: 0.7 }}
-                        >
+                        <div className="text-xs mt-0.5 text-secondary opacity-70">
                           Last connected: {formatDate(server.last_connected)}
                         </div>
                       </div>
                       <div className="flex flex-col gap-2 flex-shrink-0">
                         <button
-                          className="btn-primary text-sm"
-                          style={{ padding: '0.375rem 0.75rem' }}
+                          className="btn-primary btn-sm"
                           onClick={() => handleQuickConnect(server)}
                           disabled={connectingServerId === server.id}
                         >
                           {connectingServerId === server.id ? (
                             <span className="flex items-center gap-1.5">
-                              <span
-                                className="inline-block w-3 h-3 rounded-full animate-spin"
-                                style={{
-                                  border: '2px solid var(--bg-base)',
-                                  borderTopColor: 'transparent',
-                                }}
-                              />
+                              <span className="spinner spinner-sm" />
                               Connecting...
                             </span>
                           ) : (
@@ -253,16 +221,14 @@ export default function Connect() {
                         {confirmDeleteId === server.id ? (
                           <div className="flex gap-1">
                             <button
-                              className="btn-danger text-xs"
-                              style={{ padding: '0.25rem 0.5rem' }}
+                              className="btn-danger btn-xs"
                               onClick={() => handleDeleteServer(server.id)}
                               disabled={deletingServerId === server.id}
                             >
                               {deletingServerId === server.id ? '...' : 'Yes'}
                             </button>
                             <button
-                              className="btn-secondary text-xs"
-                              style={{ padding: '0.25rem 0.5rem' }}
+                              className="btn-secondary btn-xs"
                               onClick={() => setConfirmDeleteId(null)}
                             >
                               No
@@ -270,8 +236,7 @@ export default function Connect() {
                           </div>
                         ) : (
                           <button
-                            className="btn-danger text-xs"
-                            style={{ padding: '0.25rem 0.5rem' }}
+                            className="btn-danger btn-xs"
                             onClick={() => setConfirmDeleteId(server.id)}
                           >
                             Delete
@@ -287,10 +252,7 @@ export default function Connect() {
 
           {/* Right: Add New Server */}
           <div>
-            <h2
-              className="text-lg mb-4"
-              style={{ fontFamily: "'Cinzel', serif", color: 'var(--text-primary)' }}
-            >
+            <h2 className="text-lg mb-4 text-primary">
               Add New Server
             </h2>
 
@@ -299,8 +261,7 @@ export default function Connect() {
                 <div className="flex flex-col gap-1.5">
                   <label
                     htmlFor="server-url"
-                    className="text-sm font-semibold"
-                    style={{ color: 'var(--text-secondary)' }}
+                    className="text-sm font-semibold text-secondary"
                   >
                     Server URL
                   </label>
@@ -318,8 +279,7 @@ export default function Connect() {
                 <div className="flex flex-col gap-1.5">
                   <label
                     htmlFor="travian-username"
-                    className="text-sm font-semibold"
-                    style={{ color: 'var(--text-secondary)' }}
+                    className="text-sm font-semibold text-secondary"
                   >
                     Travian Username
                   </label>
@@ -337,8 +297,7 @@ export default function Connect() {
                 <div className="flex flex-col gap-1.5">
                   <label
                     htmlFor="travian-password"
-                    className="text-sm font-semibold"
-                    style={{ color: 'var(--text-secondary)' }}
+                    className="text-sm font-semibold text-secondary"
                   >
                     Travian Password
                   </label>
@@ -356,11 +315,10 @@ export default function Connect() {
                 <div className="flex flex-col gap-1.5">
                   <label
                     htmlFor="server-label"
-                    className="text-sm font-semibold"
-                    style={{ color: 'var(--text-secondary)' }}
+                    className="text-sm font-semibold text-secondary"
                   >
                     Label{' '}
-                    <span style={{ color: 'var(--text-secondary)', opacity: 0.6, fontWeight: 400 }}>
+                    <span className="text-secondary opacity-60 font-normal">
                       (optional)
                     </span>
                   </label>
@@ -375,49 +333,30 @@ export default function Connect() {
                   />
                 </div>
 
-                <label
-                  className="flex items-center gap-2 cursor-pointer select-none"
-                  style={{ color: 'var(--text-secondary)' }}
-                >
+                <label className="flex items-center gap-2 cursor-pointer select-none text-secondary">
                   <input
                     type="checkbox"
                     checked={saveCredentials}
                     onChange={(e) => setSaveCredentials(e.target.checked)}
                     disabled={formLoading}
-                    style={{ accentColor: 'var(--accent-gold)' }}
+                    className="checkbox-gold"
                   />
                   <span className="text-sm">Save credentials for quick connect</span>
                 </label>
 
                 {/* Error message */}
                 {formError && (
-                  <div
-                    className="text-sm px-3 py-2 rounded"
-                    style={{
-                      backgroundColor: 'rgba(179, 64, 64, 0.2)',
-                      border: '1px solid var(--danger)',
-                      color: '#e88',
-                    }}
-                  >
-                    {formError}
-                  </div>
+                  <div className="error-box">{formError}</div>
                 )}
 
                 {/* Submit */}
                 <button
                   type="submit"
-                  className="btn-primary w-full flex items-center justify-center gap-2"
+                  className="btn-primary btn-lg w-full flex items-center justify-center gap-2"
                   disabled={formLoading}
-                  style={{ padding: '0.625rem 1rem', fontSize: '1rem' }}
                 >
                   {formLoading && (
-                    <span
-                      className="inline-block w-4 h-4 rounded-full animate-spin"
-                      style={{
-                        border: '2px solid var(--bg-base)',
-                        borderTopColor: 'transparent',
-                      }}
-                    />
+                    <span className="spinner spinner-sm" />
                   )}
                   {formLoading ? 'Connecting to Travian server...' : 'Connect'}
                 </button>

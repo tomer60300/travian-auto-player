@@ -53,45 +53,18 @@ function ConstructionQueueSummary({ queue }) {
   if (!queue || queue.length === 0) return null
 
   return (
-    <div className="card" style={{ padding: '1rem' }}>
-      <h3
-        style={{
-          fontFamily: 'Cinzel, serif',
-          fontSize: '1rem',
-          marginBottom: '0.75rem',
-          color: 'var(--accent-gold)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.5rem',
-        }}
-      >
+    <div className="card p-4">
+      <h3 className="heading-gold text-base flex items-center gap-2 mb-3">
         {'\uD83D\uDD28'} Construction Queue
       </h3>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+      <div className="flex flex-col gap-2">
         {queue.map((item, idx) => (
-          <div
-            key={idx}
-            style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              padding: '0.5rem 0.75rem',
-              backgroundColor: 'var(--bg-surface)',
-              borderRadius: '0.375rem',
-              border: '1px solid var(--border)',
-            }}
-          >
-            <span style={{ fontSize: '0.9rem', color: 'var(--text-primary)' }}>
+          <div key={idx} className="surface-row">
+            <span className="text-sm text-primary">
               {item.building_name || item.name || 'Building'} {'\u2192'} Level{' '}
               {item.target_level ?? item.level ?? '?'}
             </span>
-            <span
-              style={{
-                fontSize: '0.85rem',
-                color: 'var(--warning)',
-                fontFamily: 'monospace',
-              }}
-            >
+            <span className="text-sm text-warning font-mono">
               {formatTimeRemaining(item.time_remaining ?? item.seconds_remaining)}
             </span>
           </div>
@@ -105,56 +78,20 @@ function QuickActions() {
   const navigate = useNavigate()
 
   return (
-    <div className="card" style={{ padding: '1rem' }}>
-      <h3
-        style={{
-          fontFamily: 'Cinzel, serif',
-          fontSize: '1rem',
-          marginBottom: '0.75rem',
-          color: 'var(--accent-gold)',
-        }}
-      >
+    <div className="card p-4">
+      <h3 className="heading-gold text-base mb-3">
         Quick Actions
       </h3>
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
-          gap: '0.75rem',
-        }}
-      >
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
         {quickActions.map((action) => (
           <button
             key={action.path}
             onClick={() => navigate(action.path)}
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              gap: '0.35rem',
-              padding: '1rem 0.75rem',
-              backgroundColor: 'var(--bg-surface)',
-              border: '1px solid var(--border)',
-              borderRadius: '0.5rem',
-              cursor: 'pointer',
-              transition: 'border-color 0.2s, background-color 0.2s',
-              color: 'var(--text-primary)',
-              textAlign: 'center',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.borderColor = 'var(--accent-gold)'
-              e.currentTarget.style.backgroundColor = 'rgba(201, 168, 76, 0.05)'
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = 'var(--border)'
-              e.currentTarget.style.backgroundColor = 'var(--bg-surface)'
-            }}
+            className="quick-action"
           >
-            <span style={{ fontSize: '1.5rem' }}>{action.icon}</span>
-            <span style={{ fontSize: '0.9rem', fontWeight: 600 }}>{action.label}</span>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-              {action.description}
-            </span>
+            <span className="text-2xl">{action.icon}</span>
+            <span className="text-sm font-semibold">{action.label}</span>
+            <span className="text-xs text-secondary">{action.description}</span>
           </button>
         ))}
       </div>
@@ -169,18 +106,11 @@ function PlayerInfoCard() {
   const villages = useGameStore((s) => s.villages)
 
   return (
-    <div className="card" style={{ padding: '1rem' }}>
-      <h3
-        style={{
-          fontFamily: 'Cinzel, serif',
-          fontSize: '1rem',
-          marginBottom: '0.75rem',
-          color: 'var(--accent-gold)',
-        }}
-      >
+    <div className="card p-4">
+      <h3 className="heading-gold text-base mb-3">
         Player Info
       </h3>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+      <div className="flex flex-col gap-1">
         <InfoRow label="Server" value={serverUrl || '---'} />
         <InfoRow label="Player" value={playerName || '---'} />
         <InfoRow label="Tribe" value={TRIBE_NAMES[tribeId] || `Tribe ${tribeId ?? '?'}`} />
@@ -192,24 +122,9 @@ function PlayerInfoCard() {
 
 function InfoRow({ label, value }) {
   return (
-    <div
-      style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        padding: '0.35rem 0',
-        borderBottom: '1px solid var(--border)',
-      }}
-    >
-      <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>{label}</span>
-      <span
-        style={{
-          fontSize: '0.85rem',
-          color: 'var(--text-primary)',
-          wordBreak: 'break-all',
-          textAlign: 'right',
-          maxWidth: '60%',
-        }}
-      >
+    <div className="info-row">
+      <span className="text-sm text-secondary">{label}</span>
+      <span className="text-sm text-primary break-all text-right max-w-[60%]">
         {value}
       </span>
     </div>
@@ -249,37 +164,19 @@ export default function Dashboard() {
   }, [])
 
   return (
-    <div style={{ padding: '1.5rem', maxWidth: '960px', margin: '0 auto' }}>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '1.25rem',
-        }}
-      >
-        <h2 style={{ fontFamily: 'Cinzel, serif', fontSize: '1.5rem', margin: 0 }}>Dashboard</h2>
+    <div className="p-6 max-w-4xl mx-auto">
+      <div className="flex justify-between items-center mb-5">
+        <h2 className="heading-gold text-2xl">Dashboard</h2>
         <VillageSelector />
       </div>
 
       {loading ? (
-        <div className="card" style={{ padding: '3rem', textAlign: 'center' }}>
-          <div
-            style={{
-              width: '28px',
-              height: '28px',
-              border: '3px solid var(--border)',
-              borderTopColor: 'var(--accent-gold)',
-              borderRadius: '50%',
-              animation: 'spin 0.8s linear infinite',
-              margin: '0 auto 1rem',
-            }}
-          />
-          <span style={{ color: 'var(--text-secondary)' }}>Loading village data...</span>
-          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        <div className="card p-12 text-center">
+          <div className="spinner spinner-md mx-auto mb-4" />
+          <span className="text-secondary">Loading village data...</span>
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        <div className="flex flex-col gap-4">
           <ResourceBar resources={resources} />
           <ConstructionQueueSummary queue={constructionQueue} />
           <QuickActions />

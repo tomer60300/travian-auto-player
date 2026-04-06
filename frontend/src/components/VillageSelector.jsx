@@ -11,13 +11,7 @@ export default function VillageSelector() {
     <select
       value={activeVillageId || ''}
       onChange={(e) => switchVillage(Number(e.target.value))}
-      className="input-field"
-      style={{
-        maxWidth: '260px',
-        cursor: 'pointer',
-        backgroundColor: 'var(--bg-surface)',
-        color: 'var(--text-primary)',
-      }}
+      className="input-field max-w-[260px] cursor-pointer bg-surface text-primary"
     >
       {villages.map((v) => (
         <option key={v.id} value={v.id}>

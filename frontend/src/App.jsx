@@ -1,51 +1,33 @@
-import { useEffect } from 'react'
+import { useEffect, lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import useAuthStore from './stores/authStore'
 import Layout from './components/Layout'
-import Login from './pages/Login'
-import Connect from './pages/Connect'
-import Dashboard from './pages/Dashboard'
-import Buildings from './pages/Buildings'
-import Military from './pages/Military'
-import Reports from './pages/Reports'
-import VideoRewards from './pages/VideoRewards'
-import FarmLists from './pages/FarmLists'
-import AutoScout from './pages/AutoScout'
-import BuildQueue from './pages/BuildQueue'
+
+// Route-based code splitting — each page is a separate chunk
+const Login = lazy(() => import('./pages/Login'))
+const Connect = lazy(() => import('./pages/Connect'))
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const Buildings = lazy(() => import('./pages/Buildings'))
+const Military = lazy(() => import('./pages/Military'))
+const Reports = lazy(() => import('./pages/Reports'))
+const VideoRewards = lazy(() => import('./pages/VideoRewards'))
+const FarmLists = lazy(() => import('./pages/FarmLists'))
+const AutoScout = lazy(() => import('./pages/AutoScout'))
+const BuildQueue = lazy(() => import('./pages/BuildQueue'))
 
 function LoadingScreen() {
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: 'var(--bg-base)',
-        gap: '1rem',
-      }}
-    >
-      <span
-        style={{
-          fontFamily: "'Cinzel Decorative', serif",
-          fontSize: '1.4rem',
-          color: 'var(--accent-gold)',
-        }}
-      >
-        Travian Auto Player
-      </span>
-      <div
-        style={{
-          width: '32px',
-          height: '32px',
-          border: '3px solid var(--border)',
-          borderTopColor: 'var(--accent-gold)',
-          borderRadius: '50%',
-          animation: 'spin 0.8s linear infinite',
-        }}
-      />
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    <div className="min-h-screen flex flex-col items-center justify-center bg-base gap-4">
+      <span className="logo-text-lg">Travian Auto Player</span>
+      <div className="spinner spinner-lg" />
+    </div>
+  )
+}
+
+function PageLoader() {
+  return (
+    <div className="flex items-center justify-center py-16">
+      <div className="spinner spinner-md" />
     </div>
   )
 }
@@ -59,26 +41,27 @@ export default function App() {
     checkAuth()
   }, [checkAuth])
 
-  // Don't render routes until we know if the token is valid
   if (!initialCheckDone) {
     return <LoadingScreen />
   }
 
   return (
-    <Routes>
-      <Route path="/login" element={!isAuthenticated ? <Login /> : <Navigate to="/" replace />} />
-      <Route path="/connect" element={isAuthenticated ? <Connect /> : <Navigate to="/login" replace />} />
-      <Route element={isAuthenticated ? <Layout /> : <Navigate to="/login" replace />}>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/buildings" element={<Buildings />} />
-        <Route path="/military" element={<Military />} />
-        <Route path="/reports" element={<Reports />} />
-        <Route path="/video" element={<VideoRewards />} />
-        <Route path="/farm" element={<FarmLists />} />
-        <Route path="/scout" element={<AutoScout />} />
-        <Route path="/queue" element={<BuildQueue />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <Suspense fallback={<PageLoader />}>
+      <Routes>
+        <Route path="/login" element={!isAuthenticated ? <Login /> : <Navigate to="/" replace />} />
+        <Route path="/connect" element={isAuthenticated ? <Connect /> : <Navigate to="/login" replace />} />
+        <Route element={isAuthenticated ? <Layout /> : <Navigate to="/login" replace />}>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/buildings" element={<Buildings />} />
+          <Route path="/military" element={<Military />} />
+          <Route path="/reports" element={<Reports />} />
+          <Route path="/video" element={<VideoRewards />} />
+          <Route path="/farm" element={<FarmLists />} />
+          <Route path="/scout" element={<AutoScout />} />
+          <Route path="/queue" element={<BuildQueue />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </Suspense>
   )
 }

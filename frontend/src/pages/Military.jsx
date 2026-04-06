@@ -28,20 +28,6 @@ const DEFAULT_TROOPS = [
   'Troop 6', 'Troop 7', 'Troop 8', 'Troop 9', 'Troop 10',
 ]
 
-function Spinner({ size = 4 }) {
-  return (
-    <span
-      className={`inline-block w-${size} h-${size} rounded-full animate-spin`}
-      style={{
-        border: '2px solid var(--accent-gold)',
-        borderTopColor: 'transparent',
-        width: `${size * 0.25}rem`,
-        height: `${size * 0.25}rem`,
-      }}
-    />
-  )
-}
-
 export default function Military() {
   const toast = useToast()
   const tribeId = useGameStore((s) => s.tribeId)
@@ -157,9 +143,9 @@ export default function Military() {
   if (!connected) {
     return (
       <div className="p-6">
-        <h2 className="text-2xl mb-4" style={{ fontFamily: 'Cinzel', color: 'var(--accent-gold)' }}>Military</h2>
-        <div className="card" style={{ textAlign: 'center', padding: '2rem' }}>
-          <p style={{ color: 'var(--text-secondary)' }}>Connect to a Travian server to use military features.</p>
+        <h2 className="heading-gold text-2xl mb-4">Military</h2>
+        <div className="card text-center p-8">
+          <p className="text-secondary">Connect to a Travian server to use military features.</p>
         </div>
       </div>
     )
@@ -168,25 +154,20 @@ export default function Military() {
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-6 flex-wrap gap-4">
-        <h2 className="text-2xl" style={{ fontFamily: 'Cinzel', color: 'var(--accent-gold)' }}>Military</h2>
+        <h2 className="heading-gold text-2xl">Military</h2>
         <VillageSelector />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Scout Panel */}
         <div className="card">
-          <h3
-            className="text-lg mb-4"
-            style={{ fontFamily: 'Cinzel', color: 'var(--text-primary)' }}
-          >
-            Scout
-          </h3>
+          <h3 className="text-lg mb-4 text-primary">Scout</h3>
 
           <div className="flex flex-col gap-4">
             {/* Coordinates */}
             <div className="grid grid-cols-2 gap-3">
               <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                <label className="text-sm font-semibold text-secondary">
                   X Coordinate
                 </label>
                 <input
@@ -199,7 +180,7 @@ export default function Military() {
                 />
               </div>
               <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                <label className="text-sm font-semibold text-secondary">
                   Y Coordinate
                 </label>
                 <input
@@ -215,7 +196,7 @@ export default function Military() {
 
             {/* Amount */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
+              <label className="text-sm font-semibold text-secondary">
                 Amount
               </label>
               <input
@@ -231,11 +212,11 @@ export default function Military() {
 
             {/* Scout Type */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
+              <label className="text-sm font-semibold text-secondary">
                 Scout Type
               </label>
               <div className="flex gap-4">
-                <label className="flex items-center gap-2 cursor-pointer" style={{ color: 'var(--text-primary)' }}>
+                <label className="flex items-center gap-2 cursor-pointer text-primary">
                   <input
                     type="radio"
                     name="scoutType"
@@ -243,11 +224,11 @@ export default function Military() {
                     checked={scoutType === 'resources'}
                     onChange={(e) => setScoutType(e.target.value)}
                     disabled={scoutLoading}
-                    style={{ accentColor: 'var(--accent-gold)' }}
+                    className="accent-radio"
                   />
                   <span className="text-sm">Resources</span>
                 </label>
-                <label className="flex items-center gap-2 cursor-pointer" style={{ color: 'var(--text-primary)' }}>
+                <label className="flex items-center gap-2 cursor-pointer text-primary">
                   <input
                     type="radio"
                     name="scoutType"
@@ -255,7 +236,7 @@ export default function Military() {
                     checked={scoutType === 'defenses'}
                     onChange={(e) => setScoutType(e.target.value)}
                     disabled={scoutLoading}
-                    style={{ accentColor: 'var(--accent-gold)' }}
+                    className="accent-radio"
                   />
                   <span className="text-sm">Defenses</span>
                 </label>
@@ -264,30 +245,22 @@ export default function Military() {
 
             {/* Send Button */}
             <button
-              className="btn-primary w-full flex items-center justify-center gap-2"
+              className="btn-primary btn-full flex items-center justify-center gap-2"
               onClick={handleScoutClick}
               disabled={scoutLoading}
-              style={{ padding: '0.625rem 1rem' }}
             >
-              {scoutLoading && <Spinner />}
+              {scoutLoading && <span className="spinner spinner-sm" />}
               {scoutLoading ? 'Sending Scouts...' : 'Send Scouts'}
             </button>
 
             {/* Result */}
             {scoutResult && (
               <div
-                className="text-sm px-3 py-2 rounded"
-                style={{
-                  backgroundColor: scoutResult.success
-                    ? 'rgba(74, 140, 74, 0.2)'
-                    : 'rgba(179, 64, 64, 0.2)',
-                  border: `1px solid ${scoutResult.success ? 'var(--success)' : 'var(--danger)'}`,
-                  color: scoutResult.success ? '#8c8' : '#e88',
-                }}
+                className={`result-box text-sm ${scoutResult.success ? 'result-box-success' : 'result-box-danger'}`}
               >
                 {scoutResult.success ? (
                   <div>
-                    <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>Scouts dispatched!</div>
+                    <div className="font-semibold mb-1">Scouts dispatched!</div>
                     {scoutResult.data?.travel_time && (
                       <div>Travel time: {scoutResult.data.travel_time}</div>
                     )}
@@ -305,18 +278,13 @@ export default function Military() {
 
         {/* Raid Panel */}
         <div className="card">
-          <h3
-            className="text-lg mb-4"
-            style={{ fontFamily: 'Cinzel', color: 'var(--text-primary)' }}
-          >
-            Raid
-          </h3>
+          <h3 className="text-lg mb-4 text-primary">Raid</h3>
 
           <div className="flex flex-col gap-4">
             {/* Coordinates */}
             <div className="grid grid-cols-2 gap-3">
               <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                <label className="text-sm font-semibold text-secondary">
                   X Coordinate
                 </label>
                 <input
@@ -329,7 +297,7 @@ export default function Military() {
                 />
               </div>
               <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                <label className="text-sm font-semibold text-secondary">
                   Y Coordinate
                 </label>
                 <input
@@ -345,9 +313,9 @@ export default function Military() {
 
             {/* Troop Grid */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>
+              <label className="text-sm font-semibold text-secondary">
                 Troops {getTotalTroops() > 0 && (
-                  <span style={{ color: 'var(--accent-gold)', fontWeight: 400 }}>
+                  <span className="text-gold font-normal">
                     ({getTotalTroops()} total)
                   </span>
                 )}
@@ -356,27 +324,19 @@ export default function Military() {
                 {troopNames.map((name, i) => (
                   <div key={i} className="flex items-center gap-2">
                     <label
-                      className="text-xs flex-shrink-0"
-                      style={{
-                        color: 'var(--text-secondary)',
-                        width: '120px',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                      }}
+                      className="text-xs text-secondary shrink-0 w-30 truncate"
                       title={name}
                     >
                       {name}
                     </label>
                     <input
                       type="number"
-                      className="input-field"
+                      className="input-troop"
                       min="0"
                       placeholder="0"
                       value={getTroopCount(i)}
                       onChange={(e) => setTroopCount(i, e.target.value)}
                       disabled={raidLoading}
-                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.8rem' }}
                     />
                   </div>
                 ))}
@@ -385,30 +345,22 @@ export default function Military() {
 
             {/* Send Button */}
             <button
-              className="btn-primary w-full flex items-center justify-center gap-2"
+              className="btn-primary btn-full flex items-center justify-center gap-2"
               onClick={handleRaidClick}
               disabled={raidLoading}
-              style={{ padding: '0.625rem 1rem' }}
             >
-              {raidLoading && <Spinner />}
+              {raidLoading && <span className="spinner spinner-sm" />}
               {raidLoading ? 'Sending Raid...' : 'Send Raid'}
             </button>
 
             {/* Result */}
             {raidResult && (
               <div
-                className="text-sm px-3 py-2 rounded"
-                style={{
-                  backgroundColor: raidResult.success
-                    ? 'rgba(74, 140, 74, 0.2)'
-                    : 'rgba(179, 64, 64, 0.2)',
-                  border: `1px solid ${raidResult.success ? 'var(--success)' : 'var(--danger)'}`,
-                  color: raidResult.success ? '#8c8' : '#e88',
-                }}
+                className={`result-box text-sm ${raidResult.success ? 'result-box-success' : 'result-box-danger'}`}
               >
                 {raidResult.success ? (
                   <div>
-                    <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>Raid dispatched!</div>
+                    <div className="font-semibold mb-1">Raid dispatched!</div>
                     {raidResult.data?.travel_time && (
                       <div>Travel time: {raidResult.data.travel_time}</div>
                     )}
