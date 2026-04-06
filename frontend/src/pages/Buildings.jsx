@@ -211,7 +211,7 @@ export default function Buildings() {
     } finally {
       setDetailLoading(false)
     }
-  }, [toast])
+  }, [])
 
   const handleSlotClick = (slotId) => {
     if (selectedSlot === slotId) {

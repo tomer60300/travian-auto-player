@@ -115,11 +115,13 @@ export default function FarmLists() {
       const res = await api.get('/farm/lists')
       setLists(Array.isArray(res.data) ? res.data : [])
     } catch (err) {
-      toast.error('Failed to load farm lists')
+      if (err.response?.status !== 403) {
+        toast.error('Failed to load farm lists')
+      }
     } finally {
       setLoading(false)
     }
-  }, [toast])
+  }, [])
 
   useEffect(() => {
     fetchLists()

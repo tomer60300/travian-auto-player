@@ -79,7 +79,7 @@ const useGameStore = create((set, get) => ({
       } else {
         set({ connected: false, statusChecked: true });
       }
-    } catch {
+    } catch (e) { console.warn('Store fetch failed:', e)
       set({ connected: false, statusChecked: true });
     }
   },
@@ -90,27 +90,51 @@ const useGameStore = create((set, get) => ({
     await Promise.all([get().fetchResources(), get().fetchBuildings()]);
   },
 
+  // Helper: if a 403 means "not connected to Travian", mark disconnected
+  _handleFetchError: (e) => {
+    if (e.response?.status === 403) {
+      const current = useGameStore.getState();
+      if (current.connected) {
+        set({
+          connected: false,
+          resources: null,
+          buildings: [],
+          constructionQueue: [],
+        });
+      }
+    }
+  },
+
   fetchResources: async () => {
     try {
       const res = await api.get('/buildings/resources');
       if (res.data && typeof res.data === 'object' && !Array.isArray(res.data)) {
         set({ resources: res.data });
       }
-    } catch (e) { console.warn('Store fetch failed:', e) }
+    } catch (e) {
+      console.warn('fetchResources failed:', e);
+      get()._handleFetchError(e);
+    }
   },
 
   fetchBuildings: async () => {
     try {
       const res = await api.get('/buildings');
       set({ buildings: Array.isArray(res.data) ? res.data : [] });
-    } catch (e) { console.warn('Store fetch failed:', e) }
+    } catch (e) {
+      console.warn('fetchBuildings failed:', e);
+      get()._handleFetchError(e);
+    }
   },
 
   fetchQueue: async () => {
     try {
       const res = await api.get('/buildings/queue');
       set({ constructionQueue: Array.isArray(res.data) ? res.data : [] });
-    } catch (e) { console.warn('Store fetch failed:', e) }
+    } catch (e) {
+      console.warn('fetchQueue failed:', e);
+      get()._handleFetchError(e);
+    }
   },
 }));
 
