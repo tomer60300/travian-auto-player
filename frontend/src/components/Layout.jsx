@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
-import { Outlet, NavLink, useNavigate } from 'react-router-dom'
+import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import useAuthStore from '../stores/authStore'
 import useGameStore from '../stores/gameStore'
+import useLogStore from '../stores/logStore'
+import { connectLogStream, disconnectLogStream } from '../logStream'
 import ToastContainer from './Toast'
 
 const navItems = [
@@ -18,9 +20,12 @@ const navItems = [
 
 export default function Layout() {
   const navigate = useNavigate()
+  const location = useLocation()
   const user = useAuthStore((s) => s.user)
   const logout = useAuthStore((s) => s.logout)
   const connected = useGameStore((s) => s.connected)
+  const serverLogCount = useLogStore((s) => s.serverLogCount)
+  const resetServerLogCount = useLogStore((s) => s.resetServerLogCount)
   const statusChecked = useGameStore((s) => s.statusChecked)
   const serverUrl = useGameStore((s) => s.serverUrl)
   const playerName = useGameStore((s) => s.playerName)
@@ -28,6 +33,21 @@ export default function Layout() {
   const disconnect = useGameStore((s) => s.disconnect)
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  // Connect log stream when authenticated and connected
+  useEffect(() => {
+    if (connected) {
+      connectLogStream()
+    }
+    return () => disconnectLogStream()
+  }, [connected])
+
+  // Reset server log count when viewing logs page
+  useEffect(() => {
+    if (location.pathname === '/logs') {
+      resetServerLogCount()
+    }
+  }, [location.pathname, resetServerLogCount])
 
   // Check Travian connection status once on mount
   useEffect(() => {
@@ -42,6 +62,15 @@ export default function Layout() {
       navigate('/connect', { replace: true })
     }
   }, [statusChecked, connected, navigate])
+
+  // Add 60s health poll when connected
+  useEffect(() => {
+    if (!connected) return
+    const id = setInterval(() => {
+      checkStatus()
+    }, 60000)
+    return () => clearInterval(id)
+  }, [connected, checkStatus])
 
   const handleLogout = () => {
     logout()
@@ -142,6 +171,11 @@ export default function Layout() {
                     {item.icon}
                   </span>
                   <span>{item.label}</span>
+                  {item.to === '/logs' && serverLogCount > 0 && (
+                    <span className="ml-auto bg-danger text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
+                      {serverLogCount > 99 ? '99+' : serverLogCount}
+                    </span>
+                  )}
                 </NavLink>
               ))}
             </nav>

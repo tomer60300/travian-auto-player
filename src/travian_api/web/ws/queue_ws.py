@@ -64,11 +64,11 @@ def _parse_yaml_to_plan(yaml_content: str) -> BuildPlan:
 
 
 async def _send(ws: WebSocket, data: dict) -> None:
-    """Send JSON to the WebSocket, silently ignoring closed connections."""
+    """Send JSON to the WebSocket; raise on failure so callers can handle disconnect."""
     try:
         await ws.send_json(data)
     except Exception:
-        logger.debug("Failed to send JSON over WS in queue handler", exc_info=True)
+        raise WebSocketDisconnect()
 
 
 @router.websocket("/ws/queue/run")
@@ -130,17 +130,27 @@ async def queue_run_ws(websocket: WebSocket):
         service = session.build_queue_service
         prev_callback = service._on_status
 
-        async def _stream_status(msg: str) -> None:
-            await _send(websocket, {"type": "status", "message": msg})
-
-        # The service callback is synchronous (Callable[[str], None]),
-        # so we schedule the async send onto the running event loop.
+        # Use a thread-safe queue so the sync callback never blocks and
+        # messages are drained in order by an async task.
+        status_queue: asyncio.Queue[str | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
         def _sync_status_callback(msg: str) -> None:
-            asyncio.run_coroutine_threadsafe(_stream_status(msg), loop)
+            loop.call_soon_threadsafe(status_queue.put_nowait, msg)
+
+        async def _drain_status_queue() -> None:
+            """Continuously drain status messages and send them over WS."""
+            try:
+                while True:
+                    msg = await status_queue.get()
+                    if msg is None:
+                        break
+                    await _send(websocket, {"type": "status", "message": msg})
+            except WebSocketDisconnect:
+                pass
 
         service.on_status(_sync_status_callback)
+        drainer_task = asyncio.create_task(_drain_status_queue())
 
         # ── Listener task: watch for client "stop" messages ───────────
         async def _listen_for_stop() -> None:
@@ -230,13 +240,16 @@ async def queue_run_ws(websocket: WebSocket):
             logger.exception("Build queue execution failed for user %s", user_id)
             await _send(websocket, {"type": "error", "message": str(exc)})
         finally:
-            # Restore the previous status callback
+            # Restore the previous status callback and stop the drainer
             service._on_status = prev_callback
+            status_queue.put_nowait(None)  # signal drainer to exit
+            drainer_task.cancel()
             listener_task.cancel()
-            try:
-                await listener_task
-            except asyncio.CancelledError:
-                pass
+            for t in (drainer_task, listener_task):
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
 
     except WebSocketDisconnect:
         logger.info("Queue WS disconnected: user=%s", user_id)

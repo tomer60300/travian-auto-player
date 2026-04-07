@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* Travian-themed dark color scheme */
+/* Travian-themed dark color scheme (default) */
 :root {
   --bg-base: #13100d;
   --bg-surface: #1e1914;
@@ -14,6 +14,22 @@
   --warning: #c4812f;
   --info: #4a7c8c;
   --border: #3a3028;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --bg-base: #f5f0e8;
+  --bg-surface: #ebe4d8;
+  --bg-card: #ffffff;
+  --accent-gold: #8b6914;
+  --accent-gold-hover: #a07a1e;
+  --text-primary: #2c2418;
+  --text-secondary: #6b5d4f;
+  --success: #2d6a2d;
+  --danger: #9a2e2e;
+  --warning: #a06420;
+  --info: #2d5c6a;
+  --border: #d4c8b4;
 }
 
 body {

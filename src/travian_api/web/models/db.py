@@ -1,6 +1,8 @@
 """SQLite database models and async session management for the Travian Web UI."""
 
+import os
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -10,7 +12,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 # Engine & session factory
 # ---------------------------------------------------------------------------
 
-DATABASE_URL = "sqlite+aiosqlite:///./travian_web.db"
+# Configurable via TRAVIAN_DB_PATH env var; defaults to ~/.travian/travian_web.db
+_DEFAULT_DB_DIR = Path.home() / ".travian"
+_DB_PATH = os.environ.get("TRAVIAN_DB_PATH", str(_DEFAULT_DB_DIR / "travian_web.db"))
+_DEFAULT_DB_DIR.mkdir(parents=True, exist_ok=True)
+DATABASE_URL = f"sqlite+aiosqlite:///{_DB_PATH}"
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 

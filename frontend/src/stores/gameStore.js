@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import api from '../api';
 
+let _checkingStatus = false
+
 const useGameStore = create((set, get) => ({
   connected: false,
   statusChecked: false,
@@ -97,9 +99,9 @@ const useGameStore = create((set, get) => ({
     const status = e.response?.status;
     if (status === 403) {
       const current = useGameStore.getState();
-      if (current.connected) {
-        // Don't immediately disconnect — verify the session is actually gone
-        get().checkStatus();
+      if (current.connected && !_checkingStatus) {
+        _checkingStatus = true
+        get().checkStatus().finally(() => { _checkingStatus = false })
       }
     }
   },

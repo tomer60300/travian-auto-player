@@ -50,7 +50,7 @@ class SavedServerRequest(BaseModel):
 class SavedServerResponse(BaseModel):
     id: int
     server_url: str
-    travian_username: str
+    username: str
     label: str | None
     last_connected: str | None
 
@@ -90,7 +90,7 @@ def _credential_to_response(cred: TravianCredential) -> SavedServerResponse:
     return SavedServerResponse(
         id=cred.id,
         server_url=cred.server_url,
-        travian_username=cred.travian_username,
+        username=cred.travian_username,
         label=cred.label,
         last_connected=cred.last_connected.isoformat() if cred.last_connected else None,
     )

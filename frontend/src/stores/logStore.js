@@ -5,22 +5,27 @@ const MAX_ENTRIES = 2000
 
 const useLogStore = create((set) => ({
   entries: [],
+  serverLogCount: 0,
 
-  addLog: (level, source, message, detail) => {
+  addLog: (level, source, message, detail, origin = 'client') => {
     const entry = {
       id: ++_id,
       timestamp: Date.now(),
       level,   // 'info' | 'success' | 'warning' | 'error'
-      source,  // 'api' | 'ws' | 'auth' | 'game' | 'scout' | 'farm' | 'queue' | 'military' | 'video' | 'reports'
+      source,  // 'api' | 'ws' | 'auth' | 'game' | 'scout' | 'farm' | 'queue' | 'military' | 'video' | 'reports' | 'server'
       message,
       detail,  // optional extra data (string or object)
+      origin,  // 'client' | 'server'
     }
     set((state) => ({
       entries: [...state.entries.slice(-(MAX_ENTRIES - 1)), entry],
+      serverLogCount: origin === 'server' ? state.serverLogCount + 1 : state.serverLogCount,
     }))
   },
 
-  clear: () => set({ entries: [] }),
+  resetServerLogCount: () => set({ serverLogCount: 0 }),
+
+  clear: () => set({ entries: [], serverLogCount: 0 }),
 }))
 
 export default useLogStore

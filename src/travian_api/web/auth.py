@@ -1,7 +1,9 @@
 """User authentication, JWT tokens, and credential encryption for the Travian Web UI."""
 
 import json
+import logging
 import os
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -21,20 +23,40 @@ from travian_api.web.models.db import User, get_db
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
-KEYS_FILE = Path(".web_keys")
+_logger = logging.getLogger(__name__)
+
+# Store keys in ~/.travian/ (same directory as the DB) instead of CWD
+_KEYS_DIR = Path.home() / ".travian"
+_KEYS_DIR.mkdir(parents=True, exist_ok=True)
+KEYS_FILE = _KEYS_DIR / ".web_keys"
 
 # ---------------------------------------------------------------------------
 # Key management
 # ---------------------------------------------------------------------------
 
 
-def get_or_create_keys() -> tuple[str, str]:
-    """Return (jwt_secret, fernet_key), creating the `.web_keys` file if needed.
+def _warn_if_world_readable(path: Path) -> None:
+    """Log a warning if the keys file is readable by others (Unix only)."""
+    try:
+        mode = path.stat().st_mode
+        if mode & (stat.S_IRGRP | stat.S_IROTH):
+            _logger.warning(
+                "Security: %s is readable by other users (mode %o). "
+                "Run: chmod 600 %s",
+                path, mode & 0o777, path,
+            )
+    except (OSError, AttributeError):
+        pass  # Windows or inaccessible — skip
 
-    The keys file is a JSON object stored in the project root:
+
+def get_or_create_keys() -> tuple[str, str]:
+    """Return (jwt_secret, fernet_key), creating the keys file if needed.
+
+    The keys file is a JSON object stored in ``~/.travian/.web_keys``:
         {"jwt_secret": "...", "fernet_key": "..."}
     """
     if KEYS_FILE.exists():
+        _warn_if_world_readable(KEYS_FILE)
         data = json.loads(KEYS_FILE.read_text(encoding="utf-8"))
         return data["jwt_secret"], data["fernet_key"]
 
@@ -45,6 +67,13 @@ def get_or_create_keys() -> tuple[str, str]:
         json.dumps({"jwt_secret": jwt_secret, "fernet_key": fernet_key}, indent=2),
         encoding="utf-8",
     )
+
+    # Try to restrict permissions on Unix
+    try:
+        KEYS_FILE.chmod(0o600)
+    except OSError:
+        pass
+
     return jwt_secret, fernet_key
 
 

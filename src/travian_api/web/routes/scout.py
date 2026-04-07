@@ -21,11 +21,14 @@ router = APIRouter(prefix="/api/scout", tags=["scout"])
 class ScanRequest(BaseModel):
     radius: int = Field(..., ge=1, le=100, description="Scan radius from village center")
     village_id: int | None = Field(None, description="Source village ID (default: active village)")
-    max_pop: int | None = Field(None, description="Max population filter")
-    min_pop: int | None = Field(None, description="Min population filter")
+    max_pop: int | None = Field(None, description="Max village population filter")
+    min_pop: int | None = Field(None, description="Min village population filter")
+    max_player_pop: int | None = Field(None, description="Max total player population (all villages)")
     no_player: bool = Field(False, description="Only show unoccupied villages")
     show_oases: bool = Field(False, description="Include oases in results")
     limit: int = Field(50, ge=1, le=500, description="Max results to return")
+    exclude_alliance_ids: list[int] = Field(default_factory=list, description="Alliance IDs to exclude")
+    exclude_player_names: list[str] = Field(default_factory=list, description="Player names to exclude")
 
 
 class MapTileResponse(BaseModel):
@@ -102,6 +105,15 @@ async def scan_map(
         if tiles:
             tiles = await svc.enrich_tiles(tiles)
 
+        # Build player name → ID lookup for name-based exclusion
+        exclude_player_ids = set()
+        if body.exclude_player_names:
+            name_lower_set = {n.lower() for n in body.exclude_player_names}
+            for t in tiles:
+                if t.player_name and t.player_name.lower() in name_lower_set:
+                    if t.player_id:
+                        exclude_player_ids.add(t.player_id)
+
         # Apply filters via the service
         tiles = svc.filter_targets(
             tiles,
@@ -109,7 +121,21 @@ async def scan_map(
             min_population=body.min_pop,
             only_no_player=body.no_player,
             exclude_oases=not body.show_oases,
+            exclude_alliance_ids=set(body.exclude_alliance_ids) if body.exclude_alliance_ids else None,
+            exclude_player_ids=exclude_player_ids or None,
         )
+
+        # Filter by max player total population (sum of all visible villages per player)
+        if body.max_player_pop is not None:
+            player_pops: dict[int, int] = {}
+            for t in tiles:
+                if t.player_id:
+                    player_pops.setdefault(t.player_id, 0)
+                    player_pops[t.player_id] += t.population
+            tiles = [
+                t for t in tiles
+                if not t.player_id or player_pops.get(t.player_id, 0) <= body.max_player_pop
+            ]
 
         # Apply limit
         tiles = tiles[: body.limit]

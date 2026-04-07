@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import useAuthStore from './stores/authStore'
 import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/Layout'
+import ToastContainer from './components/Toast'
 
 const Login = lazy(() => import('./pages/Login'))
 const Connect = lazy(() => import('./pages/Connect'))
@@ -58,6 +59,7 @@ export default function App() {
 
   return (
     <ErrorBoundary>
+      <ToastContainer />
       <Suspense fallback={<PageLoader />}>
         <Routes>
           <Route path="/login" element={isAuthenticated ? <Navigate to="/connect" replace /> : <GuardedPage><Login /></GuardedPage>} />

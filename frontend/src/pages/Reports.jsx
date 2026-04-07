@@ -143,6 +143,7 @@ function ReportDetail({ detail, loading }) {
 
 function RaidTargetAnalyzer() {
   const toast = useToast()
+  const [collapsed, setCollapsed] = useState(true)
   const [minResources, setMinResources] = useState(200)
   const [analyzerMaxAge, setAnalyzerMaxAge] = useState(24)
   const [analyzerMaxPages, setAnalyzerMaxPages] = useState(3)
@@ -193,8 +194,16 @@ function RaidTargetAnalyzer() {
 
   return (
     <div className="card mb-6">
-      <h3 className="heading-gold text-base mb-4">Raid Target Analyzer</h3>
+      <h3
+        className="heading-gold text-base mb-0 flex items-center justify-between cursor-pointer select-none"
+        onClick={() => setCollapsed((c) => !c)}
+      >
+        <span>Raid Target Analyzer</span>
+        <span className="text-secondary text-sm font-normal">{collapsed ? '[ + ]' : '[ - ]'}</span>
+      </h3>
 
+      {collapsed ? null : <>
+      <div className="mt-4" />
       <div className="flex items-end gap-4 flex-wrap mb-4">
         <div className="flex flex-col gap-1.5">
           <label className="text-sm font-semibold text-secondary">Min Resources</label>
@@ -320,6 +329,7 @@ function RaidTargetAnalyzer() {
           )}
         </div>
       )}
+      </>}
     </div>
   )
 }

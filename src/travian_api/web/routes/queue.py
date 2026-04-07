@@ -100,6 +100,134 @@ def _parse_yaml_to_plan(yaml_content: str) -> BuildPlan:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Build plan templates
+# ---------------------------------------------------------------------------
+
+_TEMPLATES = {
+    "resource": {
+        "label": "Resource Focus",
+        "description": "Level up all resource fields evenly to 5, then 8",
+        "yaml": (
+            "village_id: auto\n"
+            "plan:\n"
+            "  - building: Woodcutter\n"
+            "    target: 8\n"
+            "    priority: 1\n"
+            "  - building: Clay Pit\n"
+            "    target: 8\n"
+            "    priority: 1\n"
+            "  - building: Iron Mine\n"
+            "    target: 8\n"
+            "    priority: 1\n"
+            "  - building: Cropland\n"
+            "    target: 8\n"
+            "    priority: 1\n"
+        ),
+    },
+    "military_roman": {
+        "label": "Roman Military",
+        "description": "Barracks, Academy, Smithy, and Horse Drinking Trough",
+        "yaml": (
+            "village_id: auto\n"
+            "plan:\n"
+            "  - building: Barracks\n"
+            "    target: 15\n"
+            "    priority: 1\n"
+            "  - building: Academy\n"
+            "    target: 15\n"
+            "    priority: 2\n"
+            "  - building: Smithy\n"
+            "    target: 10\n"
+            "    priority: 2\n"
+            "  - building: Horse Drinking Trough\n"
+            "    target: 10\n"
+            "    priority: 3\n"
+        ),
+    },
+    "military_teuton": {
+        "label": "Teuton Raider",
+        "description": "Barracks and Stable for early raiding",
+        "yaml": (
+            "village_id: auto\n"
+            "plan:\n"
+            "  - building: Barracks\n"
+            "    target: 15\n"
+            "    priority: 1\n"
+            "  - building: Stable\n"
+            "    target: 10\n"
+            "    priority: 2\n"
+            "  - building: Academy\n"
+            "    target: 10\n"
+            "    priority: 2\n"
+        ),
+    },
+    "military_gaul": {
+        "label": "Gaul Defense",
+        "description": "Palisade, Trapper, and Stable for defensive play",
+        "yaml": (
+            "village_id: auto\n"
+            "plan:\n"
+            "  - building: Palisade\n"
+            "    target: 15\n"
+            "    priority: 1\n"
+            "  - building: Trapper\n"
+            "    target: 10\n"
+            "    priority: 1\n"
+            "  - building: Stable\n"
+            "    target: 10\n"
+            "    priority: 2\n"
+        ),
+    },
+    "economy": {
+        "label": "Economy Starter",
+        "description": "Main Building, Warehouse, Granary, Marketplace",
+        "yaml": (
+            "village_id: auto\n"
+            "plan:\n"
+            "  - building: Main Building\n"
+            "    target: 15\n"
+            "    priority: 1\n"
+            "  - building: Warehouse\n"
+            "    target: 12\n"
+            "    priority: 1\n"
+            "  - building: Granary\n"
+            "    target: 12\n"
+            "    priority: 1\n"
+            "  - building: Marketplace\n"
+            "    target: 10\n"
+            "    priority: 2\n"
+        ),
+    },
+    "settler": {
+        "label": "Second Village",
+        "description": "Residence, Warehouse, and Granary for settling",
+        "yaml": (
+            "village_id: auto\n"
+            "plan:\n"
+            "  - building: Residence\n"
+            "    target: 10\n"
+            "    priority: 1\n"
+            "  - building: Warehouse\n"
+            "    target: 14\n"
+            "    priority: 1\n"
+            "  - building: Granary\n"
+            "    target: 14\n"
+            "    priority: 1\n"
+        ),
+    },
+}
+
+
+@router.get("/templates")
+async def list_templates():
+    """Return available build plan templates."""
+    return [
+        {"key": key, "label": t["label"], "description": t["description"], "yaml": t["yaml"]}
+        for key, t in _TEMPLATES.items()
+    ]
+
+
 @router.post("/validate", response_model=ValidateResponse)
 async def validate_build_plan(
     body: ValidateRequest,

@@ -19,6 +19,15 @@ const SOURCE_LABELS = {
   video: 'Video',
   reports: 'Reports',
   ws: 'WS',
+  server: 'Server',
+}
+
+const LEVEL_BADGE = {
+  debug: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
+  info: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+  success: 'bg-green-500/20 text-green-400 border-green-500/30',
+  warning: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+  error: 'bg-red-500/20 text-red-400 border-red-500/30',
 }
 
 const ALL_SOURCES = Object.keys(SOURCE_LABELS)
@@ -36,6 +45,7 @@ export default function Logs() {
   const [autoScroll, setAutoScroll] = useState(true)
   const [filterSource, setFilterSource] = useState('all')
   const [filterLevel, setFilterLevel] = useState('all')
+  const [filterOrigin, setFilterOrigin] = useState('all')
   const [search, setSearch] = useState('')
   const [expandedId, setExpandedId] = useState(null)
   const [showDetail, setShowDetail] = useState(true)
@@ -58,6 +68,7 @@ export default function Logs() {
   const filtered = useMemo(() => entries.filter((e) => {
     if (filterSource !== 'all' && e.source !== filterSource) return false
     if (filterLevel !== 'all' && e.level !== filterLevel) return false
+    if (filterOrigin !== 'all' && e.origin !== filterOrigin) return false
     if (debouncedSearch) {
       const q = debouncedSearch.toLowerCase()
       return (
@@ -67,7 +78,20 @@ export default function Logs() {
       )
     }
     return true
-  }), [entries, filterSource, filterLevel, debouncedSearch])
+  }), [entries, filterSource, filterLevel, filterOrigin, debouncedSearch])
+
+  const handleExport = () => {
+    const blob = new Blob(
+      filtered.map(e => JSON.stringify(e) + '\n'),
+      { type: 'application/x-ndjson' }
+    )
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `travian-logs-${new Date().toISOString().slice(0, 19)}.jsonl`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
   const RENDER_CAP = 200
   const capped = (!showAllLogs && filtered.length > RENDER_CAP)
@@ -80,6 +104,7 @@ export default function Logs() {
         <h2 className="heading-gold text-2xl">Activity Log</h2>
         <div className="flex items-center gap-2">
           <span className="text-xs text-secondary">{filtered.length} / {entries.length} entries</span>
+          <button onClick={handleExport} className="btn-secondary btn-xs">Export</button>
           <button onClick={clear} className="btn-danger btn-xs">Clear All</button>
         </div>
       </div>
@@ -112,6 +137,19 @@ export default function Logs() {
             <option value="success">Success</option>
             <option value="warning">Warning</option>
             <option value="error">Error</option>
+          </select>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-secondary">Origin:</label>
+          <select
+            value={filterOrigin}
+            onChange={(e) => setFilterOrigin(e.target.value)}
+            className="input-field text-xs py-1 px-2 w-auto"
+          >
+            <option value="all">All</option>
+            <option value="server">Server</option>
+            <option value="client">Client</option>
           </select>
         </div>
 
@@ -183,6 +221,9 @@ export default function Logs() {
             >
               <div className="flex gap-2 items-start text-xs">
                 <span className="ws-panel-time shrink-0">[{formatTime(entry.timestamp)}]</span>
+                <span className={`shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium border ${LEVEL_BADGE[entry.level] || LEVEL_BADGE.info}`}>
+                  {entry.level}
+                </span>
                 <span className="text-gold shrink-0 w-[55px] text-right">{SOURCE_LABELS[entry.source] || entry.source}</span>
                 <span className="flex-1 break-all">{entry.message}</span>
               </div>

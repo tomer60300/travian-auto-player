@@ -5,6 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from travian_api.web.rate_limit import action_limiter
 from travian_api.web.sessions import get_travian_session, TravianSession
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,7 @@ async def get_construction_queue(
 async def upgrade_building(
     body: UpgradeRequest,
     session: TravianSession = Depends(get_travian_session),
+    _=Depends(action_limiter),
 ):
     """Upgrade an existing building to the next level."""
     try:
@@ -131,6 +133,7 @@ async def upgrade_building(
 async def construct_building(
     body: ConstructRequest,
     session: TravianSession = Depends(get_travian_session),
+    _=Depends(action_limiter),
 ):
     """Construct a new building on an empty slot.
 

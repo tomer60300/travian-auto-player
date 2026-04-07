@@ -46,6 +46,7 @@ export default function Military() {
   const [raidX, setRaidX] = useState('')
   const [raidY, setRaidY] = useState('')
   const [troops, setTroops] = useState({})
+  const [showAllTroops, setShowAllTroops] = useState(false)
   const [raidLoading, setRaidLoading] = useState(false)
   const [raidResult, setRaidResult] = useState(null)
   const [raidConfirmOpen, setRaidConfirmOpen] = useState(false)
@@ -340,33 +341,52 @@ export default function Military() {
 
             {/* Troop Grid */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-sm font-semibold text-secondary">
-                Troops {getTotalTroops() > 0 && (
-                  <span className="text-gold font-normal">
-                    ({getTotalTroops()} total)
-                  </span>
-                )}
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-semibold text-secondary">
+                  Troops {getTotalTroops() > 0 && (
+                    <span className="text-gold font-normal">
+                      ({getTotalTroops()} total)
+                    </span>
+                  )}
+                </label>
+                <label className="check-label-secondary text-xs cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showAllTroops}
+                    onChange={(e) => setShowAllTroops(e.target.checked)}
+                  />
+                  Show all
+                </label>
+              </div>
               <div className="grid grid-cols-2 gap-2">
-                {troopNames.map((name, i) => (
-                  <div key={i} className="flex items-center gap-2">
-                    <label
-                      className="text-xs text-secondary shrink-0 w-30 truncate"
-                      title={name}
-                    >
-                      {name}
-                    </label>
-                    <input
-                      type="number"
-                      className="input-troop"
-                      min="0"
-                      placeholder="0"
-                      value={getTroopCount(i)}
-                      onChange={(e) => setTroopCount(i, e.target.value)}
-                      disabled={raidLoading}
-                    />
-                  </div>
-                ))}
+                {troopNames.map((name, i) => {
+                  const hasValue = getTroopCount(i) !== '' && Number(getTroopCount(i)) > 0
+                  if (!showAllTroops && !hasValue) return null
+                  return (
+                    <div key={i} className="flex items-center gap-2">
+                      <label
+                        className="text-xs text-secondary shrink-0 w-30 truncate"
+                        title={name}
+                      >
+                        {name}
+                      </label>
+                      <input
+                        type="number"
+                        className="input-troop"
+                        min="0"
+                        placeholder="0"
+                        value={getTroopCount(i)}
+                        onChange={(e) => setTroopCount(i, e.target.value)}
+                        disabled={raidLoading}
+                      />
+                    </div>
+                  )
+                })}
+                {!showAllTroops && getTotalTroops() === 0 && (
+                  <p className="text-xs text-secondary col-span-2 italic">
+                    Enable "Show all" to add troops
+                  </p>
+                )}
               </div>
             </div>
 

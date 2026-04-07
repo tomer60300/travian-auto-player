@@ -50,6 +50,15 @@ function formatTimeRemaining(seconds) {
 }
 
 const ConstructionQueueSummary = memo(function ConstructionQueueSummary({ queue }) {
+  const [tick, setTick] = useState(0)
+
+  useEffect(() => {
+    if (!queue || queue.length === 0) return
+    setTick(0)
+    const id = setInterval(() => setTick(t => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [queue])
+
   if (!queue || queue.length === 0) return null
 
   return (
@@ -59,8 +68,9 @@ const ConstructionQueueSummary = memo(function ConstructionQueueSummary({ queue 
       </h3>
       <div className="flex flex-col gap-2">
         {queue.map((item, idx) => {
-          const remaining = item.remaining_seconds ?? item.time_remaining ?? item.seconds_remaining
-          const doneAt = new Date(Date.now() + (remaining || 0) * 1000)
+          const baseRemaining = item.remaining_seconds ?? item.time_remaining ?? item.seconds_remaining
+          const remaining = Math.max(0, (baseRemaining || 0) - tick)
+          const doneAt = new Date(Date.now() + remaining * 1000)
           const doneStr = doneAt.toLocaleTimeString('en-US', { hour12: false })
           return (
             <div key={item.event_id ?? `${item.building_name}-${item.target_level}-${idx}`} className="surface-row">
@@ -155,6 +165,8 @@ export default function Dashboard() {
       await fetchResources()
       if (cancelled) return
       await fetchQueue()
+      if (cancelled) return
+      await fetchBuildings()
       if (cancelled) return
       setLoading(false)
     }

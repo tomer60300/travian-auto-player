@@ -54,6 +54,13 @@ class SendResultResponse(BaseModel):
     targets: list[TargetResultResponse]
 
 
+class LastRaidResponse(BaseModel):
+    icon: str  # "no_loss", "some_loss", "all_dead", "unknown"
+    resources: int | None = None
+    capacity: int | None = None  # booty_max — total carry capacity of the raid
+    time: int | None = None  # unix timestamp
+
+
 class SlotResponse(BaseModel):
     id: int
     x: int
@@ -64,9 +71,9 @@ class SlotResponse(BaseModel):
     is_active: bool
     is_running: bool
     running_attacks: int
+    troops: dict[str, int]  # {"t1": 0, "t2": 50, ...} — full breakdown
     troop_total: int
-    last_raid_icon: str | None = None
-    last_raid_resources: int | None = None
+    last_raid: LastRaidResponse | None = None
     total_booty: int
     total_raids: int
 
@@ -78,6 +85,9 @@ class FarmListSummaryResponse(BaseModel):
     active_slots: int
     running_raids: int
     owner_village_id: int
+    owner_village_name: str | None = None
+    total_booty: int = 0
+    total_raids: int = 0
 
 
 class FarmListDetailResponse(FarmListSummaryResponse):
@@ -90,6 +100,8 @@ class FarmListDetailResponse(FarmListSummaryResponse):
 
 
 def _farm_list_to_summary(fl) -> FarmListSummaryResponse:
+    total_booty = sum(s.total_booty.booty for s in fl.slots)
+    total_raids = sum(s.total_booty.raids for s in fl.slots)
     return FarmListSummaryResponse(
         id=fl.id,
         name=fl.name,
@@ -97,16 +109,24 @@ def _farm_list_to_summary(fl) -> FarmListSummaryResponse:
         active_slots=len(fl.active_slots),
         running_raids=fl.running_raids_amount,
         owner_village_id=fl.owner_village.id,
+        total_booty=total_booty,
+        total_raids=total_raids,
     )
 
 
 def _slot_to_response(slot) -> SlotResponse:
-    last_icon = None
-    last_res = None
+    last_raid = None
     if slot.last_raid:
-        last_icon = slot.last_raid.icon_label
         raided = getattr(slot.last_raid, 'raided_resources', None)
-        last_res = raided.total if raided else None
+        last_raid = LastRaidResponse(
+            icon=slot.last_raid.icon_label,
+            resources=raided.total if raided else None,
+            capacity=slot.last_raid.booty_max or None,
+            time=slot.last_raid.time,
+        )
+
+    # Full troop breakdown (only include non-zero for cleaner output)
+    troops = slot.troop.to_dict()
 
     return SlotResponse(
         id=slot.id,
@@ -118,9 +138,9 @@ def _slot_to_response(slot) -> SlotResponse:
         is_active=slot.is_active,
         is_running=slot.is_running,
         running_attacks=slot.running_attacks,
+        troops=troops,
         troop_total=slot.troop.total,
-        last_raid_icon=last_icon,
-        last_raid_resources=last_res,
+        last_raid=last_raid,
         total_booty=slot.total_booty.booty,
         total_raids=slot.total_booty.raids,
     )
@@ -242,6 +262,162 @@ async def add_target(
             detail=exc.message,
         ) from exc
     return {"list_id": list_id, "x": body.x, "y": body.y}
+
+
+@router.delete("/lists/{list_id}/targets/{slot_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_target(
+    list_id: int,
+    slot_id: int,
+    session: TravianSession = Depends(get_travian_session),
+):
+    """Remove a target slot from a farm list."""
+    try:
+        await session.farm_service.delete_slots([slot_id])
+    except TravianError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=exc.message,
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Defender strength lookup (background-friendly)
+# ---------------------------------------------------------------------------
+
+
+class DefenseInfoRequest(BaseModel):
+    list_id: int
+    max_pages: int = 5
+    max_age_hours: int = 48
+
+
+class SlotDefenseInfo(BaseModel):
+    slot_id: int
+    x: int
+    y: int
+    name: str
+    defender_troops: dict[str, int] = {}
+    defender_total: int = 0
+    report_age_hours: float | None = None
+    report_id: str | None = None
+
+
+@router.post("/defense-scan", response_model=list[SlotDefenseInfo])
+async def scan_defense_strength(
+    body: DefenseInfoRequest,
+    session: TravianSession = Depends(get_travian_session),
+):
+    """Scan recent battle/scout reports to extract defender troop info for farm list targets.
+
+    This can be slow (fetches reports) — call it in the background from the frontend.
+    """
+    import time as _time
+    from datetime import datetime, timezone
+
+    # 1. Get the farm list slots
+    try:
+        fl = await session.farm_service.get_farm_list(body.list_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch farm list: {exc}",
+        ) from exc
+
+    # Build a coord→slot lookup
+    coord_to_slots: dict[tuple[int, int], list] = {}
+    for slot in fl.slots:
+        key = (slot.target.x, slot.target.y)
+        coord_to_slots.setdefault(key, []).append(slot)
+
+    if not coord_to_slots:
+        return []
+
+    # 2. Fetch recent reports
+    try:
+        reports = await session.reports_service.fetch_reports(
+            max_age_hours=body.max_age_hours,
+            max_pages=body.max_pages,
+        )
+    except Exception as exc:
+        logger.warning("Failed to fetch reports for defense scan: %s", exc)
+        reports = []
+
+    # 3. For each report, check if it's a battle targeting one of our farm slots
+    now_ts = _time.time()
+    results: dict[int, SlotDefenseInfo] = {}
+
+    for report in reports:
+        # Only process battle reports
+        report_type = getattr(report, 'report_type', '') or ''
+        if 'battle' not in report_type.lower() and 'raid' not in report_type.lower():
+            continue
+
+        # Try to get detailed report data
+        try:
+            detail = await session.reports_service.fetch_report_detail(report.report_id)
+        except Exception:
+            continue
+
+        if not detail:
+            continue
+
+        # Extract defender coords — look for target village coords
+        battle = getattr(detail, 'battle_data', None) or getattr(detail, 'data', None)
+        if not battle:
+            continue
+
+        defender_info = {}
+        if hasattr(battle, 'defender') and isinstance(battle.defender, dict):
+            defender_info = battle.defender
+        elif isinstance(battle, dict):
+            defender_info = battle.get('defender', {})
+
+        # Get defender coords
+        dx = defender_info.get('x') or defender_info.get('coordinateX')
+        dy = defender_info.get('y') or defender_info.get('coordinateY')
+
+        if dx is None or dy is None:
+            continue
+
+        coord_key = (int(dx), int(dy))
+        if coord_key not in coord_to_slots:
+            continue
+
+        # Extract defender troops
+        defender_troops = {}
+        if hasattr(battle, 'defender_troops'):
+            defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
+        elif isinstance(battle, dict):
+            defender_troops = dict(battle.get('defender_troops', {}))
+
+        defender_total = sum(defender_troops.values())
+
+        # Report age
+        report_time = getattr(report, 'time', None) or getattr(report, 'timestamp', None)
+        age_hours = None
+        if report_time:
+            if isinstance(report_time, (int, float)):
+                age_hours = round((now_ts - report_time) / 3600, 1)
+            elif isinstance(report_time, datetime):
+                age_hours = round((datetime.now(timezone.utc) - report_time).total_seconds() / 3600, 1)
+
+        report_id = getattr(report, 'report_id', None) or getattr(report, 'id', None)
+
+        for slot in coord_to_slots[coord_key]:
+            # Only keep the most recent (first encountered) report per slot
+            if slot.id not in results:
+                results[slot.id] = SlotDefenseInfo(
+                    slot_id=slot.id,
+                    x=slot.target.x,
+                    y=slot.target.y,
+                    name=slot.target.name,
+                    defender_troops=defender_troops,
+                    defender_total=defender_total,
+                    report_age_hours=age_hours,
+                    report_id=str(report_id) if report_id else None,
+                )
+
+    return list(results.values())
 
 
 @router.post("/lists/{list_id}/send", response_model=SendResultResponse)

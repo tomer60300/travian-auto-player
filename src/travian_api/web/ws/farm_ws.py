@@ -199,12 +199,18 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                             "error": t.error or None,
                         })
 
-                next_send = _now_iso() if end_time and time.time() + interval >= end_time else None
+                # Compute next send time: None if the loop will end before then
+                next_time = time.time() + interval
+                if end_time and next_time >= end_time:
+                    next_send = None
+                else:
+                    next_send = datetime.fromtimestamp(next_time).isoformat(timespec="seconds")
+
                 await _send(websocket, {
                     "type": "cycle_end",
                     "cycle": cycle,
-                    "success": cycle_success,
-                    "fail": cycle_fail,
+                    "sent": cycle_success,
+                    "failed": cycle_fail,
                     "total": cycle_success + cycle_fail,
                     "cumulative_success": total_success,
                     "cumulative_fail": total_fail,
@@ -238,7 +244,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
         await _send(websocket, {
             "type": "complete",
             "reason": "duration_elapsed" if (end_time and time.time() >= end_time) else "stopped",
-            "cycles": cycle,
+            "total_cycles": cycle,
             "total_success": total_success,
             "total_fail": total_fail,
             "timestamp": _now_iso(),
@@ -408,15 +414,23 @@ async def ws_farm_run_all(websocket: WebSocket):
                 total_success += cycle_success
                 total_fail += cycle_fail
 
+                # Compute next send time for run-all
+                next_time = time.time() + interval
+                if end_time and next_time >= end_time:
+                    next_send = None
+                else:
+                    next_send = datetime.fromtimestamp(next_time).isoformat(timespec="seconds")
+
                 await _send(websocket, {
                     "type": "cycle_end",
                     "cycle": cycle,
-                    "success": cycle_success,
-                    "fail": cycle_fail,
+                    "sent": cycle_success,
+                    "failed": cycle_fail,
                     "total": cycle_success + cycle_fail,
                     "cumulative_success": total_success,
                     "cumulative_fail": total_fail,
                     "timestamp": _now_iso(),
+                    "next_send_at": next_send,
                 })
 
             except WebSocketDisconnect:
@@ -445,7 +459,7 @@ async def ws_farm_run_all(websocket: WebSocket):
         await _send(websocket, {
             "type": "complete",
             "reason": "duration_elapsed" if (end_time and time.time() >= end_time) else "stopped",
-            "cycles": cycle,
+            "total_cycles": cycle,
             "total_success": total_success,
             "total_fail": total_fail,
             "timestamp": _now_iso(),

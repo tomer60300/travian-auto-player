@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from travian_api.constants import SCOUT_UNITS, TribeType
 from travian_api.exceptions import TravianError, MilitaryError, InvalidTargetError
+from travian_api.web.rate_limit import action_limiter
 from travian_api.web.sessions import get_travian_session, TravianSession
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ class RaidRequest(BaseModel):
 async def send_scouts(
     body: ScoutRequest,
     session: TravianSession = Depends(get_travian_session),
+    _=Depends(action_limiter),
 ):
     """Send scouts to a target location (tribe-aware — correct troop slot)."""
     village_id = body.village_id or session.active_village_id
@@ -136,6 +138,7 @@ async def send_scouts(
 async def send_raid(
     body: RaidRequest,
     session: TravianSession = Depends(get_travian_session),
+    _=Depends(action_limiter),
 ):
     """Send a raid to a target location."""
     village_id = body.village_id or session.active_village_id

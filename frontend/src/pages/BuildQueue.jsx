@@ -6,56 +6,12 @@ import { useToast } from '../components/Toast'
 import ConfirmDialog from '../components/ConfirmDialog'
 import useGameStore from '../stores/gameStore'
 
-const TEMPLATES = {
-  resource: {
-    label: 'Resource Focus',
-    yaml: `village_id: auto
-plan:
-  - building: Woodcutter
-    target: 5
-    priority: 1
-  - building: Clay Pit
-    target: 5
-    priority: 1
-  - building: Iron Mine
-    target: 5
-    priority: 1
-  - building: Cropland
-    target: 5
-    priority: 1`,
-  },
-  military: {
-    label: 'Military Focus',
-    yaml: `village_id: auto
-plan:
-  - building: Barracks
-    target: 10
-    priority: 1
-  - building: Academy
-    target: 10
-    priority: 2
-  - building: Smithy
-    target: 10
-    priority: 2`,
-  },
-  economy: {
-    label: 'Economy Starter',
-    yaml: `village_id: auto
-plan:
-  - building: Main Building
-    target: 10
-    priority: 1
-  - building: Warehouse
-    target: 10
-    priority: 1
-  - building: Granary
-    target: 10
-    priority: 1
-  - building: Marketplace
-    target: 5
-    priority: 2`,
-  },
-}
+// Fallback templates used when the API is unavailable
+const FALLBACK_TEMPLATES = [
+  { key: 'resource', label: 'Resource Focus', yaml: 'village_id: auto\nplan:\n  - building: Woodcutter\n    target: 5\n    priority: 1\n  - building: Clay Pit\n    target: 5\n    priority: 1\n  - building: Iron Mine\n    target: 5\n    priority: 1\n  - building: Cropland\n    target: 5\n    priority: 1' },
+  { key: 'military', label: 'Military Focus', yaml: 'village_id: auto\nplan:\n  - building: Barracks\n    target: 10\n    priority: 1\n  - building: Academy\n    target: 10\n    priority: 2\n  - building: Smithy\n    target: 10\n    priority: 2' },
+  { key: 'economy', label: 'Economy Starter', yaml: 'village_id: auto\nplan:\n  - building: Main Building\n    target: 10\n    priority: 1\n  - building: Warehouse\n    target: 10\n    priority: 1\n  - building: Granary\n    target: 10\n    priority: 1\n  - building: Marketplace\n    target: 5\n    priority: 2' },
+]
 
 function statusBadgeClass(status) {
   const map = {
@@ -254,8 +210,18 @@ export default function BuildQueue() {
   const activeVillageId = useGameStore((s) => s.activeVillageId)
   const toast = useToast()
 
+  // Templates from API (with fallback)
+  const [templates, setTemplates] = useState(FALLBACK_TEMPLATES)
+  useEffect(() => {
+    api.get('/queue/templates')
+      .then(res => {
+        if (Array.isArray(res.data) && res.data.length > 0) setTemplates(res.data)
+      })
+      .catch(() => {}) // silently use fallback
+  }, [])
+
   // YAML editor state
-  const [yamlContent, setYamlContent] = useState(TEMPLATES.resource.yaml)
+  const [yamlContent, setYamlContent] = useState(FALLBACK_TEMPLATES[0].yaml)
 
   // Validation state
   const [validationResult, setValidationResult] = useState(null)
@@ -293,8 +259,8 @@ export default function BuildQueue() {
   // Confirm dialog
   const [showConfirm, setShowConfirm] = useState(false)
 
-  const handleTemplateInsert = (key) => {
-    setYamlContent(TEMPLATES[key].yaml)
+  const handleTemplateInsert = (tpl) => {
+    setYamlContent(tpl.yaml)
     setValidated(false)
     setValidationResult(null)
   }
@@ -439,11 +405,12 @@ export default function BuildQueue() {
               Build Plan (YAML)
             </h3>
             <div className="flex gap-1.5 flex-wrap">
-              {Object.entries(TEMPLATES).map(([key, tpl]) => (
+              {templates.map((tpl) => (
                 <button
-                  key={key}
+                  key={tpl.key}
                   className="btn-secondary btn-xs"
-                  onClick={() => handleTemplateInsert(key)}
+                  onClick={() => handleTemplateInsert(tpl)}
+                  title={tpl.description || ''}
                 >
                   {tpl.label}
                 </button>

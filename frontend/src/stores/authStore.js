@@ -54,6 +54,24 @@ const useAuthStore = create((set, get) => ({
   logout: () => {
     localStorage.removeItem('token');
     set({ token: null, user: null, isAuthenticated: false, initialCheckDone: true });
+    // Clean up other stores to prevent data leaking to next user
+    try {
+      require('./gameStore').default.setState({
+        connected: false,
+        serverUrl: null,
+        playerName: null,
+        tribeId: null,
+        villages: [],
+        activeVillageId: null,
+        resources: null,
+        buildings: [],
+        constructionQueue: [],
+        statusChecked: false,
+      })
+    } catch {}
+    try {
+      require('./logStore').default.getState().clear()
+    } catch {}
   },
 }));
 
