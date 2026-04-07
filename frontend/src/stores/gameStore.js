@@ -91,7 +91,7 @@ const useGameStore = create((set, get) => ({
   switchVillage: async (villageId) => {
     await api.post('/villages/switch', { village_id: villageId });
     set({ activeVillageId: villageId });
-    await Promise.all([get().fetchResources(), get().fetchBuildings()]);
+    await Promise.all([get().fetchResources(), get().fetchBuildings(), get().fetchQueue()]);
   },
 
   // Helper: if a 403 means "not connected to Travian", verify with checkStatus

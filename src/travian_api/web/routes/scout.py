@@ -24,10 +24,10 @@ class ScanRequest(BaseModel):
     max_pop: int | None = Field(None, description="Max village population filter")
     min_pop: int | None = Field(None, description="Min village population filter")
     max_player_pop: int | None = Field(None, description="Max total player population (all villages)")
-    no_player: bool = Field(False, description="Only show unoccupied villages")
-    show_oases: bool = Field(False, description="Include oases in results")
+    show_oases: bool = Field(False, description="Include unoccupied oases in results")
     limit: int = Field(50, ge=1, le=500, description="Max results to return")
     exclude_alliance_ids: list[int] = Field(default_factory=list, description="Alliance IDs to exclude")
+    exclude_alliance_names: list[str] = Field(default_factory=list, description="Alliance names/tags to exclude (case-insensitive)")
     exclude_player_names: list[str] = Field(default_factory=list, description="Player names to exclude")
 
 
@@ -37,6 +37,7 @@ class MapTileResponse(BaseModel):
     village_id: int = 0
     player_id: int | None = None
     alliance_id: int | None = None
+    alliance_name: str = ""
     village_name: str = ""
     player_name: str = ""
     tribe: str = ""
@@ -90,23 +91,38 @@ async def scan_map(
         # Scan the map
         tiles = await svc.scan_map(cx, cy, body.radius)
 
-        # Filter out own villages
+        # Keep only relevant tiles: player villages + optionally oases
         own_village_ids = {v.id for v in session.auth_state.villages}
-        tiles = [t for t in tiles if t.village_id not in own_village_ids]
+        relevant: list = []
+        for t in tiles:
+            if t.village_id <= 0:
+                continue
+            if t.village_id in own_village_ids:
+                continue
+            if t.player_id:
+                relevant.append(t)
+                continue
+            if t.is_oasis and body.show_oases:
+                relevant.append(t)
+                continue
+        tiles = relevant
 
-        # Filter non-oasis unless requested
-        if not body.show_oases:
-            tiles = [t for t in tiles if not t.is_oasis]
-
-        # Only keep tiles with actual village IDs
-        tiles = [t for t in tiles if t.village_id > 0]
+        # Pre-enrichment: exclude alliances by ID
+        if body.exclude_alliance_ids:
+            excluded = set(body.exclude_alliance_ids)
+            tiles = [t for t in tiles if not t.alliance_id or t.alliance_id not in excluded]
 
         # Enrich with population data
         if tiles:
             tiles = await svc.enrich_tiles(tiles)
 
-        # Build player name → ID lookup for name-based exclusion
-        exclude_player_ids = set()
+        # Post-enrichment: exclude alliances by name
+        if body.exclude_alliance_names:
+            excluded_names = {n.lower() for n in body.exclude_alliance_names}
+            tiles = [t for t in tiles if not t.alliance_name or t.alliance_name.lower() not in excluded_names]
+
+        # Exclude players by name
+        exclude_player_ids: set[int] = set()
         if body.exclude_player_names:
             name_lower_set = {n.lower() for n in body.exclude_player_names}
             for t in tiles:
@@ -114,14 +130,13 @@ async def scan_map(
                     if t.player_id:
                         exclude_player_ids.add(t.player_id)
 
-        # Apply filters via the service
+        # Apply filters
         tiles = svc.filter_targets(
             tiles,
             max_population=body.max_pop,
             min_population=body.min_pop,
-            only_no_player=body.no_player,
+            only_no_player=False,
             exclude_oases=not body.show_oases,
-            exclude_alliance_ids=set(body.exclude_alliance_ids) if body.exclude_alliance_ids else None,
             exclude_player_ids=exclude_player_ids or None,
         )
 
@@ -147,6 +162,7 @@ async def scan_map(
                 village_id=t.village_id,
                 player_id=t.player_id,
                 alliance_id=t.alliance_id,
+                alliance_name=t.alliance_name,
                 village_name=t.village_name,
                 player_name=t.player_name,
                 tribe=t.tribe,

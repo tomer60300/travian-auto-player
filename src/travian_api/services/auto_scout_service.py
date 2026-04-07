@@ -380,6 +380,7 @@ class AutoScoutService:
             aid = int(alliance_match.group(1))
             if aid > 0:
                 info.alliance_id = aid
+                info.alliance_name = alliance_match.group(2).strip()
 
         # Check if oasis
         if "oasis" in html.lower() or 'class="oasis' in html:

@@ -153,34 +153,68 @@ function RaidTargetAnalyzer() {
   const [analyzing, setAnalyzing] = useState(false)
   const [results, setResults] = useState(null)
   const [analyzeError, setAnalyzeError] = useState(null)
+  const [progress, setProgress] = useState(null)
+  const [liveTargets, setLiveTargets] = useState([])
+  const wsRef = useState(null)
 
-  async function handleAnalyze() {
+  function handleAnalyze() {
     setAnalyzing(true)
     setResults(null)
     setAnalyzeError(null)
-    try {
-      const res = await api.post('/reports/analyze', {
+    setProgress({ phase: 'start', message: 'Connecting...' })
+    setLiveTargets([])
+
+    const token = localStorage.getItem('token')
+    if (!token) {
+      setAnalyzeError('No auth token')
+      setAnalyzing(false)
+      return
+    }
+
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${proto}//${window.location.host}/ws/reports/analyze?token=${token}`)
+    wsRef[1] = ws
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
         min_resources: minResources,
         max_report_age_hours: analyzerMaxAge,
         max_pages: analyzerMaxPages,
         radius: radius ? Number(radius) : null,
         exclude_alliances: excludeAlliances.split(',').map(s => s.trim()).filter(Boolean),
         exclude_players: excludePlayers.split(',').map(s => s.trim()).filter(Boolean),
-      }, { timeout: 180000 })
-      setResults(res.data)
-      toast.success(`Found ${res.data.total_targets ?? 0} raid target(s)`)
-    } catch (err) {
-      const status = err.response?.status
-      const detail = err.response?.data?.detail || err.response?.data?.message
-      let message = 'Analysis failed'
-      if (status === 403) message = 'Not connected to Travian. Please reconnect first.'
-      else if (status === 502 || status === 503) message = detail || 'Server error — the analysis timed out or Travian is not responding. Try reducing Max Pages.'
-      else if (status === 401) message = 'Session expired. Please log in again.'
-      else if (detail) message = detail
-      else if (err.code === 'ECONNABORTED') message = 'Request timed out. Try reducing Max Pages to 1-5.'
-      setAnalyzeError(message)
-      toast.error(message)
-    } finally {
+      }))
+    }
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data)
+      if (data.type === 'progress') {
+        setProgress(data)
+        // If a target was found, add it to the live table
+        if (data.phase === 'target_found' && data.target) {
+          setLiveTargets((prev) => [...prev, data.target])
+        }
+      } else if (data.type === 'complete') {
+        setResults(data)
+        setLiveTargets([])
+        setProgress(null)
+        setAnalyzing(false)
+        toast.success(`Found ${data.total_targets ?? 0} raid target(s) in ${data.diagnostics?.analysis_duration_seconds ?? '?'}s`)
+      } else if (data.type === 'error') {
+        setAnalyzeError(data.message)
+        setAnalyzing(false)
+        setProgress(null)
+        toast.error(data.message)
+      }
+    }
+
+    ws.onerror = () => {
+      setAnalyzeError('WebSocket connection error')
+      setAnalyzing(false)
+      setProgress(null)
+    }
+
+    ws.onclose = () => {
       setAnalyzing(false)
     }
   }
@@ -191,6 +225,8 @@ function RaidTargetAnalyzer() {
     if (c === 'medium') return 'text-gold'
     return 'text-secondary'
   }
+
+  const displayTargets = results?.targets ?? liveTargets
 
   return (
     <div className="card mb-6">
@@ -245,10 +281,30 @@ function RaidTargetAnalyzer() {
       <div className="flex items-center gap-4">
         <button className="btn-primary flex items-center gap-2" onClick={handleAnalyze} disabled={analyzing}>
           {analyzing && <span className="spinner spinner-sm" />}
-          {analyzing ? 'Analyzing... (this may take 30-60s)' : 'Analyze'}
+          {analyzing ? 'Analyzing...' : 'Analyze'}
         </button>
-        {analyzing && <span className="text-xs text-secondary">Scanning reports with stealth delays...</span>}
       </div>
+
+      {/* Live progress bar */}
+      {progress && (
+        <div className="mt-3 p-3 bg-surface rounded-md border-default">
+          <div className="flex items-center gap-3 mb-1.5">
+            <span className="spinner spinner-sm" />
+            <span className="text-sm text-primary">{progress.message}</span>
+            {progress.targets_found > 0 && (
+              <span className="text-xs text-gold ml-auto">{progress.targets_found} targets found</span>
+            )}
+          </div>
+          {progress.total > 0 && progress.done != null && (
+            <div className="progress-track">
+              <div className="progress-fill" style={{ width: `${Math.min(100, (progress.done / progress.total) * 100)}%` }} />
+            </div>
+          )}
+          {progress.phase_num && progress.total_phases && (
+            <div className="text-xs text-secondary mt-1">Phase {progress.phase_num}/{progress.total_phases}</div>
+          )}
+        </div>
+      )}
 
       {/* Error display */}
       {analyzeError && (
@@ -257,74 +313,92 @@ function RaidTargetAnalyzer() {
         </div>
       )}
 
-      {/* Results */}
-      {results && (
+      {/* Live targets table (during analysis) or final results */}
+      {displayTargets.length > 0 && (
         <div className="mt-4">
-          <div className="text-sm text-secondary mb-2">
-            Source: <span className="text-gold">{results.source_village}</span>{' '}
-            {results.source_coords} — {results.total_targets} target(s)
-          </div>
-
-          {results.targets && results.targets.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="data-table w-full text-sm">
-                <thead>
-                  <tr>
-                    <th className="text-left">Village</th>
-                    <th className="text-left">Player</th>
-                    <th className="text-right">Pop</th>
-                    <th className="text-right">Distance</th>
-                    <th className="text-right">Est. Loot</th>
-                    <th className="text-left">Troops</th>
-                    <th className="text-right">Score</th>
-                    <th className="text-left">Confidence</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {results.targets.map((t, idx) => {
-                    const st = t.state || {}
-                    const rec = t.recommendation || {}
-                    return (
-                      <tr key={idx}>
-                        <td className="text-primary">
-                          {st.village_name || '-'}{' '}
-                          <span className="text-secondary text-xs">({st.x}, {st.y})</span>
-                        </td>
-                        <td className="text-secondary">{st.player_name || '-'}</td>
-                        <td className="text-right text-secondary">{st.population ?? '-'}</td>
-                        <td className="text-right text-secondary">{st.distance != null ? st.distance.toFixed(1) : '-'}</td>
-                        <td className="text-right text-gold">{st.estimated_raidable ?? rec.est_loot ?? '-'}</td>
-                        <td className="text-primary">
-                          {rec.n_send ?? '-'} {rec.unit_type || ''}
-                        </td>
-                        <td className="text-right text-gold font-semibold">{rec.score != null ? rec.score.toFixed(1) : '-'}</td>
-                        <td className={confidenceClass(st.raidable_confidence)}>
-                          {st.raidable_confidence || '-'}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+          {results && (
+            <div className="text-sm text-secondary mb-2">
+              Source: <span className="text-gold">{results.source_village}</span>{' '}
+              {results.source_coords} — {results.total_targets} target(s)
+              {results.diagnostics?.analysis_duration_seconds && (
+                <span className="ml-2 text-xs">({results.diagnostics.analysis_duration_seconds}s)</span>
+              )}
             </div>
-          ) : (
-            <div className="text-secondary text-sm">
-              <p className="mb-2">No raidable targets found.</p>
-              <p className="text-xs">The analyzer needs <span className="text-gold">outgoing</span> scout and raid reports — where YOUR troops attacked or scouted another village. Incoming defense reports (others raiding you) cannot be used to score raid targets.</p>
+          )}
+          {!results && analyzing && (
+            <div className="text-sm text-secondary mb-2">
+              Targets found so far: <span className="text-gold">{liveTargets.length}</span>
+              <span className="text-xs ml-2">(table updates live as targets are scored)</span>
             </div>
           )}
 
-          {/* Diagnostics */}
-          {results.diagnostics && (
-            <div className="mt-3 p-3 bg-surface rounded text-xs text-secondary">
-              <p className="font-semibold text-primary mb-1">Diagnostics</p>
-              <p>Reports scanned: {results.diagnostics.total_reports_listed ?? '-'} | Skipped (wrong type): {results.diagnostics.reports_skipped_type ?? '-'} | Fetched OK: {results.diagnostics.reports_fetched_ok ?? '-'} | Failed: {results.diagnostics.reports_fetched_fail ?? '-'}</p>
-              <p>Pages: {results.diagnostics.pages_fetched ?? '-'} fetched, {results.diagnostics.pages_failed ?? '-'} failed | Duration: {results.diagnostics.analysis_duration_seconds ?? '-'}s</p>
-              {results.diagnostics.warnings && results.diagnostics.warnings.length > 0 && (
-                <div className="mt-1 text-warning">
-                  {results.diagnostics.warnings.map((w, i) => <p key={i}>{w}</p>)}
-                </div>
-              )}
+          <div className="overflow-x-auto">
+            <table className="data-table w-full text-sm">
+              <thead>
+                <tr>
+                  <th className="text-left">Village</th>
+                  <th className="text-left">Player</th>
+                  <th className="text-right">Pop</th>
+                  <th className="text-right">Distance</th>
+                  <th className="text-right">Est. Loot</th>
+                  <th className="text-left">Troops</th>
+                  <th className="text-right">Score</th>
+                  <th className="text-left">Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayTargets.map((t, idx) => {
+                  const st = t.state || {}
+                  const rec = t.recommendation || {}
+                  return (
+                    <tr key={`${st.x}-${st.y}-${idx}`}>
+                      <td className="text-primary">
+                        {st.village_name || '-'}{' '}
+                        <span className="text-secondary text-xs">({st.x}, {st.y})</span>
+                      </td>
+                      <td className="text-secondary">{st.player_name || '-'}</td>
+                      <td className="text-right text-secondary">{st.population ?? '-'}</td>
+                      <td className="text-right text-secondary">{st.distance != null ? Number(st.distance).toFixed(1) : '-'}</td>
+                      <td className="text-right text-gold">{st.estimated_raidable ?? rec.est_loot ?? '-'}</td>
+                      <td className="text-primary">
+                        {rec.n_send ?? '-'} {rec.unit_type || ''}
+                      </td>
+                      <td className="text-right text-gold font-semibold">{rec.score != null ? Number(rec.score).toFixed(1) : '-'}</td>
+                      <td className={confidenceClass(st.raidable_confidence)}>
+                        {st.raidable_confidence || '-'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {!results && !analyzing && displayTargets.length === 0 && (
+            <div className="text-secondary text-sm mt-2">
+              <p className="mb-2">No raidable targets found.</p>
+              <p className="text-xs">The analyzer needs <span className="text-gold">outgoing</span> scout and raid reports.</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {results && displayTargets.length === 0 && (
+        <div className="text-secondary text-sm mt-4">
+          <p className="mb-2">No raidable targets found.</p>
+          <p className="text-xs">The analyzer needs <span className="text-gold">outgoing</span> scout and raid reports — where YOUR troops attacked or scouted another village.</p>
+        </div>
+      )}
+
+      {/* Diagnostics */}
+      {results?.diagnostics && (
+        <div className="mt-3 p-3 bg-surface rounded text-xs text-secondary">
+          <p className="font-semibold text-primary mb-1">Diagnostics</p>
+          <p>Reports scanned: {results.diagnostics.total_reports_listed ?? '-'} | Skipped (wrong type): {results.diagnostics.reports_skipped_type ?? '-'} | Fetched OK: {results.diagnostics.reports_fetched_ok ?? '-'} | Failed: {results.diagnostics.reports_fetched_fail ?? '-'}</p>
+          <p>Pages: {results.diagnostics.pages_fetched ?? '-'} fetched, {results.diagnostics.pages_failed ?? '-'} failed | Duration: {results.diagnostics.analysis_duration_seconds ?? '-'}s</p>
+          {results.diagnostics.warnings && results.diagnostics.warnings.length > 0 && (
+            <div className="mt-1 text-warning">
+              {results.diagnostics.warnings.map((w, i) => <p key={i}>{w}</p>)}
             </div>
           )}
         </div>

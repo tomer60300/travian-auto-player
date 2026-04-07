@@ -174,6 +174,7 @@ class MapTileInfo(BaseModel):
     village_id: int = 0  # did
     player_id: Optional[int] = None  # uid
     alliance_id: Optional[int] = None  # aid
+    alliance_name: str = ""
     village_name: str = ""
     player_name: str = ""
     tribe: str = ""

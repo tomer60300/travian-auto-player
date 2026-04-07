@@ -628,9 +628,7 @@ export default function FarmLists() {
                       <th>Name</th>
                       <th className="text-center">Slots</th>
                       <th className="text-center">Active</th>
-                      <th className="text-center">Running</th>
                       <th className="text-right">Total Booty</th>
-                      <th className="text-center">Raids</th>
                       <th className="text-center">Actions</th>
                     </tr>
                   </thead>
@@ -657,14 +655,8 @@ export default function FarmLists() {
                           <td className="text-center font-mono text-success">
                             {list.active_slots ?? '---'}
                           </td>
-                          <td className="text-center font-mono">
-                            {list.running_raids ?? 0}
-                          </td>
                           <td className="text-right text-gold font-mono">
                             {list.total_booty != null ? list.total_booty.toLocaleString() : '---'}
-                          </td>
-                          <td className="text-center font-mono text-secondary">
-                            {list.total_raids ?? 0}
                           </td>
                           <td
                             className="text-center"
@@ -772,10 +764,10 @@ export default function FarmLists() {
             </div>
 
             {/* Multi-select toolbar */}
-            {allSlots.length > 0 && (
+            {filteredSortedSlots.length > 0 && (
               <div className="flex gap-2 items-center flex-wrap mb-3 p-2.5 bg-surface rounded-md border-default">
                 <button className="btn-secondary btn-xs" onClick={selectAllSlots}>
-                  Select All ({allSlots.length})
+                  Select All ({filteredSortedSlots.length})
                 </button>
                 {selectedSlotIds.size > 0 && (
                   <button className="btn-secondary btn-xs" onClick={deselectAllSlots}>
@@ -919,7 +911,7 @@ export default function FarmLists() {
                           </td>
                           <td className={`text-right font-mono text-xs ${isFull ? 'text-success font-bold' : 'text-gold'}`}>{bootyStr}</td>
                           <td className="text-right text-gold font-mono">{slot.total_booty != null ? slot.total_booty.toLocaleString() : '---'}</td>
-                          <td className="text-center font-mono text-secondary">{slot.total_raids ?? 0}</td>
+                          <td className="text-center font-mono text-secondary">{(slot.total_raids || 0) > 0 ? slot.total_raids : slot.last_raid ? '1+' : 0}</td>
                           <td className="text-right text-xs whitespace-nowrap">
                             {(() => {
                               const def = defenseData[slotId]

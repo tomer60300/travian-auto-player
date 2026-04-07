@@ -539,6 +539,19 @@ class RaidAnalyzerService:
         self.client = client
         self.auth_state = auth_state
         self.reports_service = ReportsService(client)
+        self._on_progress: Optional[Callable] = None
+
+    def on_progress(self, callback: Callable) -> None:
+        """Set progress callback: callback(phase, message, detail_dict)."""
+        self._on_progress = callback
+
+    def _progress(self, phase: str, message: str, **kwargs) -> None:
+        """Report progress to callback if set."""
+        if self._on_progress:
+            try:
+                self._on_progress(phase, message, kwargs)
+            except Exception:
+                pass
 
     async def analyze(self, settings: AnalyzerSettings) -> AnalysisResult:
         """Run the full analysis pipeline."""
@@ -562,12 +575,14 @@ class RaidAnalyzerService:
         )
 
         # ── Phase 1A: Fetch report list ────────────────────────────
+        self._progress("reports", "Fetching report list...", phase_num=1, total_phases=6)
         reports_list, pages_fetched, pages_failed, failed_pages = (
             await self.reports_service.fetch_reports_robust(
                 max_age_hours=settings.max_report_age_hours,
                 max_pages=settings.max_pages,
             )
         )
+        self._progress("reports", f"Found {len(reports_list)} reports across {pages_fetched} pages", reports_found=len(reports_list), pages=pages_fetched)
         result.pages_fetched = pages_fetched
         result.pages_failed = pages_failed
         result.total_reports_listed = len(reports_list)
@@ -625,6 +640,7 @@ class RaidAnalyzerService:
         # Fetch GQL metadata for ALL reports BEFORE HTML details.
         # This gives us coordinates, timestamps, and title-based classification
         # so we can filter to only in-range targets before the expensive HTML step.
+        self._progress("metadata", f"Fetching metadata for {len(filtered_list)} reports...", phase_num=2, total_phases=6, total=len(filtered_list))
         all_report_ids = [r.report_id for r in filtered_list]
         BATCH = 250
         all_gql_meta: Dict[str, Dict[str, Any]] = {}
@@ -632,6 +648,7 @@ class RaidAnalyzerService:
             batch = all_report_ids[i:i + BATCH]
             meta = await self.reports_service.fetch_report_batch_metadata(batch)
             all_gql_meta.update(meta)
+            self._progress("metadata", f"Metadata: {min(i + BATCH, len(all_report_ids))}/{len(all_report_ids)}", done=min(i + BATCH, len(all_report_ids)), total=len(all_report_ids))
 
         logger.info(f"GQL metadata: {len(all_gql_meta)}/{len(all_report_ids)} reports")
 
@@ -666,6 +683,7 @@ class RaidAnalyzerService:
             )
 
         # ── Phase 1D: Fetch HTML details (only in-range) ──────────
+        self._progress("details", f"Fetching {len(pre_filtered_ids)} report details...", phase_num=3, total_phases=6, total=len(pre_filtered_ids))
         parsed_reports, fetch_ok, fetch_fail, fail_ids = await self._fetch_all_details(
             pre_filtered_ids,
         )
@@ -732,6 +750,7 @@ class RaidAnalyzerService:
                 warnings.append(f"... and {len(parse_warnings) - 30} more parse warnings")
 
         # ── Phase 3: Group by target & reconstruct state ───────────
+        self._progress("grouping", f"Grouping {len(parsed_reports)} reports by target...", phase_num=4, total_phases=6)
         targets_map: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
 
         for pr in parsed_reports:
@@ -780,10 +799,12 @@ class RaidAnalyzerService:
             state.distance = travian_distance(my_x, my_y, state.x, state.y)
             all_states.append(state)
 
-        # ── Phase 1D: Enrich with alliance/population via GraphQL ──
+        # ── Phase 5: Enrich with alliance/population via GraphQL ──
+        self._progress("enriching", f"Enriching {len(all_states)} targets with alliance/population...", phase_num=5, total_phases=6, total=len(all_states))
         await self._enrich_targets(all_states)
 
-        # ── Phase 4+5: Score, filter, sort ─────────────────────────
+        # ── Phase 6: Score, filter, sort ──────────────────────────
+        self._progress("scoring", f"Scoring {len(all_states)} targets...", phase_num=6, total_phases=6)
         scored: List[Tuple[TargetVillageState, RaidRecommendation]] = []
 
         for state in all_states:
@@ -811,6 +832,14 @@ class RaidAnalyzerService:
                 continue
 
             scored.append((state, rec))
+            self._progress(
+                "target_found", f"Target: {state.village_name or f'({state.x},{state.y})'} score={rec.score:.1f}",
+                target={
+                    "state": state.model_dump(mode="json"),
+                    "recommendation": rec.model_dump(mode="json"),
+                },
+                targets_found=len(scored),
+            )
 
         scored.sort(key=lambda x: x[1].score, reverse=True)
 
@@ -856,8 +885,11 @@ class RaidAnalyzerService:
         fetched_fail = 0
         failed_ids: List[str] = []
         results: List[Dict[str, Any]] = []
+        _done_count = 0
+        _total = len(report_ids)
 
         async def fetch_one(rid: str) -> Optional[Dict[str, Any]]:
+            nonlocal _done_count
             async with sem:
                 try:
                     detail = await self.reports_service.fetch_report_detail(rid)
@@ -865,6 +897,10 @@ class RaidAnalyzerService:
                 except Exception as e:
                     logger.error(f"Failed to fetch report {rid}: {e}")
                     return None
+                finally:
+                    _done_count += 1
+                    if _done_count % 5 == 0 or _done_count == _total:
+                        self._progress("details", f"Fetching report details: {_done_count}/{_total}", done=_done_count, total=_total)
 
         tasks = [fetch_one(rid) for rid in report_ids]
         raw_results = await asyncio.gather(*tasks)

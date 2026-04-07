@@ -15,12 +15,11 @@ function loadJson(key, fallback) {
 }
 
 // ── Scan Config Panel ─────────────────────────────────────────────────
-function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange }) {
+function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange, activeVillageId }) {
   const [radius, setRadius] = useState(10)
   const [minPop, setMinPop] = useState(0)
   const [maxPop, setMaxPop] = useState(100)
   const [maxPlayerPop, setMaxPlayerPop] = useState('')
-  const [noPlayer, setNoPlayer] = useState(true)
   const [showOases, setShowOases] = useState(false)
   const [limit, setLimit] = useState(100)
 
@@ -52,35 +51,28 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
 
   const handleScan = async () => {
     setScanning(true)
-    const config = { radius, minPop, maxPop, maxPlayerPop, noPlayer, showOases, limit, excludeAlliances, excludePlayers }
+    const config = { radius, minPop, maxPop, maxPlayerPop, showOases, limit, excludeAlliances, excludePlayers }
     onConfigChange?.(config)
     try {
       const body = {
         radius,
         min_pop: minPop,
         max_pop: maxPop,
-        no_player: noPlayer,
         show_oases: showOases,
         limit,
         exclude_player_names: excludePlayers,
+        village_id: activeVillageId || undefined,
       }
       if (maxPlayerPop !== '') body.max_player_pop = Number(maxPlayerPop)
 
-      // Alliance IDs: if user typed numbers, pass as-is; if names, we'll filter client-side after
+      // Split alliance exclusions: numbers → IDs, strings → names
       const allianceIds = excludeAlliances.filter((a) => /^\d+$/.test(a)).map(Number)
-      const allianceNames = excludeAlliances.filter((a) => !/^\d+$/.test(a)).map((a) => a.toLowerCase())
+      const allianceNames = excludeAlliances.filter((a) => !/^\d+$/.test(a))
       if (allianceIds.length > 0) body.exclude_alliance_ids = allianceIds
+      if (allianceNames.length > 0) body.exclude_alliance_names = allianceNames
 
       const res = await api.post('/scout/scan', body)
-      let tiles = res.data.tiles ?? res.data
-
-      // Client-side filter for alliance names (backend only supports IDs)
-      if (allianceNames.length > 0) {
-        tiles = tiles.filter((t) => {
-          if (!t.alliance_name) return true
-          return !allianceNames.includes(t.alliance_name.toLowerCase())
-        })
-      }
+      const tiles = res.data.tiles ?? res.data
 
       onScanComplete(tiles)
       toast.success(`Scan complete: ${tiles.length} targets found`)
@@ -118,17 +110,14 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         </div>
       </div>
 
-      {/* Checkboxes */}
+      {/* Options */}
       <div className="flex gap-6 mb-4 flex-wrap">
         <label className="check-label">
-          <input type="checkbox" checked={noPlayer} onChange={(e) => setNoPlayer(e.target.checked)} className="checkbox-gold" />
-          Exclude player-owned villages
-        </label>
-        <label className="check-label">
           <input type="checkbox" checked={showOases} onChange={(e) => setShowOases(e.target.checked)} className="checkbox-gold" />
-          Include oases
+          Include unoccupied oases
         </label>
       </div>
+      <p className="text-xs text-secondary mb-4">Scans only player-owned villages (and oases if checked). Wilderness, abandoned valleys, and empty tiles are automatically skipped.</p>
 
       {/* Alliance exclusion */}
       <div className="mb-4">
@@ -250,6 +239,7 @@ function ScanResultsTable({ results, selected, setSelected }) {
               <SortableHeader label="V.Pop" field="population" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
               <SortableHeader label="Distance" field="distance" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
               <SortableHeader label="Player" field="player_name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <th>Alliance</th>
               <th>Type</th>
             </tr>
           </thead>
@@ -265,6 +255,7 @@ function ScanResultsTable({ results, selected, setSelected }) {
                   <td className="text-center font-mono">{row.population ?? '---'}</td>
                   <td className="text-center font-mono">{row.distance != null ? row.distance.toFixed(1) : '---'}</td>
                   <td className={row.player_name ? 'text-primary' : 'text-secondary italic'}>{row.player_name || 'Unoccupied'}</td>
+                  <td className="text-secondary text-xs">{row.alliance_name || '---'}</td>
                   <td>{row.is_oasis ? 'Oasis' : row.is_abandoned ? 'Abandoned' : 'Village'}</td>
                 </tr>
               )
@@ -388,6 +379,7 @@ export default function AutoScout() {
   const [selected, setSelected] = useState(new Set())
   const [scanning, setScanning] = useState(false)
   const [scanConfig, setScanConfig] = useState({ radius: 10 })
+  const activeVillageId = useGameStore((s) => s.activeVillageId)
 
   const handleScanComplete = (results) => {
     setScanResults(results)
@@ -401,7 +393,7 @@ export default function AutoScout() {
         <VillageSelector />
       </div>
       <div className="flex flex-col gap-4">
-        <ScanConfigPanel onScanComplete={handleScanComplete} scanning={scanning} setScanning={setScanning} onConfigChange={setScanConfig} />
+        <ScanConfigPanel onScanComplete={handleScanComplete} scanning={scanning} setScanning={setScanning} onConfigChange={setScanConfig} activeVillageId={activeVillageId} />
         {scanResults && scanResults.length > 0 && (
           <>
             <ScanResultsTable results={scanResults} selected={selected} setSelected={setSelected} />
