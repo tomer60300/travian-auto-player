@@ -400,8 +400,8 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
     }
     wsRef.current = ws
 
-    // Send config after connection opens
-    ws.onopen = () => {
+    // Send config after connection opens (addEventListener to not overwrite ws.js log handler)
+    ws.addEventListener('open', () => {
       setWsStatus('running')
       addMessage('info', 'Connected. Sending scout configuration...')
       ws.send(
@@ -414,7 +414,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
           village_id: activeVillageId,
         })
       )
-    }
+    })
   }
 
   const handleStop = () => {

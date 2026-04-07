@@ -143,6 +143,7 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[int, TravianSession] = {}
         self._lock = asyncio.Lock()
+        self._reconnect_locks: dict[int, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -187,6 +188,12 @@ class SessionManager:
         """Return an active session for *user_id*, or ``None``."""
         return self._sessions.get(user_id)
 
+    def get_reconnect_lock(self, user_id: int) -> asyncio.Lock:
+        """Return a per-user lock for serializing auto-reconnect attempts."""
+        if user_id not in self._reconnect_locks:
+            self._reconnect_locks[user_id] = asyncio.Lock()
+        return self._reconnect_locks[user_id]
+
     async def disconnect_all(self) -> None:
         """Disconnect every session (call during application shutdown)."""
         async with self._lock:
@@ -222,42 +229,50 @@ async def get_travian_session(
     if session is not None:
         return session
 
-    # Try auto-reconnect from saved credentials
-    from sqlalchemy import select
-    from travian_api.web.models.db import TravianCredential
-    from travian_api.web.auth import decrypt_credential
+    # Serialize reconnect attempts per user — prevents two concurrent requests
+    # from both triggering session_manager.connect() simultaneously.
+    reconnect_lock = session_manager.get_reconnect_lock(user.id)
+    async with reconnect_lock:
+        # Re-check after acquiring lock — another request may have reconnected
+        session = session_manager.get(user.id)
+        if session is not None:
+            return session
 
-    result = await db.execute(
-        select(TravianCredential)
-        .where(TravianCredential.user_id == user.id)
-        .order_by(TravianCredential.last_connected.desc().nulls_last())
-        .limit(1)
-    )
-    cred = result.scalar_one_or_none()
+        # Try auto-reconnect from saved credentials
+        from sqlalchemy import select
+        from travian_api.web.models.db import TravianCredential
+        from travian_api.web.auth import decrypt_credential
 
-    if cred is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not connected to a Travian server. Use POST /api/travian/connect first.",
+        result = await db.execute(
+            select(TravianCredential)
+            .where(TravianCredential.user_id == user.id)
+            .order_by(TravianCredential.last_connected.desc().nulls_last())
+            .limit(1)
         )
+        cred = result.scalar_one_or_none()
 
-    try:
-        password = decrypt_credential(cred.encrypted_password)
-        session = await session_manager.connect(
-            user_id=user.id,
-            server_url=cred.server_url,
-            username=cred.travian_username,
-            password=password,
-        )
-        # Update last_connected
-        from datetime import datetime, timezone
-        cred.last_connected = datetime.now(timezone.utc)
-        await db.commit()
-        logger.info("Auto-reconnected user %s to %s", user.id, cred.server_url)
-        return session
-    except Exception as exc:
-        logger.warning("Auto-reconnect failed for user %s: %s", user.id, exc)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Auto-reconnect failed: {exc}. Please reconnect manually.",
-        )
+        if cred is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not connected to a Travian server. Use POST /api/travian/connect first.",
+            )
+
+        try:
+            password = decrypt_credential(cred.encrypted_password)
+            session = await session_manager.connect(
+                user_id=user.id,
+                server_url=cred.server_url,
+                username=cred.travian_username,
+                password=password,
+            )
+            from datetime import datetime, timezone
+            cred.last_connected = datetime.now(timezone.utc)
+            await db.commit()
+            logger.info("Auto-reconnected user %s to %s", user.id, cred.server_url)
+            return session
+        except Exception as exc:
+            logger.warning("Auto-reconnect failed for user %s: %s", user.id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Auto-reconnect failed: {exc}. Please reconnect manually.",
+            )

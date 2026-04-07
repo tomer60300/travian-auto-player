@@ -306,11 +306,11 @@ export default function FarmLists() {
       return
     }
 
-    // Once open, send start action
-    ws.onopen = () => {
+    // Once open, send start action (addEventListener to not overwrite ws.js log handler)
+    ws.addEventListener('open', () => {
       setWsStatus('running')
       ws.send(JSON.stringify({ action: 'start' }))
-    }
+    })
 
     wsRef.current = ws
   }

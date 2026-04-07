@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import useLogStore from '../stores/logStore'
 
 const LEVEL_CLASS = {
@@ -39,7 +39,14 @@ export default function Logs() {
   const [search, setSearch] = useState('')
   const [expandedId, setExpandedId] = useState(null)
   const [showDetail, setShowDetail] = useState(true)
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const scrollRef = useRef(null)
+
+  // Debounce search input — 300ms delay prevents filtering 2000 entries on every keystroke
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300)
+    return () => clearTimeout(timer)
+  }, [search])
 
   useEffect(() => {
     if (autoScroll && scrollRef.current) {
@@ -47,11 +54,11 @@ export default function Logs() {
     }
   }, [entries, autoScroll])
 
-  const filtered = entries.filter((e) => {
+  const filtered = useMemo(() => entries.filter((e) => {
     if (filterSource !== 'all' && e.source !== filterSource) return false
     if (filterLevel !== 'all' && e.level !== filterLevel) return false
-    if (search) {
-      const q = search.toLowerCase()
+    if (debouncedSearch) {
+      const q = debouncedSearch.toLowerCase()
       return (
         e.message.toLowerCase().includes(q) ||
         (e.detail && String(e.detail).toLowerCase().includes(q)) ||
@@ -59,7 +66,7 @@ export default function Logs() {
       )
     }
     return true
-  })
+  }), [entries, filterSource, filterLevel, debouncedSearch])
 
   return (
     <div className="p-6 max-w-6xl mx-auto">

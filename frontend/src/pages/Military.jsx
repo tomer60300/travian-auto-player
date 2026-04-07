@@ -77,8 +77,19 @@ export default function Military() {
       toast.error('Please enter X and Y coordinates')
       return
     }
-    if (isNaN(parseInt(scoutX, 10)) || isNaN(parseInt(scoutY, 10))) {
+    const x = parseInt(scoutX, 10)
+    const y = parseInt(scoutY, 10)
+    if (isNaN(x) || isNaN(y)) {
       toast.error('Coordinates must be valid numbers')
+      return
+    }
+    if (x < -400 || x > 400 || y < -400 || y > 400) {
+      toast.error('Coordinates must be between -400 and 400')
+      return
+    }
+    const amt = parseInt(scoutAmount, 10) || 1
+    if (amt < 1 || amt > 1000) {
+      toast.error('Scout amount must be between 1 and 1000')
       return
     }
     setScoutConfirmOpen(true)
@@ -112,8 +123,14 @@ export default function Military() {
       toast.error('Please enter X and Y coordinates')
       return
     }
-    if (isNaN(parseInt(raidX, 10)) || isNaN(parseInt(raidY, 10))) {
+    const x = parseInt(raidX, 10)
+    const y = parseInt(raidY, 10)
+    if (isNaN(x) || isNaN(y)) {
       toast.error('Coordinates must be valid numbers')
+      return
+    }
+    if (x < -400 || x > 400 || y < -400 || y > 400) {
+      toast.error('Coordinates must be between -400 and 400')
       return
     }
     if (Object.keys(troops).length === 0) {

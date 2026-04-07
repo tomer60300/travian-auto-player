@@ -112,8 +112,11 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
 
     # ── Parse query params ───────────────────────────────────────────
     params = websocket.query_params
-    interval = int(params.get("interval", "300"))
-    duration = int(params.get("duration", "0"))  # minutes; 0 = forever
+    try:
+        interval = max(10, int(params.get("interval", "300")))
+        duration = max(0, int(params.get("duration", "0")))
+    except (ValueError, TypeError):
+        interval, duration = 300, 0
     verbose = params.get("verbose", "false").lower() in ("true", "1", "yes")
 
     channel = f"farm_run_{list_id}"
@@ -281,8 +284,11 @@ async def ws_farm_run_all(websocket: WebSocket):
 
     # ── Parse query params ───────────────────────────────────────────
     params = websocket.query_params
-    interval = int(params.get("interval", "300"))
-    duration = int(params.get("duration", "0"))
+    try:
+        interval = max(10, int(params.get("interval", "300")))
+        duration = max(0, int(params.get("duration", "0")))
+    except (ValueError, TypeError):
+        interval, duration = 300, 0
     verbose = params.get("verbose", "false").lower() in ("true", "1", "yes")
 
     list_ids_param = params.get("list_ids", "")
