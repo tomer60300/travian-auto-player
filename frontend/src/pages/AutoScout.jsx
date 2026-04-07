@@ -36,16 +36,25 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const toast = useToast()
 
   const addAlliance = () => {
-    const v = newAlliance.trim()
-    if (!v) return
-    if (!excludeAlliances.includes(v)) setExcludeAlliances([...excludeAlliances, v])
+    // Support comma-separated input: "HM2,HM,LR" → three entries
+    const parts = newAlliance.split(',').map(s => s.trim()).filter(Boolean)
+    if (parts.length === 0) return
+    const newList = [...excludeAlliances]
+    for (const v of parts) {
+      if (!newList.includes(v)) newList.push(v)
+    }
+    setExcludeAlliances(newList)
     setNewAlliance('')
   }
 
   const addPlayer = () => {
-    const v = newPlayer.trim()
-    if (!v) return
-    if (!excludePlayers.includes(v)) setExcludePlayers([...excludePlayers, v])
+    const parts = newPlayer.split(',').map(s => s.trim()).filter(Boolean)
+    if (parts.length === 0) return
+    const newList = [...excludePlayers]
+    for (const v of parts) {
+      if (!newList.includes(v)) newList.push(v)
+    }
+    setExcludePlayers(newList)
     setNewPlayer('')
   }
 
@@ -60,14 +69,15 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         max_pop: maxPop,
         show_oases: showOases,
         limit,
-        exclude_player_names: excludePlayers,
+        exclude_player_names: excludePlayers.flatMap((p) => p.split(',').map(s => s.trim())).filter(Boolean),
         village_id: activeVillageId || undefined,
       }
       if (maxPlayerPop !== '') body.max_player_pop = Number(maxPlayerPop)
 
-      // Split alliance exclusions: numbers → IDs, strings → names
-      const allianceIds = excludeAlliances.filter((a) => /^\d+$/.test(a)).map(Number)
-      const allianceNames = excludeAlliances.filter((a) => !/^\d+$/.test(a))
+      // Flatten: split any remaining comma-separated entries (safety for stale localStorage)
+      const allAlliances = excludeAlliances.flatMap((a) => a.split(',').map(s => s.trim())).filter(Boolean)
+      const allianceIds = allAlliances.filter((a) => /^\d+$/.test(a)).map(Number)
+      const allianceNames = allAlliances.filter((a) => !/^\d+$/.test(a))
       if (allianceIds.length > 0) body.exclude_alliance_ids = allianceIds
       if (allianceNames.length > 0) body.exclude_alliance_names = allianceNames
 

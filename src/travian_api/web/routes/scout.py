@@ -117,9 +117,15 @@ async def scan_map(
             tiles = await svc.enrich_tiles(tiles)
 
         # Post-enrichment: exclude alliances by name
+        logger.info(
+            "Alliance filter: exclude_alliance_names=%s, exclude_alliance_ids=%s",
+            body.exclude_alliance_names, body.exclude_alliance_ids,
+        )
         if body.exclude_alliance_names:
             excluded_names = {n.lower() for n in body.exclude_alliance_names}
+            before = len(tiles)
             tiles = [t for t in tiles if not t.alliance_name or t.alliance_name.lower() not in excluded_names]
+            logger.info("Alliance name filter: %d -> %d (excluded %s)", before, len(tiles), excluded_names)
 
         # Exclude players by name
         exclude_player_ids: set[int] = set()
