@@ -68,7 +68,7 @@ async def _send(ws: WebSocket, data: dict) -> None:
     try:
         await ws.send_json(data)
     except Exception:
-        pass
+        logger.debug("Failed to send JSON over WS in queue handler", exc_info=True)
 
 
 @router.websocket("/ws/queue/run")

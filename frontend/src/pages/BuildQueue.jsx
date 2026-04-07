@@ -273,10 +273,12 @@ export default function BuildQueue() {
   const [running, setRunning] = useState(false)
   const wsRef = useRef(null)
   const timersRef = useRef([])
+  const mountedRef = useRef(true)
 
   // Cleanup WS + timers on unmount
   useEffect(() => {
     return () => {
+      mountedRef.current = false
       timersRef.current.forEach(({ type, id }) =>
         type === 'interval' ? clearInterval(id) : clearTimeout(id)
       )
@@ -345,6 +347,7 @@ export default function BuildQueue() {
       '/ws/queue/run',
       // onMessage
       (data) => {
+        if (!mountedRef.current) return
         if (data.type === 'status') {
           addMessage('info', data.message)
         } else if (data.type === 'step_complete') {
@@ -365,12 +368,14 @@ export default function BuildQueue() {
       },
       // onError
       () => {
+        if (!mountedRef.current) return
         addMessage('error', 'WebSocket connection error')
         setRunning(false)
         setWsStatus('disconnected')
       },
       // onClose
       () => {
+        if (!mountedRef.current) return
         setRunning(false)
         setWsStatus('disconnected')
       }

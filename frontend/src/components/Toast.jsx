@@ -48,7 +48,8 @@ const typeIcons = {
 
 function ToastItem({ toast, onClose }) {
   const icon = typeIcons[toast.type] || typeIcons.info
-  const typeClass = `toast-${toast.type}` || 'toast-info'
+  const validTypes = ['success', 'error', 'warning', 'info']
+  const typeClass = validTypes.includes(toast.type) ? `toast-${toast.type}` : 'toast-info'
 
   return (
     <div className={`toast ${typeClass}`}>

@@ -147,6 +147,10 @@ const useGameStore = create((set, get) => ({
       get()._handleFetchError(e);
     }
   },
+
+  refreshVillageData: async () => {
+    await Promise.all([get().fetchResources(), get().fetchBuildings(), get().fetchQueue()]);
+  },
 }));
 
 export default useGameStore;

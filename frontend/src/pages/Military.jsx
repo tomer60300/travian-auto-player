@@ -108,6 +108,7 @@ export default function Military() {
       })
       setScoutResult({ success: true, data: res.data })
       toast.success('Scouts sent successfully!')
+      useGameStore.getState().fetchResources()
     } catch (err) {
       const message = err.response?.data?.detail || err.response?.data?.message || 'Failed to send scouts'
       setScoutResult({ success: false, message })
@@ -152,6 +153,7 @@ export default function Military() {
       })
       setRaidResult({ success: true, data: res.data })
       toast.success('Raid sent successfully!')
+      useGameStore.getState().fetchResources()
     } catch (err) {
       const message = err.response?.data?.detail || err.response?.data?.message || 'Failed to send raid'
       setRaidResult({ success: false, message })

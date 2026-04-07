@@ -300,12 +300,14 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   const [messages, setMessages] = useState([])
   const [progress, setProgress] = useState(null)
   const wsRef = useRef(null)
+  const mountedRef = useRef(true)
   const activeVillageId = useGameStore((s) => s.activeVillageId)
   const toast = useToast()
 
   // Clean up WebSocket on unmount
   useEffect(() => {
     return () => {
+      mountedRef.current = false
       if (wsRef.current) {
         try { wsRef.current.close() } catch {}
         wsRef.current = null
@@ -340,6 +342,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
     const ws = createWebSocket(
       '/ws/scout/auto',
       (data) => {
+        if (!mountedRef.current) return
         // Handle message types
         switch (data.type) {
           case 'scanning':
@@ -382,11 +385,13 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
         }
       },
       () => {
+        if (!mountedRef.current) return
         addMessage('error', 'WebSocket connection error')
         setRunning(false)
         setWsStatus('disconnected')
       },
       () => {
+        if (!mountedRef.current) return
         setRunning(false)
         setWsStatus('disconnected')
       }

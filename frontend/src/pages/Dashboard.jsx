@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, memo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import useGameStore from '../stores/gameStore'
 import VillageSelector from '../components/VillageSelector'
@@ -49,7 +49,7 @@ function formatTimeRemaining(seconds) {
   return [h, m, s].map((v) => String(v).padStart(2, '0')).join(':')
 }
 
-function ConstructionQueueSummary({ queue }) {
+const ConstructionQueueSummary = memo(function ConstructionQueueSummary({ queue }) {
   if (!queue || queue.length === 0) return null
 
   return (
@@ -78,7 +78,7 @@ function ConstructionQueueSummary({ queue }) {
       </div>
     </div>
   )
-}
+})
 
 function QuickActions() {
   const navigate = useNavigate()
@@ -147,7 +147,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const intervalRef = useRef(null)
   const fetchResourcesRef = useRef(fetchResources)
-  fetchResourcesRef.current = fetchResources
+  useEffect(() => { fetchResourcesRef.current = fetchResources }, [fetchResources])
 
   useEffect(() => {
     let cancelled = false

@@ -65,7 +65,7 @@ class ConnectionManager:
                 try:
                     await existing.close(code=status.WS_1000_NORMAL_CLOSURE, reason="Replaced by new connection")
                 except Exception:
-                    pass
+                    logger.debug("Failed to close existing WS connection: user=%s channel=%s", user_id, channel, exc_info=True)
             self._connections[user_id][channel] = websocket
         logger.info(f"WebSocket connected: user={user_id} channel={channel}")
 

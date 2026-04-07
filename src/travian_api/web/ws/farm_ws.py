@@ -255,7 +255,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                 "fatal": True,
             })
         except Exception:
-            pass
+            logger.debug("Failed to send error message to farm run WS: user=%s list=%s", user_id, list_id, exc_info=True)
     finally:
         await ws_manager.disconnect(user_id, channel)
 
@@ -462,6 +462,6 @@ async def ws_farm_run_all(websocket: WebSocket):
                 "fatal": True,
             })
         except Exception:
-            pass
+            logger.debug("Failed to send error message to farm run-all WS: user=%s", user_id, exc_info=True)
     finally:
         await ws_manager.disconnect(user_id, channel)

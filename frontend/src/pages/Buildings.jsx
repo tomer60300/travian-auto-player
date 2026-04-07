@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef, useCallback, memo } from 'react'
 import useGameStore from '../stores/gameStore'
 import { useToast } from '../components/Toast'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -38,7 +38,7 @@ const CATEGORY_TO_CLASS = {
   empty: 'btype-empty',
 }
 
-function ConstructionQueuePanel({ queue }) {
+const ConstructionQueuePanel = memo(function ConstructionQueuePanel({ queue }) {
   if (!queue || queue.length === 0) return null
 
   return (
@@ -67,7 +67,7 @@ function ConstructionQueuePanel({ queue }) {
       </div>
     </div>
   )
-}
+})
 
 function BuildingDetailPanel({
   selectedSlot,
@@ -202,6 +202,7 @@ export default function Buildings() {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [pendingAction, setPendingAction] = useState(null)
   const [actionLoading, setActionLoading] = useState(false)
+  const fetchingSlotRef = useRef(null)
 
   useEffect(() => {
     fetchBuildings()
@@ -209,15 +210,22 @@ export default function Buildings() {
   }, [fetchBuildings, fetchQueue])
 
   const fetchDetail = useCallback(async (slotId) => {
+    fetchingSlotRef.current = slotId
     setDetailLoading(true)
     try {
       const res = await api.get(`/buildings/${slotId}`)
-      setDetail(res.data)
+      if (fetchingSlotRef.current === slotId) {
+        setDetail(res.data)
+      }
     } catch (err) {
-      toast.error('Failed to load building details')
-      setDetail(null)
+      if (fetchingSlotRef.current === slotId) {
+        toast.error('Failed to load building details')
+        setDetail(null)
+      }
     } finally {
-      setDetailLoading(false)
+      if (fetchingSlotRef.current === slotId) {
+        setDetailLoading(false)
+      }
     }
   }, [])
 
@@ -260,7 +268,7 @@ export default function Buildings() {
         })
         toast.success('Construction started!')
       }
-      await Promise.all([fetchBuildings(), fetchQueue()])
+      await useGameStore.getState().refreshVillageData()
       if (selectedSlot) {
         await fetchDetail(selectedSlot)
       }

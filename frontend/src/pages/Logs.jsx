@@ -40,6 +40,7 @@ export default function Logs() {
   const [expandedId, setExpandedId] = useState(null)
   const [showDetail, setShowDetail] = useState(true)
   const [debouncedSearch, setDebouncedSearch] = useState('')
+  const [showAllLogs, setShowAllLogs] = useState(false)
   const scrollRef = useRef(null)
 
   // Debounce search input — 300ms delay prevents filtering 2000 entries on every keystroke
@@ -67,6 +68,11 @@ export default function Logs() {
     }
     return true
   }), [entries, filterSource, filterLevel, debouncedSearch])
+
+  const RENDER_CAP = 200
+  const capped = (!showAllLogs && filtered.length > RENDER_CAP)
+    ? filtered.slice(-RENDER_CAP)
+    : filtered
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -130,18 +136,40 @@ export default function Logs() {
         </label>
       </div>
 
+      {/* Render cap notice */}
+      {!showAllLogs && filtered.length > RENDER_CAP && (
+        <div className="mb-2 text-center">
+          <button
+            onClick={() => setShowAllLogs(true)}
+            className="btn-secondary btn-xs"
+          >
+            Showing last {RENDER_CAP} of {filtered.length} — Show all
+          </button>
+        </div>
+      )}
+      {showAllLogs && filtered.length > RENDER_CAP && (
+        <div className="mb-2 text-center">
+          <button
+            onClick={() => setShowAllLogs(false)}
+            className="btn-secondary btn-xs"
+          >
+            Showing all {filtered.length} — Cap to {RENDER_CAP}
+          </button>
+        </div>
+      )}
+
       {/* Log entries */}
       <div
         ref={scrollRef}
         className="ws-panel"
         style={{ maxHeight: 'calc(100vh - 280px)', minHeight: '300px' }}
       >
-        {filtered.length === 0 ? (
+        {capped.length === 0 ? (
           <div className="text-secondary italic py-4 text-center">
             {entries.length === 0 ? 'No activity yet. Navigate the app to see logs.' : 'No entries match your filters.'}
           </div>
         ) : (
-          filtered.map((entry) => {
+          capped.map((entry) => {
             const expanded = showDetail || expandedId === entry.id
             const detailStr = entry.detail
               ? (typeof entry.detail === 'object' ? JSON.stringify(entry.detail, null, 2) : String(entry.detail))

@@ -74,6 +74,7 @@ export default function VideoRewards() {
       const message = res.data?.message || res.data?.detail || 'Reward claimed!'
       setResults((prev) => ({ ...prev, [type]: { success: true, message } }))
       toast.success(`${REWARD_TYPES.find((r) => r.key === type)?.label || type}: ${message}`)
+      useGameStore.getState().fetchResources()
     } catch (err) {
       const message = err.response?.data?.detail || err.response?.data?.message || 'Failed to claim reward'
       setResults((prev) => ({ ...prev, [type]: { success: false, message } }))
@@ -145,6 +146,7 @@ export default function VideoRewards() {
       }
 
       toast.success('Claim all completed!')
+      useGameStore.getState().fetchResources()
     } catch (err) {
       const message = err.response?.data?.detail || err.response?.data?.message || 'Failed to claim all rewards'
       setClaimAllResult({ success: false, message })

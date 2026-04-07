@@ -105,7 +105,8 @@ def _slot_to_response(slot) -> SlotResponse:
     last_res = None
     if slot.last_raid:
         last_icon = slot.last_raid.icon_label
-        last_res = slot.last_raid.raided_resources.total
+        raided = getattr(slot.last_raid, 'raided_resources', None)
+        last_res = raided.total if raided else None
 
     return SlotResponse(
         id=slot.id,

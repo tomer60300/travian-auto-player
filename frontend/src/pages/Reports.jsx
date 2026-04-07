@@ -337,6 +337,9 @@ export default function Reports() {
   const [loading, setLoading] = useState(false)
   const [fetched, setFetched] = useState(false)
 
+  // Pagination
+  const [showAllReports, setShowAllReports] = useState(false)
+
   // Expanded report
   const [expandedId, setExpandedId] = useState(null)
   const [reportDetails, setReportDetails] = useState({})
@@ -347,6 +350,7 @@ export default function Reports() {
     setFetched(false)
     setExpandedId(null)
     setReportDetails({})
+    setShowAllReports(false)
     try {
       const res = await api.get('/reports', {
         params: {
@@ -455,7 +459,10 @@ export default function Reports() {
         </div>
       )}
 
-      {reports.length > 0 && (
+      {reports.length > 0 && (() => {
+        const REPORT_PAGE_SIZE = 30
+        const visibleReports = showAllReports ? reports : reports.slice(0, REPORT_PAGE_SIZE)
+        return (
         <div className="card p-0 overflow-hidden">
           {/* Header */}
           <div className="report-header text-xs font-semibold text-secondary">
@@ -466,7 +473,7 @@ export default function Reports() {
           </div>
 
           {/* Rows */}
-          {reports.map((report) => {
+          {visibleReports.map((report) => {
             const id = report.report_id || report.id
             const rtype = report.report_type || report.type
             const isExpanded = expandedId === id
@@ -514,8 +521,20 @@ export default function Reports() {
               </div>
             )
           })}
+
+          {!showAllReports && reports.length > REPORT_PAGE_SIZE && (
+            <div className="py-2 text-center">
+              <button
+                className="btn-secondary btn-xs"
+                onClick={() => setShowAllReports(true)}
+              >
+                Show all {reports.length} reports
+              </button>
+            </div>
+          )}
         </div>
-      )}
+        )
+      })()}
     </div>
   )
 }

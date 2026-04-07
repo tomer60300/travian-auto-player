@@ -97,6 +97,9 @@ export default function FarmLists() {
   // ---- Delete confirmation ----
   const [deleteConfirm, setDeleteConfirm] = useState(null)
 
+  // ---- Slot pagination ----
+  const [showAllSlots, setShowAllSlots] = useState(false)
+
   // ---- Loop mode ----
   const [loopListIds, setLoopListIds] = useState([])
   const [loopInterval, setLoopInterval] = useState(300)
@@ -105,6 +108,8 @@ export default function FarmLists() {
   const [wsStatus, setWsStatus] = useState('disconnected')
   const [wsMessages, setWsMessages] = useState([])
   const wsRef = useRef(null)
+  const mountedRef = useRef(true)
+  useEffect(() => { return () => { mountedRef.current = false } }, [])
 
   // -----------------------------------------------------------------
   //  Fetch all lists
@@ -140,8 +145,10 @@ export default function FarmLists() {
   useEffect(() => {
     if (!selectedListId) {
       setDetail(null)
+      setShowAllSlots(false)
       return
     }
+    setShowAllSlots(false)
     let cancelled = false
     ;(async () => {
       try {
@@ -158,7 +165,8 @@ export default function FarmLists() {
       }
     })()
     return () => { cancelled = true }
-  }, [selectedListId, toast])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedListId])
 
   // -----------------------------------------------------------------
   //  Create list
@@ -281,6 +289,7 @@ export default function FarmLists() {
     const ws = createWebSocket(
       `/ws/farm/run-all?${qs}`,
       (data) => {
+        if (!mountedRef.current) return
         setWsMessages((prev) => [...prev, transformWsMessage(data)])
         if (data.type === 'complete') {
           setLoopRunning(false)
@@ -289,11 +298,13 @@ export default function FarmLists() {
         }
       },
       () => {
+        if (!mountedRef.current) return
         setWsStatus('disconnected')
         setLoopRunning(false)
         toast.error('WebSocket error')
       },
       () => {
+        if (!mountedRef.current) return
         setWsStatus('disconnected')
         setLoopRunning(false)
       }
@@ -336,7 +347,9 @@ export default function FarmLists() {
   // ===========================================================================
   //  RENDER
   // ===========================================================================
-  const slots = detail?.slots ?? detail?.targets ?? []
+  const SLOT_PAGE_SIZE = 50
+  const allSlots = detail?.slots ?? detail?.targets ?? []
+  const slots = showAllSlots ? allSlots : allSlots.slice(0, SLOT_PAGE_SIZE)
 
   return (
     <div className="p-6 max-w-[1100px] mx-auto">
@@ -585,6 +598,16 @@ export default function FarmLists() {
                     })}
                   </tbody>
                 </table>
+              </div>
+            )}
+            {!showAllSlots && allSlots.length > SLOT_PAGE_SIZE && (
+              <div className="mt-2 text-center">
+                <button
+                  className="btn-secondary btn-xs"
+                  onClick={() => setShowAllSlots(true)}
+                >
+                  Show all {allSlots.length} slots
+                </button>
               </div>
             )}
           </div>

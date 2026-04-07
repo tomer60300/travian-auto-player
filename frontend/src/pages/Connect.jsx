@@ -22,6 +22,7 @@ export default function Connect() {
   // Saved servers state
   const [servers, setServers] = useState([])
   const [serversLoading, setServersLoading] = useState(true)
+  const [serversError, setServersError] = useState(null)
   const [connectingServerId, setConnectingServerId] = useState(null)
   const [deletingServerId, setDeletingServerId] = useState(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
@@ -37,12 +38,13 @@ export default function Connect() {
 
   const fetchServers = useCallback(async () => {
     setServersLoading(true)
+    setServersError(null)
     try {
       const res = await api.get('/travian/servers')
       setServers(res.data)
-    } catch {
-      // silent — may be empty
+    } catch (err) {
       setServers([])
+      setServersError('Failed to load saved servers')
     } finally {
       setServersLoading(false)
     }
@@ -168,6 +170,11 @@ export default function Connect() {
                 <span className="ml-3 text-secondary">
                   Loading servers...
                 </span>
+              </div>
+            ) : serversError ? (
+              <div className="card text-center py-8">
+                <p className="text-warning">{serversError}</p>
+                <button className="btn-secondary btn-sm mt-2" onClick={fetchServers}>Retry</button>
               </div>
             ) : servers.length === 0 ? (
               <div className="card text-center py-8">
