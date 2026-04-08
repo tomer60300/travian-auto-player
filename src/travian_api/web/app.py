@@ -26,6 +26,7 @@ from travian_api.web.routes.video import router as video_router
 from travian_api.web.routes.farm import router as farm_router
 from travian_api.web.routes.scout import router as scout_router
 from travian_api.web.routes.queue import router as queue_router
+from travian_api.web.routes.status_export import router as status_export_router
 
 # Import WebSocket routers
 from travian_api.web.ws.farm_ws import router as farm_ws_router
@@ -127,6 +128,7 @@ app.include_router(video_router)
 app.include_router(farm_router)
 app.include_router(scout_router)
 app.include_router(queue_router)
+app.include_router(status_export_router)
 
 # Mount WebSocket routes
 app.include_router(farm_ws_router)

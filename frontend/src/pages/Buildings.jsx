@@ -187,6 +187,88 @@ function BuildingDetailPanel({
   )
 }
 
+function formatMarkdown(data) {
+  const tribeName = { 1: 'Romans', 2: 'Teutons', 3: 'Gauls' }[data.tribe_id] || 'Unknown'
+  const lines = [
+    `# Player Status: ${data.player_name}`,
+    `**Tribe:** ${tribeName}  `,
+    `**Exported:** ${new Date().toLocaleString()}`,
+    '',
+  ]
+
+  for (const v of data.villages) {
+    lines.push(`---`, '', `## ${v.name} (${v.x}|${v.y})`, '')
+
+    if (v.error) {
+      lines.push(`> Failed to fetch data: ${v.error}`, '')
+      continue
+    }
+
+    // Buildings
+    const built = (v.buildings || []).filter((b) => b.name && b.name !== 'Empty' && b.level > 0)
+    if (built.length > 0) {
+      lines.push('### Buildings', '', '| Slot | Building | Level |', '|------|----------|-------|')
+      for (const b of built) {
+        lines.push(`| ${b.slot_id} | ${b.name} | ${b.level} |`)
+      }
+      lines.push('')
+    }
+
+    // Troops
+    const troops = v.troops || {}
+    const troopEntries = Object.entries(troops)
+    if (troopEntries.length > 0) {
+      lines.push('### Troops', '', '| Unit | Count |', '|------|-------|')
+      for (const [name, count] of troopEntries) {
+        lines.push(`| ${name} | ${count.toLocaleString()} |`)
+      }
+      lines.push('')
+    } else {
+      lines.push('### Troops', '', '*No troops at rally point*', '')
+    }
+
+    // Production
+    const r = v.resources || {}
+    lines.push(
+      '### Production',
+      '',
+      '| Resource | Per Hour |',
+      '|----------|----------|',
+      `| Lumber | ${(r.lumber_per_hour || 0).toLocaleString()} |`,
+      `| Clay | ${(r.clay_per_hour || 0).toLocaleString()} |`,
+      `| Iron | ${(r.iron_per_hour || 0).toLocaleString()} |`,
+      `| Crop | ${(r.crop_per_hour || 0).toLocaleString()} |`,
+      '',
+    )
+
+    // Resources
+    lines.push(
+      '### Resources',
+      '',
+      '| Resource | Current | Max |',
+      '|----------|---------|-----|',
+      `| Lumber | ${(r.lumber || 0).toLocaleString()} | ${(r.max_lumber || 0).toLocaleString()} |`,
+      `| Clay | ${(r.clay || 0).toLocaleString()} | ${(r.max_clay || 0).toLocaleString()} |`,
+      `| Iron | ${(r.iron || 0).toLocaleString()} | ${(r.max_iron || 0).toLocaleString()} |`,
+      `| Crop | ${(r.crop || 0).toLocaleString()} | ${(r.max_crop || 0).toLocaleString()} |`,
+      `| Free Crop | ${(r.free_crop || 0).toLocaleString()} | — |`,
+      '',
+    )
+  }
+
+  return lines.join('\n')
+}
+
+function downloadFile(filename, content) {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 export default function Buildings() {
   const buildings = useGameStore((s) => s.buildings)
   const buildingsLoading = useGameStore((s) => s.buildingsLoading)
@@ -202,6 +284,7 @@ export default function Buildings() {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [pendingAction, setPendingAction] = useState(null)
   const [actionLoading, setActionLoading] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const fetchingSlotRef = useRef(null)
 
   useEffect(() => {
@@ -287,6 +370,22 @@ export default function Buildings() {
     setPendingAction(null)
   }
 
+  const handleExportStatus = async () => {
+    setExporting(true)
+    try {
+      const res = await api.get('/status/export')
+      const md = formatMarkdown(res.data)
+      const name = (res.data.player_name || 'player').replace(/\s+/g, '_')
+      downloadFile(`${name}_status.md`, md)
+      toast.success('Player status downloaded')
+    } catch (err) {
+      const msg = err.response?.data?.detail || 'Failed to export status'
+      toast.error(typeof msg === 'string' ? msg : 'Export failed')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const queueOccupied = constructionQueue && constructionQueue.length > 0
 
   const buildingList = Array.isArray(buildings) ? buildings : []
@@ -295,7 +394,16 @@ export default function Buildings() {
     <div className="p-6 max-w-4xl mx-auto">
       <div className="flex justify-between items-center mb-5">
         <h2 className="heading-gold text-2xl">Buildings</h2>
-        <VillageSelector />
+        <div className="flex items-center gap-3">
+          <button
+            className="btn-secondary btn-sm"
+            onClick={handleExportStatus}
+            disabled={exporting}
+          >
+            {exporting ? 'Exporting...' : 'Download Player Status'}
+          </button>
+          <VillageSelector />
+        </div>
       </div>
 
       <ConstructionQueuePanel queue={constructionQueue} />

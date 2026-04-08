@@ -254,6 +254,10 @@ def parse_resources(html: str) -> Resources:
             max_clay=int(max_storage.get('l2', 0)),
             max_iron=int(max_storage.get('l3', 0)),
             max_crop=int(max_storage.get('l4', 0)),
+            lumber_per_hour=int(production.get('l1', 0)),
+            clay_per_hour=int(production.get('l2', 0)),
+            iron_per_hour=int(production.get('l3', 0)),
+            crop_per_hour=int(production.get('l4', 0)),
         )
         
     except (json.JSONDecodeError, KeyError, ValueError):
@@ -637,5 +641,76 @@ def parse_troop_confirm_page(html: str) -> Dict[str, Any]:
     village_input = soup.find('input', {'name': 'villagename'})
     if village_input:
         fields['villagename'] = village_input.get('value', '')
-    
+
     return fields
+
+
+def parse_troop_overview(html: str, tribe_id: int = 0) -> Dict[str, int]:
+    """Parse /village/statistics/troops and return total troops (t1-t10) for the village.
+
+    The page contains one or more ``<table>`` blocks that follow the standard
+    Travian troop-table layout used in reports:
+
+      <tbody class="units">          ← header row with unit icons
+        <tr>
+          <td class="uniticon"><img class="unit u11" /></td>  ...
+        </tr>
+      </tbody>
+      <tbody class="units">          ← count row
+        <tr>
+          <td class="unit">42</td>   ...
+        </tr>
+      </tbody>
+
+    Unit CSS classes use global IDs with a tribe offset:
+      Romans  u1–u10, Teutons u11–u20, Gauls u21–u30.
+
+    We sum counts across *all* tables (in-village + outgoing + incoming) so the
+    result represents total troops belonging to the village.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Tribe offset: Romans=0, Teutons=10, Gauls=20
+    tribe_offset = max(0, (tribe_id - 1)) * 10 if tribe_id else 0
+
+    totals: Dict[str, int] = {f't{i}': 0 for i in range(1, 11)}
+
+    for table in soup.find_all('table'):
+        tbodies = table.find_all('tbody', class_='units')
+        if len(tbodies) < 2:
+            continue
+
+        # Header tbody → extract unit keys (u-IDs)
+        unit_keys: list[str | None] = []
+        for td in tbodies[0].find_all('td', class_='uniticon'):
+            img = td.find('img', class_=re.compile(r'\bunit\b'))
+            if img:
+                cls_list = img.get('class', [])
+                uid = next((c for c in cls_list if re.match(r'^u\d+$', c)), None)
+                unit_keys.append(uid)
+            else:
+                unit_keys.append(None)
+
+        # Count tbody → extract numbers
+        count_row = tbodies[1].find('tr')
+        if not count_row:
+            continue
+        count_cells = count_row.find_all('td', class_='unit')
+
+        for uid, cell in zip(unit_keys, count_cells):
+            if uid is None:
+                continue
+            raw = cell.get_text(strip=True).replace('\u202d', '').replace('\u202c', '').replace(',', '')
+            if not raw.isdigit():
+                continue
+            count = int(raw)
+            if count == 0:
+                continue
+
+            # Convert global unit id (e.g. "u12") to tribe-relative key (e.g. "t2")
+            unit_num = int(uid[1:])
+            relative = unit_num - tribe_offset
+            if 1 <= relative <= 10:
+                totals[f't{relative}'] += count
+
+    return totals

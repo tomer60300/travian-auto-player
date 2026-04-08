@@ -61,37 +61,32 @@ async def ws_logs(websocket: WebSocket):
                 entry = await queue.get()
                 entry_level = _LEVEL_MAP.get(entry.get("level", "info"), logging.INFO)
                 if entry_level >= min_level:
-                    try:
-                        await websocket.send_json({"type": "log", **entry})
-                    except Exception:
-                        raise WebSocketDisconnect()
+                    await websocket.send_json({"type": "log", **entry})
 
         async def _listen_for_commands():
             nonlocal min_level
             while True:
-                try:
-                    msg = await websocket.receive_json()
-                except (WebSocketDisconnect, Exception):
-                    raise WebSocketDisconnect()
-                if isinstance(msg, dict):
-                    action = msg.get("action", "")
-                    if action == "filter":
-                        new_level = msg.get("level", "info").lower()
-                        min_level = _LEVEL_MAP.get(new_level, logging.INFO)
+                msg = await websocket.receive_json()
+                if isinstance(msg, dict) and msg.get("action") == "filter":
+                    new_level = msg.get("level", "info").lower()
+                    min_level = _LEVEL_MAP.get(new_level, logging.INFO)
 
-        stream_task = asyncio.create_task(_stream_logs())
-        listen_task = asyncio.create_task(_listen_for_commands())
-
-        done, pending = await asyncio.wait(
-            {stream_task, listen_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for t in pending:
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
+        tasks = [
+            asyncio.create_task(_stream_logs()),
+            asyncio.create_task(_listen_for_commands()),
+        ]
+        try:
+            done, _pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED,
+            )
+            # Retrieve result so the exception propagates to the outer
+            # handler instead of triggering "Task exception was never retrieved".
+            for t in done:
+                t.result()
+        finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     except WebSocketDisconnect:
         pass

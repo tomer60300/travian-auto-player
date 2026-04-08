@@ -7,7 +7,7 @@ from typing import Dict, Optional
 from ..clients.http_client import HttpClient
 from ..exceptions import TravianError, InvalidTargetError
 from ..models.military import TroopSendResult
-from ..parsers.html_parser import parse_rally_point_troops, parse_troop_confirm_page, clean_unicode
+from ..parsers.html_parser import parse_rally_point_troops, parse_troop_confirm_page, parse_troop_overview, clean_unicode
 from ..constants import EVENT_TYPES
 from ..stealth.human_delay import HumanDelay, ActionType
 from .target_resolver import TargetResolver
@@ -80,6 +80,19 @@ class MilitaryService:
             url = f"/build.php?newdid={village_id}&gid=16&tt=2"
         html = await self.http_client.get_html(url)
         return parse_rally_point_troops(html)
+
+    async def get_village_troop_totals(
+        self, village_id: Optional[int] = None, tribe_id: int = 0,
+    ) -> Dict[str, int]:
+        """Get total troops for a village (in-village + outgoing + incoming).
+
+        Fetches ``/village/statistics/troops`` which lists all troop categories.
+        """
+        url = "/village/statistics/troops"
+        if village_id:
+            url = f"/village/statistics/troops?newdid={village_id}"
+        html = await self.http_client.get_html(url)
+        return parse_troop_overview(html, tribe_id=tribe_id)
 
     # ── internal ─────────────────────────────────────────────────────
 
