@@ -177,7 +177,7 @@ async def auto_scout_ws(websocket: WebSocket):
             # Wait for config
             try:
                 raw = await websocket.receive_text()
-            except WebSocketDisconnect:
+            except (WebSocketDisconnect, RuntimeError):
                 break
 
             try:
@@ -365,13 +365,13 @@ async def auto_scout_ws(websocket: WebSocket):
                     "avg_time_per_target": round(avg_time, 1),
                 })
 
-            except WebSocketDisconnect:
+            except (WebSocketDisconnect, RuntimeError):
                 break
             except Exception as exc:
                 logger.exception("Auto-scout error for user %s", user_id)
                 await _send(websocket, {"type": "error", "message": str(exc)})
 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         pass
     except Exception:
         logger.exception("Unexpected error in scout WS for user %s", user_id)
@@ -422,7 +422,7 @@ async def scout_scan_ws(websocket: WebSocket):
         # Wait for config
         try:
             raw = await websocket.receive_text()
-        except WebSocketDisconnect:
+        except (WebSocketDisconnect, RuntimeError):
             return
 
         import json as _json
@@ -783,7 +783,7 @@ async def scout_scan_ws(websocket: WebSocket):
             },
         })
 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         logger.info("Scout scan WS disconnected: user=%s", user_id)
     except Exception:
         logger.exception("Unexpected error in scout scan WS for user %s", user_id)
