@@ -1,18 +1,34 @@
 # Travian API
 
-A Python library and CLI for automating Travian Legends gameplay. Async-first, multi-village, with an auto-builder that chains upgrades from a YAML plan.
+A Python library, CLI, and self-hosted web UI for automating Travian Legends gameplay. Async-first, multi-village, with stealth anti-bot protection.
 
 ## Features
 
+### CLI
 - **🔐 Authentication** — 2-step login with JWT caching, interactive setup prompt
 - **🏘️ Multi-Village** — Full support for multiple villages per account
 - **🏗️ Auto-Builder** — YAML-based build queue with priorities, multi-level chaining, gold guard, and video speedup
-- **⚔️ Military** — Scouts, raids, attacks with village selection
-- **🌾 Farm Lists** — Full CRUD + smart raid intelligence (last raid, fatalities, capacity, distance, raid status)
-- **🔭 Auto-Scout** — Scan map, filter by population/distance/player, send scouts automatically with exclude lists
+- **⚔️ Military** — Scouts, raids, attacks with tribe-aware troop selection
+- **🌾 Farm Lists** — Full CRUD + smart raid intelligence (last raid, carry ratio, distance, booty)
+- **🔭 Auto-Scout** — Scan map, filter by population/distance/player/alliance, send scouts with loop mode
 - **📊 Reports** — Fetch and parse scout/battle reports with smart type detection
+- **📍 Village Reports** — Gather all reports (own + alliance) for any village from the map tile
+- **📈 Raid Analyzer v2** — Scout-gated pipeline with binary search scoring, cache, and re-scout queue
 - **🎬 Video Rewards** — Automated ATG ad simulation for production boosts and build speedups
 - **🛡️ Gold Guard** — Never spends gold unless you explicitly opt in
+
+### Web UI (`travian-web`)
+- **🌐 Self-Hosted Dashboard** — React + FastAPI served at `http://localhost:8000`
+- **👥 Multi-User** — SQLite auth with per-user Travian session isolation
+- **🏛️ Buildings** — View, upgrade, construct with live construction queue countdown
+- **🌾 Farm Lists** — Full management with sort/filter, booty display (taken/capacity), copy/move between lists, defense scan, active/inactive sync
+- **🔭 Auto-Scout** — Map scan with alliance/player exclusion (persisted), population filters, loop mode with countdown
+- **⚔️ Military** — Scout and raid dispatch with tribe-aware troop names
+- **📊 Reports** — Browse reports with collapsible raid analyzer panel
+- **📋 Build Queue** — Visual YAML plan builder with drag-and-drop, validation, and live execution via WebSocket
+- **🎬 Video Rewards** — Claim individual or all production boosts
+- **📊 Activity Log** — Real-time server + client log streaming via WebSocket, with origin filter, level badges, and export
+- **🔒 Stealth** — All operations go through request throttler, human-like delays, and browser header simulation
 
 ## Quick Start
 
@@ -33,6 +49,24 @@ If `travian-setup` isn't found either, run it as: `python -m travian_api._post_i
 ```bash
 python -m travian_api auth login
 python -m travian_api queue run plan.yaml
+```
+
+### Web UI Install
+
+```bash
+pip install -e ".[web]"
+travian-web
+```
+
+Open `http://localhost:8000`. Register an account, connect to your Travian server, and you're in.
+
+For development with Vite hot-reload:
+```bash
+# Terminal 1: Backend
+TRAVIAN_DEV=1 python -m uvicorn travian_api.web.app:app --host 0.0.0.0 --port 8000
+
+# Terminal 2: Frontend dev server
+cd frontend && npm install && npm run dev
 ```
 
 ### First run
@@ -457,7 +491,28 @@ travian reports list --max-age-hours 48 --max-pages 10
 
 # Show detailed report
 travian reports show <report-id>
+
+# Gather all reports for a specific village (own + alliance)
+travian reports village 14 98
+travian reports village 14 98 --details          # fetch full report data
+travian reports village 14 98 -d --max-details 3 # limit detail fetches
+
+# Analyze raid targets (v2 pipeline)
+travian reports analyze --radius 15 --min-resources 100
+travian reports analyze --radius 20 --stale-hours 12 --nap-alliance HM2 --nap-alliance LR
+travian reports analyze --max-population 300 --json  # JSON output for automation
 ```
+
+The raid analyzer v2 pipeline:
+1. Scans your inbox for scout reports (falls back to battle reports if no scouts)
+2. Deduplicates to unique target coordinates
+3. Pre-filters by radius, alliance, NAP alliances, population via GQL metadata
+4. Fetches full village-reports (own + alliance) for each surviving target
+5. Reconstructs target state: resources, defenders, wall, traps
+6. Scores using combat simulation with binary search optimization
+7. Outputs ranked targets + a re-scout queue for depleted/stale targets
+
+Results are cached (30min TTL) — repeated runs are 90%+ faster.
 
 ### Video Rewards
 
@@ -674,12 +729,14 @@ travian-api/
 
 ## Known Limitations
 
-- **Farm List Send**: Requires Gold Club — the API blocks `farm-list/send` without it. Commands display "Gold Club is not active" when missing. Loop commands (`farm run`, `farm run-all`) exit immediately on this error. All other operations (create, manage, view, delete) work fine.
+- **Farm List Send**: Requires Gold Club — the API blocks `farm-list/send` without it. Loop commands exit on this error.
 - **Movement Cancellation**: Not implemented (requires UI interaction)
 - **Report Deletion**: Bulk operations not implemented
 - **Video `buildingUpgrade`**: May be disabled on some accounts (cooldown or server restriction)
 - **Single plan per run**: Each `queue run` targets one village. Run multiple plans for multiple villages.
-- **Auto-Scout enrichment**: Fetching population data requires one API call per tile. Large radius scans may be slow (use `--no-enrich` for fast scanning).
+- **Auto-Scout enrichment**: One API call per tile through stealth throttler. Large radius scans are slow by design (stealth).
+- **Raid Analyzer**: Scoring optimized for Teuton Clubswingers. Other tribes use the same formula (works but not optimal).
+- **Web UI**: Single server process. For production use, run behind a reverse proxy with HTTPS.
 
 ## Disclaimer
 
