@@ -8,7 +8,7 @@ A Python library and CLI for automating Travian Legends gameplay. Async-first, m
 - **🏘️ Multi-Village** — Full support for multiple villages per account
 - **🏗️ Auto-Builder** — YAML-based build queue with priorities, multi-level chaining, gold guard, and video speedup
 - **⚔️ Military** — Scouts, raids, attacks with tribe-aware troop selection
-- **🌾 Farm Lists** — Full CRUD + smart raid intelligence (last raid, carry ratio, distance, booty)
+- **🌾 Farm Lists** — Full CRUD + smart raid intelligence (last raid, carry ratio, distance, booty) + round-robin batched sending
 - **🔭 Auto-Scout** — Scan map, filter by population/distance/player/alliance, send scouts with loop mode
 - **📊 Reports** — Fetch and parse scout/battle reports with smart type detection
 - **📍 Village Reports** — Gather all reports (own + alliance) for any village from the map tile
@@ -221,6 +221,8 @@ travian farm send 10165 --yes
 # Dry run -- show what would be sent without actually sending
 travian farm send 10165 --dry-run
 ```
+
+**Round-robin distribution:** When sending all active slots (no explicit targets), raids are sent in small batches of 5 using a persistent cursor. This distributes troops fairly across all targets instead of always filling top-to-bottom. When troops run out, the cursor advances so the next cycle picks up where you left off.
 
 > **Note:** Sending requires Gold Club. Without it, the API returns an error. All other farm list operations (create, add targets, view, delete) work without Gold Club.
 
@@ -660,7 +662,7 @@ travian-api/
 │   │   ├── auto_scout_service.py   # Map scanning, tile enrichment, scout dispatch
 │   │   ├── building_service.py # Buildings, resources, upgrades
 │   │   ├── build_queue_service.py  # Auto-builder engine
-│   │   ├── farm_list_service.py    # Farm list GraphQL + REST CRUD + send
+│   │   ├── farm_list_service.py    # Farm list GraphQL + REST CRUD + round-robin send
 │   │   ├── military_service.py # Scout, raid, attack, troop overview
 │   │   ├── raid_analyzer_service.py # v2 raid analysis pipeline + scoring
 │   │   ├── reports_service.py  # Report fetching + GraphQL batch + village reports

@@ -68,6 +68,9 @@ class FarmListService:
 
     def __init__(self, http_client: HttpClient):
         self.http_client = http_client
+        # Round-robin cursors: {list_id: cursor_index}
+        # Persisted across cycles so each send starts where the last one left off.
+        self._cursors: Dict[int, int] = {}
 
     # ── Queries ──────────────────────────────────────────────────────
 
@@ -207,59 +210,26 @@ class FarmListService:
 
     # ── Send ─────────────────────────────────────────────────────────
 
-    async def send_farm_list(
-        self,
-        list_id: int,
-        target_slot_ids: Optional[List[int]] = None,
-    ) -> FarmListSendResult:
-        """
-        Send raids for a farm list.
+    BATCH_SIZE = 5  # targets per API call for round-robin batching
 
-        Args:
-            list_id: Farm list ID
-            target_slot_ids: Specific slot IDs to send. If None, sends all active.
-        """
-        if target_slot_ids is None:
-            # Fetch the list to get all active slot IDs
-            farm_list = await self.get_farm_list(list_id)
-            target_slot_ids = [s.id for s in farm_list.active_slots]
+    async def _send_batch(
+        self, list_id: int, slot_ids: List[int]
+    ) -> List[FarmListSendTargetResult]:
+        """Send a single batch of slot IDs. Returns per-target results."""
+        resp = await self.http_client.post_json(
+            "/api/v1/farm-list/send",
+            {
+                "action": "farmList",
+                "lists": [{"id": list_id, "targets": slot_ids}],
+            },
+        )
 
-        if not target_slot_ids:
-            return FarmListSendResult(targets=[])
-
-        try:
-            resp = await self.http_client.post_json(
-                "/api/v1/farm-list/send",
-                {
-                    "action": "farmList",
-                    "lists": [{"id": list_id, "targets": target_slot_ids}],
-                },
-            )
-        except Exception as e:
-            error_str = str(e)
-            # Gold Club error comes as HTTP 400
-            if "goldclub" in error_str.lower() or "gold club" in error_str.lower():
-                logger.warning("Gold Club not active — cannot send farm lists via API")
-                return FarmListSendResult(
-                    targets=[
-                        FarmListSendTargetResult(
-                            id=sid, status="error", error="plus.error_goldclub"
-                        )
-                        for sid in target_slot_ids
-                    ]
-                )
-            raise
-
-        # Parse response
         error = resp.get("error", "")
         if error:
-            logger.warning(f"Farm list send error: {error} — {resp.get('message', '')}")
-            return FarmListSendResult(
-                targets=[
-                    FarmListSendTargetResult(id=sid, status="error", error=error)
-                    for sid in target_slot_ids
-                ]
-            )
+            return [
+                FarmListSendTargetResult(id=sid, status="error", error=error)
+                for sid in slot_ids
+            ]
 
         result_lists = resp.get("lists", [])
         targets = []
@@ -272,7 +242,109 @@ class FarmListService:
                         error=t.get("error") or "",
                     )
                 )
-        return FarmListSendResult(targets=targets)
+        return targets
+
+    async def send_farm_list(
+        self,
+        list_id: int,
+        target_slot_ids: Optional[List[int]] = None,
+    ) -> FarmListSendResult:
+        """
+        Send raids for a farm list using round-robin batched ordering.
+
+        Travian's bulk send API ignores the order of the targets array and
+        always processes in its own internal order (top → bottom).  To
+        distribute raids fairly when troops are limited, we send targets
+        in **small batches** starting from a persistent cursor position.
+
+        Each batch is a separate API call containing only a few targets,
+        so Travian is forced to process exactly those.  When a batch
+        returns all "not enough troops", we stop — troops are exhausted.
+        The cursor advances to where we stopped, so the next cycle
+        picks up right there.
+
+        Args:
+            list_id: Farm list ID
+            target_slot_ids: Specific slot IDs to send (skips round-robin).
+                If None, fetches all active slots and applies batched rotation.
+        """
+        use_round_robin = target_slot_ids is None
+
+        if target_slot_ids is None:
+            farm_list = await self.get_farm_list(list_id)
+            target_slot_ids = [s.id for s in farm_list.active_slots]
+
+        if not target_slot_ids:
+            return FarmListSendResult(targets=[])
+
+        # ── Non-round-robin: single bulk call (explicit slot IDs) ───
+        if not use_round_robin or len(target_slot_ids) <= 1:
+            try:
+                results = await self._send_batch(list_id, target_slot_ids)
+            except Exception as e:
+                if "goldclub" in str(e).lower():
+                    return FarmListSendResult(targets=[
+                        FarmListSendTargetResult(id=s, status="error", error="plus.error_goldclub")
+                        for s in target_slot_ids
+                    ])
+                raise
+            return FarmListSendResult(targets=results)
+
+        # ── Round-robin: rotate + send in small batches ─────────────
+        total = len(target_slot_ids)
+        cursor = self._cursors.get(list_id, 0) % total
+        rotated = target_slot_ids[cursor:] + target_slot_ids[:cursor]
+
+        logger.info(
+            "Farm list %d: round-robin cursor=%d/%d, sending in batches of %d",
+            list_id, cursor, total, self.BATCH_SIZE,
+        )
+
+        all_results: List[FarmListSendTargetResult] = []
+        troops_exhausted = False
+
+        for batch_start in range(0, total, self.BATCH_SIZE):
+            batch = rotated[batch_start:batch_start + self.BATCH_SIZE]
+
+            try:
+                batch_results = await self._send_batch(list_id, batch)
+            except Exception as e:
+                if "goldclub" in str(e).lower():
+                    all_results.extend([
+                        FarmListSendTargetResult(id=s, status="error", error="plus.error_goldclub")
+                        for s in batch
+                    ])
+                    troops_exhausted = True
+                    break
+                raise
+
+            all_results.extend(batch_results)
+
+            # Check if this entire batch failed with troop errors → stop
+            batch_sent = sum(1 for t in batch_results if not t.error)
+            batch_troop_errors = sum(
+                1 for t in batch_results
+                if t.error and "troops" in t.error.lower()
+            )
+            if batch_sent == 0 and batch_troop_errors == len(batch_results):
+                troops_exhausted = True
+                logger.info(
+                    "Farm list %d: troops exhausted at batch offset %d",
+                    list_id, batch_start,
+                )
+                break
+
+        # ── Advance cursor ──────────────────────────────────────────
+        sent_ok = sum(1 for t in all_results if not t.error)
+        new_cursor = (cursor + sent_ok) % total
+        self._cursors[list_id] = new_cursor
+        logger.info(
+            "Farm list %d: %d/%d sent, cursor %d → %d%s",
+            list_id, sent_ok, len(all_results), cursor, new_cursor,
+            " (troops exhausted)" if troops_exhausted else "",
+        )
+
+        return FarmListSendResult(targets=all_results)
 
     async def send_all_farm_lists(
         self, list_ids: Optional[List[int]] = None

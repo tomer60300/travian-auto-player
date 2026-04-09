@@ -7,6 +7,11 @@
 #### CLI
 - **`travian reports village X Y`** — Gather all reports (own + alliance) for any village from the map tile popup. Uses `/api/v1/map/tile-details` endpoint. Supports `--details` for full report parsing.
 
+#### Farm List — Round-Robin Batched Sending
+- **Batched round-robin** — Farm list sends now use small batches (5 targets per API call) with a persistent cursor. Distributes troops fairly across all targets instead of always filling top-to-bottom.
+- **Cursor persistence** — The cursor advances with each cycle, so the next send picks up where the last one left off.
+- **Troop exhaustion detection** — When a full batch returns "not enough troops", sending stops immediately (no wasted API calls).
+
 #### Raid Analyzer v2 Pipeline
 - **Scout-gated entry** — Only scout reports enter the pipeline (with battle report fallback when no scouts exist)
 - **Coordinate deduplication** — Multiple scouts on the same target produce one fetch, not many
@@ -49,3 +54,4 @@
 ### Changed
 - `logging_config.py` — `SensitiveDataFilter` extracted to module-level class with precise patterns (only redacts actual credential values, not messages that mention credentials)
 - `.gitignore` — `*.json` → `/*.json` (root-only, no longer ignores JSON files in subdirectories)
+- `farm_list_service.py` — `send_farm_list()` rewritten with round-robin batched sending for fair troop distribution
