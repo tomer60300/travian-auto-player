@@ -197,9 +197,9 @@ async def auto_scout_ws(websocket: WebSocket):
             user_delay = config.get("delay", 3.0)
             village_id = config.get("village_id") or session.active_village_id
 
-            # target_coords: explicit list of (x,y) to scout (from scan results)
-            # When provided, skip the re-scan entirely — scout exactly these targets.
-            target_raw = config.get("target_coords") or []
+            # "targets": enriched target list from scan UI [{x, y, name, pop, player}, ...]
+            # When provided, skip re-scan — scout exactly these targets.
+            targets_from_ui = config.get("targets")
 
             center_village = next(
                 (v for v in session.auth_state.villages if v.id == village_id), None
@@ -213,34 +213,45 @@ async def auto_scout_ws(websocket: WebSocket):
 
             try:
                 # ── Phase 1: Resolve targets ─────────────────────────
-                if target_raw:
-                    # Use pre-filtered targets from the scan UI — no re-scan needed
+                if targets_from_ui is not None:
+                    # Pre-filtered targets from scan UI — no re-scan
                     from travian_api.models.farm_list import MapTileInfo
                     import math
+
+                    if not targets_from_ui:
+                        await _send(websocket, {"type": "complete", "total_sent": 0, "successful": 0})
+                        continue
+
                     tiles = []
-                    for item in target_raw:
+                    for item in targets_from_ui:
                         try:
-                            if isinstance(item, (list, tuple)) and len(item) == 2:
-                                tx, ty = int(item[0]), int(item[1])
-                            else:
-                                continue
+                            tx = int(item.get("x") if isinstance(item, dict) else item[0])
+                            ty = int(item.get("y") if isinstance(item, dict) else item[1])
+                            name = item.get("name", "") if isinstance(item, dict) else ""
+                            pop = item.get("pop", 0) if isinstance(item, dict) else 0
+                            player = item.get("player", "") if isinstance(item, dict) else ""
                             dist = math.sqrt((tx - cx) ** 2 + (ty - cy) ** 2)
-                            tiles.append(MapTileInfo(x=tx, y=ty, distance=round(dist, 2)))
-                        except (ValueError, TypeError):
+                            t = MapTileInfo(x=tx, y=ty, distance=round(dist, 2))
+                            t.village_name = name
+                            t.population = pop
+                            t.player_name = player
+                            tiles.append(t)
+                        except (ValueError, TypeError, KeyError):
                             pass
 
-                    if not await _send(websocket, {
-                        "type": "scan_complete",
-                        "targets": len(tiles),
-                    }):
+                    if not tiles:
+                        await _send(websocket, {"type": "complete", "total_sent": 0, "successful": 0})
+                        continue
+
+                    if not await _send(websocket, {"type": "scan_complete", "targets": len(tiles)}):
                         break
 
                     await _send(websocket, {
                         "type": "target_list",
-                        "targets": [{"x": t.x, "y": t.y, "name": "", "pop": 0, "dist": t.distance} for t in tiles],
+                        "targets": [{"x": t.x, "y": t.y, "name": t.village_name, "pop": t.population, "dist": t.distance} for t in tiles],
                     })
                 else:
-                    # Legacy: no target_coords provided, do a full scan
+                    # Legacy fallback: no targets provided, do a full scan
                     if not await _send(websocket, {"type": "scanning", "message": f"Scanning ({cx},{cy}) r={radius}..."}):
                         break
 

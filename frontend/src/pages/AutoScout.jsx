@@ -468,10 +468,12 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
     return new Promise((resolve) => {
       if (!mountedRef.current || loopStoppedRef.current) { resolve(); return }
 
-      // Send only the SELECTED targets — don't let the backend re-scan
+      // Send selected targets with enriched data — don't let the backend re-scan
       const curResults = scanResultsRef.current
       const curSelected = selectedRef.current
-      const targetCoords = curResults.filter((_, i) => curSelected.has(i)).map((r) => [r.x, r.y])
+      const targets = curResults
+        .filter((_, i) => curSelected.has(i))
+        .map((r) => ({ x: r.x, y: r.y, name: r.village_name || r.name || '', pop: r.population || 0, player: r.player_name || '' }))
       setWsStatus('connected')
       if (cycleNum > 0) addMessage('info', `--- Loop cycle ${cycleNum + 1} ---`)
 
@@ -524,7 +526,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
           amount: amountRef.current,
           type: scoutTypeRef.current,
           delay: delayRef.current,
-          target_coords: targetCoords,
+          targets: targets,
           village_id: villageIdRef.current,
         }))
       })
