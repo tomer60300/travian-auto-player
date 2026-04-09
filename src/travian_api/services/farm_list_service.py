@@ -68,6 +68,9 @@ class FarmListService:
 
     def __init__(self, http_client: HttpClient):
         self.http_client = http_client
+        # Round-robin cursors: {list_id: cursor_index}
+        # Persisted across cycles so each send starts where the last one left off.
+        self._cursors: Dict[int, int] = {}
 
     # ── Queries ──────────────────────────────────────────────────────
 
@@ -213,31 +216,51 @@ class FarmListService:
         target_slot_ids: Optional[List[int]] = None,
     ) -> FarmListSendResult:
         """
-        Send raids for a farm list.
+        Send raids for a farm list using round-robin ordering.
+
+        Travian processes targets top-to-bottom and stops when troops run
+        out.  To distribute raids fairly, we rotate the target list each
+        cycle using a persistent cursor.  The cursor advances by the
+        number of successfully sent targets, so the next cycle picks up
+        right where the last one left off.
 
         Args:
             list_id: Farm list ID
-            target_slot_ids: Specific slot IDs to send. If None, sends all active.
+            target_slot_ids: Specific slot IDs to send (skips round-robin).
+                If None, fetches all active slots and applies rotation.
         """
+        use_round_robin = target_slot_ids is None
+
         if target_slot_ids is None:
-            # Fetch the list to get all active slot IDs
             farm_list = await self.get_farm_list(list_id)
             target_slot_ids = [s.id for s in farm_list.active_slots]
 
         if not target_slot_ids:
             return FarmListSendResult(targets=[])
 
+        # ── Round-robin rotation ────────────────────────────────────
+        if use_round_robin and len(target_slot_ids) > 1:
+            cursor = self._cursors.get(list_id, 0) % len(target_slot_ids)
+            rotated = target_slot_ids[cursor:] + target_slot_ids[:cursor]
+            logger.info(
+                "Farm list %d: round-robin cursor=%d/%d (starting from slot %s)",
+                list_id, cursor, len(target_slot_ids), rotated[0],
+            )
+        else:
+            rotated = target_slot_ids
+            cursor = 0
+
+        # ── Send ────────────────────────────────────────────────────
         try:
             resp = await self.http_client.post_json(
                 "/api/v1/farm-list/send",
                 {
                     "action": "farmList",
-                    "lists": [{"id": list_id, "targets": target_slot_ids}],
+                    "lists": [{"id": list_id, "targets": rotated}],
                 },
             )
         except Exception as e:
             error_str = str(e)
-            # Gold Club error comes as HTTP 400
             if "goldclub" in error_str.lower() or "gold club" in error_str.lower():
                 logger.warning("Gold Club not active — cannot send farm lists via API")
                 return FarmListSendResult(
@@ -245,19 +268,19 @@ class FarmListService:
                         FarmListSendTargetResult(
                             id=sid, status="error", error="plus.error_goldclub"
                         )
-                        for sid in target_slot_ids
+                        for sid in rotated
                     ]
                 )
             raise
 
-        # Parse response
+        # ── Parse response ──────────────────────────────────────────
         error = resp.get("error", "")
         if error:
             logger.warning(f"Farm list send error: {error} — {resp.get('message', '')}")
             return FarmListSendResult(
                 targets=[
                     FarmListSendTargetResult(id=sid, status="error", error=error)
-                    for sid in target_slot_ids
+                    for sid in rotated
                 ]
             )
 
@@ -272,6 +295,17 @@ class FarmListService:
                         error=t.get("error") or "",
                     )
                 )
+
+        # ── Advance round-robin cursor ──────────────────────────────
+        if use_round_robin and len(target_slot_ids) > 1:
+            sent_ok = sum(1 for t in targets if not t.error)
+            new_cursor = (cursor + sent_ok) % len(target_slot_ids)
+            self._cursors[list_id] = new_cursor
+            logger.info(
+                "Farm list %d: %d/%d sent, cursor %d → %d",
+                list_id, sent_ok, len(targets), cursor, new_cursor,
+            )
+
         return FarmListSendResult(targets=targets)
 
     async def send_all_farm_lists(
