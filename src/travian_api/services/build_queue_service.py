@@ -503,9 +503,10 @@ class BuildQueueService:
             self._report("Waiting for in-progress build to finish before resolving plan...")
             while not await self.is_queue_empty(village_id=vid):
                 remaining = await self.get_queue_remaining(village_id=vid)
-                self._report(f"  Queue not empty ({remaining}s remaining)...")
-                wait = min(remaining + 5, 60)
-                await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.15))
+                self._report(f"  Queue not empty ({remaining}s remaining). Sleeping until done...")
+                # Sleep for the actual remaining time + small buffer instead of polling
+                wait = max(remaining + 3, 5)
+                await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.05))
 
         await self.resolve_slots(plan)
 
@@ -522,12 +523,12 @@ class BuildQueueService:
             for pi in prio_items:
                 self._report(f"  {pi.building} Lv{pi.current_level} -> {pi.target} (slot {pi.slot_id})")
 
-            # Wait for queue to be empty
+            # Wait for queue to be empty — sleep for actual remaining time
             while not await self.is_queue_empty(village_id=vid):
                 remaining = await self.get_queue_remaining(village_id=vid)
-                self._report(f"Waiting for queue ({remaining}s)...")
-                wait = min(remaining + 5, 60)
-                await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.15))
+                self._report(f"Queue busy ({remaining}s remaining). Sleeping until done...")
+                wait = max(remaining + 3, 5)
+                await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.05))
 
             # Show current resources if verbose
             if verbose:
@@ -636,13 +637,13 @@ class BuildQueueService:
                         built = True
 
                         # Wait for the build to actually register in the queue,
-                        # then wait for it to finish before starting the next one.
+                        # then sleep until it finishes (no wasteful polling).
                         await asyncio.sleep(HumanTiming.reaction_time())  # grace period for server to register
                         while not await self.is_queue_empty(village_id=vid):
                             remaining = await self.get_queue_remaining(village_id=vid)
-                            self._report(f"Waiting for build to finish ({remaining}s remaining)...")
-                            wait = min(remaining + 5, 60)
-                            await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.15))
+                            self._report(f"Build in progress ({remaining}s remaining). Sleeping until done...")
+                            wait = max(remaining + 3, 5)
+                            await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.05))
                             # Stealth: occasional idle browsing during long waits
                             try:
                                 await self.http_client.session_manager.idle_browse_if_due(

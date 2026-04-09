@@ -97,8 +97,29 @@ class AnalysisResult(BaseModel):
     skipped_alliance: int = 0
     skipped_player: int = 0
 
+    # v2 pipeline stats
+    re_scout_targets: List["ReScoutTarget"] = Field(default_factory=list)
+    village_reports_fetched: int = 0
+    village_reports_cached: int = 0
+    village_reports_failed: int = 0
+    unique_coords_discovered: int = 0
+    coords_after_gql_filter: int = 0
+    pipeline_version: str = "v2"
+
     # Warnings
     warnings: List[str] = Field(default_factory=list)
+
+
+class ReScoutTarget(BaseModel):
+    """A target that needs re-scouting."""
+    x: int = 0
+    y: int = 0
+    village_name: str = ""
+    player_name: str = ""
+    reason: str = ""  # "depleted" | "stale" | "no_scout_data"
+    last_report_time: Optional[datetime] = None
+    estimated_raidable_before: int = 0
+    distance: float = 0.0
 
 
 class AnalyzerSettings(BaseModel):
@@ -110,9 +131,15 @@ class AnalyzerSettings(BaseModel):
     max_pages: int = 20
     exclude_alliances: List[str] = Field(default_factory=list)
     exclude_players: List[str] = Field(default_factory=list)
+    nap_alliances: List[str] = Field(default_factory=list)
+    max_population: Optional[int] = None
     smithy_level: int = 0
     hero_offense: int = 0
     hero_strength: int = 0
     radius: Optional[float] = None
     include_alliance_reports: bool = False
     output_json: bool = False
+    # v2 pipeline settings
+    village_report_concurrency: int = 4
+    stale_hours: float = 12.0
+    cache_ttl_minutes: int = 30

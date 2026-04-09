@@ -622,3 +622,149 @@ def parse_individual_report(html: str) -> Dict[str, Any]:
         'type': 'unknown',
         'data': {'html_snippet': html[:500]},
     }
+
+
+# ---------------------------------------------------------------------------
+# Map tile village reports (karte.php?x=X&y=Y)
+# ---------------------------------------------------------------------------
+
+# iReport icon → battle result classification
+_BATTLE_RESULT_MAP = {
+    1: 'attacker_won_no_losses',
+    2: 'attacker_won_with_losses',
+    3: 'attacker_lost',
+    4: 'defender_won_no_losses',
+    5: 'defender_won_with_losses',
+    6: 'defender_lost',
+    7: 'attacker_partial_losses',
+    8: 'mixed',
+}
+
+
+def parse_map_tile_reports(html: str) -> Dict[str, Any]:
+    """Parse the map tile page (/karte.php?x=X&y=Y) for village info and reports.
+
+    The tile popup contains:
+    - Village info table (#village_info): Tribe, Alliance, Owner, Population, Distance
+    - Reports table (table.rep or #troop_info): report links with icons and carry info
+
+    Returns dict with keys:
+        village: {name, owner, tribe, alliance, population, distance, village_id, coordinates}
+        reports: List of dicts with {report_id, aid, date_str, icon_type,
+                 battle_result, battle_result_text, carry_info, carry_current, carry_max}
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    result: Dict[str, Any] = {'village': {}, 'reports': []}
+
+    # ── Village metadata ───────────────────────────────────────────
+    village: Dict[str, Any] = {
+        'name': '', 'owner': '', 'tribe': '', 'alliance': '',
+        'population': 0, 'distance': '', 'village_id': 0,
+        'coordinates': {'x': 0, 'y': 0},
+    }
+
+    heading = soup.find('h1', class_='titleInHeader') or soup.find('h1')
+    if heading:
+        raw = clean_unicode(heading.get_text(strip=True))
+        village['name'] = raw
+        coord_match = re.search(r'\(?(-?\d+)\s*\|?\s*(-?\d+)\)?', raw)
+        if coord_match:
+            village['coordinates'] = {
+                'x': int(coord_match.group(1)),
+                'y': int(coord_match.group(2)),
+            }
+
+    # Village info table — rows keyed by <th> label
+    vi_table = soup.find('table', id='village_info')
+    if vi_table:
+        for row in vi_table.find_all('tr'):
+            th = row.find('th')
+            td = row.find('td')
+            if not th or not td:
+                continue
+            label = clean_unicode(th.get_text(strip=True)).lower()
+            value = clean_unicode(td.get_text(strip=True))
+            if 'tribe' in label:
+                village['tribe'] = value
+            elif 'alliance' in label:
+                village['alliance'] = value
+            elif 'owner' in label or 'player' in label:
+                village['owner'] = value
+            elif 'population' in label:
+                try:
+                    village['population'] = int(value.replace(',', '').replace('.', ''))
+                except ValueError:
+                    pass
+            elif 'distance' in label:
+                village['distance'] = value
+
+    # village_id from "Show reports of village" link
+    vid_link = soup.find('a', href=re.compile(r'report/overview\?villageId='))
+    if vid_link:
+        vid_match = re.search(r'villageId=(\d+)', vid_link.get('href', ''))
+        if vid_match:
+            village['village_id'] = int(vid_match.group(1))
+
+    result['village'] = village
+
+    # ── Reports from the Reports/troop_info tab ────────────────────
+    rep_table = (
+        soup.find('table', id='troop_info')
+        or soup.find('table', class_=re.compile(r'\brep\b'))
+    )
+    if not rep_table:
+        return result
+
+    for row in rep_table.find_all('tr'):
+        td = row.find('td')
+        if not td:
+            continue
+
+        links = td.find_all('a', href=re.compile(r'/report\?'))
+        if not links:
+            continue
+
+        entry: Dict[str, Any] = {
+            'report_id': '', 'aid': '', 'date_str': '',
+            'icon_type': 0, 'battle_result': '', 'battle_result_text': '',
+            'carry_info': '', 'carry_current': 0, 'carry_max': 0,
+        }
+
+        # Icon: <img class="iReport iReport{N}" alt="..."/>
+        icon_img = td.find('img', class_=re.compile(r'iReport'))
+        if icon_img:
+            classes = ' '.join(icon_img.get('class', []))
+            type_match = re.search(r'iReport(\d+)', classes)
+            if type_match:
+                icon_num = int(type_match.group(1))
+                entry['icon_type'] = icon_num
+                entry['battle_result'] = _BATTLE_RESULT_MAP.get(icon_num, 'unknown')
+            entry['battle_result_text'] = clean_unicode(icon_img.get('alt', ''))
+
+        # Links: first = date link, may have carry img in second
+        for link in links:
+            href = link.get('href', '')
+            id_match = re.search(r'[?&]id=(\d+)', href)
+            aid_match = re.search(r'[?&]aid=(\d+)', href)
+            if id_match and not entry['report_id']:
+                entry['report_id'] = id_match.group(1)
+            if aid_match and not entry['aid']:
+                entry['aid'] = aid_match.group(1)
+
+            carry_img = link.find('img', class_=re.compile(r'reportInfoIcon'))
+            if carry_img:
+                carry_alt = carry_img.get('alt', '')
+                entry['carry_info'] = carry_alt
+                carry_match = re.match(r'(\d+)\s*/\s*(\d+)', carry_alt)
+                if carry_match:
+                    entry['carry_current'] = int(carry_match.group(1))
+                    entry['carry_max'] = int(carry_match.group(2))
+            else:
+                date_text = clean_unicode(link.get_text(strip=True))
+                if date_text and not entry['date_str']:
+                    entry['date_str'] = date_text
+
+        if entry['report_id']:
+            result['reports'].append(entry)
+
+    return result

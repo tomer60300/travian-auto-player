@@ -121,33 +121,37 @@ class AutoScoutService:
         return self._parse_tile_details(x, y, html)
 
     async def enrich_tiles(
-        self, tiles: List[MapTileInfo], concurrency: int = 5
+        self, tiles: List[MapTileInfo], concurrency: int = 15
     ) -> List[MapTileInfo]:
         """
         Enrich tiles with population/tribe/player from tile-details API.
-        Uses limited concurrency to avoid flooding the server.
+
+        Processes tiles sequentially to respect the global request throttler.
+        The ``concurrency`` parameter is accepted for API compatibility but
+        no longer used — concurrent requests bypass the throttler's burst
+        protection and trigger Travian's rate limiter (connection resets).
         """
-        sem = asyncio.Semaphore(concurrency)
         enriched: List[MapTileInfo] = []
+        total = len(tiles)
 
-        async def _fetch(tile: MapTileInfo) -> MapTileInfo:
-            async with sem:
-                try:
-                    detail = await self.get_tile_details(tile.x, tile.y)
-                    # Merge — keep distance from scan, take details from tile-details
-                    detail.distance = tile.distance
-                    detail.is_oasis = tile.is_oasis
-                    detail.is_abandoned = tile.is_abandoned
-                    if not detail.village_name and tile.village_name:
-                        detail.village_name = tile.village_name
-                    return detail
-                except Exception as e:
-                    logger.warning(f"Failed to get details for ({tile.x},{tile.y}): {e}")
-                    return tile
+        for i, tile in enumerate(tiles):
+            try:
+                detail = await self.get_tile_details(tile.x, tile.y)
+                detail.distance = tile.distance
+                detail.is_oasis = tile.is_oasis
+                detail.is_abandoned = tile.is_abandoned
+                if not detail.village_name and tile.village_name:
+                    detail.village_name = tile.village_name
+                enriched.append(detail)
+            except Exception as e:
+                logger.warning("Failed to get details for (%s,%s): %s", tile.x, tile.y, e)
+                enriched.append(tile)
 
-        tasks = [_fetch(t) for t in tiles]
-        enriched = await asyncio.gather(*tasks)
-        return list(enriched)
+            # Progress report every 10 tiles
+            if (i + 1) % 10 == 0 or i == total - 1:
+                self._report(f"Enriched {i + 1}/{total} tiles...")
+
+        return enriched
 
     def filter_targets(
         self,
@@ -380,6 +384,7 @@ class AutoScoutService:
             aid = int(alliance_match.group(1))
             if aid > 0:
                 info.alliance_id = aid
+                info.alliance_name = alliance_match.group(2).strip()
 
         # Check if oasis
         if "oasis" in html.lower() or 'class="oasis' in html:

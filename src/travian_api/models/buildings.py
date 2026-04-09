@@ -55,7 +55,7 @@ class BuildingDetail(BaseModel):
 
 class Resources(BaseModel):
     """Village resource information."""
-    
+
     lumber: int = Field(default=0, ge=0, description="Current lumber amount")
     clay: int = Field(default=0, ge=0, description="Current clay amount")
     iron: int = Field(default=0, ge=0, description="Current iron amount")
@@ -65,22 +65,10 @@ class Resources(BaseModel):
     max_clay: int = Field(default=0, ge=0, description="Maximum clay storage")
     max_iron: int = Field(default=0, ge=0, description="Maximum iron storage")
     max_crop: int = Field(default=0, ge=0, description="Maximum crop storage")
-    
-    @field_validator("lumber", "clay", "iron", "crop", "free_crop")
-    @classmethod
-    def validate_resource_amounts(cls, v: int) -> int:
-        """Ensure resource amounts are non-negative."""
-        if v < 0:
-            raise ValueError("Resource amounts cannot be negative")
-        return v
-    
-    @field_validator("max_lumber", "max_clay", "max_iron", "max_crop")
-    @classmethod
-    def validate_storage_amounts(cls, v: int) -> int:
-        """Ensure storage amounts are non-negative."""
-        if v < 0:
-            raise ValueError("Storage amounts cannot be negative")
-        return v
+    lumber_per_hour: int = Field(default=0, description="Lumber production per hour")
+    clay_per_hour: int = Field(default=0, description="Clay production per hour")
+    iron_per_hour: int = Field(default=0, description="Iron production per hour")
+    crop_per_hour: int = Field(default=0, description="Crop production per hour")
 
 
 class QueueItem(BaseModel):

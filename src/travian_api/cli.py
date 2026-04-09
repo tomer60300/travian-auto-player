@@ -771,6 +771,141 @@ def reports_analyze(
     _run(_do())
 
 
+@reports_app.command("village")
+def reports_village(
+    x: int = typer.Argument(..., help="Target X coordinate"),
+    y: int = typer.Argument(..., help="Target Y coordinate"),
+    details: bool = typer.Option(False, "--details", "-d", help="Fetch full report details"),
+    max_details: Optional[int] = typer.Option(None, "--max-details", help="Max reports to fetch details for"),
+):
+    """Gather all visible reports for a specific village from the map page.
+
+    Shows own + alliance reports visible on the map popup for the target.
+    Useful for villages your alliance members have attacked but you haven't.
+
+    Example: travian reports village 14 98
+             travian reports village 14 98 --details --max-details 3
+    """
+    async def _do():
+        s = _settings()
+        async with HttpClient(s) as client:
+            auth = AuthService(client, s)
+            await auth.login()
+            rs = ReportsService(client)
+            data = await rs.fetch_village_reports(
+                x=x, y=y,
+                fetch_details=details,
+                max_detail_count=max_details,
+            )
+
+            village = data.get('village', {})
+            reports = data.get('reports', [])
+
+            # Village header
+            console.print(f"\n[bold cyan]Village Reports for ({x}|{y})[/bold cyan]")
+            console.print(f"  Name:       [yellow]{village.get('name', 'N/A')}[/yellow]")
+            console.print(f"  Owner:      {village.get('owner', 'N/A')}")
+            console.print(f"  Tribe:      {village.get('tribe', 'N/A')}")
+            console.print(f"  Alliance:   {village.get('alliance', 'N/A')}")
+            console.print(f"  Population: {village.get('population', 0)}")
+            console.print()
+
+            if not reports:
+                console.print("[dim]No reports found for this village.[/dim]")
+                return
+
+            # Summary table
+            table = Table(title=f"Reports ({len(reports)} found)")
+            table.add_column("#", style="dim", width=3)
+            table.add_column("ID", style="cyan")
+            table.add_column("Date", style="green")
+            table.add_column("Result")
+            table.add_column("Carry")
+
+            for i, r in enumerate(reports, 1):
+                result_text = r.get('battle_result_text', '')
+                br = r.get('battle_result', '')
+                if 'won' in br or 'no_losses' in br:
+                    result_display = f"[green]{result_text}[/green]"
+                elif 'lost' in br:
+                    result_display = f"[red]{result_text}[/red]"
+                else:
+                    result_display = result_text
+
+                carry = r.get('carry_info', '')
+                cur = r.get('carry_current', 0)
+                mx = r.get('carry_max', 1)
+                if carry and mx > 0:
+                    ratio = cur / mx
+                    carry_display = (
+                        f"[green]{carry}[/green]" if ratio >= 0.9
+                        else f"[yellow]{carry}[/yellow]" if ratio >= 0.5
+                        else f"[red]{carry}[/red]"
+                    )
+                else:
+                    carry_display = carry or ""
+
+                table.add_row(str(i), r.get('report_id', ''), r.get('date_str', ''), result_display, carry_display)
+
+            console.print(table)
+
+            # Detailed output
+            if details:
+                for r in reports:
+                    detail = r.get('detail')
+                    if not detail:
+                        continue
+                    rid = detail.get('report_id', '?')
+                    rtype = detail.get('type', 'unknown')
+                    d = detail.get('data', {})
+                    if d and hasattr(d, 'model_dump'):
+                        d = d.model_dump()
+
+                    console.print(f"\n{'─' * 60}")
+                    console.print(f"[bold]Report {rid}[/bold]  type={rtype}  date={r.get('date_str','')}")
+
+                    if rtype == 'battle' and isinstance(d, dict):
+                        attacker = d.get('attacker', {})
+                        defender = d.get('defender', {})
+                        bounty = d.get('bounty', {})
+                        result = d.get('battle_result', '?')
+                        result_color = 'green' if result == 'victory' else ('red' if result == 'defeat' else 'yellow')
+                        console.print(f"  Result: [{result_color}]{result}[/{result_color}]")
+                        console.print(f"  Attacker: {attacker.get('player_name', '?')} from {attacker.get('village_name', '?')}")
+                        console.print(f"  Defender: {defender.get('player_name', '?')} from {defender.get('village_name', '?')}")
+                        atk_troops = {k: v for k, v in d.get('attacker_troops', {}).items() if v > 0}
+                        if atk_troops:
+                            console.print(f"  Attacker troops: {', '.join(f'{k}={v}' for k, v in atk_troops.items())}")
+                        atk_losses = {k: v for k, v in d.get('attacker_losses', {}).items() if v > 0}
+                        if atk_losses:
+                            console.print(f"  [red]Attacker losses: {', '.join(f'{k}={v}' for k, v in atk_losses.items())}[/red]")
+                        def_troops = {k: v for k, v in d.get('defender_troops', {}).items() if v > 0}
+                        if def_troops:
+                            console.print(f"  Defender troops: {', '.join(f'{k}={v}' for k, v in def_troops.items())}")
+                        def_losses = {k: v for k, v in d.get('defender_losses', {}).items() if v > 0}
+                        if def_losses:
+                            console.print(f"  [red]Defender losses: {', '.join(f'{k}={v}' for k, v in def_losses.items())}[/red]")
+                        total_bounty = sum(bounty.values())
+                        if total_bounty > 0:
+                            console.print(f"  Bounty: L:{bounty.get('lumber',0)} C:{bounty.get('clay',0)} I:{bounty.get('iron',0)} K:{bounty.get('crop',0)} ({d.get('carry_used',0)}/{d.get('carry_max',0)})")
+
+                    elif rtype == 'scout' and isinstance(d, dict):
+                        res = d.get('resources', {})
+                        steal = d.get('stealable_resources', {})
+                        troops = {k: v for k, v in d.get('troops', {}).items() if v > 0}
+                        total_res = sum(res.values())
+                        if total_res > 0:
+                            console.print(f"  Resources: L:{res.get('lumber',0)} C:{res.get('clay',0)} I:{res.get('iron',0)} K:{res.get('crop',0)} (total: {total_res})")
+                        if steal.get('raidable', 0) > 0:
+                            console.print(f"  Raidable: {steal['raidable']}  Cranny: {steal.get('cranny', 0)}")
+                        if troops:
+                            console.print(f"  Troops: {', '.join(f'{k}={v}' for k, v in troops.items())}")
+                    elif rtype == 'error':
+                        console.print(f"  [red]Error: {detail.get('error', '')}[/red]")
+
+    _run(_do())
+
+
 # -- Build Queue ---------------------------------------------------------------
 queue_app = typer.Typer(name="queue", help="Priority build queue commands")
 app.add_typer(queue_app)

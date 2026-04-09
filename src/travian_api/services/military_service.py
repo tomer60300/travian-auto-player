@@ -7,7 +7,7 @@ from typing import Dict, Optional
 from ..clients.http_client import HttpClient
 from ..exceptions import TravianError, InvalidTargetError
 from ..models.military import TroopSendResult
-from ..parsers.html_parser import parse_rally_point_troops, parse_troop_confirm_page, clean_unicode
+from ..parsers.html_parser import parse_rally_point_troops, parse_troop_confirm_page, parse_troop_overview, clean_unicode
 from ..constants import EVENT_TYPES
 from ..stealth.human_delay import HumanDelay, ActionType
 from .target_resolver import TargetResolver
@@ -80,6 +80,19 @@ class MilitaryService:
             url = f"/build.php?newdid={village_id}&gid=16&tt=2"
         html = await self.http_client.get_html(url)
         return parse_rally_point_troops(html)
+
+    async def get_village_troop_totals(
+        self, village_id: Optional[int] = None, tribe_id: int = 0,
+    ) -> Dict[str, int]:
+        """Get total troops for a village (in-village + outgoing + incoming).
+
+        Fetches ``/village/statistics/troops`` which lists all troop categories.
+        """
+        url = "/village/statistics/troops"
+        if village_id:
+            url = f"/village/statistics/troops?newdid={village_id}"
+        html = await self.http_client.get_html(url)
+        return parse_troop_overview(html, tribe_id=tribe_id)
 
     # ── internal ─────────────────────────────────────────────────────
 
@@ -196,12 +209,15 @@ class MilitaryService:
             action_token = final_data.get('action', '')
             form_reappeared = action_token and f'value="{action_token}"' in result_html
             has_error = bool(re.search(r'class="error[^"]*"', result_html))
-            # Only check for the confirmation dialog — troopSendForm is the
-            # normal send form that always appears on the rally point page
-            still_confirming = 'confirmSendTroops' in result_html
+            has_troop_movement = 'troopMovement' in result_html
 
-            # Success = no form reappeared, no error div, and not stuck on confirmation
-            success = not form_reappeared and not has_error and not still_confirming
+            # Success: the old action token was consumed (not reappearing),
+            # no error divs, and ideally we see troop movements on the page.
+            # Note: 'confirmSendTroops' always appears as a button on the
+            # rally point page — it does NOT indicate we're stuck confirming.
+            success = not form_reappeared and not has_error
+            if has_troop_movement:
+                success = True
 
             # Try to extract travel time from the confirmation we parsed
             travel_time = ""
