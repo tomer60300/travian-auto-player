@@ -196,19 +196,10 @@ async def auto_scout_ws(websocket: WebSocket):
             scout_type = config.get("type", "resources")
             user_delay = config.get("delay", 3.0)
             village_id = config.get("village_id") or session.active_village_id
-            exclude_raw = config.get("exclude_coords") or []
 
-            exclude_coords: set[tuple[int, int]] = set()
-            for item in exclude_raw:
-                try:
-                    if isinstance(item, (list, tuple)) and len(item) == 2:
-                        exclude_coords.add((int(item[0]), int(item[1])))
-                    elif isinstance(item, str):
-                        parts = item.replace("|", ",").split(",")
-                        if len(parts) == 2:
-                            exclude_coords.add((int(parts[0].strip()), int(parts[1].strip())))
-                except (ValueError, TypeError):
-                    pass
+            # target_coords: explicit list of (x,y) to scout (from scan results)
+            # When provided, skip the re-scan entirely — scout exactly these targets.
+            target_raw = config.get("target_coords") or []
 
             center_village = next(
                 (v for v in session.auth_state.villages if v.id == village_id), None
@@ -221,20 +212,48 @@ async def auto_scout_ws(websocket: WebSocket):
             svc = session.scout_service
 
             try:
-                # ── Phase 1: Scan ────────────────────────────────────
-                if not await _send(websocket, {"type": "scanning", "message": f"Scanning ({cx},{cy}) r={radius}..."}):
-                    break
+                # ── Phase 1: Resolve targets ─────────────────────────
+                if target_raw:
+                    # Use pre-filtered targets from the scan UI — no re-scan needed
+                    from travian_api.models.farm_list import MapTileInfo
+                    import math
+                    tiles = []
+                    for item in target_raw:
+                        try:
+                            if isinstance(item, (list, tuple)) and len(item) == 2:
+                                tx, ty = int(item[0]), int(item[1])
+                            else:
+                                continue
+                            dist = math.sqrt((tx - cx) ** 2 + (ty - cy) ** 2)
+                            tiles.append(MapTileInfo(x=tx, y=ty, distance=round(dist, 2)))
+                        except (ValueError, TypeError):
+                            pass
 
-                tiles = await svc.scan_map(cx, cy, radius)
-                own_ids = {v.id for v in session.auth_state.villages}
-                tiles = [t for t in tiles if t.village_id > 0 and t.village_id not in own_ids and not t.is_oasis]
-
-                if tiles:
-                    if not await _send(websocket, {"type": "scanning", "message": f"Enriching {len(tiles)} tiles..."}):
+                    if not await _send(websocket, {
+                        "type": "scan_complete",
+                        "targets": len(tiles),
+                    }):
                         break
-                    tiles = await svc.enrich_tiles(tiles)
 
-                tiles = svc.filter_targets(tiles, exclude_coords=exclude_coords, exclude_oases=True)
+                    await _send(websocket, {
+                        "type": "target_list",
+                        "targets": [{"x": t.x, "y": t.y, "name": "", "pop": 0, "dist": t.distance} for t in tiles],
+                    })
+                else:
+                    # Legacy: no target_coords provided, do a full scan
+                    if not await _send(websocket, {"type": "scanning", "message": f"Scanning ({cx},{cy}) r={radius}..."}):
+                        break
+
+                    tiles = await svc.scan_map(cx, cy, radius)
+                    own_ids = {v.id for v in session.auth_state.villages}
+                    tiles = [t for t in tiles if t.village_id > 0 and t.village_id not in own_ids and not t.is_oasis]
+
+                    if tiles:
+                        if not await _send(websocket, {"type": "scanning", "message": f"Enriching {len(tiles)} tiles..."}):
+                            break
+                        tiles = await svc.enrich_tiles(tiles)
+
+                    tiles = svc.filter_targets(tiles, exclude_oases=True)
 
                 if not tiles:
                     await _send(websocket, {"type": "scan_complete", "targets": 0})

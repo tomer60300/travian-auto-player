@@ -468,10 +468,10 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
     return new Promise((resolve) => {
       if (!mountedRef.current || loopStoppedRef.current) { resolve(); return }
 
-      // Read current values from refs (avoids stale closure in loop mode)
+      // Send only the SELECTED targets — don't let the backend re-scan
       const curResults = scanResultsRef.current
       const curSelected = selectedRef.current
-      const excludeCoords = curResults.filter((_, i) => !curSelected.has(i)).map((r) => [r.x, r.y])
+      const targetCoords = curResults.filter((_, i) => curSelected.has(i)).map((r) => [r.x, r.y])
       setWsStatus('connected')
       if (cycleNum > 0) addMessage('info', `--- Loop cycle ${cycleNum + 1} ---`)
 
@@ -524,7 +524,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
           amount: amountRef.current,
           type: scoutTypeRef.current,
           delay: delayRef.current,
-          exclude_coords: excludeCoords,
+          target_coords: targetCoords,
           village_id: villageIdRef.current,
         }))
       })
