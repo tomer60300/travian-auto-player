@@ -459,7 +459,15 @@ export default function FarmLists() {
     setWsStatus('connected')
 
     const qs = `interval=${loopInterval}&duration=${loopDuration}&list_ids=${loopListIds.join(',')}`
-    const ws = createWebSocket(
+
+    const sendStart = (ws) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        setWsStatus('running')
+        ws.send(JSON.stringify({ action: 'start' }))
+      }
+    }
+
+    const handle = createWebSocket(
       `/ws/farm/run-all?${qs}`,
       (data) => {
         if (!mountedRef.current) return
@@ -475,37 +483,49 @@ export default function FarmLists() {
         if (!mountedRef.current) return
         setWsStatus('disconnected')
         setLoopRunning(false)
-        toast.error('WebSocket error')
+        toast.error('WebSocket connection lost — max retries reached')
       },
       () => {
         if (!mountedRef.current) return
         setWsStatus('disconnected')
         setLoopRunning(false)
+      },
+      {
+        reconnect: true,
+        maxRetries: 20,
+        onReconnecting: () => {
+          if (!mountedRef.current) return
+          setWsStatus('reconnecting')
+          setWsMessages((prev) => [...prev, { id: Date.now(), type: 'warning', text: 'Connection lost — reconnecting...', timestamp: new Date().toISOString() }])
+        },
+        onReconnected: (ws) => {
+          if (!mountedRef.current) return
+          setWsMessages((prev) => [...prev, { id: Date.now(), type: 'success', text: 'Reconnected — resuming loop', timestamp: new Date().toISOString() }])
+          sendStart(ws)
+        },
       }
     )
 
-    if (!ws) {
+    if (!handle) {
       toast.error('No auth token — cannot connect')
       setLoopRunning(false)
       setWsStatus('disconnected')
       return
     }
 
-    // Once open, send start action (addEventListener to not overwrite ws.js log handler)
-    ws.addEventListener('open', () => {
-      setWsStatus('running')
-      ws.send(JSON.stringify({ action: 'start' }))
-    })
+    // First connect — send start action
+    handle.ws.addEventListener('open', () => sendStart(handle.ws))
 
-    wsRef.current = ws
+    wsRef.current = handle
   }
 
   const stopLoop = () => {
     if (wsRef.current) {
-      if (wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ action: 'stop' }))
+      const ws = wsRef.current.ws ?? wsRef.current
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ action: 'stop' }))
       }
-      try { wsRef.current.close() } catch {}
+      wsRef.current.close()
       wsRef.current = null
     }
     setLoopRunning(false)

@@ -21,15 +21,19 @@ function summarize(data, maxLen) {
  * @param {string} path - WS endpoint path (e.g., '/ws/farm/run/1')
  * @param {function} onMessage - Called with parsed JSON data for each message
  * @param {function} [onError] - Called on WS error
- * @param {function} [onClose] - Called on WS close
- * @param {object} [options] - { reconnect: false, maxRetries: 10 }
+ * @param {function} [onClose] - Called on WS close (only fires on final close when reconnect is enabled)
+ * @param {object} [options] - { reconnect, maxRetries, onReconnecting, onReconnected }
+ *   - reconnect: boolean (default false) — auto-reconnect on disconnect
+ *   - maxRetries: number (default 10)
+ *   - onReconnecting: () => void — called when a reconnect attempt starts
+ *   - onReconnected: (ws) => void — called after a successful reconnect; use to re-send config
  * @returns {WebSocket | { ws: WebSocket, close: () => void } | null}
  *   - null when there is no auth token
  *   - raw WebSocket when reconnect is disabled (backward compatible)
  *   - { ws, close() } object when reconnect is enabled
  */
 export function createWebSocket(path, onMessage, onError, onClose, options = {}) {
-  const { reconnect = false, maxRetries = 10 } = options
+  const { reconnect = false, maxRetries = 10, onReconnecting, onReconnected } = options
   const token = localStorage.getItem('token')
   const log = useLogStore.getState().addLog
   const source = wsSource(path)
@@ -45,12 +49,15 @@ export function createWebSocket(path, onMessage, onError, onClose, options = {})
   let stopped = false
   let reconnectTimer = null
   let currentWs = null
+  let isFirstConnect = true
 
   function connect() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = window.location.host
     const url = `${protocol}//${host}${path}${path.includes('?') ? '&' : '?'}token=${token}`
 
+    const isReconnect = !isFirstConnect
+    if (isReconnect) onReconnecting?.()
     log('info', source, `WS >> connect: ${path}${attempts > 0 ? ` (retry ${attempts})` : ''}`)
     const ws = new WebSocket(url)
     currentWs = ws
@@ -58,6 +65,8 @@ export function createWebSocket(path, onMessage, onError, onClose, options = {})
     ws.onopen = () => {
       log('success', source, `WS << connected: ${path}`)
       attempts = 0
+      if (isReconnect) onReconnected?.(ws)
+      isFirstConnect = false
     }
 
     ws.onmessage = (event) => {
@@ -76,13 +85,13 @@ export function createWebSocket(path, onMessage, onError, onClose, options = {})
 
     ws.onerror = (event) => {
       log('error', source, `WS error: ${path}`)
-      onError?.(event)
+      // Only forward error to caller when not auto-reconnecting
+      if (!reconnect || stopped) onError?.(event)
     }
 
     ws.onclose = (event) => {
       log('warning', source, `WS closed: ${path} code=${event.code}`, event.reason || undefined)
       currentWs = null
-      onClose?.(event)
 
       // Auto-reconnect if enabled and not manually stopped
       if (reconnect && !stopped && attempts < maxRetries) {
@@ -90,8 +99,12 @@ export function createWebSocket(path, onMessage, onError, onClose, options = {})
         attempts++
         log('info', source, `WS reconnecting in ${delay / 1000}s (attempt ${attempts}/${maxRetries})`)
         reconnectTimer = setTimeout(connect, delay)
-      } else if (reconnect && !stopped && attempts >= maxRetries) {
-        log('error', source, `WS max retries reached for ${path}`)
+      } else {
+        // Only fire onClose when we're truly done (manual stop or max retries)
+        onClose?.(event)
+        if (reconnect && !stopped && attempts >= maxRetries) {
+          log('error', source, `WS max retries reached for ${path}`)
+        }
       }
     }
 

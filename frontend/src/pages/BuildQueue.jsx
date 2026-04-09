@@ -381,7 +381,7 @@ export default function BuildQueue() {
       mountedRef.current = false
       timersRef.current.forEach(({ type, id }) => type === 'interval' ? clearInterval(id) : clearTimeout(id))
       timersRef.current = []
-      if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null }
+      if (wsRef.current) { try { wsRef.current.close() } catch {} ; wsRef.current = null }
     }
   }, [])
 
@@ -440,9 +440,20 @@ export default function BuildQueue() {
       setWsMessages((prev) => [...prev, { id: ++msgId, type, text, timestamp: new Date().toISOString() }])
     }
 
+    const configPayload = { yaml_content: generatedYaml, poll_interval: pollInterval, use_video: useVideo, verbose }
+    const itemCount = queueItems.length
+
+    const sendConfig = (ws) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        setWsStatus('running')
+        ws.send(JSON.stringify(configPayload))
+        addMessage('info', `Executing ${itemCount} items${useVideo ? ' with video speed-up' : ''}...`)
+      }
+    }
+
     addMessage('info', 'Connecting to build queue executor...')
 
-    const ws = createWebSocket(
+    const handle = createWebSocket(
       '/ws/queue/run',
       (data) => {
         if (!mountedRef.current) return
@@ -454,20 +465,34 @@ export default function BuildQueue() {
         else if (data.type === 'error') addMessage('error', data.message)
         else if (data.message) addMessage('info', data.message)
       },
-      () => { if (mountedRef.current) { addMessage('error', 'WebSocket error'); setRunning(false); setWsStatus('disconnected') } },
-      () => { if (mountedRef.current) { setRunning(false); setWsStatus('disconnected') } }
+      () => { if (mountedRef.current) { addMessage('error', 'WebSocket connection lost — max retries reached'); setRunning(false); setWsStatus('disconnected') } },
+      () => { if (mountedRef.current) { setRunning(false); setWsStatus('disconnected') } },
+      {
+        reconnect: true,
+        maxRetries: 20,
+        onReconnecting: () => {
+          if (!mountedRef.current) return
+          setWsStatus('reconnecting')
+          addMessage('warning', 'Connection lost — reconnecting...')
+        },
+        onReconnected: (ws) => {
+          if (!mountedRef.current) return
+          addMessage('success', 'Reconnected — resuming queue execution')
+          sendConfig(ws)
+        },
+      }
     )
 
-    if (!ws) { addMessage('error', 'No auth token'); setRunning(false); setWsStatus('disconnected'); return }
-    wsRef.current = ws
+    if (!handle) { addMessage('error', 'No auth token'); setRunning(false); setWsStatus('disconnected'); return }
+    wsRef.current = handle
 
+    // First connect — send config once open
     const waitForOpen = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
+      const ws = handle.ws
+      if (ws?.readyState === WebSocket.OPEN) {
         clearInterval(waitForOpen)
-        setWsStatus('running')
-        ws.send(JSON.stringify({ yaml_content: generatedYaml, poll_interval: pollInterval, use_video: useVideo, verbose }))
-        addMessage('info', `Executing ${queueItems.length} items${useVideo ? ' with video speed-up' : ''}...`)
-      } else if (ws.readyState >= 2) clearInterval(waitForOpen)
+        sendConfig(ws)
+      } else if (!ws || ws.readyState >= 2) clearInterval(waitForOpen)
     }, 100)
     timersRef.current.push({ type: 'interval', id: waitForOpen })
     const safety = setTimeout(() => clearInterval(waitForOpen), 10000)
@@ -475,8 +500,9 @@ export default function BuildQueue() {
   }, [generatedYaml, pollInterval, useVideo, verbose, queueItems.length])
 
   const handleStop = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ action: 'stop' }))
+    const ws = wsRef.current?.ws ?? wsRef.current
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ action: 'stop' }))
       toast.warning('Stop signal sent')
     }
   }
