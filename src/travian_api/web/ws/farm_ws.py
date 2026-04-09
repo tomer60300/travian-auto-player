@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from datetime import datetime
 
@@ -231,8 +232,10 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                     "timestamp": _now_iso(),
                 })
 
-            # Sleep between cycles, checking for stop periodically
-            remaining = interval
+            # Sleep between cycles with jitter (±15%) to avoid detection
+            jitter = interval * random.uniform(-0.15, 0.15)
+            wait_time = interval + jitter
+            remaining = wait_time
             while remaining > 0:
                 chunk = min(remaining, 2)
                 await asyncio.sleep(chunk)
@@ -449,8 +452,10 @@ async def ws_farm_run_all(websocket: WebSocket):
                     "timestamp": _now_iso(),
                 })
 
-            # Sleep between cycles, checking for stop periodically
-            remaining = interval
+            # Sleep between cycles with jitter (±15%) to avoid detection
+            jitter = interval * random.uniform(-0.15, 0.15)
+            wait_time = interval + jitter
+            remaining = wait_time
             while remaining > 0:
                 chunk = min(remaining, 2)
                 await asyncio.sleep(chunk)
