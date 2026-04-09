@@ -43,13 +43,25 @@ function queueToYaml(items, villageId) {
 
 // ── Construction Queue (in-progress builds) ──────────────────────────
 function ConstructionQueue({ queue }) {
+  const [snapTime, setSnapTime] = useState(Date.now)
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    if (!queue || queue.length === 0) return
+    setSnapTime(Date.now()); setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [queue])
+
   if (!queue || queue.length === 0) return null
+  const elapsed = Math.floor((now - snapTime) / 1000)
+
   return (
     <div className="mb-4 p-3 bg-surface rounded-lg border-default">
       <h4 className="text-xs font-semibold text-secondary uppercase tracking-wider mb-2">In Progress</h4>
       <div className="flex flex-col gap-1.5">
         {queue.map((item, idx) => {
-          const remaining = item.remaining_seconds ?? item.time_remaining ?? 0
+          const baseRemaining = item.remaining_seconds ?? item.time_remaining ?? 0
+          const remaining = Math.max(0, (baseRemaining || 0) - elapsed)
           const doneAt = new Date(Date.now() + remaining * 1000)
           return (
             <div key={item.event_id ?? idx} className="flex justify-between items-center text-sm">
@@ -336,7 +348,7 @@ export default function BuildQueue() {
   const [validationResult, setValidationResult] = useState(null)
   const [showConfirm, setShowConfirm] = useState(false)
 
-  useEffect(() => { fetchBuildings(); fetchQueue() }, [fetchBuildings, fetchQueue])
+  useEffect(() => { fetchBuildings(); fetchQueue() }, [fetchBuildings, fetchQueue, activeVillageId])
 
   useEffect(() => {
     return () => {
@@ -389,6 +401,10 @@ export default function BuildQueue() {
   // Execute
   const startExecution = useCallback(() => {
     setShowConfirm(false)
+    // Clear any leftover timers from previous execution
+    timersRef.current.forEach(({ type, id }) => type === 'interval' ? clearInterval(id) : clearTimeout(id))
+    timersRef.current = []
+
     setWsMessages([])
     setWsStatus('connected')
     setRunning(true)

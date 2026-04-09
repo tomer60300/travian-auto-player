@@ -45,8 +45,8 @@ async def ws_logs(websocket: WebSocket):
     level_param = websocket.query_params.get("level", "info").lower()
     min_level = _LEVEL_MAP.get(level_param, logging.INFO)
 
-    # Use a unique subscriber ID (user_id is fine for single-connection per user)
-    sub_id = user_id
+    # Unique subscriber ID — supports multiple tabs per user
+    sub_id = id(websocket)
     queue = log_stream_manager.subscribe(sub_id)
 
     try:
@@ -61,15 +61,21 @@ async def ws_logs(websocket: WebSocket):
                 entry = await queue.get()
                 entry_level = _LEVEL_MAP.get(entry.get("level", "info"), logging.INFO)
                 if entry_level >= min_level:
-                    await websocket.send_json({"type": "log", **entry})
+                    try:
+                        await websocket.send_json({"type": "log", **entry})
+                    except (WebSocketDisconnect, RuntimeError):
+                        return  # socket closed — exit cleanly
 
         async def _listen_for_commands():
             nonlocal min_level
-            while True:
-                msg = await websocket.receive_json()
-                if isinstance(msg, dict) and msg.get("action") == "filter":
-                    new_level = msg.get("level", "info").lower()
-                    min_level = _LEVEL_MAP.get(new_level, logging.INFO)
+            try:
+                while True:
+                    msg = await websocket.receive_json()
+                    if isinstance(msg, dict) and msg.get("action") == "filter":
+                        new_level = msg.get("level", "info").lower()
+                        min_level = _LEVEL_MAP.get(new_level, logging.INFO)
+            except (WebSocketDisconnect, RuntimeError):
+                return  # socket closed — exit cleanly
 
         tasks = [
             asyncio.create_task(_stream_logs()),

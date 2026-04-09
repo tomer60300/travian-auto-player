@@ -355,7 +355,8 @@ async def scan_defense_strength(
         # Try to get detailed report data
         try:
             detail = await session.reports_service.fetch_report_detail(report.report_id)
-        except Exception:
+        except Exception as exc:
+            logger.debug("Defense scan: skipping report %s: %s", report.report_id, exc)
             continue
 
         if not detail:

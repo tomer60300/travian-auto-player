@@ -23,7 +23,7 @@ class ScanRequest(BaseModel):
     village_id: int | None = Field(None, description="Source village ID (default: active village)")
     max_pop: int | None = Field(None, description="Max village population filter")
     min_pop: int | None = Field(None, description="Min village population filter")
-    max_player_pop: int | None = Field(None, description="Max total player population (all villages)")
+    max_player_pop: int | None = Field(None, description="Max player population sum from visible villages in scan radius")
     show_oases: bool = Field(False, description="Include unoccupied oases in results")
     limit: int = Field(50, ge=1, le=500, description="Max results to return")
     exclude_alliance_ids: list[int] = Field(default_factory=list, description="Alliance IDs to exclude")

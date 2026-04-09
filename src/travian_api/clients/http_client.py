@@ -91,8 +91,8 @@ class HttpClient:
                 for name, value in data.items():
                     self.client.cookies.set(name, value)
                 logger.debug(f"Loaded {len(data)} cookies from {self._cookie_file}")
-        except Exception:
-            pass  # Don't fail on cookie load errors
+        except Exception as e:
+            logger.warning("Failed to load cookies from %s: %s", self._cookie_file, e)
 
     def _save_cookies(self) -> None:
         """Save all cookies to persistent file."""
@@ -101,8 +101,8 @@ class HttpClient:
             if cookies:
                 self._cookie_file.write_text(json.dumps(cookies, indent=2))
                 logger.debug(f"Saved {len(cookies)} cookies to {self._cookie_file}")
-        except Exception:
-            pass  # Don't fail on cookie save errors
+        except Exception as e:
+            logger.warning("Failed to save cookies to %s: %s", self._cookie_file, e)
 
     def _init_stealth(self, settings: Settings) -> None:
         """Initialize stealth/anti-bot components."""
@@ -408,7 +408,7 @@ class HttpClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ()))
     )
-    async def post_json(self, url: str, data: Dict[str, Any], *, skip_reauth: bool = False) -> Dict[str, Any]:
+    async def post_json(self, url: str, data: Dict[str, Any], *, skip_reauth: bool = False, _retry: int = 0) -> Dict[str, Any]:
         """Make a POST request with JSON data."""
         if not url.startswith('http'):
             url = urljoin(self.base_url, url.lstrip('/'))
@@ -461,6 +461,14 @@ class HttpClient:
             raise NetworkError(f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code)
         except (httpx.RequestError,) as e:
             raise NetworkError(f"Request failed: {e}")
+        except (ConnectionResetError, ConnectionError, OSError) as e:
+            # Server forcibly closed connection (rate limit) — penalty + retry once
+            if _retry < 1 and self._stealth_enabled:
+                self._throttler.add_penalty(30.0)
+                logger.warning("Connection reset in post_json — 30s penalty then retry: %s", e)
+                await asyncio.sleep(30.0)
+                return await self.post_json(url, data, skip_reauth=skip_reauth, _retry=_retry + 1)
+            raise NetworkError(f"Connection reset: {e}")
         except Exception as e:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
                 raise NetworkError(f"Request failed (curl): {e}")
@@ -601,12 +609,7 @@ class HttpClient:
             if self._use_curl:
                 response = await self._curl_get(url, headers, follow_redirects=follow_redirects)
             else:
-                original_follow = self.client.follow_redirects
-                self.client.follow_redirects = follow_redirects
-                try:
-                    response = await self.client.get(url, headers=headers)
-                finally:
-                    self.client.follow_redirects = original_follow
+                response = await self.client.get(url, headers=headers, follow_redirects=follow_redirects)
 
             self._stealth_post_request(url)
 
@@ -620,15 +623,14 @@ class HttpClient:
                 if self._use_curl:
                     response = await self._curl_get(url, headers, follow_redirects=follow_redirects)
                 else:
-                    self.client.follow_redirects = follow_redirects
-                    try:
-                        response = await self.client.get(url, headers=headers)
-                    finally:
-                        self.client.follow_redirects = original_follow
+                    response = await self.client.get(url, headers=headers, follow_redirects=follow_redirects)
 
             self._check_suspicious_response(response.text)
 
             if follow_redirects and response.status_code >= 400:
+                if response.status_code == 429 and self._stealth_enabled:
+                    self._throttler.add_penalty(120.0)
+                    logger.warning("429 Too Many Requests on GET — adding 120s penalty")
                 raise NetworkError(f"HTTP {response.status_code}: {response.text}", response.status_code)
 
             return response.text

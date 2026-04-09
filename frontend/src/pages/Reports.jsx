@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import api from '../api'
 import useGameStore from '../stores/gameStore'
 import { useToast } from '../components/Toast'
@@ -155,9 +155,16 @@ function RaidTargetAnalyzer() {
   const [analyzeError, setAnalyzeError] = useState(null)
   const [progress, setProgress] = useState(null)
   const [liveTargets, setLiveTargets] = useState([])
-  const wsRef = useState(null)
+  const wsRef = useRef(null)
+
+  // Cleanup WS on unmount
+  useEffect(() => {
+    return () => { if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null } }
+  }, [])
 
   function handleAnalyze() {
+    // Close any previous WS before starting a new analysis
+    if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null }
     setAnalyzing(true)
     setResults(null)
     setAnalyzeError(null)
@@ -173,7 +180,7 @@ function RaidTargetAnalyzer() {
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${window.location.host}/ws/reports/analyze?token=${token}`)
-    wsRef[1] = ws
+    wsRef.current = ws
 
     ws.onopen = () => {
       ws.send(JSON.stringify({

@@ -51,6 +51,11 @@ class RateLimiter:
                 detail=f"Rate limit exceeded. Max {self.max_calls} requests per {self.window}s.",
             )
         self._calls[key].append(now)
+        # Prune empty keys to prevent unbounded memory growth
+        if len(self._calls) > 100:
+            empty_keys = [k for k, v in self._calls.items() if not v]
+            for k in empty_keys:
+                del self._calls[k]
 
 
 # Pre-configured limiters for different route groups

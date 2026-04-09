@@ -40,16 +40,41 @@ function transformWsMessage(data) {
         : data.message || 'Info' }
     case 'cycle_start':
       return { ...base, type: 'info', text: `Cycle ${data.cycle} started` }
-    case 'result':
-      return { ...base, type: data.success ? 'success' : 'error', text: data.success
-        ? `Sent to ${data.slot || '???'}: ${data.message || 'OK'}`
-        : `Failed ${data.slot || '???'}: ${data.message || 'error'}` }
+    case 'result': {
+      // Single-list result: { slot_id, success, status, error }
+      // Multi-list result: { list_id, success, fail, targets: [{slot_id, success, status, error}] }
+      const messages = []
+      if (data.targets && Array.isArray(data.targets)) {
+        // run-all: per-list with target details
+        const listLabel = data.list_id ? `[List #${data.list_id}] ` : ''
+        for (const t of data.targets) {
+          const ok = t.success
+          messages.push({
+            ...base, id: ++_farmMsgId,
+            type: ok ? 'success' : 'error',
+            text: `${listLabel}Slot #${t.slot_id}: ${ok ? 'Sent' : t.error || t.status || 'Failed'}`,
+          })
+        }
+        if (messages.length === 0) {
+          messages.push({ ...base, type: 'info', text: `${listLabel}sent: ${data.success ?? 0}, failed: ${data.fail ?? 0}` })
+        }
+      } else {
+        // single-list: per-target
+        const ok = data.success
+        messages.push({
+          ...base,
+          type: ok ? 'success' : 'error',
+          text: `Slot #${data.slot_id ?? '?'}: ${ok ? (data.status || 'Sent') : (data.error || data.status || 'Failed')}`,
+        })
+      }
+      return messages
+    }
     case 'cycle_end':
-      return { ...base, type: 'info', text: `Cycle ${data.cycle} finished - sent: ${data.sent ?? 0}, failed: ${data.failed ?? 0}` }
+      return { ...base, type: 'info', text: `Cycle ${data.cycle} done - sent: ${data.sent ?? 0}, failed: ${data.failed ?? 0}${data.next_send_at ? ' | next: ' + data.next_send_at : ''}` }
     case 'error':
       return { ...base, type: 'error', text: data.message || 'Unknown error' }
     case 'complete':
-      return { ...base, type: 'success', text: `Completed after ${data.total_cycles ?? '?'} cycle(s)` }
+      return { ...base, type: 'success', text: `Completed after ${data.total_cycles ?? '?'} cycle(s) - total sent: ${data.total_success ?? '?'}, failed: ${data.total_fail ?? '?'}` }
     default:
       return { ...base, type: 'info', text: JSON.stringify(data) }
   }
@@ -438,7 +463,8 @@ export default function FarmLists() {
       `/ws/farm/run-all?${qs}`,
       (data) => {
         if (!mountedRef.current) return
-        setWsMessages((prev) => [...prev, transformWsMessage(data)])
+        const msg = transformWsMessage(data)
+        setWsMessages((prev) => [...prev, ...(Array.isArray(msg) ? msg : [msg])])
         if (data.type === 'complete') {
           setLoopRunning(false)
           setWsStatus('disconnected')
@@ -475,8 +501,12 @@ export default function FarmLists() {
   }
 
   const stopLoop = () => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ action: 'stop' }))
+    if (wsRef.current) {
+      if (wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ action: 'stop' }))
+      }
+      try { wsRef.current.close() } catch {}
+      wsRef.current = null
     }
     setLoopRunning(false)
     setWsStatus('disconnected')

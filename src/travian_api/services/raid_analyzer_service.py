@@ -8,7 +8,7 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Callable, Dict, List, Optional, Tuple, Any, Union
 
 from ..clients.http_client import HttpClient
 from ..logging_config import get_logger
@@ -186,13 +186,16 @@ def extract_wall_info(buildings: List[Dict[str, Any]]) -> Tuple[int, str]:
 
 
 def extract_trap_capacity(buildings: List[Dict[str, Any]]) -> int:
-    """Extract total trap capacity from buildings list."""
+    """Extract total trap capacity from buildings list.
+
+    Travian Kingdoms Trapper: 12 traps per level (L1=12, L10=120, L20=240).
+    """
     for b in buildings:
         if "trapper" in b.get("name", "").lower():
             level_match = re.search(r'level\s*(\d+)', b.get("detail", ""))
             if level_match:
                 level = int(level_match.group(1))
-                return 4 + level * 36  # L1=40, L2=76, …
+                return 12 * level
     return 0
 
 
@@ -234,7 +237,9 @@ def calculate_score(
     t_raid = hours_since(state.last_raid_time)
 
     # ── eff_R: resource estimate for dispatch ──────────────────
-    if t_raid is None:
+    # Only apply regen decay for "scouted" confidence (no post-scout raids).
+    # "raided" confidence already has bounties subtracted — don't double-penalize.
+    if t_raid is None or state.raidable_confidence == "raided":
         eff_R = float(R)
     else:
         eff_R = R * min(1.0, t_raid / T_REGEN)
@@ -418,8 +423,10 @@ def reconstruct_state(
         elif rtype == "battle":
             raids.append(entry)
 
-        state.last_report_time = timestamp
-        state.last_report_id = report_id
+        # Track newest report time (not last-iterated)
+        if timestamp and (state.last_report_time is None or timestamp > state.last_report_time):
+            state.last_report_time = timestamp
+            state.last_report_id = report_id
         state.report_count += 1
 
     # Sort newest first
@@ -525,11 +532,162 @@ def reconstruct_state(
 
 
 # ---------------------------------------------------------------------------
-# Main service class
+# Optimised scoring helpers (v2)
 # ---------------------------------------------------------------------------
 
+
+def _score_undefended(eff_R: float, dist: float, t_scout, t_raid,
+                      hero_strength: int = 0, hero_offense: int = 0) -> Optional[RaidRecommendation]:
+    """Direct calculation for targets with no defenders and no traps."""
+    if eff_R < 1 or dist <= 0:
+        return None
+    n = math.ceil(eff_R / CLUB_CARRY)
+    if n < 1:
+        n = 1
+    loot = min(n * CLUB_CARRY, eff_R)
+    profit = loot  # no losses → profit = loot
+    C_scout = T_SCOUT / (T_SCOUT + t_scout) if t_scout is not None else 0.5
+    C_confirm = 1.2 if (t_raid is not None and t_scout is not None and t_raid < t_scout) else 1.0
+    round_trip = 2 * dist / CLUB_SPEED
+    if round_trip <= 0:
+        return None
+    score = round((profit / round_trip) * C_scout * C_confirm, 2)
+    return RaidRecommendation(
+        n_send=n, unit_type="CLUB", send_label=f"{n} CLUB",
+        profit=profit, score=score, mode="RAID",
+        round_trip_minutes=round(round_trip * 60), est_loot=round(eff_R),
+    )
+
+
+def _score_defended_binary(state: TargetVillageState, eff_R: float, dist: float,
+                           club_atk: float, hero_strength: int, hero_offense: int,
+                           t_scout, t_raid) -> Optional[RaidRecommendation]:
+    """Binary search for optimal n_send against defended targets."""
+    N_def = 0
+    DEF = 10.0
+    for uid, count in state.defenders.items():
+        if uid == "uhero":
+            continue
+        if uid in UNIT_DEF_TABLE:
+            _, def_inf, upk = UNIT_DEF_TABLE[uid]
+            DEF += count * smithy_stat(def_inf, upk, 0)
+            N_def += count
+    if state.wall_level > 0 and state.wall_tribe in WALL_BASES:
+        DEF *= WALL_BASES[state.wall_tribe] ** state.wall_level
+    traps = state.trap_capacity
+
+    def _evaluate(n: int):
+        trapped = min(n, traps)
+        fighters = n - trapped
+        if fighters <= 0:
+            return None
+        OFF = (fighters * club_atk + hero_strength) * (1 + hero_offense * 0.002)
+        if OFF <= DEF:
+            return None
+        total_units = fighters + N_def
+        K = 1.5 if total_units <= 1000 else max(1.2578, min(1.5, 2 * (1.8592 - total_units ** 0.015)))
+        x = (DEF / OFF) ** K
+        loss_ratio = x / (1 + x)
+        combat_dead = round(fighters * loss_ratio)
+        total_dead = combat_dead + trapped
+        surviving = n - total_dead
+        if surviving <= 0:
+            return None
+        loot = min(surviving * CLUB_CARRY, eff_R)
+        profit = loot - total_dead * CLUB_COST
+        return surviving, profit, total_dead, loot
+
+    # Binary search: find smallest n where all conditions met
+    lo, hi = 1, 5000
+    best_n = None
+    best_result = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        res = _evaluate(mid)
+        if res is not None:
+            surviving, profit, _, _ = res
+            if profit > 0 and surviving * CLUB_CARRY >= eff_R:
+                best_n = mid
+                best_result = res
+                hi = mid - 1
+            elif profit > 0:
+                # Profitable but not enough carry — need more
+                best_n = mid
+                best_result = res
+                lo = mid + 1
+            else:
+                lo = mid + 1
+        else:
+            lo = mid + 1
+
+    if best_n is None:
+        return None
+
+    surviving, profit, total_dead, loot = best_result
+    if profit <= 0:
+        return None
+
+    C_scout = T_SCOUT / (T_SCOUT + t_scout) if t_scout is not None else 0.5
+    C_confirm = 1.2 if (t_raid is not None and t_scout is not None and t_raid < t_scout) else 1.0
+    round_trip = 2 * dist / CLUB_SPEED
+    if round_trip <= 0:
+        return None
+    score = round((profit / round_trip) * C_scout * C_confirm, 2)
+    mode = "ATTACK" if traps > 0 else "RAID"
+    return RaidRecommendation(
+        n_send=best_n, unit_type="CLUB", send_label=f"{best_n} CLUB",
+        profit=profit, score=score, mode=mode,
+        round_trip_minutes=round(round_trip * 60), est_loot=round(eff_R),
+    )
+
+
+def calculate_score_v2(
+    state: TargetVillageState, my_x: int, my_y: int,
+    smithy_level: int = 0, hero_offense: int = 0, hero_strength: int = 0,
+) -> Optional[RaidRecommendation]:
+    """Score a target using optimised v2 paths (direct calc / binary search)."""
+    dist = state.distance
+    if dist == 0:
+        return None
+    if state.raidable_confidence in ("none", "depleted"):
+        return None
+    R = state.estimated_raidable
+    if R < 1:
+        return None
+
+    t_scout = hours_since(state.last_scout_time)
+    t_raid = hours_since(state.last_raid_time)
+    # Only apply regen decay when confidence is "scouted" (no post-scout raids).
+    # When "raided", R is already reduced by subtracted bounties — don't double-penalize.
+    if t_raid is None or state.raidable_confidence == "raided":
+        eff_R = float(R)
+    else:
+        eff_R = R * min(1.0, t_raid / T_REGEN)
+    if eff_R < 1:
+        return None
+
+    club_atk = smithy_stat(CLUB_ATK, CLUB_UPKEEP, smithy_level)
+
+    # Fast path: no defenders, no traps
+    N_def = sum(v for k, v in state.defenders.items() if k != "uhero" and k in UNIT_DEF_TABLE)
+    if N_def == 0 and state.trap_capacity == 0:
+        return _score_undefended(eff_R, dist, t_scout, t_raid, hero_strength, hero_offense)
+
+    # Defended: binary search
+    return _score_defended_binary(state, eff_R, dist, club_atk, hero_strength, hero_offense, t_scout, t_raid)
+
+
+# ---------------------------------------------------------------------------
+# Main service class (v2 pipeline)
+# ---------------------------------------------------------------------------
+
+CONCURRENCY_LIMIT = 20  # for legacy methods
+
 class RaidAnalyzerService:
-    """Orchestrates the full raid analysis pipeline."""
+    """Orchestrates the raid analysis pipeline (v2).
+
+    Pipeline: scout inbox → GQL pre-filter → village-reports fetch → reconstruct → score → re-scout queue.
+    """
 
     def __init__(
         self,
@@ -540,581 +698,485 @@ class RaidAnalyzerService:
         self.auth_state = auth_state
         self.reports_service = ReportsService(client)
         self._on_progress: Optional[Callable] = None
+        from .village_report_cache import VillageReportCache
+        self._cache = VillageReportCache()
 
     def on_progress(self, callback: Callable) -> None:
-        """Set progress callback: callback(phase, message, detail_dict)."""
         self._on_progress = callback
 
     def _progress(self, phase: str, message: str, **kwargs) -> None:
-        """Report progress to callback if set."""
         if self._on_progress:
             try:
                 self._on_progress(phase, message, kwargs)
             except Exception:
                 pass
 
+    # ==================================================================
+    # v2 Pipeline
+    # ==================================================================
+
     async def analyze(self, settings: AnalyzerSettings) -> AnalysisResult:
-        """Run the full analysis pipeline."""
+        """Run the v2 analysis pipeline.
+
+        Phases: scout inbox → GQL pre-filter → village-reports → reconstruct → score → re-scout.
+        """
         start = time.monotonic()
         warnings: List[str] = []
 
-        # ── Source village ──────────────────────────────────────────
+        # Configure cache TTL
+        self._cache._ttl = settings.cache_ttl_minutes * 60
+
         source = self._resolve_source_village(settings.village_id)
         my_x, my_y = source.x, source.y
 
         result = AnalysisResult(
             source_village_id=source.id,
             source_village_name=source.name,
-            source_x=my_x,
-            source_y=my_y,
+            source_x=my_x, source_y=my_y,
             min_resources=settings.min_resources,
             max_report_age_hours=settings.max_report_age_hours,
             radius=settings.radius,
-            excluded_alliances=settings.exclude_alliances,
+            excluded_alliances=settings.exclude_alliances + settings.nap_alliances,
             excluded_players=settings.exclude_players,
+            pipeline_version="v2",
         )
 
-        # ── Phase 1A: Fetch report list ────────────────────────────
-        self._progress("reports", "Fetching report list...", phase_num=1, total_phases=6)
+        # ── Phase 1A: Scout-gated entry ───────────────────────────
+        self._progress("scout_inbox", "Scanning report inbox for scouts...", phase_num=1, total_phases=6)
+        scout_coords, scout_gql = await self._phase_1a_scout_inbox(settings, result, warnings)
+        if not scout_coords:
+            result.warnings = warnings or ["No scout reports found in inbox within age limit. Run scouts first."]
+            result.analysis_duration_seconds = time.monotonic() - start
+            return result
+
+        # ── Phase 1B: GQL pre-filter ──────────────────────────────
+        self._progress("gql_filter", f"Pre-filtering {len(scout_coords)} coords...", phase_num=2, total_phases=6)
+        surviving_coords = await self._phase_1b_gql_prefilter(
+            scout_coords, scout_gql, source, settings, result, warnings,
+        )
+        if not surviving_coords:
+            result.warnings = warnings or ["All targets filtered out by radius/alliance/population."]
+            result.analysis_duration_seconds = time.monotonic() - start
+            return result
+
+        # ── Phase 1C: Fetch village-reports per target ────────────
+        self._progress("village_reports", f"Fetching reports for {len(surviving_coords)} targets...", phase_num=3, total_phases=6)
+        village_reports_map = await self._phase_1c_fetch_village_reports(
+            surviving_coords, settings, result, warnings,
+        )
+
+        # ── Phase 2+3: Group, normalise, reconstruct ─────────────
+        self._progress("reconstruct", "Reconstructing target states...", phase_num=4, total_phases=6)
+        all_states, re_scout_early = self._phase_23_reconstruct(
+            village_reports_map, source, result,
+        )
+
+        # ── Phase 4: Score ────────────────────────────────────────
+        self._progress("scoring", f"Scoring {len(all_states)} targets...", phase_num=5, total_phases=6)
+        scored, re_scout_from_score = self._phase_4_score(
+            all_states, source, settings, result, warnings,
+        )
+
+        # ── Phase 5: Filter & sort ────────────────────────────────
+        self._progress("filter_sort", "Filtering and ranking...", phase_num=6, total_phases=6)
+        final_targets = self._phase_5_filter_sort(scored, settings, result)
+
+        # ── Assemble result ───────────────────────────────────────
+        result.targets = final_targets
+        result.re_scout_targets = re_scout_early + re_scout_from_score
+        result.warnings = warnings
+        result.analysis_duration_seconds = time.monotonic() - start
+
+        self._progress("complete", f"Done: {len(final_targets)} targets, {len(result.re_scout_targets)} need re-scout")
+        return result
+
+    # ==================================================================
+    # Phase methods
+    # ==================================================================
+
+    async def _phase_1a_scout_inbox(
+        self, settings: AnalyzerSettings, result: AnalysisResult, warnings: List[str],
+    ) -> Tuple[List[Tuple[int, int]], Dict[str, Dict[str, Any]]]:
+        """Fetch scout reports from inbox, deduplicate to unique (x,y) coords.
+
+        Returns (unique_coords, gql_metadata_dict).
+        """
+        from ..models.raid_analyzer import ReScoutTarget
+
         reports_list, pages_fetched, pages_failed, failed_pages = (
             await self.reports_service.fetch_reports_robust(
                 max_age_hours=settings.max_report_age_hours,
                 max_pages=settings.max_pages,
             )
         )
-        self._progress("reports", f"Found {len(reports_list)} reports across {pages_fetched} pages", reports_found=len(reports_list), pages=pages_fetched)
+        result.total_reports_listed = len(reports_list)
         result.pages_fetched = pages_fetched
         result.pages_failed = pages_failed
-        result.total_reports_listed = len(reports_list)
-
         if pages_failed:
+            warnings.append(f"{pages_failed} report pages failed to load")
+
+        # Prefer scout reports; fall back to battle reports if no scouts
+        scout_reports = [r for r in reports_list if r.report_type == "scout"]
+        battle_reports = [r for r in reports_list if r.report_type == "battle"]
+        self._progress("scout_inbox", f"Found {len(scout_reports)} scouts, {len(battle_reports)} battles out of {len(reports_list)} total")
+
+        if scout_reports:
+            entry_reports = scout_reports
+        elif battle_reports:
+            # No scouts — use raids as entry points (less data but still has coords + bounty)
+            entry_reports = battle_reports
             warnings.append(
-                f"{pages_failed} report pages failed to load "
-                f"(pages {', '.join(str(p) for p in failed_pages)})"
+                f"No scout reports found. Using {len(battle_reports)} battle reports as entry points. "
+                "Scout targets for better resource estimates."
             )
+        else:
+            return [], {}
 
-        # ── Phase 1B: Alliance reports (optional) ──────────────────
-        if settings.include_alliance_reports:
-            ally_reports, ally_ok = await self.reports_service.fetch_alliance_reports(
-                max_age_hours=settings.max_report_age_hours,
-                max_pages=settings.max_pages,
-            )
-            if ally_ok:
-                # Deduplicate: alliance reports may overlap with personal
-                existing_ids = {r.report_id for r in reports_list}
-                new_ally = [r for r in ally_reports if r.report_id not in existing_ids]
-                reports_list.extend(new_ally)
-                logger.info(
-                    f"Alliance reports: {len(ally_reports)} fetched, "
-                    f"{len(new_ally)} new (after dedup)"
-                )
-            else:
-                warnings.append(
-                    "Alliance reports unavailable — route not discovered. "
-                    "Only personal reports used."
-                )
-
-        # ── Filter by age and type ─────────────────────────────────
-        now = datetime.now()
-        max_age = timedelta(hours=settings.max_report_age_hours)
-        filtered_list: List[ReportListItem] = []
-        skipped_type = 0
-
-        for r in reports_list:
-            if r.report_type not in ("battle", "scout"):
-                skipped_type += 1
-                continue
-            report_dt = parse_report_date(r.date_str)
-            if report_dt and (now - report_dt) > max_age:
-                continue
-            filtered_list.append(r)
-
-        result.reports_skipped_type = skipped_type
-
-        if not filtered_list:
-            result.warnings = warnings + ["No battle/scout reports found within age limit."]
-            result.analysis_duration_seconds = time.monotonic() - start
-            return result
-
-        # ── Phase 1C: GQL metadata pre-filter ─────────────────────
-        # Fetch GQL metadata for ALL reports BEFORE HTML details.
-        # This gives us coordinates, timestamps, and title-based classification
-        # so we can filter to only in-range targets before the expensive HTML step.
-        self._progress("metadata", f"Fetching metadata for {len(filtered_list)} reports...", phase_num=2, total_phases=6, total=len(filtered_list))
-        all_report_ids = [r.report_id for r in filtered_list]
+        # Batch GQL metadata for coords + dedup
+        scout_ids = [r.report_id for r in entry_reports]
         BATCH = 250
-        all_gql_meta: Dict[str, Dict[str, Any]] = {}
-        for i in range(0, len(all_report_ids), BATCH):
-            batch = all_report_ids[i:i + BATCH]
+        all_gql: Dict[str, Dict[str, Any]] = {}
+        for i in range(0, len(scout_ids), BATCH):
+            batch = scout_ids[i:i + BATCH]
             meta = await self.reports_service.fetch_report_batch_metadata(batch)
-            all_gql_meta.update(meta)
-            self._progress("metadata", f"Metadata: {min(i + BATCH, len(all_report_ids))}/{len(all_report_ids)}", done=min(i + BATCH, len(all_report_ids)), total=len(all_report_ids))
+            all_gql.update(meta)
 
-        logger.info(f"GQL metadata: {len(all_gql_meta)}/{len(all_report_ids)} reports")
+        coords_set: set[Tuple[int, int]] = set()
+        for rid, meta in all_gql.items():
+            defender = (meta.get("defender") or {})
+            village = (defender.get("village") or {})
+            x, y = village.get("x"), village.get("y")
+            if x is not None and y is not None:
+                coords_set.add((int(x), int(y)))
 
-        # Pre-filter: only keep reports whose target is within radius (or unknown)
-        source = self._resolve_source_village(settings.village_id)
-        pre_filtered_ids: List[str] = []
-        for rid in all_report_ids:
-            meta = all_gql_meta.get(rid)
-            if not meta:
-                # No GQL data — keep it (might be valid, will be filtered later)
-                pre_filtered_ids.append(rid)
-                continue
-            defender = meta.get("defender") or {}
-            village = defender.get("village") or {}
-            vx = village.get("x")
-            vy = village.get("y")
-            if vx is None or vy is None:
-                # No coords in GQL (e.g. oasis) — keep
-                pre_filtered_ids.append(rid)
-                continue
-            d = travian_distance(source.x, source.y, vx, vy)
-            if settings.radius and d > settings.radius:
-                continue  # Out of range — skip HTML fetch entirely
-            pre_filtered_ids.append(rid)
+        result.unique_coords_discovered = len(coords_set)
+        self._progress("scout_inbox", f"Deduped to {len(coords_set)} unique target coords")
+        return list(coords_set), all_gql
 
-        skipped_by_prefilter = len(all_report_ids) - len(pre_filtered_ids)
-        if skipped_by_prefilter:
-            logger.info(
-                f"GQL pre-filter: {skipped_by_prefilter} reports skipped "
-                f"(target out of radius {settings.radius}), "
-                f"{len(pre_filtered_ids)} remaining for HTML fetch"
-            )
+    async def _phase_1b_gql_prefilter(
+        self,
+        coords: List[Tuple[int, int]],
+        scout_gql: Dict[str, Dict[str, Any]],
+        source,
+        settings: AnalyzerSettings,
+        result: AnalysisResult,
+        warnings: List[str],
+    ) -> List[Tuple[int, int]]:
+        """Filter coords by radius, alliance, NAP, population threshold."""
+        all_exclude_alliances = set(settings.exclude_alliances + settings.nap_alliances)
 
-        # ── Phase 1D: Fetch HTML details (only in-range) ──────────
-        self._progress("details", f"Fetching {len(pre_filtered_ids)} report details...", phase_num=3, total_phases=6, total=len(pre_filtered_ids))
-        parsed_reports, fetch_ok, fetch_fail, fail_ids = await self._fetch_all_details(
-            pre_filtered_ids,
-        )
-        result.reports_fetched_ok = fetch_ok
-        result.reports_fetched_fail = fetch_fail
-        result.failed_report_ids = fail_ids
+        # Build a coord→village_id map from GQL data
+        coord_to_vid: Dict[Tuple[int, int], int] = {}
+        for meta in scout_gql.values():
+            defender = (meta.get("defender") or {})
+            village = (defender.get("village") or {})
+            x, y = village.get("x"), village.get("y")
+            vid = village.get("id")
+            if x is not None and y is not None and vid:
+                coord_to_vid[(int(x), int(y))] = int(vid)
 
-        if fetch_fail:
-            warnings.append(
-                f"{fetch_fail} individual reports failed to parse: "
-                f"{', '.join(fail_ids[:20])}{'...' if len(fail_ids) > 20 else ''}"
-            )
+        # Batch-query village metadata for alliance + population
+        vid_meta: Dict[int, Dict[str, Any]] = {}
+        unique_vids = list(set(coord_to_vid.values()))
+        if unique_vids:
+            BATCH = 250
+            for i in range(0, len(unique_vids), BATCH):
+                batch = unique_vids[i:i + BATCH]
+                aliases = [
+                    f'v{j}:village(id:{vid}){{player{{name population alliance{{tag}}}} population}}'
+                    for j, vid in enumerate(batch)
+                ]
+                query = "{" + " ".join(aliases) + "}"
+                try:
+                    resp = await self.client.post_json("/api/v1/graphql", {"query": query, "variables": {}})
+                    data = resp.get("data", {})
+                    for j, vid in enumerate(batch):
+                        vdata = data.get(f"v{j}")
+                        if vdata:
+                            vid_meta[vid] = vdata
+                except Exception as e:
+                    logger.warning("GQL village batch failed: %s", e)
+                    warnings.append(f"GQL village metadata batch failed: {e}")
 
-        # Attach timestamps from list items and GQL
-        list_lookup = {r.report_id: r for r in filtered_list}
-        for pr in parsed_reports:
-            rid = pr.get("report_id", "")
-            li = list_lookup.get(rid)
-            if li:
-                pr["timestamp"] = parse_report_date(li.date_str) or now
+        surviving: List[Tuple[int, int]] = []
+        for (x, y) in coords:
+            dist = travian_distance(source.x, source.y, x, y)
 
-        # ── Phase 1E: Enrich with GQL metadata (coords + classification) ──
-        # Re-use the GQL metadata we already fetched — inject into parsed reports
-        await self._enrich_reports_with_graphql(parsed_reports, prefetched_meta=all_gql_meta)
-
-        # Re-fetch and re-parse reports reclassified from battle→scout by GQL title.
-        # These need parse_scout_report() to extract resources/cranny/carry properly.
-        reclassified_ids = [
-            pr["report_id"] for pr in parsed_reports
-            if pr.get("type") == "scout" and pr.get("_original_type") == "battle"
-        ]
-        if reclassified_ids:
-            from ..parsers.report_parser import parse_scout_report
-            logger.info(
-                f"Re-parsing {len(reclassified_ids)} reports as scout "
-                f"(GQL title says scout, HTML parser said battle)"
-            )
-            sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
-            async def refetch_as_scout(rid: str):
-                async with sem:
-                    try:
-                        html = await self.client.get_html(f"/report?id={rid}")
-                        return rid, parse_scout_report(html)
-                    except Exception as e:
-                        logger.error(f"Re-parse scout {rid} failed: {e}")
-                        return rid, None
-
-            refetch_results = await asyncio.gather(
-                *[refetch_as_scout(rid) for rid in reclassified_ids]
-            )
-            re_map = {rid: data for rid, data in refetch_results if data is not None}
-
-            for pr in parsed_reports:
-                rid = pr.get("report_id", "")
-                if rid in re_map:
-                    pr["data"] = re_map[rid]
-                    pr["type"] = "scout"
-
-        # ── Validate parsed reports ────────────────────────────────
-        parse_warnings = self._validate_parsed_reports(parsed_reports)
-        if parse_warnings:
-            warnings.extend(parse_warnings[:30])
-            if len(parse_warnings) > 30:
-                warnings.append(f"... and {len(parse_warnings) - 30} more parse warnings")
-
-        # ── Phase 3: Group by target & reconstruct state ───────────
-        self._progress("grouping", f"Grouping {len(parsed_reports)} reports by target...", phase_num=4, total_phases=6)
-        targets_map: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
-
-        for pr in parsed_reports:
-            rtype = pr.get("type")
-            data = pr.get("data")
-            if data is None:
-                continue
-            d = data if isinstance(data, dict) else data.model_dump()
-
-            x, y = 0, 0
-
-            # First try HTML-embedded coordinates
-            if rtype == "scout":
-                target = d.get("target", {})
-                coords = target.get("coordinates", {})
-                x = coords.get("x", 0)
-                y = coords.get("y", 0)
-            elif rtype == "battle":
-                defender = d.get("defender", {})
-                coords = defender.get("coordinates", {})
-                x = coords.get("x", 0)
-                y = coords.get("y", 0)
-            else:
-                continue
-
-            # Fallback: use GQL coordinates stored during enrichment
-            if x == 0 and y == 0:
-                x = pr.get("_gql_x", 0)
-                y = pr.get("_gql_y", 0)
-
-            if x == 0 and y == 0:
-                continue
-
-            targets_map[(x, y)].append(pr)
-
-        # Sort each group chronologically
-        for key in targets_map:
-            targets_map[key].sort(key=lambda r: r.get("timestamp", now))
-
-        # Reconstruct states
-        all_states: List[TargetVillageState] = []
-        for coord_key, reports in targets_map.items():
-            state = reconstruct_state(
-                coord_key, reports, self.auth_state.player_name,
-            )
-            state.distance = travian_distance(my_x, my_y, state.x, state.y)
-            all_states.append(state)
-
-        # ── Phase 5: Enrich with alliance/population via GraphQL ──
-        self._progress("enriching", f"Enriching {len(all_states)} targets with alliance/population...", phase_num=5, total_phases=6, total=len(all_states))
-        await self._enrich_targets(all_states)
-
-        # ── Phase 6: Score, filter, sort ──────────────────────────
-        self._progress("scoring", f"Scoring {len(all_states)} targets...", phase_num=6, total_phases=6)
-        scored: List[Tuple[TargetVillageState, RaidRecommendation]] = []
-
-        for state in all_states:
-            if state.alliance_tag and state.alliance_tag in settings.exclude_alliances:
-                result.skipped_alliance += 1
-                continue
-            if state.player_name in settings.exclude_players:
-                result.skipped_player += 1
-                continue
-            if settings.radius and state.distance > settings.radius:
+            # Radius filter
+            if settings.radius and dist > settings.radius:
                 result.skipped_out_of_range += 1
                 continue
 
-            rec = calculate_score(
-                state, my_x, my_y,
-                settings.smithy_level,
-                settings.hero_offense,
-                settings.hero_strength,
+            vid = coord_to_vid.get((x, y))
+            meta = vid_meta.get(vid, {}) if vid else {}
+            player = meta.get("player") or {}
+            alliance = player.get("alliance") or {}
+            alliance_tag = alliance.get("tag", "")
+            village_pop = meta.get("population", 0)
+
+            # Alliance filter (own + NAP)
+            if alliance_tag and alliance_tag in all_exclude_alliances:
+                result.skipped_alliance += 1
+                continue
+
+            # Population threshold
+            if settings.max_population is not None and village_pop > settings.max_population:
+                continue
+
+            # Player name exclusion
+            player_name = player.get("name", "")
+            if player_name and player_name in settings.exclude_players:
+                result.skipped_player += 1
+                continue
+
+            surviving.append((x, y))
+
+        result.coords_after_gql_filter = len(surviving)
+        self._progress("gql_filter", f"{len(surviving)} coords survive pre-filter (dropped {len(coords) - len(surviving)})")
+        return surviving
+
+    async def _phase_1c_fetch_village_reports(
+        self,
+        coords: List[Tuple[int, int]],
+        settings: AnalyzerSettings,
+        result: AnalysisResult,
+        warnings: List[str],
+    ) -> Dict[Tuple[int, int], Dict[str, Any]]:
+        """Parallel fetch_village_reports with caching and short-circuit."""
+        sem = asyncio.Semaphore(settings.village_report_concurrency)
+        village_reports_map: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        cache_hits = 0
+        fetched = 0
+        failed = 0
+        total = len(coords)
+
+        async def fetch_one(x: int, y: int, idx: int):
+            nonlocal cache_hits, fetched, failed
+            # Check cache
+            cached = self._cache.get(x, y)
+            if cached is not None:
+                cache_hits += 1
+                return (x, y), cached
+
+            async with sem:
+                try:
+                    data = await self.reports_service.fetch_village_reports(
+                        x, y, fetch_details=True, max_detail_count=5,
+                    )
+                    self._cache.put(x, y, data)
+                    fetched += 1
+                    self._progress(
+                        "village_reports",
+                        f"Fetched ({x},{y}) — {fetched + cache_hits}/{total}",
+                        done=fetched + cache_hits, total=total,
+                    )
+                    return (x, y), data
+                except Exception as e:
+                    failed += 1
+                    logger.warning("Village reports fetch failed for (%s,%s): %s", x, y, e)
+                    return (x, y), None
+
+        tasks = [fetch_one(x, y, i) for i, (x, y) in enumerate(coords)]
+        results = await asyncio.gather(*tasks)
+
+        for (x, y), data in results:
+            if data is not None:
+                village_reports_map[(x, y)] = data
+
+        result.village_reports_fetched = fetched
+        result.village_reports_cached = cache_hits
+        result.village_reports_failed = failed
+        if failed > 0:
+            warnings.append(f"{failed} village report fetches failed")
+        if failed > total // 2:
+            warnings.append("More than half of fetches failed — check connection or try again")
+
+        self._progress("village_reports", f"Done: {fetched} fetched, {cache_hits} cached, {failed} failed")
+        return village_reports_map
+
+    def _phase_23_reconstruct(
+        self,
+        village_reports_map: Dict[Tuple[int, int], Dict[str, Any]],
+        source,
+        result: AnalysisResult,
+    ) -> Tuple[List[TargetVillageState], List]:
+        """Normalise village-reports data, reconstruct state, short-circuit depleted."""
+        from ..models.raid_analyzer import ReScoutTarget
+        from ..parsers.report_parser import parse_individual_report
+
+        all_states: List[TargetVillageState] = []
+        re_scout_early: list = []
+
+        for (x, y), vr_data in village_reports_map.items():
+            reports_raw = vr_data.get("reports", [])
+            village_meta = vr_data.get("village", {})
+
+            # Short-circuit: if most recent report is a non-full carry raid → depleted
+            if reports_raw:
+                top = reports_raw[0]
+                top_carry_cur = top.get("carry_current", 0)
+                top_carry_max = top.get("carry_max", 0)
+                top_icon = top.get("icon_type", 0)
+                # icon 1-3 = battle/raid results; carry_max > 0 means raid with carry data
+                if top_icon in (1, 2) and top_carry_max > 0 and top_carry_cur < top_carry_max:
+                    # Carry was not full → village was emptied
+                    re_scout_early.append(ReScoutTarget(
+                        x=x, y=y,
+                        village_name=village_meta.get("name", ""),
+                        player_name=village_meta.get("owner", ""),
+                        reason="depleted",
+                        distance=travian_distance(source.x, source.y, x, y),
+                    ))
+                    continue
+
+            # Normalise reports into reconstruct_state format
+            normalized: List[Dict[str, Any]] = []
+            for entry in reports_raw:
+                detail = entry.get("detail")
+                if detail is None:
+                    continue
+                timestamp = parse_report_date(entry.get("date_str", ""))
+                normalized.append({
+                    "type": detail.get("type"),
+                    "data": detail.get("data"),
+                    "report_id": entry.get("report_id", ""),
+                    "timestamp": timestamp,
+                    # Pass village meta as fallback for identity
+                    "_gql_vname": village_meta.get("name", ""),
+                    "_gql_pname": village_meta.get("owner", ""),
+                })
+
+            if not normalized:
+                # No parseable reports — need re-scout
+                re_scout_early.append(ReScoutTarget(
+                    x=x, y=y,
+                    village_name=village_meta.get("name", ""),
+                    player_name=village_meta.get("owner", ""),
+                    reason="no_scout_data",
+                    distance=travian_distance(source.x, source.y, x, y),
+                ))
+                continue
+
+            state = reconstruct_state((x, y), normalized, self.auth_state.player_name)
+            state.distance = travian_distance(source.x, source.y, x, y)
+
+            # Populate from village meta if missing
+            state.village_name = state.village_name or village_meta.get("name", "")
+            state.player_name = state.player_name or village_meta.get("owner", "")
+            state.village_population = village_meta.get("population", 0)
+            state.alliance_tag = state.alliance_tag or village_meta.get("alliance", "")
+
+            all_states.append(state)
+
+        result.reports_fetched_ok = sum(
+            len([r for r in vr.get("reports", []) if r.get("detail")])
+            for vr in village_reports_map.values()
+        )
+        return all_states, re_scout_early
+
+    def _phase_4_score(
+        self,
+        all_states: List[TargetVillageState],
+        source,
+        settings: AnalyzerSettings,
+        result: AnalysisResult,
+        warnings: List[str],
+    ) -> Tuple[List[Tuple[TargetVillageState, RaidRecommendation]], list]:
+        """Score targets. Separate depleted/stale into re-scout list."""
+        from ..models.raid_analyzer import ReScoutTarget
+
+        scored: List[Tuple[TargetVillageState, RaidRecommendation]] = []
+        re_scout: list = []
+
+        for state in all_states:
+            # Depleted → re-scout
+            if state.raidable_confidence == "depleted":
+                re_scout.append(ReScoutTarget(
+                    x=state.x, y=state.y,
+                    village_name=state.village_name,
+                    player_name=state.player_name,
+                    reason="depleted",
+                    last_report_time=state.last_report_time,
+                    estimated_raidable_before=state.estimated_raidable,
+                    distance=state.distance,
+                ))
+                continue
+
+            # Stale → re-scout
+            scout_age = hours_since(state.last_scout_time)
+            if scout_age is not None and scout_age > settings.stale_hours:
+                re_scout.append(ReScoutTarget(
+                    x=state.x, y=state.y,
+                    village_name=state.village_name,
+                    player_name=state.player_name,
+                    reason="stale",
+                    last_report_time=state.last_scout_time,
+                    estimated_raidable_before=state.estimated_raidable,
+                    distance=state.distance,
+                ))
+                # Still score it (stale data is better than none) but flag it
+                pass
+
+            rec = calculate_score_v2(
+                state, source.x, source.y,
+                settings.smithy_level, settings.hero_offense, settings.hero_strength,
             )
             if rec is None:
-                result.skipped_needs_scout += 1
-                continue
-            if rec.est_loot < settings.min_resources:
-                result.skipped_low_resources += 1
+                if state.raidable_confidence == "none":
+                    result.skipped_needs_scout += 1
+                else:
+                    result.skipped_low_resources += 1
                 continue
 
             scored.append((state, rec))
             self._progress(
-                "target_found", f"Target: {state.village_name or f'({state.x},{state.y})'} score={rec.score:.1f}",
-                target={
-                    "state": state.model_dump(mode="json"),
-                    "recommendation": rec.model_dump(mode="json"),
-                },
+                "target_scored",
+                f"({state.x},{state.y}) {state.village_name}: score={rec.score:.1f}",
                 targets_found=len(scored),
             )
 
-        scored.sort(key=lambda x: x[1].score, reverse=True)
+        return scored, re_scout
 
-        result.targets = scored
-        result.warnings = warnings
-        result.analysis_duration_seconds = time.monotonic() - start
+    def _phase_5_filter_sort(
+        self,
+        scored: List[Tuple[TargetVillageState, RaidRecommendation]],
+        settings: AnalyzerSettings,
+        result: AnalysisResult,
+    ) -> List[Tuple[TargetVillageState, RaidRecommendation]]:
+        """Apply secondary filters and sort by score."""
+        filtered: List[Tuple[TargetVillageState, RaidRecommendation]] = []
+        all_exclude = set(settings.exclude_alliances + settings.nap_alliances)
 
-        if parsed_reports:
-            last = max(parsed_reports, key=lambda r: r.get("timestamp", datetime.min))
-            result.last_report_id = last.get("report_id", "")
-            result.last_report_time = last.get("timestamp")
+        for state, rec in scored:
+            if state.alliance_tag and state.alliance_tag in all_exclude:
+                result.skipped_alliance += 1
+                continue
+            if state.player_name and state.player_name in settings.exclude_players:
+                result.skipped_player += 1
+                continue
+            if rec.est_loot < settings.min_resources:
+                result.skipped_low_resources += 1
+                continue
+            filtered.append((state, rec))
 
-        return result
+        filtered.sort(key=lambda x: x[1].score, reverse=True)
+        return filtered
 
-    # ------------------------------------------------------------------
+    # ==================================================================
     # Internal helpers
-    # ------------------------------------------------------------------
+    # ==================================================================
 
     def _resolve_source_village(self, village_id: Optional[int]):
         """Find the source village from auth state."""
         villages = self.auth_state.villages
         if not villages:
-            # Fallback: synthetic village at 0,0
-            from ..models.auth import Village
-            return Village(id=self.auth_state.village_id, name="Unknown", x=0, y=0)
-
+            raise ValueError(
+                "No villages found in auth state. Cannot compute distances. "
+                "Check your login or reconnect to the Travian server."
+            )
         if village_id:
             match = next((v for v in villages if v.id == village_id), None)
             if match:
                 return match
-
-        # Default: main village or first village
         main = next((v for v in villages if v.is_main_village), None)
         return main or villages[0]
-
-    async def _fetch_all_details(
-        self,
-        report_ids: List[str],
-    ) -> Tuple[List[Dict[str, Any]], int, int, List[str]]:
-        """Fetch all report details in parallel with concurrency limit."""
-        sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
-        fetched_ok = 0
-        fetched_fail = 0
-        failed_ids: List[str] = []
-        results: List[Dict[str, Any]] = []
-        _done_count = 0
-        _total = len(report_ids)
-
-        async def fetch_one(rid: str) -> Optional[Dict[str, Any]]:
-            nonlocal _done_count
-            async with sem:
-                try:
-                    detail = await self.reports_service.fetch_report_detail(rid)
-                    return detail
-                except Exception as e:
-                    logger.error(f"Failed to fetch report {rid}: {e}")
-                    return None
-                finally:
-                    _done_count += 1
-                    if _done_count % 5 == 0 or _done_count == _total:
-                        self._progress("details", f"Fetching report details: {_done_count}/{_total}", done=_done_count, total=_total)
-
-        tasks = [fetch_one(rid) for rid in report_ids]
-        raw_results = await asyncio.gather(*tasks)
-
-        for rid, detail in zip(report_ids, raw_results):
-            if detail is None:
-                fetched_fail += 1
-                failed_ids.append(rid)
-            else:
-                fetched_ok += 1
-                results.append(detail)
-
-        return results, fetched_ok, fetched_fail, failed_ids
-
-    async def _enrich_reports_with_graphql(
-        self,
-        parsed_reports: List[Dict[str, Any]],
-        prefetched_meta: Optional[Dict[str, Dict[str, Any]]] = None,
-    ) -> None:
-        """Supplement parsed report data with GraphQL metadata.
-
-        Battle report HTML often lacks defender coordinates — the GraphQL
-        endpoint provides them along with village ID, name, and player name.
-
-        If prefetched_meta is provided, skips the GQL fetch and uses it directly.
-        """
-        if prefetched_meta is not None:
-            all_meta = prefetched_meta
-        else:
-            report_ids = [pr.get("report_id", "") for pr in parsed_reports if pr.get("report_id")]
-            if not report_ids:
-                return
-            BATCH = 250
-            all_meta = {}
-            for i in range(0, len(report_ids), BATCH):
-                batch = report_ids[i:i + BATCH]
-                meta = await self.reports_service.fetch_report_batch_metadata(batch)
-                all_meta.update(meta)
-
-        # Merge metadata into parsed reports
-        for pr in parsed_reports:
-            rid = pr.get("report_id", "")
-            meta = all_meta.get(rid)
-            if not meta:
-                continue
-
-            data = pr.get("data")
-            if data is None:
-                continue
-
-            rtype = pr.get("type")
-            d = data if isinstance(data, dict) else data.model_dump()
-
-            defender_meta = meta.get("defender") or {}
-            village_meta = defender_meta.get("village") or {}
-
-            gql_x = village_meta.get("x", 0)
-            gql_y = village_meta.get("y", 0)
-            gql_vid = village_meta.get("id", 0)
-            gql_vname = village_meta.get("name", "")
-            gql_pname = defender_meta.get("playerName", "")
-
-            # Store GQL coords as fallback for grouping (HTML often lacks them)
-            if gql_x or gql_y:
-                pr["_gql_x"] = gql_x
-                pr["_gql_y"] = gql_y
-            if gql_vid:
-                pr["_gql_vid"] = gql_vid
-            if gql_vname:
-                pr["_gql_vname"] = gql_vname
-            if gql_pname:
-                pr["_gql_pname"] = gql_pname
-
-            # Use GraphQL timestamp if available (more reliable)
-            gql_time = meta.get("time")
-            if gql_time and isinstance(gql_time, (int, float)):
-                pr["timestamp"] = datetime.fromtimestamp(gql_time)
-
-            # Classify report type from GQL title (more reliable than HTML parsing)
-            gql_title = meta.get("title", "")
-            old_type = pr.get("type")
-            if " scouts " in gql_title:
-                if old_type != "scout":
-                    pr["_original_type"] = old_type
-                pr["type"] = "scout"
-                rtype = "scout"
-            elif " raids " in gql_title or " attacks " in gql_title:
-                if old_type != "battle":
-                    pr["_original_type"] = old_type
-                pr["type"] = "battle"
-                rtype = "battle"
-
-            if rtype == "battle":
-                defender = d.get("defender", {})
-                coords = defender.get("coordinates", {})
-                # Fill in missing coordinates from GraphQL
-                if (not coords.get("x") and not coords.get("y")) and (gql_x or gql_y):
-                    coords["x"] = gql_x
-                    coords["y"] = gql_y
-                    defender["coordinates"] = coords
-                if not defender.get("village_id") and gql_vid:
-                    defender["village_id"] = gql_vid
-                if not defender.get("village_name") and gql_vname:
-                    defender["village_name"] = gql_vname
-                if not defender.get("player_name") and gql_pname:
-                    defender["player_name"] = gql_pname
-                d["defender"] = defender
-                # Write back mutated dict (for Pydantic models, replace data)
-                if not isinstance(data, dict):
-                    pr["data"] = d
-            elif rtype == "scout":
-                target = d.get("target", {})
-                coords = target.get("coordinates", {})
-                if (not coords.get("x") and not coords.get("y")) and (gql_x or gql_y):
-                    coords["x"] = gql_x
-                    coords["y"] = gql_y
-                    target["coordinates"] = coords
-                if not target.get("village_id") and gql_vid:
-                    target["village_id"] = gql_vid
-                if not target.get("village_name") and gql_vname:
-                    target["village_name"] = gql_vname
-                if not target.get("player_name") and gql_pname:
-                    target["player_name"] = gql_pname
-                d["target"] = target
-                if not isinstance(data, dict):
-                    pr["data"] = d
-
-    async def _enrich_targets(self, states: List[TargetVillageState]) -> None:
-        """Enrich targets with alliance/population data via GraphQL batch."""
-        village_ids = [s.village_id for s in states if s.village_id > 0]
-        if not village_ids:
-            return
-
-        # Batch query villages for player info
-        BATCH_SIZE = 250
-        vid_to_state: Dict[int, List[TargetVillageState]] = defaultdict(list)
-        for s in states:
-            if s.village_id > 0:
-                vid_to_state[s.village_id].append(s)
-
-        unique_vids = list(set(village_ids))
-
-        for i in range(0, len(unique_vids), BATCH_SIZE):
-            batch = unique_vids[i:i + BATCH_SIZE]
-            aliases = []
-            for j, vid in enumerate(batch):
-                aliases.append(
-                    f'v{j}:village(id:{vid})'
-                    f'{{player{{name population alliance{{tag}}}} population}}'
-                )
-            query = "{" + " ".join(aliases) + "}"
-
-            try:
-                response = await self.client.post_json(
-                    "/api/v1/graphql", {"query": query, "variables": {}},
-                )
-                data = response.get("data", {})
-
-                for j, vid in enumerate(batch):
-                    alias = f"v{j}"
-                    vdata = data.get(alias)
-                    if not vdata:
-                        continue
-                    player = vdata.get("player") or {}
-                    alliance = player.get("alliance") or {}
-
-                    for s in vid_to_state.get(vid, []):
-                        s.alliance_tag = alliance.get("tag", "")
-                        s.player_name = player.get("name") or s.player_name
-                        s.player_population = player.get("population", 0)
-                        s.village_population = vdata.get("population", 0)
-
-            except Exception as e:
-                logger.warning(f"Failed to enrich village batch: {e}")
-
-    def _validate_parsed_reports(
-        self, parsed_reports: List[Dict[str, Any]],
-    ) -> List[str]:
-        """Validate parsed reports and return warnings."""
-        warnings: List[str] = []
-
-        for pr in parsed_reports:
-            rid = pr.get("report_id", "?")
-            rtype = pr.get("type", "unknown")
-            data = pr.get("data")
-
-            if rtype == "unknown":
-                warnings.append(f"Report {rid}: type=unknown, could not classify")
-                continue
-
-            if data is None:
-                continue
-
-            d = data if isinstance(data, dict) else data.model_dump()
-
-            if rtype == "scout":
-                target = d.get("target", {})
-                coords = target.get("coordinates", {})
-                if not coords.get("x") and not coords.get("y"):
-                    warnings.append(f"Report {rid}: scout with no coordinates")
-                steal = d.get("stealable_resources", {})
-                res = d.get("resources", {})
-                total_res = sum(res.get(k, 0) for k in ("lumber", "clay", "iron", "crop"))
-                if steal.get("raidable", 0) == 0 and total_res > 10:
-                    warnings.append(
-                        f"Report {rid}: scout has resources but raidable=0 (parsing issue?)"
-                    )
-
-            elif rtype == "battle":
-                defender = d.get("defender", {})
-                coords = defender.get("coordinates", {})
-                if not coords.get("x") and not coords.get("y"):
-                    warnings.append(f"Report {rid}: battle with no defender coordinates")
-                if d.get("battle_result") == "unknown":
-                    warnings.append(f"Report {rid}: battle result could not be determined")
-
-        return warnings

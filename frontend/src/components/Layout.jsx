@@ -4,7 +4,7 @@ import useAuthStore from '../stores/authStore'
 import useGameStore from '../stores/gameStore'
 import useLogStore from '../stores/logStore'
 import { connectLogStream, disconnectLogStream } from '../logStream'
-import ToastContainer from './Toast'
+// ToastContainer is mounted in App.jsx (global, works for all routes)
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: '⌂' },
@@ -58,10 +58,10 @@ export default function Layout() {
 
   // Redirect to /connect only AFTER status check completes and confirms not connected
   useEffect(() => {
-    if (statusChecked && !connected) {
+    if (statusChecked && !connected && location.pathname !== '/connect') {
       navigate('/connect', { replace: true })
     }
-  }, [statusChecked, connected, navigate])
+  }, [statusChecked, connected, navigate, location.pathname])
 
   // Add 60s health poll when connected
   useEffect(() => {
@@ -96,8 +96,6 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen bg-base">
-      <ToastContainer />
-
       {/* Top Bar */}
       <header className="top-bar">
         <div className="flex items-center gap-3">

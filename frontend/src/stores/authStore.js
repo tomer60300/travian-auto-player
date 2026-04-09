@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import api from '../api';
+import useGameStore from './gameStore';
+import useLogStore from './logStore';
 
 const useAuthStore = create((set, get) => ({
   token: localStorage.getItem('token'),
@@ -55,23 +57,12 @@ const useAuthStore = create((set, get) => ({
     localStorage.removeItem('token');
     set({ token: null, user: null, isAuthenticated: false, initialCheckDone: true });
     // Clean up other stores to prevent data leaking to next user
-    try {
-      require('./gameStore').default.setState({
-        connected: false,
-        serverUrl: null,
-        playerName: null,
-        tribeId: null,
-        villages: [],
-        activeVillageId: null,
-        resources: null,
-        buildings: [],
-        constructionQueue: [],
-        statusChecked: false,
-      })
-    } catch {}
-    try {
-      require('./logStore').default.getState().clear()
-    } catch {}
+    useGameStore.setState({
+      connected: false, serverUrl: null, playerName: null, tribeId: null,
+      villages: [], activeVillageId: null, resources: null,
+      buildings: [], constructionQueue: [], statusChecked: false,
+    });
+    useLogStore.getState().clear();
   },
 }));
 

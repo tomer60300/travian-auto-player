@@ -127,8 +127,11 @@ async def queue_run_ws(websocket: WebSocket):
         })
 
         # ── Wire up the on_status callback ────────────────────────────
+        # Save/restore with a per-websocket callback rather than clobbering
+        # the global one — safe if another WS or REST call uses the same service.
         service = session.build_queue_service
         prev_callback = service._on_status
+        _ws_id = id(websocket)  # unique per connection
 
         # Use a thread-safe queue so the sync callback never blocks and
         # messages are drained in order by an async task.
@@ -186,8 +189,9 @@ async def queue_run_ws(websocket: WebSocket):
             )
 
             # Wait for either execution to finish or stop signal
+            stop_task = asyncio.create_task(stop_event.wait())
             done, pending = await asyncio.wait(
-                {exec_task, asyncio.create_task(stop_event.wait())},
+                {exec_task, stop_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
 

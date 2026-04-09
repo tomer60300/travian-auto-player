@@ -12,10 +12,9 @@ export default class ErrorBoundary extends Component {
 
   componentDidCatch(error, errorInfo) {
     console.error('ErrorBoundary caught:', error, errorInfo?.componentStack)
-    try {
-      const { addLog } = require('../stores/logStore').default.getState()
-      addLog('error', 'ui', `React error: ${error.message}`, errorInfo?.componentStack || error.stack)
-    } catch {}
+    import('../stores/logStore').then(({ default: store }) => {
+      store.getState().addLog('error', 'ui', `React error: ${error.message}`, errorInfo?.componentStack || error.stack)
+    }).catch(() => {})
   }
 
   handleReset = () => {

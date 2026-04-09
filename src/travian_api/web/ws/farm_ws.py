@@ -188,13 +188,15 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                 total_success += cycle_success
                 total_fail += cycle_fail
 
-                if verbose:
-                    for t in result.targets:
+                # Always send per-target results for failures; all results when verbose
+                for t in result.targets:
+                    is_ok = t.error == ""
+                    if verbose or not is_ok:
                         await _send(websocket, {
                             "type": "result",
                             "cycle": cycle,
                             "slot_id": t.id,
-                            "success": t.error == "",
+                            "success": is_ok,
                             "status": t.status,
                             "error": t.error or None,
                         })
@@ -385,7 +387,10 @@ async def ws_farm_run_all(websocket: WebSocket):
                     cycle_success += list_success
                     cycle_fail += list_fail
 
-                    if verbose:
+                    # Always send individual failure details; full list when verbose
+                    failed_targets = [t for t in result.targets if t.error != ""]
+                    if verbose or failed_targets:
+                        targets_to_report = result.targets if verbose else failed_targets
                         await _send(websocket, {
                             "type": "result",
                             "cycle": cycle,
@@ -399,7 +404,7 @@ async def ws_farm_run_all(websocket: WebSocket):
                                     "status": t.status,
                                     "error": t.error or None,
                                 }
-                                for t in result.targets
+                                for t in targets_to_report
                             ],
                         })
 

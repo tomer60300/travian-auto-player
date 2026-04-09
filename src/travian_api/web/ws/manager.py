@@ -31,16 +31,19 @@ class ConnectionManager:
         """Authenticate a WebSocket connection via query parameter token.
 
         Expected URL: ws://host/ws/path?token=<JWT>
-        Returns user_id on success, None on failure (closes the socket).
+        Returns user_id on success, None on failure.
+        Must accept() before close() per ASGI spec.
         """
         token = websocket.query_params.get("token")
         if not token:
+            await websocket.accept()
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing token")
             return None
 
         try:
             payload = decode_access_token(token)
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+            await websocket.accept()
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid token")
             return None
 
@@ -48,6 +51,7 @@ class ConnectionManager:
 
         # Verify user has active Travian session
         if session_manager.get(user_id) is None:
+            await websocket.accept()
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="No active Travian session")
             return None
 

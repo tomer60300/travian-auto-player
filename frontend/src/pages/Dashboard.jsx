@@ -50,16 +50,21 @@ function formatTimeRemaining(seconds) {
 }
 
 const ConstructionQueueSummary = memo(function ConstructionQueueSummary({ queue }) {
-  const [tick, setTick] = useState(0)
+  // Snapshot the time when queue data arrived so each item's countdown is relative
+  const [snapshotTime, setSnapshotTime] = useState(Date.now)
+  const [now, setNow] = useState(Date.now)
 
   useEffect(() => {
     if (!queue || queue.length === 0) return
-    setTick(0)
-    const id = setInterval(() => setTick(t => t + 1), 1000)
+    setSnapshotTime(Date.now())
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [queue])
 
   if (!queue || queue.length === 0) return null
+
+  const elapsedSecs = Math.floor((now - snapshotTime) / 1000)
 
   return (
     <div className="card p-4">
@@ -69,7 +74,7 @@ const ConstructionQueueSummary = memo(function ConstructionQueueSummary({ queue 
       <div className="flex flex-col gap-2">
         {queue.map((item, idx) => {
           const baseRemaining = item.remaining_seconds ?? item.time_remaining ?? item.seconds_remaining
-          const remaining = Math.max(0, (baseRemaining || 0) - tick)
+          const remaining = Math.max(0, (baseRemaining || 0) - elapsedSecs)
           const doneAt = new Date(Date.now() + remaining * 1000)
           const doneStr = doneAt.toLocaleTimeString('en-US', { hour12: false })
           return (
@@ -150,6 +155,7 @@ function InfoRow({ label, value }) {
 export default function Dashboard() {
   const resources = useGameStore((s) => s.resources)
   const constructionQueue = useGameStore((s) => s.constructionQueue)
+  const activeVillageId = useGameStore((s) => s.activeVillageId)
   const fetchResources = useGameStore((s) => s.fetchResources)
   const fetchBuildings = useGameStore((s) => s.fetchBuildings)
   const fetchQueue = useGameStore((s) => s.fetchQueue)
@@ -159,8 +165,10 @@ export default function Dashboard() {
   const fetchResourcesRef = useRef(fetchResources)
   useEffect(() => { fetchResourcesRef.current = fetchResources }, [fetchResources])
 
+  // Re-fetch on mount AND when active village changes
   useEffect(() => {
     let cancelled = false
+    setLoading(true)
     async function loadData() {
       await fetchResources()
       if (cancelled) return
@@ -182,7 +190,7 @@ export default function Dashboard() {
       cancelled = true
       if (intervalRef.current) clearInterval(intervalRef.current)
     }
-  }, [])
+  }, [activeVillageId, fetchResources, fetchQueue, fetchBuildings])
 
   return (
     <div className="p-6 max-w-4xl mx-auto">

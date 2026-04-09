@@ -291,61 +291,146 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   const activeVillageId = useGameStore((s) => s.activeVillageId)
   const toast = useToast()
 
-  useEffect(() => { return () => { mountedRef.current = false; if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null } } }, [])
+  // Loop mode state
+  const [loopEnabled, setLoopEnabled] = useState(false)
+  const [loopInterval, setLoopInterval] = useState(300) // seconds between cycles
+  const [loopCycle, setLoopCycle] = useState(0)
+  const loopStoppedRef = useRef(false)
+  const loopTimerRef = useRef(null)
+
+  useEffect(() => { return () => {
+    mountedRef.current = false
+    loopStoppedRef.current = true
+    if (loopTimerRef.current) clearTimeout(loopTimerRef.current)
+    if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null }
+  } }, [])
 
   const msgIdRef = useRef(0)
   const addMessage = useCallback((type, text) => {
     setMessages((prev) => [...prev, { id: ++msgIdRef.current, type, text, timestamp: Date.now() }])
   }, [])
 
-  const handleStart = () => {
-    if (selected.size === 0) { toast.warning('No targets selected'); return }
-    const excludeCoords = scanResults.filter((_, i) => !selected.has(i)).map((r) => [r.x, r.y])
-    setRunning(true); setWsStatus('connected'); setMessages([]); setProgress(null)
-    addMessage('info', 'Connecting to auto-scout service...')
+  // Refs for values that the loop needs at execution time (avoids stale closures)
+  const scanResultsRef = useRef(scanResults)
+  const selectedRef = useRef(selected)
+  const scanConfigRef = useRef(scanConfig)
+  const amountRef = useRef(amount)
+  const scoutTypeRef = useRef(scoutType)
+  const delayRef = useRef(delay)
+  const villageIdRef = useRef(activeVillageId)
+  useEffect(() => { scanResultsRef.current = scanResults }, [scanResults])
+  useEffect(() => { selectedRef.current = selected }, [selected])
+  useEffect(() => { scanConfigRef.current = scanConfig }, [scanConfig])
+  useEffect(() => { amountRef.current = amount }, [amount])
+  useEffect(() => { scoutTypeRef.current = scoutType }, [scoutType])
+  useEffect(() => { delayRef.current = delay }, [delay])
+  useEffect(() => { villageIdRef.current = activeVillageId }, [activeVillageId])
 
-    const ws = createWebSocket('/ws/scout/auto',
-      (data) => {
-        if (!mountedRef.current) return
-        switch (data.type) {
-          case 'scanning': addMessage('info', data.message || 'Scanning map...'); break
-          case 'scan_complete': addMessage('success', `Scan complete: ${data.targets} targets found`); break
-          case 'scouting':
-            setProgress({ index: data.index, total: data.total })
-            addMessage('info', `Scouting ${data.index}/${data.total}: (${data.target.x}, ${data.target.y}) ${data.target.name || ''}`)
-            break
-          case 'scout_result':
-            addMessage(data.success ? 'success' : 'warning', `(${data.target.x}, ${data.target.y}) - ${data.success ? 'Sent' : 'Failed'}${data.travel_time ? ` | ${data.travel_time}` : ''}`)
-            break
-          case 'complete':
-            addMessage('success', `Done! ${data.successful}/${data.total_sent} scouts sent`)
-            setProgress(null); setRunning(false); setWsStatus('disconnected')
-            toast.success(`Scouting complete: ${data.successful}/${data.total_sent}`)
-            break
-          case 'error': addMessage('error', data.message || 'Error'); break
-          default: if (data.message) addMessage('info', data.message); break
-        }
-      },
-      () => { if (mountedRef.current) { addMessage('error', 'WS error'); setRunning(false); setWsStatus('disconnected') } },
-      () => { if (mountedRef.current) { setRunning(false); setWsStatus('disconnected') } }
-    )
+  // Core: run one scout pass via WS, returns a promise that resolves when complete
+  const runOnePass = useCallback((cycleNum) => {
+    return new Promise((resolve) => {
+      if (!mountedRef.current || loopStoppedRef.current) { resolve(); return }
 
-    if (!ws) { addMessage('error', 'No auth token'); setRunning(false); setWsStatus('disconnected'); return }
-    wsRef.current = ws
-    ws.addEventListener('open', () => {
-      setWsStatus('running')
-      addMessage('info', 'Connected. Sending config...')
-      ws.send(JSON.stringify({ radius: scanConfig.radius || 10, amount, type: scoutType, delay, exclude_coords: excludeCoords, village_id: activeVillageId }))
+      // Read current values from refs (avoids stale closure in loop mode)
+      const curResults = scanResultsRef.current
+      const curSelected = selectedRef.current
+      const excludeCoords = curResults.filter((_, i) => !curSelected.has(i)).map((r) => [r.x, r.y])
+      setWsStatus('connected')
+      if (cycleNum > 0) addMessage('info', `--- Loop cycle ${cycleNum + 1} ---`)
+
+      const ws = createWebSocket('/ws/scout/auto',
+        (data) => {
+          if (!mountedRef.current) return
+          switch (data.type) {
+            case 'scanning': addMessage('info', data.message || 'Scanning map...'); break
+            case 'scan_complete': addMessage('success', `Scan: ${data.targets} targets`); break
+            case 'target_list':
+              addMessage('info', `Targets queued: ${(data.targets || []).length} villages`)
+              break
+            case 'scouting':
+              setProgress({ index: data.index, total: data.total, eta: data.eta })
+              addMessage('info', `[${data.index}/${data.total}] Scouting (${data.target.x},${data.target.y}) ${data.target.name || ''}${data.eta ? ' | ' + data.eta : ''}`)
+              break
+            case 'scout_result': {
+              const ok = data.success
+              const errStr = !ok && data.error ? `: ${data.error}` : ''
+              const ttStr = data.travel_time ? ` | ${data.travel_time}` : ''
+              addMessage(ok ? 'success' : 'warning', `[${data.index || '?'}/${data.total || '?'}] (${data.target.x},${data.target.y}) ${ok ? 'Sent' : 'Failed'}${errStr}${ttStr}`)
+              break
+            }
+            case 'waiting':
+              // Update progress bar remaining but don't spam the log
+              setProgress((prev) => prev ? { ...prev, waitRemaining: data.remaining } : prev)
+              break
+            case 'complete': {
+              const timeStr = data.total_time_seconds ? ` in ${data.total_time_seconds}s` : ''
+              const avgStr = data.avg_time_per_target ? ` (avg ${data.avg_time_per_target}s/target)` : ''
+              addMessage('success', `Pass done: ${data.successful}/${data.total_sent} sent${timeStr}${avgStr}`)
+              setProgress(null); setWsStatus('disconnected')
+              resolve()
+              break
+            }
+            case 'error': addMessage('error', data.message || 'Error'); break
+            default: if (data.message) addMessage('info', data.message); break
+          }
+        },
+        () => { if (mountedRef.current) { addMessage('error', 'WS error'); setWsStatus('disconnected'); resolve() } },
+        () => { if (mountedRef.current) { setWsStatus('disconnected'); resolve() } }
+      )
+
+      if (!ws) { addMessage('error', 'No auth token'); setWsStatus('disconnected'); resolve(); return }
+      wsRef.current = ws
+      ws.addEventListener('open', () => {
+        setWsStatus('running')
+        ws.send(JSON.stringify({
+          radius: scanConfigRef.current.radius || 10,
+          amount: amountRef.current,
+          type: scoutTypeRef.current,
+          delay: delayRef.current,
+          exclude_coords: excludeCoords,
+          village_id: villageIdRef.current,
+        }))
+      })
     })
+  }, [addMessage]) // refs are stable — no deps needed for values read from refs
+
+  const handleStart = async () => {
+    if (selected.size === 0) { toast.warning('No targets selected'); return }
+    setRunning(true); setMessages([]); setProgress(null)
+    loopStoppedRef.current = false
+    setLoopCycle(0)
+
+    if (!loopEnabled) {
+      // Single pass
+      await runOnePass(0)
+      if (mountedRef.current) { setRunning(false); toast.success('Scouting complete') }
+    } else {
+      // Loop mode
+      let cycle = 0
+      const loop = async () => {
+        if (loopStoppedRef.current || !mountedRef.current) { setRunning(false); return }
+        setLoopCycle(cycle)
+        await runOnePass(cycle)
+        cycle++
+        if (loopStoppedRef.current || !mountedRef.current) { setRunning(false); return }
+        addMessage('info', `Waiting ${loopInterval}s before next cycle...`)
+        loopTimerRef.current = setTimeout(loop, loopInterval * 1000)
+      }
+      await loop()
+    }
   }
 
   const handleStop = () => {
+    loopStoppedRef.current = true
+    if (loopTimerRef.current) { clearTimeout(loopTimerRef.current); loopTimerRef.current = null }
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
     setRunning(false); setWsStatus('disconnected')
     addMessage('warning', 'Stopped by user')
+    toast.warning('Auto-scout stopped')
   }
 
   const progressPct = progress ? (progress.index / progress.total) * 100 : 0
+  const waitPct = progress?.waitRemaining != null ? progress.waitRemaining : null
 
   return (
     <div className="card">
@@ -360,21 +445,50 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
           <input type="number" className="input-field" value={delay} min={1} max={60} onChange={(e) => setDelay(Number(e.target.value))} disabled={running} />
         </div>
       </div>
-      <div className="mb-5">
+      <div className="mb-4">
         <label className="field-label-lg mb-2">Scout type</label>
         <div className="flex gap-6">
           <label className="check-label"><input type="radio" name="scoutType" value="resources" checked={scoutType === 'resources'} onChange={() => setScoutType('resources')} disabled={running} className="accent-radio" /> Resources</label>
           <label className="check-label"><input type="radio" name="scoutType" value="defenses" checked={scoutType === 'defenses'} onChange={() => setScoutType('defenses')} disabled={running} className="accent-radio" /> Defenses</label>
         </div>
       </div>
+
+      {/* Loop mode */}
+      <div className="mb-5 p-3 bg-surface rounded-md border-default">
+        <div className="flex gap-4 items-center flex-wrap">
+          <label className="check-label">
+            <input type="checkbox" className="checkbox-gold" checked={loopEnabled} onChange={(e) => setLoopEnabled(e.target.checked)} disabled={running} />
+            Loop mode
+          </label>
+          {loopEnabled && (
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-secondary">Interval (s):</label>
+              <input type="number" className="input-field text-xs py-1 px-2 w-20" min={30} max={3600} value={loopInterval} onChange={(e) => setLoopInterval(Number(e.target.value) || 300)} disabled={running} />
+            </div>
+          )}
+          {loopEnabled && running && (
+            <span className="text-xs text-gold font-semibold">Cycle #{loopCycle + 1}</span>
+          )}
+        </div>
+        {loopEnabled && (
+          <p className="text-xs text-secondary mt-2">Scan once, then re-scout the same targets every {loopInterval}s. Scouts return home and get re-sent.</p>
+        )}
+      </div>
+
+      {/* Buttons */}
       <div className="flex gap-3 mb-4">
         {!running
-          ? <button className="btn-primary" onClick={handleStart} disabled={selected.size === 0}>Start Auto-Scout ({selected.size} targets)</button>
+          ? <button className="btn-primary" onClick={handleStart} disabled={selected.size === 0}>
+              {loopEnabled ? `Start Scout Loop (${selected.size} targets)` : `Start Auto-Scout (${selected.size} targets)`}
+            </button>
           : <button className="btn-danger" onClick={handleStop}>Stop</button>}
       </div>
       {progress && (
         <div className="mb-4">
-          <div className="flex justify-between text-xs text-secondary mb-1"><span>Target {progress.index}/{progress.total}...</span><span>{Math.round(progressPct)}%</span></div>
+          <div className="flex justify-between text-xs text-secondary mb-1">
+            <span>Target {progress.index}/{progress.total}{progress.eta ? ` | ${progress.eta}` : ''}</span>
+            <span>{Math.round(progressPct)}%{waitPct != null ? ` | cooldown ${Math.round(waitPct)}s` : ''}</span>
+          </div>
           <div className="progress-track"><div className="progress-fill" style={{ width: `${progressPct}%` }} /></div>
         </div>
       )}

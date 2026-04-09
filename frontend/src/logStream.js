@@ -8,6 +8,7 @@ const BASE_DELAY = 1000
 
 export function connectLogStream() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+  reconnectAttempts = 0 // reset so reconnect works after a disconnect/reconnect cycle
 
   const token = localStorage.getItem('token')
   if (!token) return

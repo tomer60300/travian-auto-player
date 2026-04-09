@@ -58,7 +58,7 @@ export default function Military() {
     const num = parseInt(value, 10)
     setTroops((prev) => {
       const next = { ...prev }
-      if (!value || num <= 0) {
+      if (!value || isNaN(num) || num <= 0) {
         delete next[key]
       } else {
         next[key] = num

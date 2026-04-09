@@ -13,6 +13,7 @@ from ..parsers.report_parser import (
     parse_individual_report,
     parse_scout_report,
     parse_battle_report,
+    parse_map_tile_reports,
 )
 
 logger = get_logger(__name__)
@@ -41,11 +42,13 @@ class ReportsService:
         """
         all_reports: List[ReportListItem] = []
         first_page_size = None
+        pages_fetched = 0
 
         for page in range(1, max_pages + 1):
             try:
                 html = await self.client.get_html(f"/report/all?page={page}")
                 page_reports = parse_report_list(html)
+                pages_fetched += 1
 
                 if not page_reports:
                     logger.debug(f"No reports on page {page}, stopping")
@@ -62,7 +65,7 @@ class ReportsService:
                 logger.warning(f"Failed to fetch reports page {page}: {e}")
                 break
 
-        logger.info(f"Fetched {len(all_reports)} reports from {page} pages")
+        logger.info(f"Fetched {len(all_reports)} reports from {pages_fetched} pages")
         return all_reports
 
     async def fetch_reports_robust(
@@ -287,3 +290,96 @@ class ReportsService:
             f"({pages_failed} failed)"
         )
         return all_reports, True
+
+    # ------------------------------------------------------------------
+    # Village reports from map tile
+    # ------------------------------------------------------------------
+
+    async def fetch_village_reports(
+        self,
+        x: int,
+        y: int,
+        fetch_details: bool = False,
+        max_detail_count: Optional[int] = None,
+        detail_filter: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Fetch all visible reports for a village from its map tile page.
+
+        Uses ``/karte.php?x=X&y=Y`` which shows **both personal and alliance
+        reports** in the tile popup — even for villages you never attacked.
+
+        Stealth:
+        - Navigates to the map page first (human wouldn't jump straight to a tile)
+        - Human reading delay between report detail fetches
+        - All requests go through the global throttler via ``get_html``
+
+        Args:
+            x: Target village X coordinate.
+            y: Target village Y coordinate.
+            fetch_details: Also fetch full HTML detail for each report.
+            max_detail_count: Cap on how many details to fetch (``None`` = all).
+
+        Returns:
+            Dict with ``village`` (metadata dict) and ``reports`` (list of
+            summary dicts). If *fetch_details*, each report entry gains a
+            ``detail`` key with the full parsed report data.
+        """
+        from ..stealth.human_delay import ActionType
+
+        try:
+            # Stealth: navigate to the map first (like clicking "Map" in the menu)
+            navigator = self.client.navigator
+            if navigator.enabled:
+                if not navigator.current_page or 'karte' not in navigator.current_page:
+                    await navigator._visit("/karte.php", "opening map")
+                await self.client.human_delay.wait(ActionType.CLICK, "clicking map tile")
+
+            # The tile popup is loaded via the tile-details API (not karte.php HTML)
+            resp = await self.client.post_json(
+                "/api/v1/map/tile-details", {"x": x, "y": y}
+            )
+            html = resp.get("html", "")
+            if not html:
+                raise ReportError(f"Empty tile-details response for ({x}, {y})")
+        except ReportError:
+            raise
+        except Exception as e:
+            raise ReportError(f"Failed to fetch map tile for ({x}, {y}): {e}") from e
+
+        parsed = parse_map_tile_reports(html)
+        reports = parsed.get('reports', [])
+        logger.info("Found %d reports on map tile (%d, %d)", len(reports), x, y)
+
+        if fetch_details and reports:
+            limit = max_detail_count if max_detail_count is not None else len(reports)
+            fetched = 0
+            for entry in reports[:limit]:
+                # Optional: only fetch details for specific icon types
+                # detail_filter="battle_only" skips scouts, "scout_priority" fetches scouts first
+                if detail_filter == "battle_only" and entry.get("icon_type", 0) not in (1,2,3,4,5,6,7,8):
+                    continue
+                rid = entry['report_id']
+                aid = entry.get('aid', '')
+                try:
+                    # Stealth: human reading delay before clicking next report
+                    if fetched > 0 and navigator.enabled:
+                        await self.client.human_delay.wait(
+                            ActionType.PAGE_LOAD, "reading report"
+                        )
+
+                    url = f"/report?id={rid}"
+                    if aid:
+                        url += f"&aid={aid}"
+                    detail_html = await self.client.get_html(url)
+                    detail = parse_individual_report(detail_html)
+                    detail['report_id'] = rid
+                    data = detail.get('data')
+                    if data and hasattr(data, 'model_dump'):
+                        detail['data'] = data.model_dump()
+                    entry['detail'] = detail
+                    fetched += 1
+                except Exception as e:
+                    logger.warning("Failed to fetch detail for report %s: %s", rid, e)
+            parsed['details_fetched'] = fetched
+
+        return parsed

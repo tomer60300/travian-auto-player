@@ -39,7 +39,17 @@ const CATEGORY_TO_CLASS = {
 }
 
 const ConstructionQueuePanel = memo(function ConstructionQueuePanel({ queue }) {
+  const [snapTime, setSnapTime] = useState(Date.now)
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    if (!queue || queue.length === 0) return
+    setSnapTime(Date.now()); setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [queue])
+
   if (!queue || queue.length === 0) return null
+  const elapsed = Math.floor((now - snapTime) / 1000)
 
   return (
     <div className="card p-4 mb-4">
@@ -48,8 +58,9 @@ const ConstructionQueuePanel = memo(function ConstructionQueuePanel({ queue }) {
       </h3>
       <div className="flex flex-col gap-2">
         {queue.map((item, idx) => {
-          const remaining = item.remaining_seconds ?? item.time_remaining ?? item.seconds_remaining
-          const doneAt = new Date(Date.now() + (remaining || 0) * 1000)
+          const baseRemaining = item.remaining_seconds ?? item.time_remaining ?? item.seconds_remaining
+          const remaining = Math.max(0, (baseRemaining || 0) - elapsed)
+          const doneAt = new Date(Date.now() + remaining * 1000)
           const doneStr = doneAt.toLocaleTimeString('en-US', { hour12: false })
           return (
             <div key={item.event_id ?? `${item.building_name}-${idx}`} className="surface-row">
@@ -274,6 +285,7 @@ export default function Buildings() {
   const buildingsLoading = useGameStore((s) => s.buildingsLoading)
   const buildingsError = useGameStore((s) => s.buildingsError)
   const constructionQueue = useGameStore((s) => s.constructionQueue)
+  const activeVillageId = useGameStore((s) => s.activeVillageId)
   const fetchBuildings = useGameStore((s) => s.fetchBuildings)
   const fetchQueue = useGameStore((s) => s.fetchQueue)
   const toast = useToast()
@@ -290,7 +302,9 @@ export default function Buildings() {
   useEffect(() => {
     fetchBuildings()
     fetchQueue()
-  }, [fetchBuildings, fetchQueue])
+    setSelectedSlot(null)
+    setDetail(null)
+  }, [fetchBuildings, fetchQueue, activeVillageId])
 
   const fetchDetail = useCallback(async (slotId) => {
     fetchingSlotRef.current = slotId
@@ -310,7 +324,7 @@ export default function Buildings() {
         setDetailLoading(false)
       }
     }
-  }, [])
+  }, [toast])
 
   const handleSlotClick = (slotId) => {
     if (selectedSlot === slotId) {
