@@ -2,7 +2,9 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from travian_api.web.rate_limit import action_limiter
@@ -38,66 +40,66 @@ class ConstructRequest(BaseModel):
 
 @router.get("")
 async def list_buildings(
+    village_id: Optional[int] = Query(None, description="Village ID (default: active village)"),
     session: TravianSession = Depends(get_travian_session),
 ):
-    """List all buildings for the active village."""
+    """List all buildings for a village."""
+    vid = village_id or session.active_village_id
     try:
-        buildings = await session.building_service.get_village_buildings(
-            village_id=session.active_village_id,
-        )
+        buildings = await session.building_service.get_village_buildings(village_id=vid)
     except Exception as exc:
-        logger.exception("Failed to get buildings for village %s", session.active_village_id)
+        logger.exception("Failed to get buildings for village %s", vid)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to fetch buildings: {exc}",
         )
 
     return {
-        "village_id": session.active_village_id,
+        "village_id": vid,
         "buildings": [b.model_dump() for b in buildings],
     }
 
 
 @router.get("/resources")
 async def get_resources(
+    village_id: Optional[int] = Query(None, description="Village ID (default: active village)"),
     session: TravianSession = Depends(get_travian_session),
 ):
     """Get current resources, production rates, and storage capacity."""
+    vid = village_id or session.active_village_id
     try:
-        resources = await session.building_service.get_resources(
-            village_id=session.active_village_id,
-        )
+        resources = await session.building_service.get_resources(village_id=vid)
     except Exception as exc:
-        logger.exception("Failed to get resources for village %s", session.active_village_id)
+        logger.exception("Failed to get resources for village %s", vid)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to fetch resources: {exc}",
         )
 
     return {
-        "village_id": session.active_village_id,
+        "village_id": vid,
         **resources.model_dump(),
     }
 
 
 @router.get("/queue")
 async def get_construction_queue(
+    village_id: Optional[int] = Query(None, description="Village ID (default: active village)"),
     session: TravianSession = Depends(get_travian_session),
 ):
     """Get the active construction queue."""
+    vid = village_id or session.active_village_id
     try:
-        queue = await session.building_service.get_construction_queue(
-            village_id=session.active_village_id,
-        )
+        queue = await session.building_service.get_construction_queue(village_id=vid)
     except Exception as exc:
-        logger.exception("Failed to get construction queue for village %s", session.active_village_id)
+        logger.exception("Failed to get construction queue for village %s", vid)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to fetch construction queue: {exc}",
         )
 
     return {
-        "village_id": session.active_village_id,
+        "village_id": vid,
         "queue": [item.model_dump() for item in queue],
     }
 

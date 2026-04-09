@@ -136,7 +136,16 @@ async def scan_map(
                     if t.player_id:
                         exclude_player_ids.add(t.player_id)
 
-        # Apply filters
+        # Compute player total pops BEFORE village-level filters remove
+        # high-pop villages — otherwise a player with one big and one small
+        # village has their sum under-counted after the big one is removed.
+        player_pops: dict[int, int] = {}
+        if body.max_player_pop is not None:
+            for t in tiles:
+                if t.player_id:
+                    player_pops[t.player_id] = player_pops.get(t.player_id, 0) + t.population
+
+        # Apply village-level filters (population, oases, excluded players)
         tiles = svc.filter_targets(
             tiles,
             max_population=body.max_pop,
@@ -146,16 +155,12 @@ async def scan_map(
             exclude_player_ids=exclude_player_ids or None,
         )
 
-        # Filter by max player total population (sum of all visible villages per player)
+        # Filter by max player total population (uses pre-computed sums)
         if body.max_player_pop is not None:
-            player_pops: dict[int, int] = {}
-            for t in tiles:
-                if t.player_id:
-                    player_pops.setdefault(t.player_id, 0)
-                    player_pops[t.player_id] += t.population
             tiles = [
                 t for t in tiles
-                if not t.player_id or player_pops.get(t.player_id, 0) <= body.max_player_pop
+                if not t.player_id
+                or player_pops.get(t.player_id, 0) <= body.max_player_pop
             ]
 
         # Apply limit

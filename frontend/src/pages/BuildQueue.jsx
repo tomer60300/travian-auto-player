@@ -4,7 +4,6 @@ import { createWebSocket } from '../ws'
 import WebSocketPanel from '../components/WebSocketPanel'
 import { useToast } from '../components/Toast'
 import ConfirmDialog from '../components/ConfirmDialog'
-import VillageSelector from '../components/VillageSelector'
 import useGameStore from '../stores/gameStore'
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -149,56 +148,49 @@ function BuildingList({ buildings, onAdd, queueItems }) {
 // ── Queue Item ───────────────────────────────────────────────────────
 function QueueItem({ item, onRemove, onChange, onMoveUp, onMoveDown, isFirst, isLast }) {
   return (
-    <div className="flex items-center gap-2 px-3 py-2 bg-surface rounded-md border-default group">
-      {/* Reorder buttons */}
-      <div className="flex flex-col gap-0.5">
-        <button className="text-xs text-secondary hover:text-primary disabled:opacity-30" disabled={isFirst} onClick={onMoveUp} title="Move up">&uarr;</button>
-        <button className="text-xs text-secondary hover:text-primary disabled:opacity-30" disabled={isLast} onClick={onMoveDown} title="Move down">&darr;</button>
-      </div>
-
-      {/* Building info — name, slot, level */}
-      <div className="flex-1 min-w-0">
-        <div className="text-sm text-primary font-medium truncate">
+    <div className="bg-surface rounded-md border-default group px-2.5 py-1.5">
+      {/* Row 1: name + remove */}
+      <div className="flex items-center justify-between gap-1 mb-1">
+        <span className="text-sm text-primary font-medium">
           <span className="text-gold font-mono mr-1">#{item.slotId}</span>
-          {item.name}
-        </div>
-        <div className="text-xs text-secondary">
-          Lv {item.currentLevel} &rarr; <span className="text-gold font-semibold">{item.targetLevel}</span>
-        </div>
+          {item.name || '???'}
+        </span>
+        <button
+          className="text-secondary hover:text-danger text-base leading-none px-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+          onClick={onRemove}
+          title="Remove"
+        >&times;</button>
       </div>
-
-      {/* Target level */}
-      <div className="flex items-center gap-1 shrink-0">
-        <label className="text-xs text-secondary whitespace-nowrap">Target:</label>
+      {/* Row 2: level, target, priority, reorder */}
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-secondary whitespace-nowrap">
+          Lv <span className="text-primary font-semibold">{item.currentLevel}</span>
+        </span>
+        <span className="text-secondary text-xs">&rarr;</span>
         <input
           type="number"
           min={item.currentLevel + 1}
           max={30}
           value={item.targetLevel}
           onChange={(e) => onChange({ targetLevel: Math.max(item.currentLevel + 1, Number(e.target.value) || item.currentLevel + 1) })}
-          className="input-field w-16 text-center text-sm py-1"
+          className="input-field w-12 text-center text-xs py-0.5 px-1"
           title="Target level"
         />
+        <select
+          value={item.priority}
+          onChange={(e) => onChange({ priority: Number(e.target.value) })}
+          className="input-field w-12 text-center text-xs py-0.5 px-0.5"
+          title="Priority (1=highest)"
+        >
+          {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
+            <option key={p} value={p}>P{p}</option>
+          ))}
+        </select>
+        <div className="flex gap-0.5 ml-auto">
+          <button className="text-xs text-secondary hover:text-primary disabled:opacity-30 px-0.5" disabled={isFirst} onClick={onMoveUp} title="Move up">&uarr;</button>
+          <button className="text-xs text-secondary hover:text-primary disabled:opacity-30 px-0.5" disabled={isLast} onClick={onMoveDown} title="Move down">&darr;</button>
+        </div>
       </div>
-
-      {/* Priority */}
-      <select
-        value={item.priority}
-        onChange={(e) => onChange({ priority: Number(e.target.value) })}
-        className="input-field w-14 text-center text-xs py-1 shrink-0 px-1"
-        title="Priority (1=highest)"
-      >
-        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
-          <option key={p} value={p}>P{p}</option>
-        ))}
-      </select>
-
-      {/* Remove */}
-      <button
-        className="text-secondary hover:text-danger text-lg leading-none px-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-        onClick={onRemove}
-        title="Remove from queue"
-      >&times;</button>
     </div>
   )
 }
@@ -320,13 +312,19 @@ function YamlPreview({ yaml }) {
 
 // ── Main Page ────────────────────────────────────────────────────────
 export default function BuildQueue() {
-  const activeVillageId = useGameStore((s) => s.activeVillageId)
-  const buildings = useGameStore((s) => s.buildings)
-  const buildingsLoading = useGameStore((s) => s.buildingsLoading)
-  const constructionQueue = useGameStore((s) => s.constructionQueue)
-  const fetchBuildings = useGameStore((s) => s.fetchBuildings)
-  const fetchQueue = useGameStore((s) => s.fetchQueue)
+  const villages = useGameStore((s) => s.villages)
+  const globalActiveVillageId = useGameStore((s) => s.activeVillageId)
   const toast = useToast()
+
+  // Local village selection — independent of the global active village.
+  // This lets two tabs target different villages without interfering.
+  const [localVillageId, setLocalVillageId] = useState(null)
+  const villageId = localVillageId || globalActiveVillageId
+
+  // Local building/queue state (fetched per-village, not from global store)
+  const [buildings, setBuildings] = useState([])
+  const [buildingsLoading, setBuildingsLoading] = useState(false)
+  const [constructionQueue, setConstructionQueue] = useState([])
 
   // Queue items
   const [queueItems, setQueueItems] = useState([])
@@ -348,7 +346,35 @@ export default function BuildQueue() {
   const [validationResult, setValidationResult] = useState(null)
   const [showConfirm, setShowConfirm] = useState(false)
 
-  useEffect(() => { fetchBuildings(); fetchQueue() }, [fetchBuildings, fetchQueue, activeVillageId])
+  // Fetch buildings + queue for the selected village (no global switch)
+  const fetchLocalData = useCallback(async (vid) => {
+    if (!vid) return
+    setBuildingsLoading(true)
+    try {
+      const [bRes, qRes] = await Promise.all([
+        api.get(`/buildings?village_id=${vid}`),
+        api.get(`/buildings/queue?village_id=${vid}`),
+      ])
+      const arr = Array.isArray(bRes.data) ? bRes.data
+        : Array.isArray(bRes.data?.buildings) ? bRes.data.buildings : []
+      setBuildings(arr)
+      const qarr = Array.isArray(qRes.data) ? qRes.data
+        : Array.isArray(qRes.data?.queue) ? qRes.data.queue : []
+      setConstructionQueue(qarr)
+    } catch (e) {
+      console.warn('Failed to fetch village data:', e)
+    } finally {
+      setBuildingsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { fetchLocalData(villageId) }, [villageId, fetchLocalData])
+
+  const handleVillageSwitch = (id) => {
+    setLocalVillageId(id)
+    setQueueItems([])     // Clear queue when switching village
+    setValidationResult(null)
+  }
 
   useEffect(() => {
     return () => {
@@ -382,8 +408,8 @@ export default function BuildQueue() {
     toast.success(`Added ${items.length} items to queue`)
   }, [toast])
 
-  // Generate YAML
-  const generatedYaml = useMemo(() => queueToYaml(queueItems, activeVillageId), [queueItems, activeVillageId])
+  // Generate YAML — uses the local village ID, not the global active
+  const generatedYaml = useMemo(() => queueToYaml(queueItems, villageId), [queueItems, villageId])
 
   // Validate
   const handleValidate = async () => {
@@ -459,7 +485,19 @@ export default function BuildQueue() {
     <div className="p-6 max-w-[1200px] mx-auto">
       <div className="flex justify-between items-center mb-5">
         <h2 className="heading-gold text-2xl">Build Queue</h2>
-        <VillageSelector />
+        {/* Local village selector — does NOT change the global active village */}
+        {villages && villages.length > 0 && (
+          <select
+            value={villageId || ''}
+            onChange={(e) => { const id = Number(e.target.value); if (id) handleVillageSwitch(id) }}
+            disabled={running}
+            className="input-field max-w-[260px] cursor-pointer bg-surface text-primary"
+          >
+            {villages.map((v) => (
+              <option key={v.id} value={v.id}>{v.name} ({v.x}|{v.y})</option>
+            ))}
+          </select>
+        )}
       </div>
 
       {/* Construction queue (in-progress) */}
@@ -471,7 +509,7 @@ export default function BuildQueue() {
         <div className="card flex-1 min-w-0 overflow-y-auto" style={{ maxHeight: 600 }}>
           <div className="flex justify-between items-center mb-3">
             <h3 className="heading-gold text-base">Village Buildings</h3>
-            <button className="btn-secondary btn-xs" onClick={fetchBuildings} disabled={buildingsLoading}>
+            <button className="btn-secondary btn-xs" onClick={() => fetchLocalData(villageId)} disabled={buildingsLoading}>
               {buildingsLoading ? '...' : 'Refresh'}
             </button>
           </div>

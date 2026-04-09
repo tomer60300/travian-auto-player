@@ -1,5 +1,4 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
-import api from '../api'
 import { createWebSocket } from '../ws'
 import { useToast } from '../components/Toast'
 import WebSocketPanel from '../components/WebSocketPanel'
@@ -12,6 +11,53 @@ const LS_KEY_PLAYERS = 'autoscout_exclude_players'
 
 function loadJson(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback }
+}
+
+// ── Scan Progress Panel (shown during WS scan) ─────────────────────────
+function ScanProgressPanel({ phase, messages, enrichProgress, stats }) {
+  const scrollRef = useRef(null)
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  }, [messages])
+
+  const pct = enrichProgress ? Math.round((enrichProgress.index / enrichProgress.total) * 100) : 0
+
+  return (
+    <div className="mt-4">
+      {phase && (
+        <div className="flex items-center gap-2 mb-3">
+          <div className="spinner spinner-sm" />
+          <span className="text-sm text-gold font-semibold">{phase}</span>
+        </div>
+      )}
+      {enrichProgress && (
+        <div className="mb-3">
+          <div className="flex justify-between text-xs text-secondary mb-1">
+            <span>Enriching tile {enrichProgress.index}/{enrichProgress.total}{enrichProgress.name ? ` — ${enrichProgress.name}` : ''}</span>
+            <span>{pct}%{enrichProgress.eta ? ` | ETA: ${enrichProgress.eta}` : ''}</span>
+          </div>
+          <div className="progress-track"><div className="progress-fill" style={{ width: `${pct}%` }} /></div>
+        </div>
+      )}
+      <div ref={scrollRef} className="ws-panel" style={{ maxHeight: 200 }}>
+        {messages.map((msg, i) => (
+          <div key={i} className={`ws-panel-line ${msg.type === 'success' ? 'text-success' : msg.type === 'error' ? 'text-danger' : msg.type === 'detail' ? 'text-secondary' : 'text-primary'}`}>
+            <span className="ws-panel-time">[{new Date(msg.ts).toLocaleTimeString('en-US', { hour12: false })}]</span>
+            {msg.text}
+          </div>
+        ))}
+      </div>
+      {stats && (
+        <div className="mt-2 flex gap-4 text-xs text-secondary flex-wrap">
+          <span>Raw tiles: {stats.raw_tiles}</span>
+          <span>After pre-filter: {stats.after_prefilter}</span>
+          <span>Final: {stats.final}</span>
+          <span>Enrich time: {stats.enrich_time_seconds}s (avg {stats.avg_enrich_time}s/tile)</span>
+          <span>Total: {stats.time_seconds}s</span>
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ── Scan Config Panel ─────────────────────────────────────────────────
@@ -29,14 +75,27 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const [newAlliance, setNewAlliance] = useState('')
   const [newPlayer, setNewPlayer] = useState('')
 
+  // Scan progress state
+  const [scanPhase, setScanPhase] = useState(null)
+  const [scanMessages, setScanMessages] = useState([])
+  const [enrichProgress, setEnrichProgress] = useState(null)
+  const [scanStats, setScanStats] = useState(null)
+  const wsRef = useRef(null)
+  const mountedRef = useRef(true)
+
+  useEffect(() => { return () => { mountedRef.current = false; if (wsRef.current) { try { wsRef.current.close() } catch {} } } }, [])
+
   // Persist to localStorage on change
   useEffect(() => { localStorage.setItem(LS_KEY_ALLIANCES, JSON.stringify(excludeAlliances)) }, [excludeAlliances])
   useEffect(() => { localStorage.setItem(LS_KEY_PLAYERS, JSON.stringify(excludePlayers)) }, [excludePlayers])
 
   const toast = useToast()
 
+  const addScanMsg = useCallback((type, text) => {
+    setScanMessages((prev) => [...prev, { type, text, ts: Date.now() }])
+  }, [])
+
   const addAlliance = () => {
-    // Support comma-separated input: "HM2,HM,LR" → three entries
     const parts = newAlliance.split(',').map(s => s.trim()).filter(Boolean)
     if (parts.length === 0) return
     const newList = [...excludeAlliances]
@@ -58,39 +117,109 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     setNewPlayer('')
   }
 
-  const handleScan = async () => {
+  const handleScan = () => {
     setScanning(true)
+    setScanMessages([])
+    setScanPhase('Connecting...')
+    setEnrichProgress(null)
+    setScanStats(null)
+
     const config = { radius, minPop, maxPop, maxPlayerPop, showOases, limit, excludeAlliances, excludePlayers }
     onConfigChange?.(config)
-    try {
-      const body = {
-        radius,
-        min_pop: minPop,
-        max_pop: maxPop,
-        show_oases: showOases,
-        limit,
-        exclude_player_names: excludePlayers.flatMap((p) => p.split(',').map(s => s.trim())).filter(Boolean),
-        village_id: activeVillageId || undefined,
-      }
-      if (maxPlayerPop !== '') body.max_player_pop = Number(maxPlayerPop)
 
-      // Flatten: split any remaining comma-separated entries (safety for stale localStorage)
-      const allAlliances = excludeAlliances.flatMap((a) => a.split(',').map(s => s.trim())).filter(Boolean)
-      const allianceIds = allAlliances.filter((a) => /^\d+$/.test(a)).map(Number)
-      const allianceNames = allAlliances.filter((a) => !/^\d+$/.test(a))
-      if (allianceIds.length > 0) body.exclude_alliance_ids = allianceIds
-      if (allianceNames.length > 0) body.exclude_alliance_names = allianceNames
-
-      const res = await api.post('/scout/scan', body)
-      const tiles = res.data.tiles ?? res.data
-
-      onScanComplete(tiles)
-      toast.success(`Scan complete: ${tiles.length} targets found`)
-    } catch (err) {
-      toast.error(err.response?.data?.detail || 'Scan failed')
-    } finally {
-      setScanning(false)
+    const body = {
+      radius,
+      min_pop: minPop,
+      max_pop: maxPop,
+      show_oases: showOases,
+      limit,
+      exclude_player_names: excludePlayers.flatMap((p) => p.split(',').map(s => s.trim())).filter(Boolean),
+      village_id: activeVillageId || undefined,
     }
+    if (maxPlayerPop !== '') body.max_player_pop = Number(maxPlayerPop)
+
+    const allAlliances = excludeAlliances.flatMap((a) => a.split(',').map(s => s.trim())).filter(Boolean)
+    const allianceIds = allAlliances.filter((a) => /^\d+$/.test(a)).map(Number)
+    const allianceNames = allAlliances.filter((a) => !/^\d+$/.test(a))
+    if (allianceIds.length > 0) body.exclude_alliance_ids = allianceIds
+    if (allianceNames.length > 0) body.exclude_alliance_names = allianceNames
+
+    const PHASE_LABELS = {
+      map_scan: 'Scanning map regions...',
+      map_scan_done: 'Map scan complete',
+      pre_filter: 'Filtering tiles...',
+      enriching: 'Enriching tile details...',
+      enrich_done: 'Enrichment complete',
+      player_pop: 'Querying player populations...',
+      player_pop_done: 'Player populations loaded',
+      post_filter: 'Applying filters...',
+    }
+
+    const ws = createWebSocket('/ws/scout/scan',
+      (data) => {
+        if (!mountedRef.current) return
+        switch (data.type) {
+          case 'phase':
+            setScanPhase(PHASE_LABELS[data.phase] || data.phase)
+            addScanMsg(data.phase?.includes('done') || data.phase?.includes('complete') ? 'success' : 'info', data.message)
+            if (data.detail) addScanMsg('detail', data.detail)
+            break
+          case 'scan_region':
+            addScanMsg('detail', `  Fetching map region ${data.index}/${data.total} at (${data.center.x},${data.center.y})`)
+            break
+          case 'enrich_progress':
+            setEnrichProgress({ index: data.index, total: data.total, eta: data.eta, name: data.tile?.name })
+            break
+          case 'enrich_detail': {
+            const t = data.tile
+            if (t.error) {
+              addScanMsg('error', `  [${data.index}/${data.total}] (${t.x},${t.y}) Failed: ${t.error}`)
+            } else {
+              addScanMsg('detail', `  [${data.index}/${data.total}] (${t.x},${t.y}) ${t.name || '?'} — pop:${t.pop ?? '?'} player:${t.player || '-'} ally:${t.alliance || '-'}`)
+            }
+            break
+          }
+          case 'complete': {
+            const tiles = data.tiles || []
+            setScanPhase(null)
+            setEnrichProgress(null)
+            setScanStats(data.stats || null)
+            addScanMsg('success', `Scan complete: ${tiles.length} targets found in ${data.stats?.time_seconds || '?'}s`)
+            onScanComplete(tiles)
+            setScanning(false)
+            toast.success(`Scan complete: ${tiles.length} targets found`)
+            break
+          }
+          case 'error':
+            addScanMsg('error', data.message || 'Error')
+            setScanPhase(null)
+            setScanning(false)
+            toast.error(data.message || 'Scan failed')
+            break
+          default:
+            if (data.message) addScanMsg('info', data.message)
+        }
+      },
+      () => { if (mountedRef.current) { addScanMsg('error', 'WebSocket error'); setScanPhase(null); setScanning(false) } },
+      () => { if (mountedRef.current) { setScanPhase(null); setScanning(false) } }
+    )
+
+    if (!ws) { addScanMsg('error', 'No auth token'); setScanPhase(null); setScanning(false); return }
+    wsRef.current = ws
+
+    ws.addEventListener('open', () => {
+      setScanPhase('Scanning map...')
+      addScanMsg('info', `Starting scan: radius=${radius}, pop=${minPop}–${maxPop}, limit=${limit}`)
+      ws.send(JSON.stringify(body))
+    })
+  }
+
+  const handleCancel = () => {
+    if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null }
+    setScanPhase(null)
+    setScanning(false)
+    addScanMsg('warning', 'Scan cancelled by user')
+    toast.warning('Scan cancelled')
   }
 
   return (
@@ -173,9 +302,17 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         <input type="number" className="input-field max-w-[150px]" value={limit} min={1} max={500} onChange={(e) => setLimit(Number(e.target.value))} />
       </div>
 
-      <button className="btn-primary" onClick={handleScan} disabled={scanning}>
-        {scanning ? 'Scanning...' : 'Scan Map'}
-      </button>
+      <div className="flex gap-3 items-center">
+        <button className="btn-primary" onClick={handleScan} disabled={scanning}>
+          {scanning ? 'Scanning...' : 'Scan Map'}
+        </button>
+        {scanning && <button className="btn-danger" onClick={handleCancel}>Cancel</button>}
+      </div>
+
+      {/* Live scan progress */}
+      {(scanMessages.length > 0 || scanning) && (
+        <ScanProgressPanel phase={scanPhase} messages={scanMessages} enrichProgress={enrichProgress} stats={scanStats} />
+      )}
     </div>
   )
 }

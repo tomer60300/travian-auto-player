@@ -3,6 +3,7 @@ import api from '../api'
 import useGameStore from '../stores/gameStore'
 import { useToast } from '../components/Toast'
 import { useNavigate } from 'react-router-dom'
+import ConnectionProgress from '../components/ConnectionProgress'
 
 export default function Connect() {
   const navigate = useNavigate()
@@ -26,6 +27,9 @@ export default function Connect() {
   const [connectingServerId, setConnectingServerId] = useState(null)
   const [deletingServerId, setDeletingServerId] = useState(null)
   const [confirmDeleteId, setConfirmDeleteId] = useState(null)
+
+  // Connection progress overlay
+  const [connectingTo, setConnectingTo] = useState(null) // server name/url for the progress overlay
 
   // New server form state
   const [serverUrl, setServerUrl] = useState('')
@@ -56,6 +60,7 @@ export default function Connect() {
 
   async function handleQuickConnect(server) {
     setConnectingServerId(server.id)
+    setConnectingTo(server.label || server.server_url)
     try {
       await connectFromSaved(server.id)
       justConnectedRef.current = true
@@ -67,6 +72,7 @@ export default function Connect() {
         err.response?.data?.message ||
         'Failed to connect to server'
       toast.error(message)
+      setConnectingTo(null)
     } finally {
       setConnectingServerId(null)
     }
@@ -106,6 +112,7 @@ export default function Connect() {
     }
 
     setFormLoading(true)
+    setConnectingTo(label.trim() || serverUrl.trim())
     try {
       await connect(serverUrl.trim(), travianUsername.trim(), travianPassword)
       justConnectedRef.current = true
@@ -119,7 +126,6 @@ export default function Connect() {
             label: label.trim() || undefined,
           })
         } catch {
-          // non-critical — connection succeeded even if save failed
           toast.warning('Connected, but failed to save credentials')
         }
       }
@@ -132,6 +138,7 @@ export default function Connect() {
         err.response?.data?.message ||
         'Failed to connect — check URL and credentials'
       setFormError(message)
+      setConnectingTo(null)
     } finally {
       setFormLoading(false)
     }
@@ -151,6 +158,7 @@ export default function Connect() {
 
   return (
     <div className="min-h-screen px-4 py-8 bg-base">
+      <ConnectionProgress serverName={connectingTo} isActive={!!connectingTo} />
       <div className="max-w-5xl mx-auto">
         {/* Header */}
         <h1 className="heading-gold text-2xl mb-6">

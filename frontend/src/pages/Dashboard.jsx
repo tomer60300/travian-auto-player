@@ -152,6 +152,10 @@ function InfoRow({ label, value }) {
   )
 }
 
+function SkeletonCard({ height = 'h-24' }) {
+  return <div className={`card ${height} animate-pulse bg-surface/50`} />
+}
+
 export default function Dashboard() {
   const resources = useGameStore((s) => s.resources)
   const constructionQueue = useGameStore((s) => s.constructionQueue)
@@ -160,25 +164,22 @@ export default function Dashboard() {
   const fetchBuildings = useGameStore((s) => s.fetchBuildings)
   const fetchQueue = useGameStore((s) => s.fetchQueue)
 
-  const [loading, setLoading] = useState(true)
+  const [resourcesReady, setResourcesReady] = useState(false)
+  const [queueReady, setQueueReady] = useState(false)
   const intervalRef = useRef(null)
   const fetchResourcesRef = useRef(fetchResources)
   useEffect(() => { fetchResourcesRef.current = fetchResources }, [fetchResources])
 
-  // Re-fetch on mount AND when active village changes
+  // Fetch all data in PARALLEL, reveal each section as it arrives
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    async function loadData() {
-      await fetchResources()
-      if (cancelled) return
-      await fetchQueue()
-      if (cancelled) return
-      await fetchBuildings()
-      if (cancelled) return
-      setLoading(false)
-    }
-    loadData()
+    setResourcesReady(false)
+    setQueueReady(false)
+
+    // Fire all three in parallel — no sequential blocking
+    fetchResources().then(() => { if (!cancelled) setResourcesReady(true) })
+    fetchQueue().then(() => { if (!cancelled) setQueueReady(true) })
+    fetchBuildings() // buildings aren't displayed on dashboard, but pre-fetched
 
     intervalRef.current = setInterval(() => {
       if (document.visibilityState === 'visible') {
@@ -199,19 +200,27 @@ export default function Dashboard() {
         <VillageSelector />
       </div>
 
-      {loading ? (
-        <div className="card p-12 text-center">
-          <div className="spinner spinner-md mx-auto mb-4" />
-          <span className="text-secondary">Loading village data...</span>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-4">
+        {/* Player info is always available immediately from connect response */}
+        <PlayerInfoCard />
+
+        {/* Resources — skeleton until loaded */}
+        {resourcesReady ? (
           <ResourceBar resources={resources} />
+        ) : (
+          <SkeletonCard height="h-16" />
+        )}
+
+        {/* Construction queue — skeleton until loaded */}
+        {queueReady ? (
           <ConstructionQueueSummary queue={constructionQueue} />
-          <QuickActions />
-          <PlayerInfoCard />
-        </div>
-      )}
+        ) : (
+          <SkeletonCard height="h-20" />
+        )}
+
+        {/* Quick actions are always available */}
+        <QuickActions />
+      </div>
     </div>
   )
 }

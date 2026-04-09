@@ -67,8 +67,17 @@ async def _send(ws: WebSocket, data: dict) -> None:
     """Send JSON to the WebSocket; raise on failure so callers can handle disconnect."""
     try:
         await ws.send_json(data)
-    except Exception:
+    except (RuntimeError, WebSocketDisconnect):
         raise WebSocketDisconnect()
+
+
+async def _try_send(ws: WebSocket, data: dict) -> bool:
+    """Best-effort send — returns False (no exception) if the WS is already closed."""
+    try:
+        await ws.send_json(data)
+        return True
+    except (RuntimeError, WebSocketDisconnect, Exception):
+        return False
 
 
 @router.websocket("/ws/queue/run")
@@ -202,11 +211,10 @@ async def queue_run_ws(websocket: WebSocket):
                     await exec_task
                 except asyncio.CancelledError:
                     pass
-                await _send(websocket, {
+                await _try_send(websocket, {
                     "type": "status",
                     "message": "Execution stopped by client",
                 })
-                # Collect partial results from completed items
                 results = []
                 for item in plan.items:
                     if item.status != "pending":
@@ -216,21 +224,20 @@ async def queue_run_ws(websocket: WebSocket):
                             "level": f"{item.current_level}/{item.target}",
                             "status": item.status,
                         })
-                await _send(websocket, {"type": "complete", "results": results})
+                await _try_send(websocket, {"type": "complete", "results": results})
             else:
                 # Normal completion
                 results = exec_task.result()
 
-                # Send step_complete for each result
                 for r in results:
-                    await _send(websocket, {
+                    await _try_send(websocket, {
                         "type": "step_complete",
                         "building": r.get("building", ""),
                         "level": r.get("level", ""),
                         "success": r.get("status") == "started",
                     })
 
-                await _send(websocket, {"type": "complete", "results": results})
+                await _try_send(websocket, {"type": "complete", "results": results})
 
             # Cancel any pending wait tasks
             for task in pending:
@@ -240,9 +247,11 @@ async def queue_run_ws(websocket: WebSocket):
                 except asyncio.CancelledError:
                     pass
 
+        except WebSocketDisconnect:
+            logger.info("Queue WS disconnected mid-execution: user=%s", user_id)
         except Exception as exc:
             logger.exception("Build queue execution failed for user %s", user_id)
-            await _send(websocket, {"type": "error", "message": str(exc)})
+            await _try_send(websocket, {"type": "error", "message": str(exc)})
         finally:
             # Restore the previous status callback and stop the drainer
             service._on_status = prev_callback
@@ -259,6 +268,6 @@ async def queue_run_ws(websocket: WebSocket):
         logger.info("Queue WS disconnected: user=%s", user_id)
     except Exception as exc:
         logger.exception("Unexpected error in queue WS for user %s", user_id)
-        await _send(websocket, {"type": "error", "message": f"Internal error: {exc}"})
+        await _try_send(websocket, {"type": "error", "message": f"Internal error: {exc}"})
     finally:
         await ws_manager.disconnect(user_id, CHANNEL)

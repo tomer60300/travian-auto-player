@@ -11,6 +11,7 @@ const statusConfig = {
   connected: { label: 'Connected', dotClass: 'status-dot-success' },
   disconnected: { label: 'Disconnected', dotClass: 'status-dot-danger' },
   running: { label: 'Running', dotClass: 'status-dot-warning' },
+  reconnecting: { label: 'Reconnecting...', dotClass: 'status-dot-warning' },
 }
 
 function formatTime(ts) {
