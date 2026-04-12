@@ -1,7 +1,9 @@
 """FastAPI application — mounts API routes + serves built React frontend."""
 
+import asyncio
 import logging
 import os
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -41,12 +43,33 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def _quiet_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """Suppress noisy Windows ProactorEventLoop socket teardown errors.
+
+    On Windows, when a WebSocket or HTTP connection is closed by the client,
+    the ProactorEventLoop tries to call shutdown(SHUT_RDWR) on the already-dead
+    socket, producing a ConnectionResetError (WinError 10054).  This is harmless
+    cleanup noise — the connection was already closed.  We log it at DEBUG
+    instead of letting asyncio print a full traceback to the console.
+    """
+    exc = context.get("exception")
+    if isinstance(exc, ConnectionResetError):
+        logger.debug("Suppressed connection-reset during socket teardown: %s", context.get("message", ""))
+        return
+    # Fall back to the default handler for everything else
+    loop.default_exception_handler(context)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle: init DB on startup, disconnect sessions on shutdown."""
     # Attach the log broadcast handler so server logs stream to web UI
     from travian_api.logging_config import setup_logging
     setup_logging(attach_broadcast=True)
+
+    # Suppress Windows ProactorEventLoop socket teardown noise
+    if sys.platform == "win32":
+        asyncio.get_event_loop().set_exception_handler(_quiet_exception_handler)
 
     await init_db()
     logger.info("Database initialized")
