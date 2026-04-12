@@ -270,4 +270,4 @@ async def queue_run_ws(websocket: WebSocket):
         logger.exception("Unexpected error in queue WS for user %s", user_id)
         await _try_send(websocket, {"type": "error", "message": f"Internal error: {exc}"})
     finally:
-        await ws_manager.disconnect(user_id, CHANNEL)
+        await ws_manager.disconnect(user_id, CHANNEL, websocket)

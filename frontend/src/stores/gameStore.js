@@ -1,6 +1,22 @@
 import { create } from 'zustand';
 import api from '../api';
 
+const VILLAGE_KEY = 'activeVillageId'
+
+function getStoredVillageId() {
+  try {
+    const v = sessionStorage.getItem(VILLAGE_KEY)
+    return v ? Number(v) : null
+  } catch { return null }
+}
+
+function storeVillageId(id) {
+  try {
+    if (id != null) sessionStorage.setItem(VILLAGE_KEY, String(id))
+    else sessionStorage.removeItem(VILLAGE_KEY)
+  } catch {}
+}
+
 let _checkingStatus = false
 
 const useGameStore = create((set, get) => ({
@@ -10,7 +26,7 @@ const useGameStore = create((set, get) => ({
   playerName: null,
   tribeId: null,
   villages: [],
-  activeVillageId: null,
+  activeVillageId: getStoredVillageId(),
   resources: null,
   buildings: [],
   buildingsLoading: false,
@@ -24,35 +40,48 @@ const useGameStore = create((set, get) => ({
       password,
     });
     const data = res.data;
+    const storedVid = getStoredVillageId()
+    const villages = Array.isArray(data.villages) ? data.villages : []
+    const villageToUse = (storedVid && villages.some(v => v.id === storedVid))
+      ? storedVid
+      : data.active_village_id
     set({
       connected: true,
       statusChecked: true,
       serverUrl: data.server_url,
       playerName: data.player_name,
       tribeId: data.tribe_id,
-      activeVillageId: data.active_village_id,
-      villages: Array.isArray(data.villages) ? data.villages : [],
+      activeVillageId: villageToUse,
+      villages: villages,
     });
+    storeVillageId(villageToUse)
     return data;
   },
 
   connectFromSaved: async (serverId) => {
     const res = await api.post(`/travian/servers/${serverId}/connect`);
     const data = res.data;
+    const storedVid = getStoredVillageId()
+    const villages = Array.isArray(data.villages) ? data.villages : []
+    const villageToUse = (storedVid && villages.some(v => v.id === storedVid))
+      ? storedVid
+      : data.active_village_id
     set({
       connected: true,
       statusChecked: true,
       serverUrl: data.server_url,
       playerName: data.player_name,
       tribeId: data.tribe_id,
-      activeVillageId: data.active_village_id,
-      villages: Array.isArray(data.villages) ? data.villages : [],
+      activeVillageId: villageToUse,
+      villages: villages,
     });
+    storeVillageId(villageToUse)
     return data;
   },
 
   disconnect: async () => {
     try { await api.delete('/travian/disconnect'); } catch (e) { console.warn('Disconnect failed:', e) }
+    storeVillageId(null)
     set({
       connected: false,
       serverUrl: null,
@@ -71,15 +100,21 @@ const useGameStore = create((set, get) => ({
       const res = await api.get('/travian/status');
       const data = res.data;
       if (data && data.connected) {
+        const storedVid = getStoredVillageId()
+        const villages = Array.isArray(data.villages) ? data.villages : []
+        const villageToUse = (storedVid && villages.some(v => v.id === storedVid))
+          ? storedVid
+          : data.active_village_id
         set({
           connected: true,
           statusChecked: true,
           serverUrl: data.server_url,
           playerName: data.player_name,
           tribeId: data.tribe_id,
-          activeVillageId: data.active_village_id,
-          villages: Array.isArray(data.villages) ? data.villages : [],
+          activeVillageId: villageToUse,
+          villages: villages,
         });
+        storeVillageId(villageToUse)
       } else {
         set({ connected: false, statusChecked: true });
       }
@@ -91,6 +126,7 @@ const useGameStore = create((set, get) => ({
   switchVillage: async (villageId) => {
     await api.post('/villages/switch', { village_id: villageId });
     set({ activeVillageId: villageId });
+    storeVillageId(villageId)
     await Promise.all([get().fetchResources(), get().fetchBuildings(), get().fetchQueue()]);
   },
 

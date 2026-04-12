@@ -1,4 +1,4 @@
-import { useEffect, lazy, Suspense } from 'react'
+import { useEffect, lazy, Suspense, createContext, useMemo } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import useAuthStore from './stores/authStore'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -16,6 +16,8 @@ const FarmLists = lazy(() => import('./pages/FarmLists'))
 const AutoScout = lazy(() => import('./pages/AutoScout'))
 const BuildQueue = lazy(() => import('./pages/BuildQueue'))
 const Logs = lazy(() => import('./pages/Logs'))
+
+export const TabContext = createContext(null)
 
 function LoadingScreen() {
   return (
@@ -48,36 +50,45 @@ export default function App() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const initialCheckDone = useAuthStore((s) => s.initialCheckDone)
   const checkAuth = useAuthStore((s) => s.checkAuth)
+  const tabId = useMemo(() => {
+    try { return crypto.randomUUID() } catch { return Math.random().toString(36).slice(2) + Date.now().toString(36) }
+  }, [])
 
   useEffect(() => {
     checkAuth()
   }, [checkAuth])
 
   if (!initialCheckDone) {
-    return <LoadingScreen />
+    return (
+      <TabContext.Provider value={tabId}>
+        <LoadingScreen />
+      </TabContext.Provider>
+    )
   }
 
   return (
-    <ErrorBoundary>
-      <ToastContainer />
-      <Suspense fallback={<PageLoader />}>
-        <Routes>
-          <Route path="/login" element={isAuthenticated ? <Navigate to="/connect" replace /> : <GuardedPage><Login /></GuardedPage>} />
-          <Route path="/connect" element={isAuthenticated ? <GuardedPage><Connect /></GuardedPage> : <Navigate to="/login" replace />} />
-          <Route element={isAuthenticated ? <Layout /> : <Navigate to="/login" replace />}>
-            <Route path="/" element={<GuardedPage><Dashboard /></GuardedPage>} />
-            <Route path="/buildings" element={<GuardedPage><Buildings /></GuardedPage>} />
-            <Route path="/military" element={<GuardedPage><Military /></GuardedPage>} />
-            <Route path="/reports" element={<GuardedPage><Reports /></GuardedPage>} />
-            <Route path="/video" element={<GuardedPage><VideoRewards /></GuardedPage>} />
-            <Route path="/farm" element={<GuardedPage><FarmLists /></GuardedPage>} />
-            <Route path="/scout" element={<GuardedPage><AutoScout /></GuardedPage>} />
-            <Route path="/queue" element={<GuardedPage><BuildQueue /></GuardedPage>} />
-            <Route path="/logs" element={<GuardedPage><Logs /></GuardedPage>} />
-          </Route>
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </Suspense>
-    </ErrorBoundary>
+    <TabContext.Provider value={tabId}>
+      <ErrorBoundary>
+        <ToastContainer />
+        <Suspense fallback={<PageLoader />}>
+          <Routes>
+            <Route path="/login" element={isAuthenticated ? <Navigate to="/connect" replace /> : <GuardedPage><Login /></GuardedPage>} />
+            <Route path="/connect" element={isAuthenticated ? <GuardedPage><Connect /></GuardedPage> : <Navigate to="/login" replace />} />
+            <Route element={isAuthenticated ? <Layout /> : <Navigate to="/login" replace />}>
+              <Route path="/" element={<GuardedPage><Dashboard /></GuardedPage>} />
+              <Route path="/buildings" element={<GuardedPage><Buildings /></GuardedPage>} />
+              <Route path="/military" element={<GuardedPage><Military /></GuardedPage>} />
+              <Route path="/reports" element={<GuardedPage><Reports /></GuardedPage>} />
+              <Route path="/video" element={<GuardedPage><VideoRewards /></GuardedPage>} />
+              <Route path="/farm" element={<GuardedPage><FarmLists /></GuardedPage>} />
+              <Route path="/scout" element={<GuardedPage><AutoScout /></GuardedPage>} />
+              <Route path="/queue" element={<GuardedPage><BuildQueue /></GuardedPage>} />
+              <Route path="/logs" element={<GuardedPage><Logs /></GuardedPage>} />
+            </Route>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
+      </ErrorBoundary>
+    </TabContext.Provider>
   )
 }

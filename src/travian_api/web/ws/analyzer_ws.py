@@ -153,4 +153,4 @@ async def ws_analyze_reports(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        await ws_manager.disconnect(user_id, channel)
+        await ws_manager.disconnect(user_id, channel, websocket)

@@ -405,7 +405,7 @@ export default function Buildings() {
   const buildingList = Array.isArray(buildings) ? buildings : []
 
   return (
-    <div className="p-6 max-w-4xl mx-auto">
+    <div className="p-6 max-w-5xl mx-auto">
       <div className="flex justify-between items-center mb-5">
         <h2 className="heading-gold text-2xl">Buildings</h2>
         <div className="flex items-center gap-3">
@@ -461,12 +461,15 @@ export default function Buildings() {
               const categoryClass = CATEGORY_TO_CLASS[category] || ''
               const isSelected = selectedSlot === slotId
               const isEmpty = category === 'empty'
+              const isUpgrading = constructionQueue?.some(
+                (q) => (q.slot_id ?? q.slotId) === slotId
+              )
 
               return (
                 <button
                   key={slotId}
                   onClick={() => handleSlotClick(slotId)}
-                  className={`building-slot ${categoryClass}${isSelected ? ' row-selected' : ''}`}
+                  className={`building-slot ${categoryClass}${isSelected ? ' row-selected' : ''}${isUpgrading ? ' border-gold' : ''}`}
                 >
                   <span className="text-xs text-secondary min-w-8 text-right">
                     #{slotId}
@@ -477,7 +480,7 @@ export default function Buildings() {
                     {isEmpty ? 'Empty Slot' : b.name || 'Unknown'}
                   </span>
                   <span className="text-xs text-secondary min-w-14 text-right">
-                    {isEmpty ? '---' : `Lvl ${b.level ?? '?'}`}
+                    {isEmpty ? '---' : `Lv ${b.level ?? '?'}`}
                   </span>
                 </button>
               )

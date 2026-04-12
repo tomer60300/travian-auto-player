@@ -46,12 +46,13 @@ async def ws_logs(websocket: WebSocket):
     min_level = _LEVEL_MAP.get(level_param, logging.INFO)
 
     # Unique subscriber ID — supports multiple tabs per user
+    # Pass user_id so logs are filtered to this user only (no cross-user leakage)
     sub_id = id(websocket)
-    queue = log_stream_manager.subscribe(sub_id)
+    queue = log_stream_manager.subscribe(sub_id, user_id=user_id)
 
     try:
-        # Send history as catch-up
-        history = log_stream_manager.get_history(100)
+        # Send history as catch-up (filtered to this user)
+        history = log_stream_manager.get_history(100, user_id=user_id)
         filtered_history = [e for e in history if _LEVEL_MAP.get(e.get("level", "info"), logging.INFO) >= min_level]
         await websocket.send_json({"type": "history", "entries": filtered_history})
 
@@ -100,4 +101,4 @@ async def ws_logs(websocket: WebSocket):
         logger.exception("Unexpected error in logs WS: user=%s", user_id)
     finally:
         log_stream_manager.unsubscribe(sub_id)
-        await ws_manager.disconnect(user_id, channel)
+        await ws_manager.disconnect(user_id, channel, websocket)

@@ -1,98 +1,166 @@
-import { useState, useEffect } from 'react'
-
-const STEPS = [
-  { key: 'connect', label: 'Connecting to server', detail: 'Establishing secure connection...' },
-  { key: 'auth', label: 'Authenticating', detail: 'Logging in to Travian...' },
-  { key: 'villages', label: 'Loading villages', detail: 'Fetching player data...' },
-  { key: 'ready', label: 'Ready', detail: 'Redirecting to dashboard...' },
-]
+import { useState, useEffect, useRef } from 'react'
 
 /**
- * Animated connection progress overlay.
- * Advances through steps on a timer to give the impression of progress,
- * since the backend connect call is a single blocking request.
+ * Connection progress overlay.
+ *
+ * The backend connect is a SINGLE blocking HTTP call that does:
+ *   1. DNS + TLS to Travian server
+ *   2. Login (username/password via stealth-throttled HTTP)
+ *   3. Parse response → extract player, tribe, villages
+ *
+ * We can't get real mid-flight progress, so this component shows an
+ * honest indeterminate progress with a pulsing status indicator.
+ * The steps advance on a timer but the overall feel is "working…"
+ * rather than pretending we know exact progress.
  */
-export default function ConnectionProgress({ serverName, isActive }) {
-  const [step, setStep] = useState(0)
 
+export default function ConnectionProgress({ serverName, isActive }) {
+  const [visible, setVisible] = useState(false)
+  const [elapsed, setElapsed] = useState(0)
+  const startRef = useRef(null)
+
+  // Fade in/out
   useEffect(() => {
-    if (!isActive) { setStep(0); return }
-    // Advance through "visual" steps on a timer.
-    // Step 0 immediately, step 1 after 1.2s, step 2 after 3s
-    const timers = [
-      setTimeout(() => setStep(1), 1200),
-      setTimeout(() => setStep(2), 3000),
-    ]
-    return () => timers.forEach(clearTimeout)
+    if (isActive) {
+      startRef.current = Date.now()
+      setElapsed(0)
+      requestAnimationFrame(() => setVisible(true))
+    } else {
+      setVisible(false)
+      const t = setTimeout(() => { setElapsed(0); startRef.current = null }, 300)
+      return () => clearTimeout(t)
+    }
   }, [isActive])
 
-  // Called externally when connect actually succeeds
+  // Elapsed timer
   useEffect(() => {
     if (!isActive) return
-    // The parent will unmount us on navigate, so step 3 is just visual
+    const id = setInterval(() => {
+      if (startRef.current) setElapsed(Math.floor((Date.now() - startRef.current) / 1000))
+    }, 1000)
+    return () => clearInterval(id)
   }, [isActive])
 
-  if (!isActive) return null
+  if (!isActive && !visible) return null
+
+  const statusText = elapsed < 3
+    ? 'Establishing connection…'
+    : elapsed < 8
+      ? 'Authenticating with server…'
+      : elapsed < 15
+        ? 'Loading player data…'
+        : 'Still working — stealth delays active…'
 
   return (
-    <div className="fixed inset-0 z-50 bg-base/95 flex items-center justify-center">
-      <div className="w-full max-w-md px-6">
-        {/* Title */}
-        <div className="text-center mb-8">
-          <h2 className="logo-text-lg text-xl mb-2">Connecting</h2>
-          {serverName && <p className="text-sm text-secondary truncate">{serverName}</p>}
-        </div>
-
-        {/* Steps */}
-        <div className="flex flex-col gap-1">
-          {STEPS.map((s, i) => {
-            const isDone = i < step
-            const isCurrent = i === step
-            const isPending = i > step
-
-            return (
-              <div
-                key={s.key}
-                className={`flex items-center gap-3 px-4 py-2.5 rounded-lg transition-all duration-300 ${
-                  isCurrent ? 'bg-surface border-default' : ''
-                } ${isPending ? 'opacity-30' : ''}`}
-              >
-                {/* Icon */}
-                <div className="w-6 h-6 flex items-center justify-center shrink-0">
-                  {isDone ? (
-                    <span className="text-success text-lg">&#10003;</span>
-                  ) : isCurrent ? (
-                    <div className="spinner spinner-sm" />
-                  ) : (
-                    <span className="w-2 h-2 rounded-full bg-secondary/30 block" />
-                  )}
-                </div>
-
-                {/* Text */}
-                <div className="flex-1 min-w-0">
-                  <div className={`text-sm font-medium ${isDone ? 'text-success' : isCurrent ? 'text-primary' : 'text-secondary'}`}>
-                    {s.label}
-                  </div>
-                  {isCurrent && (
-                    <div className="text-xs text-secondary mt-0.5 animate-pulse">{s.detail}</div>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-
-        {/* Subtle progress bar */}
-        <div className="mt-6 h-1 bg-surface rounded-full overflow-hidden">
-          <div
-            className="h-full bg-gold rounded-full transition-all duration-1000 ease-out"
-            style={{ width: `${((step + 1) / STEPS.length) * 100}%` }}
-          />
-        </div>
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 50,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: 'var(--bg-base)',
+        opacity: visible ? 1 : 0,
+        transition: 'opacity 300ms cubic-bezier(0.2, 0, 0, 1)',
+      }}
+    >
+      {/* Atmospheric blurs */}
+      <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }} aria-hidden="true">
+        <div style={{
+          position: 'absolute', width: 400, height: 400, top: '20%', left: '50%',
+          transform: 'translateX(-50%)', borderRadius: '50%',
+          background: 'var(--md-primary)', opacity: 0.06, filter: 'blur(80px)',
+        }} />
+        <div style={{
+          position: 'absolute', width: 300, height: 300, bottom: '10%', right: '20%',
+          borderRadius: '50%', background: 'var(--md-tertiary)', opacity: 0.05, filter: 'blur(60px)',
+        }} />
       </div>
+
+      <div style={{ width: '100%', maxWidth: 380, padding: '0 1.5rem', position: 'relative', zIndex: 1, textAlign: 'center' }}>
+        {/* Pulsing connection icon */}
+        <div style={{
+          width: 80, height: 80, margin: '0 auto 24px', borderRadius: 24,
+          background: 'var(--md-primary-container)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          animation: 'status-pulse 2s ease-in-out infinite',
+        }}>
+          <span className="spinner" style={{ width: 32, height: 32, borderWidth: 3 }} />
+        </div>
+
+        {/* Title */}
+        <h2 style={{
+          fontFamily: "'Roboto', system-ui, sans-serif", fontWeight: 500,
+          fontSize: '1.35rem', color: 'var(--text-primary)', margin: '0 0 6px',
+        }}>
+          Connecting
+        </h2>
+
+        {/* Server name */}
+        {serverName && (
+          <p style={{
+            fontSize: '0.85rem', color: 'var(--md-primary)', margin: '0 0 20px',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500,
+          }}>
+            {serverName}
+          </p>
+        )}
+
+        {/* Status card */}
+        <div style={{
+          background: 'var(--bg-card)', borderRadius: 20, padding: '20px 24px',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
+        }}>
+          {/* Current activity */}
+          <p style={{
+            fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 16px',
+            minHeight: 20, transition: 'opacity 200ms',
+          }}>
+            {statusText}
+          </p>
+
+          {/* Indeterminate progress bar */}
+          <div style={{
+            height: 4, borderRadius: 9999, backgroundColor: 'var(--md-surface-container-high)',
+            overflow: 'hidden', position: 'relative',
+          }}>
+            <div style={{
+              position: 'absolute', top: 0, left: 0, height: '100%', width: '40%',
+              borderRadius: 9999, backgroundColor: 'var(--md-primary)',
+              animation: 'indeterminate-bar 1.8s cubic-bezier(0.65, 0, 0.35, 1) infinite',
+            }} />
+          </div>
+
+          {/* Elapsed time */}
+          <p style={{
+            fontSize: '0.75rem', color: 'var(--text-secondary)', margin: '12px 0 0',
+            opacity: 0.7, fontVariantNumeric: 'tabular-nums',
+          }}>
+            {elapsed > 0 ? `${elapsed}s elapsed` : ''}
+          </p>
+        </div>
+
+        {/* Hint for long waits */}
+        {elapsed >= 10 && (
+          <p style={{
+            fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: 16, opacity: 0.6,
+            animation: 'fade-in 300ms ease',
+          }}>
+            Stealth mode adds delays between requests to avoid detection
+          </p>
+        )}
+      </div>
+
+      {/* Indeterminate bar animation */}
+      <style>{`
+        @keyframes indeterminate-bar {
+          0% { left: -40%; }
+          100% { left: 100%; }
+        }
+      `}</style>
     </div>
   )
 }
 
-/** Trigger the "Ready" step from outside */
-ConnectionProgress.STEP_COUNT = STEPS.length
+ConnectionProgress.STEP_COUNT = 4

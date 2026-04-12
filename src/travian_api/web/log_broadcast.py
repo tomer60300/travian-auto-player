@@ -73,11 +73,17 @@ def _source_from_logger(name: str) -> str:
 
 
 class LogStreamManager:
-    """Manages per-subscriber queues and a shared ring buffer."""
+    """Manages per-subscriber queues and a shared ring buffer.
+
+    Subscribers are tagged with a user_id so that log entries are only
+    delivered to the user that generated them. This prevents cross-user
+    log leakage when multiple users are connected simultaneously.
+    """
 
     def __init__(self, buffer_size: int = RING_BUFFER_SIZE) -> None:
         self._buffer: deque[dict] = deque(maxlen=buffer_size)
-        self._subscribers: dict[int, asyncio.Queue] = {}
+        # {subscriber_id: (queue, user_id)}
+        self._subscribers: dict[int, tuple[asyncio.Queue, int | None]] = {}
         self._lock = Lock()
         self._min_level = logging.INFO
 
@@ -90,25 +96,32 @@ class LogStreamManager:
         self._min_level = value
 
     def push(self, entry: dict) -> None:
-        """Push a log entry to all subscribers (thread-safe)."""
+        """Push a log entry to subscribers that match the entry's user_id."""
+        entry_user = entry.get("user_id")
         with self._lock:
             self._buffer.append(entry)
-            for q in self._subscribers.values():
-                try:
-                    q.put_nowait(entry)
-                except asyncio.QueueFull:
-                    # Drop oldest if subscriber is slow
+            for sub_id, (q, sub_user) in self._subscribers.items():
+                # Deliver if: entry has no user_id (system log), or user matches
+                if entry_user is None or sub_user is None or entry_user == sub_user:
                     try:
-                        q.get_nowait()
                         q.put_nowait(entry)
-                    except (asyncio.QueueEmpty, asyncio.QueueFull):
-                        pass
+                    except asyncio.QueueFull:
+                        try:
+                            q.get_nowait()
+                            q.put_nowait(entry)
+                        except (asyncio.QueueEmpty, asyncio.QueueFull):
+                            pass
 
-    def subscribe(self, subscriber_id: int) -> asyncio.Queue:
-        """Register a subscriber and return its queue."""
+    def subscribe(self, subscriber_id: int, user_id: int | None = None) -> asyncio.Queue:
+        """Register a subscriber and return its queue.
+
+        Args:
+            subscriber_id: Unique ID for this subscription (e.g., id(websocket))
+            user_id: If set, only receive logs tagged with this user_id
+        """
         q: asyncio.Queue = asyncio.Queue(maxsize=500)
         with self._lock:
-            self._subscribers[subscriber_id] = q
+            self._subscribers[subscriber_id] = (q, user_id)
         return q
 
     def unsubscribe(self, subscriber_id: int) -> None:
@@ -116,10 +129,15 @@ class LogStreamManager:
         with self._lock:
             self._subscribers.pop(subscriber_id, None)
 
-    def get_history(self, count: int = 100) -> list[dict]:
-        """Return the last *count* entries from the ring buffer."""
+    def get_history(self, count: int = 100, user_id: int | None = None) -> list[dict]:
+        """Return the last *count* entries from the ring buffer.
+
+        If user_id is set, only return entries for that user (or system entries).
+        """
         with self._lock:
             items = list(self._buffer)
+        if user_id is not None:
+            items = [e for e in items if e.get("user_id") is None or e.get("user_id") == user_id]
         return items[-count:]
 
 

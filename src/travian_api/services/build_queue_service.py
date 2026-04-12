@@ -581,6 +581,40 @@ class BuildQueueService:
                         missing_str = ', '.join(f"{k}={v}" for k, v in missing.items()) if missing else 'none'
                         self._report(f"  {item.building} (slot {item.slot_id}): costs({costs_str}) missing({missing_str})")
                 if check['can_build']:
+                    # ── Guard: check if this slot already has an in-progress upgrade ──
+                    try:
+                        current_queue = await self.building_service.get_construction_queue(village_id=vid)
+                        already_upgrading = any(
+                            q.building_name and item.building and
+                            q.building_name.lower() == item.building.lower()
+                            for q in current_queue
+                        )
+                        if already_upgrading:
+                            self._report(f"  SKIP: {item.building} (slot {item.slot_id}) already in construction queue — waiting for it to finish")
+                            # Wait for queue to clear before re-evaluating
+                            while not await self.is_queue_empty(village_id=vid):
+                                remaining = await self.get_queue_remaining(village_id=vid)
+                                wait = max(remaining + 3, 5)
+                                await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.05))
+                            # Re-read level after queue clears
+                            try:
+                                buildings = await self.building_service.get_village_buildings(village_id=vid)
+                                for b in buildings:
+                                    if b.slot_id == item.slot_id:
+                                        item.current_level = b.level
+                                        break
+                            except Exception:
+                                pass
+                            if item.current_level >= item.target:
+                                item.status = "done"
+                                self._report(f"  DONE: {item.building} reached Lv{item.current_level} (target was {item.target})")
+                            else:
+                                self._report(f"  PROGRESS: {item.building} now Lv{item.current_level}, continuing to Lv{item.target}")
+                            built = True
+                            break
+                    except Exception as e:
+                        self._report(f"  WARNING: Queue guard check failed: {e} — proceeding with upgrade")
+
                     # Stealth: simulate human browsing to the building before upgrading
                     delay = self.http_client.human_delay
                     await delay.wait(ActionType.PRE_UPGRADE, f"preparing to upgrade {item.building}")
@@ -673,12 +707,28 @@ class BuildQueueService:
                                 f"(tracker expected Lv{next_level}). Using server value."
                             )
 
-                        item.current_level = actual_level
-                        if item.current_level >= item.target:
+                        # Guard: also check queue — server level may lag behind
+                        queued_target = None
+                        try:
+                            post_queue = await self.building_service.get_construction_queue(village_id=vid)
+                            for q in post_queue:
+                                if q.building_name and item.building and q.building_name.lower() == item.building.lower():
+                                    queued_target = q.target_level
+                                    break
+                        except Exception:
+                            pass
+
+                        if queued_target is not None and queued_target >= item.target:
+                            item.current_level = queued_target
                             item.status = "done"
-                            self._report(f"  DONE: {item.building} reached Lv{item.current_level} (target was {item.target})")
+                            self._report(f"  DONE: {item.building} upgrade to Lv{queued_target} in progress/complete (target was {item.target})")
                         else:
-                            self._report(f"  PROGRESS: {item.building} now Lv{item.current_level}, continuing to Lv{item.target}")
+                            item.current_level = actual_level
+                            if item.current_level >= item.target:
+                                item.status = "done"
+                                self._report(f"  DONE: {item.building} reached Lv{item.current_level} (target was {item.target})")
+                            else:
+                                self._report(f"  PROGRESS: {item.building} now Lv{item.current_level}, continuing to Lv{item.target}")
 
                         break
 

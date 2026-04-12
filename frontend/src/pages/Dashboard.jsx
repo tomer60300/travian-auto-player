@@ -15,30 +15,11 @@ const TRIBE_NAMES = {
 }
 
 const quickActions = [
-  {
-    icon: '\uD83C\uDFAC',
-    label: 'Claim Video Rewards',
-    description: 'Watch ads for free resources',
-    path: '/video',
-  },
-  {
-    icon: '\uD83D\uDDE1\uFE0F',
-    label: 'Send Farm Lists',
-    description: 'Launch farm raids',
-    path: '/farm',
-  },
-  {
-    icon: '\uD83D\uDCDC',
-    label: 'View Reports',
-    description: 'Battle and trade reports',
-    path: '/reports',
-  },
-  {
-    icon: '\uD83D\uDDFA\uFE0F',
-    label: 'Scan Map',
-    description: 'Auto-scout surroundings',
-    path: '/scout',
-  },
+  { icon: '\uD83D\uDCCB', label: 'Build Queue', description: 'Automated building upgrades', path: '/queue' },
+  { icon: '\uD83C\uDF3E', label: 'Send Farms', description: 'Launch farm raids', path: '/farm' },
+  { icon: '\uD83D\uDD2D', label: 'Scout Map', description: 'Auto-scout surroundings', path: '/scout' },
+  { icon: '\uD83C\uDFAC', label: 'Video Rewards', description: 'Watch ads for free resources', path: '/video' },
+  { icon: '\uD83D\uDCDC', label: 'Reports', description: 'Battle and trade reports', path: '/reports' },
 ]
 
 function formatTimeRemaining(seconds) {
@@ -103,7 +84,7 @@ function QuickActions() {
       <h3 className="heading-gold text-base mb-3">
         Quick Actions
       </h3>
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-3">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-3">
         {quickActions.map((action) => (
           <button
             key={action.path}
@@ -125,6 +106,12 @@ function PlayerInfoCard() {
   const playerName = useGameStore((s) => s.playerName)
   const tribeId = useGameStore((s) => s.tribeId)
   const villages = useGameStore((s) => s.villages)
+  const activeVillageId = useGameStore((s) => s.activeVillageId)
+
+  const activeVillage = villages?.find((v) => (v.id ?? v.villageId) === activeVillageId)
+  const coordsStr = activeVillage
+    ? `(${activeVillage.x ?? '?'}|${activeVillage.y ?? '?'})`
+    : '---'
 
   return (
     <div className="card p-4">
@@ -136,6 +123,7 @@ function PlayerInfoCard() {
         <InfoRow label="Player" value={playerName || '---'} />
         <InfoRow label="Tribe" value={TRIBE_NAMES[tribeId] || `Tribe ${tribeId ?? '?'}`} />
         <InfoRow label="Villages" value={villages?.length ?? 0} />
+        <InfoRow label="Active Village" value={coordsStr} />
       </div>
     </div>
   )
@@ -194,7 +182,7 @@ export default function Dashboard() {
   }, [activeVillageId, fetchResources, fetchQueue, fetchBuildings])
 
   return (
-    <div className="p-6 max-w-4xl mx-auto">
+    <div className="p-6 max-w-5xl mx-auto">
       <div className="flex justify-between items-center mb-5">
         <h2 className="heading-gold text-2xl">Dashboard</h2>
         <VillageSelector />
@@ -205,15 +193,25 @@ export default function Dashboard() {
         <PlayerInfoCard />
 
         {/* Resources — skeleton until loaded */}
-        {resourcesReady ? (
-          <ResourceBar resources={resources} />
-        ) : (
-          <SkeletonCard height="h-16" />
-        )}
+        <div>
+          <h3 className="heading-gold text-base mb-2">Resources</h3>
+          {resourcesReady ? (
+            <ResourceBar resources={resources} />
+          ) : (
+            <SkeletonCard height="h-16" />
+          )}
+        </div>
 
         {/* Construction queue — skeleton until loaded */}
         {queueReady ? (
-          <ConstructionQueueSummary queue={constructionQueue} />
+          <>
+            <ConstructionQueueSummary queue={constructionQueue} />
+            {(!constructionQueue || constructionQueue.length === 0) && resourcesReady && (
+              <div className="card p-6 text-center">
+                <p className="text-secondary text-sm">No active operations. Start something from the actions below.</p>
+              </div>
+            )}
+          </>
         ) : (
           <SkeletonCard height="h-20" />
         )}

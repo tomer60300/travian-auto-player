@@ -78,16 +78,14 @@ async def switch_village(
     body: SwitchVillageRequest,
     session: TravianSession = Depends(get_travian_session),
 ):
-    """Switch the active village context."""
-    try:
-        session.switch_village(body.village_id)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        )
+    """Switch the active village context.
 
-    # Find the village we just switched to
+    NOTE: This is now a client-side-only operation. The backend validates that the
+    village belongs to the player but does NOT mutate session.active_village_id.
+    Each browser tab tracks its own active village via sessionStorage. This prevents
+    one tab/browser from affecting another's village context.
+    """
+    # Validate that the village belongs to this player (don't mutate session state)
     village = None
     if session.auth_state:
         for v in session.auth_state.villages:
@@ -105,10 +103,10 @@ async def switch_village(
     if village is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Village {body.village_id} not found after switch.",
+            detail=f"Village {body.village_id} not found for this player.",
         )
 
     return SwitchVillageResponse(
-        active_village_id=session.active_village_id,
+        active_village_id=body.village_id,
         village=village,
     )

@@ -6,6 +6,12 @@ const MAX_ENTRIES = 2000
 const useLogStore = create((set) => ({
   entries: [],
   serverLogCount: 0,
+  drawerOpen: false,
+  drawerHeight: 300,
+
+  toggleDrawer: () => set((state) => ({ drawerOpen: !state.drawerOpen })),
+  setDrawerOpen: (open) => set({ drawerOpen: open }),
+  setDrawerHeight: (h) => set({ drawerHeight: h }),
 
   addLog: (level, source, message, detail, origin = 'client') => {
     const entry = {

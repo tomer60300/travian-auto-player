@@ -89,7 +89,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
                 "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
                 "font-src 'self' https://fonts.gstatic.com; "
-                "connect-src 'self' ws: wss: http://localhost:* ws://localhost:*; "
+                "connect-src 'self' ws: wss: http://localhost:* ws://localhost:* http://100.103.184.128:* ws://100.103.184.128:*; "
                 "img-src 'self' data:; "
                 "frame-ancestors 'none'"
             )
@@ -108,7 +108,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 # CORS for development (Vite dev server runs on port 5173)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:8000"],
+    allow_origins=["http://localhost:5173", "http://localhost:8000", "http://localhost:8001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -158,7 +158,7 @@ def main():
     """CLI entry point for ``travian-web`` command."""
     import uvicorn
 
-    uvicorn.run("travian_api.web.app:app", host="0.0.0.0", port=8000)
+    uvicorn.run("travian_api.web.app:app", host="0.0.0.0", port=8001)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import { useToast } from '../components/Toast'
 import WebSocketPanel from '../components/WebSocketPanel'
 import VillageSelector from '../components/VillageSelector'
 import useGameStore from '../stores/gameStore'
+import api from '../api'
 
 // ── localStorage helpers ─────────────────────────────────────────────
 const LS_KEY_ALLIANCES = 'autoscout_exclude_alliances'
@@ -67,7 +68,6 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const [maxPop, setMaxPop] = useState(100)
   const [maxPlayerPop, setMaxPlayerPop] = useState('')
   const [showOases, setShowOases] = useState(false)
-  const [limit, setLimit] = useState(100)
 
   // Alliance & player exclusion — persisted in localStorage
   const [excludeAlliances, setExcludeAlliances] = useState(() => loadJson(LS_KEY_ALLIANCES, []))
@@ -124,7 +124,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     setEnrichProgress(null)
     setScanStats(null)
 
-    const config = { radius, minPop, maxPop, maxPlayerPop, showOases, limit, excludeAlliances, excludePlayers }
+    const config = { radius, minPop, maxPop, maxPlayerPop, showOases, excludeAlliances, excludePlayers }
     onConfigChange?.(config)
 
     const body = {
@@ -132,7 +132,6 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       min_pop: minPop,
       max_pop: maxPop,
       show_oases: showOases,
-      limit,
       exclude_player_names: excludePlayers.flatMap((p) => p.split(',').map(s => s.trim())).filter(Boolean),
       village_id: activeVillageId || undefined,
     }
@@ -209,7 +208,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
 
     ws.addEventListener('open', () => {
       setScanPhase('Scanning map...')
-      addScanMsg('info', `Starting scan: radius=${radius}, pop=${minPop}–${maxPop}, limit=${limit}`)
+      addScanMsg('info', `Starting scan: radius=${radius}, pop=${minPop}–${maxPop}`)
       ws.send(JSON.stringify(body))
     })
   }
@@ -294,12 +293,6 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             ))}
           </div>
         )}
-      </div>
-
-      {/* Result limit */}
-      <div className="mb-5">
-        <label className="field-label-lg">Result Limit</label>
-        <input type="number" className="input-field max-w-[150px]" value={limit} min={1} max={500} onChange={(e) => setLimit(Number(e.target.value))} />
       </div>
 
       <div className="flex gap-3 items-center">
@@ -418,7 +411,8 @@ function ScanResultsTable({ results, selected, setSelected }) {
 function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   const [amount, setAmount] = useState(1)
   const [scoutType, setScoutType] = useState('resources')
-  const [delay, setDelay] = useState(3)
+  const [delayMin, setDelayMin] = useState(2)
+  const [delayMax, setDelayMax] = useState(5)
   const [running, setRunning] = useState(false)
   const [wsStatus, setWsStatus] = useState('disconnected')
   const [messages, setMessages] = useState([])
@@ -428,12 +422,39 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   const activeVillageId = useGameStore((s) => s.activeVillageId)
   const toast = useToast()
 
+  // Idle scout count
+  const [idleScouts, setIdleScouts] = useState(null)
+  const [checkingScouts, setCheckingScouts] = useState(false)
+
+  const checkIdleScouts = async () => {
+    if (!activeVillageId) return
+    setCheckingScouts(true)
+    try {
+      const res = await api.get(`/military/troops?village_id=${activeVillageId}`)
+      const troops = res.data
+      // Scout unit depends on tribe: t3 for Gauls, t4 for Romans/Teutons
+      const tribeId = useGameStore.getState().tribeId
+      const scoutKey = tribeId === 3 ? 't3' : 't4'
+      const count = troops[scoutKey] || 0
+      setIdleScouts(count)
+    } catch {
+      setIdleScouts('API not available')
+    } finally {
+      setCheckingScouts(false)
+    }
+  }
+
   // Loop mode state
   const [loopEnabled, setLoopEnabled] = useState(false)
   const [loopInterval, setLoopInterval] = useState(300) // seconds between cycles
+  const [loopDuration, setLoopDuration] = useState(0) // 0 = infinite
   const [loopCycle, setLoopCycle] = useState(0)
   const loopStoppedRef = useRef(false)
   const loopTimerRef = useRef(null)
+  const loopStartRef = useRef(null)
+
+  // Round-robin resume position
+  const [resumeIndex, setResumeIndex] = useState(0)
 
   useEffect(() => { return () => {
     mountedRef.current = false
@@ -453,20 +474,34 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   const scanConfigRef = useRef(scanConfig)
   const amountRef = useRef(amount)
   const scoutTypeRef = useRef(scoutType)
-  const delayRef = useRef(delay)
+  const delayMinRef = useRef(delayMin)
+  const delayMaxRef = useRef(delayMax)
   const villageIdRef = useRef(activeVillageId)
+  const resumeIndexRef = useRef(resumeIndex)
+  const loopDurationRef = useRef(loopDuration)
   useEffect(() => { scanResultsRef.current = scanResults }, [scanResults])
   useEffect(() => { selectedRef.current = selected }, [selected])
   useEffect(() => { scanConfigRef.current = scanConfig }, [scanConfig])
   useEffect(() => { amountRef.current = amount }, [amount])
   useEffect(() => { scoutTypeRef.current = scoutType }, [scoutType])
-  useEffect(() => { delayRef.current = delay }, [delay])
+  useEffect(() => { delayMinRef.current = delayMin }, [delayMin])
+  useEffect(() => { delayMaxRef.current = delayMax }, [delayMax])
   useEffect(() => { villageIdRef.current = activeVillageId }, [activeVillageId])
+  useEffect(() => { resumeIndexRef.current = resumeIndex }, [resumeIndex])
+  useEffect(() => { loopDurationRef.current = loopDuration }, [loopDuration])
 
   // Core: run one scout pass via WS, returns a promise that resolves when complete
   const runOnePass = useCallback((cycleNum) => {
     return new Promise((resolve) => {
       if (!mountedRef.current || loopStoppedRef.current) { resolve(); return }
+      // Safety timeout — resolve if WS never completes (5 min max per pass)
+      let resolved = false
+      const safeResolve = () => { if (!resolved) { resolved = true; resolve() } }
+      const safetyTimer = setTimeout(() => {
+        addMessage('warning', 'Pass timed out after 5 minutes')
+        setWsStatus('disconnected')
+        safeResolve()
+      }, 300000)
 
       // Send selected targets with enriched data — don't let the backend re-scan
       const curResults = scanResultsRef.current
@@ -494,7 +529,8 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
               const ok = data.success
               const errStr = !ok && data.error ? `: ${data.error}` : ''
               const ttStr = data.travel_time ? ` | ${data.travel_time}` : ''
-              addMessage(ok ? 'success' : 'warning', `[${data.index || '?'}/${data.total || '?'}] (${data.target.x},${data.target.y}) ${ok ? 'Sent' : 'Failed'}${errStr}${ttStr}`)
+              const t = data.target || {}
+              addMessage(ok ? 'success' : 'warning', `[${data.index || '?'}/${data.total || '?'}] (${t.x ?? '?'},${t.y ?? '?'}) ${ok ? 'Sent' : 'Failed'}${errStr}${ttStr}`)
               break
             }
             case 'waiting':
@@ -506,28 +542,55 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
               const avgStr = data.avg_time_per_target ? ` (avg ${data.avg_time_per_target}s/target)` : ''
               addMessage('success', `Pass done: ${data.successful}/${data.total_sent} sent${timeStr}${avgStr}`)
               setProgress(null); setWsStatus('disconnected')
-              resolve()
+              // Update round-robin resume index (prefer backend-computed value)
+              if (data.next_start_index != null) setResumeIndex(data.next_start_index)
+              else setResumeIndex((prev) => (prev + (data.total_sent || 0)) % (scanResultsRef.current?.length || 1))
+              clearTimeout(safetyTimer); safeResolve()
               break
             }
+            case 'scout_preflight':
+              addMessage('info', `Scouts available: ${data.available}${data.needed_per_target > 1 ? ` (${data.needed_per_target} per target)` : ''} — can send to ${data.can_send_to}/${data.total_targets} targets`)
+              break
+            case 'scouts_capped':
+              addMessage('warning', data.message || `Capped to ${data.can_send_to} targets (${data.available} scouts idle)`)
+              break
+            case 'scouts_exhausted':
+              addMessage('warning', data.message || `Scouts ran out after ${data.sent_so_far} sends`)
+              setProgress(null)
+              break
+            case 'scouts_low':
+              addMessage('warning', `Scouts running low: ${data.remaining} remaining`)
+              break
+            case 'noise_action':
+              addMessage('info', data.message || 'Stealth: idle browsing...')
+              break
+            case 're_navigate':
+              addMessage('info', data.message || 'Stealth: breaking request pattern...')
+              break
             case 'error': addMessage('error', data.message || 'Error'); break
             default: if (data.message) addMessage('info', data.message); break
           }
         },
-        () => { if (mountedRef.current) { addMessage('error', 'WS error'); setWsStatus('disconnected'); resolve() } },
-        () => { if (mountedRef.current) { setWsStatus('disconnected'); resolve() } }
+        () => { if (mountedRef.current) { addMessage('error', 'WS error'); setWsStatus('disconnected') }; clearTimeout(safetyTimer); safeResolve() },
+        () => { if (mountedRef.current) { setWsStatus('disconnected') }; clearTimeout(safetyTimer); safeResolve() }
       )
 
-      if (!ws) { addMessage('error', 'No auth token'); setWsStatus('disconnected'); resolve(); return }
+      if (!ws) { addMessage('error', 'No auth token'); setWsStatus('disconnected'); clearTimeout(safetyTimer); safeResolve(); return }
+      // Close any previous WS before assigning new one
+      if (wsRef.current) { try { wsRef.current.close() } catch {} }
       wsRef.current = ws
       ws.addEventListener('open', () => {
+        if (!mountedRef.current) { try { ws.close() } catch {} clearTimeout(safetyTimer); safeResolve(); return }
         setWsStatus('running')
         ws.send(JSON.stringify({
           radius: scanConfigRef.current.radius || 10,
           amount: amountRef.current,
           type: scoutTypeRef.current,
-          delay: delayRef.current,
+          delay_min: delayMinRef.current,
+          delay_max: delayMaxRef.current,
           targets: targets,
           village_id: villageIdRef.current,
+          start_index: resumeIndexRef.current,
         }))
       })
     })
@@ -535,25 +598,39 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
 
   const handleStart = async () => {
     if (selected.size === 0) { toast.warning('No targets selected'); return }
+    if (loopTimerRef.current) { clearTimeout(loopTimerRef.current); loopTimerRef.current = null }
     setRunning(true); setMessages([]); setProgress(null)
     loopStoppedRef.current = false
     setLoopCycle(0)
 
     if (!loopEnabled) {
-      // Single pass
+      // Single pass — reset resume index for fresh run
+      setResumeIndex(0)
+      resumeIndexRef.current = 0
       await runOnePass(0)
       if (mountedRef.current) { setRunning(false); toast.success('Scouting complete') }
     } else {
       // Loop mode
+      loopStartRef.current = Date.now()
       let cycle = 0
       const loop = async () => {
         if (loopStoppedRef.current || !mountedRef.current) { setRunning(false); return }
+        // Check duration limit
+        if (loopDurationRef.current > 0 && loopStartRef.current) {
+          const elapsedMin = (Date.now() - loopStartRef.current) / 60000
+          if (elapsedMin >= loopDurationRef.current) {
+            addMessage('info', `Duration limit reached (${loopDurationRef.current} min). Stopping.`)
+            setRunning(false)
+            return
+          }
+        }
         setLoopCycle(cycle)
         await runOnePass(cycle)
         cycle++
         if (loopStoppedRef.current || !mountedRef.current) { setRunning(false); return }
-        addMessage('info', `Waiting ${loopInterval}s before next cycle...`)
-        loopTimerRef.current = setTimeout(loop, loopInterval * 1000)
+        const safeInterval = Math.max(loopInterval, 30)
+        addMessage('info', `Waiting ${safeInterval}s before next cycle...`)
+        loopTimerRef.current = setTimeout(loop, safeInterval * 1000)
       }
       await loop()
     }
@@ -574,23 +651,60 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   return (
     <div className="card">
       <h3 className="heading-gold text-lg mb-4">Auto-Scout</h3>
+
+      {/* Scouts per target + idle scout check */}
       <div className="flex gap-4 mb-4 flex-wrap">
         <div className="flex-1 min-w-[120px]">
           <label className="field-label-lg">Scouts per target</label>
           <input type="number" className="input-field" value={amount} min={1} max={20} onChange={(e) => setAmount(Number(e.target.value))} disabled={running} />
-        </div>
-        <div className="flex-1 min-w-[120px]">
-          <label className="field-label-lg">Delay between sends (s)</label>
-          <input type="number" className="input-field" value={delay} min={1} max={60} onChange={(e) => setDelay(Number(e.target.value))} disabled={running} />
+          <div className="flex items-center gap-2 mt-1">
+            <button className="btn-secondary btn-xs" onClick={checkIdleScouts} disabled={checkingScouts || running}>
+              {checkingScouts ? '...' : 'Check'}
+            </button>
+            {idleScouts !== null && (
+              <span className="text-xs text-secondary">
+                {typeof idleScouts === 'number' ? `${idleScouts} scouts idle in village` : idleScouts}
+              </span>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* Stealth delay range */}
+      <div className="mb-4">
+        <label className="field-label-lg">Stealth delay</label>
+        <div className="flex items-center gap-2">
+          <input type="number" className="input-field w-20" value={delayMin} min={0} max={60} onChange={(e) => setDelayMin(Number(e.target.value))} disabled={running} />
+          <span className="text-secondary">s</span>
+          <span className="text-secondary">&mdash;</span>
+          <input type="number" className="input-field w-20" value={delayMax} min={0} max={120} onChange={(e) => setDelayMax(Number(e.target.value))} disabled={running} />
+          <span className="text-secondary">s</span>
+        </div>
+        <p className="text-xs text-secondary mt-1">Human-like delay — heavy-tailed distribution (most delays shorter, occasional longer pauses)</p>
+      </div>
+
+      {/* Scout type */}
       <div className="mb-4">
         <label className="field-label-lg mb-2">Scout type</label>
         <div className="flex gap-6">
-          <label className="check-label"><input type="radio" name="scoutType" value="resources" checked={scoutType === 'resources'} onChange={() => setScoutType('resources')} disabled={running} className="accent-radio" /> Resources</label>
-          <label className="check-label"><input type="radio" name="scoutType" value="defenses" checked={scoutType === 'defenses'} onChange={() => setScoutType('defenses')} disabled={running} className="accent-radio" /> Defenses</label>
+          <label className="check-label">
+            <input type="radio" name="scoutType" value="resources" checked={scoutType === 'resources'} onChange={() => setScoutType('resources')} disabled={running} className="accent-radio" /> Resources
+          </label>
+          <label className="check-label">
+            <input type="radio" name="scoutType" value="defenses" checked={scoutType === 'defenses'} onChange={() => setScoutType('defenses')} disabled={running} className="accent-radio" /> Defenses
+          </label>
+          <label className="check-label">
+            <input type="radio" name="scoutType" value="both" checked={scoutType === 'both'} onChange={() => setScoutType('both')} disabled={running} className="accent-radio" /> Both
+          </label>
         </div>
       </div>
+
+      {/* Resume position indicator */}
+      {resumeIndex > 0 && !running && (
+        <div className="mb-4">
+          <span className="text-xs text-secondary">Resuming from target #{resumeIndex + 1}</span>
+        </div>
+      )}
 
       {/* Loop mode */}
       <div className="mb-5 p-3 bg-surface rounded-md border-default">
@@ -599,16 +713,23 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
             <input type="checkbox" className="checkbox-gold" checked={loopEnabled} onChange={(e) => setLoopEnabled(e.target.checked)} disabled={running} />
             Loop mode
           </label>
-          {loopEnabled && (
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-secondary">Interval (s):</label>
-              <input type="number" className="input-field text-xs py-1 px-2 w-20" min={30} max={3600} value={loopInterval} onChange={(e) => setLoopInterval(Number(e.target.value) || 300)} disabled={running} />
-            </div>
-          )}
           {loopEnabled && running && (
             <span className="text-xs text-gold font-semibold">Cycle #{loopCycle + 1}</span>
           )}
         </div>
+        {loopEnabled && (
+          <div className="flex items-center gap-4 flex-wrap mt-3">
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-secondary">Interval (s):</label>
+              <input type="number" className="input-field text-xs py-1 px-2 w-20" min={30} max={3600} value={loopInterval} onChange={(e) => setLoopInterval(Number(e.target.value) || 300)} disabled={running} />
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="text-xs text-secondary">Duration (min):</label>
+              <input type="number" className="input-field text-xs py-1 px-2 w-20" min={0} max={1440} value={loopDuration} onChange={(e) => setLoopDuration(Number(e.target.value) || 0)} disabled={running} />
+              <span className="text-xs text-secondary opacity-70">0 = infinite</span>
+            </div>
+          </div>
+        )}
         {loopEnabled && (
           <p className="text-xs text-secondary mt-2">Scan once, then re-scout the same targets every {loopInterval}s. Scouts return home and get re-sent.</p>
         )}

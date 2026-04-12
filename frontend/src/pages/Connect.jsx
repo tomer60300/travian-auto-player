@@ -144,16 +144,19 @@ export default function Connect() {
     }
   }
 
-  function formatDate(dateStr) {
+  function relativeDate(dateStr) {
     if (!dateStr) return 'Never'
     const d = new Date(dateStr)
-    return d.toLocaleDateString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
+    if (isNaN(d.getTime())) return dateStr
+    const diff = Date.now() - d.getTime()
+    const mins = Math.floor(diff / 60000)
+    if (mins < 1) return 'Just now'
+    if (mins < 60) return `${mins}m ago`
+    const hours = Math.floor(mins / 60)
+    if (hours < 24) return `${hours}h ago`
+    const days = Math.floor(hours / 24)
+    if (days < 7) return `${days}d ago`
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
   }
 
   return (
@@ -212,7 +215,7 @@ export default function Connect() {
                           {server.username}
                         </div>
                         <div className="text-xs mt-0.5 text-secondary opacity-70">
-                          Last connected: {formatDate(server.last_connected)}
+                          Last connected: {relativeDate(server.last_connected)}
                         </div>
                       </div>
                       <div className="flex flex-col gap-2 flex-shrink-0">
@@ -220,12 +223,13 @@ export default function Connect() {
                           className="btn-primary btn-sm"
                           onClick={() => handleQuickConnect(server)}
                           disabled={connectingServerId === server.id}
+                          style={{ minWidth: 90, justifyContent: 'center', display: 'flex', alignItems: 'center', gap: 6 }}
                         >
                           {connectingServerId === server.id ? (
-                            <span className="flex items-center gap-1.5">
-                              <span className="spinner spinner-sm" />
-                              Connecting...
-                            </span>
+                            <>
+                              <span className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
+                              <span>Connecting</span>
+                            </>
                           ) : (
                             'Connect'
                           )}

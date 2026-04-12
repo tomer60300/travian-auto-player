@@ -134,6 +134,20 @@ async def send_scouts(
         ) from exc
 
 
+@router.get("/troops")
+async def get_available_troops(
+    village_id: int = None,
+    session: TravianSession = Depends(get_travian_session),
+):
+    """Get available (idle) troops at the rally point for a village."""
+    try:
+        troops = await session.military_service.get_available_troops(village_id)
+        return troops
+    except Exception as exc:
+        logger.warning("Failed to get troops: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 @router.post("/raid")
 async def send_raid(
     body: RaidRequest,

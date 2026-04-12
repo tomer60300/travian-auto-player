@@ -4,6 +4,8 @@ import useAuthStore from '../stores/authStore'
 import useGameStore from '../stores/gameStore'
 import useLogStore from '../stores/logStore'
 import { connectLogStream, disconnectLogStream } from '../logStream'
+import MobileNav from './MobileNav'
+import VillageSelector from './VillageSelector'
 // ToastContainer is mounted in App.jsx (global, works for all routes)
 
 const navItems = [
@@ -33,6 +35,7 @@ export default function Layout() {
   const disconnect = useGameStore((s) => s.disconnect)
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
   // Connect log stream when authenticated and connected
   useEffect(() => {
@@ -56,12 +59,18 @@ export default function Layout() {
     }
   }, [statusChecked, checkStatus])
 
-  // Redirect to /connect only AFTER status check completes and confirms not connected
+  // Redirect to /connect only on INITIAL status check — not on subsequent poll failures.
+  // This prevents all open tabs from being kicked to /connect when one disconnects.
+  const [initialRedirectDone, setInitialRedirectDone] = useState(false)
   useEffect(() => {
-    if (statusChecked && !connected && location.pathname !== '/connect') {
+    if (statusChecked && !connected && !initialRedirectDone && location.pathname !== '/connect') {
+      setInitialRedirectDone(true)
       navigate('/connect', { replace: true })
     }
-  }, [statusChecked, connected, navigate, location.pathname])
+    if (statusChecked && connected) {
+      setInitialRedirectDone(true)
+    }
+  }, [statusChecked, connected, navigate, location.pathname, initialRedirectDone])
 
   // Add 60s health poll when connected
   useEffect(() => {
@@ -94,11 +103,22 @@ export default function Layout() {
     )
   }
 
+  const sidebarWidth = sidebarCollapsed ? 60 : 220
+
   return (
     <div className="min-h-screen bg-base">
+      {/* MD3 Atmospheric Background Shapes */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none" aria-hidden="true" style={{ zIndex: 0 }}>
+        <div className="md3-blur-shape md3-blur-primary" style={{ width: 600, height: 600, top: -200, right: -100 }} />
+        <div className="md3-blur-shape md3-blur-secondary" style={{ width: 500, height: 500, bottom: -150, left: -100 }} />
+        <div className="md3-blur-shape md3-blur-tertiary" style={{ width: 400, height: 400, top: '40%', left: '50%', transform: 'translateX(-50%)' }} />
+      </div>
+
       {/* Top Bar */}
       <header className="top-bar">
+        {/* Left section */}
         <div className="flex items-center gap-3">
+          {/* Hamburger: only visible on mobile when sidebar overlay is used (hidden by md:hidden) */}
           {connected && (
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -112,7 +132,15 @@ export default function Layout() {
           </span>
         </div>
 
-        <div className="flex items-center gap-3 text-sm text-secondary">
+        {/* Center: Village selector on mobile */}
+        {connected && (
+          <div className="mobile-only flex items-center">
+            <VillageSelector compact />
+          </div>
+        )}
+
+        {/* Right section - desktop */}
+        <div className="desktop-only flex items-center gap-3 text-sm text-secondary">
           {connected && serverUrl && (
             <>
               <span className="status-dot status-dot-success" />
@@ -126,9 +154,6 @@ export default function Layout() {
               )}
             </>
           )}
-        </div>
-
-        <div className="flex items-center gap-3">
           {user && (
             <span className="text-sm text-secondary">
               {user.username}
@@ -141,22 +166,63 @@ export default function Layout() {
             Logout
           </button>
         </div>
+
+        {/* Right section - mobile: connection status dot + logout */}
+        <div className="mobile-only flex items-center gap-2">
+          {connected && (
+            <span className="status-dot status-dot-success" />
+          )}
+          <button
+            onClick={handleLogout}
+            className="btn-secondary btn-sm"
+          >
+            Logout
+          </button>
+        </div>
       </header>
 
-      {/* Sidebar */}
+      {/* Sidebar — hidden on mobile via CSS (.sidebar has display:none at max-width:767px) */}
       {connected && (
         <>
           {sidebarOpen && (
             <div
               onClick={() => setSidebarOpen(false)}
-              className="sidebar-overlay fixed inset-0 bg-black/50 z-[149] md:hidden"
+              className="sidebar-overlay fixed inset-0 bg-black/40 backdrop-blur-sm z-[149] md:hidden"
             />
           )}
 
           <aside
             className={sidebarOpen ? 'sidebar sidebar-open' : 'sidebar'}
+            style={{ width: sidebarWidth, transition: 'width 200ms ease', willChange: 'width' }}
           >
-            <nav className="flex-1 py-2">
+            {/* Village selector + collapse toggle */}
+            <div className="flex items-center gap-1 px-2 py-1.5" style={{ overflow: 'hidden' }}>
+              {sidebarCollapsed ? null : (
+                <div className="flex-1 min-w-0 px-1">
+                  <VillageSelector />
+                </div>
+              )}
+              <button
+                onClick={() => setSidebarCollapsed((c) => !c)}
+                className="bg-transparent border-none text-secondary cursor-pointer hover:text-primary"
+                style={{
+                  fontSize: '0.85rem',
+                  width: 28,
+                  height: 28,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: 6,
+                  flexShrink: 0,
+                }}
+                title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              >
+                {sidebarCollapsed ? '»' : '«'}
+              </button>
+            </div>
+
+            {/* Navigation */}
+            <nav className="flex-1 py-1" style={{ overflow: 'hidden' }}>
               {navItems.map((item) => (
                 <NavLink
                   key={item.to}
@@ -164,48 +230,117 @@ export default function Layout() {
                   end={item.to === '/'}
                   onClick={() => setSidebarOpen(false)}
                   className={({ isActive }) => isActive ? 'nav-link nav-link-active' : 'nav-link'}
+                  title={sidebarCollapsed ? item.label : undefined}
+                  style={sidebarCollapsed ? { justifyContent: 'center', paddingLeft: 0, paddingRight: 0 } : undefined}
                 >
                   <span className="nav-icon">
                     {item.icon}
                   </span>
-                  <span>{item.label}</span>
-                  {item.to === '/logs' && serverLogCount > 0 && (
+                  {!sidebarCollapsed && <span>{item.label}</span>}
+                  {!sidebarCollapsed && item.to === '/logs' && serverLogCount > 0 && (
                     <span className="ml-auto bg-danger text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
                       {serverLogCount > 99 ? '99+' : serverLogCount}
+                    </span>
+                  )}
+                  {sidebarCollapsed && item.to === '/logs' && serverLogCount > 0 && (
+                    <span
+                      style={{
+                        position: 'absolute',
+                        top: 4,
+                        right: 4,
+                        background: 'var(--danger)',
+                        color: '#fff',
+                        fontSize: 10,
+                        fontWeight: 700,
+                        borderRadius: 9999,
+                        minWidth: 16,
+                        height: 16,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '0 3px',
+                      }}
+                    >
+                      {serverLogCount > 9 ? '9+' : serverLogCount}
                     </span>
                   )}
                 </NavLink>
               ))}
             </nav>
 
-            <div className="px-4 py-3 border-t-default">
-              <div className="flex items-center gap-2 mb-3 text-xs">
-                <span className="status-dot status-dot-success" />
-                <span className="text-secondary">Connected</span>
-              </div>
-              <button
-                onClick={() => navigate('/connect')}
-                className="btn-secondary btn-sm btn-full mb-2"
-              >
-                Switch Server
-              </button>
-              <button
-                onClick={handleDisconnect}
-                className="btn-danger btn-sm btn-full"
-              >
-                Disconnect
-              </button>
+            {/* Bottom section */}
+            <div className="px-3 py-2 border-t-default" style={{ overflow: 'hidden' }}>
+              {!sidebarCollapsed && (
+                <div className="flex items-center gap-2">
+                  <span className="status-dot status-dot-success" />
+                  <button
+                    onClick={() => navigate('/connect')}
+                    className="text-xs text-secondary hover:text-primary bg-transparent border-none cursor-pointer"
+                    style={{ padding: 0 }}
+                  >
+                    Switch
+                  </button>
+                  <span className="text-xs text-secondary">·</span>
+                  <button
+                    onClick={handleDisconnect}
+                    className="text-xs bg-transparent border-none cursor-pointer"
+                    style={{ padding: 0, color: 'var(--danger)' }}
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              )}
+              {sidebarCollapsed && (
+                <div className="flex flex-col items-center gap-1">
+                  <span className="status-dot status-dot-success" />
+                  <button
+                    onClick={() => navigate('/connect')}
+                    className="bg-transparent border-none text-secondary cursor-pointer hover:text-primary"
+                    title="Switch Server"
+                    style={{ fontSize: '0.85rem', padding: 2 }}
+                  >
+                    🔄
+                  </button>
+                  <button
+                    onClick={handleDisconnect}
+                    className="bg-transparent border-none cursor-pointer hover:text-primary"
+                    title="Disconnect"
+                    style={{ fontSize: '0.85rem', padding: 2, color: 'var(--danger)' }}
+                  >
+                    ⏏
+                  </button>
+                </div>
+              )}
             </div>
           </aside>
         </>
       )}
 
+      {/* Mobile bottom tab bar — hidden on desktop via .mobile-only */}
+      {connected && (
+        <div className="mobile-only">
+          <MobileNav />
+        </div>
+      )}
+
       {/* Main content */}
       <main
-        className={`main-content min-h-[calc(100vh-56px)] mt-[56px] transition-[margin-left] duration-200 ${connected ? 'ml-[220px]' : 'ml-0'}`}
+        className={`main-content min-h-[calc(100vh-64px)] mt-[64px] transition-[margin-left] duration-200 ${connected ? '' : 'ml-0'}`}
+        style={connected ? { marginLeft: sidebarWidth } : undefined}
       >
         <Outlet />
       </main>
+
+      {/* Inline styles for responsive helpers — no external CSS changes needed */}
+      <style>{`
+        .mobile-only { display: none; }
+        .desktop-only { display: flex; }
+        @media (max-width: 767px) {
+          .mobile-only { display: flex; }
+          .desktop-only { display: none !important; }
+          .main-content { margin-left: 0 !important; }
+        }
+      `}</style>
     </div>
   )
 }

@@ -12,6 +12,13 @@ export default class ErrorBoundary extends Component {
 
   componentDidCatch(error, errorInfo) {
     console.error('ErrorBoundary caught:', error, errorInfo?.componentStack)
+
+    // Auto-reload on stale chunk errors (happens after a rebuild when browser has cached old HTML)
+    if (error?.message?.includes('dynamically imported module') || error?.message?.includes('Failed to fetch')) {
+      window.location.reload()
+      return
+    }
+
     import('../stores/logStore').then(({ default: store }) => {
       store.getState().addLog('error', 'ui', `React error: ${error.message}`, errorInfo?.componentStack || error.stack)
     }).catch(() => {})
