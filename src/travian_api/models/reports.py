@@ -81,7 +81,9 @@ class BattleReportData(BaseModel):
     carry_used: int = Field(default=0, description="Resources actually carried")
     carry_max: int = Field(default=0, description="Total carry capacity of surviving troops")
     carry_full: bool = Field(default=False, description="True if troops were fully loaded")
-    
+    attacker_combat_strength: int = Field(default=0, description="Attacker combat strength")
+    defender_combat_strength: int = Field(default=0, description="Defender combat strength")
+
     @field_validator("battle_result")
     @classmethod
     def validate_battle_result(cls, v: str) -> str:

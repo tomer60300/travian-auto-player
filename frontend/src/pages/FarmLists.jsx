@@ -967,10 +967,16 @@ export default function FarmLists() {
                               const def = defenseData[slotId]
                               if (defenseScanning) return <span className="text-secondary">...</span>
                               if (!def) return <span className="text-secondary">---</span>
-                              if (def.defender_total === 0) return <span className="text-success">Empty</span>
+                              if (def.defender_combat_strength === 0 && def.defender_total === 0)
+                                return <span className="text-success">Empty{def.report_age_hours != null && <span className="text-secondary ml-1">({def.report_age_hours}h)</span>}</span>
+                              const strength = def.defender_combat_strength || def.defender_total
+                              const troopTip = Object.entries(def.defender_troops || {}).filter(([,v]) => v > 0).map(([k,v]) => `${k}:${v}`).join(' ')
+                              const tip = troopTip
+                                ? `Troops: ${troopTip}\nCombat Str: ${def.defender_combat_strength}`
+                                : `Combat Str: ${def.defender_combat_strength}`
                               return (
-                                <span className="text-danger" title={Object.entries(def.defender_troops).filter(([,v]) => v > 0).map(([k,v]) => `${k}:${v}`).join(' ')}>
-                                  {def.defender_total.toLocaleString()}
+                                <span className="text-danger" title={tip}>
+                                  {strength.toLocaleString()}
                                   {def.report_age_hours != null && <span className="text-secondary ml-1">({def.report_age_hours}h)</span>}
                                 </span>
                               )

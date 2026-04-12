@@ -284,6 +284,35 @@ async def auto_scout_ws(websocket: WebSocket):
                     "targets": [{"x": t.x, "y": t.y, "name": t.village_name, "pop": t.population, "dist": round(t.distance, 1)} for t in tiles],
                 })
 
+                # ── Player population breakdown (debug aid) ──────────
+                player_villages: dict[str, list[tuple[str, int, int, int]]] = {}
+                for t in tiles:
+                    pname = t.player_name or ""
+                    if pname:
+                        vname = t.village_name or f"({t.x},{t.y})"
+                        player_villages.setdefault(pname, []).append(
+                            (vname, t.population, t.x, t.y)
+                        )
+
+                if player_villages:
+                    await _send(websocket, {
+                        "type": "player_pops",
+                        "players": [
+                            {
+                                "name": pname,
+                                "total": sum(vp for _, vp, *_ in vils),
+                                "villages": [
+                                    {"name": vn, "pop": vp, "x": vx, "y": vy}
+                                    for vn, vp, vx, vy in vils
+                                ],
+                            }
+                            for pname, vils in sorted(
+                                player_villages.items(),
+                                key=lambda kv: -sum(vp for _, vp, *_ in kv[1]),
+                            )
+                        ],
+                    })
+
                 original_total = len(tiles)
 
                 # Rotate targets for round-robin resume
@@ -754,6 +783,16 @@ async def scout_scan_ws(websocket: WebSocket):
                 detail.is_abandoned = tile.is_abandoned
                 if not detail.village_name and tile.village_name:
                     detail.village_name = tile.village_name
+                # Preserve player/alliance from map scan when tile-details
+                # didn't extract them (occupied oases may use different HTML)
+                if not detail.player_id and tile.player_id:
+                    detail.player_id = tile.player_id
+                if not detail.player_name and tile.player_name:
+                    detail.player_name = tile.player_name
+                if not detail.alliance_id and tile.alliance_id:
+                    detail.alliance_id = tile.alliance_id
+                if not detail.alliance_name and tile.alliance_name:
+                    detail.alliance_name = tile.alliance_name
                 enriched.append(detail)
 
                 if not await _send(websocket, {
@@ -795,23 +834,34 @@ async def scout_scan_ws(websocket: WebSocket):
         # ── Phase 3b: Compute player populations ──────────────────
         # GQL player.population returns 0 for other players, so we sum
         # all visible village populations per player from the enriched tiles.
-        player_pops: dict[int, int] = {}
-        if max_player_pop is not None:
-            player_pops = _sum_visible_player_pops(tiles)
+        # Always computed (not gated on max_player_pop) so the breakdown
+        # is visible in the scan logs for debugging.
+        player_pops = _sum_visible_player_pops(tiles)
 
-            # Log what we found
-            seen: set[int] = set()
-            deduped = []
+        if player_pops:
+            # Build per-village breakdown keyed by player_id
+            pv_map: dict[int, list[dict]] = {}
+            pn_map: dict[int, str] = {}
             for t in tiles:
-                if t.player_id and t.player_id not in seen and t.player_id in player_pops:
-                    seen.add(t.player_id)
-                    deduped.append(f"{t.player_name or '?'}={player_pops[t.player_id]}")
-            deduped.sort(key=lambda s: -int(s.split('=')[1]))
+                if t.player_id and t.player_id in player_pops:
+                    pn_map.setdefault(t.player_id, t.player_name or "?")
+                    pv_map.setdefault(t.player_id, []).append({
+                        "name": t.village_name or f"({t.x},{t.y})",
+                        "pop": t.population,
+                        "x": t.x,
+                        "y": t.y,
+                    })
+
             if not await _send(websocket, {
-                "type": "phase",
-                "phase": "player_pop",
-                "message": f"Player populations (visible sum): {', '.join(deduped[:25])}"
-                           f"{'...' if len(deduped) > 25 else ''}",
+                "type": "player_pops",
+                "players": [
+                    {
+                        "name": pn_map[pid],
+                        "total": player_pops[pid],
+                        "villages": pv_map[pid],
+                    }
+                    for pid in sorted(player_pops, key=lambda p: -player_pops[p])
+                ],
             }):
                 return
 

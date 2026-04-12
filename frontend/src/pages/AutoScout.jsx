@@ -3,6 +3,7 @@ import { createWebSocket } from '../ws'
 import { useToast } from '../components/Toast'
 import WebSocketPanel from '../components/WebSocketPanel'
 import VillageSelector from '../components/VillageSelector'
+import AddToFarmDialog from '../components/AddToFarmDialog'
 import useGameStore from '../stores/gameStore'
 import api from '../api'
 
@@ -178,6 +179,17 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             }
             break
           }
+          case 'player_pops': {
+            const players = data.players || []
+            if (players.length > 0) {
+              addScanMsg('info', 'Player populations (sum of visible villages):')
+              for (const p of players) {
+                const parts = p.villages.map((v) => `${v.name}(${v.x},${v.y})=${v.pop}`).join(' + ')
+                addScanMsg('info', `  ${p.name}: ${p.total} = ${parts}`)
+              }
+            }
+            break
+          }
           case 'complete': {
             const tiles = data.tiles || []
             setScanPhase(null)
@@ -322,9 +334,10 @@ function SortableHeader({ label, field, sortField, sortDir, onSort, className = 
 }
 
 // ── Scan Results Table ────────────────────────────────────────────────
-function ScanResultsTable({ results, selected, setSelected }) {
+function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap, onFarmAdded }) {
   const [sortField, setSortField] = useState(null)
   const [sortDir, setSortDir] = useState('asc')
+  const [addFarmTarget, setAddFarmTarget] = useState(null)
 
   const handleSort = (field) => {
     if (sortField === field) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
@@ -381,6 +394,8 @@ function ScanResultsTable({ results, selected, setSelected }) {
               <SortableHeader label="Player" field="player_name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <th>Alliance</th>
               <th>Type</th>
+              <th>Farm Lists</th>
+              <th className="w-10"></th>
             </tr>
           </thead>
           <tbody>
@@ -397,12 +412,31 @@ function ScanResultsTable({ results, selected, setSelected }) {
                   <td className={row.player_name ? 'text-primary' : 'text-secondary italic'}>{row.player_name || 'Unoccupied'}</td>
                   <td className="text-secondary text-xs">{row.alliance_name || '---'}</td>
                   <td>{row.is_oasis ? 'Oasis' : row.is_abandoned ? 'Abandoned' : 'Village'}</td>
+                  <td>
+                    {(coordMap?.[`${row.x},${row.y}`] || []).map((entry) => (
+                      <span key={entry.list_id} className="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-surface border-default text-gold mr-1 mb-0.5">
+                        {entry.list_name}
+                      </span>
+                    ))}
+                  </td>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <button className="btn-secondary btn-xs" title="Add to farm list" onClick={() => setAddFarmTarget(row)}>+Farm</button>
+                  </td>
                 </tr>
               )
             })}
           </tbody>
         </table>
       </div>
+      {farmLists && farmLists.length > 0 && (
+        <AddToFarmDialog
+          open={!!addFarmTarget}
+          target={addFarmTarget}
+          farmLists={farmLists}
+          onClose={() => setAddFarmTarget(null)}
+          onAdded={onFarmAdded}
+        />
+      )}
     </div>
   )
 }
@@ -521,6 +555,17 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
             case 'target_list':
               addMessage('info', `Targets queued: ${(data.targets || []).length} villages`)
               break
+            case 'player_pops': {
+              const players = data.players || []
+              if (players.length > 0) {
+                addMessage('info', 'Player max population (visible villages sum):')
+                for (const p of players) {
+                  const parts = p.villages.map((v) => `${v.name}(${v.x},${v.y})=${v.pop}`).join(' + ')
+                  addMessage('info', `  ${p.name}: ${p.total} = ${parts}`)
+                }
+              }
+              break
+            }
             case 'scouting':
               setProgress({ index: data.index, total: data.total, eta: data.eta })
               addMessage('info', `[${data.index}/${data.total}] Scouting (${data.target.x},${data.target.y}) ${data.target.name || ''}${data.eta ? ' | ' + data.eta : ''}`)
@@ -765,9 +810,36 @@ export default function AutoScout() {
   const [scanConfig, setScanConfig] = useState({ radius: 10 })
   const activeVillageId = useGameStore((s) => s.activeVillageId)
 
+  // Farm list integration
+  const [farmLists, setFarmLists] = useState([])
+  const [coordMap, setCoordMap] = useState({})
+
+  const fetchFarmData = useCallback(async () => {
+    try {
+      const [listsRes, mapRes] = await Promise.all([
+        api.get('/farm/lists'),
+        api.get('/farm/coord-map'),
+      ])
+      setFarmLists(Array.isArray(listsRes.data) ? listsRes.data : [])
+      setCoordMap(mapRes.data && typeof mapRes.data === 'object' ? mapRes.data : {})
+    } catch { /* farm integration is optional — silently degrade */ }
+  }, [])
+
+  useEffect(() => { fetchFarmData() }, [fetchFarmData])
+
+  const handleFarmAdded = useCallback((listId, x, y) => {
+    const list = farmLists.find((l) => l.id === listId)
+    const key = `${x},${y}`
+    setCoordMap((prev) => ({
+      ...prev,
+      [key]: [...(prev[key] || []), { list_id: listId, list_name: list?.name || '?' }],
+    }))
+  }, [farmLists])
+
   const handleScanComplete = (results) => {
     setScanResults(results)
     setSelected(new Set(results.map((_, i) => i)))
+    fetchFarmData() // refresh farm data after scan
   }
 
   return (
@@ -780,7 +852,7 @@ export default function AutoScout() {
         <ScanConfigPanel onScanComplete={handleScanComplete} scanning={scanning} setScanning={setScanning} onConfigChange={setScanConfig} activeVillageId={activeVillageId} />
         {scanResults && scanResults.length > 0 && (
           <>
-            <ScanResultsTable results={scanResults} selected={selected} setSelected={setSelected} />
+            <ScanResultsTable results={scanResults} selected={selected} setSelected={setSelected} farmLists={farmLists} coordMap={coordMap} onFarmAdded={handleFarmAdded} />
             <AutoScoutPanel scanResults={scanResults} selected={selected} scanConfig={scanConfig} />
           </>
         )}

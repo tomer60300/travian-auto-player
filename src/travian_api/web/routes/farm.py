@@ -78,6 +78,11 @@ class SlotResponse(BaseModel):
     total_raids: int
 
 
+class CoordMapEntry(BaseModel):
+    list_id: int
+    list_name: str
+
+
 class FarmListSummaryResponse(BaseModel):
     id: int
     name: str
@@ -204,6 +209,29 @@ async def get_farm_list(
     )
 
 
+@router.get("/coord-map")
+async def get_coord_map(
+    session: TravianSession = Depends(get_travian_session),
+):
+    """Return a lightweight coord -> farm list(s) mapping for all lists."""
+    try:
+        lists = await session.farm_service.get_all_farm_lists()
+    except TravianError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=exc.message,
+        ) from exc
+
+    result: dict[str, list[dict]] = {}
+    for fl in lists:
+        for slot in fl.slots:
+            key = f"{slot.target.x},{slot.target.y}"
+            result.setdefault(key, []).append(
+                {"list_id": fl.id, "list_name": fl.name}
+            )
+    return result
+
+
 @router.post("/lists", status_code=status.HTTP_201_CREATED)
 async def create_farm_list(
     body: CreateFarmListRequest,
@@ -298,6 +326,7 @@ class SlotDefenseInfo(BaseModel):
     name: str
     defender_troops: dict[str, int] = {}
     defender_total: int = 0
+    defender_combat_strength: int = 0
     report_age_hours: float | None = None
     report_id: str | None = None
 
@@ -362,20 +391,23 @@ async def scan_defense_strength(
         if not detail:
             continue
 
-        # Extract defender coords — look for target village coords
-        battle = getattr(detail, 'battle_data', None) or getattr(detail, 'data', None)
+        # Only process battle reports
+        if detail.get('type') != 'battle':
+            continue
+
+        battle = detail.get('data')
         if not battle:
             continue
 
+        # Extract defender info from BattleReportData model
         defender_info = {}
         if hasattr(battle, 'defender') and isinstance(battle.defender, dict):
             defender_info = battle.defender
-        elif isinstance(battle, dict):
-            defender_info = battle.get('defender', {})
 
-        # Get defender coords
-        dx = defender_info.get('x') or defender_info.get('coordinateX')
-        dy = defender_info.get('y') or defender_info.get('coordinateY')
+        # Get defender coords (nested in 'coordinates' dict)
+        coords = defender_info.get('coordinates', {})
+        dx = coords.get('x')
+        dy = coords.get('y')
 
         if dx is None or dy is None:
             continue
@@ -384,25 +416,24 @@ async def scan_defense_strength(
         if coord_key not in coord_to_slots:
             continue
 
-        # Extract defender troops
-        defender_troops = {}
-        if hasattr(battle, 'defender_troops'):
-            defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
-        elif isinstance(battle, dict):
-            defender_troops = dict(battle.get('defender_troops', {}))
-
+        # Extract defender troops and combat strength
+        defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
         defender_total = sum(defender_troops.values())
+        defender_combat_strength = getattr(battle, 'defender_combat_strength', 0) or 0
 
-        # Report age
-        report_time = getattr(report, 'time', None) or getattr(report, 'timestamp', None)
+        # Report age from date_str
         age_hours = None
-        if report_time:
-            if isinstance(report_time, (int, float)):
-                age_hours = round((now_ts - report_time) / 3600, 1)
-            elif isinstance(report_time, datetime):
-                age_hours = round((datetime.now(timezone.utc) - report_time).total_seconds() / 3600, 1)
+        date_str = getattr(report, 'date_str', None)
+        if date_str:
+            try:
+                from travian_api.services.raid_analyzer_service import parse_report_date
+                report_dt = parse_report_date(date_str)
+                if report_dt:
+                    age_hours = round((datetime.now() - report_dt).total_seconds() / 3600, 1)
+            except Exception:
+                pass
 
-        report_id = getattr(report, 'report_id', None) or getattr(report, 'id', None)
+        report_id = getattr(report, 'report_id', None)
 
         for slot in coord_to_slots[coord_key]:
             # Only keep the most recent (first encountered) report per slot
@@ -414,6 +445,7 @@ async def scan_defense_strength(
                     name=slot.target.name,
                     defender_troops=defender_troops,
                     defender_total=defender_total,
+                    defender_combat_strength=defender_combat_strength,
                     report_age_hours=age_hours,
                     report_id=str(report_id) if report_id else None,
                 )

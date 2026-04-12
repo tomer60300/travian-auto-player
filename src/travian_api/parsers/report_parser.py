@@ -522,6 +522,30 @@ def parse_battle_report(html: str) -> BattleReportData:
                     carry_used = int(parts[0]) if parts[0] else 0
                     carry_max = int(parts[1]) if parts[1] else 0
 
+    # Combat strength from combatStatistic table
+    attacker_combat_strength = 0
+    defender_combat_strength = 0
+    combat_table = soup.find('table', class_='combatStatistic')
+    if combat_table:
+        for tr in combat_table.find_all('tr'):
+            th = tr.find('th')
+            if not th:
+                continue
+            header = th.get_text(strip=True).lower()
+            if 'combat' in header or 'kampfkraft' in header or 'strength' in header:
+                tds = tr.find_all('td')
+                for i, td in enumerate(tds):
+                    value_span = td.find('span', class_='value')
+                    if value_span:
+                        raw = clean_unicode(value_span.get_text(strip=True))
+                        cleaned = re.sub(r'[^\d]', '', raw)
+                        if cleaned.isdigit():
+                            if i == 0:
+                                attacker_combat_strength = int(cleaned)
+                            elif i == 1:
+                                defender_combat_strength = int(cleaned)
+                break
+
     return BattleReportData(
         attacker=attacker_info,
         defender=defender_info,
@@ -534,6 +558,8 @@ def parse_battle_report(html: str) -> BattleReportData:
         carry_used=carry_used,
         carry_max=carry_max,
         carry_full=carry_full,
+        attacker_combat_strength=attacker_combat_strength,
+        defender_combat_strength=defender_combat_strength,
     )
 
 

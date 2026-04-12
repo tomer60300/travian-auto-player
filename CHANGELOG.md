@@ -1,6 +1,38 @@
 # Changelog
 
-## [Unreleased] — 2026-04-09
+## [Unreleased] — 2026-04-12
+
+### Added
+
+#### Auto Scout — Player Population Debug Logging
+- **Player population breakdown in scan logs** — After enrichment, the scan WS now always sends a `player_pops` message showing each player's total population with per-village breakdown (e.g., `PlayerA: 350 = Village1(50,60)=200 + Village2(55,65)=150`). Previously this was only shown when `max_player_pop` was set.
+- **Player population in auto-scout logs** — The auto-scout WS panel also displays per-player population breakdown before scouting begins, making it easy to verify the `max_player_pop` filter calculation.
+
+#### Auto Scout — Farm List Integration
+- **Farm list badges in scan results** — Each scan result row now shows which farm list(s) the target already belongs to, displayed as gold badges in a new "Farm Lists" column.
+- **Quick-add to farm list** — Each scan result row has a "+Farm" button that opens a dialog to add the target to any farm list with configurable troop type and count.
+- **`GET /api/farm/coord-map` endpoint** — New lightweight API that returns a coordinate-to-farm-list mapping for all farm list slots, enabling efficient lookup without N+1 queries.
+- **Shared troop constants** — Extracted `TRIBE_TROOPS` and `DEFAULT_TROOPS` from `Military.jsx` into `constants/troops.js` for reuse by `AddToFarmDialog`.
+
+#### Farm Lists — Defense Scan Combat Strength
+- **Combat strength extraction** — Battle report parser now extracts attacker and defender combat strength from the `<table class="combatStatistic">` element, supporting both English ("Combat strength") and German ("Kampfkraft") labels.
+- **Combat strength display** — Farm list defense column now shows the defender's combat strength value (red when defenders present, green "Empty" when 0), with troop breakdown in hover tooltip.
+
+### Fixed
+
+#### Auto Scout — Occupied Oasis Handling
+- **Oasis player info preservation** — During tile enrichment, player/alliance info from the map scan is now preserved when the tile-details HTML parser doesn't extract it (e.g., occupied oases using "Occupied by" instead of "Owner").
+- **Oasis owner detection** — The tile-details parser regex now matches both `Owner` and `Occupied by` labels for player extraction.
+- **`max_player_pop` filter for oases** — With player info properly preserved, occupied oasis population is now correctly included in player totals and the `max_player_pop` filter applies to them.
+
+#### Farm Lists — Defense Scan (3 critical bugs)
+- **Dict-as-object access** — `scan_defense_strength` used `getattr(detail, 'data')` on a plain dict, which always returned None. Fixed to use `detail.get('data')`.
+- **Nested coordinate extraction** — Defender coordinates were accessed as flat `x`/`y` keys but the parser returns `{'coordinates': {'x': ..., 'y': ...}}`. Fixed to access the nested structure. This was the root cause of defense data never populating.
+- **Report age computation** — Report age was read from a non-existent `time` attribute. Fixed to parse `date_str` using `parse_report_date()`.
+
+---
+
+## [Previous] — 2026-04-09
 
 ### Added
 

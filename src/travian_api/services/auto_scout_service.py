@@ -142,6 +142,16 @@ class AutoScoutService:
                 detail.is_abandoned = tile.is_abandoned
                 if not detail.village_name and tile.village_name:
                     detail.village_name = tile.village_name
+                # Preserve player/alliance from map scan when tile-details
+                # didn't extract them (occupied oases may use different HTML)
+                if not detail.player_id and tile.player_id:
+                    detail.player_id = tile.player_id
+                if not detail.player_name and tile.player_name:
+                    detail.player_name = tile.player_name
+                if not detail.alliance_id and tile.alliance_id:
+                    detail.alliance_id = tile.alliance_id
+                if not detail.alliance_name and tile.alliance_name:
+                    detail.alliance_name = tile.alliance_name
                 enriched.append(detail)
             except Exception as e:
                 logger.warning("Failed to get details for (%s,%s): %s", tile.x, tile.y, e)
@@ -338,9 +348,9 @@ class AutoScoutService:
         if pop_match:
             info.population = int(pop_match.group(1))
 
-        # Owner
+        # Owner (villages) or Occupied by (occupied oases)
         player_match = re.search(
-            r'<th>\s*Owner\s*</th>\s*<td[^>]*>\s*<a\s+href="/profile/(\d+)"[^>]*>([^<]*)</a>',
+            r'<th>\s*(?:Owner|Occupied\s+by)\s*</th>\s*<td[^>]*>\s*<a\s+href="/profile/(\d+)"[^>]*>([^<]*)</a>',
             html,
             re.DOTALL,
         )
