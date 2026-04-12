@@ -1,3 +1,8 @@
+/**
+ * MobileNav — Bottom tab bar with primary tabs and a "More" sheet for overflow navigation.
+ *
+ * Props: none (standalone component, reads route and log count from stores).
+ */
 import { NavLink, useLocation } from 'react-router-dom'
 import { useState } from 'react'
 import useLogStore from '../stores/logStore'

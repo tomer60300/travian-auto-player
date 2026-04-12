@@ -481,17 +481,23 @@ class BuildQueueService:
         use_video: bool = False,
         verbose: bool = False,
     ) -> List[Dict[str, Any]]:
-        """
-        Execute entire plan continuously — waits for each build to finish
-        before starting next.
+        """Execute entire plan continuously, waiting for each build to finish.
 
-        This is the main entry point for the auto-builder.
+        This is the main entry point for the auto-builder.  Three guard
+        mechanisms prevent duplicate or wasted upgrades:
+
+        1. **Pre-build queue guard** -- before issuing an upgrade, re-check
+           the live construction queue to catch races with other tabs.
+        2. **Level-sync guard** -- after a build finishes, re-read the
+           building level from the server instead of trusting the tracker.
+        3. **Post-build queue guard** -- cross-check the queue's target
+           level against the plan target to handle server-side lag.
 
         Args:
-            plan: Build plan to execute
-            poll_interval_s: How often to check conditions (seconds)
-            use_video: If True, claim buildingUpgrade video reward after each upgrade
-            verbose: If True, show current resources and detailed cost breakdown
+            plan: Build plan to execute.
+            poll_interval_s: How often to check conditions (seconds).
+            use_video: If True, claim buildingUpgrade video reward after each upgrade.
+            verbose: If True, show current resources and detailed cost breakdown.
         """
         all_results = []
         vid = plan.village_id or None
@@ -581,7 +587,12 @@ class BuildQueueService:
                         missing_str = ', '.join(f"{k}={v}" for k, v in missing.items()) if missing else 'none'
                         self._report(f"  {item.building} (slot {item.slot_id}): costs({costs_str}) missing({missing_str})")
                 if check['can_build']:
-                    # ── Guard: check if this slot already has an in-progress upgrade ──
+                    # ── Queue guard: prevent duplicate upgrades ──────────────
+                    # Between the is_queue_empty() check above and this point,
+                    # another tab or a previous cycle may have already queued
+                    # the same building.  Re-check the live construction queue
+                    # and, if the building is already upgrading, wait for it
+                    # to finish rather than issuing a duplicate request.
                     try:
                         current_queue = await self.building_service.get_construction_queue(village_id=vid)
                         already_upgrading = any(
@@ -591,12 +602,12 @@ class BuildQueueService:
                         )
                         if already_upgrading:
                             self._report(f"  SKIP: {item.building} (slot {item.slot_id}) already in construction queue — waiting for it to finish")
-                            # Wait for queue to clear before re-evaluating
+                            # Block until the in-flight upgrade completes
                             while not await self.is_queue_empty(village_id=vid):
                                 remaining = await self.get_queue_remaining(village_id=vid)
                                 wait = max(remaining + 3, 5)
                                 await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.05))
-                            # Re-read level after queue clears
+                            # Sync level from server to avoid off-by-one on next iteration
                             try:
                                 buildings = await self.building_service.get_village_buildings(village_id=vid)
                                 for b in buildings:
@@ -688,9 +699,10 @@ class BuildQueueService:
                             except Exception:
                                 pass  # stealth failures shouldn't break the builder
 
-                        # Re-read actual level from server (authoritative source of truth).
-                        # This prevents drift when a plan is restarted mid-build or the
-                        # server state diverges from the in-memory tracker.
+                        # Level-sync guard: re-read the actual level from the server
+                        # rather than trusting the in-memory tracker.  This prevents
+                        # drift when a plan is restarted mid-build or the server
+                        # state diverges from our bookkeeping.
                         actual_level = next_level  # fallback
                         try:
                             buildings = await self.building_service.get_village_buildings(village_id=vid)
@@ -707,7 +719,11 @@ class BuildQueueService:
                                 f"(tracker expected Lv{next_level}). Using server value."
                             )
 
-                        # Guard: also check queue — server level may lag behind
+                        # Post-build guard: the server-reported level sometimes
+                        # lags behind (caching).  Cross-check against the live
+                        # construction queue — if the building's target level in
+                        # the queue already meets our plan target, mark it done
+                        # immediately rather than issuing a redundant upgrade.
                         queued_target = None
                         try:
                             post_queue = await self.building_service.get_construction_queue(village_id=vid)

@@ -18,8 +18,9 @@ class ConnectionManager:
     """Manages WebSocket connections keyed by user_id.
 
     Each user can have multiple concurrent WebSocket connections
-    (e.g., one for farm loop, one for build queue).
-    Connections are tagged with a 'channel' name for routing.
+    (e.g., one for farm loop, one for build queue).  Connections are
+    stored under a unique ``ws_key`` (channel + object id) so that
+    multiple browser tabs on the same channel don't evict each other.
     """
 
     def __init__(self):
@@ -60,9 +61,10 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket, user_id: int, channel: str):
         """Accept and register a WebSocket connection.
 
-        Each connection gets a unique key (channel + ws_id) so multiple tabs
-        can coexist on the same logical channel without killing each other.
-        The actual storage key is returned and must be used for disconnect().
+        Each connection gets a unique key ``channel_<id(ws)>`` so that
+        multiple tabs on the same logical channel coexist without evicting
+        each other.  The key is stored on ``websocket._ws_channel_key`` for
+        later retrieval by :meth:`disconnect`.
         """
         await websocket.accept()
         # Use unique key per connection so different tabs don't replace each other
@@ -78,8 +80,11 @@ class ConnectionManager:
     async def disconnect(self, user_id: int, channel: str, websocket: WebSocket = None):
         """Remove a WebSocket connection.
 
-        Uses the unique ws_key stored on the websocket object during connect().
-        Falls back to the channel name for backward compatibility.
+        Args:
+            user_id: Owner of the connection.
+            channel: Logical channel name (fallback key).
+            websocket: If provided, the unique ``_ws_channel_key`` set by
+                :meth:`connect` is used instead of *channel*.
         """
         ws_key = channel
         if websocket and hasattr(websocket, '_ws_channel_key'):
@@ -112,7 +117,7 @@ class ConnectionManager:
                 await self.disconnect(user_id, channel)
 
     async def broadcast_to_user(self, user_id: int, data: dict):
-        """Send a JSON message to all of a user's channels."""
+        """Send a JSON message to all of a user's active connections."""
         async with self._lock:
             channels = dict(self._connections.get(user_id, {}))
         for channel, ws in channels.items():
@@ -122,7 +127,7 @@ class ConnectionManager:
                 await self.disconnect(user_id, channel)
 
     def is_connected(self, user_id: int, channel: str) -> bool:
-        """Check if a user has an active connection on a channel."""
+        """Check if a user has an active connection matching the given key."""
         return channel in self._connections.get(user_id, {})
 
 

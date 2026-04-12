@@ -1,3 +1,11 @@
+/**
+ * LogDrawer — Floating, resizable log drawer with virtual-scrolled entries.
+ *
+ * Collapses to a single-line ticker bar; expands to a filterable log panel.
+ * Currently not mounted in the app layout.
+ *
+ * Props: none (reads all state from logStore).
+ */
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import useLogStore from '../stores/logStore'
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from travian_api.constants import SCOUT_UNITS, TribeType
 from travian_api.exceptions import TravianError, MilitaryError, InvalidTargetError
@@ -75,18 +75,18 @@ async def _send_scouts_safe(
 
 
 class ScoutRequest(BaseModel):
-    x: int
-    y: int
-    amount: int = 1
-    type: str = "resources"  # "resources" or "defenses"
-    village_id: int | None = None
+    x: int = Field(..., description="Target X coordinate")
+    y: int = Field(..., description="Target Y coordinate")
+    amount: int = Field(1, description="Number of scouts to send")
+    type: str = Field("resources", description="Scout type: 'resources' or 'defenses'")
+    village_id: int | None = Field(None, description="Source village (default: active village)")
 
 
 class RaidRequest(BaseModel):
-    x: int
-    y: int
-    troops: dict[str, int]  # e.g. {"t1": 50, "t2": 30}
-    village_id: int | None = None
+    x: int = Field(..., description="Target X coordinate")
+    y: int = Field(..., description="Target Y coordinate")
+    troops: dict[str, int] = Field(..., description="Troops to send, e.g. {'t1': 50, 't2': 30}")
+    village_id: int | None = Field(None, description="Source village (default: active village)")
 
 
 # ---------------------------------------------------------------------------

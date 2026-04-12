@@ -1,3 +1,20 @@
+/**
+ * OperationCard — Reusable card showing real-time progress of a long-running operation.
+ *
+ * Props:
+ *   title          (string)         — operation name, e.g. "Building Queue"
+ *   subtitle       (string)         — secondary label, e.g. "Village 1"
+ *   status         (string)         — 'running' | 'waiting' | 'success' | 'error' | 'idle'
+ *   statusLabel    (string?)        — override for badge text (default: capitalised status)
+ *   stepText       (string?)        — current step description
+ *   progress       (number?)        — 0-100 percentage (null = indeterminate)
+ *   startedAt      (number?)        — timestamp when operation started (elapsed timer)
+ *   lastUpdate     (number?)        — timestamp of last WS message
+ *   estimatedRemaining (string?)    — e.g. "~2m"
+ *   errorMessage   (string?)        — shown when status is 'error'
+ *   onRetry        (function?)      — retry callback (shown on error)
+ *   children       (ReactNode?)     — extra content rendered below the card
+ */
 import { useState, useEffect } from 'react'
 
 /**

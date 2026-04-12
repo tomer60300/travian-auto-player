@@ -96,7 +96,13 @@ class LogStreamManager:
         self._min_level = value
 
     def push(self, entry: dict) -> None:
-        """Push a log entry to subscribers that match the entry's user_id."""
+        """Push a log entry to the ring buffer and matching subscribers.
+
+        Delivery rules: an entry is sent to a subscriber if the entry has
+        no ``user_id`` (system log), the subscriber has no ``user_id``
+        filter, or both IDs match.  On queue overflow the oldest entry
+        is silently dropped.
+        """
         entry_user = entry.get("user_id")
         with self._lock:
             self._buffer.append(entry)
@@ -116,8 +122,12 @@ class LogStreamManager:
         """Register a subscriber and return its queue.
 
         Args:
-            subscriber_id: Unique ID for this subscription (e.g., id(websocket))
+            subscriber_id: Unique ID for this subscription (e.g., id(websocket)).
             user_id: If set, only receive logs tagged with this user_id
+                (plus system logs that have no user_id).
+
+        Returns:
+            An asyncio.Queue that will receive matching log dicts.
         """
         q: asyncio.Queue = asyncio.Queue(maxsize=500)
         with self._lock:
@@ -132,7 +142,10 @@ class LogStreamManager:
     def get_history(self, count: int = 100, user_id: int | None = None) -> list[dict]:
         """Return the last *count* entries from the ring buffer.
 
-        If user_id is set, only return entries for that user (or system entries).
+        Args:
+            count: Maximum number of entries to return.
+            user_id: If set, only return entries for that user (plus
+                system entries that have no user_id).
         """
         with self._lock:
             items = list(self._buffer)

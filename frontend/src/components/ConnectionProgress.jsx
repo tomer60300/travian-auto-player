@@ -1,16 +1,20 @@
 import { useState, useEffect, useRef } from 'react'
 
 /**
- * Connection progress overlay.
+ * ConnectionProgress — Full-screen connection progress overlay with indeterminate bar.
+ *
+ * Props:
+ *   serverName (string)  — Travian server URL shown under the title
+ *   isActive   (boolean) — whether a connection attempt is in progress
  *
  * The backend connect is a SINGLE blocking HTTP call that does:
  *   1. DNS + TLS to Travian server
  *   2. Login (username/password via stealth-throttled HTTP)
- *   3. Parse response → extract player, tribe, villages
+ *   3. Parse response -> extract player, tribe, villages
  *
  * We can't get real mid-flight progress, so this component shows an
  * honest indeterminate progress with a pulsing status indicator.
- * The steps advance on a timer but the overall feel is "working…"
+ * The steps advance on a timer but the overall feel is "working..."
  * rather than pretending we know exact progress.
  */
 

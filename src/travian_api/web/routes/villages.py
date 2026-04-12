@@ -17,6 +17,7 @@ router = APIRouter(prefix="/api/villages", tags=["villages"])
 
 
 class VillageInfo(BaseModel):
+    """Single village summary."""
     id: int
     name: str
     x: int
@@ -26,6 +27,7 @@ class VillageInfo(BaseModel):
 
 
 class VillageListResponse(BaseModel):
+    """Response for the village list endpoint."""
     active_village_id: int | None
     villages: list[VillageInfo]
 
@@ -35,6 +37,7 @@ class SwitchVillageRequest(BaseModel):
 
 
 class SwitchVillageResponse(BaseModel):
+    """Response confirming the village switch (client-side only)."""
     active_village_id: int
     village: VillageInfo
 
