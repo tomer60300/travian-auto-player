@@ -58,19 +58,30 @@ class RequestThrottler:
         self._request_times: deque = deque()
         self._lock = asyncio.Lock()
         self._penalty_until: float = 0  # extra penalty from errors
+        self._captcha_guard = None  # set via set_captcha_guard()
     
+    def set_captcha_guard(self, guard) -> None:
+        """Attach a CaptchaGuard so requests block when captcha is active."""
+        self._captcha_guard = guard
+
     async def wait(self, context: str = "") -> float:
         """Wait until it's safe to make the next request.
-        
+
         Args:
             context: Optional description for logging (e.g., "upgrade building")
-            
+
         Returns:
             Actual seconds waited
         """
         if not self.enabled:
             return 0.0
-        
+
+        # Captcha gate: block indefinitely if captcha is active.
+        # Placed BEFORE the lock so all coroutines suspend on the Event
+        # rather than queueing on the lock.
+        if self._captcha_guard is not None:
+            await self._captcha_guard.wait_if_blocked()
+
         async with self._lock:
             now = time.monotonic()
             waited = 0.0

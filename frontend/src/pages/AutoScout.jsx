@@ -181,11 +181,19 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
           }
           case 'player_pops': {
             const players = data.players || []
+            const source = data.source || 'visible'
             if (players.length > 0) {
-              addScanMsg('info', 'Player populations (sum of visible villages):')
+              addScanMsg('info', source === 'profile'
+                ? 'Player populations (from profile pages):'
+                : 'Player populations (sum of visible villages):')
               for (const p of players) {
                 const parts = p.villages.map((v) => `${v.name}(${v.x},${v.y})=${v.pop}`).join(' + ')
-                addScanMsg('info', `  ${p.name}: ${p.total} = ${parts}`)
+                const visibleSum = p.visible_total ?? p.total
+                if (p.source === 'profile' && p.total !== visibleSum) {
+                  addScanMsg('info', `  ${p.name}: ${p.total} (profile) | visible: ${visibleSum} = ${parts}`)
+                } else {
+                  addScanMsg('info', `  ${p.name}: ${p.total} = ${parts}`)
+                }
               }
             }
             break
@@ -557,11 +565,19 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
               break
             case 'player_pops': {
               const players = data.players || []
+              const popSource = data.source || 'visible'
               if (players.length > 0) {
-                addMessage('info', 'Player max population (visible villages sum):')
+                addMessage('info', popSource === 'profile'
+                  ? 'Player populations (from profile pages):'
+                  : 'Player max population (visible villages sum):')
                 for (const p of players) {
                   const parts = p.villages.map((v) => `${v.name}(${v.x},${v.y})=${v.pop}`).join(' + ')
-                  addMessage('info', `  ${p.name}: ${p.total} = ${parts}`)
+                  const visibleSum = p.visible_total ?? p.total
+                  if (p.source === 'profile' && p.total !== visibleSum) {
+                    addMessage('info', `  ${p.name}: ${p.total} (profile) | visible: ${visibleSum} = ${parts}`)
+                  } else {
+                    addMessage('info', `  ${p.name}: ${p.total} = ${parts}`)
+                  }
                 }
               }
               break

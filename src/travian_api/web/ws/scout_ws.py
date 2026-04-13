@@ -832,11 +832,40 @@ async def scout_scan_ws(websocket: WebSocket):
             return
 
         # ── Phase 3b: Compute player populations ──────────────────
-        # GQL player.population returns 0 for other players, so we sum
-        # all visible village populations per player from the enriched tiles.
-        # Always computed (not gated on max_player_pop) so the breakdown
-        # is visible in the scan logs for debugging.
-        player_pops = _sum_visible_player_pops(tiles)
+        # Visible village sums (always computed for the debug breakdown)
+        visible_pops = _sum_visible_player_pops(tiles)
+
+        # When max_player_pop filter is active, fetch REAL total
+        # populations from each player's profile page so villages
+        # outside the scan radius are counted.
+        if max_player_pop is not None and visible_pops:
+            unique_pids = set(visible_pops.keys())
+            if not await _send(websocket, {
+                "type": "phase",
+                "phase": "player_profiles",
+                "message": f"Fetching {len(unique_pids)} player profile(s) for accurate population…",
+            }):
+                return
+            profile_pops = await svc.fetch_player_populations(unique_pids)
+            # Use profile pop when available; fall back to visible sum
+            player_pops = {
+                pid: profile_pops.get(pid) or visible_pops.get(pid, 0)
+                for pid in unique_pids
+            }
+            pop_source = "profile"
+
+            # Inherit: occupied oases have population=0 but belong to a
+            # player.  Set their population to the owner's total so both
+            # village-level and player-level filters apply correctly and
+            # the scan results show a meaningful number.
+            for t in tiles:
+                if t.is_oasis and t.player_id and t.population == 0:
+                    owner_pop = player_pops.get(t.player_id, 0)
+                    if owner_pop > 0:
+                        t.population = owner_pop
+        else:
+            player_pops = visible_pops
+            pop_source = "visible"
 
         if player_pops:
             # Build per-village breakdown keyed by player_id
@@ -854,11 +883,14 @@ async def scout_scan_ws(websocket: WebSocket):
 
             if not await _send(websocket, {
                 "type": "player_pops",
+                "source": pop_source,
                 "players": [
                     {
                         "name": pn_map[pid],
                         "total": player_pops[pid],
+                        "visible_total": visible_pops.get(pid, 0),
                         "villages": pv_map[pid],
+                        "source": pop_source,
                     }
                     for pid in sorted(player_pops, key=lambda p: -player_pops[p])
                 ],

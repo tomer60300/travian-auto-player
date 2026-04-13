@@ -1,6 +1,39 @@
 # Changelog
 
-## [Unreleased] — 2026-04-12
+## [Unreleased] — 2026-04-13
+
+### Added
+
+#### Captcha/Bot Detection — Emergency Halt System
+- **CaptchaGuard module** — New `asyncio.Event`-based per-user gate (`stealth/captcha_guard.py`) that blocks ALL outbound HTTP requests when bot detection fires, and resumes when the user resolves the captcha.
+- **Structural validation** — Bot detection now uses HTML structural evidence (captcha divs, script tags, error page size, HTTP status codes) instead of naive substring matching to avoid false positives from the word "recaptcha" appearing in normal Travian JS bundles.
+- **Rich diagnostic logging** — When detection fires, logs include: URL, HTTP status code, response length, and a ±200 char snippet around the matched pattern (HTML-stripped).
+- **Full-screen captcha alert modal** — Non-dismissible modal (`CaptchaAlert.jsx`) that appears on any page when bot detection triggers, showing pattern, URL, status code, response snippet, and step-by-step resolution instructions.
+- **"Dismiss (False Positive)" button** — Quick resolution option for false positives without requiring a browser visit.
+- **REST endpoints** — `GET /api/captcha/status` and `POST /api/captcha/resolve` for checking and clearing captcha state.
+- **Page-refresh recovery** — Frontend checks captcha status on WebSocket connect so the modal reappears after a page refresh.
+- **Multi-tab broadcast** — `captcha_alert`/`captcha_resolved` messages broadcast to all user WS connections.
+
+#### Auto Scout — Real Player Population from Profile Pages
+- **Profile page population lookup** — New `get_player_population(player_id)` method fetches `/profile/<player_id>` and extracts real account-wide population from the React JSON data (`ranks.population`), not the misleading `<div class="population">` footer which shows the logged-in user's own pop.
+- **Batch profile fetching** — `fetch_player_populations(player_ids)` fetches multiple profiles sequentially (respects throttler) with progress reporting.
+- **Occupied oasis population inheritance** — Occupied oases (population=0) now inherit their owner's total population from their profile, so village-level and player-level filters both apply correctly.
+- **Profile vs visible breakdown in UI** — Scan results show `PlayerName: 676 (profile) | visible: 228 = Village(16,93)=228` when profile data differs from visible village sums.
+
+### Fixed
+
+#### Auto Scout — Max Player Pop Filter (Critical Logic Error)
+- **Incorrect population calculation** — The `max_player_pop` filter was summing populations only from villages found within the scan radius. Players with villages outside the radius had their total population undercounted, allowing large players to bypass the filter. Now fetches real total population from each player's profile page.
+
+### Changed
+
+#### Bot Detection — Reduced False Positives
+- **`recaptcha` pattern** — No longer triggers on bare substring match in large responses. Requires structural HTML evidence (`class="g-recaptcha"`, `<script src="...recaptcha/api...">`), a short error page (<5000 chars), or an error HTTP status (403/429/503).
+- **Other high-confidence patterns** — `bot-detection`, `suspicious activity`, `access denied`, etc. now also require short response or error status code context before triggering the guard.
+
+---
+
+## [Previous] — 2026-04-12
 
 ### Added
 

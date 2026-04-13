@@ -136,14 +136,24 @@ async def scan_map(
                     if t.player_id:
                         exclude_player_ids.add(t.player_id)
 
-        # Compute player total pops BEFORE village-level filters remove
-        # high-pop villages — otherwise a player with one big and one small
-        # village has their sum under-counted after the big one is removed.
+        # Compute real player total populations from profile pages when the
+        # max_player_pop filter is active.  This is more accurate than summing
+        # visible villages (which misses villages outside the scan radius).
         player_pops: dict[int, int] = {}
         if body.max_player_pop is not None:
-            for t in tiles:
-                if t.player_id:
-                    player_pops[t.player_id] = player_pops.get(t.player_id, 0) + t.population
+            unique_pids = {t.player_id for t in tiles if t.player_id}
+            if unique_pids:
+                player_pops = await svc.fetch_player_populations(unique_pids)
+                # Fall back to visible pop for any player whose profile fetch failed
+                for t in tiles:
+                    if t.player_id and not player_pops.get(t.player_id):
+                        player_pops[t.player_id] = player_pops.get(t.player_id, 0) + t.population
+                # Occupied oases inherit owner's total population
+                for t in tiles:
+                    if t.is_oasis and t.player_id and t.population == 0:
+                        owner_pop = player_pops.get(t.player_id, 0)
+                        if owner_pop > 0:
+                            t.population = owner_pop
 
         # Apply village-level filters (population, oases, excluded players)
         tiles = svc.filter_targets(

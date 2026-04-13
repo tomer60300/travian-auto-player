@@ -74,6 +74,11 @@ class TravianSession:
         self.http_client._cookie_file = self._data_dir / "cookies.json"
         self.http_client._load_cookies()  # load from per-user file
 
+        # ── Captcha guard notification callback ─────────────────────
+        self.http_client.captcha_guard.set_trigger_callback(
+            self._on_captcha_triggered
+        )
+
         # ── Services (all share the same isolated http_client) ────────
         self.auth_service = AuthService(self.http_client, self.settings)
         self.building_service = BuildingService(self.http_client)
@@ -93,6 +98,46 @@ class TravianSession:
         self.active_village_id: Optional[int] = None
         self.player_name: Optional[str] = None
         self.tribe_id: Optional[int] = None
+
+    # ------------------------------------------------------------------
+    # Captcha guard
+    # ------------------------------------------------------------------
+
+    async def _on_captcha_triggered(
+        self,
+        pattern: str,
+        *,
+        url: str = "",
+        status_code: int = 0,
+        response_snippet: str = "",
+    ) -> None:
+        """Broadcast captcha alert to all user's WS connections + log stream."""
+        import time as _time
+        from travian_api.web.ws.manager import ws_manager
+        from travian_api.web.log_broadcast import log_stream_manager
+
+        await ws_manager.broadcast_to_user(self.user_id, {
+            "type": "captcha_alert",
+            "active": True,
+            "pattern": pattern,
+            "triggered_at": _time.time(),
+            "url": url,
+            "status_code": status_code,
+            "response_snippet": response_snippet,
+            "message": f"Bot detection triggered ({pattern}). All operations paused.",
+        })
+
+        log_stream_manager.push({
+            "timestamp": _time.time(),
+            "level": "error",
+            "source": "stealth",
+            "message": (
+                f"CAPTCHA/BOT DETECTION: '{pattern}' | url={url} | "
+                f"status={status_code} | All operations halted until resolved."
+            ),
+            "detail": response_snippet or None,
+            "user_id": self.user_id,
+        })
 
     # ------------------------------------------------------------------
     # Lifecycle

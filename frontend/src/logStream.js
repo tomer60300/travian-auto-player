@@ -1,4 +1,5 @@
 import useLogStore from './stores/logStore'
+import useCaptchaStore from './stores/captchaStore'
 
 let ws = null
 let reconnectTimer = null
@@ -21,12 +22,49 @@ export function connectLogStream() {
 
   ws.onopen = () => {
     reconnectAttempts = 0
+    // Check captcha status on connect (covers page-refresh case)
+    fetch('/api/captcha/status', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data && data.active) {
+          useCaptchaStore.getState().trigger(
+            data.pattern,
+            data.triggered_at ? data.triggered_at * 1000 : Date.now(),
+            {
+              url: data.url,
+              statusCode: data.status_code,
+              responseSnippet: data.response_snippet,
+            },
+          )
+        }
+      })
+      .catch(() => {})
   }
 
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
       const addLog = useLogStore.getState().addLog
+
+      // Captcha guard messages — handle before normal log routing
+      if (data.type === 'captcha_alert' && data.active) {
+        useCaptchaStore.getState().trigger(
+          data.pattern,
+          data.triggered_at ? data.triggered_at * 1000 : Date.now(),
+          {
+            url: data.url,
+            statusCode: data.status_code,
+            responseSnippet: data.response_snippet,
+          },
+        )
+        return
+      }
+      if (data.type === 'captcha_resolved') {
+        useCaptchaStore.getState().resolve()
+        return
+      }
 
       if (data.type === 'history' && Array.isArray(data.entries)) {
         data.entries.forEach(e => {

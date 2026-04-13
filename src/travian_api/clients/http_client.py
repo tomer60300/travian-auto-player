@@ -113,9 +113,11 @@ class HttpClient:
         from ..stealth.navigator import PageNavigator
         from ..stealth.noise import NoiseInjector
         from ..stealth.scheduler import ActivityScheduler
+        from ..stealth.captcha_guard import CaptchaGuard
 
         self._ua_rotator = UserAgentRotator()
         self._browser_headers = BrowserHeaders(self._ua_rotator, settings.base_url)
+        self._captcha_guard = CaptchaGuard()
         self._throttler = RequestThrottler(
             min_gap_s=settings.stealth_min_gap,
             max_gap_s=settings.stealth_max_gap,
@@ -123,6 +125,7 @@ class HttpClient:
             burst_cooldown_s=settings.stealth_burst_cooldown,
             enabled=settings.stealth,
         )
+        self._throttler.set_captcha_guard(self._captcha_guard)
         self._human_delay = HumanDelay(
             speed_factor=settings.stealth_speed,
             enabled=settings.stealth,
@@ -182,6 +185,10 @@ class HttpClient:
     @property
     def browser_headers(self) -> "BrowserHeaders":
         return self._browser_headers
+
+    @property
+    def captcha_guard(self) -> "CaptchaGuard":
+        return self._captcha_guard
 
     def set_auth_callback(self, callback: callable) -> None:
         """Set callback function to call when re-authentication is needed."""
@@ -271,25 +278,99 @@ class HttpClient:
         if self._stealth_enabled:
             self._browser_headers.update_last_page(url)
 
-    def _check_suspicious_response(self, response_text: str) -> None:
+    @staticmethod
+    def _extract_snippet(text: str, pattern: str, context_chars: int = 200) -> str:
+        """Extract a snippet around the first occurrence of *pattern*.
+
+        Returns up to *context_chars* characters around the match with
+        HTML tags stripped for readability.  Used for diagnostic logging.
+        """
+        idx = text.lower().find(pattern.lower())
+        if idx == -1:
+            return ""
+        start = max(0, idx - context_chars // 2)
+        end = min(len(text), idx + len(pattern) + context_chars // 2)
+        snippet = text[start:end]
+        # Strip HTML tags for readability
+        snippet = re.sub(r'<[^>]+>', ' ', snippet)
+        # Collapse whitespace
+        snippet = re.sub(r'\s+', ' ', snippet).strip()
+        if start > 0:
+            snippet = "..." + snippet
+        if end < len(text):
+            snippet = snippet + "..."
+        return snippet
+
+    async def _check_suspicious_response(
+        self, response_text: str, *, url: str = "", status_code: int = 0,
+    ) -> None:
         """Check if server response indicates bot detection.
 
-        Looks for captcha, rate limiting, or ban indicators.
-        Adds throttle penalty if suspicious.
+        Triggers the captcha guard (blocking ALL further requests) when
+        captcha, rate limiting, or ban indicators are found.
 
         IMPORTANT: Travian HTML contains words like "upgradeBlocked" (CSS class)
-        and "blocked" in normal game contexts. We must only flag patterns that
-        genuinely indicate anti-bot action, not normal game UI text.
+        and "blocked" in normal game contexts.  Normal game pages also reference
+        "recaptcha" in JavaScript bundles.  We use structural evidence (HTML
+        elements, response size, HTTP status) to distinguish real captcha
+        challenges from normal game content.
         """
         if not self._stealth_enabled:
             return
 
         response_lower = response_text.lower()
+        resp_len = len(response_text)
 
-        # Phase 1: High-confidence bot detection patterns (exact phrases)
-        # These should NEVER appear in normal game HTML
-        high_confidence_patterns = [
-            'recaptcha',
+        async def _fire(label: str) -> None:
+            """Log diagnostics and trigger the captcha guard."""
+            snippet = self._extract_snippet(response_text, label)
+            logger.warning(
+                "BOT DETECTION CONFIRMED: '%s' | url=%s | status=%d | "
+                "response_len=%d | snippet: %s",
+                label, url, status_code, resp_len, snippet,
+            )
+            await self._captcha_guard.trigger(
+                label, url=url, status_code=status_code,
+                response_snippet=snippet,
+            )
+
+        # ── Phase 1: recaptcha — require structural HTML evidence ────
+        #
+        # The word "recaptcha" appears in Travian JS bundles and script
+        # references on normal game pages.  Only trigger if it appears in
+        # an actual captcha challenge context:
+        #   - <div class="g-recaptcha" ...>
+        #   - <script src="...recaptcha/api...">
+        #   - <iframe ...recaptcha...>
+        #   - Short error/block page (<5000 chars) with the word present
+        if 'recaptcha' in response_lower:
+            is_structural = bool(re.search(
+                r'(class=["\']g-recaptcha|'
+                r'<(script|iframe)[^>]*recaptcha/api|'
+                r'<(div|form|iframe)[^>]*recaptcha)',
+                response_lower,
+            ))
+            is_short_page = resp_len < 5000
+            is_error_status = status_code in (403, 429, 503)
+
+            if is_structural or is_short_page or is_error_status:
+                await _fire("recaptcha")
+                return
+            else:
+                logger.debug(
+                    "BOT DETECTION SKIPPED (likely false positive): 'recaptcha' in "
+                    "large response (%d chars, status=%d) without structural HTML "
+                    "evidence | url=%s",
+                    resp_len, status_code, url,
+                )
+
+        # ── Phase 1b: other high-confidence patterns ─────────────────
+        #
+        # These phrases don't normally appear in game HTML, but they can
+        # show up in large JS bundles or error messages embedded in normal
+        # pages.  Only fire if the response is a short error page (<5000
+        # chars) or the HTTP status is an error code.
+        error_page_patterns = [
             'bot-detection',
             'suspicious activity',
             'automated access',
@@ -297,38 +378,35 @@ class HttpClient:
             'access denied',
         ]
 
-        for pattern in high_confidence_patterns:
+        for pattern in error_page_patterns:
             if pattern in response_lower:
-                logger.warning(f"BOT DETECTION: '{pattern}' found in response")
-                self._throttler.add_penalty(120.0)
-                return
+                is_short = resp_len < 5000
+                is_error = status_code in (0, 403, 429, 503)
+                if is_short or is_error:
+                    await _fire(pattern)
+                    return
+                else:
+                    logger.debug(
+                        "BOT DETECTION SKIPPED: '%s' in large response (%d chars, "
+                        "status=%d) — likely embedded in normal page | url=%s",
+                        pattern, resp_len, status_code, url,
+                    )
 
-        # Phase 2: Medium-confidence patterns — only flag if they appear
-        # in a context that suggests anti-bot (not normal game UI)
-        # "blocked" in game HTML = "upgradeBlocked" CSS class (normal)
-        # "blocked" in error page = actual block (suspicious)
-
-        # Check for captcha (but not in script/CSS references)
+        # ── Phase 2: captcha form — structural regex check ───────────
         if 'captcha' in response_lower:
-            # Only flag if it looks like an actual captcha challenge, not a JS variable
             if re.search(r'<(form|div|iframe)[^>]*captcha', response_lower):
-                logger.warning("BOT DETECTION: captcha form detected in response")
-                self._throttler.add_penalty(120.0)
+                await _fire("captcha_form")
                 return
 
-        # HTTP 429 is handled separately in post_json/post_form/get_html
-        # "too many requests" as page text (not in normal game HTML)
+        # ── Phase 3: "too many requests" — short error page only ─────
         if 'too many requests' in response_lower:
-            # Check it's not inside game text / script
-            if len(response_text) < 2000:  # error pages are short
-                logger.warning("BOT DETECTION: 'too many requests' in short response (likely error page)")
-                self._throttler.add_penalty(60.0)
+            if resp_len < 2000:
+                await _fire("too_many_requests")
                 return
 
-        # "banned" — only if it's the main page content, not a player name or chat
+        # ── Phase 4: ban message — exact phrase match ────────────────
         if 'your account has been banned' in response_lower or 'you have been banned' in response_lower:
-            logger.warning("BOT DETECTION: ban message detected")
-            self._throttler.add_penalty(300.0)
+            await _fire("account_banned")
             return
 
     def _sync_cookies_to_curl(self) -> None:
@@ -437,7 +515,7 @@ class HttpClient:
                     response = await self.client.post(url, json=data, headers=headers)
 
             # Check for bot detection
-            self._check_suspicious_response(response.text)
+            await self._check_suspicious_response(response.text, url=url, status_code=response.status_code)
 
             if response.status_code >= 400:
                 if response.status_code == 429:
@@ -507,7 +585,7 @@ class HttpClient:
                     response = await self.client.delete(url, headers=headers)
 
             # Check for bot detection
-            self._check_suspicious_response(response.text)
+            await self._check_suspicious_response(response.text, url=url, status_code=response.status_code)
 
             if response.status_code >= 400:
                 if response.status_code == 429:
@@ -567,7 +645,7 @@ class HttpClient:
                 else:
                     response = await self.client.post(url, content=form_str.encode(), headers=headers)
 
-            self._check_suspicious_response(response.text)
+            await self._check_suspicious_response(response.text, url=url, status_code=response.status_code)
 
             if response.status_code >= 400:
                 if response.status_code == 429:
@@ -625,7 +703,7 @@ class HttpClient:
                 else:
                     response = await self.client.get(url, headers=headers, follow_redirects=follow_redirects)
 
-            self._check_suspicious_response(response.text)
+            await self._check_suspicious_response(response.text, url=url, status_code=response.status_code)
 
             if follow_redirects and response.status_code >= 400:
                 if response.status_code == 429 and self._stealth_enabled:

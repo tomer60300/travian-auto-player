@@ -4,6 +4,7 @@ import useAuthStore from './stores/authStore'
 import ErrorBoundary from './components/ErrorBoundary'
 import Layout from './components/Layout'
 import ToastContainer from './components/Toast'
+import CaptchaAlert from './components/CaptchaAlert'
 
 const Login = lazy(() => import('./pages/Login'))
 const Connect = lazy(() => import('./pages/Connect'))
@@ -70,6 +71,7 @@ export default function App() {
     <TabContext.Provider value={tabId}>
       <ErrorBoundary>
         <ToastContainer />
+        <CaptchaAlert />
         <Suspense fallback={<PageLoader />}>
           <Routes>
             <Route path="/login" element={isAuthenticated ? <Navigate to="/connect" replace /> : <GuardedPage><Login /></GuardedPage>} />

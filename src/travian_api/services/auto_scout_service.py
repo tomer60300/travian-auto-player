@@ -203,6 +203,58 @@ class AutoScoutService:
 
         return sorted(result, key=lambda t: t.distance)
 
+    # ── Player profile population lookup ────────────────────────────
+
+    async def get_player_population(self, player_id: int) -> int:
+        """Fetch a player's **true** total population from their profile page.
+
+        The profile page ``/profile/<player_id>`` embeds a React
+        ``PlayerProfile.render(...)`` call whose ``viewData`` JSON
+        contains ``"ranks":{"populationRank":N,"population":N,...}``.
+
+        NOTE: The ``<div class="population">`` footer on that page shows
+        the **logged-in** user's population, NOT the profile owner's.
+        We must extract from the embedded JSON data instead.
+
+        Returns 0 on failure so callers can fall back gracefully.
+        """
+        try:
+            page_html = await self.http_client.get_html(f"/profile/{player_id}")
+        except Exception as exc:
+            logger.warning("Failed to fetch profile for player %d: %s", player_id, exc)
+            return 0
+
+        # Extract population from the React JSON: "ranks":{..."population":NNN...}
+        m = re.search(
+            r'"ranks"\s*:\s*\{[^}]*"population"\s*:\s*(\d+)',
+            page_html,
+        )
+        if m:
+            pop = int(m.group(1))
+            logger.debug("Player %d profile population: %d", player_id, pop)
+            return pop
+
+        logger.warning("Could not extract population from profile for player %d", player_id)
+        return 0
+
+    async def fetch_player_populations(
+        self,
+        player_ids: Set[int],
+    ) -> Dict[int, int]:
+        """Fetch true total populations for a set of players via their profile pages.
+
+        Processes players sequentially to respect the global request throttler.
+        Reports progress via :meth:`_report`.
+        """
+        result: Dict[int, int] = {}
+        total = len(player_ids)
+        for i, pid in enumerate(player_ids):
+            pop = await self.get_player_population(pid)
+            result[pid] = pop
+            if (i + 1) % 5 == 0 or i == total - 1:
+                self._report(f"Fetched player profiles: {i + 1}/{total}")
+        return result
+
     # ── Scout sending ────────────────────────────────────────────────
 
     async def get_available_scout_count(
