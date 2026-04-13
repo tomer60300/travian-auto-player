@@ -30,7 +30,7 @@ let _queueId = 0
 function nextId() { return ++_queueId }
 
 function queueToYaml(items, villageId) {
-  let yaml = `village_id: ${villageId || 'auto'}\nplan:\n`
+  let yaml = `village_id: ${villageId || 0}\nplan:\n`
   for (const item of items) {
     yaml += `  - building: "${item.name}"\n`
     yaml += `    target: ${item.targetLevel}\n`

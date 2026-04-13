@@ -42,7 +42,13 @@ def _parse_yaml_to_plan(yaml_content: str) -> BuildPlan:
     if not isinstance(data, dict):
         raise ValueError("YAML must be a mapping with 'village' and 'plan' keys.")
 
-    village_id = data.get("village", data.get("village_id", 0))
+    raw_vid = data.get("village", data.get("village_id", 0))
+    # Sanitise: YAML may parse "auto" as a string or 0 as falsy.
+    # Ensure we always end up with an int (0 means "use session default").
+    try:
+        village_id = int(raw_vid)
+    except (TypeError, ValueError):
+        village_id = 0
     plan_entries = data.get("plan", [])
 
     if not isinstance(plan_entries, list) or not plan_entries:
@@ -130,9 +136,21 @@ async def queue_run_ws(websocket: WebSocket):
             await _send(websocket, {"type": "error", "message": f"Invalid build plan: {exc}"})
             return
 
+        # Fall back to session active village when YAML has no village_id
+        if not plan.village_id and session.active_village_id:
+            plan.village_id = session.active_village_id
+
+        # Resolve village name for logging
+        village_label = str(plan.village_id)
+        if session.auth_state:
+            for v in session.auth_state.villages:
+                if v.id == plan.village_id:
+                    village_label = f"{v.name} ({v.id})"
+                    break
+
         await _send(websocket, {
             "type": "status",
-            "message": f"Parsed plan: village {plan.village_id}, {len(plan.items)} items",
+            "message": f"Parsed plan: village {village_label}, {len(plan.items)} items",
         })
 
         # ── Wire up the on_status callback ────────────────────────────
