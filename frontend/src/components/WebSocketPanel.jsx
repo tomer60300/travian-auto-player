@@ -65,6 +65,16 @@ export default function WebSocketPanel({ messages = [], status = 'disconnected',
                 [{formatTime(msg.timestamp)}]
               </span>
               {msg.text}
+              {msg.detail && (
+                <details className="mt-1 ml-4">
+                  <summary className="cursor-pointer text-secondary text-xs hover:text-primary select-none">
+                    {msg.detailLabel || 'Show details'}
+                  </summary>
+                  <pre className="mt-1 p-2 bg-surface rounded text-xs text-secondary overflow-x-auto whitespace-pre-wrap border-default" style={{ borderWidth: 1 }}>
+                    {msg.detail}
+                  </pre>
+                </details>
+              )}
             </div>
           ))
         )}

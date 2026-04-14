@@ -562,6 +562,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
           if (!mountedRef.current) return
           switch (data.type) {
             case 'session_init': addMessage('info', `Session: ${data.session_id} (viewable from /sessions)`); break
+            case 'trigger_info': addMessage('warning', `$ ${data.command}`); break
             case 'scanning': addMessage('info', data.message || 'Scanning map...'); break
             case 'scan_complete': addMessage('success', `Scan: ${data.targets} targets`); break
             case 'target_list':

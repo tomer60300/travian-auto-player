@@ -109,6 +109,7 @@ export default function Sessions() {
             type: typeToLevel(m.type),
             text: formatMessage(m),
             timestamp: m.ts ? m.ts * 1000 : Date.now(),
+            ...(m.plan_yaml ? { detail: m.plan_yaml, detailLabel: 'Show plan.yaml' } : {}),
           }))
           setMessages(hist)
           return
@@ -135,6 +136,7 @@ export default function Sessions() {
               type: typeToLevel(data.data.type),
               text: formatMessage(data.data),
               timestamp: data.data.ts ? data.data.ts * 1000 : Date.now(),
+              ...(data.data.plan_yaml ? { detail: data.data.plan_yaml, detailLabel: 'Show plan.yaml' } : {}),
             },
           ])
           return

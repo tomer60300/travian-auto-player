@@ -436,8 +436,8 @@ export default function BuildQueue() {
     setRunning(true)
 
     let msgId = Date.now()
-    const addMessage = (type, text) => {
-      setWsMessages((prev) => [...prev, { id: ++msgId, type, text, timestamp: new Date().toISOString() }])
+    const addMessage = (type, text, extra) => {
+      setWsMessages((prev) => [...prev, { id: ++msgId, type, text, timestamp: new Date().toISOString(), ...extra }])
     }
 
     const configPayload = { yaml_content: generatedYaml, poll_interval: pollInterval, use_video: useVideo, verbose }
@@ -458,6 +458,7 @@ export default function BuildQueue() {
       (data) => {
         if (!mountedRef.current) return
         if (data.type === 'session_init') addMessage('info', `Session: ${data.session_id} (viewable from /sessions)`)
+        else if (data.type === 'trigger_info') addMessage('warning', `$ ${data.command}`, data.plan_yaml ? { detail: data.plan_yaml, detailLabel: 'Show plan.yaml' } : undefined)
         else if (data.type === 'status') addMessage('info', data.message)
         else if (data.type === 'step_complete') {
           addMessage(data.success ? 'success' : 'error', `${data.building} -> Level ${data.level}: ${data.success ? 'Done' : 'Failed'}`)

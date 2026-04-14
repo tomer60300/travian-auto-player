@@ -163,7 +163,7 @@ async def queue_run_ws(websocket: WebSocket):
         exec_session.label = f"Build Queue - {village_label}"
         await _tracked_send(websocket, {"type": "session_init", "session_id": exec_session.id})
         # Build equivalent CLI command for display
-        cli_parts = [f"travian queue run <plan:{len(plan.items)} items> --village {village_label} --poll {poll_interval}"]
+        cli_parts = [f"travian queue run plan.yaml --village {village_label} --poll {poll_interval}"]
         if use_video:
             cli_parts.append("--use-video")
         if verbose:
@@ -171,6 +171,7 @@ async def queue_run_ws(websocket: WebSocket):
         await _tracked_send(websocket, {
             "type": "trigger_info",
             "command": " ".join(cli_parts),
+            "plan_yaml": yaml_content,
         })
         await _tracked_send(websocket, {
             "type": "status",
