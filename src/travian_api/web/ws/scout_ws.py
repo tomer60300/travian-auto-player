@@ -17,6 +17,7 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.sessions import session_manager, TravianSession
 from travian_api.web.ws.manager import ws_manager
 from travian_api.web.routes.military import _resolve_scout_unit
@@ -173,7 +174,17 @@ async def auto_scout_ws(websocket: WebSocket):
 
     await ws_manager.connect(websocket, user_id, CHANNEL)
 
+    exec_session = exec_session_manager.create(user_id, "scout-auto", "Auto Scout")
+
+    async def _tracked_send(ws, data):
+        ok = await _send(ws, data)
+        if ok:
+            exec_session_manager.push(exec_session.id, data)
+        return ok
+
     try:
+        await _tracked_send(websocket, {"type": "session_init", "session_id": exec_session.id})
+
         while True:
             # Wait for config
             try:
@@ -185,12 +196,12 @@ async def auto_scout_ws(websocket: WebSocket):
                 import json
                 config = json.loads(raw)
             except (json.JSONDecodeError, TypeError):
-                await _send(websocket, {"type": "error", "message": "Invalid JSON config"})
+                await _tracked_send(websocket, {"type": "error", "message": "Invalid JSON config"})
                 continue
 
             radius = config.get("radius")
             if not radius or not isinstance(radius, int) or radius < 1:
-                await _send(websocket, {"type": "error", "message": "Invalid radius"})
+                await _tracked_send(websocket, {"type": "error", "message": "Invalid radius"})
                 continue
 
             amount = config.get("amount", 1)
@@ -208,7 +219,7 @@ async def auto_scout_ws(websocket: WebSocket):
                 (v for v in session.auth_state.villages if v.id == village_id), None
             )
             if not center_village:
-                await _send(websocket, {"type": "error", "message": f"Village {village_id} not found"})
+                await _tracked_send(websocket, {"type": "error", "message": f"Village {village_id} not found"})
                 continue
 
             cx, cy = center_village.x, center_village.y
@@ -222,7 +233,7 @@ async def auto_scout_ws(websocket: WebSocket):
                     import math
 
                     if not targets_from_ui:
-                        await _send(websocket, {"type": "complete", "total_sent": 0, "successful": 0, "next_start_index": 0})
+                        await _tracked_send(websocket, {"type": "complete", "total_sent": 0, "successful": 0, "next_start_index": 0})
                         continue
 
                     tiles = []
@@ -243,19 +254,19 @@ async def auto_scout_ws(websocket: WebSocket):
                             pass
 
                     if not tiles:
-                        await _send(websocket, {"type": "complete", "total_sent": 0, "successful": 0, "next_start_index": 0})
+                        await _tracked_send(websocket, {"type": "complete", "total_sent": 0, "successful": 0, "next_start_index": 0})
                         continue
 
-                    if not await _send(websocket, {"type": "scan_complete", "targets": len(tiles)}):
+                    if not await _tracked_send(websocket, {"type": "scan_complete", "targets": len(tiles)}):
                         break
 
-                    await _send(websocket, {
+                    await _tracked_send(websocket, {
                         "type": "target_list",
                         "targets": [{"x": t.x, "y": t.y, "name": t.village_name, "pop": t.population, "dist": t.distance} for t in tiles],
                     })
                 else:
                     # Legacy fallback: no targets provided, do a full scan
-                    if not await _send(websocket, {"type": "scanning", "message": f"Scanning ({cx},{cy}) r={radius}..."}):
+                    if not await _tracked_send(websocket, {"type": "scanning", "message": f"Scanning ({cx},{cy}) r={radius}..."}):
                         break
 
                     tiles = await svc.scan_map(cx, cy, radius)
@@ -263,23 +274,23 @@ async def auto_scout_ws(websocket: WebSocket):
                     tiles = [t for t in tiles if t.village_id > 0 and t.village_id not in own_ids and not t.is_oasis]
 
                     if tiles:
-                        if not await _send(websocket, {"type": "scanning", "message": f"Enriching {len(tiles)} tiles..."}):
+                        if not await _tracked_send(websocket, {"type": "scanning", "message": f"Enriching {len(tiles)} tiles..."}):
                             break
                         tiles = await svc.enrich_tiles(tiles)
 
                     tiles = svc.filter_targets(tiles, exclude_oases=True)
 
                 if not tiles:
-                    await _send(websocket, {"type": "scan_complete", "targets": 0})
-                    await _send(websocket, {"type": "complete", "total_sent": 0, "successful": 0, "next_start_index": 0})
+                    await _tracked_send(websocket, {"type": "scan_complete", "targets": 0})
+                    await _tracked_send(websocket, {"type": "complete", "total_sent": 0, "successful": 0, "next_start_index": 0})
                     continue
 
                 total = len(tiles)
-                if not await _send(websocket, {"type": "scan_complete", "targets": total}):
+                if not await _tracked_send(websocket, {"type": "scan_complete", "targets": total}):
                     break
 
                 # Send pre-computed target list so frontend can show them all immediately
-                await _send(websocket, {
+                await _tracked_send(websocket, {
                     "type": "target_list",
                     "targets": [{"x": t.x, "y": t.y, "name": t.village_name, "pop": t.population, "dist": round(t.distance, 1)} for t in tiles],
                 })
@@ -295,7 +306,7 @@ async def auto_scout_ws(websocket: WebSocket):
                         )
 
                 if player_villages:
-                    await _send(websocket, {
+                    await _tracked_send(websocket, {
                         "type": "player_pops",
                         "players": [
                             {
@@ -331,7 +342,7 @@ async def auto_scout_ws(websocket: WebSocket):
 
                 if available_scouts >= 0:
                     max_targets = available_scouts // scouts_per_target if scouts_per_target > 0 else 0
-                    await _send(websocket, {
+                    await _tracked_send(websocket, {
                         "type": "scout_preflight",
                         "available": available_scouts,
                         "needed_per_target": scouts_per_target,
@@ -340,13 +351,13 @@ async def auto_scout_ws(websocket: WebSocket):
                     })
 
                     if max_targets == 0:
-                        await _send(websocket, {
+                        await _tracked_send(websocket, {
                             "type": "scouts_exhausted",
                             "available": 0,
                             "message": f"No scouts available (0 {scout_unit} idle)",
                             "sent_so_far": 0, "successful": 0,
                         })
-                        await _send(websocket, {
+                        await _tracked_send(websocket, {
                             "type": "complete",
                             "total_sent": 0, "successful": 0,
                             "next_start_index": start_index,
@@ -354,7 +365,7 @@ async def auto_scout_ws(websocket: WebSocket):
                         continue
                     elif max_targets < len(tiles):
                         tiles = tiles[:max_targets]
-                        await _send(websocket, {
+                        await _tracked_send(websocket, {
                             "type": "scouts_capped",
                             "available": available_scouts,
                             "can_send_to": max_targets,
@@ -387,7 +398,7 @@ async def auto_scout_ws(websocket: WebSocket):
                         eta_sec = int(eta_secs % 60)
                         eta_str = f" | ETA: {eta_min}m{eta_sec:02d}s"
 
-                    if not await _send(websocket, {
+                    if not await _tracked_send(websocket, {
                         "type": "scouting",
                         "target": {"x": target.x, "y": target.y, "name": target.village_name or "?"},
                         "index": i + 1,
@@ -402,7 +413,7 @@ async def auto_scout_ws(websocket: WebSocket):
                         try:
                             injected = await noise.maybe_inject_noise()
                             if injected:
-                                await _send(websocket, {"type": "noise_action", "message": "Idle browsing (stealth)..."})
+                                await _tracked_send(websocket, {"type": "noise_action", "message": "Idle browsing (stealth)..."})
                                 force_navigate = True
                         except Exception:
                             pass
@@ -416,7 +427,7 @@ async def auto_scout_ws(websocket: WebSocket):
                             if nav and hasattr(nav, 'idle_browse'):
                                 await nav.idle_browse()
                                 force_navigate = True
-                                await _send(websocket, {"type": "re_navigate", "message": "Breaking request pattern (stealth)..."})
+                                await _tracked_send(websocket, {"type": "re_navigate", "message": "Breaking request pattern (stealth)..."})
                         except Exception:
                             pass
 
@@ -459,7 +470,7 @@ async def auto_scout_ws(websocket: WebSocket):
                             )
                             results.append(result)
 
-                        if not await _send(websocket, {
+                        if not await _tracked_send(websocket, {
                             "type": "scout_result",
                             "target": {"x": target.x, "y": target.y},
                             "success": result["success"],
@@ -474,7 +485,7 @@ async def auto_scout_ws(websocket: WebSocket):
                         logger.warning("Scout error for (%s,%s): %s", target.x, target.y, e)
                         result = {"success": False, "error": str(e), "travel_time": None}
                         results.append(result)
-                        if not await _send(websocket, {
+                        if not await _tracked_send(websocket, {
                             "type": "scout_result",
                             "target": {"x": target.x, "y": target.y},
                             "success": False,
@@ -495,7 +506,7 @@ async def auto_scout_ws(websocket: WebSocket):
                         consecutive_troop_failures = 0
 
                     if consecutive_troop_failures >= 2:
-                        await _send(websocket, {
+                        await _tracked_send(websocket, {
                             "type": "scouts_exhausted",
                             "sent_so_far": i + 1,
                             "successful": sum(1 for r in results if r.get("success")),
@@ -519,7 +530,7 @@ async def auto_scout_ws(websocket: WebSocket):
                 successful = sum(1 for r in results if r.get("success"))
                 total_time = time.monotonic() - t_start_total
                 avg_time = total_time / total_sent if total_sent else 0
-                await _send(websocket, {
+                await _tracked_send(websocket, {
                     "type": "complete",
                     "total_sent": total_sent,
                     "successful": successful,
@@ -532,13 +543,14 @@ async def auto_scout_ws(websocket: WebSocket):
                 break
             except Exception as exc:
                 logger.exception("Auto-scout error for user %s", user_id)
-                await _send(websocket, {"type": "error", "message": str(exc)})
+                await _tracked_send(websocket, {"type": "error", "message": str(exc)})
 
     except (WebSocketDisconnect, RuntimeError):
         pass
     except Exception:
         logger.exception("Unexpected error in scout WS for user %s", user_id)
     finally:
+        exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)
 
 
@@ -581,7 +593,17 @@ async def scout_scan_ws(websocket: WebSocket):
 
     await ws_manager.connect(websocket, user_id, SCAN_CHANNEL)
 
+    exec_session = exec_session_manager.create(user_id, "scout-scan", "Map Scan")
+
+    async def _tracked_send(ws, data):
+        ok = await _send(ws, data)
+        if ok:
+            exec_session_manager.push(exec_session.id, data)
+        return ok
+
     try:
+        await _tracked_send(websocket, {"type": "session_init", "session_id": exec_session.id})
+
         # Wait for config
         try:
             raw = await websocket.receive_text()
@@ -592,7 +614,7 @@ async def scout_scan_ws(websocket: WebSocket):
         try:
             config = _json.loads(raw)
         except (ValueError, TypeError):
-            await _send(websocket, {"type": "error", "message": "Invalid JSON"})
+            await _tracked_send(websocket, {"type": "error", "message": "Invalid JSON"})
             return
 
         radius = config.get("radius", 10)
@@ -610,7 +632,7 @@ async def scout_scan_ws(websocket: WebSocket):
             (v for v in session.auth_state.villages if v.id == village_id), None
         )
         if not center_village:
-            await _send(websocket, {"type": "error", "message": f"Village {village_id} not found"})
+            await _tracked_send(websocket, {"type": "error", "message": f"Village {village_id} not found"})
             return
 
         cx, cy = center_village.x, center_village.y
@@ -627,7 +649,7 @@ async def scout_scan_ws(websocket: WebSocket):
                 scan_centers.append((scx, scy))
 
         num_regions = len(scan_centers)
-        if not await _send(websocket, {
+        if not await _tracked_send(websocket, {
             "type": "phase",
             "phase": "map_scan",
             "message": f"Scanning {num_regions} map region(s) around ({cx},{cy}) r={radius}...",
@@ -636,7 +658,7 @@ async def scout_scan_ws(websocket: WebSocket):
 
         all_tile_data: dict[tuple[int, int], dict] = {}
         for idx, (scx, scy) in enumerate(scan_centers):
-            if not await _send(websocket, {
+            if not await _tracked_send(websocket, {
                 "type": "scan_region",
                 "index": idx + 1,
                 "total": num_regions,
@@ -684,7 +706,7 @@ async def scout_scan_ws(websocket: WebSocket):
                 is_abandoned=did == -1 and uid is None,
             ))
 
-        if not await _send(websocket, {
+        if not await _tracked_send(websocket, {
             "type": "phase",
             "phase": "map_scan_done",
             "message": f"Map scan complete: {len(all_tile_data)} raw tiles, {len(raw_tiles)} with villages/oases",
@@ -725,7 +747,7 @@ async def scout_scan_ws(websocket: WebSocket):
             filter_parts.append(f"{removed_alliance_id} excluded alliances")
         filter_summary = ", ".join(filter_parts) if filter_parts else "none removed"
 
-        if not await _send(websocket, {
+        if not await _tracked_send(websocket, {
             "type": "phase",
             "phase": "pre_filter",
             "message": f"Pre-filter: {before_count} → {len(tiles)} tiles (removed: {filter_summary})",
@@ -733,7 +755,7 @@ async def scout_scan_ws(websocket: WebSocket):
             return
 
         if not tiles:
-            await _send(websocket, {"type": "complete", "tiles": [], "total": 0, "stats": {
+            await _tracked_send(websocket, {"type": "complete", "tiles": [], "total": 0, "stats": {
                 "raw_tiles": len(all_tile_data), "after_prefilter": 0,
                 "time_seconds": round(time.monotonic() - t_total_start, 1),
             }})
@@ -741,7 +763,7 @@ async def scout_scan_ws(websocket: WebSocket):
 
         # ── Phase 3: Enrichment (the slow part) ────────────────────
         enrich_total = len(tiles)
-        if not await _send(websocket, {
+        if not await _tracked_send(websocket, {
             "type": "phase",
             "phase": "enriching",
             "message": f"Enriching {enrich_total} tiles with population, player, tribe data...",
@@ -765,7 +787,7 @@ async def scout_scan_ws(websocket: WebSocket):
                 eta_s = int(eta_secs % 60)
                 eta_str = f"{eta_m}m{eta_s:02d}s"
 
-            if not await _send(websocket, {
+            if not await _tracked_send(websocket, {
                 "type": "enrich_progress",
                 "index": i + 1,
                 "total": enrich_total,
@@ -795,7 +817,7 @@ async def scout_scan_ws(websocket: WebSocket):
                     detail.alliance_name = tile.alliance_name
                 enriched.append(detail)
 
-                if not await _send(websocket, {
+                if not await _tracked_send(websocket, {
                     "type": "enrich_detail",
                     "index": i + 1,
                     "total": enrich_total,
@@ -813,7 +835,7 @@ async def scout_scan_ws(websocket: WebSocket):
             except Exception as e:
                 logger.warning("Enrich failed for (%s,%s): %s", tile.x, tile.y, e)
                 enriched.append(tile)
-                await _send(websocket, {
+                await _tracked_send(websocket, {
                     "type": "enrich_detail",
                     "index": i + 1,
                     "total": enrich_total,
@@ -823,7 +845,7 @@ async def scout_scan_ws(websocket: WebSocket):
             enrich_times.append(time.monotonic() - t_enrich_start)
 
         tiles = enriched
-        if not await _send(websocket, {
+        if not await _tracked_send(websocket, {
             "type": "phase",
             "phase": "enrich_done",
             "message": f"Enrichment complete: {len(tiles)} tiles enriched "
@@ -840,7 +862,7 @@ async def scout_scan_ws(websocket: WebSocket):
         # outside the scan radius are counted.
         if max_player_pop is not None and visible_pops:
             unique_pids = set(visible_pops.keys())
-            if not await _send(websocket, {
+            if not await _tracked_send(websocket, {
                 "type": "phase",
                 "phase": "player_profiles",
                 "message": f"Fetching {len(unique_pids)} player profile(s) for accurate population…",
@@ -881,7 +903,7 @@ async def scout_scan_ws(websocket: WebSocket):
                         "y": t.y,
                     })
 
-            if not await _send(websocket, {
+            if not await _tracked_send(websocket, {
                 "type": "player_pops",
                 "source": pop_source,
                 "players": [
@@ -964,7 +986,7 @@ async def scout_scan_ws(websocket: WebSocket):
             post_filter_msgs.append(f"Capped at limit={limit}")
 
         filter_detail = "; ".join(post_filter_msgs) if post_filter_msgs else "no additional filtering needed"
-        if not await _send(websocket, {
+        if not await _tracked_send(websocket, {
             "type": "phase",
             "phase": "post_filter",
             "message": f"Post-filter: {len(tiles)} targets remaining ({filter_detail})",
@@ -991,7 +1013,7 @@ async def scout_scan_ws(websocket: WebSocket):
             for t in tiles
         ]
 
-        await _send(websocket, {
+        await _tracked_send(websocket, {
             "type": "complete",
             "tiles": tile_dicts,
             "total": len(tile_dicts),
@@ -1010,6 +1032,7 @@ async def scout_scan_ws(websocket: WebSocket):
         logger.info("Scout scan WS disconnected: user=%s", user_id)
     except Exception:
         logger.exception("Unexpected error in scout scan WS for user %s", user_id)
-        await _send(websocket, {"type": "error", "message": "Internal scan error"})
+        await _tracked_send(websocket, {"type": "error", "message": "Internal scan error"})
     finally:
+        exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, SCAN_CHANNEL, websocket)

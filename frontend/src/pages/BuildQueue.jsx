@@ -457,7 +457,8 @@ export default function BuildQueue() {
       '/ws/queue/run',
       (data) => {
         if (!mountedRef.current) return
-        if (data.type === 'status') addMessage('info', data.message)
+        if (data.type === 'session_init') addMessage('info', `Session: ${data.session_id} (viewable from /sessions)`)
+        else if (data.type === 'status') addMessage('info', data.message)
         else if (data.type === 'step_complete') {
           addMessage(data.success ? 'success' : 'error', `${data.building} -> Level ${data.level}: ${data.success ? 'Done' : 'Failed'}`)
         }

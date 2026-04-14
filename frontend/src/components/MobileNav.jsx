@@ -20,6 +20,7 @@ const moreTabs = [
   { to: '/video', label: 'Video', icon: '🎬' },
   { to: '/queue', label: 'Queue', icon: '📋' },
   { to: '/logs', label: 'Logs', icon: '📊' },
+  { to: '/sessions', label: 'Sessions', icon: '📡' },
 ]
 
 export default function MobileNav() {

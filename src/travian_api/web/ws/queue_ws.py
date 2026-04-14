@@ -24,6 +24,7 @@ import yaml
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from travian_api.services.build_queue_service import BuildPlan, BuildPlanItem
+from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.sessions import session_manager, TravianSession
 from travian_api.web.ws.manager import ws_manager
 
@@ -105,6 +106,17 @@ async def queue_run_ws(websocket: WebSocket):
 
     await ws_manager.connect(websocket, user_id, CHANNEL)
 
+    exec_session = exec_session_manager.create(user_id, "queue", "Build Queue")
+
+    async def _tracked_send(ws: WebSocket, data: dict) -> None:
+        await _send(ws, data)
+        exec_session_manager.push(exec_session.id, data)
+
+    async def _tracked_try_send(ws: WebSocket, data: dict) -> bool:
+        ok = await _try_send(ws, data)
+        exec_session_manager.push(exec_session.id, data)
+        return ok
+
     # ── Event used to signal cancellation from a client "stop" message ──
     stop_event = asyncio.Event()
 
@@ -114,10 +126,10 @@ async def queue_run_ws(websocket: WebSocket):
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=30)
             config = json.loads(raw)
         except asyncio.TimeoutError:
-            await _send(websocket, {"type": "error", "message": "Timed out waiting for config message"})
+            await _tracked_send(websocket, {"type": "error", "message": "Timed out waiting for config message"})
             return
         except (json.JSONDecodeError, WebSocketDisconnect) as exc:
-            await _send(websocket, {"type": "error", "message": f"Invalid config: {exc}"})
+            await _tracked_send(websocket, {"type": "error", "message": f"Invalid config: {exc}"})
             return
 
         yaml_content: str = config.get("yaml_content", "")
@@ -126,14 +138,14 @@ async def queue_run_ws(websocket: WebSocket):
         verbose: bool = config.get("verbose", False)
 
         if not yaml_content:
-            await _send(websocket, {"type": "error", "message": "yaml_content is required"})
+            await _tracked_send(websocket, {"type": "error", "message": "yaml_content is required"})
             return
 
         # ── Parse the YAML plan ───────────────────────────────────────
         try:
             plan = _parse_yaml_to_plan(yaml_content)
         except (yaml.YAMLError, ValueError) as exc:
-            await _send(websocket, {"type": "error", "message": f"Invalid build plan: {exc}"})
+            await _tracked_send(websocket, {"type": "error", "message": f"Invalid build plan: {exc}"})
             return
 
         # Fall back to session active village when YAML has no village_id
@@ -148,7 +160,9 @@ async def queue_run_ws(websocket: WebSocket):
                     village_label = f"{v.name} ({v.id})"
                     break
 
-        await _send(websocket, {
+        exec_session.label = f"Build Queue - {village_label}"
+        await _tracked_send(websocket, {"type": "session_init", "session_id": exec_session.id})
+        await _tracked_send(websocket, {
             "type": "status",
             "message": f"Parsed plan: village {village_label}, {len(plan.items)} items",
         })
@@ -175,7 +189,7 @@ async def queue_run_ws(websocket: WebSocket):
                     msg = await status_queue.get()
                     if msg is None:
                         break
-                    await _send(websocket, {"type": "status", "message": msg})
+                    await _tracked_send(websocket, {"type": "status", "message": msg})
             except WebSocketDisconnect:
                 pass
 
@@ -193,7 +207,7 @@ async def queue_run_ws(websocket: WebSocket):
                         continue
                     if msg.get("action") == "stop":
                         stop_event.set()
-                        await _send(websocket, {
+                        await _tracked_send(websocket, {
                             "type": "status",
                             "message": "Stop requested -- aborting after current step",
                         })
@@ -229,7 +243,7 @@ async def queue_run_ws(websocket: WebSocket):
                     await exec_task
                 except asyncio.CancelledError:
                     pass
-                await _try_send(websocket, {
+                await _tracked_try_send(websocket, {
                     "type": "status",
                     "message": "Execution stopped by client",
                 })
@@ -242,20 +256,20 @@ async def queue_run_ws(websocket: WebSocket):
                             "level": f"{item.current_level}/{item.target}",
                             "status": item.status,
                         })
-                await _try_send(websocket, {"type": "complete", "results": results})
+                await _tracked_try_send(websocket, {"type": "complete", "results": results})
             else:
                 # Normal completion
                 results = exec_task.result()
 
                 for r in results:
-                    await _try_send(websocket, {
+                    await _tracked_try_send(websocket, {
                         "type": "step_complete",
                         "building": r.get("building", ""),
                         "level": r.get("level", ""),
                         "success": r.get("status") == "started",
                     })
 
-                await _try_send(websocket, {"type": "complete", "results": results})
+                await _tracked_try_send(websocket, {"type": "complete", "results": results})
 
             # Cancel any pending wait tasks
             for task in pending:
@@ -269,7 +283,7 @@ async def queue_run_ws(websocket: WebSocket):
             logger.info("Queue WS disconnected mid-execution: user=%s", user_id)
         except Exception as exc:
             logger.exception("Build queue execution failed for user %s", user_id)
-            await _try_send(websocket, {"type": "error", "message": str(exc)})
+            await _tracked_try_send(websocket, {"type": "error", "message": str(exc)})
         finally:
             # Restore the previous status callback and stop the drainer
             service._on_status = prev_callback
@@ -286,6 +300,7 @@ async def queue_run_ws(websocket: WebSocket):
         logger.info("Queue WS disconnected: user=%s", user_id)
     except Exception as exc:
         logger.exception("Unexpected error in queue WS for user %s", user_id)
-        await _try_send(websocket, {"type": "error", "message": f"Internal error: {exc}"})
+        await _tracked_try_send(websocket, {"type": "error", "message": f"Internal error: {exc}"})
     finally:
+        exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)

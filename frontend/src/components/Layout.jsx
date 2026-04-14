@@ -18,6 +18,7 @@ const navItems = [
   { to: '/scout', label: 'Auto Scout', icon: '🔭' },
   { to: '/queue', label: 'Build Queue', icon: '📋' },
   { to: '/logs', label: 'Activity Log', icon: '📊' },
+  { to: '/sessions', label: 'Sessions', icon: '📡' },
 ]
 
 export default function Layout() {

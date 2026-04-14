@@ -31,6 +31,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
+from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.sessions import session_manager
 from travian_api.web.ws.manager import ws_manager
 
@@ -123,18 +124,26 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
     channel = f"farm_run_{list_id}"
     await ws_manager.connect(websocket, user_id, channel)
 
+    exec_session = exec_session_manager.create(user_id, "farm-run", f"Farm Run - #{list_id}")
+
+    async def _tracked_send(ws, data):
+        await _send(ws, data)
+        exec_session_manager.push(exec_session.id, data)
+
     try:
         # ── Fetch list info and send initial message ─────────────────
         try:
             fl = await session.farm_service.get_farm_list(list_id)
         except Exception as exc:
-            await _send(websocket, {
+            await _tracked_send(websocket, {
                 "type": "error",
                 "message": f"Failed to fetch farm list {list_id}: {exc}",
             })
             return
 
-        await _send(websocket, {
+        exec_session.label = f"Farm Run - {fl.name}"
+        await _tracked_send(websocket, {"type": "session_init", "session_id": exec_session.id})
+        await _tracked_send(websocket, {
             "type": "info",
             "list_id": fl.id,
             "list_name": fl.name,
@@ -147,7 +156,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
 
         # ── Wait for client to send {"action": "start"} ─────────────
         if not await _wait_for_start_or_stop(websocket):
-            await _send(websocket, {"type": "complete", "reason": "cancelled"})
+            await _tracked_send(websocket, {"type": "complete", "reason": "cancelled"})
             return
 
         # ── Main loop ────────────────────────────────────────────────
@@ -166,7 +175,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                 break
 
             cycle += 1
-            await _send(websocket, {
+            await _tracked_send(websocket, {
                 "type": "cycle_start",
                 "cycle": cycle,
                 "timestamp": _now_iso(),
@@ -177,7 +186,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
 
                 # Check Gold Club error
                 if result.targets and result.targets[0].error == "plus.error_goldclub":
-                    await _send(websocket, {
+                    await _tracked_send(websocket, {
                         "type": "error",
                         "message": "Gold Club not active - cannot send farm lists",
                         "fatal": True,
@@ -193,7 +202,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                 for t in result.targets:
                     is_ok = t.error == ""
                     if verbose or not is_ok:
-                        await _send(websocket, {
+                        await _tracked_send(websocket, {
                             "type": "result",
                             "cycle": cycle,
                             "slot_id": t.id,
@@ -209,7 +218,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                 else:
                     next_send = datetime.fromtimestamp(next_time).isoformat(timespec="seconds")
 
-                await _send(websocket, {
+                await _tracked_send(websocket, {
                     "type": "cycle_end",
                     "cycle": cycle,
                     "sent": cycle_success,
@@ -224,7 +233,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
             except WebSocketDisconnect:
                 raise
             except Exception as exc:
-                await _send(websocket, {
+                await _tracked_send(websocket, {
                     "type": "error",
                     "cycle": cycle,
                     "message": str(exc),
@@ -246,7 +255,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                 break
 
         # ── Send completion summary ──────────────────────────────────
-        await _send(websocket, {
+        await _tracked_send(websocket, {
             "type": "complete",
             "reason": "duration_elapsed" if (end_time and time.time() >= end_time) else "stopped",
             "total_cycles": cycle,
@@ -260,7 +269,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
     except Exception as exc:
         logger.exception("Unexpected error in farm run WS: user=%s list=%s", user_id, list_id)
         try:
-            await _send(websocket, {
+            await _tracked_send(websocket, {
                 "type": "error",
                 "message": f"Unexpected server error: {exc}",
                 "fatal": True,
@@ -268,6 +277,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
         except Exception:
             logger.debug("Failed to send error message to farm run WS: user=%s list=%s", user_id, list_id, exc_info=True)
     finally:
+        exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, channel, websocket)
 
 
@@ -310,12 +320,18 @@ async def ws_farm_run_all(websocket: WebSocket):
     channel = "farm_run_all"
     await ws_manager.connect(websocket, user_id, channel)
 
+    exec_session = exec_session_manager.create(user_id, "farm-run-all", "Farm Run All")
+
+    async def _tracked_send_all(ws, data):
+        await _send(ws, data)
+        exec_session_manager.push(exec_session.id, data)
+
     try:
         # ── Fetch lists and resolve IDs ──────────────────────────────
         try:
             all_lists = await session.farm_service.get_all_farm_lists()
         except Exception as exc:
-            await _send(websocket, {
+            await _tracked_send_all(websocket, {
                 "type": "error",
                 "message": f"Failed to fetch farm lists: {exc}",
             })
@@ -325,7 +341,7 @@ async def ws_farm_run_all(websocket: WebSocket):
             all_lists = [fl for fl in all_lists if fl.id in requested_ids]
 
         if not all_lists:
-            await _send(websocket, {
+            await _tracked_send_all(websocket, {
                 "type": "error",
                 "message": "No farm lists found",
                 "fatal": True,
@@ -335,7 +351,10 @@ async def ws_farm_run_all(websocket: WebSocket):
         send_ids = [fl.id for fl in all_lists]
         total_active = sum(len(fl.active_slots) for fl in all_lists)
 
-        await _send(websocket, {
+        list_names = ", ".join(fl.name for fl in all_lists)
+        exec_session.label = f"Farm Run All ({len(all_lists)} lists)"
+        await _tracked_send_all(websocket, {"type": "session_init", "session_id": exec_session.id})
+        await _tracked_send_all(websocket, {
             "type": "info",
             "lists": [
                 {"id": fl.id, "name": fl.name, "active_slots": len(fl.active_slots)}
@@ -350,7 +369,7 @@ async def ws_farm_run_all(websocket: WebSocket):
 
         # ── Wait for start ───────────────────────────────────────────
         if not await _wait_for_start_or_stop(websocket):
-            await _send(websocket, {"type": "complete", "reason": "cancelled"})
+            await _tracked_send_all(websocket, {"type": "complete", "reason": "cancelled"})
             return
 
         # ── Main loop ────────────────────────────────────────────────
@@ -367,7 +386,7 @@ async def ws_farm_run_all(websocket: WebSocket):
                 break
 
             cycle += 1
-            await _send(websocket, {
+            await _tracked_send_all(websocket, {
                 "type": "cycle_start",
                 "cycle": cycle,
                 "timestamp": _now_iso(),
@@ -394,7 +413,7 @@ async def ws_farm_run_all(websocket: WebSocket):
                     failed_targets = [t for t in result.targets if t.error != ""]
                     if verbose or failed_targets:
                         targets_to_report = result.targets if verbose else failed_targets
-                        await _send(websocket, {
+                        await _tracked_send_all(websocket, {
                             "type": "result",
                             "cycle": cycle,
                             "list_id": lid,
@@ -412,7 +431,7 @@ async def ws_farm_run_all(websocket: WebSocket):
                         })
 
                 if gold_club_error:
-                    await _send(websocket, {
+                    await _tracked_send_all(websocket, {
                         "type": "error",
                         "message": "Gold Club not active - cannot send farm lists",
                         "fatal": True,
@@ -429,7 +448,7 @@ async def ws_farm_run_all(websocket: WebSocket):
                 else:
                     next_send = datetime.fromtimestamp(next_time).isoformat(timespec="seconds")
 
-                await _send(websocket, {
+                await _tracked_send_all(websocket, {
                     "type": "cycle_end",
                     "cycle": cycle,
                     "sent": cycle_success,
@@ -444,7 +463,7 @@ async def ws_farm_run_all(websocket: WebSocket):
             except WebSocketDisconnect:
                 raise
             except Exception as exc:
-                await _send(websocket, {
+                await _tracked_send_all(websocket, {
                     "type": "error",
                     "cycle": cycle,
                     "message": str(exc),
@@ -466,7 +485,7 @@ async def ws_farm_run_all(websocket: WebSocket):
                 break
 
         # ── Completion ───────────────────────────────────────────────
-        await _send(websocket, {
+        await _tracked_send_all(websocket, {
             "type": "complete",
             "reason": "duration_elapsed" if (end_time and time.time() >= end_time) else "stopped",
             "total_cycles": cycle,
@@ -480,7 +499,7 @@ async def ws_farm_run_all(websocket: WebSocket):
     except Exception as exc:
         logger.exception("Unexpected error in farm run-all WS: user=%s", user_id)
         try:
-            await _send(websocket, {
+            await _tracked_send_all(websocket, {
                 "type": "error",
                 "message": f"Unexpected server error: {exc}",
                 "fatal": True,
@@ -488,4 +507,5 @@ async def ws_farm_run_all(websocket: WebSocket):
         except Exception:
             logger.debug("Failed to send error message to farm run-all WS: user=%s", user_id, exc_info=True)
     finally:
+        exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, channel, websocket)

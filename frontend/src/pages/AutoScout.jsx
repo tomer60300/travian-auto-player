@@ -159,6 +159,9 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       (data) => {
         if (!mountedRef.current) return
         switch (data.type) {
+          case 'session_init':
+            addScanMsg('info', `Session: ${data.session_id} (viewable from /sessions)`)
+            break
           case 'phase':
             setScanPhase(PHASE_LABELS[data.phase] || data.phase)
             addScanMsg(data.phase?.includes('done') || data.phase?.includes('complete') ? 'success' : 'info', data.message)
@@ -558,6 +561,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
         (data) => {
           if (!mountedRef.current) return
           switch (data.type) {
+            case 'session_init': addMessage('info', `Session: ${data.session_id} (viewable from /sessions)`); break
             case 'scanning': addMessage('info', data.message || 'Scanning map...'); break
             case 'scan_complete': addMessage('success', `Scan: ${data.targets} targets`); break
             case 'target_list':

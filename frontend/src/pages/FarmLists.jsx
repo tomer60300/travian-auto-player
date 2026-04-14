@@ -71,6 +71,8 @@ function transformWsMessage(data) {
     }
     case 'cycle_end':
       return { ...base, type: 'info', text: `Cycle ${data.cycle} done - sent: ${data.sent ?? 0}, failed: ${data.failed ?? 0}${data.next_send_at ? ' | next: ' + data.next_send_at : ''}` }
+    case 'session_init':
+      return { ...base, type: 'info', text: `Session: ${data.session_id} (viewable from /sessions)` }
     case 'error':
       return { ...base, type: 'error', text: data.message || 'Unknown error' }
     case 'complete':

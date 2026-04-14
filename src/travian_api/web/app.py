@@ -30,6 +30,7 @@ from travian_api.web.routes.scout import router as scout_router
 from travian_api.web.routes.queue import router as queue_router
 from travian_api.web.routes.status_export import router as status_export_router
 from travian_api.web.routes.captcha import router as captcha_router
+from travian_api.web.routes.exec_sessions import router as exec_sessions_router
 
 # Import WebSocket routers
 from travian_api.web.ws.farm_ws import router as farm_ws_router
@@ -74,7 +75,13 @@ async def lifespan(app: FastAPI):
 
     await init_db()
     logger.info("Database initialized")
+
+    from travian_api.web.execution_sessions import exec_session_manager
+    exec_session_manager.start_cleanup()
+
     yield
+
+    exec_session_manager.stop_cleanup()
     await session_manager.disconnect_all()
     logger.info("All sessions disconnected")
 
@@ -154,6 +161,7 @@ app.include_router(scout_router)
 app.include_router(queue_router)
 app.include_router(status_export_router)
 app.include_router(captcha_router)
+app.include_router(exec_sessions_router)
 
 # Mount WebSocket routes
 app.include_router(farm_ws_router)
