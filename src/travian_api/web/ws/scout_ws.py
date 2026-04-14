@@ -225,6 +225,20 @@ async def auto_scout_ws(websocket: WebSocket):
             cx, cy = center_village.x, center_village.y
             svc = session.scout_service
 
+            # Build equivalent CLI command for display
+            cli_parts = [f"travian scout auto --radius {radius} --village-id {village_id}"]
+            cli_parts.append(f"--amount {amount}")
+            cli_parts.append(f"--type {scout_type}")
+            cli_parts.append(f"--delay {delay_min}")
+            if start_index:
+                cli_parts.append(f"--start-index {start_index}")
+            if targets_from_ui:
+                cli_parts.append(f"--targets {len(targets_from_ui)}")
+            await _tracked_send(websocket, {
+                "type": "trigger_info",
+                "command": " ".join(cli_parts),
+            })
+
             try:
                 # ── Phase 1: Resolve targets ─────────────────────────
                 if targets_from_ui is not None:
@@ -637,6 +651,27 @@ async def scout_scan_ws(websocket: WebSocket):
 
         cx, cy = center_village.x, center_village.y
         svc = session.scout_service
+
+        # Build equivalent CLI command for display
+        cli_parts = [f"travian scout scan --radius {radius} --village-id {village_id}"]
+        if min_pop is not None:
+            cli_parts.append(f"--min-pop {min_pop}")
+        if max_pop is not None:
+            cli_parts.append(f"--max-pop {max_pop}")
+        if max_player_pop is not None:
+            cli_parts.append(f"--max-player-pop {max_player_pop}")
+        if show_oases:
+            cli_parts.append("--show-oases")
+        if limit != 99999:
+            cli_parts.append(f"--limit {limit}")
+        if exclude_alliance_names:
+            cli_parts.append(f'--exclude-alliances "{",".join(exclude_alliance_names)}"')
+        if exclude_player_names:
+            cli_parts.append(f'--exclude-players "{",".join(exclude_player_names)}"')
+        await _tracked_send(websocket, {
+            "type": "trigger_info",
+            "command": " ".join(cli_parts),
+        })
 
         import math
         t_total_start = time.monotonic()

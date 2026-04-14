@@ -30,6 +30,7 @@ function timeAgo(ts) {
 
 function formatMessage(data) {
   if (!data) return ''
+  if (data.type === 'trigger_info') return `$ ${data.command}`
   if (data.message) return data.message
   if (data.type === 'cycle_start') return `Cycle ${data.cycle} started`
   if (data.type === 'cycle_end') return `Cycle ${data.cycle} done - sent: ${data.sent}, failed: ${data.failed}`
@@ -47,6 +48,7 @@ function formatMessage(data) {
 function typeToLevel(type) {
   if (type === 'error') return 'error'
   if (type === 'complete' || type === 'step_complete' || type === 'scout_result') return 'success'
+  if (type === 'trigger_info') return 'warning'
   if (type === 'warning') return 'warning'
   return 'info'
 }
@@ -65,7 +67,7 @@ export default function Sessions() {
   // Fetch session list
   const fetchSessions = useCallback(async () => {
     try {
-      const res = await api.get('/api/sessions')
+      const res = await api.get('/sessions')
       setSessions(res.data)
     } catch {
       // ignore

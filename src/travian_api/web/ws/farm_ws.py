@@ -143,6 +143,14 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
 
         exec_session.label = f"Farm Run - {fl.name}"
         await _tracked_send(websocket, {"type": "session_init", "session_id": exec_session.id})
+        # Build equivalent CLI command for display
+        cli_parts = [f"travian farm run {fl.id} --interval {interval} --duration {duration}"]
+        if verbose:
+            cli_parts.append("--verbose")
+        await _tracked_send(websocket, {
+            "type": "trigger_info",
+            "command": " ".join(cli_parts),
+        })
         await _tracked_send(websocket, {
             "type": "info",
             "list_id": fl.id,
@@ -354,6 +362,16 @@ async def ws_farm_run_all(websocket: WebSocket):
         list_names = ", ".join(fl.name for fl in all_lists)
         exec_session.label = f"Farm Run All ({len(all_lists)} lists)"
         await _tracked_send_all(websocket, {"type": "session_init", "session_id": exec_session.id})
+        # Build equivalent CLI command for display
+        cli_parts = [f"travian farm run-all --interval {interval} --duration {duration}"]
+        if list_ids_param:
+            cli_parts.append(f"--lists {list_ids_param}")
+        if verbose:
+            cli_parts.append("--verbose")
+        await _tracked_send_all(websocket, {
+            "type": "trigger_info",
+            "command": " ".join(cli_parts),
+        })
         await _tracked_send_all(websocket, {
             "type": "info",
             "lists": [
