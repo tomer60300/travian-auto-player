@@ -1,73 +1,103 @@
-# Travian API
+# Travian Auto Player
 
 A Python library, CLI, and self-hosted web UI for automating Travian Legends gameplay. Async-first, multi-village, with stealth anti-bot protection.
 
-## Features
+## Quick Start (Web UI)
 
-### CLI
-- **🔐 Authentication** — 2-step login with JWT caching, interactive setup prompt
-- **🏘️ Multi-Village** — Full support for multiple villages per account
-- **🏗️ Auto-Builder** — YAML-based build queue with priorities, multi-level chaining, gold guard, and video speedup
-- **⚔️ Military** — Scouts, raids, attacks with tribe-aware troop selection
-- **🌾 Farm Lists** — Full CRUD + smart raid intelligence (last raid, carry ratio, distance, booty)
-- **🔭 Auto-Scout** — Scan map, filter by population/distance/player/alliance, send scouts with loop mode
-- **📊 Reports** — Fetch and parse scout/battle reports with smart type detection
-- **📍 Village Reports** — Gather all reports (own + alliance) for any village from the map tile
-- **📈 Raid Analyzer v2** — Scout-gated pipeline with binary search scoring, cache, and re-scout queue
-- **🎬 Video Rewards** — Automated ATG ad simulation for production boosts and build speedups
-- **🛡️ Gold Guard** — Never spends gold unless you explicitly opt in
+### Prerequisites
 
-### Web UI (`travian-web`)
-- **🌐 Self-Hosted Dashboard** — React + FastAPI served at `http://localhost:8000`
-- **👥 Multi-User** — SQLite auth with per-user Travian session isolation
-- **🏛️ Buildings** — View, upgrade, construct with live construction queue countdown
-- **🌾 Farm Lists** — Full management with sort/filter, booty display (taken/capacity), copy/move between lists, defense scan, active/inactive sync
-- **🔭 Auto-Scout** — Map scan with alliance/player exclusion (persisted), population filters, loop mode with countdown
-- **⚔️ Military** — Scout and raid dispatch with tribe-aware troop names
-- **📊 Reports** — Browse reports with collapsible raid analyzer panel
-- **📋 Build Queue** — Visual YAML plan builder with drag-and-drop, validation, and live execution via WebSocket
-- **🎬 Video Rewards** — Claim individual or all production boosts
-- **📊 Activity Log** — Real-time server + client log streaming via WebSocket, with origin filter, level badges, and export
-- **🔒 Stealth** — All operations go through request throttler, human-like delays, and browser header simulation
+- **Python 3.11+** — [python.org/downloads](https://www.python.org/downloads/)
+- **Node.js 18+** — [nodejs.org](https://nodejs.org/)
 
-## Quick Start
-
-### Install
+### Setup & Run
 
 ```bash
-git clone <repository-url>
-cd travian-api
+git clone https://github.com/tomer60300/travian-auto-player.git
+cd travian-auto-player
+git checkout feature/web-ui
+```
+
+Then one command:
+
+| OS | Command |
+|----|---------|
+| **Windows** | Double-click `start.bat` |
+| **Linux / Mac** | `./start.sh` |
+
+The script installs all dependencies, builds the frontend, and starts the server.
+
+### First-Time Usage
+
+1. Open **http://localhost:8001** in your browser
+2. **Register** — create a username and password (this is your local web UI account, not Travian)
+3. **Connect** — enter your Travian server URL (e.g. `https://ts2.x1.europe.travian.com`) and your Travian login credentials
+4. You're in — use Dashboard, Farm Lists, Auto Scout, Build Queue, and more
+
+### Access from Phone / Another Device
+
+The server binds to `0.0.0.0:8001`, so it's already accessible on your local network at `http://<your-lan-ip>:8001`.
+
+For access outside your network, use **Tailscale** (free, no port forwarding needed):
+
+1. Install Tailscale on your server machine and your phone/laptop — [tailscale.com/download](https://tailscale.com/download)
+2. Sign in on both devices with the same account
+3. Find your server's Tailscale IP: `tailscale ip`
+4. Access from any device: `http://<tailscale-ip>:8001`
+
+### Development Mode (hot-reload)
+
+```bash
+# Terminal 1 — Backend with relaxed CSP
+TRAVIAN_DEV=1 python -m uvicorn travian_api.web.app:app --host 0.0.0.0 --port 8000 --reload
+
+# Terminal 2 — Frontend Vite dev server
+cd frontend && npm install && npm run dev
+```
+
+Frontend dev server runs on `:5173` and proxies API calls to the backend.
+
+---
+
+## Features
+
+### Web UI (`travian-web`)
+- **Self-Hosted Dashboard** — React + FastAPI served at `http://localhost:8001`
+- **Multi-User** — SQLite auth with per-user Travian session isolation
+- **Buildings** — View, upgrade, construct with live construction queue countdown
+- **Farm Lists** — Full management with sort/filter, booty display (taken/capacity), copy/move between lists, defense scan with combat strength, active/inactive sync
+- **Auto-Scout** — Map scan with alliance/player exclusion (persisted), population filters (including real player population from profile pages), loop mode with countdown
+- **Military** — Scout and raid dispatch with tribe-aware troop names
+- **Reports** — Browse reports with collapsible raid analyzer panel
+- **Build Queue** — Visual plan builder with drag-and-drop, validation, and live execution via WebSocket
+- **Video Rewards** — Claim individual or all production boosts
+- **Activity Log** — Real-time server + client log streaming via WebSocket
+- **Captcha Guard** — Automatic bot-detection with full-screen alert, operation freeze, and user-guided resolution
+- **Stealth** — Request throttling, human-like delays, browser header simulation, noise injection, activity scheduling
+
+### CLI
+- **Authentication** — 2-step login with JWT caching, interactive setup prompt
+- **Multi-Village** — Full support for multiple villages per account
+- **Auto-Builder** — YAML-based build queue with priorities, multi-level chaining, gold guard, and video speedup
+- **Military** — Scouts, raids, attacks with tribe-aware troop selection
+- **Farm Lists** — Full CRUD + smart raid intelligence (last raid, carry ratio, distance, booty)
+- **Auto-Scout** — Scan map, filter by population/distance/player/alliance, send scouts with loop mode
+- **Reports** — Fetch and parse scout/battle reports with smart type detection
+- **Raid Analyzer v2** — Scout-gated pipeline with binary search scoring, cache, and re-scout queue
+- **Video Rewards** — Automated ATG ad simulation for production boosts and build speedups
+- **Gold Guard** — Never spends gold unless you explicitly opt in
+
+---
+
+## CLI Quick Start
+
+### Install (CLI only)
+
+```bash
 pip install -e .
 travian-setup
 ```
 
-`travian-setup` checks if the `travian` command is on your PATH. If not, it offers to add it automatically (no admin needed on Windows). You only need to run this once.
-
-If `travian-setup` isn't found either, run it as: `python -m travian_api._post_install`
-
-**Alternative**: skip all of that and always use `python -m travian_api` instead of `travian`:
-```bash
-python -m travian_api auth login
-python -m travian_api queue run plan.yaml
-```
-
-### Web UI Install
-
-```bash
-pip install -e ".[web]"
-travian-web
-```
-
-Open `http://localhost:8000`. Register an account, connect to your Travian server, and you're in.
-
-For development with Vite hot-reload:
-```bash
-# Terminal 1: Backend
-TRAVIAN_DEV=1 python -m uvicorn travian_api.web.app:app --host 0.0.0.0 --port 8000
-
-# Terminal 2: Frontend dev server
-cd frontend && npm install && npm run dev
-```
+`travian-setup` checks if the `travian` command is on your PATH. If not, it offers to add it automatically. You only need to run this once.
 
 ### First run
 
@@ -82,7 +112,6 @@ Server URL (e.g. https://ts1.x1.europe.travian.com): https://ts1.x1.europe.travi
 Username/email: me@email.com
 Password: ****
 Save credentials to .env? [Y/n]: y
-Saved to C:\projects\travian-api\.env
 
 OK - Logged in!
   Player: Chieftain
@@ -92,9 +121,7 @@ OK - Logged in!
     20031  New village   (-161|167)
 ```
 
-After saving, every command works without typing credentials again.
-
-### Other ways to configure
+### Configuration
 
 **CLI flags** (one-off):
 ```bash
@@ -115,26 +142,22 @@ TRAVIAN_USERNAME=me@email.com
 TRAVIAN_PASSWORD=secret
 ```
 
+---
+
 ## CLI Reference
 
 ### Authentication
 
 ```bash
-# Login and show player info
-travian auth login
-
-# Print the current JWT token (useful for debugging or external tools)
-travian auth token
+travian auth login          # Login and show player info
+travian auth token          # Print the current JWT token
 ```
 
 ### Villages
 
 ```bash
-# List all your villages
-travian village list
-
-# Switch active village context
-travian village switch 20031
+travian village list        # List all your villages
+travian village switch 20031  # Switch active village context
 ```
 
 ### Buildings
@@ -142,601 +165,137 @@ travian village switch 20031
 All building commands accept `--village-id` / `-v` to target a specific village:
 
 ```bash
-# List all buildings
-travian building list
-travian building list -v 20031
-
-# Show current resources
-travian building resources
-travian building resources -v 20031
-
-# Show construction queue
-travian building queue
-
-# Upgrade a building (gold guard ON by default)
-travian building upgrade --slot-id 15
-travian building upgrade --slot-id 15 -v 20031
-
-# Allow gold spend if queue is occupied
-travian building upgrade --slot-id 15 --allow-gold
-
-# Construct a NEW building on an empty slot (slots 19-40)
-# (upgrade levels existing buildings; construct places new ones)
-travian building construct --slot-id 25 --building Cranny
-travian building construct --slot-id 25 --building Embassy -v 20031
-travian building construct --slot-id 25 --building Barracks --allow-gold
+travian building list                          # List all buildings
+travian building list -v 20031                 # List for specific village
+travian building resources                     # Show current resources
+travian building queue                         # Show construction queue
+travian building upgrade --slot-id 15          # Upgrade a building
+travian building upgrade --slot-id 15 --allow-gold  # Allow gold spend
+travian building construct --slot-id 25 --building Cranny  # New building
 ```
 
 ### Military
 
 ```bash
-# Send scouts
 travian military scout --x 100 --y 200 --amount 5
 travian military scout --x 100 --y 200 --amount 3 --type defenses
-
-# Send from a specific village
-travian military scout --x 100 --y 200 --amount 5 --village-id 20031
-
-# Send a raid (uses currently active village -- switch first if needed)
 travian military raid --x 50 --y -30 --troop t1=10 --troop t2=5
 ```
 
 ### Farm Lists
 
-Manage farm lists and trigger raids with full visibility into raid performance. Works without Gold Club for everything except sending.
-
-#### List all farm lists
-
 ```bash
-travian farm list
+travian farm list                              # List all farm lists
+travian farm show 10165                        # Show list with raid intelligence
+travian farm send 10165                        # Send a farm list
+travian farm send-all --yes                    # Send all farm lists
+travian farm run 10165                         # Loop-send every 5 minutes
+travian farm run 10165 --interval 180 --duration 120  # Custom interval/duration
+travian farm create --name "New List"          # Create farm list
+travian farm add-target 10165 --x -162 --y 167 -t t1=5  # Add target
+travian farm delete 10165                      # Delete farm list
 ```
-
-```
-                              Farm Lists
-┌───────┬───────────────┬───────┬─────────┬──────────────┬────────────┐
-│    ID │ Name          │ Slots │ Running │ Last Started │ Village ID │
-├───────┼───────────────┼───────┼─────────┼──────────────┼────────────┤
-│ 10165 │ My Raid List  │     5 │    0    │       2h ago │      20030 │
-│ 10200 │ Inactive Farms│     3 │    0    │       never  │      20031 │
-└───────┴───────────────┴───────┴─────────┴──────────────┴────────────┘
-```
-
-#### Show farm list with raid intelligence
-
-The `farm show` command displays everything you need to make smart raiding decisions:
-
-```bash
-travian farm show 10165
-```
-
-```
-My Raid List  (id=10165)
-  Village: 20030  |  Running raids: 0  |  Slots: 5
-  Available troops: t1=490 t2=33 t3=141 t4=48 t5=31 t6=0
-
-                                    Targets
-┌───┬──────────┬─────┬──────┬────────┬──────────┬───────────┬───────────┬───────────┬──────────┐
-│ # │ Target   │ Pop │ Dist │ Troops │ Last Raid│ Raided/Cap│ Result    │ Status    │ Total    │
-├───┼──────────┼─────┼──────┼────────┼──────────┼───────────┼───────────┼───────────┼──────────┤
-│ 1 │ Village1 │  12 │  1.4 │  t1=5  │  15m ago │   450/600 │ no loss   │ ready     │   3,200  │
-│   │ (-162|…) │     │      │        │          │           │           │           │ (8 raids)│
-├───┼──────────┼─────┼──────┼────────┼──────────┼───────────┼───────────┼───────────┼──────────┤
-│ 2 │ Village2 │  45 │  3.2 │  t1=10 │   2h ago │   120/600 │ some loss │ raiding...│   1,500  │
-│   │ (-159|…) │     │      │  t4=1  │          │           │           │           │ (3 raids)│
-├───┼──────────┼─────┼──────┼────────┼──────────┼───────────┼───────────┼───────────┼──────────┤
-│ 3 │ Village3 │   8 │  5.0 │  t1=3  │    never │         — │ —         │ inactive  │        — │
-└───┴──────────┴─────┴──────┴────────┴──────────┴───────────┴───────────┴───────────┴──────────┘
-```
-
-**Columns explained:**
-
-| Column | Description |
-|--------|-------------|
-| **Pop** | Target village population |
-| **Dist** | Distance in fields from source village |
-| **Troops** | Troop composition assigned to this target (t1–t10) |
-| **Last Raid** | Time since last raid was sent |
-| **Raided/Cap** | Resources raided vs carry capacity. Colour-coded: green (>70%), yellow (30-70%), red (<30%) |
-| **Result** | Last raid outcome: `no loss` (green), `some loss` (yellow), `all dead` (red) |
-| **Status** | Current state: `ready`, `raiding...`, `scouting...`, or `inactive` |
-| **Total** | Cumulative resources raided and total raid count |
-
-#### Send a farm list
-
-```bash
-# Interactive — shows target count and asks for confirmation
-travian farm send 10165
-
-# Skip confirmation
-travian farm send 10165 --yes
-
-# Dry run -- show what would be sent without actually sending
-travian farm send 10165 --dry-run
-```
-
-> **Note:** Sending requires Gold Club. Without it, the API returns an error. All other farm list operations (create, add targets, view, delete) work without Gold Club.
-
-#### Create, add targets, delete
-
-```bash
-# Create a new farm list
-travian farm create --name "New Raid List"
-travian farm create --name "Village 2 List" --village-id 20031
-
-# Add a target with troop composition
-travian farm add-target 10165 --x -162 --y 167 -t t1=5
-travian farm add-target 10165 --x -159 --y 168 -t t1=3 -t t4=1
-
-# Force add (even if target exists in another list)
-travian farm add-target 10165 --x -162 --y 167 -t t1=5 --force
-
-# Delete a farm list
-travian farm delete 10165
-travian farm delete 10165 --yes  # skip confirmation
-```
-
-#### Send all farm lists
-
-Send all farm lists at once (or a subset by ID):
-
-```bash
-# Send all farm lists
-travian farm send-all --yes
-
-# Send specific lists only
-travian farm send-all --lists 10165,10200 --yes
-
-# Dry run
-travian farm send-all --dry-run
-```
-
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `--lists` | `-l` | all | Comma-separated list IDs to send (default: all lists) |
-| `--dry-run` | — | false | Show plan without sending |
-| `--yes` | `-y` | false | Skip confirmation prompt |
-
-> **Note:** Requires Gold Club, same as `farm send`.
-
-#### Loop-send a farm list
-
-Continuously send a farm list at a fixed interval. Runs until stopped with Ctrl+C or duration expires:
-
-```bash
-# Send farm list 10165 every 5 minutes (default), forever
-travian farm run 10165
-
-# Custom interval: every 3 minutes, for 2 hours
-travian farm run 10165 --interval 180 --duration 120
-
-# Dry run -- show config without starting loop
-travian farm run 10165 --dry-run
-
-# Show per-slot details on each send
-travian farm run 10165 --verbose
-```
-
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `--interval` | `-i` | 300 | Seconds between sends |
-| `--duration` | `-d` | 0 | Total minutes to run (0 = forever, until Ctrl+C) |
-| `--dry-run` | — | false | Show plan without starting the loop |
-| `--verbose` | — | false | Show per-slot send details each round |
-
-> **Note:** Requires Gold Club. If Gold Club is not active, the loop exits immediately with an error.
-
-#### Loop-send all farm lists
-
-Like `farm run`, but sends all (or a subset of) farm lists each interval:
-
-```bash
-# Send all farm lists every 5 minutes, forever
-travian farm run-all
-
-# Send specific lists every 2 minutes, for 1 hour
-travian farm run-all --lists 10165,10200 --interval 120 --duration 60
-
-# Dry run
-travian farm run-all --dry-run
-```
-
-| Flag | Short | Default | Description |
-|------|-------|---------|-------------|
-| `--lists` | `-l` | all | Comma-separated list IDs (default: all lists) |
-| `--interval` | `-i` | 300 | Seconds between sends |
-| `--duration` | `-d` | 0 | Total minutes to run (0 = forever) |
-| `--dry-run` | — | false | Show plan without starting the loop |
-| `--verbose` | — | false | Show per-list send details each round |
-
----
 
 ### Auto-Scout
 
-Scan the map around your village, discover targets, filter by conditions, and send scouts automatically.
-
-#### Scan (preview only)
-
-Scan the map and display results without sending anything:
-
 ```bash
-# Basic scan — enriches tiles with population and player data
-travian scout scan --radius 10
-
-# Filter by population
-travian scout scan --radius 15 --max-pop 50
-travian scout scan --radius 15 --min-pop 5 --max-pop 50
-
-# Fast scan without tile enrichment (no population data)
-travian scout scan --radius 20 --no-enrich
-
-# Only show villages with no active player
-travian scout scan --radius 10 --no-player
-
-# Include oases in results
-travian scout scan --radius 10 --show-oases
-
-# Scan from a specific village
-travian scout scan --radius 10 --village-id 20031
-
-# Limit results
-travian scout scan --radius 20 --limit 30
+travian scout scan --radius 10                 # Scan and preview targets
+travian scout scan --radius 15 --max-pop 50    # Filter by population
+travian scout auto --radius 10 --max-pop 50 --amount 1 --type resources --yes  # Scan + send
+travian scout auto --radius 15 --max-pop 100 --dry-run  # Dry run
 ```
-
-```
-Scanning from Chieftain`s village (-161|166) radius=10
-  Scanning 1 map region(s) around (-161,166) r=10
-  Found 45 tiles with villages/oases in radius
-  Enriching 28 tiles with details...
-
-Found 15 targets:
-                                 Scan Results
-┌────┬────────────┬───────────────────────┬─────┬──────┬─────────────┬────────┐
-│  # │ Coords     │ Name                  │ Pop │ Dist │ Player      │ Tribe  │
-├────┼────────────┼───────────────────────┼─────┼──────┼─────────────┼────────┤
-│  1 │ (-162|167) │ KAK Köyü              │  12 │  1.4 │ KAK         │ Gauls  │
-│  2 │ (-159|168) │ CENGİZHAN80 Köyü      │  12 │  2.8 │ CENGİZHAN80 │ Gauls  │
-│  3 │ (-164|166) │ Bergen                │  42 │  3.0 │ Odin        │ Teuton │
-│ ...│            │                       │     │      │             │        │
-└────┴────────────┴───────────────────────┴─────┴──────┴─────────────┴────────┘
-```
-
-#### Auto-scout (scan + send)
-
-Scan, filter, and send scouts in one command:
-
-```bash
-# Scout all low-pop villages within radius 10 (resource scout)
-travian scout auto --radius 10 --max-pop 50 --amount 1 --type resources --yes
-
-# Scout with defenses type (reveal troops)
-travian scout auto --radius 10 --max-pop 30 --amount 2 --type defenses --yes
-
-# Dry run — show what would be scouted
-travian scout auto --radius 15 --max-pop 100 --dry-run
-
-# Use an exclude list to skip known targets
-travian scout auto --radius 10 --exclude exclude.txt --yes
-
-# Limit number of targets and add delay between sends
-travian scout auto --radius 20 --limit 10 --delay 2.0 --yes
-
-# Scout from a different village
-travian scout auto --radius 10 --village-id 20031 --amount 1 --yes
-```
-
-```
-Auto-Scout from Chieftain`s village (-161|166) r=10 type=resources amount=1
-  Scanning 1 map region(s) around (-161,166) r=10
-  Found 45 tiles with villages/oases in radius
-  Enriching 28 tiles...
-
-6 targets to scout:
-┌───┬────────────┬──────────────────┬─────┬──────┬─────────────┐
-│ # │ Coords     │ Name             │ Pop │ Dist │ Player      │
-├───┼────────────┼──────────────────┼─────┼──────┼─────────────┤
-│ 1 │ (-162|167) │ KAK Köyü         │  12 │  1.4 │ KAK         │
-│ 2 │ (-159|168) │ CENGİZHAN80 Köyü │  12 │  2.8 │ CENGİZHAN80 │
-│ ...│           │                  │     │      │             │
-└───┴────────────┴──────────────────┴─────┴──────┴─────────────┘
-  [1/6] Scouting (-162,167) KAK Köyü pop=12 dist=1.41
-    -> Scouts sent! Travel: 0:09:26
-  [2/6] Scouting (-159,168) CENGİZHAN80 Köyü pop=12 dist=2.83
-    -> Scouts sent! Travel: 0:18:51
-  ...
-  Done: 6/6 scouts sent successfully
-
-Results: 6/6 scouts sent
-```
-
-#### Exclude file format
-
-Create a text file with coordinates to skip (one per line):
-
-```
-# exclude.txt — coordinates to never scout
-# Format: x,y or x|y (pipe-separated also works)
--162,167
--159,168
--164|166
-
-# Comments and blank lines are ignored
-```
-
-#### All auto-scout options
-
-| Option | Short | Default | Description |
-|--------|-------|---------|-------------|
-| `--radius` | `-r` | 10 | Scan radius in fields from village center |
-| `--village-id` | `-v` | main village | Source village for scanning and sending scouts |
-| `--max-pop` | — | no limit | Max target population (filter out large villages) |
-| `--min-pop` | — | no limit | Min target population |
-| `--type` | `-t` | `resources` | Scout type: `resources` (reveal resources) or `defenses` (reveal troops) |
-| `--amount` | `-n` | 1 | Number of scouts to send per target |
-| `--exclude` | `-e` | none | Path to exclude file (coordinates to skip) |
-| `--no-player` | — | false | Only scout villages with no active player |
-| `--show-oases` | — | false | Include oases in scan results |
-| `--limit` | `-l` | 20 | Max number of targets to scout |
-| `--dry-run` | — | false | Show targets without sending scouts |
-| `--yes` | `-y` | false | Skip confirmation prompt |
-| `--delay` | — | 1.0 | Seconds between scout sends (rate limiting) |
-
----
 
 ### Reports
 
 ```bash
-# List recent reports (default: last 24 hours, up to 5 pages)
-travian reports list
-travian reports list --max-age-hours 48 --max-pages 10
-
-# Show detailed report
-travian reports show <report-id>
-
-# Gather all reports for a specific village (own + alliance)
-travian reports village 14 98
-travian reports village 14 98 --details          # fetch full report data
-travian reports village 14 98 -d --max-details 3 # limit detail fetches
-
-# Analyze raid targets (v2 pipeline)
-travian reports analyze --radius 15 --min-resources 100
-travian reports analyze --radius 20 --stale-hours 12 --nap-alliance HM2 --nap-alliance LR
-travian reports analyze --max-population 300 --json  # JSON output for automation
+travian reports list                           # Recent reports
+travian reports show <report-id>               # Report details
+travian reports village 14 98                  # All reports for a village
+travian reports analyze --radius 15            # Raid analyzer v2
 ```
-
-The raid analyzer v2 pipeline:
-1. Scans your inbox for scout reports (falls back to battle reports if no scouts)
-2. Deduplicates to unique target coordinates
-3. Pre-filters by radius, alliance, NAP alliances, population via GQL metadata
-4. Fetches full village-reports (own + alliance) for each surviving target
-5. Reconstructs target state: resources, defenders, wall, traps
-6. Scores using combat simulation with binary search optimization
-7. Outputs ranked targets + a re-scout queue for depleted/stale targets
-
-Results are cached (30min TTL) — repeated runs are 90%+ faster.
 
 ### Video Rewards
 
 ```bash
-# Check availability
-travian video available
-
-# Claim a production boost (~33 seconds)
-travian video claim ironProductionBonus
-
-# Claim all available production boosts
-travian video claim-all
-
-# Claim building speedup
-travian video claim buildingUpgrade --village-id 20031 --slot-id 3 --building-id 8
+travian video available                        # Check availability
+travian video claim ironProductionBonus         # Claim boost
+travian video claim-all                        # Claim all boosts
 ```
-
-Available types: `lumberProductionBonus`, `clayProductionBonus`, `ironProductionBonus`, `cropProductionBonus`, `buildingUpgrade`
 
 ### Auto-Builder (Build Queue)
 
-The main feature. Define what to build in YAML, run one command, walk away.
-
-#### Step 1: Find your slots
-
 ```bash
-travian building list -v 20031
+travian queue validate plan.yaml               # Validate plan
+travian queue run plan.yaml                    # Execute plan
+travian queue run plan.yaml --use-video --verbose  # With video speedup
 ```
 
-```
-┌─────────────────────────────────────┐
-│ Slot │ Name       │ GID │ Level    │
-├──────┼────────────┼─────┼──────────┤
-│    3 │ Clay Pit   │   8 │       2  │
-│    5 │ Clay Pit   │   8 │       3  │
-│    8 │ Clay Pit   │   8 │       3  │
-│   12 │ Clay Pit   │   8 │       6  │
-│   19 │ Cranny     │  23 │       1  │
-└──────┴────────────┴─────┴──────────┘
-```
-
-#### Step 2: Create `plan.yaml`
+**Example `plan.yaml`:**
 
 ```yaml
 village: 20031
 plan:
-  # --- Priority 1: build these first ---
-
-  # Upgrade Clay Pit at slot 3 (Lv2 → Lv5, chains automatically)
   - slot: 3
-    expect: Clay Pit       # safety guard — skips if slot 3 isn't a Clay Pit
-    target: 5
-    priority: 1
-
-  # Upgrade Clay Pit at slot 5 (Lv3 → Lv5)
-  - slot: 5
     expect: Clay Pit
     target: 5
     priority: 1
-
-  # --- Priority 2: after all P1 items are done ---
-
-  # Unique buildings can use name instead of slot
   - building: Cranny
     target: 5
     priority: 2
-
-  # --- Priority 3: low priority ---
-
-  - building: Residence
-    target: 10
-    priority: 3
 ```
 
-#### Plan YAML format
-
-**Top-level:**
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `village` | Yes | Village ID (from `travian village list` or `travian auth login`) |
-| `plan` | Yes | List of build items |
-
-**Per-item:**
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `slot` | One of `slot` or `building` | Slot ID (1-40). **Use for resource fields** with duplicates (4 Clay Pits, 6 Croplands, etc.) |
-| `building` | One of `slot` or `building` | Building name (partial, case-insensitive). For unique buildings like Cranny, Barracks. If multiple match, picks the lowest level below target. |
-| `expect` | No | Safety guard for `slot` items. Verifies the building name matches (partial). **Skips with a warning if it doesn't match.** |
-| `target` | Yes | Target level. Auto-chains: Lv2 with target 5 → upgrades 2→3→4→5 |
-| `priority` | No (default: 5) | Any positive integer. 1 = build first, higher = later. Same priority: whichever has resources first |
-
-#### Step 3: Validate
-
-```bash
-travian queue validate plan.yaml
-```
-
-Shows resolved slots, current levels, what's already done, and any mismatches.
-
-#### Step 4: Run
-
-```bash
-# Dry run — preview without building
-travian queue run plan.yaml --dry-run
-
-# Run for real
-travian queue run plan.yaml
-
-# With video speedup (~33s extra per build)
-travian queue run plan.yaml --use-video
-
-# Custom poll interval
-travian queue run plan.yaml --poll 60
-
-# With verbose output (show resources and cost breakdown)
-travian queue run plan.yaml --verbose
-
-# Log all output to a file
-travian queue run plan.yaml --log-file build.log
-
-# Combine all options
-travian queue run plan.yaml --use-video --poll 60 --verbose --log-file build.log
-```
-
-#### How it works
-
-1. Resolves all slots and checks current levels
-2. Processes priority 1 items first, then 2, etc.
-3. For each item: waits for empty queue → checks resources → starts upgrade
-4. **Multi-level chaining**: target 5 means keep upgrading until Lv5
-5. **Same priority**: builds whichever has enough resources first
-6. **Gold guard**: never spends gold — waits for queue instead of using master builder
-7. **Video speedup** (`--use-video`): claims `buildingUpgrade` reward after each build
-8. **Expect guard**: skips items where slot doesn't match expected building name
-
-#### Example: Targeted upgrades
-
-Starting state: Clay Pits at Lv2 (slot 3), Lv3 (slot 5), Lv3 (slot 8), Lv6 (slot 12)
-
-```yaml
-village: 20031
-plan:
-  - slot: 3
-    expect: Clay Pit
-    target: 5
-    priority: 1
-  - slot: 5
-    expect: Clay Pit
-    target: 5
-    priority: 1
-```
-
-Result: 5, 5, 3, 6 — only slots 3 and 5 are upgraded.
+---
 
 ## Architecture
 
 ```
-travian-api/
+travian-auto-player/
 ├── src/travian_api/
 │   ├── cli.py                  # CLI (typer)
 │   ├── config.py               # Settings (.env + env vars)
-│   ├── constants.py            # Game constants
-│   ├── exceptions.py           # Error types
 │   ├── clients/
-│   │   └── http_client.py      # Async HTTP with retry + session management
-│   ├── models/
-│   │   ├── auth.py             # AuthState, Village
-│   │   ├── buildings.py        # Building, Resources, QueueItem, UpgradeResult
-│   │   ├── farm_list.py        # FarmList, FarmListSlot, MapTileInfo, LastRaid
-│   │   ├── military.py         # TroopSendResult, TargetInfo
-│   │   └── reports.py          # ReportListItem, ScoutReportData, BattleReportData
-│   ├── services/
-│   │   ├── auth_service.py     # Login, JWT, re-auth
-│   │   ├── auto_scout_service.py   # Map scanning, tile enrichment, scout dispatch
-│   │   ├── building_service.py # Buildings, resources, upgrades
-│   │   ├── build_queue_service.py  # Auto-builder engine
-│   │   ├── farm_list_service.py    # Farm list GraphQL + REST CRUD + send
-│   │   ├── military_service.py # Scout, raid, attack
-│   │   ├── reports_service.py  # Report fetching + GraphQL batch
-│   │   ├── target_resolver.py  # Coordinate/name resolution
-│   │   └── video_reward_service.py # ATG ad simulation
-│   ├── parsers/
-│   │   ├── html_parser.py      # dorf1/dorf2/build page parsing
-│   │   └── report_parser.py    # Scout/battle report parsing
-│   └── utils/
-│       ├── checksum.py         # Upgrade checksum handling
-│       └── helpers.py          # Utilities
-├── tests/
-├── .env.example
-├── pyproject.toml
-└── README.md
+│   │   └── http_client.py      # Async HTTP with retry + stealth
+│   ├── models/                 # Pydantic models
+│   ├── services/               # Business logic (auth, buildings, farm, scout, military, reports)
+│   ├── parsers/                # HTML + report parsing
+│   ├── stealth/                # Anti-bot: throttler, human delays, headers, noise, captcha guard
+│   └── web/
+│       ├── app.py              # FastAPI app + middleware
+│       ├── routes/             # REST API endpoints
+│       ├── ws/                 # WebSocket handlers (farm loop, scout, queue, logs)
+│       ├── models/db.py        # SQLite models (User, TravianCredential)
+│       └── sessions.py         # Per-user Travian session isolation
+├── frontend/
+│   ├── src/
+│   │   ├── pages/              # React pages (Dashboard, FarmLists, AutoScout, BuildQueue, etc.)
+│   │   ├── components/         # Shared components (Toast, ConfirmDialog, CaptchaAlert, etc.)
+│   │   └── stores/             # Zustand state management
+│   └── package.json
+├── start.bat                   # One-click Windows startup
+├── start.sh                    # One-click Linux/Mac startup
+├── pyproject.toml              # Python package config
+└── CHANGELOG.md
 ```
-
-### Key design decisions
-
-- **Async-first**: All services use `httpx` async. CLI wraps with `asyncio.run()`.
-- **Village context via `newdid`**: Travian switches villages by appending `?newdid=<id>` to page URLs. All services pass this through.
-- **Gold guard by default**: `upgrade_building()` checks the construction queue. If occupied, it refuses unless `allow_gold=True`.
-- **jQuery.param encoding**: ATG video ads require `jQuery.param()` format, not JSON. Custom `_jquery_param()` encoder handles this.
-- **Real timing for video rewards**: ATG requires 3-second intervals between ticks. Faster = empty signature.
 
 ## Configuration
 
-| Environment Variable | CLI Flag | Description | Default |
-|---------------------|----------|-------------|---------|
-| `TRAVIAN_BASE_URL` | `--server` | Game server URL | _(prompted)_ |
-| `TRAVIAN_USERNAME` | `--username` | Account email | _(prompted)_ |
-| `TRAVIAN_PASSWORD` | `--password` | Account password | _(prompted)_ |
-| `TRAVIAN_X_VERSION` | — | Game client version | `389` |
-| `TRAVIAN_LOG_LEVEL` | — | Logging level | `INFO` |
-| `TRAVIAN_TIMEOUT` | — | Request timeout (seconds) | `30` |
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `TRAVIAN_BASE_URL` | _(prompted)_ | Game server URL |
+| `TRAVIAN_USERNAME` | _(prompted)_ | Account email |
+| `TRAVIAN_PASSWORD` | _(prompted)_ | Account password |
+| `TRAVIAN_STEALTH` | `true` | Enable stealth anti-bot mode |
+| `TRAVIAN_STEALTH_SPEED` | `1.0` | Delay multiplier (0.5=fast, 2.0=cautious) |
+| `TRAVIAN_DEV` | `false` | Relaxed CSP for Vite dev server |
+| `TRAVIAN_LOG_LEVEL` | `INFO` | Logging level |
+| `TRAVIAN_TIMEOUT` | `30` | Request timeout (seconds) |
 
 ## Known Limitations
 
-- **Farm List Send**: Requires Gold Club — the API blocks `farm-list/send` without it. Loop commands exit on this error.
-- **Movement Cancellation**: Not implemented (requires UI interaction)
-- **Report Deletion**: Bulk operations not implemented
-- **Video `buildingUpgrade`**: May be disabled on some accounts (cooldown or server restriction)
-- **Single plan per run**: Each `queue run` targets one village. Run multiple plans for multiple villages.
-- **Auto-Scout enrichment**: One API call per tile through stealth throttler. Large radius scans are slow by design (stealth).
-- **Raid Analyzer**: Scoring optimized for Teuton Clubswingers. Other tribes use the same formula (works but not optimal).
-- **Web UI**: Single server process. For production use, run behind a reverse proxy with HTTPS.
+- **Farm List Send**: Requires Gold Club
+- **Single server process**: For production use, run behind a reverse proxy with HTTPS
+- **Auto-Scout enrichment**: One API call per tile through stealth throttler — large radius scans are slow by design
+- **Raid Analyzer**: Scoring optimized for Teuton Clubswingers
 
 ## Disclaimer
 
