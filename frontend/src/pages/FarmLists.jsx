@@ -967,14 +967,11 @@ export default function FarmLists() {
                           <td className="text-right text-xs whitespace-nowrap">
                             {(() => {
                               const def = defenseData[slotId]
-                              const h = def?.from_heuristic
                               if (defenseScanning) return <span className="text-secondary">...</span>
                               if (!def) return <span className="text-secondary">---</span>
                               if (def.never_raided) return <span className="text-secondary">N/A</span>
-                              if (def.defender_combat_strength === -1)
-                                return <span className="text-danger" title="All troops died — strong defense">{h ? '~' : ''}Strong{def.report_age_hours != null && <span className="text-secondary ml-1">({def.report_age_hours}h)</span>}</span>
                               if (def.defender_combat_strength === 0 && def.defender_total === 0)
-                                return <span className="text-success">{h ? '~' : ''}Empty{def.report_age_hours != null && <span className="text-secondary ml-1">({def.report_age_hours}h)</span>}</span>
+                                return <span className="text-success">Empty{def.report_age_hours != null && <span className="text-secondary ml-1">({def.report_age_hours}h)</span>}</span>
                               const strength = def.defender_combat_strength || def.defender_total
                               const troopTip = Object.entries(def.defender_troops || {}).filter(([,v]) => v > 0).map(([k,v]) => `${k}:${v}`).join(' ')
                               const tip = troopTip

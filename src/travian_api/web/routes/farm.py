@@ -330,7 +330,6 @@ class SlotDefenseInfo(BaseModel):
     report_age_hours: float | None = None
     report_id: str | None = None
     never_raided: bool = False
-    from_heuristic: bool = False
 
 
 # ── Module-level defense cache (per user_id → per coordinate) ─────────
@@ -366,50 +365,19 @@ def _cache_put(user_id: int, x: int, y: int, last_raid_time: int, data: dict) ->
     _defense_cache[user_id][(x, y)] = (time.monotonic(), last_raid_time, data)
 
 
-def _compute_heuristic(slot) -> SlotDefenseInfo | None:
-    """Use carry data from lastRaid to estimate defense without HTTP calls.
-
-    Returns a SlotDefenseInfo with from_heuristic=True for high-confidence
-    cases, or None if the HTML report should be fetched.
-    """
-    lr = slot.last_raid
-    if not lr or not lr.time:
-        return None
-
-    icon = lr.icon  # 1=no_loss, 2=some_loss, 3=all_dead
-
-    base = dict(
-        slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-        name=slot.target.name, from_heuristic=True,
-    )
-
-    # All troops dead → strong defense
-    if icon == 3:
-        return SlotDefenseInfo(**base, defender_combat_strength=-1)  # -1 = "strong"
-
-    # No losses → defense was minimal (empty or near-empty)
-    # Low carry just means the village was poor, not defended
-    if icon == 1:
-        return SlotDefenseInfo(**base, defender_combat_strength=0)
-
-    # Some losses (icon=2) → moderate defense, need exact number from HTML
-    return None
-
-
 @router.post("/defense-scan", response_model=list[SlotDefenseInfo])
 async def scan_defense_strength(
     body: DefenseInfoRequest,
     session: TravianSession = Depends(get_travian_session),
     user=Depends(get_current_user),
 ):
-    """Fetch defender combat strength with caching and heuristics.
+    """Fetch defender combat strength with 30-min cache.
 
     Flow:
       1. Get farm list (1 GraphQL call)
       2. Check cache for each coordinate (0 calls)
-      3. Compute carry heuristic for uncached slots (0 calls)
-      4. For ambiguous slots only: tile-details + report HTML (2 calls each)
-      5. Cache all results
+      3. For uncached: tile-details + report HTML (2 calls each)
+      4. Cache all fetched results
     """
     import time as _time
 
@@ -429,12 +397,10 @@ async def scan_defense_strength(
     user_id = user.id
 
     results: list[SlotDefenseInfo] = []
-    # Coords that need HTML fetching (ambiguous heuristic, not cached)
     needs_fetch: dict[tuple[int, int], list] = {}
 
-    # ── 2-3. Cache check + heuristic for each slot ────────────────────
+    # ── 2. Cache check for each slot ──────────────────────────────────
     for slot in fl.slots:
-        # Never raided
         if not slot.last_raid or not slot.last_raid.time:
             results.append(SlotDefenseInfo(
                 slot_id=slot.id, x=slot.target.x, y=slot.target.y,
@@ -445,7 +411,6 @@ async def scan_defense_strength(
         coord_key = (slot.target.x, slot.target.y)
         age_hours = round((now_ts - slot.last_raid.time) / 3600, 1)
 
-        # Check cache (skip if force_refresh)
         if not body.force_refresh:
             cached = _cache_get(user_id, slot.target.x, slot.target.y, slot.last_raid.time)
             if cached is not None:
@@ -455,27 +420,12 @@ async def scan_defense_strength(
                 ))
                 continue
 
-        # Compute heuristic
-        heuristic = _compute_heuristic(slot)
-        if heuristic is not None:
-            heuristic.report_age_hours = age_hours
-            results.append(heuristic)
-            # Cache heuristic results too
-            _cache_put(user_id, slot.target.x, slot.target.y, slot.last_raid.time, {
-                "defender_combat_strength": heuristic.defender_combat_strength,
-                "defender_troops": heuristic.defender_troops,
-                "defender_total": heuristic.defender_total,
-                "from_heuristic": True,
-            })
-            continue
-
-        # Ambiguous — needs HTML fetch
         if coord_key not in needs_fetch:
             needs_fetch[coord_key] = []
         needs_fetch[coord_key].append(slot)
 
     logger.info(
-        "Defense scan: %d slots, %d cached/heuristic, %d need HTML fetch",
+        "Defense scan: %d slots, %d cached, %d need fetch",
         len(fl.slots), len(results), len(needs_fetch),
     )
 
