@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from travian_api.exceptions import TravianError
+from travian_api.web.auth import get_current_user
 from travian_api.web.sessions import get_travian_session, TravianSession
 
 logger = logging.getLogger(__name__)
@@ -315,8 +316,7 @@ async def delete_target(
 
 class DefenseInfoRequest(BaseModel):
     list_id: int
-    max_pages: int = 5  # unused now, kept for backwards compat
-    max_age_hours: int = 48  # unused now, kept for backwards compat
+    force_refresh: bool = False
 
 
 class SlotDefenseInfo(BaseModel):
@@ -330,21 +330,86 @@ class SlotDefenseInfo(BaseModel):
     report_age_hours: float | None = None
     report_id: str | None = None
     never_raided: bool = False
+    from_heuristic: bool = False
+
+
+# ── Module-level defense cache (per user_id → per coordinate) ─────────
+_DEFENSE_CACHE_TTL = 1800  # 30 minutes
+
+# {user_id: {(x,y): (monotonic_ts, last_raid_time, defense_dict)}}
+_defense_cache: dict[int, dict[tuple[int, int], tuple[float, int, dict]]] = {}
+
+
+def _cache_get(user_id: int, x: int, y: int, last_raid_time: int) -> dict | None:
+    """Return cached defense data if fresh and last_raid_time matches."""
+    import time
+    user_store = _defense_cache.get(user_id)
+    if not user_store:
+        return None
+    entry = user_store.get((x, y))
+    if not entry:
+        return None
+    ts, cached_lrt, data = entry
+    if time.monotonic() - ts > _DEFENSE_CACHE_TTL:
+        del user_store[(x, y)]
+        return None
+    if cached_lrt != last_raid_time:
+        del user_store[(x, y)]
+        return None
+    return data
+
+
+def _cache_put(user_id: int, x: int, y: int, last_raid_time: int, data: dict) -> None:
+    import time
+    if user_id not in _defense_cache:
+        _defense_cache[user_id] = {}
+    _defense_cache[user_id][(x, y)] = (time.monotonic(), last_raid_time, data)
+
+
+def _compute_heuristic(slot) -> SlotDefenseInfo | None:
+    """Use carry data from lastRaid to estimate defense without HTTP calls.
+
+    Returns a SlotDefenseInfo with from_heuristic=True for high-confidence
+    cases, or None if the HTML report should be fetched.
+    """
+    lr = slot.last_raid
+    if not lr or not lr.time:
+        return None
+
+    icon = lr.icon  # 1=no_loss, 2=some_loss, 3=all_dead
+
+    base = dict(
+        slot_id=slot.id, x=slot.target.x, y=slot.target.y,
+        name=slot.target.name, from_heuristic=True,
+    )
+
+    # All troops dead → strong defense
+    if icon == 3:
+        return SlotDefenseInfo(**base, defender_combat_strength=-1)  # -1 = "strong"
+
+    # No losses → defense was minimal (empty or near-empty)
+    # Low carry just means the village was poor, not defended
+    if icon == 1:
+        return SlotDefenseInfo(**base, defender_combat_strength=0)
+
+    # Some losses (icon=2) → moderate defense, need exact number from HTML
+    return None
 
 
 @router.post("/defense-scan", response_model=list[SlotDefenseInfo])
 async def scan_defense_strength(
     body: DefenseInfoRequest,
     session: TravianSession = Depends(get_travian_session),
+    user=Depends(get_current_user),
 ):
-    """Fetch defender combat strength from each slot's last raid report.
+    """Fetch defender combat strength with caching and heuristics.
 
-    Optimized two-pass approach:
-      Pass 1 (fast): Fetch report list pages → batch GraphQL for defender
-              coordinates → match to farm slots → fetch HTML detail only
-              for matched reports.
-      Pass 2 (fallback): For any raided coordinates not resolved in pass 1,
-              use tile-details API per coordinate.
+    Flow:
+      1. Get farm list (1 GraphQL call)
+      2. Check cache for each coordinate (0 calls)
+      3. Compute carry heuristic for uncached slots (0 calls)
+      4. For ambiguous slots only: tile-details + report HTML (2 calls each)
+      5. Cache all results
     """
     import time as _time
 
@@ -361,102 +426,73 @@ async def scan_defense_strength(
         return []
 
     now_ts = _time.time()
+    user_id = user.id
 
-    # Build coord → slots lookup (only raided slots)
-    coord_to_slots: dict[tuple[int, int], list] = {}
-    never_raided_results: list[SlotDefenseInfo] = []
+    results: list[SlotDefenseInfo] = []
+    # Coords that need HTML fetching (ambiguous heuristic, not cached)
+    needs_fetch: dict[tuple[int, int], list] = {}
 
+    # ── 2-3. Cache check + heuristic for each slot ────────────────────
     for slot in fl.slots:
+        # Never raided
         if not slot.last_raid or not slot.last_raid.time:
-            never_raided_results.append(SlotDefenseInfo(
+            results.append(SlotDefenseInfo(
                 slot_id=slot.id, x=slot.target.x, y=slot.target.y,
                 name=slot.target.name, never_raided=True,
             ))
-        else:
-            key = (slot.target.x, slot.target.y)
-            coord_to_slots.setdefault(key, []).append(slot)
+            continue
 
-    if not coord_to_slots:
-        return never_raided_results
+        coord_key = (slot.target.x, slot.target.y)
+        age_hours = round((now_ts - slot.last_raid.time) / 3600, 1)
 
-    coord_defense: dict[tuple[int, int], SlotDefenseInfo | None] = {}
-
-    # ── Pass 1: report list + batch metadata (fast) ───────────────────
-    try:
-        reports = await session.reports_service.fetch_reports(
-            max_age_hours=body.max_age_hours,
-            max_pages=body.max_pages,
-        )
-    except Exception as exc:
-        logger.warning("Defense scan pass 1: failed to fetch report list: %s", exc)
-        reports = []
-
-    battle_report_ids = [
-        r.report_id for r in reports
-        if getattr(r, 'icon_type', 0) in range(1, 9)
-        or 'battle' in (getattr(r, 'report_type', '') or '').lower()
-    ]
-
-    if battle_report_ids:
-        try:
-            metadata = await session.reports_service.fetch_report_batch_metadata(battle_report_ids)
-        except Exception:
-            metadata = {}
-
-        # Match reports to farm slot coordinates (newest report per coord)
-        coord_to_report: dict[tuple[int, int], str] = {}
-        for rid, meta in metadata.items():
-            defender = meta.get('defender') or {}
-            village = defender.get('village') or {}
-            vx, vy = village.get('x'), village.get('y')
-            if vx is None or vy is None:
-                continue
-            coord_key = (int(vx), int(vy))
-            if coord_key in coord_to_slots and coord_key not in coord_to_report:
-                coord_to_report[coord_key] = rid
-
-        logger.info(
-            "Defense scan pass 1: matched %d/%d coords via batch metadata",
-            len(coord_to_report), len(coord_to_slots),
-        )
-
-        # Fetch HTML detail for matched reports
-        for coord_key, report_id in coord_to_report.items():
-            try:
-                detail = await session.reports_service.fetch_report_detail(report_id)
-            except Exception:
-                continue
-            if not detail or detail.get('type') != 'battle':
-                continue
-            battle = detail.get('data')
-            if not battle:
+        # Check cache (skip if force_refresh)
+        if not body.force_refresh:
+            cached = _cache_get(user_id, slot.target.x, slot.target.y, slot.last_raid.time)
+            if cached is not None:
+                results.append(SlotDefenseInfo(
+                    slot_id=slot.id, x=slot.target.x, y=slot.target.y,
+                    name=slot.target.name, report_age_hours=age_hours, **cached,
+                ))
                 continue
 
-            defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
-            defender_total = sum(defender_troops.values())
-            defender_combat_strength = getattr(battle, 'defender_combat_strength', 0) or 0
-            first_slot = coord_to_slots[coord_key][0]
-            age_hours = round((now_ts - first_slot.last_raid.time) / 3600, 1) if first_slot.last_raid and first_slot.last_raid.time else None
+        # Compute heuristic
+        heuristic = _compute_heuristic(slot)
+        if heuristic is not None:
+            heuristic.report_age_hours = age_hours
+            results.append(heuristic)
+            # Cache heuristic results too
+            _cache_put(user_id, slot.target.x, slot.target.y, slot.last_raid.time, {
+                "defender_combat_strength": heuristic.defender_combat_strength,
+                "defender_troops": heuristic.defender_troops,
+                "defender_total": heuristic.defender_total,
+                "from_heuristic": True,
+            })
+            continue
 
-            coord_defense[coord_key] = SlotDefenseInfo(
-                slot_id=0, x=coord_key[0], y=coord_key[1], name="",
-                defender_troops=defender_troops, defender_total=defender_total,
-                defender_combat_strength=defender_combat_strength,
-                report_age_hours=age_hours, report_id=report_id,
-            )
+        # Ambiguous — needs HTML fetch
+        if coord_key not in needs_fetch:
+            needs_fetch[coord_key] = []
+        needs_fetch[coord_key].append(slot)
 
-    # ── Pass 2: tile-details fallback for unresolved coords ───────────
-    unresolved = [c for c in coord_to_slots if c not in coord_defense]
-    if unresolved:
-        logger.info("Defense scan pass 2: %d unresolved coords, using tile-details", len(unresolved))
+    logger.info(
+        "Defense scan: %d slots, %d cached/heuristic, %d need HTML fetch",
+        len(fl.slots), len(results), len(needs_fetch),
+    )
 
-    for coord_key in unresolved:
+    # ── 4. Tile-details + report HTML for ambiguous coords ────────────
+    for coord_key, slots in needs_fetch.items():
         try:
             village_data = await session.reports_service.fetch_village_reports(
                 x=coord_key[0], y=coord_key[1], fetch_details=False,
             )
         except Exception as exc:
             logger.debug("Defense scan: tile-details failed for (%s,%s): %s", coord_key[0], coord_key[1], exc)
+            for slot in slots:
+                age_hours = round((now_ts - slot.last_raid.time) / 3600, 1) if slot.last_raid and slot.last_raid.time else None
+                results.append(SlotDefenseInfo(
+                    slot_id=slot.id, x=slot.target.x, y=slot.target.y,
+                    name=slot.target.name, report_age_hours=age_hours,
+                ))
             continue
 
         tile_reports = village_data.get('reports', [])
@@ -464,63 +500,54 @@ async def scan_defense_strength(
             (r for r in tile_reports if 1 <= r.get('icon_type', 0) <= 8),
             None,
         )
+
         if not battle_report:
+            for slot in slots:
+                age_hours = round((now_ts - slot.last_raid.time) / 3600, 1) if slot.last_raid and slot.last_raid.time else None
+                results.append(SlotDefenseInfo(
+                    slot_id=slot.id, x=slot.target.x, y=slot.target.y,
+                    name=slot.target.name, report_age_hours=age_hours,
+                ))
             continue
 
         report_id = battle_report.get('report_id', '')
         aid = battle_report.get('aid', '')
+
+        defense_data = None
         try:
             detail = await session.reports_service.fetch_report_detail(
                 f"{report_id}&aid={aid}" if aid else report_id
             )
-        except Exception:
-            continue
-        if not detail or detail.get('type') != 'battle':
-            continue
-        battle = detail.get('data')
-        if not battle:
-            continue
+            if detail and detail.get('type') == 'battle':
+                battle = detail.get('data')
+                if battle:
+                    defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
+                    defense_data = {
+                        "defender_troops": defender_troops,
+                        "defender_total": sum(defender_troops.values()),
+                        "defender_combat_strength": getattr(battle, 'defender_combat_strength', 0) or 0,
+                        "report_id": report_id,
+                    }
+        except Exception as exc:
+            logger.debug("Defense scan: report fetch failed for %s: %s", report_id, exc)
 
-        defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
-        defender_total = sum(defender_troops.values())
-        defender_combat_strength = getattr(battle, 'defender_combat_strength', 0) or 0
-        first_slot = coord_to_slots[coord_key][0]
-        age_hours = round((now_ts - first_slot.last_raid.time) / 3600, 1) if first_slot.last_raid and first_slot.last_raid.time else None
-
-        coord_defense[coord_key] = SlotDefenseInfo(
-            slot_id=0, x=coord_key[0], y=coord_key[1], name="",
-            defender_troops=defender_troops, defender_total=defender_total,
-            defender_combat_strength=defender_combat_strength,
-            report_age_hours=age_hours, report_id=report_id,
-        )
-
-    # ── Build final results ───────────────────────────────────────────
-    results = list(never_raided_results)
-    for coord_key, slots in coord_to_slots.items():
-        defense = coord_defense.get(coord_key)
         for slot in slots:
             age_hours = round((now_ts - slot.last_raid.time) / 3600, 1) if slot.last_raid and slot.last_raid.time else None
-            if defense is not None:
+            if defense_data:
                 results.append(SlotDefenseInfo(
                     slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                    name=slot.target.name,
-                    defender_troops=defense.defender_troops,
-                    defender_total=defense.defender_total,
-                    defender_combat_strength=defense.defender_combat_strength,
-                    report_age_hours=age_hours, report_id=defense.report_id,
+                    name=slot.target.name, report_age_hours=age_hours,
+                    **defense_data,
                 ))
+                # Cache the fetched result
+                _cache_put(user_id, slot.target.x, slot.target.y, slot.last_raid.time, defense_data)
             else:
                 results.append(SlotDefenseInfo(
                     slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                    name=slot.target.name,
+                    name=slot.target.name, report_age_hours=age_hours,
                 ))
 
-    logger.info(
-        "Defense scan complete: %d slots, %d resolved via pass 1, %d via pass 2, %d unresolved",
-        len(fl.slots), len(coord_defense) - len(unresolved) + len([c for c in unresolved if c in coord_defense]),
-        len([c for c in unresolved if c in coord_defense]),
-        len([c for c in coord_to_slots if c not in coord_defense]),
-    )
+    logger.info("Defense scan complete: %d results (%d fetched)", len(results), len(needs_fetch))
     return results
 
 
