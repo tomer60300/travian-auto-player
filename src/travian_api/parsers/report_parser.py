@@ -523,9 +523,24 @@ def parse_battle_report(html: str) -> BattleReportData:
                     carry_max = int(parts[1]) if parts[1] else 0
 
     # Combat strength from combatStatistic table
+    # Regex fast-path: extract both values without BS4 DOM traversal
     attacker_combat_strength = 0
     defender_combat_strength = 0
-    combat_table = soup.find('table', class_='combatStatistic')
+    _combat_re = re.search(
+        r'combatStatistic.*?<span[^>]*class="value"[^>]*>\s*([\d\s,.]+)</span>'
+        r'.*?<span[^>]*class="value"[^>]*>\s*([\d\s,.]+)</span>',
+        html, re.DOTALL | re.IGNORECASE,
+    )
+    if _combat_re:
+        try:
+            attacker_combat_strength = int(re.sub(r'[^\d]', '', _combat_re.group(1)))
+            defender_combat_strength = int(re.sub(r'[^\d]', '', _combat_re.group(2)))
+        except (ValueError, IndexError):
+            attacker_combat_strength = 0
+            defender_combat_strength = 0
+
+    # BS4 fallback if regex didn't find values
+    combat_table = soup.find('table', class_='combatStatistic') if not _combat_re else None
     if combat_table:
         for tr in combat_table.find_all('tr'):
             th = tr.find('th')

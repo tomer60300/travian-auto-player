@@ -128,9 +128,11 @@ export default function FarmLists() {
   const [transferMode, setTransferMode] = useState('copy') // 'copy' | 'move'
   const [transferring, setTransferring] = useState(false)
 
-  // ---- Defense scan (background) ----
+  // ---- Defense scan (streaming) ----
   const [defenseData, setDefenseData] = useState({})
   const [defenseScanning, setDefenseScanning] = useState(false)
+  const [defenseScanProgress, setDefenseScanProgress] = useState(null) // {total, cached, to_fetch, fetched}
+  const [defenseScanLogs, setDefenseScanLogs] = useState([])
 
   // ---- Sorting & Filtering ----
   const [sortField, setSortField] = useState('distance') // distance|population|total_booty|total_raids|booty_ratio
@@ -386,23 +388,60 @@ export default function FarmLists() {
   const handleDefenseScan = async () => {
     if (!selectedListId) return
     setDefenseScanning(true)
+    setDefenseScanProgress(null)
+    setDefenseScanLogs([])
+
+    const token = localStorage.getItem('token')
     try {
-      const res = await api.post('/farm/defense-scan', {
-        list_id: selectedListId,
-        max_pages: 5,
-        max_age_hours: 48,
+      const resp = await fetch('/api/farm/defense-scan', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ list_id: selectedListId }),
       })
-      const map = {}
-      for (const item of (res.data || [])) {
-        map[item.slot_id] = item
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}))
+        throw new Error(err.detail || `HTTP ${resp.status}`)
       }
-      setDefenseData(map)
-      const count = Object.keys(map).length
-      toast.success(`Defense scan complete: ${count} target(s) with report data`)
+
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        const lines = buffer.split('\n')
+        buffer = lines.pop() // keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (!line.trim()) continue
+          try {
+            const msg = JSON.parse(line)
+            if (msg.type === 'result') {
+              setDefenseData((prev) => ({ ...prev, [msg.slot_id]: msg }))
+            } else if (msg.type === 'progress') {
+              setDefenseScanProgress(msg)
+            } else if (msg.type === 'log') {
+              setDefenseScanLogs((prev) => [...prev.slice(-19), msg.message])
+            } else if (msg.type === 'complete') {
+              toast.success(`Defense scan: ${msg.total} targets, ${msg.fetched} fetched in ${msg.elapsed}s`)
+            } else if (msg.type === 'error') {
+              toast.error(msg.message)
+            }
+          } catch { /* skip malformed lines */ }
+        }
+      }
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Defense scan failed')
+      toast.error(err.message || 'Defense scan failed')
     } finally {
       setDefenseScanning(false)
+      setDefenseScanProgress(null)
     }
   }
 
@@ -765,15 +804,23 @@ export default function FarmLists() {
                   </span>
                 )}
               </h3>
-              <button
-                className="btn-secondary btn-xs flex items-center gap-1.5"
-                disabled={defenseScanning || !detail}
-                onClick={handleDefenseScan}
-                title="Scan recent reports for defender troop info on targets"
-              >
-                {defenseScanning && <span className="spinner spinner-sm" />}
-                {defenseScanning ? 'Scanning Reports...' : 'Scan Defense'}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  className="btn-secondary btn-xs flex items-center gap-1.5"
+                  disabled={defenseScanning || !detail}
+                  onClick={handleDefenseScan}
+                  title="Scan recent reports for defender troop info on targets"
+                >
+                  {defenseScanning && <span className="spinner spinner-sm" />}
+                  {defenseScanning ? 'Scanning...' : 'Scan Defense'}
+                </button>
+                {defenseScanProgress && (
+                  <span className="text-xs text-secondary">
+                    {defenseScanProgress.fetched}/{defenseScanProgress.to_fetch} fetched
+                    {defenseScanProgress.cached > 0 && ` (${defenseScanProgress.cached} cached)`}
+                  </span>
+                )}
+              </div>
             </div>
 
             {/* Add Target form */}
@@ -865,6 +912,15 @@ export default function FarmLists() {
                     </button>
                   </>
                 )}
+              </div>
+            )}
+
+            {/* Defense scan log */}
+            {defenseScanLogs.length > 0 && (
+              <div className="mb-3 p-2.5 bg-base rounded-md border-default text-xs font-mono max-h-32 overflow-y-auto">
+                {defenseScanLogs.map((msg, i) => (
+                  <div key={i} className="text-secondary leading-relaxed">{msg}</div>
+                ))}
               </div>
             )}
 

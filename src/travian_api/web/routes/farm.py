@@ -5,7 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import json as _json
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from travian_api.exceptions import TravianError
@@ -313,6 +316,8 @@ async def delete_target(
 # Defender strength lookup (background-friendly)
 # ---------------------------------------------------------------------------
 
+from travian_api.services.defense_cache import defense_cache
+
 
 class DefenseInfoRequest(BaseModel):
     list_id: int
@@ -332,173 +337,218 @@ class SlotDefenseInfo(BaseModel):
     never_raided: bool = False
 
 
-# ── Module-level defense cache (per user_id → per coordinate) ─────────
-_DEFENSE_CACHE_TTL = 1800  # 30 minutes
-
-# {user_id: {(x,y): (monotonic_ts, last_raid_time, defense_dict)}}
-_defense_cache: dict[int, dict[tuple[int, int], tuple[float, int, dict]]] = {}
-
-
-def _cache_get(user_id: int, x: int, y: int, last_raid_time: int) -> dict | None:
-    """Return cached defense data if fresh and last_raid_time matches."""
-    import time
-    user_store = _defense_cache.get(user_id)
-    if not user_store:
+async def _fetch_defense_for_coord(
+    session, x: int, y: int,
+) -> dict | None:
+    """Fetch defense data for a single coordinate (tile-details + report HTML)."""
+    try:
+        village_data = await session.reports_service.fetch_village_reports(
+            x=x, y=y, fetch_details=False,
+        )
+    except Exception as exc:
+        logger.debug("Defense scan: tile-details failed for (%s,%s): %s", x, y, exc)
         return None
-    entry = user_store.get((x, y))
-    if not entry:
+
+    tile_reports = village_data.get('reports', [])
+    battle_report = next(
+        (r for r in tile_reports if 1 <= r.get('icon_type', 0) <= 8),
+        None,
+    )
+    if not battle_report:
         return None
-    ts, cached_lrt, data = entry
-    if time.monotonic() - ts > _DEFENSE_CACHE_TTL:
-        del user_store[(x, y)]
-        return None
-    if cached_lrt != last_raid_time:
-        del user_store[(x, y)]
-        return None
-    return data
+
+    report_id = battle_report.get('report_id', '')
+    aid = battle_report.get('aid', '')
+
+    try:
+        detail = await session.reports_service.fetch_report_detail(
+            f"{report_id}&aid={aid}" if aid else report_id
+        )
+        if detail and detail.get('type') == 'battle':
+            battle = detail.get('data')
+            if battle:
+                defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
+                return {
+                    "defender_troops": defender_troops,
+                    "defender_total": sum(defender_troops.values()),
+                    "defender_combat_strength": getattr(battle, 'defender_combat_strength', 0) or 0,
+                    "report_id": report_id,
+                }
+    except Exception as exc:
+        logger.debug("Defense scan: report fetch failed for %s: %s", report_id, exc)
+
+    return None
 
 
-def _cache_put(user_id: int, x: int, y: int, last_raid_time: int, data: dict) -> None:
-    import time
-    if user_id not in _defense_cache:
-        _defense_cache[user_id] = {}
-    _defense_cache[user_id][(x, y)] = (time.monotonic(), last_raid_time, data)
-
-
-@router.post("/defense-scan", response_model=list[SlotDefenseInfo])
+@router.post("/defense-scan")
 async def scan_defense_strength(
     body: DefenseInfoRequest,
     session: TravianSession = Depends(get_travian_session),
     user=Depends(get_current_user),
 ):
-    """Fetch defender combat strength with 30-min cache.
+    """Stream defense scan results as NDJSON (newline-delimited JSON).
 
-    Flow:
-      1. Get farm list (1 GraphQL call)
-      2. Check cache for each coordinate (0 calls)
-      3. For uncached: tile-details + report HTML (2 calls each)
-      4. Cache all fetched results
+    Each line is one of:
+      {"type":"progress","total":60,"cached":45,"to_fetch":15,"fetched":0}
+      {"type":"result","slot_id":123,"x":12,"y":120,...}
+      {"type":"log","message":"Fetching (12,120) BrightMaster..."}
+      {"type":"complete","total":60,"fetched":15,"elapsed":45.2}
+      {"type":"error","message":"..."}
+
+    Cached results stream instantly. Fetched results stream one-by-one
+    as each target completes. If interrupted, cached data persists on disk.
     """
     import time as _time
 
-    # ── 1. Get the farm list slots ────────────────────────────────────
-    try:
-        fl = await session.farm_service.get_farm_list(body.list_id)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to fetch farm list: {exc}",
-        ) from exc
+    async def _generate():
+        scan_start = _time.monotonic()
 
-    if not fl.slots:
-        return []
+        def _line(obj: dict) -> str:
+            return _json.dumps(obj, ensure_ascii=False) + "\n"
 
-    now_ts = _time.time()
-    user_id = user.id
+        try:
+            fl = await session.farm_service.get_farm_list(body.list_id)
+        except Exception as exc:
+            yield _line({"type": "error", "message": f"Failed to fetch farm list: {exc}"})
+            return
 
-    results: list[SlotDefenseInfo] = []
-    needs_fetch: dict[tuple[int, int], list] = {}
+        if not fl.slots:
+            yield _line({"type": "complete", "total": 0, "fetched": 0, "elapsed": 0})
+            return
 
-    # ── 2. Cache check for each slot ──────────────────────────────────
-    for slot in fl.slots:
-        if not slot.last_raid or not slot.last_raid.time:
-            results.append(SlotDefenseInfo(
-                slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                name=slot.target.name, never_raided=True,
-            ))
-            continue
+        now_ts = _time.time()
+        needs_fetch: dict[tuple[int, int], list] = {}
+        cached_count = 0
 
-        coord_key = (slot.target.x, slot.target.y)
-        age_hours = round((now_ts - slot.last_raid.time) / 3600, 1)
+        # ── Phase 1: classify slots (cached vs needs-fetch) ──────────
+        for slot in fl.slots:
+            if not slot.last_raid or not slot.last_raid.time:
+                continue  # will emit after classification
+            coord_key = (slot.target.x, slot.target.y)
+            if not body.force_refresh:
+                cached = defense_cache.get(slot.target.x, slot.target.y, slot.last_raid.time)
+                if cached is not None:
+                    cached_count += 1
+                    continue
+            if coord_key not in needs_fetch:
+                needs_fetch[coord_key] = []
+            needs_fetch[coord_key].append(slot)
 
-        if not body.force_refresh:
-            cached = _cache_get(user_id, slot.target.x, slot.target.y, slot.last_raid.time)
-            if cached is not None:
-                results.append(SlotDefenseInfo(
+        total = len(fl.slots)
+        to_fetch = len(needs_fetch)
+
+        yield _line({
+            "type": "progress",
+            "total": total,
+            "cached": cached_count,
+            "to_fetch": to_fetch,
+            "fetched": 0,
+        })
+
+        yield _line({
+            "type": "log",
+            "message": f"Scan started: {total} targets, {cached_count} cached, {to_fetch} to fetch",
+        })
+
+        # ── Phase 2: emit cached results instantly ────────────────────
+        for slot in fl.slots:
+            if not slot.last_raid or not slot.last_raid.time:
+                yield _line(SlotDefenseInfo(
                     slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                    name=slot.target.name, report_age_hours=age_hours, **cached,
-                ))
+                    name=slot.target.name, never_raided=True,
+                ).model_dump() | {"type": "result"})
                 continue
 
-        if coord_key not in needs_fetch:
-            needs_fetch[coord_key] = []
-        needs_fetch[coord_key].append(slot)
+            coord_key = (slot.target.x, slot.target.y)
+            age_hours = round((now_ts - slot.last_raid.time) / 3600, 1)
 
-    logger.info(
-        "Defense scan: %d slots, %d cached, %d need fetch",
-        len(fl.slots), len(results), len(needs_fetch),
-    )
+            if coord_key not in needs_fetch:
+                # This is a cache hit
+                cached = defense_cache.get(slot.target.x, slot.target.y, slot.last_raid.time)
+                if cached is not None:
+                    yield _line(SlotDefenseInfo(
+                        slot_id=slot.id, x=slot.target.x, y=slot.target.y,
+                        name=slot.target.name, report_age_hours=age_hours,
+                        defender_troops=cached.get("defender_troops", {}),
+                        defender_total=cached.get("defender_total", 0),
+                        defender_combat_strength=cached.get("defender_combat_strength", 0),
+                        report_id=cached.get("report_id"),
+                    ).model_dump() | {"type": "result"})
 
-    # ── 4. Tile-details + report HTML for ambiguous coords ────────────
-    for coord_key, slots in needs_fetch.items():
-        try:
-            village_data = await session.reports_service.fetch_village_reports(
-                x=coord_key[0], y=coord_key[1], fetch_details=False,
-            )
-        except Exception as exc:
-            logger.debug("Defense scan: tile-details failed for (%s,%s): %s", coord_key[0], coord_key[1], exc)
-            for slot in slots:
-                age_hours = round((now_ts - slot.last_raid.time) / 3600, 1) if slot.last_raid and slot.last_raid.time else None
-                results.append(SlotDefenseInfo(
-                    slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                    name=slot.target.name, report_age_hours=age_hours,
-                ))
-            continue
+        # ── Phase 3: fetch uncached coordinates one by one ────────────
+        fetched_count = 0
 
-        tile_reports = village_data.get('reports', [])
-        battle_report = next(
-            (r for r in tile_reports if 1 <= r.get('icon_type', 0) <= 8),
-            None,
-        )
+        for coord_key, slots in needs_fetch.items():
+            x, y = coord_key
+            first_slot = slots[0]
 
-        if not battle_report:
-            for slot in slots:
-                age_hours = round((now_ts - slot.last_raid.time) / 3600, 1) if slot.last_raid and slot.last_raid.time else None
-                results.append(SlotDefenseInfo(
-                    slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                    name=slot.target.name, report_age_hours=age_hours,
-                ))
-            continue
+            yield _line({
+                "type": "log",
+                "message": f"Fetching ({x},{y}) {first_slot.target.name}... [{fetched_count + 1}/{to_fetch}]",
+            })
 
-        report_id = battle_report.get('report_id', '')
-        aid = battle_report.get('aid', '')
-
-        defense_data = None
-        try:
-            detail = await session.reports_service.fetch_report_detail(
-                f"{report_id}&aid={aid}" if aid else report_id
-            )
-            if detail and detail.get('type') == 'battle':
-                battle = detail.get('data')
-                if battle:
-                    defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
-                    defense_data = {
-                        "defender_troops": defender_troops,
-                        "defender_total": sum(defender_troops.values()),
-                        "defender_combat_strength": getattr(battle, 'defender_combat_strength', 0) or 0,
-                        "report_id": report_id,
-                    }
-        except Exception as exc:
-            logger.debug("Defense scan: report fetch failed for %s: %s", report_id, exc)
-
-        for slot in slots:
-            age_hours = round((now_ts - slot.last_raid.time) / 3600, 1) if slot.last_raid and slot.last_raid.time else None
-            if defense_data:
-                results.append(SlotDefenseInfo(
-                    slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                    name=slot.target.name, report_age_hours=age_hours,
-                    **defense_data,
-                ))
-                # Cache the fetched result
-                _cache_put(user_id, slot.target.x, slot.target.y, slot.last_raid.time, defense_data)
+            # Request coalescing
+            inflight = defense_cache.get_inflight(x, y)
+            if inflight is not None:
+                try:
+                    defense_data = await inflight
+                except Exception:
+                    defense_data = None
             else:
-                results.append(SlotDefenseInfo(
-                    slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                    name=slot.target.name, report_age_hours=age_hours,
-                ))
+                fut = defense_cache.set_inflight(x, y)
+                try:
+                    defense_data = await _fetch_defense_for_coord(session, x, y)
+                    fut.set_result(defense_data)
+                except Exception as exc:
+                    fut.set_exception(exc)
+                    defense_data = None
+                finally:
+                    defense_cache.clear_inflight(x, y)
 
-    logger.info("Defense scan complete: %d results (%d fetched)", len(results), len(needs_fetch))
-    return results
+            fetched_count += 1
+
+            for slot in slots:
+                age_hours = round((now_ts - slot.last_raid.time) / 3600, 1) if slot.last_raid and slot.last_raid.time else None
+                if defense_data:
+                    yield _line(SlotDefenseInfo(
+                        slot_id=slot.id, x=slot.target.x, y=slot.target.y,
+                        name=slot.target.name, report_age_hours=age_hours,
+                        **defense_data,
+                    ).model_dump() | {"type": "result"})
+                    defense_cache.put(slot.target.x, slot.target.y, slot.last_raid.time, defense_data)
+                else:
+                    yield _line(SlotDefenseInfo(
+                        slot_id=slot.id, x=slot.target.x, y=slot.target.y,
+                        name=slot.target.name, report_age_hours=age_hours,
+                    ).model_dump() | {"type": "result"})
+
+            yield _line({
+                "type": "progress",
+                "total": total,
+                "cached": cached_count,
+                "to_fetch": to_fetch,
+                "fetched": fetched_count,
+            })
+
+        elapsed = round(_time.monotonic() - scan_start, 1)
+        yield _line({
+            "type": "log",
+            "message": f"Scan complete: {total} targets, {fetched_count} fetched in {elapsed}s",
+        })
+        yield _line({
+            "type": "complete",
+            "total": total,
+            "fetched": fetched_count,
+            "elapsed": elapsed,
+        })
+
+    return StreamingResponse(_generate(), media_type="application/x-ndjson")
+
+
+@router.get("/defense-cache/stats")
+async def defense_cache_stats(user=Depends(get_current_user)):
+    """Return defense scan cache statistics."""
+    return defense_cache.get_stats()
 
 
 @router.post("/lists/{list_id}/send", response_model=SendResultResponse)
