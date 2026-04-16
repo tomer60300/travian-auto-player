@@ -186,9 +186,8 @@ class OasisRaiderService:
                 "info",
             )
 
-        if config.max_targets > 0 and len(oases) > config.max_targets:
-            oases = oases[: config.max_targets]
-            await send_log("SORT", "📏", f"Capped to {config.max_targets} targets", "info")
+        if config.max_targets > 0:
+            await send_log("SORT", "📏", f"Will stop after {config.max_targets} successful raids", "info")
 
         # ── STEP 4b: Humanize target order (Mitigation 1) ───────────
         original_sorted = list(oases)
@@ -410,6 +409,15 @@ class OasisRaiderService:
 
             # 5e-post — Increment burst counter (Mitigation 6 tracking)
             raids_in_burst += 1
+
+            # Check max raids limit
+            if config.max_targets > 0 and stats["sent"] >= config.max_targets:
+                await send_log(
+                    "DONE", "🎯",
+                    f"Reached target of {config.max_targets} successful raid(s) — stopping",
+                    "info",
+                )
+                break
 
         # ── STEP 6: Summary ──────────────────────────────────────────
         duration = time.monotonic() - t_start
