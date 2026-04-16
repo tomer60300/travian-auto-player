@@ -38,6 +38,7 @@ from travian_api.web.ws.scout_ws import router as scout_ws_router
 from travian_api.web.ws.queue_ws import router as queue_ws_router
 from travian_api.web.ws.logs_ws import router as logs_ws_router
 from travian_api.web.ws.analyzer_ws import router as analyzer_ws_router
+from travian_api.web.ws.oasis_raider import router as oasis_raider_ws_router
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,7 @@ app.include_router(scout_ws_router)
 app.include_router(queue_ws_router)
 app.include_router(logs_ws_router)
 app.include_router(analyzer_ws_router)
+app.include_router(oasis_raider_ws_router)
 
 # Serve static frontend files if the build directory exists
 if STATIC_DIR.is_dir():

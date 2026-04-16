@@ -16,6 +16,7 @@ const navItems = [
   { to: '/video', label: 'Video Rewards', icon: '🎬' },
   { to: '/farm', label: 'Farm Lists', icon: '🌾' },
   { to: '/scout', label: 'Auto Scout', icon: '🔭' },
+  { to: '/oasis-raider', label: 'Oasis Raider', icon: '🏕' },
   { to: '/queue', label: 'Build Queue', icon: '📋' },
   { to: '/logs', label: 'Activity Log', icon: '📊' },
   { to: '/sessions', label: 'Sessions', icon: '📡' },
