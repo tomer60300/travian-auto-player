@@ -31,6 +31,7 @@ from travian_api.web.routes.queue import router as queue_router
 from travian_api.web.routes.status_export import router as status_export_router
 from travian_api.web.routes.captcha import router as captcha_router
 from travian_api.web.routes.exec_sessions import router as exec_sessions_router
+from travian_api.web.routes.farm_builder import router as farm_builder_router
 
 # Import WebSocket routers
 from travian_api.web.ws.farm_ws import router as farm_ws_router
@@ -39,6 +40,10 @@ from travian_api.web.ws.queue_ws import router as queue_ws_router
 from travian_api.web.ws.logs_ws import router as logs_ws_router
 from travian_api.web.ws.analyzer_ws import router as analyzer_ws_router
 from travian_api.web.ws.oasis_raider import router as oasis_raider_ws_router
+from travian_api.web.ws.farm_builder import router as farm_builder_ws_router
+
+# Import DB models so init_db() creates their tables
+from travian_api.web.models import farm_builder as _fb_models  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +168,7 @@ app.include_router(queue_router)
 app.include_router(status_export_router)
 app.include_router(captcha_router)
 app.include_router(exec_sessions_router)
+app.include_router(farm_builder_router)
 
 # Mount WebSocket routes
 app.include_router(farm_ws_router)
@@ -171,6 +177,7 @@ app.include_router(queue_ws_router)
 app.include_router(logs_ws_router)
 app.include_router(analyzer_ws_router)
 app.include_router(oasis_raider_ws_router)
+app.include_router(farm_builder_ws_router)
 
 # Serve static frontend files if the build directory exists
 if STATIC_DIR.is_dir():

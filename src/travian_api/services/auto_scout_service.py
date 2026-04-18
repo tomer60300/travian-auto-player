@@ -163,6 +163,97 @@ class AutoScoutService:
 
         return enriched
 
+    @staticmethod
+    def filter_canonical(
+        tiles: List[MapTileInfo],
+        *,
+        exclude_oases: bool = True,
+        exclude_abandoned: bool = True,
+        exclude_natars_alliance_tag: bool = True,
+        exclude_own_village_ids: Optional[Set[int]] = None,
+        exclude_player_ids: Optional[Set[int]] = None,
+        exclude_alliance_tags_lower: Optional[Set[str]] = None,
+        exclude_player_names_lower: Optional[Set[str]] = None,
+        player_total_pops: Optional[Dict[int, int]] = None,
+        max_player_total_pop: Optional[int] = None,
+        max_target_village_pop: Optional[int] = None,
+        min_target_village_pop: Optional[int] = None,
+        within_chebyshev_of: Optional[List[Tuple[int, int, int]]] = None,
+    ) -> Tuple[List[MapTileInfo], Dict[str, int]]:
+        """Canonical farm-builder filter — shared single source of truth.
+
+        Returns a tuple ``(survivors, drop_counts)`` where ``drop_counts`` is
+        a dict keyed by reason string. This is the ONE filter function both
+        the dry-run preview and the live execution path must call. Do not
+        reimplement any of these predicates elsewhere; call this instead.
+        """
+        drop_counts: Dict[str, int] = {}
+
+        def _drop(reason: str) -> None:
+            drop_counts[reason] = drop_counts.get(reason, 0) + 1
+
+        result: List[MapTileInfo] = []
+        own_vids = exclude_own_village_ids or set()
+        exc_pids = exclude_player_ids or set()
+        exc_tags = {t.lower() for t in (exclude_alliance_tags_lower or set())}
+        exc_names = {n.lower() for n in (exclude_player_names_lower or set())}
+
+        for t in tiles:
+            if exclude_oases and t.is_oasis:
+                _drop("oasis")
+                continue
+            if exclude_abandoned and t.is_abandoned:
+                _drop("abandoned")
+                continue
+            if t.player_id is None or t.player_id <= 0:
+                _drop("no_player")
+                continue
+            if t.village_id <= 0:
+                _drop("no_village_id")
+                continue
+            if t.population <= 0:
+                _drop("zero_population")
+                continue
+            if t.village_id in own_vids:
+                _drop("own_village")
+                continue
+            if t.player_id in exc_pids:
+                _drop("excluded_player_id")
+                continue
+            tag = (t.alliance_name or "").lower()
+            if exclude_natars_alliance_tag and tag in {"natars", "natar"}:
+                _drop("natars")
+                continue
+            if tag and tag in exc_tags:
+                _drop("excluded_alliance")
+                continue
+            name = (t.player_name or "").lower()
+            if name and name in exc_names:
+                _drop("excluded_player_name")
+                continue
+            if max_target_village_pop is not None and t.population > max_target_village_pop:
+                _drop("target_pop_too_high")
+                continue
+            if min_target_village_pop is not None and t.population < min_target_village_pop:
+                _drop("target_pop_too_low")
+                continue
+            if player_total_pops is not None and max_player_total_pop is not None:
+                total = player_total_pops.get(t.player_id, 0)
+                if total > max_player_total_pop:
+                    _drop("player_total_pop_too_high")
+                    continue
+            if within_chebyshev_of:
+                ok = any(
+                    max(abs(t.x - cx), abs(t.y - cy)) <= r
+                    for cx, cy, r in within_chebyshev_of
+                )
+                if not ok:
+                    _drop("outside_chebyshev_radius")
+                    continue
+            result.append(t)
+
+        return result, drop_counts
+
     def filter_targets(
         self,
         tiles: List[MapTileInfo],
