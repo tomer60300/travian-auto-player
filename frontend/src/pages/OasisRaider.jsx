@@ -61,6 +61,7 @@ export default function OasisRaider() {
   const [maxTargets, setMaxTargets] = useState(0)
   const [bonusFilter, setBonusFilter] = useState(['Wood', 'Clay', 'Iron', 'Crop'])
   const [sleepInterval, setSleepInterval] = useState(60)
+  const [repeatIntervalSeconds, setRepeatIntervalSeconds] = useState(0)
 
   // Operation state
   const [status, setStatus] = useState('idle')
@@ -147,6 +148,7 @@ export default function OasisRaider() {
         sleep_interval: sleepInterval,
         dry_run: dryRun,
         village_id: activeVillageId || undefined,
+        repeat_interval_seconds: repeatIntervalSeconds,
       },
     }
     lastConfigRef.current = startPayload
@@ -380,6 +382,21 @@ export default function OasisRaider() {
               placeholder="60"
             />
             <p className="text-xs text-secondary mt-1">Between troop re-checks</p>
+          </div>
+          <div>
+            <label className="field-label-lg">Repeat Interval (s)</label>
+            <input
+              type="number"
+              className="input-field w-24"
+              value={repeatIntervalSeconds}
+              min={0}
+              onChange={(e) => setRepeatIntervalSeconds(Number(e.target.value))}
+              disabled={isRunning}
+              placeholder="0"
+            />
+            <p className="text-xs text-secondary mt-1">
+              0 = single run. &gt;0 = re-run after sweep completes (e.g. 3600 = every hour)
+            </p>
           </div>
         </div>
 

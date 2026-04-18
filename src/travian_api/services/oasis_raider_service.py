@@ -90,6 +90,9 @@ class OasisRaiderConfig:
     sleep_interval: int = 60
     dry_run: bool = False
     village_id: int | None = None
+    # Recurring-run support: if > 0, the sweep re-runs every N seconds
+    # after completion until the user stops. 0 = single-shot (default).
+    repeat_interval_seconds: int = 0
 
 
 class OasisRaiderService:

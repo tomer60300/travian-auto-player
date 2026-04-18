@@ -98,6 +98,7 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
             sleep_interval=cfg.get("sleep_interval", 60),
             dry_run=cfg.get("dry_run", False),
             village_id=cfg.get("village_id"),
+            repeat_interval_seconds=cfg.get("repeat_interval_seconds", 0),
         )
 
         if not config.troops:
@@ -139,10 +140,42 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
         listener = asyncio.create_task(_listen_for_stop(websocket, stop_event))
 
         try:
-            stats = await service.run_sweep(config, send_log, check_stop)
+            iteration = 0
+            while not stop_event.is_set():
+                iteration += 1
+                if iteration > 1:
+                    await send_log(
+                        "RECURRING", "🔁",
+                        f"Starting iteration #{iteration} (repeat_interval={config.repeat_interval_seconds}s)",
+                        "info",
+                    )
+                    await tracked_send({"type": "status", "data": {"state": "running"}})
+
+                stats = await service.run_sweep(config, send_log, check_stop)
+                await tracked_send({"type": "summary", "data": stats})
+
+                # If user stopped mid-sweep or recurring is disabled — exit
+                if stop_event.is_set() or config.repeat_interval_seconds <= 0:
+                    break
+
+                # Wait for repeat_interval_seconds (interruptible by stop)
+                wait_secs = config.repeat_interval_seconds
+                await send_log(
+                    "RECURRING", "⏱️",
+                    f"Iteration #{iteration} complete — next run in {wait_secs}s",
+                    "info",
+                )
+                await tracked_send({"type": "status", "data": {"state": "sleeping"}})
+
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=wait_secs)
+                    # stop_event fired → user stopped during wait
+                    break
+                except asyncio.TimeoutError:
+                    pass  # timeout reached, run next iteration
+
             state = "stopped" if stop_event.is_set() else "completed"
             await tracked_send({"type": "status", "data": {"state": state}})
-            await tracked_send({"type": "summary", "data": stats})
         except (WebSocketDisconnect, RuntimeError):
             pass
         except Exception as exc:
