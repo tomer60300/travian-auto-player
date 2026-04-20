@@ -4,6 +4,7 @@
 run.ps1
 start.bat
 start.sh
+STRATEGY.md
 
 # Python
 __pycache__/
