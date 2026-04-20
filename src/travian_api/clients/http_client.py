@@ -51,8 +51,10 @@ class HttpClient:
         self.settings = settings
         self.base_url = settings.base_url.rstrip('/')
         self._resolved_x_version: str | None = None
+        self._auth_callback: Optional[callable] = None
+        self._cookie_file = Path(".travian_cookies.json")
 
-        # Initialize stealth components
+        # Initialize stealth components (needs _cookie_file for persona/scheduler paths)
         self._stealth_enabled = settings.stealth
         self._init_stealth(settings)
 
@@ -78,9 +80,6 @@ class HttpClient:
                 'X-Version': settings.x_version,
             }
         )
-
-        self._auth_callback: Optional[callable] = None
-        self._cookie_file = Path(".travian_cookies.json")
 
         # Load persisted cookies from file
         self._load_cookies()
@@ -168,38 +167,35 @@ class HttpClient:
         )
 
     async def _fetch_x_version(self) -> str:
-        """Resolve X-Version from a live game page (cached after first call).
+        """Return the best known X-Version value.
 
-        Fetches /dorf1.php and looks for the version in ``gpack/{VERSION}/``
-        URL patterns.  Falls back to ``self.settings.x_version`` when the
-        pattern is not found.
+        On first call, returns the config fallback immediately (no network).
+        After authentication succeeds, call ``try_resolve_x_version()`` to
+        attempt a live lookup from a game page.  This avoids surprise
+        pre-login fetches and ensures stealth mode is not bypassed.
         """
         if self._resolved_x_version is not None:
             return self._resolved_x_version
-
-        # Use config value as temporary guard against recursion: get_html
-        # calls _stealth_pre_request which calls _fetch_x_version again.
+        # First call — use config default (no network request)
         self._resolved_x_version = self.settings.x_version
+        return self._resolved_x_version
 
+    async def try_resolve_x_version(self) -> None:
+        """Attempt to resolve X-Version from a live game page.
+
+        Call this AFTER successful authentication.  Parses ``gpack/{VERSION}/``
+        from /dorf1.php.  On failure, keeps the config fallback silently.
+        """
         try:
             html = await self.get_html("/dorf1.php", skip_reauth=True)
             m = re.search(r'gpack/(\d+)/', html)
             if not m:
-                # secondary pattern
                 m = re.search(r'window\.Travian\.version\s*=\s*["\'](\d+)["\']', html)
             if m:
                 self._resolved_x_version = m.group(1)
                 logger.info("Resolved X-Version from live page: %s", self._resolved_x_version)
-                return self._resolved_x_version
         except Exception as e:
-            logger.warning("Failed to fetch X-Version from live page: %s", e)
-
-        logger.warning(
-            "Could not extract X-Version from game page, falling back to config value: %s",
-            self.settings.x_version,
-        )
-        # _resolved_x_version already holds the fallback value
-        return self._resolved_x_version
+            logger.debug("Could not resolve X-Version from live page: %s", e)
 
     async def _ensure_curl_session(self) -> Any:
         """Lazy-create the curl_cffi session with persona-matched impersonation."""

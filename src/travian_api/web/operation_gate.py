@@ -49,13 +49,19 @@ class OperationGate:
             return True
 
     def release(self, user_id: int, op_type: str) -> None:
-        """Release an operation slot."""
+        """Release an operation slot.
+
+        When the last operation for a user is released, the should_stop
+        flag is also cleared so future operations start clean.
+        """
         with self._lock:
             user_ops = self._active.get(user_id)
             if user_ops:
                 user_ops.pop(op_type, None)
                 if not user_ops:
                     del self._active[user_id]
+                    # All ops done — clear the stop flag for next session
+                    self._should_stop.pop(user_id, None)
             logger.info(
                 "Operation gate: released %s for user %s",
                 op_type, user_id,
@@ -85,9 +91,18 @@ class OperationGate:
             logger.info("Operation gate: should_stop set for user %s", user_id)
 
     def check_should_stop(self, user_id: int) -> bool:
-        """Check and clear the should_stop flag. Returns True if operations should stop."""
+        """Check the should_stop flag (non-destructive — all operations see it).
+
+        The flag persists until explicitly cleared via ``clear_should_stop``,
+        so every active operation for this user will observe ``True``.
+        """
         with self._lock:
-            return self._should_stop.pop(user_id, False)
+            return self._should_stop.get(user_id, False)
+
+    def clear_should_stop(self, user_id: int) -> None:
+        """Clear the should_stop flag after all operations have acknowledged it."""
+        with self._lock:
+            self._should_stop.pop(user_id, None)
 
 
 # Global singleton

@@ -117,6 +117,12 @@ class AuthService:
                 except Exception:
                     pass  # Warm-up failure shouldn't block login
 
+            # Resolve dynamic X-Version now that we're authenticated
+            try:
+                await self.http_client.try_resolve_x_version()
+            except Exception:
+                pass  # Fallback to config value is fine
+
             return self._auth_state
             
         except Exception as e:
