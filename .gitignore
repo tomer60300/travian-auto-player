@@ -5,6 +5,7 @@ run.ps1
 start.bat
 start.sh
 STRATEGY.md
+agent-logs/
 
 # Python
 __pycache__/
