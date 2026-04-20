@@ -7,6 +7,7 @@ so that cookie jars, JWT tokens, and stealth state never leak between users.
 
 import asyncio
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -46,6 +47,10 @@ class TravianSession:
         # ── Per-user data directory ───────────────────────────────────
         self._data_dir = _SESSION_DATA_DIR / str(user_id)
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self._data_dir, 0o700)
+        except OSError:
+            pass  # Windows ACL may not support chmod
 
         # ── Isolated Settings ─────────────────────────────────────────
         # Start from a default Settings (reads .env for stealth config) then

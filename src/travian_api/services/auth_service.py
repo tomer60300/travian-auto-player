@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from base64 import b64decode
 from pathlib import Path
@@ -241,6 +242,10 @@ class AuthService:
             
             self._jwt_cache_path.parent.mkdir(parents=True, exist_ok=True)
             self._jwt_cache_path.write_text(json.dumps(cache_data, indent=2))
+            try:
+                os.chmod(self._jwt_cache_path, 0o600)
+            except OSError:
+                pass  # Windows ACL may not support chmod
             
         except Exception:
             # Don't fail on cache errors

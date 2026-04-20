@@ -31,7 +31,9 @@ from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
+from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.web.execution_sessions import exec_session_manager
+from travian_api.web.operation_gate import operation_gate
 from travian_api.web.sessions import session_manager
 from travian_api.web.ws.manager import ws_manager
 
@@ -121,6 +123,17 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
         interval, duration = 300, 0
     verbose = params.get("verbose", "false").lower() in ("true", "1", "yes")
 
+    op_type = "farm"
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "A farm operation is already running for this account",
+            "fatal": True,
+        })
+        await websocket.close(code=4009, reason="Operation already running")
+        return
+
     channel = f"farm_run_{list_id}"
     await ws_manager.connect(websocket, user_id, channel)
 
@@ -178,8 +191,26 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
             if end_time and time.time() >= end_time:
                 break
 
-            # Check for stop from client
+            # Check for stop from client or captcha resolution
             if await _check_stop(websocket):
+                break
+            if operation_gate.check_should_stop(user_id):
+                await _tracked_send(websocket, {
+                    "type": "error",
+                    "message": "Stopped after captcha resolution — restart manually",
+                    "fatal": True,
+                })
+                break
+
+            # Activity budget check
+            try:
+                session.http_client.check_activity_budget()
+            except ActivityBudgetExhausted as exc:
+                await _tracked_send(websocket, {
+                    "type": "error",
+                    "message": str(exc),
+                    "fatal": True,
+                })
                 break
 
             cycle += 1
@@ -285,6 +316,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
         except Exception:
             logger.debug("Failed to send error message to farm run WS: user=%s list=%s", user_id, list_id, exc_info=True)
     finally:
+        operation_gate.release(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, channel, websocket)
 
@@ -324,6 +356,17 @@ async def ws_farm_run_all(websocket: WebSocket):
     requested_ids: list[int] | None = None
     if list_ids_param:
         requested_ids = [int(x.strip()) for x in list_ids_param.split(",") if x.strip()]
+
+    op_type = "farm-all"
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "A farm-all operation is already running for this account",
+            "fatal": True,
+        })
+        await websocket.close(code=4009, reason="Operation already running")
+        return
 
     channel = "farm_run_all"
     await ws_manager.connect(websocket, user_id, channel)
@@ -401,6 +444,24 @@ async def ws_farm_run_all(websocket: WebSocket):
                 break
 
             if await _check_stop(websocket):
+                break
+            if operation_gate.check_should_stop(user_id):
+                await _tracked_send_all(websocket, {
+                    "type": "error",
+                    "message": "Stopped after captcha resolution — restart manually",
+                    "fatal": True,
+                })
+                break
+
+            # Activity budget check
+            try:
+                session.http_client.check_activity_budget()
+            except ActivityBudgetExhausted as exc:
+                await _tracked_send_all(websocket, {
+                    "type": "error",
+                    "message": str(exc),
+                    "fatal": True,
+                })
                 break
 
             cycle += 1
@@ -525,5 +586,6 @@ async def ws_farm_run_all(websocket: WebSocket):
         except Exception:
             logger.debug("Failed to send error message to farm run-all WS: user=%s", user_id, exc_info=True)
     finally:
+        operation_gate.release(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, channel, websocket)

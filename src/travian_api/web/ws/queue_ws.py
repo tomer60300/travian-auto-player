@@ -23,8 +23,10 @@ import logging
 import yaml
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
+from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.services.build_queue_service import BuildPlan, BuildPlanItem
 from travian_api.web.execution_sessions import exec_session_manager
+from travian_api.web.operation_gate import operation_gate
 from travian_api.web.sessions import session_manager, TravianSession
 from travian_api.web.ws.manager import ws_manager
 
@@ -104,6 +106,17 @@ async def queue_run_ws(websocket: WebSocket):
             code=status.WS_1008_POLICY_VIOLATION,
             reason="No active Travian session",
         )
+        return
+
+    op_type = "queue"
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "A build queue operation is already running for this account",
+            "fatal": True,
+        })
+        await websocket.close(code=4009, reason="Operation already running")
         return
 
     await ws_manager.connect(websocket, user_id, CHANNEL)
@@ -203,6 +216,18 @@ async def queue_run_ws(websocket: WebSocket):
                     await _tracked_send(websocket, {"type": "status", "message": msg})
             except WebSocketDisconnect:
                 pass
+
+        # Check if captcha was just resolved
+        if operation_gate.check_should_stop(user_id):
+            await _tracked_send(websocket, {"type": "error", "message": "Stopped after captcha resolution — restart manually"})
+            return
+
+        # Activity budget check before starting execution
+        try:
+            session.http_client.check_activity_budget()
+        except ActivityBudgetExhausted as exc:
+            await _tracked_send(websocket, {"type": "error", "message": str(exc)})
+            return
 
         service.add_status_callback(_sync_status_callback)
         drainer_task = asyncio.create_task(_drain_status_queue())
@@ -313,5 +338,6 @@ async def queue_run_ws(websocket: WebSocket):
         logger.exception("Unexpected error in queue WS for user %s", user_id)
         await _tracked_try_send(websocket, {"type": "error", "message": f"Internal error: {exc}"})
     finally:
+        operation_gate.release(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)

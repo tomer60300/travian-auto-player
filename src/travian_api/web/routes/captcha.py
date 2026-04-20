@@ -45,20 +45,26 @@ async def captcha_resolve(user: User = Depends(get_current_user)):
 
     guard.resolve()
 
+    from travian_api.web.operation_gate import operation_gate
     from travian_api.web.ws.manager import ws_manager
     from travian_api.web.log_broadcast import log_stream_manager
+
+    # Signal all active operations to stop so they don't auto-resume
+    # after being unblocked by captcha_guard.resolve().
+    operation_gate.set_should_stop(user.id)
 
     await ws_manager.broadcast_to_user(user.id, {
         "type": "captcha_resolved",
         "active": False,
+        "operations_stopped": True,
     })
 
     log_stream_manager.push({
         "timestamp": time.time(),
         "level": "info",
         "source": "stealth",
-        "message": "Captcha block resolved by user. Operations resuming.",
+        "message": "Captcha block resolved by user. Active operations signalled to stop.",
         "user_id": user.id,
     })
 
-    return {"status": "ok", "message": "Captcha block lifted. Operations resuming."}
+    return {"status": "ok", "message": "Captcha block lifted. Active operations stopped — restart them manually."}

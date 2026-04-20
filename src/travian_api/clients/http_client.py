@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -19,7 +20,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 import logging
 
 from ..config import Settings
-from ..exceptions import NetworkError, SessionExpiredError, TravianError
+from ..exceptions import ActivityBudgetExhausted, NetworkError, SessionExpiredError, TravianError
 from ..utils.helpers import mask_sensitive_data
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,10 @@ class HttpClient:
             cookies = self.get_cookies()
             if cookies:
                 self._cookie_file.write_text(json.dumps(cookies, indent=2))
+                try:
+                    os.chmod(self._cookie_file, 0o600)
+                except OSError:
+                    pass  # Windows ACL may not support chmod
                 logger.debug(f"Saved {len(cookies)} cookies to {self._cookie_file}")
         except Exception as e:
             logger.warning("Failed to save cookies to %s: %s", self._cookie_file, e)
@@ -189,6 +194,35 @@ class HttpClient:
     @property
     def captcha_guard(self) -> "CaptchaGuard":
         return self._captcha_guard
+
+    def check_activity_budget(self) -> bool:
+        """Check whether the activity budget allows continued operation.
+
+        Returns True if operations can continue, False if the daily or
+        continuous session budget is exhausted.  WS handlers should call
+        this at the start of each operation cycle.
+
+        Raises:
+            ActivityBudgetExhausted: when the budget is used up (so callers
+                that forget to check the return value still stop).
+        """
+        if not self._stealth_enabled:
+            return True
+        if self._activity_scheduler.can_continue():
+            return True
+        remaining = self._activity_scheduler.remaining_daily_budget()
+        logger.warning(
+            "Activity budget exhausted: daily=%.1fh/%.1fh, session=%.1fh/%.1fh, remaining=%.2fh",
+            self._activity_scheduler.daily_hours_used,
+            self._activity_scheduler.max_daily_hours,
+            self._activity_scheduler.session_hours,
+            self._activity_scheduler.max_continuous_hours,
+            remaining,
+        )
+        raise ActivityBudgetExhausted(
+            f"Activity budget exhausted (daily {self._activity_scheduler.daily_hours_used:.1f}h "
+            f"/ {self._activity_scheduler.max_daily_hours}h)"
+        )
 
     def set_auth_callback(self, callback: callable) -> None:
         """Set callback function to call when re-authentication is needed."""
@@ -408,6 +442,30 @@ class HttpClient:
         if 'your account has been banned' in response_lower or 'you have been banned' in response_lower:
             await _fire("account_banned")
             return
+
+        # ── Phase 5: unknown block page — fail closed on 403/429/503 ─
+        #
+        # If the HTTP status is a block-like code AND the response doesn't
+        # look like a normal Travian game page, treat it as an unknown
+        # block.  Normal Travian pages are large and contain game markers.
+        # Session-expiry 403s are handled upstream (redirect to login),
+        # but an explicit login-page keyword check avoids false positives.
+        if status_code in (403, 429, 503):
+            _has_game_marker = (
+                'travian' in response_lower
+                or 'troop' in response_lower
+                or 'village' in response_lower
+                or 'dorf1' in response_lower
+                or 'dorf2' in response_lower
+                or 'buildingSlot' in response_lower
+            )
+            _is_login_page = (
+                'login' in response_lower
+                or 'password' in response_lower
+            )
+            if not _has_game_marker and not _is_login_page and resp_len < 5000:
+                await _fire("unknown_block_page")
+                return
 
     def _sync_cookies_to_curl(self) -> None:
         """Copy httpx cookies to curl_cffi session (call after httpx-based requests)."""
@@ -704,6 +762,23 @@ class HttpClient:
                     response = await self.client.get(url, headers=headers, follow_redirects=follow_redirects)
 
             await self._check_suspicious_response(response.text, url=url, status_code=response.status_code)
+
+            # Fail-closed: detect login/auth pages even when skip_reauth
+            # is True.  This prevents callers (e.g., navigator._visit)
+            # from recording a successful page visit when the server
+            # actually returned a login redirect.
+            if skip_reauth:
+                resp_url = str(response.url) if hasattr(response, 'url') else url
+                if 'login' in resp_url.lower() or (
+                    'auth' in resp_url.lower() and 'code' not in resp_url
+                ):
+                    logger.warning(
+                        "Login page detected with skip_reauth=True: url=%s -> %s",
+                        url, resp_url,
+                    )
+                    raise SessionExpiredError(
+                        f"Session expired (redirected to login): {resp_url}"
+                    )
 
             if follow_redirects and response.status_code >= 400:
                 if response.status_code == 429 and self._stealth_enabled:

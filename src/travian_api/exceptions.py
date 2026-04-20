@@ -118,5 +118,12 @@ class NetworkError(TravianError):
         self.response_text = response_text
 
 
+class ActivityBudgetExhausted(TravianError):
+    """Activity budget (daily hours / continuous session) is used up."""
+
+    def __init__(self, message: str = "Activity budget exhausted", details: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(message, details)
+
+
 # Alias for backward compatibility
 TravianAPIError = TravianError

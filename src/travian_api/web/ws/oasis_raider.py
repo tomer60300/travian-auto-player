@@ -10,9 +10,11 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.services.oasis_raider_service import OasisRaiderConfig, OasisRaiderService
 from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.log_broadcast import log_stream_manager
+from travian_api.web.operation_gate import operation_gate
 from travian_api.web.sessions import TravianSession, session_manager
 from travian_api.web.ws.manager import ws_manager
 
@@ -58,6 +60,17 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
     session: Optional[TravianSession] = session_manager.get(user_id)
     if session is None or session.auth_state is None:
         await websocket.close(code=4003, reason="No active Travian session")
+        return
+
+    op_type = "oasis-raider"
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "An oasis raider operation is already running for this account",
+            "fatal": True,
+        })
+        await websocket.close(code=4009, reason="Operation already running")
         return
 
     await ws_manager.connect(websocket, user_id, CHANNEL)
@@ -142,6 +155,20 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
         try:
             iteration = 0
             while not stop_event.is_set():
+                # Check if captcha was just resolved — stop instead of auto-resuming
+                if operation_gate.check_should_stop(user_id):
+                    await tracked_send({"type": "error", "message": "Stopped after captcha resolution — restart manually"})
+                    await tracked_send({"type": "status", "data": {"state": "stopped"}})
+                    break
+
+                # Activity budget check
+                try:
+                    session.http_client.check_activity_budget()
+                except ActivityBudgetExhausted as exc:
+                    await tracked_send({"type": "error", "message": str(exc)})
+                    await tracked_send({"type": "status", "data": {"state": "stopped"}})
+                    break
+
                 iteration += 1
                 if iteration > 1:
                     await send_log(
@@ -194,5 +221,6 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
     except Exception:
         logger.exception("Unexpected error in oasis raider WS for user %s", user_id)
     finally:
+        operation_gate.release(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)

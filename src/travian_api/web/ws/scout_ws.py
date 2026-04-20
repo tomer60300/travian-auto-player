@@ -17,7 +17,9 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.web.execution_sessions import exec_session_manager
+from travian_api.web.operation_gate import operation_gate
 from travian_api.web.sessions import session_manager, TravianSession
 from travian_api.web.ws.manager import ws_manager
 from travian_api.web.routes.military import _resolve_scout_unit
@@ -170,6 +172,17 @@ async def auto_scout_ws(websocket: WebSocket):
     session: Optional[TravianSession] = session_manager.get(user_id)
     if session is None or session.auth_state is None:
         await websocket.close(code=4003, reason="No active Travian session")
+        return
+
+    op_type = "scout"
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "A scout operation is already running for this account",
+            "fatal": True,
+        })
+        await websocket.close(code=4009, reason="Operation already running")
         return
 
     await ws_manager.connect(websocket, user_id, CHANNEL)
@@ -390,6 +403,26 @@ async def auto_scout_ws(websocket: WebSocket):
                 total = len(tiles)
 
                 # ── Phase 2: Send scouts (stealth mode) ─────────────
+                # Check if captcha was just resolved
+                if operation_gate.check_should_stop(user_id):
+                    await _tracked_send(websocket, {"type": "error", "message": "Stopped after captcha resolution — restart manually"})
+                    await _tracked_send(websocket, {
+                        "type": "complete", "total_sent": 0, "successful": 0,
+                        "next_start_index": start_index,
+                    })
+                    continue
+
+                # Activity budget check before starting the send loop
+                try:
+                    session.http_client.check_activity_budget()
+                except ActivityBudgetExhausted as exc:
+                    await _tracked_send(websocket, {"type": "error", "message": str(exc)})
+                    await _tracked_send(websocket, {
+                        "type": "complete", "total_sent": 0, "successful": 0,
+                        "next_start_index": start_index,
+                    })
+                    continue
+
                 results = []
                 times_per_target = []
                 t_start_total = time.monotonic()
@@ -564,6 +597,7 @@ async def auto_scout_ws(websocket: WebSocket):
     except Exception:
         logger.exception("Unexpected error in scout WS for user %s", user_id)
     finally:
+        operation_gate.release(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)
 
@@ -603,6 +637,17 @@ async def scout_scan_ws(websocket: WebSocket):
     session: Optional[TravianSession] = session_manager.get(user_id)
     if session is None or session.auth_state is None:
         await websocket.close(code=4003, reason="No active Travian session")
+        return
+
+    scan_op_type = "scout-scan"
+    if not operation_gate.acquire(user_id, scan_op_type):
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "A scout scan is already running for this account",
+            "fatal": True,
+        })
+        await websocket.close(code=4009, reason="Operation already running")
         return
 
     await ws_manager.connect(websocket, user_id, SCAN_CHANNEL)
@@ -1069,5 +1114,6 @@ async def scout_scan_ws(websocket: WebSocket):
         logger.exception("Unexpected error in scout scan WS for user %s", user_id)
         await _tracked_send(websocket, {"type": "error", "message": "Internal scan error"})
     finally:
+        operation_gate.release(user_id, scan_op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, SCAN_CHANNEL, websocket)

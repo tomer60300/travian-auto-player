@@ -34,11 +34,13 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.services.farm_builder_service import FarmBuilderService
 from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.log_broadcast import log_stream_manager
 from travian_api.web.models.db import async_session_factory
 from travian_api.web.models.farm_builder import FarmBuilderRunHistory
+from travian_api.web.operation_gate import operation_gate
 from travian_api.web.sessions import TravianSession, session_manager
 from travian_api.web.ws.manager import ws_manager
 
@@ -81,6 +83,17 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
     session: Optional[TravianSession] = session_manager.get(user_id)
     if session is None or session.auth_state is None:
         await websocket.close(code=4003, reason="No active Travian session")
+        return
+
+    op_type = "farm-builder"
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "message": "A farm builder operation is already running for this account",
+            "fatal": True,
+        })
+        await websocket.close(code=4009, reason="Operation already running")
         return
 
     await ws_manager.connect(websocket, user_id, CHANNEL)
@@ -135,6 +148,20 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
 
         async def check_stop() -> bool:
             return stop_event.is_set()
+
+        # Check if captcha was just resolved
+        if operation_gate.check_should_stop(user_id):
+            await tracked_send({"type": "error", "message": "Stopped after captcha resolution — restart manually"})
+            await tracked_send({"type": "status", "data": {"state": "stopped"}})
+            return
+
+        # Activity budget check before starting
+        try:
+            session.http_client.check_activity_budget()
+        except ActivityBudgetExhausted as exc:
+            await tracked_send({"type": "error", "message": str(exc)})
+            await tracked_send({"type": "status", "data": {"state": "stopped"}})
+            return
 
         await tracked_send({"type": "status", "data": {"state": "running"}})
         listener = asyncio.create_task(_listen_for_stop(websocket, stop_event))
@@ -213,4 +240,5 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
     except Exception:
         logger.exception("Unexpected error in farm builder WS for user %s", user_id)
     finally:
+        operation_gate.release(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
