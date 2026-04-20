@@ -705,11 +705,9 @@ class BuildQueueService:
                             await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.05))
                             # Stealth: occasional idle browsing during long waits
                             try:
-                                await self.http_client.session_manager.idle_browse_if_due(
-                                    self.http_client.navigator, self.http_client, village_id=vid
-                                )
-                                # Check if we should take a break
-                                await self.http_client.session_manager.take_break_if_needed()
+                                noise = getattr(self.http_client, 'noise_injector', None)
+                                if noise:
+                                    await noise.maybe_inject_noise(village_id=vid)
                             except Exception:
                                 pass  # stealth failures shouldn't break the builder
 
