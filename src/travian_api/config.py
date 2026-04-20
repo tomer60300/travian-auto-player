@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     stealth_navigate: bool = Field(default=True, description="Simulate page navigation before actions")
     stealth_burst_max: int = Field(default=20, description="Max requests per 60s window before cooldown")
     stealth_burst_cooldown: float = Field(default=15.0, description="Cooldown seconds when burst limit hit")
-    stealth_noise_rate: float = Field(default=0.0, description="Noise injection probability (0.0-1.0, default disabled)")
+    stealth_noise_rate: float = Field(default=0.15, description="Noise injection probability (0.0-1.0, default 0.15)")
     stealth_max_daily_hours: float = Field(default=10.0, description="Maximum daily active hours")
     stealth_max_continuous_hours: float = Field(default=4.0, description="Max hours before forced break")
     stealth_min_break_minutes: float = Field(default=30.0, description="Minimum break duration in minutes")

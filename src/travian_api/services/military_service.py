@@ -135,7 +135,7 @@ class MilitaryService:
             await delay.wait(ActionType.FORM_FILL, "filling troop selection form")
             
             logger.info(f"Step 1: Sending troop form to ({x},{y}) type={event_type} troops={troops}")
-            confirm_html = await self.http_client.post_form(rally_url, form_data)
+            confirm_html = await self.http_client.post_form(rally_url, form_data, safe_to_retry=False)
 
             # Check for error — but only if we DON'T have a confirmation form
             has_confirm = 'troopSendForm' in confirm_html or 'confirmSendTroops' in confirm_html
@@ -199,7 +199,7 @@ class MilitaryService:
             await delay.wait(ActionType.PAGE_LOAD, "reading troop confirmation")
             
             logger.info(f"Step 2: Confirming with checksum={checksum}")
-            result_html = await self.http_client.post_form(rally_url, final_data)
+            result_html = await self.http_client.post_form(rally_url, final_data, safe_to_retry=False)
 
             # Success detection: after confirming, the server returns the rally point
             # page. The key negative indicator is the confirmation form reappearing

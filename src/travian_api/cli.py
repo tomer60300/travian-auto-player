@@ -229,7 +229,7 @@ def auth_login():
         s = _settings()
         async with HttpClient(s) as client:
             auth = AuthService(client, s)
-            result = await auth.login()
+            result = await auth.login(force=True)
             console.print("[green]OK - Logged in![/green]")
             console.print(f"  Player: {result.player_name}")
             console.print(f"  Tribe:  {result.tribe_id} (1=Roman, 2=Teuton, 3=Gaul)")

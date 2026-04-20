@@ -207,7 +207,7 @@ class BuildingService:
                 upgrade_url += f'{sep}newdid={village_id}'
             
             # Perform upgrade by GET request to the URL
-            response_html = await self.http_client.get_html(upgrade_url, skip_reauth=True)
+            response_html = await self.http_client.get_html(upgrade_url, skip_reauth=True, safe_to_retry=False)
             
             # Success detection: after upgrade, server redirects to dorf1/dorf2 page
             # which shows the construction queue with the new item.
@@ -324,7 +324,7 @@ class BuildingService:
                 sep = '&' if '?' in build_url else '?'
                 build_url += f'{sep}newdid={village_id}'
 
-            response_html = await self.http_client.get_html(build_url, skip_reauth=True)
+            response_html = await self.http_client.get_html(build_url, skip_reauth=True, safe_to_retry=False)
 
             import re
             has_queue_item = bool(re.search(r'showCancelBuildingDialog', response_html))

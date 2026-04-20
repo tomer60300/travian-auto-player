@@ -175,37 +175,11 @@ class FarmListService:
         logger.info(f"Added slot ({x},{y}) to list {list_id}")
 
     async def delete_slots(self, slot_ids: List[int]) -> None:
-        """Delete slots by IDs via Travian REST API.
-
-        The Travian DELETE endpoint requires a JSON body, which the standard
-        ``delete_json`` helper doesn't support.  We build the request manually
-        using whichever transport the http_client is configured with.
-        """
-        from urllib.parse import urljoin
-
-        url = urljoin(self.http_client.base_url + "/", "api/v1/farm-list/slot")
-        body = {"slots": slot_ids, "abandoned": False}
-        headers = {
-            "Content-Type": "application/json",
-            "X-Version": self.http_client.settings.x_version,
-        }
-
-        # Use curl_cffi if available (has correct session cookies), else httpx
-        import json as _json
-        if hasattr(self.http_client, '_curl_session') and self.http_client._curl_session is not None:
-            session = self.http_client._curl_session
-            resp = await session.delete(
-                url,
-                headers=headers,
-                data=_json.dumps(body).encode(),
-                timeout=self.http_client.settings.timeout,
-                allow_redirects=False,
-            )
-        else:
-            resp = await self.http_client.client.request(
-                "DELETE", url, json=body, headers=headers,
-            )
-        resp.raise_for_status()
+        """Delete slots by IDs via Travian REST API (DELETE with JSON body)."""
+        await self.http_client.delete_json(
+            "/api/v1/farm-list/slot",
+            data={"slots": slot_ids, "abandoned": False},
+        )
         logger.info(f"Deleted slots: {slot_ids}")
 
     # ── Send ─────────────────────────────────────────────────────────
@@ -222,6 +196,7 @@ class FarmListService:
                 "action": "farmList",
                 "lists": [{"id": list_id, "targets": slot_ids}],
             },
+            safe_to_retry=False,
         )
 
         error = resp.get("error", "")

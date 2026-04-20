@@ -27,16 +27,44 @@ class AuthService:
         # Set up re-auth callback
         self.http_client.set_auth_callback(self._handle_reauth)
         
-    async def login(self) -> AuthState:
+    async def login(self, *, force: bool = False) -> AuthState:
         """
         Perform 2-step authentication flow.
-        
+
+        Tries cached JWT first (unless *force* is True). Falls back to a full
+        credential login when the cache is missing, expired, or the session is
+        no longer alive on the server.
+
+        Args:
+            force: Skip cache check and do a fresh credential login.
+
         Returns:
             AuthState with JWT and player info
-            
+
         Raises:
             AuthError: If login fails
         """
+        # ── Try cached JWT first (unless forced) ────────────────────
+        if not force and self._jwt_cache_path:
+            try:
+                await self._load_cached_jwt()
+                if self._auth_state and self._is_jwt_valid(self._auth_state.jwt):
+                    # Lightweight server-side check: fetch player data
+                    player_data = await self.http_client.post_json("/api/v1/graphql", {
+                        "query": "{ ownPlayer { name } }"
+                    }, skip_reauth=True)
+                    if player_data.get("data", {}).get("ownPlayer"):
+                        # Resolve dynamic X-Version with cached session too
+                        try:
+                            await self.http_client.try_resolve_x_version()
+                        except Exception:
+                            pass
+                        return self._auth_state
+            except Exception:
+                pass  # Cache check failed — fall through to fresh login
+            # Reset state so fresh login starts clean
+            self._auth_state = None
+
         try:
             # Clear any existing cookies
             self.http_client.clear_cookies()

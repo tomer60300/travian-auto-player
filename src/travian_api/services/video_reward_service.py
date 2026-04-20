@@ -149,7 +149,7 @@ class VideoRewardService:
             
             open_data = await self.http_client.post_json(
                 f"/api/v1/videofeature/open/{open_endpoint}", open_body,
-                skip_reauth=True,
+                skip_reauth=True, safe_to_retry=False,
             )
 
             vrid = open_data.get("vrid") if isinstance(open_data, dict) else None
@@ -189,7 +189,7 @@ class VideoRewardService:
             await self.http_client.post_json(
                 "/api/v1/videofeature/start",
                 {"vrid": vrid},
-                skip_reauth=True,
+                skip_reauth=True, safe_to_retry=False,
             )
 
             # Phase 4: Send progress ticks to fc.php (real 3s timing required)
@@ -257,7 +257,7 @@ class VideoRewardService:
             ends_data = await self.http_client.post_json(
                 "/api/v1/videofeature/ends",
                 {"vrid": vrid, "hash": signature},
-                skip_reauth=True,
+                skip_reauth=True, safe_to_retry=False,
             )
 
             if ends_data.get("error"):

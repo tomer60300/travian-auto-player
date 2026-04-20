@@ -67,17 +67,10 @@ class TravianSession:
         })
 
         # ── Isolated HTTP client ──────────────────────────────────────
-        self.http_client = HttpClient(self.settings)
-
-        # CRITICAL: Cookie/session isolation for multi-user safety.
-        # HttpClient.__init__ loads cookies from the global .travian_cookies.json
-        # which may contain another user's session. We must:
-        # 1. Clear any cookies loaded from the global file
-        # 2. Set the per-user cookie file path
-        # 3. Load cookies from the per-user file instead
-        self.http_client.clear_cookies()
-        self.http_client._cookie_file = self._data_dir / "cookies.json"
-        self.http_client._load_cookies()  # load from per-user file
+        # Pass per-user cookie path so persona/scheduler files land in the
+        # per-user directory from the start (instead of the working dir).
+        self._cookie_file = self._data_dir / "cookies.json"
+        self.http_client = HttpClient(self.settings, cookie_file=self._cookie_file)
 
         # ── Captcha guard notification callback ─────────────────────
         self.http_client.captcha_guard.set_trigger_callback(

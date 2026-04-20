@@ -47,12 +47,12 @@ class HttpClient:
     5. Chrome TLS fingerprint via curl_cffi (if available)
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, cookie_file: Path | None = None):
         self.settings = settings
         self.base_url = settings.base_url.rstrip('/')
         self._resolved_x_version: str | None = None
         self._auth_callback: Optional[callable] = None
-        self._cookie_file = Path(".travian_cookies.json")
+        self._cookie_file = cookie_file if cookie_file is not None else Path(".travian_cookies.json")
 
         # Initialize stealth components (needs _cookie_file for persona/scheduler paths)
         self._stealth_enabled = settings.stealth
@@ -205,6 +205,8 @@ class HttpClient:
             self._curl_session = CurlAsyncSession(
                 impersonate=impersonate,
             )
+            # Sync persisted cookies (loaded into httpx) into the new curl session
+            self._sync_cookies_to_curl()
         return self._curl_session
 
     # ── Stealth accessors (for services to use) ──────────────────────
@@ -550,15 +552,17 @@ class HttpClient:
         self._sync_cookies_from_curl(response)
         return response
 
-    async def _curl_delete_json(self, url: str, headers: Dict[str, str]) -> Any:
+    async def _curl_delete_json(self, url: str, headers: Dict[str, str], data: Dict[str, Any] | None = None) -> Any:
         """Make a DELETE request via curl_cffi."""
         session = await self._ensure_curl_session()
-        response = await session.delete(
-            url,
-            headers=headers,
-            timeout=self.settings.timeout,
-            allow_redirects=False,
-        )
+        kwargs: Dict[str, Any] = {
+            "headers": headers,
+            "timeout": self.settings.timeout,
+            "allow_redirects": False,
+        }
+        if data is not None:
+            kwargs["json"] = data
+        response = await session.delete(url, **kwargs)
         self._sync_cookies_from_curl(response)
         return response
 
@@ -592,7 +596,7 @@ class HttpClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ()))
     )
-    async def post_json(self, url: str, data: Dict[str, Any], *, skip_reauth: bool = False, _retry: int = 0) -> Dict[str, Any]:
+    async def post_json(self, url: str, data: Dict[str, Any], *, skip_reauth: bool = False, safe_to_retry: bool = True, _retry: int = 0) -> Dict[str, Any]:
         """Make a POST request with JSON data."""
         if not url.startswith('http'):
             url = urljoin(self.base_url, url.lstrip('/'))
@@ -644,18 +648,26 @@ class HttpClient:
                     logger.warning("429 Too Many Requests — adding 120s penalty")
             raise NetworkError(f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code)
         except (httpx.RequestError,) as e:
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
             raise NetworkError(f"Request failed: {e}")
         except (ConnectionResetError, ConnectionError, OSError) as e:
+            if not safe_to_retry:
+                raise NetworkError(f"Connection reset (non-retryable): {e}")
             # Server forcibly closed connection (rate limit) — penalty + retry once
             if _retry < 1 and self._stealth_enabled:
                 self._throttler.add_penalty(30.0)
                 logger.warning("Connection reset in post_json — 30s penalty then retry: %s", e)
                 await asyncio.sleep(30.0)
-                return await self.post_json(url, data, skip_reauth=skip_reauth, _retry=_retry + 1)
+                return await self.post_json(url, data, skip_reauth=skip_reauth, safe_to_retry=safe_to_retry, _retry=_retry + 1)
             raise NetworkError(f"Connection reset: {e}")
         except Exception as e:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
+                if not safe_to_retry:
+                    raise NetworkError(f"Request failed (curl, non-retryable): {e}")
                 raise NetworkError(f"Request failed (curl): {e}")
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
     @retry(
@@ -663,8 +675,12 @@ class HttpClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ()))
     )
-    async def delete_json(self, url: str, *, skip_reauth: bool = False) -> Dict[str, Any]:
-        """Make a DELETE request (JSON response expected)."""
+    async def delete_json(self, url: str, *, data: Dict[str, Any] | None = None, skip_reauth: bool = False, safe_to_retry: bool = True) -> Dict[str, Any]:
+        """Make a DELETE request (JSON response expected).
+
+        Args:
+            data: Optional JSON body to include with the DELETE request.
+        """
         if not url.startswith('http'):
             url = urljoin(self.base_url, url.lstrip('/'))
 
@@ -674,9 +690,12 @@ class HttpClient:
             logger.debug(f"DELETE {url}")
 
             if self._use_curl:
-                response = await self._curl_delete_json(url, headers)
+                response = await self._curl_delete_json(url, headers, data=data)
             else:
-                response = await self.client.delete(url, headers=headers)
+                if data is not None:
+                    response = await self.client.request("DELETE", url, json=data, headers=headers)
+                else:
+                    response = await self.client.delete(url, headers=headers)
 
             self._stealth_post_request(url)
 
@@ -686,9 +705,12 @@ class HttpClient:
             )):
                 await self._handle_session_expired()
                 if self._use_curl:
-                    response = await self._curl_delete_json(url, headers)
+                    response = await self._curl_delete_json(url, headers, data=data)
                 else:
-                    response = await self.client.delete(url, headers=headers)
+                    if data is not None:
+                        response = await self.client.request("DELETE", url, json=data, headers=headers)
+                    else:
+                        response = await self.client.delete(url, headers=headers)
 
             # Check for bot detection
             await self._check_suspicious_response(response.text, url=url, status_code=response.status_code)
@@ -714,10 +736,16 @@ class HttpClient:
                     logger.warning("429 Too Many Requests — adding 120s penalty")
             raise NetworkError(f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code)
         except (httpx.RequestError,) as e:
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
             raise NetworkError(f"Request failed: {e}")
         except Exception as e:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
+                if not safe_to_retry:
+                    raise NetworkError(f"Request failed (curl, non-retryable): {e}")
                 raise NetworkError(f"Request failed (curl): {e}")
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
     @retry(
@@ -725,7 +753,7 @@ class HttpClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ()))
     )
-    async def post_form(self, url: str, data: Dict[str, str]) -> str:
+    async def post_form(self, url: str, data: Dict[str, str], *, safe_to_retry: bool = True) -> str:
         """Make a POST request with form data."""
         if not url.startswith('http'):
             url = urljoin(self.base_url, url.lstrip('/'))
@@ -769,10 +797,16 @@ class HttpClient:
                     self._throttler.add_penalty(120.0)
             raise NetworkError(f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code)
         except (httpx.RequestError,) as e:
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
             raise NetworkError(f"Request failed: {e}")
         except Exception as e:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
+                if not safe_to_retry:
+                    raise NetworkError(f"Request failed (curl, non-retryable): {e}")
                 raise NetworkError(f"Request failed (curl): {e}")
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
     @retry(
@@ -780,7 +814,7 @@ class HttpClient:
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ()))
     )
-    async def get_html(self, url: str, follow_redirects: bool = True, *, skip_reauth: bool = False) -> str:
+    async def get_html(self, url: str, follow_redirects: bool = True, *, skip_reauth: bool = False, safe_to_retry: bool = True) -> str:
         """Make a GET request and return HTML."""
         if not url.startswith('http'):
             url = urljoin(self.base_url, url.lstrip('/'))
@@ -844,10 +878,16 @@ class HttpClient:
                     self._throttler.add_penalty(120.0)
             raise NetworkError(f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code)
         except (httpx.RequestError,) as e:
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
             raise NetworkError(f"Request failed: {e}")
         except Exception as e:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
+                if not safe_to_retry:
+                    raise NetworkError(f"Request failed (curl, non-retryable): {e}")
                 raise NetworkError(f"Request failed (curl): {e}")
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
     async def _handle_session_expired(self) -> None:
