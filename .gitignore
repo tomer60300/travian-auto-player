@@ -1,6 +1,9 @@
 # Credentials & secrets
 .env
 *.env.local
+run.ps1
+start.bat
+start.sh
 
 # Python
 __pycache__/
