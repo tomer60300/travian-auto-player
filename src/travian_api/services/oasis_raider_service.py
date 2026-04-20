@@ -225,6 +225,20 @@ class OasisRaiderService:
                 await send_log("STOP", "⛔", "Stopped by user", "warning")
                 break
 
+            # Activity scheduler gate — stop if budget exhausted
+            try:
+                scheduler = self._http.activity_scheduler
+                if not scheduler.can_continue():
+                    await send_log(
+                        "STOP", "⛔",
+                        f"Activity limit reached. Stopping sweep at {i}/{stats['total']} targets.",
+                        "warning",
+                    )
+                    break
+                scheduler.log_activity(10.0)
+            except Exception:
+                pass
+
             # 5a — Troop gate
             if not self._has_enough_troops(available, config.troops):
                 needed_str = self._format_troops(config.troops, tribe_id)

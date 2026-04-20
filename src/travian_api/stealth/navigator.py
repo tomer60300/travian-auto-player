@@ -88,39 +88,51 @@ class PageNavigator:
         self, slot_id: int, village_id: Optional[int] = None
     ) -> None:
         """Navigate to a resource field (slot 1-18) as a human would.
-        
+
         Chain: dorf1.php → build.php?id=X
         """
         if not self.enabled:
             return
-        
+
         newdid = f"?newdid={village_id}" if village_id else ""
-        
+
         # Visit dorf1 first (resource field overview)
         if self._current_page != f"/dorf1.php{newdid}":
             await self._visit(f"/dorf1.php{newdid}", "viewing resource fields")
-        
+
         # Small click delay before opening the field
         await self._delay.wait(ActionType.CLICK, f"clicking field slot {slot_id}")
+
+        # Actually fetch the building page (creates realistic referer chain)
+        build_url = f"/build.php?id={slot_id}"
+        if village_id:
+            build_url = f"/build.php?newdid={village_id}&id={slot_id}"
+        await self._visit(build_url, f"opening resource field slot {slot_id}")
     
     async def navigate_to_building(
         self, slot_id: int, village_id: Optional[int] = None
     ) -> None:
         """Navigate to a village building (slot 19-40) as a human would.
-        
+
         Chain: dorf2.php → build.php?id=X
         """
         if not self.enabled:
             return
-        
+
         newdid = f"?newdid={village_id}" if village_id else ""
-        
+
         # Visit dorf2 first (building overview)
         if self._current_page != f"/dorf2.php{newdid}":
             await self._visit(f"/dorf2.php{newdid}", "viewing village buildings")
-        
+
         # Small click delay
         await self._delay.wait(ActionType.CLICK, f"clicking building slot {slot_id}")
+
+        # Actually fetch the building page (creates realistic referer chain)
+        build_url = f"/build.php?id={slot_id}"
+        if village_id:
+            build_url = f"/build.php?newdid={village_id}&id={slot_id}"
+        await self._visit(build_url, f"opening building slot {slot_id}")
     
     async def navigate_to_rally_point(
         self, village_id: Optional[int] = None

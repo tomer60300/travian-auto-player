@@ -13,6 +13,7 @@ Provides human-like behavior simulation to avoid bot detection:
 
 from .user_agents import get_random_ua, UserAgentRotator
 from .headers import BrowserHeaders
+from .persona import Persona, build_persona, load_persona, save_persona
 from .throttler import RequestThrottler
 from .human_delay import HumanDelay, ActionType
 from .navigator import PageNavigator
@@ -25,6 +26,10 @@ __all__ = [
     "get_random_ua",
     "UserAgentRotator",
     "BrowserHeaders",
+    "Persona",
+    "build_persona",
+    "load_persona",
+    "save_persona",
     "RequestThrottler",
     "HumanDelay",
     "ActionType",

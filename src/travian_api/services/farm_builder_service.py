@@ -569,6 +569,17 @@ class FarmBuilderService:
         for i, tgt in enumerate(all_targets):
             if await check_stop():
                 return {"stopped": True, "bucket_lists": bucket_lists, "defense_data": defense_data}
+
+            # Activity scheduler gate
+            try:
+                scheduler = self._http.activity_scheduler
+                if not scheduler.can_continue():
+                    await send_log("FB-DEFENSE", "⛔", f"Activity limit reached at report {i}/{len(all_targets)}. Stopping.", "warning")
+                    break
+                scheduler.log_activity(5.0)
+            except Exception:
+                pass
+
             x, y = tgt["x"], tgt["y"]
             try:
                 v = await self._reports.fetch_village_reports(x=x, y=y, fetch_details=False)
@@ -611,6 +622,17 @@ class FarmBuilderService:
         for i, tgt in enumerate(remaining):
             if await check_stop():
                 return {"stopped": True, "bucket_lists": bucket_lists, "defense_data": defense_data}
+
+            # Activity scheduler gate
+            try:
+                scheduler = self._http.activity_scheduler
+                if not scheduler.can_continue():
+                    await send_log("FB-DEFENSE", "⛔", f"Activity limit reached at scout {i}/{len(remaining)}. Stopping.", "warning")
+                    break
+                scheduler.log_activity(5.0)
+            except Exception:
+                pass
+
             x, y = tgt["x"], tgt["y"]
             success = False
             travel_s = 0
@@ -667,6 +689,17 @@ class FarmBuilderService:
             for i, sr in enumerate(scout_results):
                 if await check_stop():
                     break
+
+                # Activity scheduler gate
+                try:
+                    scheduler = self._http.activity_scheduler
+                    if not scheduler.can_continue():
+                        await send_log("FB-DEFENSE", "⛔", f"Activity limit reached at report fetch {i}/{len(scout_results)}. Stopping.", "warning")
+                        break
+                    scheduler.log_activity(5.0)
+                except Exception:
+                    pass
+
                 x, y = sr["x"], sr["y"]
                 got = None
                 for attempt in range(3):
@@ -746,6 +779,17 @@ class FarmBuilderService:
             for r in recs:
                 if await check_stop():
                     break
+
+                # Activity scheduler gate
+                try:
+                    scheduler = self._http.activity_scheduler
+                    if not scheduler.can_continue():
+                        await send_log("FB-ASSIGN", "⛔", "Activity limit reached during assignment. Stopping.", "warning")
+                        break
+                    scheduler.log_activity(3.0)
+                except Exception:
+                    pass
+
                 x, y = r["x"], r["y"]
                 d = defense_data.get((x, y))
 

@@ -50,6 +50,7 @@ class HttpClient:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.base_url = settings.base_url.rstrip('/')
+        self._resolved_x_version: str | None = None
 
         # Initialize stealth components
         self._stealth_enabled = settings.stealth
@@ -119,8 +120,20 @@ class HttpClient:
         from ..stealth.noise import NoiseInjector
         from ..stealth.scheduler import ActivityScheduler
         from ..stealth.captcha_guard import CaptchaGuard
+        from ..stealth.persona import Persona, build_persona, load_persona, save_persona
 
-        self._ua_rotator = UserAgentRotator()
+        # ── Persistent persona: same cookies = same browser identity ──
+        self._persona_file = self._cookie_file.parent / ".travian_persona.json"
+        persona = load_persona(self._persona_file)
+        if persona is None:
+            persona = build_persona(server_url=settings.base_url)
+            save_persona(persona, self._persona_file)
+            logger.info("Created new persona: %s (impersonate=%s)", persona.user_agent, persona.impersonate)
+        else:
+            logger.debug("Loaded existing persona: %s (impersonate=%s)", persona.user_agent, persona.impersonate)
+
+        self._persona = persona
+        self._ua_rotator = UserAgentRotator(persona=persona, server_url=settings.base_url)
         self._browser_headers = BrowserHeaders(self._ua_rotator, settings.base_url)
         self._captcha_guard = CaptchaGuard()
         self._throttler = RequestThrottler(
@@ -151,13 +164,50 @@ class HttpClient:
             max_continuous_hours=settings.stealth_max_continuous_hours,
             min_break_minutes=settings.stealth_min_break_minutes,
             enabled=settings.stealth,
+            state_file=self._cookie_file.parent / ".scheduler_state.json",
         )
 
+    async def _fetch_x_version(self) -> str:
+        """Resolve X-Version from a live game page (cached after first call).
+
+        Fetches /dorf1.php and looks for the version in ``gpack/{VERSION}/``
+        URL patterns.  Falls back to ``self.settings.x_version`` when the
+        pattern is not found.
+        """
+        if self._resolved_x_version is not None:
+            return self._resolved_x_version
+
+        # Use config value as temporary guard against recursion: get_html
+        # calls _stealth_pre_request which calls _fetch_x_version again.
+        self._resolved_x_version = self.settings.x_version
+
+        try:
+            html = await self.get_html("/dorf1.php", skip_reauth=True)
+            m = re.search(r'gpack/(\d+)/', html)
+            if not m:
+                # secondary pattern
+                m = re.search(r'window\.Travian\.version\s*=\s*["\'](\d+)["\']', html)
+            if m:
+                self._resolved_x_version = m.group(1)
+                logger.info("Resolved X-Version from live page: %s", self._resolved_x_version)
+                return self._resolved_x_version
+        except Exception as e:
+            logger.warning("Failed to fetch X-Version from live page: %s", e)
+
+        logger.warning(
+            "Could not extract X-Version from game page, falling back to config value: %s",
+            self.settings.x_version,
+        )
+        # _resolved_x_version already holds the fallback value
+        return self._resolved_x_version
+
     async def _ensure_curl_session(self) -> Any:
-        """Lazy-create the curl_cffi session with Chrome impersonation."""
+        """Lazy-create the curl_cffi session with persona-matched impersonation."""
         if self._curl_session is None and HAS_CURL_CFFI:
+            target = getattr(self, "_persona", None)
+            impersonate = target.impersonate if target else "chrome"
             self._curl_session = CurlAsyncSession(
-                impersonate="chrome",
+                impersonate=impersonate,
             )
         return self._curl_session
 
@@ -283,10 +333,12 @@ class HttpClient:
         Returns:
             Headers dict to use for the request
         """
+        x_version = await self._fetch_x_version()
+
         if not self._stealth_enabled:
             return {
                 'Content-Type': 'application/json' if request_type == "json" else 'application/x-www-form-urlencoded' if request_type == "form" else '',
-                'X-Version': self.settings.x_version,
+                'X-Version': x_version,
             }
 
         # Throttle
@@ -303,7 +355,7 @@ class HttpClient:
             headers = self._browser_headers.for_page_load(url)
 
         # Always include X-Version
-        headers['X-Version'] = self.settings.x_version
+        headers['X-Version'] = x_version
 
         return headers
 
