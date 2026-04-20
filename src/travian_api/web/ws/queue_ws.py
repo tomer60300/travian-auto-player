@@ -57,6 +57,8 @@ def _parse_yaml_to_plan(yaml_content: str) -> BuildPlan:
 
     items: list[BuildPlanItem] = []
     for entry in plan_entries:
+        if not isinstance(entry, dict):
+            raise ValueError(f"Each plan entry must be a mapping, got {type(entry).__name__}: {entry!r}")
         items.append(
             BuildPlanItem(
                 building=entry.get("building", ""),
@@ -179,11 +181,9 @@ async def queue_run_ws(websocket: WebSocket):
         })
 
         # ── Wire up the on_status callback ────────────────────────────
-        # Save/restore with a per-websocket callback rather than clobbering
-        # the global one — safe if another WS or REST call uses the same service.
+        # Use add/remove to register a per-connection callback instead of
+        # overwriting the shared _on_status — safe for concurrent WS/REST calls.
         service = session.build_queue_service
-        prev_callback = service._on_status
-        _ws_id = id(websocket)  # unique per connection
 
         # Use a thread-safe queue so the sync callback never blocks and
         # messages are drained in order by an async task.
@@ -204,7 +204,7 @@ async def queue_run_ws(websocket: WebSocket):
             except WebSocketDisconnect:
                 pass
 
-        service.on_status(_sync_status_callback)
+        service.add_status_callback(_sync_status_callback)
         drainer_task = asyncio.create_task(_drain_status_queue())
 
         # ── Listener task: watch for client "stop" messages ───────────
@@ -296,8 +296,8 @@ async def queue_run_ws(websocket: WebSocket):
             logger.exception("Build queue execution failed for user %s", user_id)
             await _tracked_try_send(websocket, {"type": "error", "message": str(exc)})
         finally:
-            # Restore the previous status callback and stop the drainer
-            service._on_status = prev_callback
+            # Unregister this connection's callback and stop the drainer
+            service.remove_status_callback(_sync_status_callback)
             status_queue.put_nowait(None)  # signal drainer to exit
             drainer_task.cancel()
             listener_task.cancel()

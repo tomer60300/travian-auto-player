@@ -161,8 +161,8 @@ class VillageBuildings(BaseModel):
     def validate_buildings(cls, v: Dict[int, Building]) -> Dict[int, Building]:
         """Ensure all building slots are valid."""
         for slot, building in v.items():
-            if slot != building.slot:
-                raise ValueError(f"Building slot mismatch: key {slot} != building.slot {building.slot}")
+            if slot != building.slot_id:
+                raise ValueError(f"Building slot mismatch: key {slot} != building.slot_id {building.slot_id}")
         return v
     
     def get_building(self, slot: int) -> Optional[Building]:

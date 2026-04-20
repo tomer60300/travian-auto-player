@@ -114,16 +114,30 @@ class BuildQueueService:
         self.http_client = http_client
         self.building_service = BuildingService(http_client)
         self._on_status: Optional[Callable[[str], None]] = None
-    
+        self._status_callbacks: list[Callable[[str], None]] = []
+
     def on_status(self, callback: Callable[[str], None]):
-        """Set status callback for progress reporting."""
+        """Set status callback for progress reporting (legacy single-callback API)."""
         self._on_status = callback
-    
+
+    def add_status_callback(self, callback: Callable[[str], None]) -> None:
+        """Register an additional status callback (safe for concurrent use)."""
+        self._status_callbacks.append(callback)
+
+    def remove_status_callback(self, callback: Callable[[str], None]) -> None:
+        """Remove a previously registered status callback."""
+        try:
+            self._status_callbacks.remove(callback)
+        except ValueError:
+            pass
+
     def _report(self, msg: str):
         """Report status."""
         logger.info(msg)
         if self._on_status:
             self._on_status(msg)
+        for cb in self._status_callbacks:
+            cb(msg)
     
     async def resolve_slots(self, plan: BuildPlan):
         """Resolve building names to slot IDs."""

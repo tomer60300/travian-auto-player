@@ -10,7 +10,7 @@ from pathlib import Path
 import bcrypt
 import jwt
 from cryptography.fernet import Fernet
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -144,10 +144,14 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/login")
 
 
 async def get_current_user(
+    request: Request,
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """Decode the Bearer token and return the corresponding `User` row.
+
+    Also sets ``request.state.user_id`` so that downstream dependencies
+    (e.g. the rate limiter) can key on the authenticated user rather than IP.
 
     Raises HTTP 401 if the token is invalid/expired or the user no longer exists.
     """
@@ -169,5 +173,8 @@ async def get_current_user(
 
     if user is None:
         raise credentials_exception
+
+    # Expose user_id on request state for rate limiting and other middleware
+    request.state.user_id = user_id
 
     return user

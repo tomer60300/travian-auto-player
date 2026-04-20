@@ -34,7 +34,7 @@ _LEVEL_MAP = {
 async def ws_logs(websocket: WebSocket):
     """Stream server-side log entries to authenticated clients."""
 
-    user_id = await ws_manager.authenticate(websocket)
+    user_id = await ws_manager.authenticate(websocket, require_travian_session=False)
     if user_id is None:
         return
 

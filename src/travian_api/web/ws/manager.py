@@ -28,12 +28,20 @@ class ConnectionManager:
         self._connections: dict[int, dict[str, WebSocket]] = {}
         self._lock = asyncio.Lock()
 
-    async def authenticate(self, websocket: WebSocket) -> Optional[int]:
+    async def authenticate(
+        self, websocket: WebSocket, *, require_travian_session: bool = True,
+    ) -> Optional[int]:
         """Authenticate a WebSocket connection via query parameter token.
 
         Expected URL: ws://host/ws/path?token=<JWT>
         Returns user_id on success, None on failure.
         Must accept() before close() per ASGI spec.
+
+        Args:
+            websocket: The WebSocket connection.
+            require_travian_session: If True (default), reject the connection
+                when the user has no active Travian session.  Set to False for
+                endpoints like /ws/logs and /ws/sessions that only need JWT auth.
         """
         token = websocket.query_params.get("token")
         if not token:
@@ -50,8 +58,8 @@ class ConnectionManager:
 
         user_id = payload["user_id"]
 
-        # Verify user has active Travian session
-        if session_manager.get(user_id) is None:
+        # Verify user has active Travian session (when required)
+        if require_travian_session and session_manager.get(user_id) is None:
             await websocket.accept()
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="No active Travian session")
             return None

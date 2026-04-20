@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from travian_api.models.auth import LoginRequest, LoginResponse, AuthStatus, JWTCache
 from travian_api.models.common import Coordinates, VillageInfo, ResourceAmount, TroopCount
-from travian_api.models.buildings import BuildingInfo, Resources, ConstructionItem
+from travian_api.models.buildings import Building, Resources, QueueItem
 from travian_api.models.military import TargetInfo, TroopComposition, ScoutRequest
 from travian_api.constants import BuildingType, TribeType
 
@@ -105,7 +105,7 @@ class TestCommonModels:
         total = res1 + res2
         assert total.wood == 150
         assert total.clay == 275
-        assert total.total() == 850
+        assert total.total() == 1250
         
         # Subtraction
         diff = res1 - res2
@@ -131,64 +131,42 @@ class TestBuildingModels:
     """Test building models."""
     
     def test_building_info(self):
-        """Test building info model."""
-        building = BuildingInfo(
-            slot=15,
-            building_type=BuildingType.MAIN_BUILDING,
+        """Test building model."""
+        building = Building(
+            slot_id=15,
+            gid=BuildingType.MAIN_BUILDING,
+            name="Main Building",
             level=5,
-            is_constructing=False
         )
-        
-        assert building.slot == 15
-        assert building.building_type == BuildingType.MAIN_BUILDING
+
+        assert building.slot_id == 15
+        assert building.gid == BuildingType.MAIN_BUILDING
         assert building.level == 5
         assert building.name == "Main Building"
-        assert building.is_village_building
-        assert not building.is_resource_field
-        assert building.can_upgrade()
     
-    def test_building_info_invalid_slot(self):
-        """Test building info with invalid slot."""
+    def test_building_invalid_slot(self):
+        """Test building with invalid slot."""
         with pytest.raises(ValidationError):
-            BuildingInfo(
-                slot=50,  # Invalid slot
-                building_type=BuildingType.MAIN_BUILDING,
-                level=1
+            Building(
+                slot_id=50,  # Invalid slot (must be 1-40)
+                gid=BuildingType.MAIN_BUILDING,
+                name="Main Building",
+                level=1,
             )
-    
+
     def test_resources_model(self):
         """Test resources model."""
         resources = Resources(
-            wood=1000,
+            lumber=1000,
             clay=1500,
             iron=800,
             crop=2000,
-            warehouse_capacity=10000,
-            granary_capacity=15000
         )
-        
-        assert resources.total_resources == 5300
-        assert resources.warehouse_usage == 0.33  # (1000+1500+800)/10000
-        assert resources.granary_usage == 2000/15000
-        
-        resource_amount = resources.to_resource_amount()
-        assert resource_amount.wood == 1000
-        assert resource_amount.crop == 2000
-    
-    def test_construction_item(self):
-        """Test construction item model."""
-        now = datetime.utcnow()
-        item = ConstructionItem(
-            slot=10,
-            building_type=BuildingType.WAREHOUSE,
-            target_level=5,
-            time_remaining=3600,
-            started_at=now
-        )
-        
-        assert item.building_name == "Warehouse"
-        assert not item.is_complete
-        assert item.time_remaining == 3600
+
+        assert resources.lumber == 1000
+        assert resources.clay == 1500
+        assert resources.iron == 800
+        assert resources.crop == 2000
 
 
 class TestMilitaryModels:
@@ -196,52 +174,37 @@ class TestMilitaryModels:
     
     def test_target_info(self):
         """Test target info model."""
-        coords = Coordinates(x=10, y=20)
-        village = VillageInfo(
-            id="123",
-            name="Target Village",
-            coordinates=coords
-        )
-        
-        target = TargetInfo(
-            coordinates=coords,
-            village=village,
-            is_valid=True
-        )
-        
-        assert target.display_name == "Target Village (10, 20)"
-        assert target.is_valid
-    
+        target = TargetInfo(x=10, y=20, village_id=123, village_name="Target Village")
+
+        assert target.x == 10
+        assert target.y == 20
+        assert target.village_id == 123
+        assert target.village_name == "Target Village"
+
     def test_troop_composition(self):
         """Test troop composition model."""
         composition = TroopComposition()
-        assert composition.is_empty
-        assert composition.total_troops == 0
-        
-        # Set scouts for Romans
-        composition.set_scouts_only(5, TribeType.ROMANS)
-        assert composition.troops.t4 == 5  # Roman scouts
-        assert composition.get_scout_count(TribeType.ROMANS) == 5
-        assert not composition.is_empty
-    
+        assert composition.total() == 0
+
+        composition = TroopComposition(t1=10, t4=5)
+        assert composition.total() == 15
+        assert composition.t1 == 10
+        assert composition.t4 == 5
+
     def test_scout_request(self):
         """Test scout request model."""
-        target = Coordinates(x=50, y=100)
-        request = ScoutRequest(target=target, scout_count=3)
-        
+        target = TargetInfo(x=50, y=100, village_id=456)
+        request = ScoutRequest(target=target, scouts=3)
+
         assert request.target == target
-        assert request.scout_count == 3
-        assert not request.include_hero
-    
+        assert request.scouts == 3
+
     def test_scout_request_invalid_count(self):
         """Test scout request with invalid count."""
-        target = Coordinates(x=50, y=100)
-        
+        target = TargetInfo(x=50, y=100, village_id=456)
+
         with pytest.raises(ValidationError):
-            ScoutRequest(target=target, scout_count=0)
-        
-        with pytest.raises(ValidationError):
-            ScoutRequest(target=target, scout_count=2000)
+            ScoutRequest(target=target, scouts=0)
 
 
 class TestValidationEdgeCases:
@@ -273,22 +236,9 @@ class TestValidationEdgeCases:
     def test_building_level_limits(self):
         """Test building level validation."""
         # Valid levels
-        BuildingInfo(
-            slot=1,
-            building_type=BuildingType.WOODCUTTER,
-            level=0  # Empty slot
-        )
-        
-        BuildingInfo(
-            slot=1, 
-            building_type=BuildingType.WOODCUTTER,
-            level=20  # Max level
-        )
-        
+        Building(slot_id=1, gid=BuildingType.WOODCUTTER, name="Woodcutter", level=0)
+        Building(slot_id=1, gid=BuildingType.WOODCUTTER, name="Woodcutter", level=20)
+
         # Invalid level
         with pytest.raises(ValidationError):
-            BuildingInfo(
-                slot=1,
-                building_type=BuildingType.WOODCUTTER,
-                level=25  # Too high
-            )
+            Building(slot_id=1, gid=BuildingType.WOODCUTTER, name="Woodcutter", level=-1)

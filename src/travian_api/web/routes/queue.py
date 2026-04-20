@@ -82,6 +82,11 @@ def _parse_yaml_to_plan(yaml_content: str) -> BuildPlan:
 
     items: list[BuildPlanItem] = []
     for entry in plan_entries:
+        if not isinstance(entry, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Each plan entry must be a mapping, got {type(entry).__name__}: {entry!r}",
+            )
         items.append(
             BuildPlanItem(
                 building=entry.get("building", ""),
@@ -243,8 +248,8 @@ async def validate_build_plan(
     # Collect status messages emitted during resolve_slots
     messages: list[str] = []
     service = session.build_queue_service
-    prev_callback = service._on_status  # preserve existing callback
-    service.on_status(lambda msg: messages.append(msg))
+    _msg_callback = lambda msg: messages.append(msg)
+    service.add_status_callback(_msg_callback)
 
     try:
         await service.resolve_slots(plan)
@@ -260,8 +265,7 @@ async def validate_build_plan(
             detail=f"Failed to resolve slots: {exc}",
         ) from exc
     finally:
-        # Restore previous callback
-        service._on_status = prev_callback
+        service.remove_status_callback(_msg_callback)
 
     items = [
         ValidatedItem(

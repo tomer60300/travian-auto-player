@@ -51,7 +51,7 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
         5. Otherwise stream live messages until the session ends or the
            client disconnects.
     """
-    user_id = await ws_manager.authenticate(websocket)
+    user_id = await ws_manager.authenticate(websocket, require_travian_session=False)
     if user_id is None:
         return
 
