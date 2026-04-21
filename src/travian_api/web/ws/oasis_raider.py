@@ -63,18 +63,20 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
         return
 
     op_type = "oasis-raider"
-    operation_gate.acquire(user_id, op_type)
-
-    await ws_manager.connect(websocket, user_id, CHANNEL)
-    exec_session = exec_session_manager.create(user_id, "oasis-raider", "Oasis Raider")
-
-    async def tracked_send(data: dict) -> bool:
-        ok = await _send(websocket, data)
-        if ok:
-            exec_session_manager.push(exec_session.id, data)
-        return ok
 
     try:
+        operation_gate.acquire(user_id, op_type)
+        op_started_at = time.monotonic()
+
+        await ws_manager.connect(websocket, user_id, CHANNEL)
+        exec_session = exec_session_manager.create(user_id, "oasis-raider", "Oasis Raider")
+
+        async def tracked_send(data: dict) -> bool:
+            ok = await _send(websocket, data)
+            if ok:
+                exec_session_manager.push(exec_session.id, data)
+            return ok
+
         await tracked_send({"type": "session_init", "session_id": exec_session.id})
 
         # ── Wait for start command ───────────────────────────────────
@@ -148,7 +150,7 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
             iteration = 0
             while not stop_event.is_set():
                 # Check if captcha was just resolved — stop instead of auto-resuming
-                if operation_gate.check_should_stop(user_id):
+                if operation_gate.check_should_stop(user_id, op_started_at):
                     await tracked_send({"type": "error", "message": "Stopped after captcha resolution — restart manually"})
                     await tracked_send({"type": "status", "data": {"state": "stopped"}})
                     break

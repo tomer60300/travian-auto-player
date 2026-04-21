@@ -184,7 +184,7 @@ class AuthService:
                         # Verify it's actually a JWT by trying to decode payload
                         self._decode_jwt_payload(value)
                         return value
-                except:
+                except Exception:
                     continue
                     
         return None

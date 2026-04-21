@@ -249,8 +249,7 @@ export default function OasisRaider() {
       setTimeout(() => {
         if (wsRef.current) {
           try {
-            if (wsRef.current.close) wsRef.current.close()
-            else wsRef.current.close()
+            wsRef.current.close()
           } catch { /* ignore */ }
         }
       }, 1000)

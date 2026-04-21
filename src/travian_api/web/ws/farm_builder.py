@@ -86,31 +86,33 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
         return
 
     op_type = "farm-builder"
-    operation_gate.acquire(user_id, op_type)
-
-    await ws_manager.connect(websocket, user_id, CHANNEL)
-    exec_session = exec_session_manager.create(user_id, "farm-builder", "Farm Builder")
-
-    async def tracked_send(data: dict) -> bool:
-        ok = await _send(websocket, data)
-        if ok:
-            exec_session_manager.push(exec_session.id, data)
-        return ok
-
-    async def send_log(category: str, emoji: str, message: str, level: str = "info") -> None:
-        ts = time.time()
-        await tracked_send({
-            "type": "log",
-            "data": {"timestamp": ts, "emoji": emoji, "category": category,
-                     "message": message, "level": level},
-        })
-        log_stream_manager.push({
-            "timestamp": ts, "level": level, "source": "farm_builder",
-            "message": f"[{category}] {emoji} {message}",
-            "user_id": user_id,
-        })
 
     try:
+        operation_gate.acquire(user_id, op_type)
+        op_started_at = time.monotonic()
+
+        await ws_manager.connect(websocket, user_id, CHANNEL)
+        exec_session = exec_session_manager.create(user_id, "farm-builder", "Farm Builder")
+
+        async def tracked_send(data: dict) -> bool:
+            ok = await _send(websocket, data)
+            if ok:
+                exec_session_manager.push(exec_session.id, data)
+            return ok
+
+        async def send_log(category: str, emoji: str, message: str, level: str = "info") -> None:
+            ts = time.time()
+            await tracked_send({
+                "type": "log",
+                "data": {"timestamp": ts, "emoji": emoji, "category": category,
+                         "message": message, "level": level},
+            })
+            log_stream_manager.push({
+                "timestamp": ts, "level": level, "source": "farm_builder",
+                "message": f"[{category}] {emoji} {message}",
+                "user_id": user_id,
+            })
+
         await tracked_send({"type": "session_init", "session_id": exec_session.id})
 
         # Wait for start command (preview or run)
@@ -142,7 +144,7 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
             return stop_event.is_set()
 
         # Check if captcha was just resolved
-        if operation_gate.check_should_stop(user_id):
+        if operation_gate.check_should_stop(user_id, op_started_at):
             await tracked_send({"type": "error", "message": "Stopped after captcha resolution — restart manually"})
             await tracked_send({"type": "status", "data": {"state": "stopped"}})
             return

@@ -124,18 +124,20 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
     verbose = params.get("verbose", "false").lower() in ("true", "1", "yes")
 
     op_type = "farm"
-    operation_gate.acquire(user_id, op_type)
-
-    channel = f"farm_run_{list_id}"
-    await ws_manager.connect(websocket, user_id, channel)
-
-    exec_session = exec_session_manager.create(user_id, "farm-run", f"Farm Run - #{list_id}")
-
-    async def _tracked_send(ws, data):
-        await _send(ws, data)
-        exec_session_manager.push(exec_session.id, data)
 
     try:
+        operation_gate.acquire(user_id, op_type)
+        op_started_at = time.monotonic()
+
+        channel = f"farm_run_{list_id}"
+        await ws_manager.connect(websocket, user_id, channel)
+
+        exec_session = exec_session_manager.create(user_id, "farm-run", f"Farm Run - #{list_id}")
+
+        async def _tracked_send(ws, data):
+            await _send(ws, data)
+            exec_session_manager.push(exec_session.id, data)
+
         # ── Fetch list info and send initial message ─────────────────
         try:
             fl = await session.farm_service.get_farm_list(list_id)
@@ -186,7 +188,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
             # Check for stop from client or captcha resolution
             if await _check_stop(websocket):
                 break
-            if operation_gate.check_should_stop(user_id):
+            if operation_gate.check_should_stop(user_id, op_started_at):
                 await _tracked_send(websocket, {
                     "type": "error",
                     "message": "Stopped after captcha resolution — restart manually",
@@ -350,18 +352,20 @@ async def ws_farm_run_all(websocket: WebSocket):
         requested_ids = [int(x.strip()) for x in list_ids_param.split(",") if x.strip()]
 
     op_type = "farm-all"
-    operation_gate.acquire(user_id, op_type)
-
-    channel = "farm_run_all"
-    await ws_manager.connect(websocket, user_id, channel)
-
-    exec_session = exec_session_manager.create(user_id, "farm-run-all", "Farm Run All")
-
-    async def _tracked_send_all(ws, data):
-        await _send(ws, data)
-        exec_session_manager.push(exec_session.id, data)
 
     try:
+        operation_gate.acquire(user_id, op_type)
+        op_started_at = time.monotonic()
+
+        channel = "farm_run_all"
+        await ws_manager.connect(websocket, user_id, channel)
+
+        exec_session = exec_session_manager.create(user_id, "farm-run-all", "Farm Run All")
+
+        async def _tracked_send_all(ws, data):
+            await _send(ws, data)
+            exec_session_manager.push(exec_session.id, data)
+
         # ── Fetch lists and resolve IDs ──────────────────────────────
         try:
             all_lists = await session.farm_service.get_all_farm_lists()
@@ -429,7 +433,7 @@ async def ws_farm_run_all(websocket: WebSocket):
 
             if await _check_stop(websocket):
                 break
-            if operation_gate.check_should_stop(user_id):
+            if operation_gate.check_should_stop(user_id, op_started_at):
                 await _tracked_send_all(websocket, {
                     "type": "error",
                     "message": "Stopped after captcha resolution — restart manually",

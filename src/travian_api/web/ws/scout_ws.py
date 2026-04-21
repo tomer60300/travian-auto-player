@@ -175,19 +175,21 @@ async def auto_scout_ws(websocket: WebSocket):
         return
 
     op_type = "scout"
-    operation_gate.acquire(user_id, op_type)
-
-    await ws_manager.connect(websocket, user_id, CHANNEL)
-
-    exec_session = exec_session_manager.create(user_id, "scout-auto", "Auto Scout")
-
-    async def _tracked_send(ws, data):
-        ok = await _send(ws, data)
-        if ok:
-            exec_session_manager.push(exec_session.id, data)
-        return ok
 
     try:
+        operation_gate.acquire(user_id, op_type)
+        op_started_at = time.monotonic()
+
+        await ws_manager.connect(websocket, user_id, CHANNEL)
+
+        exec_session = exec_session_manager.create(user_id, "scout-auto", "Auto Scout")
+
+        async def _tracked_send(ws, data):
+            ok = await _send(ws, data)
+            if ok:
+                exec_session_manager.push(exec_session.id, data)
+            return ok
+
         await _tracked_send(websocket, {"type": "session_init", "session_id": exec_session.id})
 
         while True:
@@ -396,7 +398,7 @@ async def auto_scout_ws(websocket: WebSocket):
 
                 # ── Phase 2: Send scouts (stealth mode) ─────────────
                 # Check if captcha was just resolved
-                if operation_gate.check_should_stop(user_id):
+                if operation_gate.check_should_stop(user_id, op_started_at):
                     await _tracked_send(websocket, {"type": "error", "message": "Stopped after captcha resolution — restart manually"})
                     await _tracked_send(websocket, {
                         "type": "complete", "total_sent": 0, "successful": 0,
@@ -632,19 +634,20 @@ async def scout_scan_ws(websocket: WebSocket):
         return
 
     scan_op_type = "scout-scan"
-    operation_gate.acquire(user_id, scan_op_type)
-
-    await ws_manager.connect(websocket, user_id, SCAN_CHANNEL)
-
-    exec_session = exec_session_manager.create(user_id, "scout-scan", "Map Scan")
-
-    async def _tracked_send(ws, data):
-        ok = await _send(ws, data)
-        if ok:
-            exec_session_manager.push(exec_session.id, data)
-        return ok
 
     try:
+        operation_gate.acquire(user_id, scan_op_type)
+
+        await ws_manager.connect(websocket, user_id, SCAN_CHANNEL)
+
+        exec_session = exec_session_manager.create(user_id, "scout-scan", "Map Scan")
+
+        async def _tracked_send(ws, data):
+            ok = await _send(ws, data)
+            if ok:
+                exec_session_manager.push(exec_session.id, data)
+            return ok
+
         await _tracked_send(websocket, {"type": "session_init", "session_id": exec_session.id})
 
         # Wait for config

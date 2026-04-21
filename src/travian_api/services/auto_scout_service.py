@@ -135,16 +135,6 @@ class AutoScoutService:
         total = len(tiles)
 
         for i, tile in enumerate(tiles):
-            # Activity scheduler gate — stop if budget exhausted
-            try:
-                scheduler = self.http_client.activity_scheduler
-                if not scheduler.can_continue():
-                    logger.info("Activity limit reached during tile enrichment. Stopping at %d/%d.", i, total)
-                    self._report(f"Activity limit reached. Enriched {i}/{total} tiles before stopping.")
-                    break
-            except Exception:
-                pass
-
             try:
                 detail = await self.get_tile_details(tile.x, tile.y)
                 detail.distance = tile.distance
@@ -350,16 +340,6 @@ class AutoScoutService:
         result: Dict[int, int] = {}
         total = len(player_ids)
         for i, pid in enumerate(player_ids):
-            # Activity scheduler gate — stop if budget exhausted
-            try:
-                scheduler = self.http_client.activity_scheduler
-                if not scheduler.can_continue():
-                    logger.info("Activity limit reached during player population fetch. Stopping at %d/%d.", i, total)
-                    self._report(f"Activity limit reached. Fetched {i}/{total} player profiles before stopping.")
-                    break
-            except Exception:
-                pass
-
             pop = await self.get_player_population(pid)
             result[pid] = pop
             if (i + 1) % 5 == 0 or i == total - 1:
@@ -434,17 +414,6 @@ class AutoScoutService:
 
         results = []
         for i, target in enumerate(targets):
-            # Activity scheduler gate — stop if budget exhausted
-            try:
-                scheduler = self.http_client.activity_scheduler
-                if not scheduler.can_continue():
-                    logger.info("Activity limit reached during scout sends. Stopping at %d/%d.", i, len(targets))
-                    self._report(f"Activity limit reached. Sent {i}/{len(targets)} scouts before stopping.")
-                    break
-                scheduler.log_activity(5.0)
-            except Exception:
-                pass
-
             self._report(
                 f"[{i + 1}/{len(targets)}] Scouting ({target.x},{target.y}) "
                 f"{target.village_name or '?'} pop={target.population} dist={target.distance}"

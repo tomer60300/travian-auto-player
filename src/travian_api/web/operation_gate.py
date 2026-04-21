@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,8 @@ class OperationGate:
     def __init__(self) -> None:
         # {user_id: {op_type: count}}
         self._active: dict[int, dict[str, int]] = {}
-        self._should_stop: dict[int, bool] = {}
+        # {user_id: monotonic timestamp when should_stop was set}
+        self._should_stop: dict[int, float] = {}
         self._lock = threading.Lock()
 
     def acquire(self, user_id: int, op_type: str) -> bool:
@@ -69,9 +71,9 @@ class OperationGate:
     def stop_all(self, user_id: int) -> list[str]:
         """Release all operations for a user. Returns the list of released op types."""
         with self._lock:
+            self._should_stop[user_id] = time.monotonic()
             user_ops = self._active.pop(user_id, {})
             released = list(user_ops.keys())
-            self._should_stop.pop(user_id, None)
             if released:
                 logger.info(
                     "Operation gate: released all for user %s: %s",
@@ -82,13 +84,22 @@ class OperationGate:
     def set_should_stop(self, user_id: int) -> None:
         """Signal all operations for a user to stop (e.g., after captcha resolve)."""
         with self._lock:
-            self._should_stop[user_id] = True
+            self._should_stop[user_id] = time.monotonic()
             logger.info("Operation gate: should_stop set for user %s", user_id)
 
-    def check_should_stop(self, user_id: int) -> bool:
-        """Check the should_stop flag (non-destructive — all operations see it)."""
+    def check_should_stop(self, user_id: int, started_after: float = 0.0) -> bool:
+        """Check the should_stop flag.
+
+        When *started_after* is provided (a ``time.monotonic()`` timestamp),
+        only returns ``True`` if the flag was set **after** that timestamp.
+        This prevents new operations from seeing stale stop signals that
+        were meant for earlier operations.
+        """
         with self._lock:
-            return self._should_stop.get(user_id, False)
+            ts = self._should_stop.get(user_id)
+            if ts is None:
+                return False
+            return ts > started_after
 
     def clear_should_stop(self, user_id: int) -> None:
         """Clear the should_stop flag."""

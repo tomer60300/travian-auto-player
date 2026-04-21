@@ -84,44 +84,63 @@ class TestOperationGate:
         assert gate.get_active(1) == ["scout"]
 
     def test_stop_signal_seen_by_all_operations(self):
-        """should_stop flag must be visible to ALL active operations (non-destructive)."""
+        """should_stop flag visible to all ops started before the signal."""
+        import time as _time
         from travian_api.web.operation_gate import OperationGate
 
         gate = OperationGate()
+        started = _time.monotonic()
         gate.acquire(1, "farm")
         gate.acquire(1, "scout")
         gate.set_should_stop(1)
 
-        # Both operations must see the flag
-        assert gate.check_should_stop(1) is True
-        assert gate.check_should_stop(1) is True  # still True (not consumed)
+        # Both operations started before the signal see it
+        assert gate.check_should_stop(1, started_after=started) is True
+        assert gate.check_should_stop(1, started_after=started) is True  # non-destructive
 
-    def test_stop_signal_cleared_on_last_release(self):
-        """should_stop flag clears when last operation releases."""
+    def test_stop_signal_not_seen_by_new_operation(self):
+        """Operations started AFTER the stop signal don't see it."""
+        import time as _time
         from travian_api.web.operation_gate import OperationGate
 
         gate = OperationGate()
+        gate.acquire(1, "farm")
+        gate.set_should_stop(1)
+        new_start = _time.monotonic()  # after the signal
+        gate.acquire(1, "scout")
+
+        assert gate.check_should_stop(1, started_after=new_start) is False
+
+    def test_stop_signal_cleared_on_last_release(self):
+        """should_stop flag clears when last operation releases."""
+        import time as _time
+        from travian_api.web.operation_gate import OperationGate
+
+        gate = OperationGate()
+        started = _time.monotonic()
         gate.acquire(1, "farm")
         gate.acquire(1, "scout")
         gate.set_should_stop(1)
 
         gate.release(1, "farm")
-        assert gate.check_should_stop(1) is True  # scout still active
+        assert gate.check_should_stop(1, started_after=started) is True
 
         gate.release(1, "scout")  # last op released
-        assert gate.check_should_stop(1) is False  # flag cleared
+        assert gate.check_should_stop(1, started_after=started) is False
 
     def test_different_users_independent(self):
         """Different users don't interfere."""
+        import time as _time
         from travian_api.web.operation_gate import OperationGate
 
         gate = OperationGate()
+        started = _time.monotonic()
         gate.acquire(1, "farm")
         gate.acquire(2, "farm")
         gate.set_should_stop(1)
 
-        assert gate.check_should_stop(1) is True
-        assert gate.check_should_stop(2) is False
+        assert gate.check_should_stop(1, started_after=started) is True
+        assert gate.check_should_stop(2, started_after=started) is False
 
 
 class TestPersona:

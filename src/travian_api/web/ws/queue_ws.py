@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 
 import yaml
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
@@ -109,25 +110,27 @@ async def queue_run_ws(websocket: WebSocket):
         return
 
     op_type = "queue"
-    operation_gate.acquire(user_id, op_type)
-
-    await ws_manager.connect(websocket, user_id, CHANNEL)
-
-    exec_session = exec_session_manager.create(user_id, "queue", "Build Queue")
-
-    async def _tracked_send(ws: WebSocket, data: dict) -> None:
-        await _send(ws, data)
-        exec_session_manager.push(exec_session.id, data)
-
-    async def _tracked_try_send(ws: WebSocket, data: dict) -> bool:
-        ok = await _try_send(ws, data)
-        exec_session_manager.push(exec_session.id, data)
-        return ok
-
-    # ── Event used to signal cancellation from a client "stop" message ──
-    stop_event = asyncio.Event()
 
     try:
+        operation_gate.acquire(user_id, op_type)
+        op_started_at = time.monotonic()
+
+        await ws_manager.connect(websocket, user_id, CHANNEL)
+
+        exec_session = exec_session_manager.create(user_id, "queue", "Build Queue")
+
+        async def _tracked_send(ws: WebSocket, data: dict) -> None:
+            await _send(ws, data)
+            exec_session_manager.push(exec_session.id, data)
+
+        async def _tracked_try_send(ws: WebSocket, data: dict) -> bool:
+            ok = await _try_send(ws, data)
+            exec_session_manager.push(exec_session.id, data)
+            return ok
+
+        # ── Event used to signal cancellation from a client "stop" message ──
+        stop_event = asyncio.Event()
+
         # ── Wait for the config message ───────────────────────────────
         try:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=30)
@@ -210,7 +213,7 @@ async def queue_run_ws(websocket: WebSocket):
                 pass
 
         # Check if captcha was just resolved
-        if operation_gate.check_should_stop(user_id):
+        if operation_gate.check_should_stop(user_id, op_started_at):
             await _tracked_send(websocket, {"type": "error", "message": "Stopped after captcha resolution — restart manually"})
             return
 
