@@ -71,15 +71,17 @@ class TestOperationGate:
     """Test OperationGate concurrency and stop signal semantics."""
 
     def test_acquire_release(self):
-        """Basic acquire and release."""
+        """Acquire always succeeds (tracker, not lock). Multiple instances allowed."""
         from travian_api.web.operation_gate import OperationGate
 
         gate = OperationGate()
         assert gate.acquire(1, "farm") is True
-        assert gate.acquire(1, "farm") is False  # duplicate blocked
-        assert gate.acquire(1, "scout") is True  # different type OK
-        gate.release(1, "farm")
-        assert gate.acquire(1, "farm") is True  # re-acquire after release
+        assert gate.acquire(1, "farm") is True  # duplicate allowed
+        assert gate.acquire(1, "scout") is True
+        assert sorted(gate.get_active(1)) == ["farm", "scout"]
+        gate.release(1, "farm")  # decrement count
+        gate.release(1, "farm")  # second instance
+        assert gate.get_active(1) == ["scout"]
 
     def test_stop_signal_seen_by_all_operations(self):
         """should_stop flag must be visible to ALL active operations (non-destructive)."""

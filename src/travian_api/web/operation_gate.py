@@ -1,7 +1,8 @@
-"""Per-user operation gate to prevent overlapping long-running WS jobs.
+"""Per-user operation tracker for long-running WS jobs.
 
-Each user can only run one instance of each operation type at a time.
-Operation types: farm, farm-all, scout, scout-scan, queue, oasis-raider, farm-builder.
+Tracks active operations per user for visibility and captcha-stop
+coordination.  Does NOT block parallel operations — multiple instances
+of the same operation type can run concurrently.
 """
 
 from __future__ import annotations
@@ -15,52 +16,45 @@ logger = logging.getLogger(__name__)
 class OperationGate:
     """Thread-safe registry of active operations per user.
 
-    Prevents the same user from running two instances of the same
-    operation type concurrently (e.g., two farm loops).
+    Registers operations for two purposes:
+    1. Visibility — ``get_active()`` shows what's running.
+    2. Captcha stop signal — ``set_should_stop()`` tells all active
+       operations to halt after captcha resolution.
 
-    Also tracks a ``should_stop`` flag per user that is set when captcha
-    is resolved, so operations don't auto-resume after a captcha block.
+    Multiple instances of the same operation type are allowed.
     """
 
     def __init__(self) -> None:
-        self._active: dict[int, dict[str, bool]] = {}  # {user_id: {op_type: True}}
-        self._should_stop: dict[int, bool] = {}  # {user_id: True when captcha resolved}
+        # {user_id: {op_type: count}}
+        self._active: dict[int, dict[str, int]] = {}
+        self._should_stop: dict[int, bool] = {}
         self._lock = threading.Lock()
 
     def acquire(self, user_id: int, op_type: str) -> bool:
-        """Try to acquire an operation slot.
-
-        Returns True if acquired, False if the same op_type is already
-        running for this user.
-        """
+        """Register an operation. Always returns True (never blocks)."""
         with self._lock:
             user_ops = self._active.setdefault(user_id, {})
-            if user_ops.get(op_type):
-                logger.warning(
-                    "Operation gate: blocked duplicate %s for user %s",
-                    op_type, user_id,
-                )
-                return False
-            user_ops[op_type] = True
+            user_ops[op_type] = user_ops.get(op_type, 0) + 1
             logger.info(
-                "Operation gate: acquired %s for user %s",
-                op_type, user_id,
+                "Operation gate: registered %s for user %s (count: %d)",
+                op_type, user_id, user_ops[op_type],
             )
             return True
 
     def release(self, user_id: int, op_type: str) -> None:
-        """Release an operation slot.
+        """Unregister an operation instance.
 
         When the last operation for a user is released, the should_stop
         flag is also cleared so future operations start clean.
         """
         with self._lock:
             user_ops = self._active.get(user_id)
-            if user_ops:
-                user_ops.pop(op_type, None)
+            if user_ops and op_type in user_ops:
+                user_ops[op_type] -= 1
+                if user_ops[op_type] <= 0:
+                    del user_ops[op_type]
                 if not user_ops:
                     del self._active[user_id]
-                    # All ops done — clear the stop flag for next session
                     self._should_stop.pop(user_id, None)
             logger.info(
                 "Operation gate: released %s for user %s",
@@ -77,6 +71,7 @@ class OperationGate:
         with self._lock:
             user_ops = self._active.pop(user_id, {})
             released = list(user_ops.keys())
+            self._should_stop.pop(user_id, None)
             if released:
                 logger.info(
                     "Operation gate: released all for user %s: %s",
@@ -91,16 +86,12 @@ class OperationGate:
             logger.info("Operation gate: should_stop set for user %s", user_id)
 
     def check_should_stop(self, user_id: int) -> bool:
-        """Check the should_stop flag (non-destructive — all operations see it).
-
-        The flag persists until explicitly cleared via ``clear_should_stop``,
-        so every active operation for this user will observe ``True``.
-        """
+        """Check the should_stop flag (non-destructive — all operations see it)."""
         with self._lock:
             return self._should_stop.get(user_id, False)
 
     def clear_should_stop(self, user_id: int) -> None:
-        """Clear the should_stop flag after all operations have acknowledged it."""
+        """Clear the should_stop flag."""
         with self._lock:
             self._should_stop.pop(user_id, None)
 

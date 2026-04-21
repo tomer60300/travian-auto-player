@@ -86,15 +86,7 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
         return
 
     op_type = "farm-builder"
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.accept()
-        await websocket.send_json({
-            "type": "error",
-            "message": "A farm builder operation is already running for this account",
-            "fatal": True,
-        })
-        await websocket.close(code=4009, reason="Operation already running")
-        return
+    operation_gate.acquire(user_id, op_type)
 
     await ws_manager.connect(websocket, user_id, CHANNEL)
     exec_session = exec_session_manager.create(user_id, "farm-builder", "Farm Builder")

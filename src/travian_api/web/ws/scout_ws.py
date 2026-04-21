@@ -175,15 +175,7 @@ async def auto_scout_ws(websocket: WebSocket):
         return
 
     op_type = "scout"
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.accept()
-        await websocket.send_json({
-            "type": "error",
-            "message": "A scout operation is already running for this account",
-            "fatal": True,
-        })
-        await websocket.close(code=4009, reason="Operation already running")
-        return
+    operation_gate.acquire(user_id, op_type)
 
     await ws_manager.connect(websocket, user_id, CHANNEL)
 
@@ -640,15 +632,7 @@ async def scout_scan_ws(websocket: WebSocket):
         return
 
     scan_op_type = "scout-scan"
-    if not operation_gate.acquire(user_id, scan_op_type):
-        await websocket.accept()
-        await websocket.send_json({
-            "type": "error",
-            "message": "A scout scan is already running for this account",
-            "fatal": True,
-        })
-        await websocket.close(code=4009, reason="Operation already running")
-        return
+    operation_gate.acquire(user_id, scan_op_type)
 
     await ws_manager.connect(websocket, user_id, SCAN_CHANNEL)
 

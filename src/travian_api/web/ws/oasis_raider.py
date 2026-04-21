@@ -63,15 +63,7 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
         return
 
     op_type = "oasis-raider"
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.accept()
-        await websocket.send_json({
-            "type": "error",
-            "message": "An oasis raider operation is already running for this account",
-            "fatal": True,
-        })
-        await websocket.close(code=4009, reason="Operation already running")
-        return
+    operation_gate.acquire(user_id, op_type)
 
     await ws_manager.connect(websocket, user_id, CHANNEL)
     exec_session = exec_session_manager.create(user_id, "oasis-raider", "Oasis Raider")

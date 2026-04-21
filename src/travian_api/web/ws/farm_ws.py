@@ -124,15 +124,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
     verbose = params.get("verbose", "false").lower() in ("true", "1", "yes")
 
     op_type = "farm"
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.accept()
-        await websocket.send_json({
-            "type": "error",
-            "message": "A farm operation is already running for this account",
-            "fatal": True,
-        })
-        await websocket.close(code=4009, reason="Operation already running")
-        return
+    operation_gate.acquire(user_id, op_type)
 
     channel = f"farm_run_{list_id}"
     await ws_manager.connect(websocket, user_id, channel)
@@ -358,15 +350,7 @@ async def ws_farm_run_all(websocket: WebSocket):
         requested_ids = [int(x.strip()) for x in list_ids_param.split(",") if x.strip()]
 
     op_type = "farm-all"
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.accept()
-        await websocket.send_json({
-            "type": "error",
-            "message": "A farm-all operation is already running for this account",
-            "fatal": True,
-        })
-        await websocket.close(code=4009, reason="Operation already running")
-        return
+    operation_gate.acquire(user_id, op_type)
 
     channel = "farm_run_all"
     await ws_manager.connect(websocket, user_id, channel)
