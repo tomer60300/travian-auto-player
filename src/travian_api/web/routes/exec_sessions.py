@@ -1,7 +1,8 @@
 """REST + WebSocket routes for remote execution session mirroring.
 
 REST:
-    GET /api/sessions — list the current user's execution sessions
+    GET  /api/sessions          — list the current user's execution sessions
+    POST /api/sessions/stop-all — signal all active operations to stop
 
 WebSocket:
     WS /ws/sessions/{session_id}/stream?token=<JWT> — subscribe to a session's
@@ -16,6 +17,7 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
 
 from travian_api.web.auth import get_current_user
 from travian_api.web.execution_sessions import exec_session_manager
+from travian_api.web.operation_gate import operation_gate
 from travian_api.web.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,15 @@ router = APIRouter()
 async def list_sessions(user=Depends(get_current_user)):
     """Return the caller's execution sessions (running + disconnected <24h)."""
     return exec_session_manager.list_for_user(user.id)
+
+
+@router.post("/api/sessions/stop-all")
+async def stop_all_sessions(user=Depends(get_current_user)):
+    """Signal all active operations for this user to stop gracefully."""
+    operation_gate.set_should_stop(user.id)
+    active = operation_gate.get_active(user.id)
+    logger.info("Stop-all requested by user %s, active ops: %s", user.id, active)
+    return {"stopped": True, "active_operations": active}
 
 
 # ---------------------------------------------------------------------------
