@@ -204,11 +204,14 @@ export default function OasisRaider() {
           addLog('❌', 'SYSTEM', 'WebSocket error', 'error')
         }
       },
-      () => {
-        // Only fires on final close (after all retries exhausted)
-        if (mountedRef.current) {
-          setStatus((prev) => (prev === 'completed' ? prev : 'stopped'))
+      (event) => {
+        // Only fires on final close (after all retries exhausted or non-retryable)
+        if (!mountedRef.current) return
+        if (event?.code === 4009) {
+          addLog('🚫', 'SYSTEM', event.reason || 'This operation is already running in another tab', 'error')
+          toast.error(event.reason || 'Operation already running')
         }
+        setStatus((prev) => (prev === 'completed' ? prev : 'stopped'))
       },
       {
         reconnect: true,

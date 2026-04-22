@@ -64,8 +64,11 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
 
     op_type = "oasis-raider"
 
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.close(code=4009, reason="An oasis raider operation is already running")
+        return
+
     try:
-        operation_gate.acquire(user_id, op_type)
         op_started_at = time.monotonic()
 
         await ws_manager.connect(websocket, user_id, CHANNEL)

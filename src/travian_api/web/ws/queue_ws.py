@@ -27,6 +27,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.services.build_queue_service import BuildPlan, BuildPlanItem
 from travian_api.web.execution_sessions import exec_session_manager
+from travian_api.web.log_broadcast import log_stream_manager
 from travian_api.web.operation_gate import operation_gate
 from travian_api.web.sessions import session_manager, TravianSession
 from travian_api.web.ws.manager import ws_manager
@@ -111,8 +112,11 @@ async def queue_run_ws(websocket: WebSocket):
 
     op_type = "queue"
 
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.close(code=4009, reason="A queue operation is already running")
+        return
+
     try:
-        operation_gate.acquire(user_id, op_type)
         op_started_at = time.monotonic()
 
         await ws_manager.connect(websocket, user_id, CHANNEL)
@@ -127,6 +131,16 @@ async def queue_run_ws(websocket: WebSocket):
             ok = await _try_send(ws, data)
             exec_session_manager.push(exec_session.id, data)
             return ok
+
+        def _broadcast_log(message: str, level: str = "info") -> None:
+            """Push a log entry to the shared log stream for the Logs page."""
+            log_stream_manager.push({
+                "timestamp": time.time(),
+                "level": level,
+                "source": "build_queue",
+                "message": message,
+                "user_id": user_id,
+            })
 
         # ── Event used to signal cancellation from a client "stop" message ──
         stop_event = asyncio.Event()
@@ -187,6 +201,7 @@ async def queue_run_ws(websocket: WebSocket):
             "type": "status",
             "message": f"Parsed plan: village {village_label}, {len(plan.items)} items",
         })
+        _broadcast_log(f"Build queue started: {village_label}, {len(plan.items)} items")
 
         # ── Wire up the on_status callback ────────────────────────────
         # Use add/remove to register a per-connection callback instead of
@@ -288,11 +303,14 @@ async def queue_run_ws(websocket: WebSocket):
                             "status": item.status,
                         })
                 await _tracked_try_send(websocket, {"type": "complete", "results": results})
+                _broadcast_log("Build queue stopped by user", "warning")
             else:
                 # Normal completion
                 results = exec_task.result()
 
                 for r in results:
+                    status_str = "OK" if r.get("status") == "started" else "FAIL"
+                    _broadcast_log(f"{r.get('building', '?')} -> Lv{r.get('level', '?')}: {status_str}")
                     await _tracked_try_send(websocket, {
                         "type": "step_complete",
                         "building": r.get("building", ""),
@@ -301,6 +319,7 @@ async def queue_run_ws(websocket: WebSocket):
                     })
 
                 await _tracked_try_send(websocket, {"type": "complete", "results": results})
+                _broadcast_log(f"Build queue completed ({len(results)} steps)", "success")
 
             # Cancel any pending wait tasks
             for task in pending:
@@ -315,6 +334,7 @@ async def queue_run_ws(websocket: WebSocket):
         except Exception as exc:
             logger.exception("Build queue execution failed for user %s", user_id)
             await _tracked_try_send(websocket, {"type": "error", "message": str(exc)})
+            _broadcast_log(f"Build queue error: {exc}", "error")
         finally:
             # Unregister this connection's callback and stop the drainer
             service.remove_status_callback(_sync_status_callback)

@@ -146,13 +146,16 @@ function BuildingList({ buildings, onAdd, queueItems }) {
 }
 
 // ── Queue Item ───────────────────────────────────────────────────────
-function QueueItem({ item, onRemove, onChange, onMoveUp, onMoveDown, isFirst, isLast }) {
+function QueueItem({ item, onRemove, onChange, onMoveUp, onMoveDown, isFirst, isLast, selected, onToggleSelect }) {
   return (
-    <div className="bg-surface rounded-md border-default group px-2.5 py-1.5">
-      {/* Row 1: name + remove */}
+    <div className={`bg-surface rounded-md border-default group px-2.5 py-1.5${selected ? ' ring-1 ring-gold/50' : ''}`}>
+      {/* Row 1: checkbox + name + remove */}
       <div className="flex items-center justify-between gap-1 mb-1">
-        <span className="text-sm text-primary font-medium">
-          <span className="text-gold font-mono mr-1">#{item.slotId}</span>
+        <span className="text-sm text-primary font-medium flex items-center gap-1.5">
+          {onToggleSelect && (
+            <input type="checkbox" checked={selected} onChange={onToggleSelect} className="checkbox-gold" />
+          )}
+          <span className="text-gold font-mono">#{item.slotId}</span>
           {item.name || '???'}
         </span>
         <button
@@ -197,7 +200,37 @@ function QueueItem({ item, onRemove, onChange, onMoveUp, onMoveDown, isFirst, is
 
 // ── Queue Panel (right side) ─────────────────────────────────────────
 function QueuePanel({ items, setItems }) {
-  const handleRemove = (id) => setItems((prev) => prev.filter((i) => i.id !== id))
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [bulkPriority, setBulkPriority] = useState(1)
+
+  const toggleSelect = (id) => setSelectedIds((prev) => {
+    const next = new Set(prev)
+    next.has(id) ? next.delete(id) : next.add(id)
+    return next
+  })
+  const selectNone = () => setSelectedIds(new Set())
+  const selectGroupIds = (groupItems, allSelected) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      for (const item of groupItems) {
+        allSelected ? next.delete(item.id) : next.add(item.id)
+      }
+      return next
+    })
+  }
+  const applyBulkPriority = () => {
+    setItems((prev) => prev.map((i) => selectedIds.has(i.id) ? { ...i, priority: bulkPriority } : i))
+    setSelectedIds(new Set())
+  }
+  const removeSelected = () => {
+    setItems((prev) => prev.filter((i) => !selectedIds.has(i.id)))
+    setSelectedIds(new Set())
+  }
+
+  const handleRemove = (id) => {
+    setItems((prev) => prev.filter((i) => i.id !== id))
+    setSelectedIds((prev) => { const next = new Set(prev); next.delete(id); return next })
+  }
   const handleChange = (id, changes) => setItems((prev) => prev.map((i) => i.id === id ? { ...i, ...changes } : i))
   const handleMoveUp = (idx) => {
     if (idx <= 0) return
@@ -241,27 +274,62 @@ function QueuePanel({ items, setItems }) {
 
   return (
     <div className="flex flex-col gap-3">
-      {priorities.map((p) => (
-        <div key={p}>
-          <h4 className="text-xs font-semibold text-gold uppercase tracking-wider mb-1.5">Priority {p}</h4>
-          <div className="flex flex-col gap-1">
-            {grouped[p].map((item) => (
-              <QueueItem
-                key={item.id}
-                item={item}
-                onRemove={() => handleRemove(item.id)}
-                onChange={(changes) => handleChange(item.id, changes)}
-                onMoveUp={() => handleMoveUp(item._idx)}
-                onMoveDown={() => handleMoveDown(item._idx)}
-                isFirst={item._idx === 0}
-                isLast={item._idx === items.length - 1}
-              />
+      {/* Bulk action bar */}
+      {selectedIds.size > 0 && (
+        <div className="flex items-center gap-2 p-2 bg-surface rounded-lg border-default sticky top-0 z-10">
+          <span className="text-xs text-secondary font-medium">{selectedIds.size} selected</span>
+          <select
+            value={bulkPriority}
+            onChange={(e) => setBulkPriority(Number(e.target.value))}
+            className="input-field text-xs w-14 py-0.5 px-1"
+          >
+            {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
+              <option key={p} value={p}>P{p}</option>
             ))}
-          </div>
+          </select>
+          <button className="btn-gold btn-xs" onClick={applyBulkPriority}>Set Priority</button>
+          <button className="btn-danger btn-xs" onClick={removeSelected}>Remove</button>
+          <button className="btn-secondary btn-xs ml-auto" onClick={selectNone}>Deselect</button>
         </div>
-      ))}
+      )}
+
+      {priorities.map((p) => {
+        const groupItems = grouped[p]
+        const allSelected = groupItems.every((item) => selectedIds.has(item.id))
+        return (
+          <div key={p}>
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={() => selectGroupIds(groupItems, allSelected)}
+                className="checkbox-gold"
+                title={`Select all Priority ${p}`}
+              />
+              <h4 className="text-xs font-semibold text-gold uppercase tracking-wider">Priority {p}</h4>
+              <span className="text-xs text-secondary">({groupItems.length})</span>
+            </div>
+            <div className="flex flex-col gap-1">
+              {groupItems.map((item) => (
+                <QueueItem
+                  key={item.id}
+                  item={item}
+                  onRemove={() => handleRemove(item.id)}
+                  onChange={(changes) => handleChange(item.id, changes)}
+                  onMoveUp={() => handleMoveUp(item._idx)}
+                  onMoveDown={() => handleMoveDown(item._idx)}
+                  isFirst={item._idx === 0}
+                  isLast={item._idx === items.length - 1}
+                  selected={selectedIds.has(item.id)}
+                  onToggleSelect={() => toggleSelect(item.id)}
+                />
+              ))}
+            </div>
+          </div>
+        )
+      })}
       <div className="flex justify-end pt-1">
-        <button className="btn-secondary btn-xs" onClick={() => setItems([])}>Clear All</button>
+        <button className="btn-secondary btn-xs" onClick={() => { setItems([]); setSelectedIds(new Set()) }}>Clear All</button>
       </div>
     </div>
   )
@@ -468,7 +536,11 @@ export default function BuildQueue() {
         else if (data.message) addMessage('info', data.message)
       },
       () => { if (mountedRef.current) { addMessage('error', 'WebSocket connection lost — max retries reached'); setRunning(false); setWsStatus('disconnected') } },
-      () => { if (mountedRef.current) { setRunning(false); setWsStatus('disconnected') } },
+      (event) => {
+        if (!mountedRef.current) return
+        if (event?.code === 4009) addMessage('error', event.reason || 'This operation is already running in another tab')
+        setRunning(false); setWsStatus('disconnected')
+      },
       {
         reconnect: true,
         maxRetries: 20,

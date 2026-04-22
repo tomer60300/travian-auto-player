@@ -125,8 +125,11 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
 
     op_type = "farm"
 
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.close(code=4009, reason="A farm run operation is already running")
+        return
+
     try:
-        operation_gate.acquire(user_id, op_type)
         op_started_at = time.monotonic()
 
         channel = f"farm_run_{list_id}"
@@ -353,8 +356,11 @@ async def ws_farm_run_all(websocket: WebSocket):
 
     op_type = "farm-all"
 
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.close(code=4009, reason="A farm-all operation is already running")
+        return
+
     try:
-        operation_gate.acquire(user_id, op_type)
         op_started_at = time.monotonic()
 
         channel = "farm_run_all"

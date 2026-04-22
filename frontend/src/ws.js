@@ -93,8 +93,11 @@ export function createWebSocket(path, onMessage, onError, onClose, options = {})
       log('warning', source, `WS closed: ${path} code=${event.code}`, event.reason || undefined)
       currentWs = null
 
+      // Don't reconnect on 4009 (operation already running) or 4003 (no session)
+      const noRetry = event.code === 4009 || event.code === 4003
+
       // Auto-reconnect if enabled and not manually stopped
-      if (reconnect && !stopped && attempts < maxRetries) {
+      if (reconnect && !stopped && !noRetry && attempts < maxRetries) {
         const delay = Math.min(1000 * Math.pow(2, attempts), 30000)
         attempts++
         log('info', source, `WS reconnecting in ${delay / 1000}s (attempt ${attempts}/${maxRetries})`)

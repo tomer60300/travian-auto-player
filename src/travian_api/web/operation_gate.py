@@ -1,8 +1,10 @@
-"""Per-user operation tracker for long-running WS jobs.
+"""Per-user operation gate for long-running WS jobs.
 
 Tracks active operations per user for visibility and captcha-stop
-coordination.  Does NOT block parallel operations — multiple instances
-of the same operation type can run concurrently.
+coordination.  Blocks concurrent operations of the SAME type for the
+same user (prevents double-upgrade / double-raid race conditions from
+multiple browser tabs).  Different operation types can still run in
+parallel (e.g. queue + oasis-raider).
 """
 
 from __future__ import annotations
@@ -17,12 +19,13 @@ logger = logging.getLogger(__name__)
 class OperationGate:
     """Thread-safe registry of active operations per user.
 
-    Registers operations for two purposes:
-    1. Visibility — ``get_active()`` shows what's running.
-    2. Captcha stop signal — ``set_should_stop()`` tells all active
+    Registers operations for three purposes:
+    1. Mutual exclusion — ``acquire()`` rejects a second instance of the
+       same operation type for the same user, preventing race conditions
+       from multiple browser tabs.
+    2. Visibility — ``get_active()`` shows what's running.
+    3. Captcha stop signal — ``set_should_stop()`` tells all active
        operations to halt after captcha resolution.
-
-    Multiple instances of the same operation type are allowed.
     """
 
     def __init__(self) -> None:
@@ -33,13 +36,25 @@ class OperationGate:
         self._lock = threading.Lock()
 
     def acquire(self, user_id: int, op_type: str) -> bool:
-        """Register an operation. Always returns True (never blocks)."""
+        """Register an operation.
+
+        Returns ``False`` (and does NOT register) when the same
+        ``(user_id, op_type)`` pair is already active.  This prevents
+        race conditions from multiple browser tabs running the same
+        operation concurrently.
+        """
         with self._lock:
             user_ops = self._active.setdefault(user_id, {})
-            user_ops[op_type] = user_ops.get(op_type, 0) + 1
+            if user_ops.get(op_type, 0) > 0:
+                logger.warning(
+                    "Operation gate: REJECTED %s for user %s (already active)",
+                    op_type, user_id,
+                )
+                return False
+            user_ops[op_type] = 1
             logger.info(
-                "Operation gate: registered %s for user %s (count: %d)",
-                op_type, user_id, user_ops[op_type],
+                "Operation gate: registered %s for user %s",
+                op_type, user_id,
             )
             return True
 
@@ -58,10 +73,15 @@ class OperationGate:
                 if not user_ops:
                     del self._active[user_id]
                     self._should_stop.pop(user_id, None)
-            logger.info(
-                "Operation gate: released %s for user %s",
-                op_type, user_id,
-            )
+                logger.info(
+                    "Operation gate: released %s for user %s",
+                    op_type, user_id,
+                )
+            else:
+                logger.debug(
+                    "Operation gate: release called for non-active %s user %s (no-op)",
+                    op_type, user_id,
+                )
 
     def get_active(self, user_id: int) -> list[str]:
         """Return list of active operation types for a user."""
@@ -69,14 +89,18 @@ class OperationGate:
             return list(self._active.get(user_id, {}).keys())
 
     def stop_all(self, user_id: int) -> list[str]:
-        """Release all operations for a user. Returns the list of released op types."""
+        """Signal all operations for a user to stop and return active op types.
+
+        Does NOT remove entries from ``_active`` — individual handlers
+        will call ``release()`` themselves when they observe the stop
+        signal and exit.  This avoids corrupting the gate state.
+        """
         with self._lock:
             self._should_stop[user_id] = time.monotonic()
-            user_ops = self._active.pop(user_id, {})
-            released = list(user_ops.keys())
+            released = list(self._active.get(user_id, {}).keys())
             if released:
                 logger.info(
-                    "Operation gate: released all for user %s: %s",
+                    "Operation gate: stop_all for user %s: %s",
                     user_id, released,
                 )
             return released

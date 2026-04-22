@@ -369,6 +369,28 @@ class OasisRaiderService:
             if await check_stop():
                 break
 
+            # 5d-jit — JIT re-verification before dispatch (skip in dry-run)
+            # Checks for ANY troops (animals or human player units)
+            if not config.dry_run:
+                try:
+                    jit_detail = await self._fetch_oasis_detail(oasis.x, oasis.y)
+                    if jit_detail.get("has_any_troops"):
+                        jit_troops = jit_detail.get("troops", {})
+                        jit_str = self._format_animal_troops(jit_troops) if jit_troops else "player troops"
+                        await send_log(
+                            "JIT", "⚠️",
+                            f"({oasis.x}|{oasis.y}) now occupied ({jit_str}) — skipping",
+                            "warning",
+                        )
+                        stats["skipped_animals"].append(f"({oasis.x}|{oasis.y})")
+                        continue
+                except Exception as exc:
+                    await send_log(
+                        "JIT", "⚠️",
+                        f"JIT recheck failed for ({oasis.x}|{oasis.y}): {exc} — proceeding",
+                        "warning",
+                    )
+
             # 5d — Send raid (or dry-run)
             raid_troops_str = self._format_troops(config.troops, tribe_id)
             if config.dry_run:
@@ -700,6 +722,10 @@ class OasisRaiderService:
         bonus = self._parse_oasis_bonus(soup)
         troops = self._parse_oasis_troops(soup)
 
+        # Detect ANY troops (including human player units, not just animals)
+        # by checking the troop_info table for any non-zero count rows.
+        has_any_troops = self._has_any_troops(soup)
+
         # Parse distance from id="distance" table
         distance = 0.0
         dist_table = soup.find("table", id="distance")
@@ -715,6 +741,7 @@ class OasisRaiderService:
             "troops": troops,
             "troops_str": self._format_animal_troops(troops),
             "distance": distance,
+            "has_any_troops": has_any_troops,
         }
 
     @staticmethod
@@ -758,6 +785,23 @@ class OasisRaiderService:
             except ValueError:
                 pass
         return troops
+
+    @staticmethod
+    def _has_any_troops(soup) -> bool:
+        """Check if the oasis has ANY troops (animals or human player units)."""
+        table = soup.find("table", id="troop_info")
+        if not table:
+            return False
+        for row in table.find_all("tr"):
+            val = row.find("td", class_="val")
+            if val:
+                try:
+                    count = int(val.get_text(strip=True))
+                    if count > 0:
+                        return True
+                except ValueError:
+                    pass
+        return False
 
     @staticmethod
     def _format_animal_troops(troops: Dict[str, int]) -> str:

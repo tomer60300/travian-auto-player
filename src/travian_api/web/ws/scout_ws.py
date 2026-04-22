@@ -176,8 +176,11 @@ async def auto_scout_ws(websocket: WebSocket):
 
     op_type = "scout"
 
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.close(code=4009, reason="A scout operation is already running")
+        return
+
     try:
-        operation_gate.acquire(user_id, op_type)
         op_started_at = time.monotonic()
 
         await ws_manager.connect(websocket, user_id, CHANNEL)
@@ -635,9 +638,11 @@ async def scout_scan_ws(websocket: WebSocket):
 
     scan_op_type = "scout-scan"
 
-    try:
-        operation_gate.acquire(user_id, scan_op_type)
+    if not operation_gate.acquire(user_id, scan_op_type):
+        await websocket.close(code=4009, reason="A map scan operation is already running")
+        return
 
+    try:
         await ws_manager.connect(websocket, user_id, SCAN_CHANNEL)
 
         exec_session = exec_session_manager.create(user_id, "scout-scan", "Map Scan")

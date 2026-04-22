@@ -16,8 +16,12 @@ const SOURCE_LABELS = {
   farm: 'Farm',
   scout: 'Scout',
   queue: 'Queue',
+  build_queue: 'Build Queue',
+  oasis_raider: 'Oasis Raider',
+  farm_builder: 'Farm Builder',
   video: 'Video',
   reports: 'Reports',
+  captcha: 'Captcha',
   ws: 'WS',
   server: 'Server',
 }
