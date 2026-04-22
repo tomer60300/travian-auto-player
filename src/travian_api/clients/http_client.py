@@ -363,21 +363,25 @@ class HttpClient:
 
         return headers
 
-    def _stealth_post_request(self, url: str, request_type: str = "page") -> None:
+    def _stealth_post_request(
+        self, request_type: str, response: Any | None = None, *, fallback_url: str = "",
+    ) -> None:
         """Update stealth state after a request.
 
-        Only promotes actual page/document navigations into the Referer
-        chain.  API, JSON, and XHR endpoints are never recorded as the
-        last-visited page — a real browser would not set Referer from
-        those requests.
+        Only document-like requests should advance page context.  API/XHR
+        endpoints are intentionally excluded so they cannot become future
+        Referer values.
         """
-        if not self._stealth_enabled:
+        if not self._stealth_enabled or request_type not in {"page", "form"}:
             return
-        # Only page loads and form submissions that navigate to a document
-        # should update the tracked last page.  API/JSON/XHR calls must
-        # not poison the Referer chain.
-        if request_type in ("page", "form"):
-            self._browser_headers.update_last_page(url)
+
+        target_url = ""
+        if response is not None and hasattr(response, "url"):
+            target_url = str(response.url)
+        if not target_url:
+            target_url = fallback_url
+        if target_url:
+            self._browser_headers.update_last_page(target_url)
 
     @staticmethod
     def _extract_snippet(text: str, pattern: str, context_chars: int = 200) -> str:
@@ -435,6 +439,23 @@ class HttpClient:
                 response_snippet=snippet,
             )
 
+        def _soft_penalty_seconds(default_seconds: float) -> float:
+            """Avoid double-penalizing explicit 429 handlers later in the request flow."""
+            if status_code == 429:
+                return 0.0
+            return default_seconds
+
+        def _soft_fire(label: str, penalty_seconds: float) -> None:
+            """Log a soft block/rate-limit signal without freezing the session."""
+            snippet = self._extract_snippet(response_text, label)
+            logger.warning(
+                "SOFT BLOCK DETECTED: '%s' | url=%s | status=%d | "
+                "response_len=%d | snippet: %s",
+                label, url, status_code, resp_len, snippet,
+            )
+            if penalty_seconds > 0 and self._stealth_enabled:
+                self._throttler.add_penalty(penalty_seconds)
+
         # ── Phase 1: recaptcha — require structural HTML evidence ────
         #
         # The word "recaptcha" appears in Travian JS bundles and script
@@ -454,8 +475,11 @@ class HttpClient:
             is_short_page = resp_len < 5000
             is_error_status = status_code in (403, 429, 503)
 
-            if is_structural or is_short_page or is_error_status:
+            if is_structural:
                 await _fire("recaptcha")
+                return
+            if is_short_page or is_error_status:
+                _soft_fire("recaptcha_indicator", _soft_penalty_seconds(120.0))
                 return
             else:
                 logger.debug(
@@ -484,7 +508,7 @@ class HttpClient:
                 is_short = resp_len < 5000
                 is_error = status_code in (0, 403, 429, 503)
                 if is_short or is_error:
-                    await _fire(pattern)
+                    _soft_fire(pattern, _soft_penalty_seconds(90.0))
                     return
                 else:
                     logger.debug(
@@ -504,11 +528,7 @@ class HttpClient:
         # Handle with a throttler penalty, not the captcha hard-stop.
         if 'too many requests' in response_lower:
             if resp_len < 2000:
-                logger.warning(
-                    "RATE LIMIT (soft): 'too many requests' | url=%s | status=%d",
-                    url, status_code,
-                )
-                self._throttler.add_penalty(120.0)
+                _soft_fire("too_many_requests", _soft_penalty_seconds(120.0))
                 return
 
         # ── Phase 4: ban message — exact phrase match ────────────────
@@ -534,16 +554,7 @@ class HttpClient:
                 or 'password' in response_lower
             )
             if not _has_game_marker and not _is_login_page and resp_len < 5000:
-                if status_code == 429:
-                    # Transient rate limit — penalty, not hard stop
-                    logger.warning(
-                        "RATE LIMIT (soft): 429 short page | url=%s | len=%d",
-                        url, resp_len,
-                    )
-                    self._throttler.add_penalty(180.0)
-                else:
-                    # 403/503 short non-game page — likely real block
-                    await _fire("unknown_block_page")
+                _soft_fire("unknown_block_page", _soft_penalty_seconds(90.0))
                 return
 
     def _sync_cookies_to_curl(self) -> None:
@@ -641,8 +652,6 @@ class HttpClient:
             else:
                 response = await self.client.post(url, json=data, headers=headers)
 
-            self._stealth_post_request(url, "json")
-
             # Check for session expiry indicators
             if not skip_reauth and (response.status_code == 302 or (
                 'redirectTo' in response.text and 'code' not in response.text
@@ -662,6 +671,8 @@ class HttpClient:
                         self._throttler.add_penalty(120.0)
                         logger.warning("429 Too Many Requests — adding 120s penalty")
                 raise NetworkError(f"HTTP {response.status_code}: {response.text}", response.status_code)
+
+            self._stealth_post_request("json", response, fallback_url=url)
 
             try:
                 return response.json()
@@ -726,8 +737,6 @@ class HttpClient:
                 else:
                     response = await self.client.delete(url, headers=headers)
 
-            self._stealth_post_request(url, "json")
-
             # Check for session expiry indicators
             if not skip_reauth and (response.status_code == 302 or (
                 'redirectTo' in response.text and 'code' not in response.text
@@ -750,6 +759,8 @@ class HttpClient:
                         self._throttler.add_penalty(120.0)
                         logger.warning("429 Too Many Requests — adding 120s penalty")
                 raise NetworkError(f"HTTP {response.status_code}: {response.text}", response.status_code)
+
+            self._stealth_post_request("json", response, fallback_url=url)
 
             try:
                 return response.json()
@@ -799,8 +810,6 @@ class HttpClient:
             else:
                 response = await self.client.post(url, content=form_str.encode(), headers=headers)
 
-            self._stealth_post_request(url, "form")
-
             if response.status_code == 302:
                 await self._handle_session_expired()
                 if self._use_curl:
@@ -815,6 +824,8 @@ class HttpClient:
                     if self._stealth_enabled:
                         self._throttler.add_penalty(120.0)
                 raise NetworkError(f"HTTP {response.status_code}: {response.text}", response.status_code)
+
+            self._stealth_post_request("form", response, fallback_url=url)
 
             return response.text
 
@@ -858,8 +869,6 @@ class HttpClient:
             else:
                 response = await self.client.get(url, headers=headers, follow_redirects=follow_redirects)
 
-            self._stealth_post_request(url)
-
             # Check for session expiry
             response_url = str(response.url) if hasattr(response, 'url') else url
             if not skip_reauth and ('login' in response_url.lower() or (
@@ -896,6 +905,8 @@ class HttpClient:
                     self._throttler.add_penalty(120.0)
                     logger.warning("429 Too Many Requests on GET — adding 120s penalty")
                 raise NetworkError(f"HTTP {response.status_code}: {response.text}", response.status_code)
+
+            self._stealth_post_request("page", response, fallback_url=url)
 
             return response.text
 
