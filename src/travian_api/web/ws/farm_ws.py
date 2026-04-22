@@ -299,6 +299,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
             "total_fail": total_fail,
             "timestamp": _now_iso(),
         })
+        await websocket.close(code=1000, reason="Operation complete")
 
     except WebSocketDisconnect:
         logger.info("Farm run WS disconnected: user=%s list=%s", user_id, list_id)
@@ -566,6 +567,7 @@ async def ws_farm_run_all(websocket: WebSocket):
             "total_fail": total_fail,
             "timestamp": _now_iso(),
         })
+        await websocket.close(code=1000, reason="Operation complete")
 
     except WebSocketDisconnect:
         logger.info("Farm run-all WS disconnected: user=%s", user_id)

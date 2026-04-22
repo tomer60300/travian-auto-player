@@ -37,15 +37,15 @@ class ActionType(Enum):
 # Timing profiles: (min_s, mode_s, max_s) — uses triangular distribution
 # mode_s is the most likely value
 _TIMING_PROFILES = {
-    ActionType.PAGE_LOAD:      (1.5, 3.0, 8.0),
-    ActionType.CLICK:          (0.3, 0.8, 2.5),
-    ActionType.FORM_FILL:      (1.0, 2.0, 5.0),
-    ActionType.DECISION:       (2.0, 5.0, 15.0),
-    ActionType.RAPID:          (0.8, 1.5, 3.5),
-    ActionType.POST_LOGIN:     (2.0, 3.5, 6.0),
-    ActionType.BETWEEN_RAIDS:  (1.5, 3.0, 6.0),
-    ActionType.BETWEEN_SCOUTS: (1.5, 3.5, 7.0),
-    ActionType.PRE_UPGRADE:    (1.5, 3.0, 8.0),
+    ActionType.PAGE_LOAD:      (0.8, 1.5, 4.0),
+    ActionType.CLICK:          (0.2, 0.5, 1.5),
+    ActionType.FORM_FILL:      (0.5, 1.2, 3.0),
+    ActionType.DECISION:       (1.0, 2.5, 7.0),
+    ActionType.RAPID:          (0.4, 0.8, 2.0),
+    ActionType.POST_LOGIN:     (1.5, 2.5, 4.0),
+    ActionType.BETWEEN_RAIDS:  (0.8, 1.5, 3.5),
+    ActionType.BETWEEN_SCOUTS: (1.0, 2.0, 4.0),
+    ActionType.PRE_UPGRADE:    (1.0, 2.0, 5.0),
     ActionType.VIDEO_TICK:     (2.5, 3.0, 3.8),  # Tight range — ATG expects ~3s
 }
 

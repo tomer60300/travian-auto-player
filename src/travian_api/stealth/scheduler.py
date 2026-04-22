@@ -69,6 +69,7 @@ class ActivityScheduler:
         self._day_start: str = self._today_key()
         self._session_start: float = time.monotonic()
         self._session_seconds: float = 0.0
+        self._last_activity_time: float = time.monotonic()
 
         self._state_file = state_file
         self._last_save_time: float = 0.0
@@ -94,13 +95,27 @@ class ActivityScheduler:
             saved_day = data.get("day_start", "")
             if saved_day == self._today_key():
                 self._daily_seconds = float(data.get("daily_seconds", 0.0))
-                self._session_seconds = float(data.get("session_seconds", 0.0))
                 self._day_start = saved_day
-                logger.info(
-                    "Restored scheduler state: daily=%.1fh, session=%.1fh",
-                    self._daily_seconds / 3600.0,
-                    self._session_seconds / 3600.0,
-                )
+
+                # Check if enough real time elapsed since last save to
+                # count as a break.  If so, reset session counter.
+                last_saved = data.get("last_saved", 0)
+                idle_since_save = time.time() - last_saved if last_saved else 0
+                if idle_since_save >= self.min_break_minutes * 60:
+                    self._session_seconds = 0.0
+                    logger.info(
+                        "Restored scheduler state: daily=%.1fh, "
+                        "session reset (idle %.0fs since last save)",
+                        self._daily_seconds / 3600.0,
+                        idle_since_save,
+                    )
+                else:
+                    self._session_seconds = float(data.get("session_seconds", 0.0))
+                    logger.info(
+                        "Restored scheduler state: daily=%.1fh, session=%.1fh",
+                        self._daily_seconds / 3600.0,
+                        self._session_seconds / 3600.0,
+                    )
             else:
                 logger.info(
                     "Scheduler state from %s ignored (new day %s)",
@@ -160,6 +175,27 @@ class ActivityScheduler:
             self._daily_seconds = 0.0
             self._day_start = today
 
+    def _auto_reset_session_if_idle(self) -> None:
+        """Auto-reset session counter if enough idle time has passed.
+
+        If no activity has been logged for at least ``min_break_minutes``,
+        the user effectively took a break — reset the session counter so
+        they aren't permanently locked out by a stale session_seconds
+        value from the state file.
+        """
+        idle_seconds = time.monotonic() - self._last_activity_time
+        if idle_seconds >= self.min_break_minutes * 60:
+            if self._session_seconds > 0:
+                logger.info(
+                    "Session auto-reset: idle %.0fs >= break threshold %.0fs "
+                    "(was %.1fh session)",
+                    idle_seconds,
+                    self.min_break_minutes * 60,
+                    self._session_seconds / 3600.0,
+                )
+                self._session_seconds = 0.0
+                self._session_start = time.monotonic()
+
     def can_continue(self) -> bool:
         """Check if we're within daily/continuous limits.
 
@@ -170,6 +206,7 @@ class ActivityScheduler:
             return True
 
         self._reset_daily_if_new_day()
+        self._auto_reset_session_if_idle()
 
         # Check daily limit
         daily_hours = self._daily_seconds / 3600.0
@@ -239,6 +276,7 @@ class ActivityScheduler:
         """
         self._daily_seconds += seconds
         self._session_seconds += seconds
+        self._last_activity_time = time.monotonic()
         self._save_state()
 
     def start_session(self) -> None:

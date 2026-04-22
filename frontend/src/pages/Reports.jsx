@@ -221,8 +221,12 @@ function RaidTargetAnalyzer() {
       setProgress(null)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setAnalyzing(false)
+      if (event.code === 4009) {
+        setAnalyzeError(event.reason || 'An analysis is already running')
+        toast.error(event.reason || 'Analysis already running')
+      }
     }
   }
 

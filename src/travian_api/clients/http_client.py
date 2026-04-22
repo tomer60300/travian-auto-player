@@ -258,19 +258,25 @@ class HttpClient:
             return True
         if self._activity_scheduler.can_continue():
             return True
-        remaining = self._activity_scheduler.remaining_daily_budget()
+        sched = self._activity_scheduler
+        daily_h = sched.daily_hours_used
+        session_h = sched.session_hours
         logger.warning(
-            "Activity budget exhausted: daily=%.1fh/%.1fh, session=%.1fh/%.1fh, remaining=%.2fh",
-            self._activity_scheduler.daily_hours_used,
-            self._activity_scheduler.max_daily_hours,
-            self._activity_scheduler.session_hours,
-            self._activity_scheduler.max_continuous_hours,
-            remaining,
+            "Activity budget exhausted: daily=%.1fh/%.1fh, session=%.1fh/%.1fh",
+            daily_h, sched.max_daily_hours,
+            session_h, sched.max_continuous_hours,
         )
-        raise ActivityBudgetExhausted(
-            f"Activity budget exhausted (daily {self._activity_scheduler.daily_hours_used:.1f}h "
-            f"/ {self._activity_scheduler.max_daily_hours}h)"
-        )
+        # Show which limit was actually hit
+        if daily_h >= sched.max_daily_hours:
+            reason = f"daily limit reached ({daily_h:.1f}h / {sched.max_daily_hours}h)"
+        elif session_h >= sched.max_continuous_hours:
+            reason = (
+                f"continuous session limit reached ({session_h:.1f}h / {sched.max_continuous_hours}h)"
+                f" — take a {sched.min_break_minutes:.0f}min break"
+            )
+        else:
+            reason = f"daily {daily_h:.1f}h / {sched.max_daily_hours}h, session {session_h:.1f}h / {sched.max_continuous_hours}h"
+        raise ActivityBudgetExhausted(f"Activity budget exhausted: {reason}")
 
     def set_auth_callback(self, callback: callable) -> None:
         """Set callback function to call when re-authentication is needed."""

@@ -37,11 +37,11 @@ class SessionManager:
     
     def __init__(
         self,
-        min_session_minutes: float = 10.0,
-        max_session_minutes: float = 45.0,
-        min_break_minutes: float = 2.0,
-        max_break_minutes: float = 15.0,
-        max_actions_per_session: int = 50,
+        min_session_minutes: float = 15.0,
+        max_session_minutes: float = 90.0,
+        min_break_minutes: float = 1.0,
+        max_break_minutes: float = 8.0,
+        max_actions_per_session: int = 150,
         enabled: bool = True,
     ):
         self.min_session_minutes = min_session_minutes

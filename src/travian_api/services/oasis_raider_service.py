@@ -51,9 +51,9 @@ BROWSE_FREQ_MIN = 2               # Browse every N enrichments (randomized)
 BROWSE_FREQ_MAX = 4
 
 # Mitigation 3 — Decision delay before raids
-THINK_DELAY_MIN = 5.0             # Seconds: quick glance → immediate raid
-THINK_DELAY_MODE = 12.0           # Seconds: read page, think, open rally point
-THINK_DELAY_MAX = 25.0            # Seconds: careful read, check troops, hesitate
+THINK_DELAY_MIN = 2.0             # Seconds: quick glance → immediate raid
+THINK_DELAY_MODE = 5.0            # Seconds: read page, open rally point
+THINK_DELAY_MAX = 12.0            # Seconds: careful read, check troops, hesitate
 
 # Mitigation 5 — Random false skips
 SKIP_PROBABILITY = 0.10           # 10% chance to skip a valid empty target

@@ -8,12 +8,25 @@ import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
+from travian_api.web.execution_sessions import exec_session_manager
+from travian_api.web.log_broadcast import log_stream_manager
+from travian_api.web.operation_gate import operation_gate
 from travian_api.web.sessions import session_manager
 from travian_api.web.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+CHANNEL = "analyze_reports"
+
+
+async def _send(ws: WebSocket, data: dict) -> bool:
+    try:
+        await ws.send_json(data)
+        return True
+    except Exception:
+        return False
 
 
 @router.websocket("/ws/reports/analyze")
@@ -32,15 +45,40 @@ async def ws_analyze_reports(websocket: WebSocket):
         )
         return
 
-    channel = "analyze_reports"
-    await ws_manager.connect(websocket, user_id, channel)
+    op_type = "raid-analyzer"
+
+    if not operation_gate.acquire(user_id, op_type):
+        await websocket.close(code=4009, reason="An analysis is already running")
+        return
 
     try:
+        await ws_manager.connect(websocket, user_id, CHANNEL)
+        exec_session = exec_session_manager.create(user_id, "raid-analyzer", "Raid Analysis")
+
+        async def tracked_send(data: dict) -> bool:
+            ok = await _send(websocket, data)
+            if ok:
+                exec_session_manager.push(exec_session.id, data)
+            return ok
+
+        def broadcast_log(message: str, level: str = "info") -> None:
+            log_stream_manager.push({
+                "timestamp": time.time(),
+                "level": level,
+                "source": "raid_analyzer",
+                "message": message,
+                "user_id": user_id,
+            })
+
+        await tracked_send({"type": "session_init", "session_id": exec_session.id})
+
         # Wait for config message
         try:
             msg = await asyncio.wait_for(websocket.receive_json(), timeout=30)
         except asyncio.TimeoutError:
-            await websocket.send_json({"type": "error", "message": "Timeout waiting for config"})
+            await tracked_send({"type": "error", "message": "Timeout waiting for config"})
+            return
+        except (WebSocketDisconnect, RuntimeError):
             return
 
         from travian_api.models.raid_analyzer import AnalyzerSettings
@@ -60,6 +98,7 @@ async def ws_analyze_reports(websocket: WebSocket):
         )
 
         analyzer = session.raid_analyzer
+        broadcast_log(f"Raid analysis started (radius={settings.radius}, min_res={settings.min_resources})")
 
         # Progress queue for async delivery
         progress_queue: asyncio.Queue = asyncio.Queue()
@@ -81,8 +120,8 @@ async def ws_analyze_reports(websocket: WebSocket):
         async def send_progress():
             while True:
                 try:
-                    msg = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
-                    await websocket.send_json(msg)
+                    item = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+                    await tracked_send(item)
                 except asyncio.TimeoutError:
                     continue
                 except (WebSocketDisconnect, Exception):
@@ -91,7 +130,7 @@ async def ws_analyze_reports(websocket: WebSocket):
         progress_task = asyncio.create_task(send_progress())
 
         try:
-            await websocket.send_json({"type": "progress", "phase": "start", "message": "Analysis starting..."})
+            await tracked_send({"type": "progress", "phase": "start", "message": "Analysis starting..."})
 
             result = await analyzer.analyze(settings)
 
@@ -105,8 +144,8 @@ async def ws_analyze_reports(websocket: WebSocket):
             # Drain remaining progress messages
             while not progress_queue.empty():
                 try:
-                    msg = progress_queue.get_nowait()
-                    await websocket.send_json(msg)
+                    item = progress_queue.get_nowait()
+                    await tracked_send(item)
                 except Exception:
                     break
 
@@ -118,7 +157,7 @@ async def ws_analyze_reports(websocket: WebSocket):
                     "recommendation": rec.model_dump(mode="json"),
                 })
 
-            await websocket.send_json({
+            complete_msg = {
                 "type": "complete",
                 "source_village": result.source_village_name,
                 "source_coords": f"({result.source_x}, {result.source_y})",
@@ -134,12 +173,20 @@ async def ws_analyze_reports(websocket: WebSocket):
                     "analysis_duration_seconds": round(getattr(result, "analysis_duration_seconds", 0), 1),
                     "warnings": getattr(result, "warnings", []),
                 },
-            })
+            }
+            await tracked_send(complete_msg)
+
+            duration = round(getattr(result, "analysis_duration_seconds", 0), 1)
+            broadcast_log(
+                f"Raid analysis complete: {len(targets)} targets in {duration}s",
+                "success",
+            )
 
         except Exception as exc:
             progress_task.cancel()
             logger.exception("Analysis failed in WS handler")
-            await websocket.send_json({"type": "error", "message": f"Analysis failed: {exc}"})
+            await tracked_send({"type": "error", "message": f"Analysis failed: {exc}"})
+            broadcast_log(f"Raid analysis error: {exc}", "error")
 
         finally:
             analyzer.on_progress(None)
@@ -153,4 +200,6 @@ async def ws_analyze_reports(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        await ws_manager.disconnect(user_id, channel, websocket)
+        operation_gate.release(user_id, op_type)
+        exec_session_manager.mark_disconnected(exec_session.id)
+        await ws_manager.disconnect(user_id, CHANNEL, websocket)
