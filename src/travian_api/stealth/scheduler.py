@@ -1,11 +1,12 @@
 """Activity scheduling to prevent 24/7 patterns.
 
-Travian Multihunters flag accounts active >10h/day from single IP.
-Commercial bots typically limit to 10h/day, 5h continuous max,
-with 2h minimum gap between sessions.
+Travian Multihunters flag accounts with no daily downtime from a single IP.
+This scheduler tracks cumulative activity in a **rolling 24-hour window**
+(not calendar-day) and enforces continuous-session breaks to make usage
+patterns look natural.
 
-This scheduler tracks cumulative daily activity and enforces breaks
-to prevent the most common automated-play detection heuristics.
+Rolling window means: at any point in time, only the last 24h of activity
+counts.  Old activity naturally expires — no midnight reset exploit.
 """
 
 from __future__ import annotations
@@ -27,12 +28,11 @@ class ActivityScheduler:
     """Enforces realistic play session boundaries.
 
     Tracks:
-    - Total daily active hours
-    - Continuous session duration
-    - Break timing and duration
+    - Rolling 24h activity via hourly buckets (no midnight reset)
+    - Continuous session duration with auto-reset after idle
 
     Usage:
-        scheduler = ActivityScheduler(max_daily_hours=10.0)
+        scheduler = ActivityScheduler(max_daily_hours=16.0)
 
         while running:
             if not scheduler.can_continue():
@@ -46,30 +46,26 @@ class ActivityScheduler:
 
     def __init__(
         self,
-        max_daily_hours: float = 10.0,
-        max_continuous_hours: float = 4.0,
-        min_break_minutes: float = 30.0,
+        max_daily_hours: float = 16.0,
+        max_continuous_hours: float = 6.0,
+        min_break_minutes: float = 10.0,
         enabled: bool = True,
         state_file: Path | None = None,
     ):
-        """
-        Args:
-            max_daily_hours: Maximum active hours per calendar day
-            max_continuous_hours: Maximum hours before forced break
-            min_break_minutes: Minimum break duration in minutes
-            enabled: If False, no limits are enforced
-            state_file: Optional path for persisting budget across restarts
-        """
         self.max_daily_hours = max_daily_hours
         self.max_continuous_hours = max_continuous_hours
         self.min_break_minutes = min_break_minutes
         self.enabled = enabled
 
-        self._daily_seconds: float = 0.0
-        self._day_start: str = self._today_key()
+        # Hourly buckets: {"2026-04-22T14": 305.2, ...}
+        # Each key is an hour slot, value is seconds of activity in that hour.
+        self._hourly_buckets: dict[str, float] = {}
+
+        # Continuous session tracking
         self._session_start: float = time.monotonic()
         self._session_seconds: float = 0.0
         self._last_activity_time: float = time.monotonic()
+        self._last_activity_wall: float = time.time()
 
         self._state_file = state_file
         self._last_save_time: float = 0.0
@@ -79,12 +75,48 @@ class ActivityScheduler:
         if self._state_file is not None:
             atexit.register(self._save_state_force)
 
-    @staticmethod
-    def _today_key() -> str:
-        """Calendar day key for tracking daily limits."""
-        return datetime.now().strftime("%Y-%m-%d")
+    # ── Helpers ──────────────────────────────────────────────────────
 
-    # ── State persistence ───────────────────────────────────────────
+    @staticmethod
+    def _hour_key(wall_time: float | None = None) -> str:
+        """Return hour-granularity key like '2026-04-22T14'."""
+        t = datetime.fromtimestamp(wall_time) if wall_time else datetime.now()
+        return t.strftime("%Y-%m-%dT%H")
+
+    def _prune_old_buckets(self) -> None:
+        """Remove buckets older than 24 hours.
+
+        Uses ``<=`` so the boundary hour is always pruned.  With hour
+        granularity the effective window is 23h01m–24h00m, which slightly
+        favors the user (never over-restricts).
+        """
+        cutoff = time.time() - 24 * 3600
+        cutoff_key = self._hour_key(cutoff)
+        old_keys = [k for k in self._hourly_buckets if k <= cutoff_key]
+        for k in old_keys:
+            del self._hourly_buckets[k]
+
+    def _rolling_24h_seconds(self) -> float:
+        """Sum activity seconds within the last 24 hours."""
+        self._prune_old_buckets()
+        return sum(self._hourly_buckets.values())
+
+    def _auto_reset_session_if_idle(self) -> None:
+        """Auto-reset session counter if enough idle time has passed."""
+        idle_seconds = time.monotonic() - self._last_activity_time
+        if idle_seconds >= self.min_break_minutes * 60:
+            if self._session_seconds > 0:
+                logger.info(
+                    "Session auto-reset: idle %.0fs >= break threshold %.0fs "
+                    "(was %.1fh session)",
+                    idle_seconds,
+                    self.min_break_minutes * 60,
+                    self._session_seconds / 3600.0,
+                )
+                self._session_seconds = 0.0
+                self._session_start = time.monotonic()
+
+    # ── State persistence ────────────────────────────────────────────
 
     def _load_state(self) -> None:
         """Load persisted budget state from disk."""
@@ -92,36 +124,41 @@ class ActivityScheduler:
             return
         try:
             data = json.loads(self._state_file.read_text(encoding="utf-8"))
-            saved_day = data.get("day_start", "")
-            if saved_day == self._today_key():
-                self._daily_seconds = float(data.get("daily_seconds", 0.0))
-                self._day_start = saved_day
 
-                # Check if enough real time elapsed since last save to
-                # count as a break.  If so, reset session counter.
-                last_saved = data.get("last_saved", 0)
-                idle_since_save = time.time() - last_saved if last_saved else 0
-                if idle_since_save >= self.min_break_minutes * 60:
-                    self._session_seconds = 0.0
+            # Load hourly buckets (prune old ones)
+            buckets = data.get("hourly_buckets", {})
+            if isinstance(buckets, dict):
+                self._hourly_buckets = {
+                    k: float(v) for k, v in buckets.items()
+                }
+                self._prune_old_buckets()
+
+            # Migrate from old format: discard stale daily_seconds.
+            # Old calendar-day data doesn't map to the rolling window;
+            # starting fresh is fairer than concentrating it in one bucket.
+            if not self._hourly_buckets and "daily_seconds" in data:
+                old_daily = float(data.get("daily_seconds", 0))
+                if old_daily > 0:
                     logger.info(
-                        "Restored scheduler state: daily=%.1fh, "
-                        "session reset (idle %.0fs since last save)",
-                        self._daily_seconds / 3600.0,
-                        idle_since_save,
+                        "Discarded old scheduler format: %.1fh (rolling window starts fresh)",
+                        old_daily / 3600.0,
                     )
-                else:
-                    self._session_seconds = float(data.get("session_seconds", 0.0))
-                    logger.info(
-                        "Restored scheduler state: daily=%.1fh, session=%.1fh",
-                        self._daily_seconds / 3600.0,
-                        self._session_seconds / 3600.0,
-                    )
+
+            # Session: reset if idle since last save
+            last_saved = data.get("last_saved", 0)
+            idle_since_save = time.time() - last_saved if last_saved else 0
+            if idle_since_save >= self.min_break_minutes * 60:
+                self._session_seconds = 0.0
             else:
-                logger.info(
-                    "Scheduler state from %s ignored (new day %s)",
-                    saved_day,
-                    self._today_key(),
-                )
+                self._session_seconds = float(data.get("session_seconds", 0.0))
+
+            rolling = self._rolling_24h_seconds()
+            logger.info(
+                "Restored scheduler: rolling_24h=%.1fh, session=%.1fh (idle_since_save=%.0fs)",
+                rolling / 3600.0,
+                self._session_seconds / 3600.0,
+                idle_since_save,
+            )
         except Exception as e:
             logger.warning("Failed to load scheduler state from %s: %s", self._state_file, e)
 
@@ -138,9 +175,9 @@ class ActivityScheduler:
         """Write state to disk immediately (atomic via tempfile + replace)."""
         if self._state_file is None:
             return
+        self._prune_old_buckets()
         data = {
-            "daily_seconds": self._daily_seconds,
-            "day_start": self._day_start,
+            "hourly_buckets": self._hourly_buckets,
             "session_seconds": self._session_seconds,
             "last_saved": time.time(),
         }
@@ -153,51 +190,19 @@ class ActivityScheduler:
                     json.dump(data, f)
                 os.replace(tmp_path, str(self._state_file))
             except BaseException:
-                # Clean up temp file on failure
                 try:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
                 raise
             self._last_save_time = time.monotonic()
-            logger.debug("Saved scheduler state to %s", self._state_file)
         except Exception as e:
             logger.warning("Failed to save scheduler state: %s", e)
 
-    def _reset_daily_if_new_day(self) -> None:
-        """Reset daily counter if we've crossed midnight."""
-        today = self._today_key()
-        if today != self._day_start:
-            logger.info(
-                f"New day ({today}): resetting daily activity counter "
-                f"(yesterday: {self._daily_seconds / 3600:.1f}h)"
-            )
-            self._daily_seconds = 0.0
-            self._day_start = today
-
-    def _auto_reset_session_if_idle(self) -> None:
-        """Auto-reset session counter if enough idle time has passed.
-
-        If no activity has been logged for at least ``min_break_minutes``,
-        the user effectively took a break — reset the session counter so
-        they aren't permanently locked out by a stale session_seconds
-        value from the state file.
-        """
-        idle_seconds = time.monotonic() - self._last_activity_time
-        if idle_seconds >= self.min_break_minutes * 60:
-            if self._session_seconds > 0:
-                logger.info(
-                    "Session auto-reset: idle %.0fs >= break threshold %.0fs "
-                    "(was %.1fh session)",
-                    idle_seconds,
-                    self.min_break_minutes * 60,
-                    self._session_seconds / 3600.0,
-                )
-                self._session_seconds = 0.0
-                self._session_start = time.monotonic()
+    # ── Public API ───────────────────────────────────────────────────
 
     def can_continue(self) -> bool:
-        """Check if we're within daily/continuous limits.
+        """Check if we're within rolling-24h and continuous limits.
 
         Returns:
             True if we can keep working, False if break needed.
@@ -205,14 +210,14 @@ class ActivityScheduler:
         if not self.enabled:
             return True
 
-        self._reset_daily_if_new_day()
         self._auto_reset_session_if_idle()
 
-        # Check daily limit
-        daily_hours = self._daily_seconds / 3600.0
-        if daily_hours >= self.max_daily_hours:
+        # Check rolling 24h limit
+        rolling_hours = self._rolling_24h_seconds() / 3600.0
+        if rolling_hours >= self.max_daily_hours:
             logger.info(
-                f"Daily limit reached: {daily_hours:.1f}h / {self.max_daily_hours}h"
+                "Rolling 24h limit reached: %.1fh / %.1fh",
+                rolling_hours, self.max_daily_hours,
             )
             return False
 
@@ -220,8 +225,8 @@ class ActivityScheduler:
         session_hours = self._session_seconds / 3600.0
         if session_hours >= self.max_continuous_hours:
             logger.info(
-                f"Continuous limit reached: {session_hours:.1f}h / "
-                f"{self.max_continuous_hours}h"
+                "Continuous limit reached: %.1fh / %.1fh",
+                session_hours, self.max_continuous_hours,
             )
             return False
 
@@ -230,53 +235,66 @@ class ActivityScheduler:
     def next_break_duration(self) -> float:
         """How long to break (in seconds).
 
-        Short break (mid-session): min_break_minutes + random 0-15 min
-        Long break (daily limit approaching): 2-6 hours
+        Short break (mid-session): min_break_minutes + random jitter
+        Long break (rolling limit near): 1-3 hours
         Night break (if past 11pm local): 6-9 hours
-
-        Returns:
-            Break duration in seconds
         """
         if not self.enabled:
             return 0.0
 
         hour = datetime.now().hour
-        daily_hours = self._daily_seconds / 3600.0
+        rolling_hours = self._rolling_24h_seconds() / 3600.0
 
         # Night break: if it's late, take a long rest
         if hour >= 23 or hour < 6:
             duration_h = random.uniform(6.0, 9.0)
-            logger.info(f"Night break: sleeping {duration_h:.1f}h")
+            logger.info("Night break: sleeping %.1fh", duration_h)
             return duration_h * 3600.0
 
-        # Daily limit approaching (>80% used): long break
-        if daily_hours >= self.max_daily_hours * 0.8:
-            duration_h = random.uniform(2.0, 6.0)
-            logger.info(f"Long break (daily limit near): {duration_h:.1f}h")
+        # Rolling limit approaching (>85% used): longer break
+        if rolling_hours >= self.max_daily_hours * 0.85:
+            duration_h = random.uniform(1.0, 3.0)
+            logger.info("Long break (rolling limit near): %.1fh", duration_h)
             return duration_h * 3600.0
 
         # Standard mid-session break
         base_minutes = self.min_break_minutes
-        extra_minutes = random.uniform(0.0, 15.0)
+        extra_minutes = random.uniform(0.0, 10.0)
         duration_s = (base_minutes + extra_minutes) * 60.0
-        logger.info(f"Short break: {duration_s / 60:.0f} minutes")
+        logger.info("Short break: %.0f minutes", duration_s / 60)
         return duration_s
 
     def remaining_daily_budget(self) -> float:
-        """Hours remaining in today's activity budget."""
-        self._reset_daily_if_new_day()
-        remaining = self.max_daily_hours - (self._daily_seconds / 3600.0)
+        """Hours remaining in the rolling 24h window."""
+        remaining = self.max_daily_hours - (self._rolling_24h_seconds() / 3600.0)
         return max(0.0, remaining)
 
     def log_activity(self, seconds: float) -> None:
         """Record that we were active for N seconds.
 
-        Args:
-            seconds: Duration of activity to log
+        Splits activity across hour boundaries so each bucket only
+        contains seconds that actually fell within that hour.
         """
-        self._daily_seconds += seconds
+        now = time.time()
+        start = now - seconds
+
+        # Walk from activity start to now, splitting at hour boundaries
+        remaining = seconds
+        cursor = start
+        while remaining > 0:
+            key = self._hour_key(cursor)
+            # Seconds until the next hour boundary
+            dt = datetime.fromtimestamp(cursor)
+            next_hour = dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            secs_to_boundary = (next_hour.timestamp() - cursor)
+            chunk = min(remaining, secs_to_boundary)
+            self._hourly_buckets[key] = self._hourly_buckets.get(key, 0.0) + chunk
+            remaining -= chunk
+            cursor += chunk
+
         self._session_seconds += seconds
         self._last_activity_time = time.monotonic()
+        self._last_activity_wall = now
         self._save_state()
 
     def start_session(self) -> None:
@@ -288,9 +306,8 @@ class ActivityScheduler:
 
     @property
     def daily_hours_used(self) -> float:
-        """Hours active today."""
-        self._reset_daily_if_new_day()
-        return self._daily_seconds / 3600.0
+        """Hours active in the rolling 24h window."""
+        return self._rolling_24h_seconds() / 3600.0
 
     @property
     def session_hours(self) -> float:

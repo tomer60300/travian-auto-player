@@ -21,23 +21,19 @@ logger = logging.getLogger(__name__)
 # ── Chrome-on-Windows UA pool (curl_cffi can impersonate these) ────────
 
 _CHROME_WINDOWS_UAS = [
-    # Chrome 132-136 on Windows 10/11 (current stable range early 2026)
+    # Only versions with exact curl_cffi impersonation support.
+    # This ensures UA, sec-ch-ua, and TLS fingerprint all match.
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 ]
 
 # Map Chrome major version -> curl_cffi impersonate target.
-# curl_cffi supports: chrome131, chrome133a, chrome136.
-# For versions without an exact match we pick the nearest lower target.
+# Only exact matches — no version skew between UA and TLS fingerprint.
 _IMPERSONATE_MAP: dict[int, str] = {
     136: "chrome136",
-    135: "chrome136",
-    134: "chrome133a",
     133: "chrome133a",
-    132: "chrome131",
+    131: "chrome131",
 }
 _IMPERSONATE_FALLBACK = "chrome136"
 

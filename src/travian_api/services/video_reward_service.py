@@ -271,7 +271,7 @@ class VideoRewardService:
             redirect_to = ends_data.get("redirectTo")
             if redirect_to and reward_type == "buildingUpgrade":
                 logger.info(f"Following buildingUpgrade redirect: {redirect_to}")
-                await self.http_client.get_html(redirect_to, skip_reauth=True)
+                await self.http_client.get_html(redirect_to, skip_reauth=True, safe_to_retry=False)
 
             logger.info(f"Reward claimed successfully! Type: {reward_type}")
             return VideoRewardResult(

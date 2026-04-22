@@ -138,19 +138,24 @@ class PageNavigator:
         self, village_id: Optional[int] = None
     ) -> None:
         """Navigate to rally point as a human would.
-        
+
         Chain: dorf2.php → build.php?gid=16&tt=2
         """
         if not self.enabled:
             return
-        
+
         newdid = f"?newdid={village_id}" if village_id else ""
-        
+        newdid_amp = f"&newdid={village_id}" if village_id else ""
+
         # Visit dorf2 first
         if self._current_page != f"/dorf2.php{newdid}":
             await self._visit(f"/dorf2.php{newdid}", "viewing village")
-        
+
         await self._delay.wait(ActionType.CLICK, "clicking rally point")
+
+        # Actually fetch the rally point page so referer chain is truthful
+        rally_url = f"/build.php?gid=16&tt=2{newdid_amp}"
+        await self._visit(rally_url, "opening rally point")
     
     async def navigate_to_reports(self) -> None:
         """Navigate to reports page."""

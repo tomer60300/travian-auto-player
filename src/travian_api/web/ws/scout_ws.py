@@ -98,7 +98,7 @@ async def _send_scout_fast(
     form_data['eventType'] = '4'  # raid
     form_data['ok'] = 'ok'
 
-    confirm_html = await http.post_form(rally_url, form_data)
+    confirm_html = await http.post_form(rally_url, form_data, safe_to_retry=False)
 
     has_confirm = 'troopSendForm' in confirm_html or 'confirmSendTroops' in confirm_html
     if not has_confirm:
@@ -125,7 +125,7 @@ async def _send_scout_fast(
 
     await delay.wait(ActionType.CLICK, "clicking send")
 
-    result_html = await http.post_form(rally_url, final_data)
+    result_html = await http.post_form(rally_url, final_data, safe_to_retry=False)
 
     # Detect success
     action_token = final_data.get('action', '')
@@ -542,6 +542,15 @@ async def auto_scout_ws(websocket: WebSocket):
 
                     t_elapsed = time.monotonic() - t_start
                     times_per_target.append(t_elapsed)
+
+                    # ── Mid-loop: charge activity budget ──────
+                    session.http_client.activity_scheduler.log_activity(t_elapsed)
+                    if (i + 1) % 5 == 0:
+                        try:
+                            session.http_client.check_activity_budget()
+                        except ActivityBudgetExhausted as exc:
+                            await _tracked_send(websocket, {"type": "error", "message": str(exc)})
+                            break
 
                     # ── Mid-loop: detect troop exhaustion ───────
                     if not result.get("success") and "troops" in (result.get("error") or "").lower():

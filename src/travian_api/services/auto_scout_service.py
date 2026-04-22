@@ -55,6 +55,10 @@ class AutoScoutService:
 
         self._report(f"Scanning {len(scan_centers)} map region(s) around ({center_x},{center_y}) r={radius}")
 
+        # Establish map context once before the scan batch (stealth)
+        if hasattr(self.http_client, 'navigator') and self.http_client.navigator.enabled:
+            await self.http_client.navigator._visit("/karte.php", "opening map")
+
         for sx, sy in scan_centers:
             resp = await self.http_client.post_json(
                 "/api/v1/map/position",

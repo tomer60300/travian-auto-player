@@ -259,23 +259,23 @@ class HttpClient:
         if self._activity_scheduler.can_continue():
             return True
         sched = self._activity_scheduler
-        daily_h = sched.daily_hours_used
+        rolling_h = sched.daily_hours_used
         session_h = sched.session_hours
         logger.warning(
-            "Activity budget exhausted: daily=%.1fh/%.1fh, session=%.1fh/%.1fh",
-            daily_h, sched.max_daily_hours,
+            "Activity budget exhausted: rolling_24h=%.1fh/%.1fh, session=%.1fh/%.1fh",
+            rolling_h, sched.max_daily_hours,
             session_h, sched.max_continuous_hours,
         )
         # Show which limit was actually hit
-        if daily_h >= sched.max_daily_hours:
-            reason = f"daily limit reached ({daily_h:.1f}h / {sched.max_daily_hours}h)"
+        if rolling_h >= sched.max_daily_hours:
+            reason = f"rolling 24h limit reached ({rolling_h:.1f}h / {sched.max_daily_hours}h)"
         elif session_h >= sched.max_continuous_hours:
             reason = (
                 f"continuous session limit reached ({session_h:.1f}h / {sched.max_continuous_hours}h)"
                 f" — take a {sched.min_break_minutes:.0f}min break"
             )
         else:
-            reason = f"daily {daily_h:.1f}h / {sched.max_daily_hours}h, session {session_h:.1f}h / {sched.max_continuous_hours}h"
+            reason = f"rolling 24h {rolling_h:.1f}h / {sched.max_daily_hours}h, session {session_h:.1f}h / {sched.max_continuous_hours}h"
         raise ActivityBudgetExhausted(f"Activity budget exhausted: {reason}")
 
     def set_auth_callback(self, callback: callable) -> None:
@@ -363,9 +363,20 @@ class HttpClient:
 
         return headers
 
-    def _stealth_post_request(self, url: str) -> None:
-        """Update stealth state after a request."""
-        if self._stealth_enabled:
+    def _stealth_post_request(self, url: str, request_type: str = "page") -> None:
+        """Update stealth state after a request.
+
+        Only promotes actual page/document navigations into the Referer
+        chain.  API, JSON, and XHR endpoints are never recorded as the
+        last-visited page — a real browser would not set Referer from
+        those requests.
+        """
+        if not self._stealth_enabled:
+            return
+        # Only page loads and form submissions that navigate to a document
+        # should update the tracked last page.  API/JSON/XHR calls must
+        # not poison the Referer chain.
+        if request_type in ("page", "form"):
             self._browser_headers.update_last_page(url)
 
     @staticmethod
@@ -488,10 +499,16 @@ class HttpClient:
                 await _fire("captcha_form")
                 return
 
-        # ── Phase 3: "too many requests" — short error page only ─────
+        # ── Phase 3: "too many requests" — transient rate limit (soft) ─
+        # These are temporary throttle events, not real captcha/bot detection.
+        # Handle with a throttler penalty, not the captcha hard-stop.
         if 'too many requests' in response_lower:
             if resp_len < 2000:
-                await _fire("too_many_requests")
+                logger.warning(
+                    "RATE LIMIT (soft): 'too many requests' | url=%s | status=%d",
+                    url, status_code,
+                )
+                self._throttler.add_penalty(120.0)
                 return
 
         # ── Phase 4: ban message — exact phrase match ────────────────
@@ -499,13 +516,10 @@ class HttpClient:
             await _fire("account_banned")
             return
 
-        # ── Phase 5: unknown block page — fail closed on 403/429/503 ─
+        # ── Phase 5: unknown block page — tiered handling for 403/429/503
         #
-        # If the HTTP status is a block-like code AND the response doesn't
-        # look like a normal Travian game page, treat it as an unknown
-        # block.  Normal Travian pages are large and contain game markers.
-        # Session-expiry 403s are handled upstream (redirect to login),
-        # but an explicit login-page keyword check avoids false positives.
+        # 429 is always a transient rate limit → throttler penalty.
+        # 403/503 on short non-game pages → captcha guard (may be real block).
         if status_code in (403, 429, 503):
             _has_game_marker = (
                 'travian' in response_lower
@@ -520,7 +534,16 @@ class HttpClient:
                 or 'password' in response_lower
             )
             if not _has_game_marker and not _is_login_page and resp_len < 5000:
-                await _fire("unknown_block_page")
+                if status_code == 429:
+                    # Transient rate limit — penalty, not hard stop
+                    logger.warning(
+                        "RATE LIMIT (soft): 429 short page | url=%s | len=%d",
+                        url, resp_len,
+                    )
+                    self._throttler.add_penalty(180.0)
+                else:
+                    # 403/503 short non-game page — likely real block
+                    await _fire("unknown_block_page")
                 return
 
     def _sync_cookies_to_curl(self) -> None:
@@ -618,7 +641,7 @@ class HttpClient:
             else:
                 response = await self.client.post(url, json=data, headers=headers)
 
-            self._stealth_post_request(url)
+            self._stealth_post_request(url, "json")
 
             # Check for session expiry indicators
             if not skip_reauth and (response.status_code == 302 or (
@@ -656,7 +679,7 @@ class HttpClient:
         except (httpx.RequestError,) as e:
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
-            raise NetworkError(f"Request failed: {e}")
+            raise  # Let tenacity see the original exception and retry
         except (ConnectionResetError, ConnectionError, OSError) as e:
             if not safe_to_retry:
                 raise NetworkError(f"Connection reset (non-retryable): {e}")
@@ -671,7 +694,7 @@ class HttpClient:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
                 if not safe_to_retry:
                     raise NetworkError(f"Request failed (curl, non-retryable): {e}")
-                raise NetworkError(f"Request failed (curl): {e}")
+                raise  # Let tenacity retry
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
@@ -703,7 +726,7 @@ class HttpClient:
                 else:
                     response = await self.client.delete(url, headers=headers)
 
-            self._stealth_post_request(url)
+            self._stealth_post_request(url, "json")
 
             # Check for session expiry indicators
             if not skip_reauth and (response.status_code == 302 or (
@@ -744,12 +767,12 @@ class HttpClient:
         except (httpx.RequestError,) as e:
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
-            raise NetworkError(f"Request failed: {e}")
+            raise  # Let tenacity retry
         except Exception as e:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
                 if not safe_to_retry:
                     raise NetworkError(f"Request failed (curl, non-retryable): {e}")
-                raise NetworkError(f"Request failed (curl): {e}")
+                raise  # Let tenacity retry
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
@@ -776,7 +799,7 @@ class HttpClient:
             else:
                 response = await self.client.post(url, content=form_str.encode(), headers=headers)
 
-            self._stealth_post_request(url)
+            self._stealth_post_request(url, "form")
 
             if response.status_code == 302:
                 await self._handle_session_expired()
@@ -805,12 +828,12 @@ class HttpClient:
         except (httpx.RequestError,) as e:
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
-            raise NetworkError(f"Request failed: {e}")
+            raise  # Let tenacity see the original exception and retry
         except Exception as e:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
                 if not safe_to_retry:
                     raise NetworkError(f"Request failed (curl, non-retryable): {e}")
-                raise NetworkError(f"Request failed (curl): {e}")
+                raise  # Let tenacity retry
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
@@ -886,12 +909,12 @@ class HttpClient:
         except (httpx.RequestError,) as e:
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
-            raise NetworkError(f"Request failed: {e}")
+            raise  # Let tenacity see the original exception and retry
         except Exception as e:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
                 if not safe_to_retry:
                     raise NetworkError(f"Request failed (curl, non-retryable): {e}")
-                raise NetworkError(f"Request failed (curl): {e}")
+                raise  # Let tenacity retry
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
