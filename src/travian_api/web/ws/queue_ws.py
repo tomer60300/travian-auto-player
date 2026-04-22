@@ -110,11 +110,8 @@ async def queue_run_ws(websocket: WebSocket):
         )
         return
 
-    op_type = "queue"
-
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.close(code=4009, reason="A queue operation is already running")
-        return
+    op_type = None  # Set after village_id is known (per-village gate)
+    gate_acquired = False
 
     try:
         op_started_at = time.monotonic()
@@ -175,6 +172,16 @@ async def queue_run_ws(websocket: WebSocket):
         # Fall back to session active village when YAML has no village_id
         if not plan.village_id and session.active_village_id:
             plan.village_id = session.active_village_id
+
+        # Per-village gate: different villages can run queues in parallel
+        op_type = f"queue:{plan.village_id}"
+        if not operation_gate.acquire(user_id, op_type):
+            await _tracked_send(websocket, {
+                "type": "error",
+                "message": f"A queue is already running for this village",
+            })
+            return
+        gate_acquired = True
 
         # Resolve village name for logging
         village_label = str(plan.village_id)
@@ -353,6 +360,7 @@ async def queue_run_ws(websocket: WebSocket):
         logger.exception("Unexpected error in queue WS for user %s", user_id)
         await _tracked_try_send(websocket, {"type": "error", "message": f"Internal error: {exc}"})
     finally:
-        operation_gate.release(user_id, op_type)
+        if gate_acquired and op_type:
+            operation_gate.release(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)

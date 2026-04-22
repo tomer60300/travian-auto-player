@@ -287,7 +287,7 @@ function QueuePanel({ items, setItems }) {
               <option key={p} value={p}>P{p}</option>
             ))}
           </select>
-          <button className="btn-gold btn-xs" onClick={applyBulkPriority}>Set Priority</button>
+          <button className="btn-primary btn-xs" onClick={applyBulkPriority}>Set Priority</button>
           <button className="btn-danger btn-xs" onClick={removeSelected}>Remove</button>
           <button className="btn-secondary btn-xs ml-auto" onClick={selectNone}>Deselect</button>
         </div>
