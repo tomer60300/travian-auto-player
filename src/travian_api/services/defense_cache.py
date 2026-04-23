@@ -40,6 +40,7 @@ class TieredDefenseCache:
     def _ensure_l2(self):
         if self._l2 is None:
             import diskcache
+
             self._disk_dir.mkdir(parents=True, exist_ok=True)
             self._l2 = diskcache.Cache(str(self._disk_dir), size_limit=50 * 1024 * 1024)
         return self._l2
@@ -99,7 +100,9 @@ class TieredDefenseCache:
 
         check_count = (prev.get("check_count", 0) if prev else 0) + 1
         change_count = prev.get("change_count", 0) if prev else 0
-        if prev and prev.get("defender_combat_strength") != defense_data.get("defender_combat_strength"):
+        if prev and prev.get("defender_combat_strength") != defense_data.get(
+            "defender_combat_strength"
+        ):
             change_count += 1
 
         entry = {

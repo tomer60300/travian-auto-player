@@ -53,9 +53,9 @@ dev = [
     "pytest-cov>=4.1.0",
     "httpx[test]",  # For testing HTTP clients
     "mypy>=1.5.0",
-    "black>=23.0.0",
-    "isort>=5.12.0",
-    "flake8>=6.0.0",
+    "ruff>=0.8.0",
+    "pip-audit>=2.7.0",
+    "pre-commit>=3.6.0",
 ]
 
 [project.scripts]
@@ -69,13 +69,62 @@ where = ["src"]
 [tool.setuptools.package-dir]
 "" = "src"
 
-[tool.black]
+[tool.ruff]
+target-version = "py311"
 line-length = 100
-target-version = ['py311']
+# Only lint the real codebase, not debug scripts at root
+include = ["src/**/*.py", "tests/**/*.py"]
 
-[tool.isort]
-profile = "black"
-line_length = 100
+[tool.ruff.lint]
+select = [
+    "E", "W",     # pycodestyle
+    "F",           # pyflakes
+    "I",           # isort
+    "UP",          # pyupgrade (Optional[T] -> T | None, etc.)
+    "B",           # bugbear (common mistakes)
+    "SIM",         # simplify
+    "ASYNC",       # async anti-patterns
+    "S",           # bandit security checks
+    "T20",         # no print() in production
+    "RET",         # return statement checks
+    "PIE",         # misc lints
+]
+ignore = [
+    "S101",        # allow assert in tests
+    "S603", "S607", # subprocess — not relevant
+    "S311",        # random module is intentional for stealth delays (not crypto)
+    "S110", "S112", # try-except-pass — many best-effort operations are intentional
+    "E501",        # line length handled by formatter
+    "B008",        # FastAPI uses Depends() in default args — standard pattern
+    "UP006",       # List[x] -> list[x] — skip mass annotation churn
+    "UP007",       # X | Y union syntax — keep Optional for pydantic compat
+    "UP035",       # deprecated typing imports — skip mass annotation churn
+    "UP045",       # Optional[T] -> T | None — skip mass annotation churn
+    "RET504",      # unnecessary assignment before return — readability
+    "SIM105",      # contextlib.suppress — existing try/except/pass is fine
+    "SIM102",      # collapsible-if — nested ifs often more readable
+    "B904",        # raise-from — too many to fix now, low risk
+    "E741",        # ambiguous var name (l, O) — false positives in game code
+    "B007",        # unused loop variable — use _ convention already in place
+    "B905",        # zip-without-strict — not needed for game data iteration
+    "SIM108",      # ternary suggestion — explicit if/else often more readable
+    "SIM110",      # reimplemented-builtin (any/all) — explicit loop is clearer
+    "SIM115",      # open-file-with-context — false positive on Path.read_text()
+    "E731",        # lambda assignment — used for inline callbacks
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "T20"]
+"src/travian_api/_post_install.py" = ["T201"]  # CLI script, print() is intentional
+"src/travian_api/cli.py" = ["T201", "ASYNC230", "ASYNC240"]  # CLI: print() + sync I/O in async ok
+"src/travian_api/web/app.py" = ["S104"]        # 0.0.0.0 bind is intentional for server
+"src/travian_api/parsers/html_parser.py" = ["B023"]   # lambda in loop used immediately, not deferred
+"src/travian_api/web/routes/farm.py" = ["E402"]        # delayed import for circular dep avoidance
+"src/travian_api/web/routes/users.py" = ["S105"]       # "token_type" is not a password
+"tests/test_player_pop_filter.py" = ["E402"]           # delayed import after fixture setup
+
+[tool.ruff.format]
+quote-style = "double"
 
 [tool.mypy]
 python_version = "3.11"

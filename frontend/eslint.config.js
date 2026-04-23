@@ -24,6 +24,11 @@ export default defineConfig([
     },
     rules: {
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      // React 19 strict rules — downgrade to warn for patterns common in this codebase
+      'react-hooks/rules-of-hooks': 'error',
+      'react-hooks/purity': 'off',  // too strict — flags ref reads during render, Date.now() in useMemo, etc.
+      'react-hooks/set-state-in-effect': 'warn',
+      'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
     },
   },
 ])

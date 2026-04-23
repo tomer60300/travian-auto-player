@@ -1,0 +1,110 @@
+# Travian Auto-Player
+
+Full-stack web app. Python 3.12 FastAPI backend + React 19/Vite/TypeScript frontend.
+Automates Travian Legends gameplay: farming, scouting, build queues, military, reports.
+
+## Repository Structure
+- `src/travian_api/` — FastAPI backend (SQLAlchemy 2.0 async, aiosqlite, Pydantic v2, JWT auth, WebSockets)
+- `src/travian_api/web/` — ASGI app, routes, WebSocket handlers, auth, rate limiting
+- `src/travian_api/clients/` — HTTP client (httpx + curl_cffi stealth)
+- `src/travian_api/parsers/` — HTML/response parsers (BeautifulSoup + lxml)
+- `src/travian_api/services/` — Business logic layer
+- `src/travian_api/stealth/` — Anti-bot evasion (TLS fingerprinting, request throttling)
+- `frontend/` — React 19 + Vite + Zustand 5 + Tailwind CSS v4
+- `tests/` — pytest test suite
+- `plans/` — YAML build plan files
+
+## Universal Rules
+- All commits follow Conventional Commits format
+- Never commit secrets. Use environment variables for all credentials.
+- Tests required for all new features — run them before declaring done
+- Match existing code patterns. Read before writing.
+- Minimal diffs only. No unrequested refactors.
+
+## Dual Server Environment
+- Port 8000: Stable production server. NEVER restart without explicit permission.
+- Port 8001: Debug/dev server. Restart freely after Python changes.
+
+## Commands
+### Backend
+- `cd travian-auto-player && uv run fastapi dev` — Dev server
+- `cd travian-auto-player && uv run pytest -x -v` — Tests
+- `cd travian-auto-player && uv run ruff check . && uv run ruff format .` — Lint + format
+- `cd travian-auto-player && uv run uvicorn src.travian_api.web.app:app --port 8001` — Debug server
+
+### Frontend
+- `cd travian-auto-player/frontend && npm run dev` — Dev server (Vite, localhost:5173)
+- `cd travian-auto-player/frontend && npm run build` — Build to src/travian_api/web/static
+- `cd travian-auto-player/frontend && npx eslint .` — Lint
+
+## Code Quality Rules
+
+### Scope Control (CRITICAL)
+- Only make changes directly requested or clearly necessary
+- A bug fix does not need surrounding code cleaned up
+- A simple feature does not need extra configurability
+- Do not add docstrings, comments, or type annotations to code you didn't change
+- If you create temporary files, delete them when done
+
+### Before Writing Code
+- Read existing code in the area you're modifying
+- Find similar patterns already in this codebase and align with them
+- Check if the logic already exists before writing new code
+- Challenge yourself: can this be done by modifying just one existing file?
+
+### Coding Principles
+- DRY, KISS, YAGNI. Pure functions preferred. Strict typing everywhere.
+- Fix root causes, not symptoms. Raise errors explicitly, never silently ignore.
+- No fallbacks unless explicitly requested. No flag parameters. No multi-mode functions.
+- When unsure, inspect the codebase instead of inventing patterns.
+
+### Prohibited
+- No `any` types in TypeScript
+- No default exports (named exports only)
+- No console.log in production code
+- Never delete or skip existing tests
+- No dependencies added without clear justification
+
+## Delivery Workflow (MANDATORY for all features and bug fixes)
+
+Every task MUST follow this exact pipeline. Do not skip steps.
+
+### Phase 1: Design
+1. Read the user's request carefully. Ask clarifying questions if ambiguous.
+2. Explore the affected code areas — read existing files before proposing changes.
+3. Present a brief implementation plan: which files change, what the approach is, any refactors needed.
+4. Wait for user approval before writing code (skip if user said "just do it").
+
+### Phase 2: Implement
+1. Write the code following all Code Quality Rules below.
+2. Keep diffs minimal. Only touch files directly related to the task.
+3. If the task requires frontend changes, rebuild: `cd frontend && npm run build`
+
+### Phase 3: Verify
+1. Run backend linting: `uv run ruff check . && uv run ruff format --check .`
+2. Run backend tests: `uv run pytest -x -v --tb=short`
+3. Run frontend linting: `cd frontend && npx eslint . --max-warnings=20`
+4. If frontend changed, verify the build succeeds: `cd frontend && npm run build`
+5. Show ALL output to the user. Never claim "it works" without evidence.
+6. If fixing a bug: write a FAILING test first, then fix, then show test passing.
+
+### Phase 4: Submit
+1. Stage only the relevant files (never `git add -A`).
+2. Commit with Conventional Commits format.
+3. Push to the current branch.
+
+### Phase 5: Codex Review Gate
+1. After pushing, run `/codex:review --wait` to get a Codex code review.
+2. If Codex returns **no P1/P2 issues**: report success to the user. Task is done.
+3. If Codex returns **P1 or P2 issues**: fix every issue Codex flagged, then loop back to Phase 3 (verify → commit → push → re-review). Repeat until Codex passes.
+4. Always show the Codex review output to the user.
+
+### Evidence-Based Bug Fixing (NON-NEGOTIABLE):
+1. Read the actual error/logs FIRST. Do not theorize before reading evidence.
+2. Write a failing test that reproduces the bug before attempting any fix.
+3. Fix ONLY the broken code. Do not "preemptively" fix working code nearby.
+4. After fixing, run the test. Show the output. If it still fails after 2 attempts, STOP and reassess.
+
+## Farm Status Reading
+- Empty slots = success
+- "Not enough troops" = expected troop exhaustion, not a failure

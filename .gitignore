@@ -46,6 +46,12 @@ nohup.out
 .claude/
 memory/
 
+# Cookie/session files (per-user, contain JWTs)
+.travian_cookies.json
+.travian_persona.json
+frontend/.travian_cookies.json
+frontend/.travian_persona.json
+
 # Session logs & personal plans
 cli-log.md
 plans/*.yaml

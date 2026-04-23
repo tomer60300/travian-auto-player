@@ -11,7 +11,7 @@ from __future__ import annotations
 import random
 from typing import Optional
 
-from .persona import Persona, build_persona, _CHROME_WINDOWS_UAS
+from .persona import _CHROME_WINDOWS_UAS, Persona, build_persona
 
 # Public alias — kept for backward compatibility
 _USER_AGENTS = list(_CHROME_WINDOWS_UAS)

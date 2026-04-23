@@ -4,8 +4,6 @@ Reproduces bug: pre-filter `village_id > 0` drops unoccupied oases (village_id=0
 before `show_oases` flag is checked, causing oases to never appear in results.
 """
 
-import pytest
-
 from travian_api.models.farm_list import MapTileInfo
 
 
@@ -14,39 +12,70 @@ def build_test_tiles():
     return [
         # Regular player village — should always be included
         MapTileInfo(
-            x=10, y=10, village_id=1001, player_id=42,
-            village_name="Enemy Village", population=150,
-            distance=5.0, is_oasis=False,
+            x=10,
+            y=10,
+            village_id=1001,
+            player_id=42,
+            village_name="Enemy Village",
+            population=150,
+            distance=5.0,
+            is_oasis=False,
         ),
         # Own village — should always be excluded
         MapTileInfo(
-            x=0, y=0, village_id=500, player_id=1,
-            village_name="My Village", population=300,
-            distance=0.0, is_oasis=False,
+            x=0,
+            y=0,
+            village_id=500,
+            player_id=1,
+            village_name="My Village",
+            population=300,
+            distance=0.0,
+            is_oasis=False,
         ),
         # Unoccupied oasis — village_id=0, no player. THE BUG TARGET.
         MapTileInfo(
-            x=5, y=5, village_id=0, player_id=None,
-            village_name="Oasis", population=0,
-            distance=3.0, is_oasis=True,
+            x=5,
+            y=5,
+            village_id=0,
+            player_id=None,
+            village_name="Oasis",
+            population=0,
+            distance=3.0,
+            is_oasis=True,
         ),
         # Another unoccupied oasis
         MapTileInfo(
-            x=-3, y=7, village_id=0, player_id=None,
-            village_name="Woodland Oasis", population=0,
-            distance=4.2, is_oasis=True,
+            x=-3,
+            y=7,
+            village_id=0,
+            player_id=None,
+            village_name="Woodland Oasis",
+            population=0,
+            distance=4.2,
+            is_oasis=True,
         ),
         # Occupied oasis (has a player) — village_id > 0
         MapTileInfo(
-            x=8, y=2, village_id=2001, player_id=99,
-            village_name="Occupied Oasis", population=50,
-            distance=6.0, is_oasis=True,
+            x=8,
+            y=2,
+            village_id=2001,
+            player_id=99,
+            village_name="Occupied Oasis",
+            population=50,
+            distance=6.0,
+            is_oasis=True,
         ),
         # Abandoned village — village_id=-1
         MapTileInfo(
-            x=12, y=-4, village_id=0, player_id=None,
-            village_name="Ruins", population=0,
-            distance=8.0, is_oasis=False, is_abandoned=True,
+            x=12,
+            y=-4,
+            village_id=0,
+            player_id=None,
+            village_name="Ruins",
+            population=0,
+            distance=8.0,
+            is_oasis=False,
+            is_abandoned=True,
         ),
     ]
 
@@ -73,9 +102,9 @@ def pre_filter_tiles_fixed(raw_tiles, own_ids, show_oases):
     """
     # Keep player villages (village_id > 0, not own) + oases if requested
     tiles = [
-        t for t in raw_tiles
-        if (t.village_id > 0 and t.village_id not in own_ids)
-        or (t.is_oasis and show_oases)
+        t
+        for t in raw_tiles
+        if (t.village_id > 0 and t.village_id not in own_ids) or (t.is_oasis and show_oases)
     ]
     # Remove oases if not requested
     if not show_oases:
@@ -121,8 +150,12 @@ class TestOasisFilter:
         result = pre_filter_tiles_fixed(self.raw_tiles, self.own_ids, show_oases=True)
         coords = {(t.x, t.y) for t in result}
 
-        assert (5, 5) in coords, "REGRESSION: unoccupied oasis (5,5) must be in results when show_oases=True"
-        assert (-3, 7) in coords, "REGRESSION: unoccupied oasis (-3,7) must be in results when show_oases=True"
+        assert (5, 5) in coords, (
+            "REGRESSION: unoccupied oasis (5,5) must be in results when show_oases=True"
+        )
+        assert (-3, 7) in coords, (
+            "REGRESSION: unoccupied oasis (-3,7) must be in results when show_oases=True"
+        )
 
     def test_fixed_filter_includes_unoccupied_oases_when_show_oases_true(self):
         """CONFIRMS THE FIX: unoccupied oases are included when show_oases=True."""

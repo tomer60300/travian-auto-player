@@ -132,7 +132,7 @@ export function createWebSocket(path, onMessage, onError, onClose, options = {})
     close() {
       stopped = true
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-      if (currentWs) { try { currentWs.close() } catch {} }
+      if (currentWs) { try { currentWs.close() } catch { /* empty */ } }
     }
   }
 }

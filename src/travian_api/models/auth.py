@@ -3,37 +3,38 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
 from typing import List, Optional
+
 from pydantic import BaseModel, Field, field_validator
 
 
 class AuthStatus(BaseModel):
     """Current authentication status."""
-    
+
     is_authenticated: bool = Field(default=False, description="Whether user is authenticated")
     jwt_token: Optional[str] = Field(None, description="Current JWT token")
     username: Optional[str] = Field(None, description="Authenticated username")
     expires_at: Optional[int] = Field(None, description="Token expiration timestamp")
-    
+
     @property
     def is_expired(self) -> bool:
         """Check if the token is expired."""
         if not self.expires_at:
             return False
         import time
+
         return int(time.time()) >= self.expires_at
 
 
 class LoginRequest(BaseModel):
     """Login request data."""
-    
+
     name: str = Field(..., description="Username")
     password: str = Field(..., description="Password")
     lowRes: int = Field(default=1, description="Low resolution flag")
     w: str = Field(default="1920:1080", description="Screen resolution")
     mobile_optimizations: bool = Field(default=False, description="Enable mobile optimizations")
-    
+
     @field_validator("name")
     @classmethod
     def validate_name(cls, v: str) -> str:
@@ -41,7 +42,7 @@ class LoginRequest(BaseModel):
         if not v.strip():
             raise ValueError("Username cannot be empty")
         return v.strip()
-    
+
     @field_validator("password")
     @classmethod
     def validate_password(cls, v: str) -> str:
@@ -53,7 +54,7 @@ class LoginRequest(BaseModel):
 
 class LoginResponse(BaseModel):
     """Login response data."""
-    
+
     success: bool = Field(default=True, description="Whether login was successful")
     jwt: Optional[str] = Field(None, description="JWT token if successful")
     error_message: Optional[str] = Field(None, description="Error message if failed")
@@ -61,7 +62,7 @@ class LoginResponse(BaseModel):
     tribe_id: Optional[int] = Field(None, description="Tribe ID if successful")
     village_id: Optional[int] = Field(None, description="Current village ID if successful")
     redirectTo: Optional[str] = Field(None, description="Redirect URL")
-    
+
     @property
     def redirect_to(self) -> Optional[str]:
         """Get redirect URL."""
@@ -91,12 +92,14 @@ class AuthState(BaseModel):
 
 class JWTCache(BaseModel):
     """JWT token cache for persistent authentication."""
-    
-    token: str = Field(..., description="JWT token") 
+
+    token: str = Field(..., description="JWT token")
     username: str = Field(..., description="Username")
     server_url: str = Field(..., description="Server URL")
-    cached_at: Optional[datetime] = Field(default_factory=lambda: datetime.now(), description="When token was cached")
-    
+    cached_at: Optional[datetime] = Field(
+        default_factory=lambda: datetime.now(), description="When token was cached"
+    )
+
     @field_validator("token")
     @classmethod
     def validate_token(cls, v: str) -> str:
@@ -104,11 +107,11 @@ class JWTCache(BaseModel):
         if not v.strip():
             raise ValueError("JWT token cannot be empty")
         return v.strip()
-    
+
     def is_stale(self, max_age_hours: float = 24.0) -> bool:
         """Check if the cached token is stale."""
         if not self.cached_at:
             return True
-        
+
         age_hours = (datetime.now() - self.cached_at).total_seconds() / 3600
         return age_hours >= max_age_hours

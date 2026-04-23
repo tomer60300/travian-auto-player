@@ -1,12 +1,12 @@
 """Constants used throughout the Travian API."""
 
 from enum import IntEnum
-from typing import Dict, Set
 
 
 # Building type IDs (from game data)
 class BuildingType(IntEnum):
     """Building type identifiers."""
+
     WOODCUTTER = 1
     CLAY_PIT = 2
     IRON_MINE = 3
@@ -37,8 +37,8 @@ class BuildingType(IntEnum):
     GREAT_BARRACKS = 29
     GREAT_STABLE = 30
     CITY_WALL = 31  # Romans
-    EARTH_WALL = 32  # Teutons  
-    PALISADE = 33   # Gauls
+    EARTH_WALL = 32  # Teutons
+    PALISADE = 33  # Gauls
     STONEMASON = 34
     BREWERY = 35
     TRAPPER = 36
@@ -57,7 +57,7 @@ VILLAGE_BUILDING_SLOTS = set(range(19, 41))  # 19-40
 # Building names for display
 BUILDING_NAMES = {
     BuildingType.WOODCUTTER: "Woodcutter",
-    BuildingType.CLAY_PIT: "Clay Pit", 
+    BuildingType.CLAY_PIT: "Clay Pit",
     BuildingType.IRON_MINE: "Iron Mine",
     BuildingType.CROPLAND: "Cropland",
     BuildingType.SAWMILL: "Sawmill",
@@ -102,6 +102,7 @@ BUILDING_NAMES = {
 # Event types for military actions
 class EventType(IntEnum):
     """Military event type identifiers."""
+
     SCOUT = 2
     ATTACK = 3
     RAID = 4
@@ -111,6 +112,7 @@ class EventType(IntEnum):
 # Tribe identifiers
 class TribeType(IntEnum):
     """Tribe type identifiers."""
+
     ROMANS = 1
     TEUTONS = 2
     GAULS = 3
@@ -120,7 +122,7 @@ class TribeType(IntEnum):
 TROOP_MAPPINGS = {
     TribeType.ROMANS: {
         "t1": "Legionnaire",
-        "t2": "Praetorian", 
+        "t2": "Praetorian",
         "t3": "Imperian",
         "t4": "Equites Legati",  # Scout unit
         "t5": "Equites Imperatoris",
@@ -133,7 +135,7 @@ TROOP_MAPPINGS = {
     TribeType.TEUTONS: {
         "t1": "Clubswinger",
         "t2": "Spearman",
-        "t3": "Axeman", 
+        "t3": "Axeman",
         "t4": "Scout",  # Scout unit
         "t5": "Paladin",
         "t6": "Teutonic Knight",
@@ -147,7 +149,7 @@ TROOP_MAPPINGS = {
         "t2": "Swordsman",
         "t3": "Pathfinder",  # Scout unit
         "t4": "Theutates Thunder",
-        "t5": "Druidrider", 
+        "t5": "Druidrider",
         "t6": "Haeduan",
         "t7": "Ram",
         "t8": "Trebuchet",
@@ -159,17 +161,18 @@ TROOP_MAPPINGS = {
 
 # Scout unit types per tribe
 SCOUT_UNITS = {
-    TribeType.ROMANS: "t4",    # Equites Legati
-    TribeType.TEUTONS: "t4",   # Scout
-    TribeType.GAULS: "t3",     # Pathfinder
+    TribeType.ROMANS: "t4",  # Equites Legati
+    TribeType.TEUTONS: "t4",  # Scout
+    TribeType.GAULS: "t3",  # Pathfinder
 }
 
 
 # Resource types
 class ResourceType(IntEnum):
     """Resource type identifiers."""
+
     WOOD = 1
-    CLAY = 2  
+    CLAY = 2
     IRON = 3
     CROP = 4
 
@@ -177,7 +180,7 @@ class ResourceType(IntEnum):
 RESOURCE_NAMES = {
     ResourceType.WOOD: "Wood",
     ResourceType.CLAY: "Clay",
-    ResourceType.IRON: "Iron", 
+    ResourceType.IRON: "Iron",
     ResourceType.CROP: "Crop",
 }
 
@@ -185,7 +188,7 @@ RESOURCE_NAMES = {
 # Report types (from CSS classes)
 REPORT_TYPES = {
     "iReport1": "scout",
-    "iReport2": "trade", 
+    "iReport2": "trade",
     "iReport3": "reinforce",
     "iReport4": "attack",
     "iReport5": "defend",
@@ -195,8 +198,8 @@ REPORT_TYPES = {
 
 
 # HTML parsing patterns
-CHECKSUM_PATTERN = r'checksum=([a-f0-9]{6})'
-RESOURCES_PATTERN = r'var resources = ({[^}]+});'
+CHECKSUM_PATTERN = r"checksum=([a-f0-9]{6})"
+RESOURCES_PATTERN = r"var resources = ({[^}]+});"
 VILLAGE_ID_PATTERN = r'villageId["\']?\s*:\s*["\']?(\d+)'
 
 
@@ -205,7 +208,7 @@ API_ENDPOINTS = {
     "auth_login": "/api/v1/auth/login",
     "auth_redirect": "/api/v1/auth",
     "validate_destination": "/api/v1/validate-destination",
-    "autocomplete_village": "/api/v1/autocomplete/villagename", 
+    "autocomplete_village": "/api/v1/autocomplete/villagename",
     "map_position": "/api/v1/map/position",
     "graphql": "/api/v1/graphql",
     "video_open": "/api/v1/videofeature/open/buildingUpgrade",
@@ -231,7 +234,7 @@ DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
-    "Sec-Fetch-Dest": "empty", 
+    "Sec-Fetch-Dest": "empty",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Site": "same-origin",
 }
@@ -243,11 +246,11 @@ RETRY_DELAY = 1.0  # seconds
 BACKOFF_FACTOR = 2.0
 
 
-# Tribe-specific scout unit slots (map slot index to unit type)  
+# Tribe-specific scout unit slots (map slot index to unit type)
 TRIBE_SCOUT_SLOTS = {
-    TribeType.ROMANS: {"t4": 4},     # Equites Legati in slot 4
-    TribeType.TEUTONS: {"t4": 4},    # Scout in slot 4
-    TribeType.GAULS: {"t3": 3},      # Pathfinder in slot 3
+    TribeType.ROMANS: {"t4": 4},  # Equites Legati in slot 4
+    TribeType.TEUTONS: {"t4": 4},  # Scout in slot 4
+    TribeType.GAULS: {"t3": 3},  # Pathfinder in slot 3
 }
 
 
@@ -255,7 +258,7 @@ TRIBE_SCOUT_SLOTS = {
 EVENT_TYPES = {
     "building_complete": "Building Complete",
     "troop_return": "Troops Return",
-    "attack_arrival": "Attack Arrival", 
+    "attack_arrival": "Attack Arrival",
     "trade_arrival": "Trade Arrival",
     "celebration_complete": "Celebration Complete",
 }

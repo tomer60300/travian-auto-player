@@ -10,10 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -52,9 +51,7 @@ def _impersonate_for(chrome_major: int) -> str:
 def _sec_ch_ua_for(chrome_major: int) -> str:
     """Build sec-ch-ua header value from Chrome major version."""
     return (
-        f'"Chromium";v="{chrome_major}", '
-        f'"Google Chrome";v="{chrome_major}", '
-        f'"Not-A.Brand";v="99"'
+        f'"Chromium";v="{chrome_major}", "Google Chrome";v="{chrome_major}", "Not-A.Brand";v="99"'
     )
 
 
@@ -150,7 +147,7 @@ _PERSONA_TTL_DAYS = 7
 def save_persona(persona: Persona, path: Path) -> None:
     """Persist persona to a JSON file with a creation timestamp."""
     data = asdict(persona)
-    data["created_at"] = datetime.now(timezone.utc).isoformat()
+    data["created_at"] = datetime.now(UTC).isoformat()
     try:
         path.write_text(json.dumps(data, indent=2))
         logger.debug("Saved persona to %s", path)
@@ -166,12 +163,14 @@ def load_persona(path: Path, ttl_days: int = _PERSONA_TTL_DAYS) -> Persona | Non
         data = json.loads(path.read_text())
         created_at = datetime.fromisoformat(data["created_at"])
         # Ensure timezone-aware comparison
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
+            created_at = created_at.replace(tzinfo=UTC)
         age_days = (now - created_at).total_seconds() / 86400
         if age_days > ttl_days:
-            logger.info("Persona expired (%.1f days old, ttl=%d), will create new", age_days, ttl_days)
+            logger.info(
+                "Persona expired (%.1f days old, ttl=%d), will create new", age_days, ttl_days
+            )
             return None
         return Persona(
             user_agent=data["user_agent"],

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from travian_api.exceptions import TravianError
-from travian_api.web.sessions import get_travian_session, TravianSession
+from travian_api.web.sessions import TravianSession, get_travian_session
 
 logger = logging.getLogger(__name__)
 
@@ -92,17 +92,21 @@ async def claim_all_production_boosts(
                 reward_type=reward_type,
                 **extra_params,
             )
-            results.append({
-                "success": result.success,
-                "reward_type": result.reward_type,
-                "message": result.message,
-            })
+            results.append(
+                {
+                    "success": result.success,
+                    "reward_type": result.reward_type,
+                    "message": result.message,
+                }
+            )
         except TravianError as exc:
-            results.append({
-                "success": False,
-                "reward_type": reward_type,
-                "message": exc.message,
-            })
+            results.append(
+                {
+                    "success": False,
+                    "reward_type": reward_type,
+                    "message": exc.message,
+                }
+            )
 
     return {
         "results": results,

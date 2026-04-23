@@ -159,12 +159,12 @@ function RaidTargetAnalyzer() {
 
   // Cleanup WS on unmount
   useEffect(() => {
-    return () => { if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null } }
+    return () => { if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } wsRef.current = null } }
   }, [])
 
   function handleAnalyze() {
     // Close any previous WS before starting a new analysis
-    if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null }
+    if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } wsRef.current = null }
     setAnalyzing(true)
     setResults(null)
     setAnalyzeError(null)

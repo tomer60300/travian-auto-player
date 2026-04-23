@@ -1,6 +1,5 @@
 """Regression tests for HttpClient construction, OperationGate, and persona."""
 
-import pytest
 from pathlib import Path
 
 
@@ -9,8 +8,8 @@ class TestHttpClientConstruction:
 
     def test_default_construction(self):
         """HttpClient(Settings(...)) must not crash."""
-        from travian_api.config import Settings
         from travian_api.clients.http_client import HttpClient
+        from travian_api.config import Settings
 
         s = Settings(
             base_url="https://ts2.x1.europe.travian.com",
@@ -23,8 +22,8 @@ class TestHttpClientConstruction:
 
     def test_stealth_disabled(self):
         """HttpClient with stealth=False should construct without stealth components."""
-        from travian_api.config import Settings
         from travian_api.clients.http_client import HttpClient
+        from travian_api.config import Settings
 
         s = Settings(
             base_url="https://ts2.x1.europe.travian.com",
@@ -38,8 +37,8 @@ class TestHttpClientConstruction:
 
     def test_cookie_file_set_before_stealth_init(self):
         """_cookie_file must be set before _init_stealth runs."""
-        from travian_api.config import Settings
         from travian_api.clients.http_client import HttpClient
+        from travian_api.config import Settings
 
         s = Settings(
             base_url="https://ts2.x1.europe.travian.com",
@@ -53,8 +52,9 @@ class TestHttpClientConstruction:
     def test_x_version_defaults_to_config(self):
         """X-Version should default to config value (no network fetch at construction)."""
         import asyncio
-        from travian_api.config import Settings
+
         from travian_api.clients.http_client import HttpClient
+        from travian_api.config import Settings
 
         s = Settings(
             base_url="https://ts2.x1.europe.travian.com",
@@ -71,21 +71,22 @@ class TestOperationGate:
     """Test OperationGate concurrency and stop signal semantics."""
 
     def test_acquire_release(self):
-        """Acquire always succeeds (tracker, not lock). Multiple instances allowed."""
+        """Acquire grants first request, rejects duplicate op_type for same user."""
         from travian_api.web.operation_gate import OperationGate
 
         gate = OperationGate()
         assert gate.acquire(1, "farm") is True
-        assert gate.acquire(1, "farm") is True  # duplicate allowed
-        assert gate.acquire(1, "scout") is True
+        assert gate.acquire(1, "farm") is False  # duplicate rejected (mutual exclusion)
+        assert gate.acquire(1, "scout") is True  # different op_type allowed
         assert sorted(gate.get_active(1)) == ["farm", "scout"]
-        gate.release(1, "farm")  # decrement count
-        gate.release(1, "farm")  # second instance
+        gate.release(1, "farm")
         assert gate.get_active(1) == ["scout"]
+        assert gate.acquire(1, "farm") is True  # can re-acquire after release
 
     def test_stop_signal_seen_by_all_operations(self):
         """should_stop flag visible to all ops started before the signal."""
         import time as _time
+
         from travian_api.web.operation_gate import OperationGate
 
         gate = OperationGate()
@@ -101,6 +102,7 @@ class TestOperationGate:
     def test_stop_signal_not_seen_by_new_operation(self):
         """Operations started AFTER the stop signal don't see it."""
         import time as _time
+
         from travian_api.web.operation_gate import OperationGate
 
         gate = OperationGate()
@@ -114,6 +116,7 @@ class TestOperationGate:
     def test_stop_signal_cleared_on_last_release(self):
         """should_stop flag clears when last operation releases."""
         import time as _time
+
         from travian_api.web.operation_gate import OperationGate
 
         gate = OperationGate()
@@ -131,6 +134,7 @@ class TestOperationGate:
     def test_different_users_independent(self):
         """Different users don't interfere."""
         import time as _time
+
         from travian_api.web.operation_gate import OperationGate
 
         gate = OperationGate()

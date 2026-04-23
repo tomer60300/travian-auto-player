@@ -8,28 +8,36 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional
 from urllib.parse import urlencode, urljoin
 
-import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+if TYPE_CHECKING:
+    from ..stealth.browser_headers import BrowserHeaders
+    from ..stealth.captcha_guard import CaptchaGuard
+    from ..stealth.human_delay import HumanDelay
+    from ..stealth.navigator import PageNavigator
+    from ..stealth.noise import NoiseInjector
+    from ..stealth.scheduler import ActivityScheduler
+    from ..stealth.throttler import RequestThrottler
 
-import logging
+import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ..config import Settings
-from ..exceptions import ActivityBudgetExhausted, NetworkError, SessionExpiredError, TravianError
+from ..exceptions import ActivityBudgetExhausted, NetworkError, SessionExpiredError
 from ..utils.helpers import mask_sensitive_data
 
 logger = logging.getLogger(__name__)
 
 # Try to import curl_cffi for Chrome TLS fingerprinting
 try:
-    from curl_cffi.requests import AsyncSession as CurlAsyncSession
-    from curl_cffi.requests import Response as CurlResponse
     from curl_cffi import CurlError
+    from curl_cffi.requests import AsyncSession as CurlAsyncSession
+
     HAS_CURL_CFFI = True
 except ImportError:
     HAS_CURL_CFFI = False
@@ -49,10 +57,12 @@ class HttpClient:
 
     def __init__(self, settings: Settings, cookie_file: Path | None = None):
         self.settings = settings
-        self.base_url = settings.base_url.rstrip('/')
+        self.base_url = settings.base_url.rstrip("/")
         self._resolved_x_version: str | None = None
         self._auth_callback: Optional[callable] = None
-        self._cookie_file = cookie_file if cookie_file is not None else Path(".travian_cookies.json")
+        self._cookie_file = (
+            cookie_file if cookie_file is not None else Path(".travian_cookies.json")
+        )
 
         # Initialize stealth components (needs _cookie_file for persona/scheduler paths)
         self._stealth_enabled = settings.stealth
@@ -69,16 +79,20 @@ class HttpClient:
             )
 
         # Create httpx client (used as fallback or when stealth is off)
-        ua = self._browser_headers.for_page_load().get("User-Agent", "Mozilla/5.0") if self._stealth_enabled else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ua = (
+            self._browser_headers.for_page_load().get("User-Agent", "Mozilla/5.0")
+            if self._stealth_enabled
+            else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
 
         self.client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=settings.timeout,
             follow_redirects=False,
             headers={
-                'User-Agent': ua,
-                'X-Version': settings.x_version,
-            }
+                "User-Agent": ua,
+                "X-Version": settings.x_version,
+            },
         )
 
         # Load persisted cookies from file
@@ -111,15 +125,15 @@ class HttpClient:
 
     def _init_stealth(self, settings: Settings) -> None:
         """Initialize stealth/anti-bot components."""
-        from ..stealth.user_agents import UserAgentRotator
+        from ..stealth.captcha_guard import CaptchaGuard
         from ..stealth.headers import BrowserHeaders
-        from ..stealth.throttler import RequestThrottler
         from ..stealth.human_delay import HumanDelay
         from ..stealth.navigator import PageNavigator
         from ..stealth.noise import NoiseInjector
+        from ..stealth.persona import build_persona, load_persona, save_persona
         from ..stealth.scheduler import ActivityScheduler
-        from ..stealth.captcha_guard import CaptchaGuard
-        from ..stealth.persona import Persona, build_persona, load_persona, save_persona
+        from ..stealth.throttler import RequestThrottler
+        from ..stealth.user_agents import UserAgentRotator
 
         # ── Persistent persona: same cookies = same browser identity ──
         self._persona_file = self._cookie_file.parent / ".travian_persona.json"
@@ -127,9 +141,15 @@ class HttpClient:
         if persona is None:
             persona = build_persona(server_url=settings.base_url)
             save_persona(persona, self._persona_file)
-            logger.info("Created new persona: %s (impersonate=%s)", persona.user_agent, persona.impersonate)
+            logger.info(
+                "Created new persona: %s (impersonate=%s)", persona.user_agent, persona.impersonate
+            )
         else:
-            logger.debug("Loaded existing persona: %s (impersonate=%s)", persona.user_agent, persona.impersonate)
+            logger.debug(
+                "Loaded existing persona: %s (impersonate=%s)",
+                persona.user_agent,
+                persona.impersonate,
+            )
 
         self._persona = persona
         self._ua_rotator = UserAgentRotator(persona=persona, server_url=settings.base_url)
@@ -188,7 +208,7 @@ class HttpClient:
         """
         try:
             html = await self.get_html("/dorf1.php", skip_reauth=True)
-            m = re.search(r'gpack/(\d+)/', html)
+            m = re.search(r"gpack/(\d+)/", html)
             if not m:
                 m = re.search(r'window\.Travian\.version\s*=\s*["\'](\d+)["\']', html)
             if m:
@@ -216,31 +236,31 @@ class HttpClient:
         return self._stealth_enabled
 
     @property
-    def throttler(self) -> "RequestThrottler":
+    def throttler(self) -> RequestThrottler:
         return self._throttler
 
     @property
-    def human_delay(self) -> "HumanDelay":
+    def human_delay(self) -> HumanDelay:
         return self._human_delay
 
     @property
-    def navigator(self) -> "PageNavigator":
+    def navigator(self) -> PageNavigator:
         return self._navigator
 
     @property
-    def noise_injector(self) -> "NoiseInjector":
+    def noise_injector(self) -> NoiseInjector:
         return self._noise_injector
 
     @property
-    def activity_scheduler(self) -> "ActivityScheduler":
+    def activity_scheduler(self) -> ActivityScheduler:
         return self._activity_scheduler
 
     @property
-    def browser_headers(self) -> "BrowserHeaders":
+    def browser_headers(self) -> BrowserHeaders:
         return self._browser_headers
 
     @property
-    def captcha_guard(self) -> "CaptchaGuard":
+    def captcha_guard(self) -> CaptchaGuard:
         return self._captcha_guard
 
     def check_activity_budget(self) -> bool:
@@ -263,8 +283,10 @@ class HttpClient:
         session_h = sched.session_hours
         logger.warning(
             "Activity budget exhausted: rolling_24h=%.1fh/%.1fh, session=%.1fh/%.1fh",
-            rolling_h, sched.max_daily_hours,
-            session_h, sched.max_continuous_hours,
+            rolling_h,
+            sched.max_daily_hours,
+            session_h,
+            sched.max_continuous_hours,
         )
         # Show which limit was actually hit
         if rolling_h >= sched.max_daily_hours:
@@ -341,8 +363,12 @@ class HttpClient:
 
         if not self._stealth_enabled:
             return {
-                'Content-Type': 'application/json' if request_type == "json" else 'application/x-www-form-urlencoded' if request_type == "form" else '',
-                'X-Version': x_version,
+                "Content-Type": "application/json"
+                if request_type == "json"
+                else "application/x-www-form-urlencoded"
+                if request_type == "form"
+                else "",
+                "X-Version": x_version,
             }
 
         # Throttle
@@ -359,12 +385,16 @@ class HttpClient:
             headers = self._browser_headers.for_page_load(url)
 
         # Always include X-Version
-        headers['X-Version'] = x_version
+        headers["X-Version"] = x_version
 
         return headers
 
     def _stealth_post_request(
-        self, request_type: str, response: Any | None = None, *, fallback_url: str = "",
+        self,
+        request_type: str,
+        response: Any | None = None,
+        *,
+        fallback_url: str = "",
     ) -> None:
         """Update stealth state after a request.
 
@@ -397,9 +427,9 @@ class HttpClient:
         end = min(len(text), idx + len(pattern) + context_chars // 2)
         snippet = text[start:end]
         # Strip HTML tags for readability
-        snippet = re.sub(r'<[^>]+>', ' ', snippet)
+        snippet = re.sub(r"<[^>]+>", " ", snippet)
         # Collapse whitespace
-        snippet = re.sub(r'\s+', ' ', snippet).strip()
+        snippet = re.sub(r"\s+", " ", snippet).strip()
         if start > 0:
             snippet = "..." + snippet
         if end < len(text):
@@ -407,7 +437,11 @@ class HttpClient:
         return snippet
 
     async def _check_suspicious_response(
-        self, response_text: str, *, url: str = "", status_code: int = 0,
+        self,
+        response_text: str,
+        *,
+        url: str = "",
+        status_code: int = 0,
     ) -> None:
         """Check if server response indicates bot detection.
 
@@ -432,10 +466,16 @@ class HttpClient:
             logger.warning(
                 "BOT DETECTION CONFIRMED: '%s' | url=%s | status=%d | "
                 "response_len=%d | snippet: %s",
-                label, url, status_code, resp_len, snippet,
+                label,
+                url,
+                status_code,
+                resp_len,
+                snippet,
             )
             await self._captcha_guard.trigger(
-                label, url=url, status_code=status_code,
+                label,
+                url=url,
+                status_code=status_code,
                 response_snippet=snippet,
             )
 
@@ -449,9 +489,12 @@ class HttpClient:
             """Log a soft block/rate-limit signal without freezing the session."""
             snippet = self._extract_snippet(response_text, label)
             logger.warning(
-                "SOFT BLOCK DETECTED: '%s' | url=%s | status=%d | "
-                "response_len=%d | snippet: %s",
-                label, url, status_code, resp_len, snippet,
+                "SOFT BLOCK DETECTED: '%s' | url=%s | status=%d | response_len=%d | snippet: %s",
+                label,
+                url,
+                status_code,
+                resp_len,
+                snippet,
             )
             if penalty_seconds > 0 and self._stealth_enabled:
                 self._throttler.add_penalty(penalty_seconds)
@@ -465,13 +508,15 @@ class HttpClient:
         #   - <script src="...recaptcha/api...">
         #   - <iframe ...recaptcha...>
         #   - Short error/block page (<5000 chars) with the word present
-        if 'recaptcha' in response_lower:
-            is_structural = bool(re.search(
-                r'(class=["\']g-recaptcha|'
-                r'<(script|iframe)[^>]*recaptcha/api|'
-                r'<(div|form|iframe)[^>]*recaptcha)',
-                response_lower,
-            ))
+        if "recaptcha" in response_lower:
+            is_structural = bool(
+                re.search(
+                    r'(class=["\']g-recaptcha|'
+                    r"<(script|iframe)[^>]*recaptcha/api|"
+                    r"<(div|form|iframe)[^>]*recaptcha)",
+                    response_lower,
+                )
+            )
             is_short_page = resp_len < 5000
             is_error_status = status_code in (403, 429, 503)
 
@@ -481,13 +526,14 @@ class HttpClient:
             if is_short_page or is_error_status:
                 _soft_fire("recaptcha_indicator", _soft_penalty_seconds(120.0))
                 return
-            else:
-                logger.debug(
-                    "BOT DETECTION SKIPPED (likely false positive): 'recaptcha' in "
-                    "large response (%d chars, status=%d) without structural HTML "
-                    "evidence | url=%s",
-                    resp_len, status_code, url,
-                )
+            logger.debug(
+                "BOT DETECTION SKIPPED (likely false positive): 'recaptcha' in "
+                "large response (%d chars, status=%d) without structural HTML "
+                "evidence | url=%s",
+                resp_len,
+                status_code,
+                url,
+            )
 
         # ── Phase 1b: other high-confidence patterns ─────────────────
         #
@@ -496,11 +542,11 @@ class HttpClient:
         # pages.  Only fire if the response is a short error page (<5000
         # chars) or the HTTP status is an error code.
         error_page_patterns = [
-            'bot-detection',
-            'suspicious activity',
-            'automated access',
-            'your ip has been',
-            'access denied',
+            "bot-detection",
+            "suspicious activity",
+            "automated access",
+            "your ip has been",
+            "access denied",
         ]
 
         for pattern in error_page_patterns:
@@ -510,29 +556,34 @@ class HttpClient:
                 if is_short or is_error:
                     _soft_fire(pattern, _soft_penalty_seconds(90.0))
                     return
-                else:
-                    logger.debug(
-                        "BOT DETECTION SKIPPED: '%s' in large response (%d chars, "
-                        "status=%d) — likely embedded in normal page | url=%s",
-                        pattern, resp_len, status_code, url,
-                    )
+                logger.debug(
+                    "BOT DETECTION SKIPPED: '%s' in large response (%d chars, "
+                    "status=%d) — likely embedded in normal page | url=%s",
+                    pattern,
+                    resp_len,
+                    status_code,
+                    url,
+                )
 
         # ── Phase 2: captcha form — structural regex check ───────────
-        if 'captcha' in response_lower:
-            if re.search(r'<(form|div|iframe)[^>]*captcha', response_lower):
+        if "captcha" in response_lower:
+            if re.search(r"<(form|div|iframe)[^>]*captcha", response_lower):
                 await _fire("captcha_form")
                 return
 
         # ── Phase 3: "too many requests" — transient rate limit (soft) ─
         # These are temporary throttle events, not real captcha/bot detection.
         # Handle with a throttler penalty, not the captcha hard-stop.
-        if 'too many requests' in response_lower:
+        if "too many requests" in response_lower:
             if resp_len < 2000:
                 _soft_fire("too_many_requests", _soft_penalty_seconds(120.0))
                 return
 
         # ── Phase 4: ban message — exact phrase match ────────────────
-        if 'your account has been banned' in response_lower or 'you have been banned' in response_lower:
+        if (
+            "your account has been banned" in response_lower
+            or "you have been banned" in response_lower
+        ):
             await _fire("account_banned")
             return
 
@@ -542,17 +593,14 @@ class HttpClient:
         # 403/503 on short non-game pages → captcha guard (may be real block).
         if status_code in (403, 429, 503):
             _has_game_marker = (
-                'travian' in response_lower
-                or 'troop' in response_lower
-                or 'village' in response_lower
-                or 'dorf1' in response_lower
-                or 'dorf2' in response_lower
-                or 'buildingSlot' in response_lower
+                "travian" in response_lower
+                or "troop" in response_lower
+                or "village" in response_lower
+                or "dorf1" in response_lower
+                or "dorf2" in response_lower
+                or "buildingSlot" in response_lower
             )
-            _is_login_page = (
-                'login' in response_lower
-                or 'password' in response_lower
-            )
+            _is_login_page = "login" in response_lower or "password" in response_lower
             if not _has_game_marker and not _is_login_page and resp_len < 5000:
                 _soft_fire("unknown_block_page", _soft_penalty_seconds(90.0))
                 return
@@ -569,7 +617,7 @@ class HttpClient:
     def _sync_cookies_from_curl(self, curl_response: Any) -> None:
         """Copy cookies from curl_cffi response to httpx client."""
         try:
-            if hasattr(curl_response, 'cookies'):
+            if hasattr(curl_response, "cookies"):
                 for name, value in curl_response.cookies.items():
                     self.client.cookies.set(name, value)
             # Also sync from session cookies
@@ -592,7 +640,9 @@ class HttpClient:
         self._sync_cookies_from_curl(response)
         return response
 
-    async def _curl_delete_json(self, url: str, headers: Dict[str, str], data: Dict[str, Any] | None = None) -> Any:
+    async def _curl_delete_json(
+        self, url: str, headers: Dict[str, str], data: Dict[str, Any] | None = None
+    ) -> Any:
         """Make a DELETE request via curl_cffi."""
         session = await self._ensure_curl_session()
         kwargs: Dict[str, Any] = {
@@ -619,7 +669,9 @@ class HttpClient:
         self._sync_cookies_from_curl(response)
         return response
 
-    async def _curl_get(self, url: str, headers: Dict[str, str], follow_redirects: bool = True) -> Any:
+    async def _curl_get(
+        self, url: str, headers: Dict[str, str], follow_redirects: bool = True
+    ) -> Any:
         """Make a GET request via curl_cffi."""
         session = await self._ensure_curl_session()
         response = await session.get(
@@ -634,12 +686,22 @@ class HttpClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ()))
+        retry=retry_if_exception_type(
+            (httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ())
+        ),
     )
-    async def post_json(self, url: str, data: Dict[str, Any], *, skip_reauth: bool = False, safe_to_retry: bool = True, _retry: int = 0) -> Dict[str, Any]:
+    async def post_json(
+        self,
+        url: str,
+        data: Dict[str, Any],
+        *,
+        skip_reauth: bool = False,
+        safe_to_retry: bool = True,
+        _retry: int = 0,
+    ) -> Dict[str, Any]:
         """Make a POST request with JSON data."""
-        if not url.startswith('http'):
-            url = urljoin(self.base_url, url.lstrip('/'))
+        if not url.startswith("http"):
+            url = urljoin(self.base_url, url.lstrip("/"))
 
         headers = await self._stealth_pre_request(url, "json")
 
@@ -653,9 +715,10 @@ class HttpClient:
                 response = await self.client.post(url, json=data, headers=headers)
 
             # Check for session expiry indicators
-            if not skip_reauth and (response.status_code == 302 or (
-                'redirectTo' in response.text and 'code' not in response.text
-            )):
+            if not skip_reauth and (
+                response.status_code == 302
+                or ("redirectTo" in response.text and "code" not in response.text)
+            ):
                 await self._handle_session_expired()
                 if self._use_curl:
                     response = await self._curl_post_json(url, data, headers)
@@ -663,14 +726,18 @@ class HttpClient:
                     response = await self.client.post(url, json=data, headers=headers)
 
             # Check for bot detection
-            await self._check_suspicious_response(response.text, url=url, status_code=response.status_code)
+            await self._check_suspicious_response(
+                response.text, url=url, status_code=response.status_code
+            )
 
             if response.status_code >= 400:
                 if response.status_code == 429:
                     if self._stealth_enabled:
                         self._throttler.add_penalty(120.0)
                         logger.warning("429 Too Many Requests — adding 120s penalty")
-                raise NetworkError(f"HTTP {response.status_code}: {response.text}", response.status_code)
+                raise NetworkError(
+                    f"HTTP {response.status_code}: {response.text}", response.status_code
+                )
 
             self._stealth_post_request("json", response, fallback_url=url)
 
@@ -681,13 +748,15 @@ class HttpClient:
 
         except NetworkError:
             raise
-        except (httpx.HTTPStatusError,) as e:
+        except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 if self._stealth_enabled:
                     self._throttler.add_penalty(120.0)
                     logger.warning("429 Too Many Requests — adding 120s penalty")
-            raise NetworkError(f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code)
-        except (httpx.RequestError,) as e:
+            raise NetworkError(
+                f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
+            )
+        except httpx.RequestError as e:
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise  # Let tenacity see the original exception and retry
@@ -699,7 +768,13 @@ class HttpClient:
                 self._throttler.add_penalty(30.0)
                 logger.warning("Connection reset in post_json — 30s penalty then retry: %s", e)
                 await asyncio.sleep(30.0)
-                return await self.post_json(url, data, skip_reauth=skip_reauth, safe_to_retry=safe_to_retry, _retry=_retry + 1)
+                return await self.post_json(
+                    url,
+                    data,
+                    skip_reauth=skip_reauth,
+                    safe_to_retry=safe_to_retry,
+                    _retry=_retry + 1,
+                )
             raise NetworkError(f"Connection reset: {e}")
         except Exception as e:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
@@ -713,16 +788,25 @@ class HttpClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ()))
+        retry=retry_if_exception_type(
+            (httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ())
+        ),
     )
-    async def delete_json(self, url: str, *, data: Dict[str, Any] | None = None, skip_reauth: bool = False, safe_to_retry: bool = True) -> Dict[str, Any]:
+    async def delete_json(
+        self,
+        url: str,
+        *,
+        data: Dict[str, Any] | None = None,
+        skip_reauth: bool = False,
+        safe_to_retry: bool = True,
+    ) -> Dict[str, Any]:
         """Make a DELETE request (JSON response expected).
 
         Args:
             data: Optional JSON body to include with the DELETE request.
         """
-        if not url.startswith('http'):
-            url = urljoin(self.base_url, url.lstrip('/'))
+        if not url.startswith("http"):
+            url = urljoin(self.base_url, url.lstrip("/"))
 
         headers = await self._stealth_pre_request(url, "json")
 
@@ -738,27 +822,34 @@ class HttpClient:
                     response = await self.client.delete(url, headers=headers)
 
             # Check for session expiry indicators
-            if not skip_reauth and (response.status_code == 302 or (
-                'redirectTo' in response.text and 'code' not in response.text
-            )):
+            if not skip_reauth and (
+                response.status_code == 302
+                or ("redirectTo" in response.text and "code" not in response.text)
+            ):
                 await self._handle_session_expired()
                 if self._use_curl:
                     response = await self._curl_delete_json(url, headers, data=data)
                 else:
                     if data is not None:
-                        response = await self.client.request("DELETE", url, json=data, headers=headers)
+                        response = await self.client.request(
+                            "DELETE", url, json=data, headers=headers
+                        )
                     else:
                         response = await self.client.delete(url, headers=headers)
 
             # Check for bot detection
-            await self._check_suspicious_response(response.text, url=url, status_code=response.status_code)
+            await self._check_suspicious_response(
+                response.text, url=url, status_code=response.status_code
+            )
 
             if response.status_code >= 400:
                 if response.status_code == 429:
                     if self._stealth_enabled:
                         self._throttler.add_penalty(120.0)
                         logger.warning("429 Too Many Requests — adding 120s penalty")
-                raise NetworkError(f"HTTP {response.status_code}: {response.text}", response.status_code)
+                raise NetworkError(
+                    f"HTTP {response.status_code}: {response.text}", response.status_code
+                )
 
             self._stealth_post_request("json", response, fallback_url=url)
 
@@ -769,13 +860,15 @@ class HttpClient:
 
         except NetworkError:
             raise
-        except (httpx.HTTPStatusError,) as e:
+        except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 if self._stealth_enabled:
                     self._throttler.add_penalty(120.0)
                     logger.warning("429 Too Many Requests — adding 120s penalty")
-            raise NetworkError(f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code)
-        except (httpx.RequestError,) as e:
+            raise NetworkError(
+                f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
+            )
+        except httpx.RequestError as e:
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise  # Let tenacity retry
@@ -791,12 +884,14 @@ class HttpClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ()))
+        retry=retry_if_exception_type(
+            (httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ())
+        ),
     )
     async def post_form(self, url: str, data: Dict[str, str], *, safe_to_retry: bool = True) -> str:
         """Make a POST request with form data."""
-        if not url.startswith('http'):
-            url = urljoin(self.base_url, url.lstrip('/'))
+        if not url.startswith("http"):
+            url = urljoin(self.base_url, url.lstrip("/"))
 
         headers = await self._stealth_pre_request(url, "form")
 
@@ -815,15 +910,21 @@ class HttpClient:
                 if self._use_curl:
                     response = await self._curl_post_form(url, form_str, headers)
                 else:
-                    response = await self.client.post(url, content=form_str.encode(), headers=headers)
+                    response = await self.client.post(
+                        url, content=form_str.encode(), headers=headers
+                    )
 
-            await self._check_suspicious_response(response.text, url=url, status_code=response.status_code)
+            await self._check_suspicious_response(
+                response.text, url=url, status_code=response.status_code
+            )
 
             if response.status_code >= 400:
                 if response.status_code == 429:
                     if self._stealth_enabled:
                         self._throttler.add_penalty(120.0)
-                raise NetworkError(f"HTTP {response.status_code}: {response.text}", response.status_code)
+                raise NetworkError(
+                    f"HTTP {response.status_code}: {response.text}", response.status_code
+                )
 
             self._stealth_post_request("form", response, fallback_url=url)
 
@@ -831,12 +932,14 @@ class HttpClient:
 
         except NetworkError:
             raise
-        except (httpx.HTTPStatusError,) as e:
+        except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 if self._stealth_enabled:
                     self._throttler.add_penalty(120.0)
-            raise NetworkError(f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code)
-        except (httpx.RequestError,) as e:
+            raise NetworkError(
+                f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
+            )
+        except httpx.RequestError as e:
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise  # Let tenacity see the original exception and retry
@@ -852,12 +955,21 @@ class HttpClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ()))
+        retry=retry_if_exception_type(
+            (httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ())
+        ),
     )
-    async def get_html(self, url: str, follow_redirects: bool = True, *, skip_reauth: bool = False, safe_to_retry: bool = True) -> str:
+    async def get_html(
+        self,
+        url: str,
+        follow_redirects: bool = True,
+        *,
+        skip_reauth: bool = False,
+        safe_to_retry: bool = True,
+    ) -> str:
         """Make a GET request and return HTML."""
-        if not url.startswith('http'):
-            url = urljoin(self.base_url, url.lstrip('/'))
+        if not url.startswith("http"):
+            url = urljoin(self.base_url, url.lstrip("/"))
 
         headers = await self._stealth_pre_request(url, "page")
 
@@ -867,44 +979,52 @@ class HttpClient:
             if self._use_curl:
                 response = await self._curl_get(url, headers, follow_redirects=follow_redirects)
             else:
-                response = await self.client.get(url, headers=headers, follow_redirects=follow_redirects)
+                response = await self.client.get(
+                    url, headers=headers, follow_redirects=follow_redirects
+                )
 
             # Check for session expiry
-            response_url = str(response.url) if hasattr(response, 'url') else url
-            if not skip_reauth and ('login' in response_url.lower() or (
-                'auth' in response_url.lower() and 'code' not in response_url
-            )):
+            response_url = str(response.url) if hasattr(response, "url") else url
+            if not skip_reauth and (
+                "login" in response_url.lower()
+                or ("auth" in response_url.lower() and "code" not in response_url)
+            ):
                 await self._handle_session_expired()
 
                 if self._use_curl:
                     response = await self._curl_get(url, headers, follow_redirects=follow_redirects)
                 else:
-                    response = await self.client.get(url, headers=headers, follow_redirects=follow_redirects)
+                    response = await self.client.get(
+                        url, headers=headers, follow_redirects=follow_redirects
+                    )
 
-            await self._check_suspicious_response(response.text, url=url, status_code=response.status_code)
+            await self._check_suspicious_response(
+                response.text, url=url, status_code=response.status_code
+            )
 
             # Fail-closed: detect login/auth pages even when skip_reauth
             # is True.  This prevents callers (e.g., navigator._visit)
             # from recording a successful page visit when the server
             # actually returned a login redirect.
             if skip_reauth:
-                resp_url = str(response.url) if hasattr(response, 'url') else url
-                if 'login' in resp_url.lower() or (
-                    'auth' in resp_url.lower() and 'code' not in resp_url
+                resp_url = str(response.url) if hasattr(response, "url") else url
+                if "login" in resp_url.lower() or (
+                    "auth" in resp_url.lower() and "code" not in resp_url
                 ):
                     logger.warning(
                         "Login page detected with skip_reauth=True: url=%s -> %s",
-                        url, resp_url,
+                        url,
+                        resp_url,
                     )
-                    raise SessionExpiredError(
-                        f"Session expired (redirected to login): {resp_url}"
-                    )
+                    raise SessionExpiredError(f"Session expired (redirected to login): {resp_url}")
 
             if follow_redirects and response.status_code >= 400:
                 if response.status_code == 429 and self._stealth_enabled:
                     self._throttler.add_penalty(120.0)
                     logger.warning("429 Too Many Requests on GET — adding 120s penalty")
-                raise NetworkError(f"HTTP {response.status_code}: {response.text}", response.status_code)
+                raise NetworkError(
+                    f"HTTP {response.status_code}: {response.text}", response.status_code
+                )
 
             self._stealth_post_request("page", response, fallback_url=url)
 
@@ -912,12 +1032,14 @@ class HttpClient:
 
         except NetworkError:
             raise
-        except (httpx.HTTPStatusError,) as e:
+        except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 if self._stealth_enabled:
                     self._throttler.add_penalty(120.0)
-            raise NetworkError(f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code)
-        except (httpx.RequestError,) as e:
+            raise NetworkError(
+                f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
+            )
+        except httpx.RequestError as e:
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise  # Let tenacity see the original exception and retry

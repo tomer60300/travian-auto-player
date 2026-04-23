@@ -7,19 +7,30 @@ Covers:
 - Edge cases: single village, no player_id, exact boundary, zero pop
 """
 
-import pytest
 from types import SimpleNamespace
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # Fake tile objects (mimics MapTileInfo with the fields filters use)
 # ---------------------------------------------------------------------------
 
+
 def tile(x, y, vid, pid, pop, name="", player="", alliance=""):
     return SimpleNamespace(
-        x=x, y=y, village_id=vid, player_id=pid, population=pop,
-        village_name=name, player_name=player, alliance_name=alliance,
-        alliance_id=None, tribe="", distance=1.0, is_oasis=False, is_abandoned=False,
+        x=x,
+        y=y,
+        village_id=vid,
+        player_id=pid,
+        population=pop,
+        village_name=name,
+        player_name=player,
+        alliance_name=alliance,
+        alliance_id=None,
+        tribe="",
+        distance=1.0,
+        is_oasis=False,
+        is_abandoned=False,
     )
 
 
@@ -62,7 +73,7 @@ class TestSumVisiblePlayerPops:
     def test_no_player_id_skipped(self):
         tiles = [
             tile(1, 1, 100, None, 500),  # no player
-            tile(2, 2, 101, 0, 400),      # player_id = 0 (falsy)
+            tile(2, 2, 101, 0, 400),  # player_id = 0 (falsy)
             tile(3, 3, 102, 10, 200, player="alice"),
         ]
         result = _sum_visible_player_pops(tiles)
@@ -130,15 +141,14 @@ class TestPlayerPopFilterOrdering:
         # Step 3: Player pop filter using PRE-COMPUTED player_pops
         filtered = []
         for t in tiles:
-            if not t.player_id:
-                filtered.append(t)
-            elif player_pops.get(t.player_id, 0) <= max_player_pop:
+            if not t.player_id or player_pops.get(t.player_id, 0) <= max_player_pop:
                 filtered.append(t)
         tiles = filtered
 
         # finci MUST be removed (581 > 350)
-        assert not any(t.player_name == "finci" for t in tiles), \
+        assert not any(t.player_name == "finci" for t in tiles), (
             "BUG: finci should be filtered out (total pop 581 > 350)"
+        )
 
         # goodplayer and bigplayer should survive
         names = {t.player_name for t in tiles}
@@ -156,7 +166,7 @@ class TestPlayerPopFilterOrdering:
 
         # finci's 422 village was already removed → wrong total
         assert wrong_pops[50] == 159  # WRONG: should be 581
-        assert 159 <= max_player_pop  # finci INCORRECTLY passes the filter
+        assert max_player_pop >= 159  # finci INCORRECTLY passes the filter
 
     def test_exact_boundary(self):
         """Player pop exactly at the limit should pass."""

@@ -46,7 +46,7 @@ export default function Connect() {
     try {
       const res = await api.get('/travian/servers')
       setServers(res.data)
-    } catch (err) {
+    } catch {
       setServers([])
       setServersError('Failed to load saved servers')
     } finally {

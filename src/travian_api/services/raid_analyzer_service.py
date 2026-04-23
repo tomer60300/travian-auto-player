@@ -6,20 +6,18 @@ import asyncio
 import math
 import re
 import time
-from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Callable, Dict, List, Optional, Tuple, Any, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..clients.http_client import HttpClient
 from ..logging_config import get_logger
 from ..models.auth import AuthState
 from ..models.raid_analyzer import (
-    AnalyzerSettings,
     AnalysisResult,
+    AnalyzerSettings,
     RaidRecommendation,
     TargetVillageState,
 )
-from ..models.reports import BattleReportData, ScoutReportData, ReportListItem
 from ..services.reports_service import ReportsService
 
 logger = get_logger(__name__)
@@ -105,8 +103,8 @@ AXE_COST = 490
 AXE_SPEED = 6
 AXE_UPKEEP = 1
 
-T_SCOUT = 6.0   # hours — confidence decay half-life
-T_REGEN = 8.0   # hours — resource regen reference window
+T_SCOUT = 6.0  # hours — confidence decay half-life
+T_REGEN = 8.0  # hours — resource regen reference window
 
 CONCURRENCY_LIMIT = 20  # parallel report fetches
 
@@ -114,6 +112,7 @@ CONCURRENCY_LIMIT = 20  # parallel report fetches
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
+
 
 def parse_report_date(date_str: str) -> Optional[datetime]:
     """Parse report list date string to datetime.
@@ -123,24 +122,33 @@ def parse_report_date(date_str: str) -> Optional[datetime]:
     now = datetime.now()
     date_str = date_str.strip()
 
-    m = re.match(r'today,\s*(\d{1,2}):(\d{2})', date_str, re.I)
+    m = re.match(r"today,\s*(\d{1,2}):(\d{2})", date_str, re.I)
     if m:
         return now.replace(
-            hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0,
+            hour=int(m.group(1)),
+            minute=int(m.group(2)),
+            second=0,
+            microsecond=0,
         )
 
-    m = re.match(r'yesterday,\s*(\d{1,2}):(\d{2})', date_str, re.I)
+    m = re.match(r"yesterday,\s*(\d{1,2}):(\d{2})", date_str, re.I)
     if m:
         yesterday = now - timedelta(days=1)
         return yesterday.replace(
-            hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0,
+            hour=int(m.group(1)),
+            minute=int(m.group(2)),
+            second=0,
+            microsecond=0,
         )
 
-    m = re.match(r'(\d{2})\.(\d{2})\.(\d{2}),\s*(\d{1,2}):(\d{2})', date_str)
+    m = re.match(r"(\d{2})\.(\d{2})\.(\d{2}),\s*(\d{1,2}):(\d{2})", date_str)
     if m:
         return datetime(
-            2000 + int(m.group(3)), int(m.group(2)), int(m.group(1)),
-            int(m.group(4)), int(m.group(5)),
+            2000 + int(m.group(3)),
+            int(m.group(2)),
+            int(m.group(1)),
+            int(m.group(4)),
+            int(m.group(5)),
         )
 
     return None
@@ -170,7 +178,7 @@ def smithy_stat(base: float, upkeep: int, level: int) -> float:
     """S(b, u, l) = b + (b + 300*u/7) * (1.007^l - 1). If l=0: b."""
     if level == 0:
         return base
-    return base + (base + 300 * upkeep / 7) * (1.007 ** level - 1)
+    return base + (base + 300 * upkeep / 7) * (1.007**level - 1)
 
 
 def extract_wall_info(buildings: List[Dict[str, Any]]) -> Tuple[int, str]:
@@ -179,7 +187,7 @@ def extract_wall_info(buildings: List[Dict[str, Any]]) -> Tuple[int, str]:
         name = b.get("name", "")
         for wall_name, tribe in WALL_NAMES.items():
             if wall_name.lower() in name.lower():
-                level_match = re.search(r'level\s*(\d+)', b.get("detail", ""))
+                level_match = re.search(r"level\s*(\d+)", b.get("detail", ""))
                 level = int(level_match.group(1)) if level_match else 0
                 return level, tribe
     return 0, ""
@@ -192,7 +200,7 @@ def extract_trap_capacity(buildings: List[Dict[str, Any]]) -> int:
     """
     for b in buildings:
         if "trapper" in b.get("name", "").lower():
-            level_match = re.search(r'level\s*(\d+)', b.get("detail", ""))
+            level_match = re.search(r"level\s*(\d+)", b.get("detail", ""))
             if level_match:
                 level = int(level_match.group(1))
                 return 12 * level
@@ -202,6 +210,7 @@ def extract_trap_capacity(buildings: List[Dict[str, Any]]) -> int:
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
+
 
 def calculate_score(
     state: TargetVillageState,
@@ -288,7 +297,7 @@ def calculate_score(
         if total_units <= 1000:
             K = 1.5
         else:
-            K = max(1.2578, min(1.5, 2 * (1.8592 - total_units ** 0.015)))
+            K = max(1.2578, min(1.5, 2 * (1.8592 - total_units**0.015)))
 
         x = (DEF / OFF) ** K
         loss_ratio = x / (1 + x)
@@ -326,7 +335,7 @@ def calculate_score(
     fighters = n - trapped
     OFF = (fighters * club_atk + hero_strength) * (1 + hero_offense * 0.002)
     total_units = fighters + N_def
-    K = 1.5 if total_units <= 1000 else max(1.2578, min(1.5, 2 * (1.8592 - total_units ** 0.015)))
+    K = 1.5 if total_units <= 1000 else max(1.2578, min(1.5, 2 * (1.8592 - total_units**0.015)))
     x = (DEF / OFF) ** K
     loss_ratio = x / (1 + x)
     combat_dead = round(fighters * loss_ratio)
@@ -522,7 +531,9 @@ def reconstruct_state(
                 if remaining > 0:
                     surviving[uid] = remaining
             # Use newest raid's defender data
-            if not state.defender_timestamp or (raid["timestamp"] and raid["timestamp"] > state.defender_timestamp):
+            if not state.defender_timestamp or (
+                raid["timestamp"] and raid["timestamp"] > state.defender_timestamp
+            ):
                 state.defenders = surviving
                 state.defender_source = "battle"
                 state.defender_timestamp = raid["timestamp"]
@@ -536,8 +547,9 @@ def reconstruct_state(
 # ---------------------------------------------------------------------------
 
 
-def _score_undefended(eff_R: float, dist: float, t_scout, t_raid,
-                      hero_strength: int = 0, hero_offense: int = 0) -> Optional[RaidRecommendation]:
+def _score_undefended(
+    eff_R: float, dist: float, t_scout, t_raid, hero_strength: int = 0, hero_offense: int = 0
+) -> Optional[RaidRecommendation]:
     """Direct calculation for targets with no defenders and no traps."""
     if eff_R < 1 or dist <= 0:
         return None
@@ -553,15 +565,27 @@ def _score_undefended(eff_R: float, dist: float, t_scout, t_raid,
         return None
     score = round((profit / round_trip) * C_scout * C_confirm, 2)
     return RaidRecommendation(
-        n_send=n, unit_type="CLUB", send_label=f"{n} CLUB",
-        profit=profit, score=score, mode="RAID",
-        round_trip_minutes=round(round_trip * 60), est_loot=round(eff_R),
+        n_send=n,
+        unit_type="CLUB",
+        send_label=f"{n} CLUB",
+        profit=profit,
+        score=score,
+        mode="RAID",
+        round_trip_minutes=round(round_trip * 60),
+        est_loot=round(eff_R),
     )
 
 
-def _score_defended_binary(state: TargetVillageState, eff_R: float, dist: float,
-                           club_atk: float, hero_strength: int, hero_offense: int,
-                           t_scout, t_raid) -> Optional[RaidRecommendation]:
+def _score_defended_binary(
+    state: TargetVillageState,
+    eff_R: float,
+    dist: float,
+    club_atk: float,
+    hero_strength: int,
+    hero_offense: int,
+    t_scout,
+    t_raid,
+) -> Optional[RaidRecommendation]:
     """Binary search for optimal n_send against defended targets."""
     N_def = 0
     DEF = 10.0
@@ -585,7 +609,7 @@ def _score_defended_binary(state: TargetVillageState, eff_R: float, dist: float,
         if OFF <= DEF:
             return None
         total_units = fighters + N_def
-        K = 1.5 if total_units <= 1000 else max(1.2578, min(1.5, 2 * (1.8592 - total_units ** 0.015)))
+        K = 1.5 if total_units <= 1000 else max(1.2578, min(1.5, 2 * (1.8592 - total_units**0.015)))
         x = (DEF / OFF) ** K
         loss_ratio = x / (1 + x)
         combat_dead = round(fighters * loss_ratio)
@@ -635,15 +659,24 @@ def _score_defended_binary(state: TargetVillageState, eff_R: float, dist: float,
     score = round((profit / round_trip) * C_scout * C_confirm, 2)
     mode = "ATTACK" if traps > 0 else "RAID"
     return RaidRecommendation(
-        n_send=best_n, unit_type="CLUB", send_label=f"{best_n} CLUB",
-        profit=profit, score=score, mode=mode,
-        round_trip_minutes=round(round_trip * 60), est_loot=round(eff_R),
+        n_send=best_n,
+        unit_type="CLUB",
+        send_label=f"{best_n} CLUB",
+        profit=profit,
+        score=score,
+        mode=mode,
+        round_trip_minutes=round(round_trip * 60),
+        est_loot=round(eff_R),
     )
 
 
 def calculate_score_v2(
-    state: TargetVillageState, my_x: int, my_y: int,
-    smithy_level: int = 0, hero_offense: int = 0, hero_strength: int = 0,
+    state: TargetVillageState,
+    my_x: int,
+    my_y: int,
+    smithy_level: int = 0,
+    hero_offense: int = 0,
+    hero_strength: int = 0,
 ) -> Optional[RaidRecommendation]:
     """Score a target using optimised v2 paths (direct calc / binary search)."""
     dist = state.distance
@@ -674,7 +707,9 @@ def calculate_score_v2(
         return _score_undefended(eff_R, dist, t_scout, t_raid, hero_strength, hero_offense)
 
     # Defended: binary search
-    return _score_defended_binary(state, eff_R, dist, club_atk, hero_strength, hero_offense, t_scout, t_raid)
+    return _score_defended_binary(
+        state, eff_R, dist, club_atk, hero_strength, hero_offense, t_scout, t_raid
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +717,7 @@ def calculate_score_v2(
 # ---------------------------------------------------------------------------
 
 CONCURRENCY_LIMIT = 20  # for legacy methods
+
 
 class RaidAnalyzerService:
     """Orchestrates the raid analysis pipeline (v2).
@@ -699,6 +735,7 @@ class RaidAnalyzerService:
         self.reports_service = ReportsService(client)
         self._on_progress: Optional[Callable] = None
         from .village_report_cache import VillageReportCache
+
         self._cache = VillageReportCache()
 
     def on_progress(self, callback: Callable) -> None:
@@ -732,7 +769,8 @@ class RaidAnalyzerService:
         result = AnalysisResult(
             source_village_id=source.id,
             source_village_name=source.name,
-            source_x=my_x, source_y=my_y,
+            source_x=my_x,
+            source_y=my_y,
             min_resources=settings.min_resources,
             max_report_age_hours=settings.max_report_age_hours,
             radius=settings.radius,
@@ -742,39 +780,73 @@ class RaidAnalyzerService:
         )
 
         # ── Phase 1A: Scout-gated entry ───────────────────────────
-        self._progress("scout_inbox", "Scanning report inbox for scouts...", phase_num=1, total_phases=6)
+        self._progress(
+            "scout_inbox", "Scanning report inbox for scouts...", phase_num=1, total_phases=6
+        )
         scout_coords, scout_gql = await self._phase_1a_scout_inbox(settings, result, warnings)
         if not scout_coords:
-            result.warnings = warnings or ["No scout reports found in inbox within age limit. Run scouts first."]
+            result.warnings = warnings or [
+                "No scout reports found in inbox within age limit. Run scouts first."
+            ]
             result.analysis_duration_seconds = time.monotonic() - start
             return result
 
         # ── Phase 1B: GQL pre-filter ──────────────────────────────
-        self._progress("gql_filter", f"Pre-filtering {len(scout_coords)} coords...", phase_num=2, total_phases=6)
+        self._progress(
+            "gql_filter",
+            f"Pre-filtering {len(scout_coords)} coords...",
+            phase_num=2,
+            total_phases=6,
+        )
         surviving_coords = await self._phase_1b_gql_prefilter(
-            scout_coords, scout_gql, source, settings, result, warnings,
+            scout_coords,
+            scout_gql,
+            source,
+            settings,
+            result,
+            warnings,
         )
         if not surviving_coords:
-            result.warnings = warnings or ["All targets filtered out by radius/alliance/population."]
+            result.warnings = warnings or [
+                "All targets filtered out by radius/alliance/population."
+            ]
             result.analysis_duration_seconds = time.monotonic() - start
             return result
 
         # ── Phase 1C: Fetch village-reports per target ────────────
-        self._progress("village_reports", f"Fetching reports for {len(surviving_coords)} targets...", phase_num=3, total_phases=6)
+        self._progress(
+            "village_reports",
+            f"Fetching reports for {len(surviving_coords)} targets...",
+            phase_num=3,
+            total_phases=6,
+        )
         village_reports_map = await self._phase_1c_fetch_village_reports(
-            surviving_coords, settings, result, warnings,
+            surviving_coords,
+            settings,
+            result,
+            warnings,
         )
 
         # ── Phase 2+3: Group, normalise, reconstruct ─────────────
-        self._progress("reconstruct", "Reconstructing target states...", phase_num=4, total_phases=6)
+        self._progress(
+            "reconstruct", "Reconstructing target states...", phase_num=4, total_phases=6
+        )
         all_states, re_scout_early = self._phase_23_reconstruct(
-            village_reports_map, source, result,
+            village_reports_map,
+            source,
+            result,
         )
 
         # ── Phase 4: Score ────────────────────────────────────────
-        self._progress("scoring", f"Scoring {len(all_states)} targets...", phase_num=5, total_phases=6)
+        self._progress(
+            "scoring", f"Scoring {len(all_states)} targets...", phase_num=5, total_phases=6
+        )
         scored, re_scout_from_score = self._phase_4_score(
-            all_states, source, settings, result, warnings,
+            all_states,
+            source,
+            settings,
+            result,
+            warnings,
         )
 
         # ── Phase 5: Filter & sort ────────────────────────────────
@@ -787,7 +859,10 @@ class RaidAnalyzerService:
         result.warnings = warnings
         result.analysis_duration_seconds = time.monotonic() - start
 
-        self._progress("complete", f"Done: {len(final_targets)} targets, {len(result.re_scout_targets)} need re-scout")
+        self._progress(
+            "complete",
+            f"Done: {len(final_targets)} targets, {len(result.re_scout_targets)} need re-scout",
+        )
         return result
 
     # ==================================================================
@@ -795,19 +870,24 @@ class RaidAnalyzerService:
     # ==================================================================
 
     async def _phase_1a_scout_inbox(
-        self, settings: AnalyzerSettings, result: AnalysisResult, warnings: List[str],
+        self,
+        settings: AnalyzerSettings,
+        result: AnalysisResult,
+        warnings: List[str],
     ) -> Tuple[List[Tuple[int, int]], Dict[str, Dict[str, Any]]]:
         """Fetch scout reports from inbox, deduplicate to unique (x,y) coords.
 
         Returns (unique_coords, gql_metadata_dict).
         """
-        from ..models.raid_analyzer import ReScoutTarget
 
-        reports_list, pages_fetched, pages_failed, failed_pages = (
-            await self.reports_service.fetch_reports_robust(
-                max_age_hours=settings.max_report_age_hours,
-                max_pages=settings.max_pages,
-            )
+        (
+            reports_list,
+            pages_fetched,
+            pages_failed,
+            failed_pages,
+        ) = await self.reports_service.fetch_reports_robust(
+            max_age_hours=settings.max_report_age_hours,
+            max_pages=settings.max_pages,
         )
         result.total_reports_listed = len(reports_list)
         result.pages_fetched = pages_fetched
@@ -818,7 +898,10 @@ class RaidAnalyzerService:
         # Prefer scout reports; fall back to battle reports if no scouts
         scout_reports = [r for r in reports_list if r.report_type == "scout"]
         battle_reports = [r for r in reports_list if r.report_type == "battle"]
-        self._progress("scout_inbox", f"Found {len(scout_reports)} scouts, {len(battle_reports)} battles out of {len(reports_list)} total")
+        self._progress(
+            "scout_inbox",
+            f"Found {len(scout_reports)} scouts, {len(battle_reports)} battles out of {len(reports_list)} total",
+        )
 
         if scout_reports:
             entry_reports = scout_reports
@@ -837,14 +920,14 @@ class RaidAnalyzerService:
         BATCH = 250
         all_gql: Dict[str, Dict[str, Any]] = {}
         for i in range(0, len(scout_ids), BATCH):
-            batch = scout_ids[i:i + BATCH]
+            batch = scout_ids[i : i + BATCH]
             meta = await self.reports_service.fetch_report_batch_metadata(batch)
             all_gql.update(meta)
 
         coords_set: set[Tuple[int, int]] = set()
         for rid, meta in all_gql.items():
-            defender = (meta.get("defender") or {})
-            village = (defender.get("village") or {})
+            defender = meta.get("defender") or {}
+            village = defender.get("village") or {}
             x, y = village.get("x"), village.get("y")
             if x is not None and y is not None:
                 coords_set.add((int(x), int(y)))
@@ -868,8 +951,8 @@ class RaidAnalyzerService:
         # Build a coord→village_id map from GQL data
         coord_to_vid: Dict[Tuple[int, int], int] = {}
         for meta in scout_gql.values():
-            defender = (meta.get("defender") or {})
-            village = (defender.get("village") or {})
+            defender = meta.get("defender") or {}
+            village = defender.get("village") or {}
             x, y = village.get("x"), village.get("y")
             vid = village.get("id")
             if x is not None and y is not None and vid:
@@ -881,14 +964,16 @@ class RaidAnalyzerService:
         if unique_vids:
             BATCH = 250
             for i in range(0, len(unique_vids), BATCH):
-                batch = unique_vids[i:i + BATCH]
+                batch = unique_vids[i : i + BATCH]
                 aliases = [
-                    f'v{j}:village(id:{vid}){{player{{name population alliance{{tag}}}} population}}'
+                    f"v{j}:village(id:{vid}){{player{{name population alliance{{tag}}}} population}}"
                     for j, vid in enumerate(batch)
                 ]
                 query = "{" + " ".join(aliases) + "}"
                 try:
-                    resp = await self.client.post_json("/api/v1/graphql", {"query": query, "variables": {}})
+                    resp = await self.client.post_json(
+                        "/api/v1/graphql", {"query": query, "variables": {}}
+                    )
                     data = resp.get("data", {})
                     for j, vid in enumerate(batch):
                         vdata = data.get(f"v{j}")
@@ -899,7 +984,7 @@ class RaidAnalyzerService:
                     warnings.append(f"GQL village metadata batch failed: {e}")
 
         surviving: List[Tuple[int, int]] = []
-        for (x, y) in coords:
+        for x, y in coords:
             dist = travian_distance(source.x, source.y, x, y)
 
             # Radius filter
@@ -932,7 +1017,10 @@ class RaidAnalyzerService:
             surviving.append((x, y))
 
         result.coords_after_gql_filter = len(surviving)
-        self._progress("gql_filter", f"{len(surviving)} coords survive pre-filter (dropped {len(coords) - len(surviving)})")
+        self._progress(
+            "gql_filter",
+            f"{len(surviving)} coords survive pre-filter (dropped {len(coords) - len(surviving)})",
+        )
         return surviving
 
     async def _phase_1c_fetch_village_reports(
@@ -961,14 +1049,18 @@ class RaidAnalyzerService:
             async with sem:
                 try:
                     data = await self.reports_service.fetch_village_reports(
-                        x, y, fetch_details=True, max_detail_count=5,
+                        x,
+                        y,
+                        fetch_details=True,
+                        max_detail_count=5,
                     )
                     self._cache.put(x, y, data)
                     fetched += 1
                     self._progress(
                         "village_reports",
                         f"Fetched ({x},{y}) — {fetched + cache_hits}/{total}",
-                        done=fetched + cache_hits, total=total,
+                        done=fetched + cache_hits,
+                        total=total,
                     )
                     return (x, y), data
                 except Exception as e:
@@ -991,7 +1083,9 @@ class RaidAnalyzerService:
         if failed > total // 2:
             warnings.append("More than half of fetches failed — check connection or try again")
 
-        self._progress("village_reports", f"Done: {fetched} fetched, {cache_hits} cached, {failed} failed")
+        self._progress(
+            "village_reports", f"Done: {fetched} fetched, {cache_hits} cached, {failed} failed"
+        )
         return village_reports_map
 
     def _phase_23_reconstruct(
@@ -1002,7 +1096,6 @@ class RaidAnalyzerService:
     ) -> Tuple[List[TargetVillageState], List]:
         """Normalise village-reports data, reconstruct state, short-circuit depleted."""
         from ..models.raid_analyzer import ReScoutTarget
-        from ..parsers.report_parser import parse_individual_report
 
         all_states: List[TargetVillageState] = []
         re_scout_early: list = []
@@ -1020,13 +1113,16 @@ class RaidAnalyzerService:
                 # icon 1-3 = battle/raid results; carry_max > 0 means raid with carry data
                 if top_icon in (1, 2) and top_carry_max > 0 and top_carry_cur < top_carry_max:
                     # Carry was not full → village was emptied
-                    re_scout_early.append(ReScoutTarget(
-                        x=x, y=y,
-                        village_name=village_meta.get("name", ""),
-                        player_name=village_meta.get("owner", ""),
-                        reason="depleted",
-                        distance=travian_distance(source.x, source.y, x, y),
-                    ))
+                    re_scout_early.append(
+                        ReScoutTarget(
+                            x=x,
+                            y=y,
+                            village_name=village_meta.get("name", ""),
+                            player_name=village_meta.get("owner", ""),
+                            reason="depleted",
+                            distance=travian_distance(source.x, source.y, x, y),
+                        )
+                    )
                     continue
 
             # Normalise reports into reconstruct_state format
@@ -1036,25 +1132,30 @@ class RaidAnalyzerService:
                 if detail is None:
                     continue
                 timestamp = parse_report_date(entry.get("date_str", ""))
-                normalized.append({
-                    "type": detail.get("type"),
-                    "data": detail.get("data"),
-                    "report_id": entry.get("report_id", ""),
-                    "timestamp": timestamp,
-                    # Pass village meta as fallback for identity
-                    "_gql_vname": village_meta.get("name", ""),
-                    "_gql_pname": village_meta.get("owner", ""),
-                })
+                normalized.append(
+                    {
+                        "type": detail.get("type"),
+                        "data": detail.get("data"),
+                        "report_id": entry.get("report_id", ""),
+                        "timestamp": timestamp,
+                        # Pass village meta as fallback for identity
+                        "_gql_vname": village_meta.get("name", ""),
+                        "_gql_pname": village_meta.get("owner", ""),
+                    }
+                )
 
             if not normalized:
                 # No parseable reports — need re-scout
-                re_scout_early.append(ReScoutTarget(
-                    x=x, y=y,
-                    village_name=village_meta.get("name", ""),
-                    player_name=village_meta.get("owner", ""),
-                    reason="no_scout_data",
-                    distance=travian_distance(source.x, source.y, x, y),
-                ))
+                re_scout_early.append(
+                    ReScoutTarget(
+                        x=x,
+                        y=y,
+                        village_name=village_meta.get("name", ""),
+                        player_name=village_meta.get("owner", ""),
+                        reason="no_scout_data",
+                        distance=travian_distance(source.x, source.y, x, y),
+                    )
+                )
                 continue
 
             state = reconstruct_state((x, y), normalized, self.auth_state.player_name)
@@ -1091,35 +1192,44 @@ class RaidAnalyzerService:
         for state in all_states:
             # Depleted → re-scout
             if state.raidable_confidence == "depleted":
-                re_scout.append(ReScoutTarget(
-                    x=state.x, y=state.y,
-                    village_name=state.village_name,
-                    player_name=state.player_name,
-                    reason="depleted",
-                    last_report_time=state.last_report_time,
-                    estimated_raidable_before=state.estimated_raidable,
-                    distance=state.distance,
-                ))
+                re_scout.append(
+                    ReScoutTarget(
+                        x=state.x,
+                        y=state.y,
+                        village_name=state.village_name,
+                        player_name=state.player_name,
+                        reason="depleted",
+                        last_report_time=state.last_report_time,
+                        estimated_raidable_before=state.estimated_raidable,
+                        distance=state.distance,
+                    )
+                )
                 continue
 
             # Stale → re-scout
             scout_age = hours_since(state.last_scout_time)
             if scout_age is not None and scout_age > settings.stale_hours:
-                re_scout.append(ReScoutTarget(
-                    x=state.x, y=state.y,
-                    village_name=state.village_name,
-                    player_name=state.player_name,
-                    reason="stale",
-                    last_report_time=state.last_scout_time,
-                    estimated_raidable_before=state.estimated_raidable,
-                    distance=state.distance,
-                ))
+                re_scout.append(
+                    ReScoutTarget(
+                        x=state.x,
+                        y=state.y,
+                        village_name=state.village_name,
+                        player_name=state.player_name,
+                        reason="stale",
+                        last_report_time=state.last_scout_time,
+                        estimated_raidable_before=state.estimated_raidable,
+                        distance=state.distance,
+                    )
+                )
                 # Still score it (stale data is better than none) but flag it
-                pass
 
             rec = calculate_score_v2(
-                state, source.x, source.y,
-                settings.smithy_level, settings.hero_offense, settings.hero_strength,
+                state,
+                source.x,
+                source.y,
+                settings.smithy_level,
+                settings.hero_offense,
+                settings.hero_strength,
             )
             if rec is None:
                 if state.raidable_confidence == "none":

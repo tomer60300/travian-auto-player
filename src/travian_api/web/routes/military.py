@@ -8,9 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from travian_api.constants import SCOUT_UNITS, TribeType
-from travian_api.exceptions import TravianError, MilitaryError, InvalidTargetError
+from travian_api.exceptions import InvalidTargetError, MilitaryError, TravianError
 from travian_api.web.rate_limit import action_limiter
-from travian_api.web.sessions import get_travian_session, TravianSession
+from travian_api.web.sessions import TravianSession, get_travian_session
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +57,17 @@ async def _send_scouts_safe(
 
     logger.info(
         "Tribe-safe scout: tribe=%s unit=%s amount=%d target=(%d,%d) type=%s",
-        session.tribe_id, scout_unit, amount, x, y, scout_type,
+        session.tribe_id,
+        scout_unit,
+        amount,
+        x,
+        y,
+        scout_type,
     )
 
     return await session.military_service._send_troops(
-        x=x, y=y,
+        x=x,
+        y=y,
         troops=troops,
         event_type=_RAID_EVENT_TYPE,
         scout_target=scout_target_value,

@@ -8,8 +8,9 @@ when browsing Travian, including proper Sec-Fetch-* headers and Referer chains.
 from __future__ import annotations
 
 from typing import Dict, Optional
-from .user_agents import UserAgentRotator
+
 from .persona import Persona
+from .user_agents import UserAgentRotator
 
 
 class BrowserHeaders:

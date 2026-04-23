@@ -1,18 +1,18 @@
 """Video reward service — simulates video playback via ATG ad provider APIs."""
+
 from __future__ import annotations
 
 import asyncio
-import json
-import re
 import base64
+import json
 import logging
-from typing import Optional, Dict, Any, List, Tuple
+import re
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import httpx
 
 from ..clients.http_client import HttpClient
-from ..exceptions import TravianError
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ REWARD_TYPES = {
 }
 
 
-def _jquery_param(obj: Any, prefix: str = '') -> List[Tuple[str, str]]:
+def _jquery_param(obj: Any, prefix: str = "") -> List[Tuple[str, str]]:
     """Emulate jQuery.param() — serialize nested dicts to URL-encoded key=value pairs."""
     parts: List[Tuple[str, str]] = []
     if isinstance(obj, dict):
@@ -64,7 +64,7 @@ class VideoRewardResult:
 class VideoRewardService:
     """
     Claims video rewards by simulating the ATG ad provider protocol.
-    
+
     Flow:
     1. POST /api/v1/videofeature/open/{type} → vrid + iframe URL
     2. Fetch iframe HTML → extract ATG config (xsign with fc/xs URLs + xc state)
@@ -98,21 +98,20 @@ class VideoRewardService:
     ) -> VideoRewardResult:
         """
         Claim a video reward by simulating ATG ad playback.
-        
+
         Takes ~33 seconds (real 3s timing required by ATG server).
-        
+
         Args:
             reward_type: One of the REWARD_TYPES keys (e.g. "ironProductionBonus")
             tick_delay_ms: Delay between progress ticks (ms). 3000ms required for signature.
             wait_before_claim_s: Wait time before calling /ends after getting hash
-            
+
         Returns:
             VideoRewardResult
         """
         if reward_type not in REWARD_TYPES:
             return VideoRewardResult(
-                False, reward_type,
-                f"Unknown reward type. Valid: {', '.join(REWARD_TYPES.keys())}"
+                False, reward_type, f"Unknown reward type. Valid: {', '.join(REWARD_TYPES.keys())}"
             )
 
         try:
@@ -121,7 +120,7 @@ class VideoRewardService:
             # Build request data based on reward type
             open_body: Dict[str, Any] = {}
             open_endpoint = reward_type
-            
+
             # Production boost types need resource parameter
             resource_map = {
                 "lumberProductionBonus": ("productionBoost", "lumber"),
@@ -130,7 +129,7 @@ class VideoRewardService:
                 "cropProductionBonus": ("productionBoost", "crop"),
                 "productionBoost": ("productionBoost", None),  # needs resource param
             }
-            
+
             if reward_type in resource_map:
                 endpoint, resource = resource_map[reward_type]
                 open_endpoint = endpoint
@@ -143,13 +142,16 @@ class VideoRewardService:
                         open_body[key] = extra_params[key]
                 if not all(k in open_body for k in ("villageId", "slotId", "buildingId")):
                     return VideoRewardResult(
-                        False, reward_type,
-                        "buildingUpgrade requires villageId, slotId, buildingId params"
+                        False,
+                        reward_type,
+                        "buildingUpgrade requires villageId, slotId, buildingId params",
                     )
-            
+
             open_data = await self.http_client.post_json(
-                f"/api/v1/videofeature/open/{open_endpoint}", open_body,
-                skip_reauth=True, safe_to_retry=False,
+                f"/api/v1/videofeature/open/{open_endpoint}",
+                open_body,
+                skip_reauth=True,
+                safe_to_retry=False,
             )
 
             vrid = open_data.get("vrid") if isinstance(open_data, dict) else None
@@ -157,14 +159,18 @@ class VideoRewardService:
 
             if not vrid or not iframe_url:
                 error_msg = open_data.get("error", open_data.get("message", "Unknown"))
-                return VideoRewardResult(False, reward_type, f"Open failed: {error_msg}", str(open_data))
+                return VideoRewardResult(
+                    False, reward_type, f"Open failed: {error_msg}", str(open_data)
+                )
 
             logger.info(f"Got vrid={vrid}, iframe URL length={len(iframe_url)}")
 
             # Phase 2: Fetch iframe and extract ATG config
             atg_config = await self._extract_atg_config(iframe_url)
             if not atg_config:
-                return VideoRewardResult(False, reward_type, "Failed to extract ATG config from iframe")
+                return VideoRewardResult(
+                    False, reward_type, "Failed to extract ATG config from iframe"
+                )
 
             xsign = atg_config.get("xsign")
             if not xsign:
@@ -175,21 +181,28 @@ class VideoRewardService:
             xc = xsign.get("xc")
 
             if not all([fc_url, xs_url, xc]):
-                return VideoRewardResult(False, reward_type, f"Missing ATG fields: fc={bool(fc_url)} xs={bool(xs_url)} xc={bool(xc)}")
+                return VideoRewardResult(
+                    False,
+                    reward_type,
+                    f"Missing ATG fields: fc={bool(fc_url)} xs={bool(xs_url)} xc={bool(xc)}",
+                )
 
             # Get banner/zone IDs
             waterfall = atg_config.get("waterfall", [])
             bid = waterfall[0].get("bid", "17606") if waterfall else "17606"
             zone_id = str(atg_config.get("zone_id", "3716"))
 
-            logger.info(f"ATG config: fc={fc_url[:50]}... xs={xs_url[:50]}... bid={bid} zone={zone_id}")
+            logger.info(
+                f"ATG config: fc={fc_url[:50]}... xs={xs_url[:50]}... bid={bid} zone={zone_id}"
+            )
 
             # Phase 3: Notify server that video started
             logger.info("Notifying server: video started")
             await self.http_client.post_json(
                 "/api/v1/videofeature/start",
                 {"vrid": vrid},
-                skip_reauth=True, safe_to_retry=False,
+                skip_reauth=True,
+                safe_to_retry=False,
             )
 
             # Phase 4: Send progress ticks to fc.php (real 3s timing required)
@@ -201,13 +214,21 @@ class VideoRewardService:
                 "X-Requested-With": "XMLHttpRequest",
             }
 
-            logger.info(f"Sending progress ticks ({total_duration}s with {tick_delay_ms}ms delays)...")
+            logger.info(
+                f"Sending progress ticks ({total_duration}s with {tick_delay_ms}ms delays)..."
+            )
             for ts in range(0, total_duration + 1, tick_interval):
                 remaining = total_duration - ts
                 xc["ts"] = ts + tick_interval  # Mutate xc.ts BEFORE sending (matches JS behavior)
 
                 try:
-                    payload = {"self": xc, "at": ts, "rm": remaining, "b": str(bid), "z": str(zone_id)}
+                    payload = {
+                        "self": xc,
+                        "at": ts,
+                        "rm": remaining,
+                        "b": str(bid),
+                        "z": str(zone_id),
+                    }
                     body = urlencode(_jquery_param(payload))
                     resp = await atg.post(fc_url, content=body.encode(), headers=atg_headers)
                     if resp.status_code == 200 and resp.text.strip():
@@ -221,6 +242,7 @@ class VideoRewardService:
                 if ts < total_duration:
                     # Stealth: micro-jitter on tick timing (must stay close to 3s)
                     from ..stealth.timing import HumanTiming
+
                     tick_s = tick_delay_ms / 1000.0
                     await asyncio.sleep(max(2.0, HumanTiming.micro_jitter(tick_s, jitter_pct=0.1)))
 
@@ -232,14 +254,17 @@ class VideoRewardService:
                 xs_resp = await atg.post(xs_url, content=xs_body.encode(), headers=atg_headers)
                 if xs_resp.status_code != 200:
                     return VideoRewardResult(
-                        False, reward_type,
-                        f"xs.php returned {xs_resp.status_code}: {xs_resp.text[:200]}"
+                        False,
+                        reward_type,
+                        f"xs.php returned {xs_resp.status_code}: {xs_resp.text[:200]}",
                     )
                 # Parse XML response for signature
                 sign_match = re.search(r"<sign>(.*?)</sign>", xs_resp.text)
                 signature = sign_match.group(1) if sign_match else ""
                 if not signature:
-                    return VideoRewardResult(False, reward_type, "Empty signature from xs.php (timing too fast?)")
+                    return VideoRewardResult(
+                        False, reward_type, "Empty signature from xs.php (timing too fast?)"
+                    )
                 logger.info(f"Got signature: {signature}")
             except Exception as e:
                 return VideoRewardResult(False, reward_type, f"xs.php failed: {e}")
@@ -249,6 +274,7 @@ class VideoRewardService:
 
             # Phase 6: Wait a bit then claim reward (human-like reaction)
             from ..stealth.timing import HumanTiming
+
             actual_wait = wait_before_claim_s + HumanTiming.reaction_time(base_ms=1500)
             logger.info(f"Waiting {actual_wait:.1f}s before claiming...")
             await asyncio.sleep(actual_wait)
@@ -257,12 +283,14 @@ class VideoRewardService:
             ends_data = await self.http_client.post_json(
                 "/api/v1/videofeature/ends",
                 {"vrid": vrid, "hash": signature},
-                skip_reauth=True, safe_to_retry=False,
+                skip_reauth=True,
+                safe_to_retry=False,
             )
 
             if ends_data.get("error"):
                 return VideoRewardResult(
-                    False, reward_type,
+                    False,
+                    reward_type,
                     f"Server rejected: {ends_data.get('error')} - {ends_data.get('message', '')}",
                     str(ends_data),
                 )
@@ -275,7 +303,8 @@ class VideoRewardService:
 
             logger.info(f"Reward claimed successfully! Type: {reward_type}")
             return VideoRewardResult(
-                True, reward_type,
+                True,
+                reward_type,
                 f"Reward claimed: {REWARD_TYPES.get(reward_type, reward_type)}",
                 str(ends_data),
             )
@@ -303,22 +332,22 @@ class VideoRewardService:
             if not b64_match:
                 # Try the standard atob() pattern
                 b64_match = re.search(r'atob\(["\']([^"\']+)["\']\)', html)
-            
+
             if not b64_match:
                 logger.warning("No base64 config found in iframe HTML")
                 return None
 
             config_json = base64.b64decode(b64_match.group(1)).decode("utf-8")
             config = json.loads(config_json)
-            
+
             # xsign can be at root or inside config
             if "xsign" not in config and "config" in config and "xsign" in config["config"]:
                 config["xsign"] = config["config"]["xsign"]
-            
+
             # zone_id can be in config subobject
             if "zone_id" not in config and "config" in config:
                 config["zone_id"] = config["config"].get("zone_id")
-            
+
             return config
 
         except Exception as e:
@@ -328,19 +357,22 @@ class VideoRewardService:
     async def get_available_rewards(self) -> Dict[str, bool]:
         """
         Check which video rewards are currently available.
-        
+
         Returns:
             Dict mapping reward type to availability
         """
         try:
-            resp = await self.http_client.post_json("/api/v1/graphql", {
-                "query": """{ ownPlayer { productionBoost {
+            resp = await self.http_client.post_json(
+                "/api/v1/graphql",
+                {
+                    "query": """{ ownPlayer { productionBoost {
                     lumber { videoFeatureAvailable isActive }
                     clay { videoFeatureAvailable isActive }
                     iron { videoFeatureAvailable isActive }
                     crop { videoFeatureAvailable isActive }
                 } } }"""
-            })
+                },
+            )
             data = resp.get("data", {}).get("ownPlayer", {}).get("productionBoost", {})
             result = {}
             for resource in ["lumber", "clay", "iron", "crop"]:
@@ -352,4 +384,3 @@ class VideoRewardService:
         except Exception as e:
             logger.warning(f"Failed to check rewards: {e}")
             return {}
-

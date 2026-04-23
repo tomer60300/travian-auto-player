@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import stat
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import bcrypt
@@ -41,9 +41,10 @@ def _warn_if_world_readable(path: Path) -> None:
         mode = path.stat().st_mode
         if mode & (stat.S_IRGRP | stat.S_IROTH):
             _logger.warning(
-                "Security: %s is readable by other users (mode %o). "
-                "Run: chmod 600 %s",
-                path, mode & 0o777, path,
+                "Security: %s is readable by other users (mode %o). Run: chmod 600 %s",
+                path,
+                mode & 0o777,
+                path,
             )
     except (OSError, AttributeError):
         pass  # Windows or inaccessible — skip
@@ -107,7 +108,7 @@ def create_access_token(user_id: int, username: str) -> str:
     payload = {
         "user_id": user_id,
         "username": username,
-        "exp": datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS),
+        "exp": datetime.now(UTC) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 

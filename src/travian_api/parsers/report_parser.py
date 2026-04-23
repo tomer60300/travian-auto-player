@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Any
-from bs4 import BeautifulSoup
-from datetime import datetime
+from typing import Any, Dict, List
 
-from ..models.reports import Report, ReportListItem, BattleReportData, ScoutReportData
+from bs4 import BeautifulSoup
+
+from ..models.reports import BattleReportData, ReportListItem, ScoutReportData
 from .html_parser import clean_unicode
 
 
@@ -21,24 +21,24 @@ def parse_report_list(html: str) -> List[ReportListItem]:
       <div><a href="?id=...">subject</a></div>
       <td class="dat">date</td>
     """
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, "html.parser")
     reports = []
 
-    for checkbox in soup.find_all('input', {'name': 'ids[]'}):
-        report_id = checkbox.get('value', '')
+    for checkbox in soup.find_all("input", {"name": "ids[]"}):
+        report_id = checkbox.get("value", "")
         if not report_id:
             continue
 
-        row = checkbox.find_parent('tr')
+        row = checkbox.find_parent("tr")
         if not row:
             continue
 
         icon_type = 0
         report_type = "unknown"
-        icon_img = row.find('img', class_=re.compile(r'iReport'))
+        icon_img = row.find("img", class_=re.compile(r"iReport"))
         if icon_img:
-            classes = ' '.join(icon_img.get('class', []))
-            type_match = re.search(r'iReport(\d+)', classes)
+            classes = " ".join(icon_img.get("class", []))
+            type_match = re.search(r"iReport(\d+)", classes)
             if type_match:
                 icon_type = int(type_match.group(1))
                 if 1 <= icon_type <= 8:
@@ -57,33 +57,35 @@ def parse_report_list(html: str) -> List[ReportListItem]:
                     report_type = "misc"
 
         subject = ""
-        sub_cell = row.find('td', class_='sub')
+        sub_cell = row.find("td", class_="sub")
         if sub_cell:
-            div = sub_cell.find('div')
+            div = sub_cell.find("div")
             if div:
-                link = div.find('a')
+                link = div.find("a")
                 if link:
                     subject = clean_unicode(link.get_text(strip=True))
 
         date_str = ""
-        dat_cell = row.find('td', class_='dat')
+        dat_cell = row.find("td", class_="dat")
         if dat_cell:
             date_str = clean_unicode(dat_cell.get_text(strip=True))
 
         is_read = True
-        status_img = row.find('img', class_=re.compile(r'messageStatus'))
+        status_img = row.find("img", class_=re.compile(r"messageStatus"))
         if status_img:
-            status_classes = ' '.join(status_img.get('class', []))
-            is_read = 'messageStatusUnread' not in status_classes
+            status_classes = " ".join(status_img.get("class", []))
+            is_read = "messageStatusUnread" not in status_classes
 
-        reports.append(ReportListItem(
-            report_id=report_id,
-            icon_type=icon_type,
-            report_type=report_type,
-            subject=subject,
-            date_str=date_str,
-            is_read=is_read,
-        ))
+        reports.append(
+            ReportListItem(
+                report_id=report_id,
+                icon_type=icon_type,
+                report_type=report_type,
+                subject=subject,
+                date_str=date_str,
+                is_read=is_read,
+            )
+        )
 
     return reports
 
@@ -97,21 +99,21 @@ def parse_alliance_report_list(html: str) -> List[ReportListItem]:
       - Report ID in <a href="/report?id=XXX&aid=YYY">
       - Same iReport icons and td.sub/td.dat classes
     """
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, "html.parser")
     reports = []
 
-    for row in soup.find_all('tr'):
-        sub_cell = row.find('td', class_='sub')
+    for row in soup.find_all("tr"):
+        sub_cell = row.find("td", class_="sub")
         if not sub_cell:
             continue
 
         # Extract report ID from link: /report?id=XXX&aid=YYY
         report_id = ""
         subject = ""
-        report_link = sub_cell.find('a', href=re.compile(r'/report\?id='))
+        report_link = sub_cell.find("a", href=re.compile(r"/report\?id="))
         if report_link:
-            href = report_link.get('href', '')
-            id_match = re.search(r'id=(\d+)', href)
+            href = report_link.get("href", "")
+            id_match = re.search(r"id=(\d+)", href)
             if id_match:
                 report_id = id_match.group(1)
             subject = clean_unicode(report_link.get_text(strip=True))
@@ -122,10 +124,10 @@ def parse_alliance_report_list(html: str) -> List[ReportListItem]:
         # Icon type
         icon_type = 0
         report_type = "unknown"
-        icon_img = row.find('img', class_=re.compile(r'iReport'))
+        icon_img = row.find("img", class_=re.compile(r"iReport"))
         if icon_img:
-            classes = ' '.join(icon_img.get('class', []))
-            type_match = re.search(r'iReport(\d+)', classes)
+            classes = " ".join(icon_img.get("class", []))
+            type_match = re.search(r"iReport(\d+)", classes)
             if type_match:
                 icon_type = int(type_match.group(1))
                 if 1 <= icon_type <= 8:
@@ -145,18 +147,20 @@ def parse_alliance_report_list(html: str) -> List[ReportListItem]:
 
         # Date
         date_str = ""
-        dat_cell = row.find('td', class_='dat')
+        dat_cell = row.find("td", class_="dat")
         if dat_cell:
             date_str = clean_unicode(dat_cell.get_text(strip=True))
 
-        reports.append(ReportListItem(
-            report_id=report_id,
-            icon_type=icon_type,
-            report_type=report_type,
-            subject=subject,
-            date_str=date_str,
-            is_read=True,
-        ))
+        reports.append(
+            ReportListItem(
+                report_id=report_id,
+                icon_type=icon_type,
+                report_type=report_type,
+                subject=subject,
+                date_str=date_str,
+                is_read=True,
+            )
+        )
 
     return reports
 
@@ -172,26 +176,26 @@ def _parse_resource_wrapper(wrapper) -> Dict[str, int]:
       </div>
     """
     result = {}
-    for icon_div in wrapper.find_all('div', class_='inlineIcon'):
-        title = (icon_div.get('title') or '').lower()
-        value_span = icon_div.find('span', class_='value')
+    for icon_div in wrapper.find_all("div", class_="inlineIcon"):
+        title = (icon_div.get("title") or "").lower()
+        value_span = icon_div.find("span", class_="value")
         if not value_span:
             continue
         raw = clean_unicode(value_span.get_text(strip=True))
         # Strip any level text e.g. "Residence level 4" — skip non-numeric
-        num_match = re.search(r'^(\d[\d,\.]*)', raw.replace(',', ''))
+        num_match = re.search(r"^(\d[\d,\.]*)", raw.replace(",", ""))
         if not num_match:
             continue
         val = int(num_match.group(1))
         # Map title to resource key
-        if 'lumber' in title or 'wood' in title:
-            result['lumber'] = val
-        elif 'clay' in title:
-            result['clay'] = val
-        elif 'iron' in title:
-            result['iron'] = val
-        elif 'crop' in title:
-            result['crop'] = val
+        if "lumber" in title or "wood" in title:
+            result["lumber"] = val
+        elif "clay" in title:
+            result["clay"] = val
+        elif "iron" in title:
+            result["iron"] = val
+        elif "crop" in title:
+            result["crop"] = val
     return result
 
 
@@ -216,34 +220,34 @@ def _parse_troops_table(table) -> Dict[str, int]:
       </tbody>
     """
     troops = {}
-    tbodies = table.find_all('tbody', class_='units')
+    tbodies = table.find_all("tbody", class_="units")
     if len(tbodies) < 2:
         return troops
 
     # First tbody: unit icons (headers)
     header_tbody = tbodies[0]
     unit_keys = []
-    for td in header_tbody.find_all('td', class_='uniticon'):
-        img = td.find('img', class_=re.compile(r'\bunit\b'))
+    for td in header_tbody.find_all("td", class_="uniticon"):
+        img = td.find("img", class_=re.compile(r"\bunit\b"))
         if img:
-            alt = img.get('alt', '').strip()
-            cls_list = img.get('class', [])
-            uid = next((c for c in cls_list if re.match(r'^u\d+$|^uhero$', c)), None)
+            alt = img.get("alt", "").strip()
+            cls_list = img.get("class", [])
+            uid = next((c for c in cls_list if re.match(r"^u\d+$|^uhero$", c)), None)
             unit_keys.append(uid or alt)
         else:
             unit_keys.append(None)
 
     # Second tbody: unit counts
     count_tbody = tbodies[1]
-    count_row = count_tbody.find('tr')
+    count_row = count_tbody.find("tr")
     if not count_row:
         return troops
 
-    count_cells = count_row.find_all('td', class_='unit')
+    count_cells = count_row.find_all("td", class_="unit")
     for key, cell in zip(unit_keys, count_cells):
         if key is None:
             continue
-        raw = cell.get_text(strip=True).replace(',', '')
+        raw = cell.get_text(strip=True).replace(",", "")
         if raw.isdigit():
             troops[key] = int(raw)
 
@@ -258,19 +262,19 @@ def _parse_troops_losses(table) -> Dict[str, int]:
     Loss values are typically negative or shown as casualties.
     """
     losses = {}
-    tbodies = table.find_all('tbody', class_='units')
+    tbodies = table.find_all("tbody", class_="units")
     if len(tbodies) < 2:
         return losses
 
     # Unit keys from first tbody
     header_tbody = tbodies[0]
     unit_keys = []
-    for td in header_tbody.find_all('td', class_='uniticon'):
-        img = td.find('img', class_=re.compile(r'\bunit\b'))
+    for td in header_tbody.find_all("td", class_="uniticon"):
+        img = td.find("img", class_=re.compile(r"\bunit\b"))
         if img:
-            cls_list = img.get('class', [])
-            uid = next((c for c in cls_list if re.match(r'^u\d+$|^uhero$', c)), None)
-            alt = img.get('alt', '').strip()
+            cls_list = img.get("class", [])
+            uid = next((c for c in cls_list if re.match(r"^u\d+$|^uhero$", c)), None)
+            alt = img.get("alt", "").strip()
             unit_keys.append(uid or alt)
         else:
             unit_keys.append(None)
@@ -280,22 +284,22 @@ def _parse_troops_losses(table) -> Dict[str, int]:
     if len(tbodies) >= 3:
         loss_tbody = tbodies[2]
     else:
-        loss_tbody = table.find('tbody', class_='last')
+        loss_tbody = table.find("tbody", class_="last")
 
     if not loss_tbody:
         return losses
 
-    loss_row = loss_tbody.find('tr')
+    loss_row = loss_tbody.find("tr")
     if not loss_row:
         return losses
 
-    loss_cells = loss_row.find_all('td', class_='unit')
+    loss_cells = loss_row.find_all("td", class_="unit")
     for key, cell in zip(unit_keys, loss_cells):
         if key is None:
             continue
-        raw = cell.get_text(strip=True).replace(',', '')
+        raw = cell.get_text(strip=True).replace(",", "")
         # Losses may appear as negative numbers or plain numbers
-        cleaned = raw.lstrip('-')
+        cleaned = raw.lstrip("-")
         if cleaned.isdigit() and int(cleaned) > 0:
             losses[key] = int(cleaned)
 
@@ -305,41 +309,41 @@ def _parse_troops_losses(table) -> Dict[str, int]:
 def _extract_player_village(soup: BeautifulSoup, role: str) -> Dict[str, Any]:
     """Extract player + village info from a role div (attacker/defender)."""
     info: Dict[str, Any] = {
-        'player_name': '',
-        'village_name': '',
-        'village_id': 0,
-        'coordinates': {'x': 0, 'y': 0},
+        "player_name": "",
+        "village_name": "",
+        "village_id": 0,
+        "coordinates": {"x": 0, "y": 0},
     }
 
-    role_div = soup.find('div', class_=re.compile(rf'\brole\s+{role}\b'))
+    role_div = soup.find("div", class_=re.compile(rf"\brole\s+{role}\b"))
     if not role_div:
         return info
 
     # Village link: <a href="/karte.php?d=ID">Village Name</a>
     # Note: some links are /karte.php with no text (map icon), skip those
-    for a in role_div.find_all('a', href=re.compile(r'karte\.php')):
-        href = a.get('href', '')
+    for a in role_div.find_all("a", href=re.compile(r"karte\.php")):
+        href = a.get("href", "")
         name = clean_unicode(a.get_text(strip=True))
         if not name:
             continue
-        did_match = re.search(r'd=(\d+)', href)
+        did_match = re.search(r"d=(\d+)", href)
         if did_match:
-            info['village_id'] = int(did_match.group(1))
-        info['village_name'] = name
+            info["village_id"] = int(did_match.group(1))
+        info["village_name"] = name
         break
 
     # Player link: <a href="/spieler.php?...">Name</a>
-    for a in role_div.find_all('a', href=re.compile(r'spieler\.php')):
+    for a in role_div.find_all("a", href=re.compile(r"spieler\.php")):
         name = clean_unicode(a.get_text(strip=True))
         if name:
-            info['player_name'] = name
+            info["player_name"] = name
             break
 
     # Coordinates: look for coord text like "(−161|167)" or "(x|y)" in role div
-    role_text = role_div.get_text(' ', strip=True)
-    coord_match = re.search(r'\((-?\d+)\|(-?\d+)\)', role_text)
+    role_text = role_div.get_text(" ", strip=True)
+    coord_match = re.search(r"\((-?\d+)\|(-?\d+)\)", role_text)
     if coord_match:
-        info['coordinates'] = {'x': int(coord_match.group(1)), 'y': int(coord_match.group(2))}
+        info["coordinates"] = {"x": int(coord_match.group(1)), "y": int(coord_match.group(2))}
 
     return info
 
@@ -354,41 +358,41 @@ def parse_scout_report(html: str) -> ScoutReportData:
     - Defender troops (if visible)
     - Target village info
     """
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, "html.parser")
 
-    target_info = _extract_player_village(soup, 'defender')
+    target_info = _extract_player_village(soup, "defender")
 
     # Resources: first resourceWrapper inside additionalInformation
-    resources: Dict[str, int] = {'lumber': 0, 'clay': 0, 'iron': 0, 'crop': 0}
+    resources: Dict[str, int] = {"lumber": 0, "clay": 0, "iron": 0, "crop": 0}
     cranny: int = 0
     raidable: int = 0
 
-    ai_table = soup.find('table', class_='additionalInformation')
+    ai_table = soup.find("table", class_="additionalInformation")
     if ai_table:
-        wrappers = ai_table.find_all('div', class_='resourceWrapper')
+        wrappers = ai_table.find_all("div", class_="resourceWrapper")
         if wrappers:
             # First wrapper = actual resources
             resources.update(_parse_resource_wrapper(wrappers[0]))
         if len(wrappers) > 1:
             # Second wrapper = cranny + raidable
-            for icon_div in wrappers[1].find_all('div', class_='inlineIcon'):
-                title = (icon_div.get('title') or '').lower()
-                value_span = icon_div.find('span', class_='value')
+            for icon_div in wrappers[1].find_all("div", class_="inlineIcon"):
+                title = (icon_div.get("title") or "").lower()
+                value_span = icon_div.find("span", class_="value")
                 if not value_span:
                     continue
-                raw = clean_unicode(value_span.get_text(strip=True)).replace(',', '')
+                raw = clean_unicode(value_span.get_text(strip=True)).replace(",", "")
                 if raw.isdigit():
                     val = int(raw)
-                    if 'cranny' in title:
+                    if "cranny" in title:
                         cranny = val
-                    elif 'raidable' in title or 'carry' in title:
+                    elif "raidable" in title or "carry" in title:
                         raidable = val
 
     # Defender troops (if visible)
     troops: Dict[str, int] = {}
-    defender_role = soup.find('div', class_=re.compile(r'\brole\s+defender\b'))
+    defender_role = soup.find("div", class_=re.compile(r"\brole\s+defender\b"))
     if defender_role:
-        for table in defender_role.find_all('table'):
+        for table in defender_role.find_all("table"):
             t = _parse_troops_table(table)
             if t:
                 troops.update(t)
@@ -396,19 +400,19 @@ def parse_scout_report(html: str) -> ScoutReportData:
     # Buildings from additionalInformation
     buildings: List[Dict[str, Any]] = []
     if ai_table:
-        for row in ai_table.find_all('tr'):
-            th = row.find('th')
-            if th and 'building' in th.get_text(strip=True).lower():
-                for icon_div in row.find_all('div', class_='inlineIcon'):
-                    title = icon_div.get('title', '')
-                    value_span = icon_div.find('span', class_='value')
+        for row in ai_table.find_all("tr"):
+            th = row.find("th")
+            if th and "building" in th.get_text(strip=True).lower():
+                for icon_div in row.find_all("div", class_="inlineIcon"):
+                    title = icon_div.get("title", "")
+                    value_span = icon_div.find("span", class_="value")
                     if title and value_span:
-                        buildings.append({'name': title, 'detail': value_span.get_text(strip=True)})
+                        buildings.append({"name": title, "detail": value_span.get_text(strip=True)})
 
     return ScoutReportData(
         target=target_info,
         resources=resources,
-        stealable_resources={'raidable': raidable, 'cranny': cranny},
+        stealable_resources={"raidable": raidable, "cranny": cranny},
         troops=troops,
         buildings=buildings,
     )
@@ -416,10 +420,10 @@ def parse_scout_report(html: str) -> ScoutReportData:
 
 def parse_battle_report(html: str) -> BattleReportData:
     """Parse a battle report page."""
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, "html.parser")
 
-    attacker_info = _extract_player_village(soup, 'attacker')
-    defender_info = _extract_player_village(soup, 'defender')
+    attacker_info = _extract_player_village(soup, "attacker")
+    defender_info = _extract_player_village(soup, "defender")
 
     # Troops and losses per role
     attacker_troops: Dict[str, int] = {}
@@ -427,9 +431,9 @@ def parse_battle_report(html: str) -> BattleReportData:
     attacker_losses: Dict[str, int] = {}
     defender_losses: Dict[str, int] = {}
 
-    attacker_role = soup.find('div', class_=re.compile(r'\brole\s+attacker\b'))
+    attacker_role = soup.find("div", class_=re.compile(r"\brole\s+attacker\b"))
     if attacker_role:
-        for table in attacker_role.find_all('table'):
+        for table in attacker_role.find_all("table"):
             t = _parse_troops_table(table)
             if t:
                 attacker_troops.update(t)
@@ -437,9 +441,9 @@ def parse_battle_report(html: str) -> BattleReportData:
             if l:
                 attacker_losses.update(l)
 
-    defender_role = soup.find('div', class_=re.compile(r'\brole\s+defender\b'))
+    defender_role = soup.find("div", class_=re.compile(r"\brole\s+defender\b"))
     if defender_role:
-        for table in defender_role.find_all('table'):
+        for table in defender_role.find_all("table"):
             t = _parse_troops_table(table)
             if t:
                 defender_troops.update(t)
@@ -451,46 +455,47 @@ def parse_battle_report(html: str) -> BattleReportData:
     # e.g. "Attacker with no losses" = attacker won
     # "Defender with no losses" = defender won
     # Both have losses = draw or partial
-    battle_result = 'unknown'
-    outcomes = [div.get_text(' ', strip=True).lower()
-                for div in soup.find_all('div', class_='outcome')]
+    battle_result = "unknown"
+    outcomes = [
+        div.get_text(" ", strip=True).lower() for div in soup.find_all("div", class_="outcome")
+    ]
     if outcomes:
-        attacker_outcome = next((o for o in outcomes if 'attacker' in o), '')
-        defender_outcome = next((o for o in outcomes if 'defender' in o), '')
-        atk_no_loss = 'no loss' in attacker_outcome
-        def_no_loss = 'no loss' in defender_outcome
+        attacker_outcome = next((o for o in outcomes if "attacker" in o), "")
+        defender_outcome = next((o for o in outcomes if "defender" in o), "")
+        atk_no_loss = "no loss" in attacker_outcome
+        def_no_loss = "no loss" in defender_outcome
         if atk_no_loss and not def_no_loss:
-            battle_result = 'victory'
+            battle_result = "victory"
         elif def_no_loss and not atk_no_loss:
-            battle_result = 'defeat'
+            battle_result = "defeat"
         elif atk_no_loss and def_no_loss:
             # Both no losses: attacker won if defender had no actual troops (all zeros = empty)
             has_def_troops = any(v > 0 for v in defender_troops.values())
             if not has_def_troops:
-                battle_result = 'victory'
+                battle_result = "victory"
             else:
-                battle_result = 'draw'
+                battle_result = "draw"
         else:
-            battle_result = 'victory'  # both took losses but attacker was aggressor
+            battle_result = "victory"  # both took losses but attacker was aggressor
     else:
         # Fallback: check string text
-        for el in soup.find_all(string=re.compile(r'(victory|defeat|draw)', re.I)):
+        for el in soup.find_all(string=re.compile(r"(victory|defeat|draw)", re.I)):
             t = el.strip().lower()
-            if 'victory' in t:
-                battle_result = 'victory'
+            if "victory" in t:
+                battle_result = "victory"
                 break
-            elif 'defeat' in t:
-                battle_result = 'defeat'
+            if "defeat" in t:
+                battle_result = "defeat"
                 break
-            elif 'draw' in t:
-                battle_result = 'draw'
+            if "draw" in t:
+                battle_result = "draw"
                 break
 
     # Bounty (resources stolen) — in resourceWrapper after battle
-    bounty: Dict[str, int] = {'lumber': 0, 'clay': 0, 'iron': 0, 'crop': 0}
-    ai_table = soup.find('table', class_='additionalInformation')
+    bounty: Dict[str, int] = {"lumber": 0, "clay": 0, "iron": 0, "crop": 0}
+    ai_table = soup.find("table", class_="additionalInformation")
     if ai_table:
-        rw = ai_table.find('div', class_='resourceWrapper')
+        rw = ai_table.find("div", class_="resourceWrapper")
         if rw:
             bounty.update(_parse_resource_wrapper(rw))
 
@@ -499,25 +504,25 @@ def parse_battle_report(html: str) -> BattleReportData:
     carry_max = 0
     carry_full = False
     if ai_table:
-        carry_div = ai_table.find('div', class_=re.compile(r'inlineIcon.*carry|carry.*inlineIcon'))
+        carry_div = ai_table.find("div", class_=re.compile(r"inlineIcon.*carry|carry.*inlineIcon"))
         if not carry_div:
             # Fallback: find any div with 'carry' in class within additionalInformation
-            for div in ai_table.find_all('div', class_=True):
-                classes = ' '.join(div.get('class', []))
-                if 'carry' in classes and 'inlineIcon' in classes:
+            for div in ai_table.find_all("div", class_=True):
+                classes = " ".join(div.get("class", []))
+                if "carry" in classes and "inlineIcon" in classes:
                     carry_div = div
                     break
         if carry_div:
-            carry_i = carry_div.find('i', class_=re.compile(r'carry'))
+            carry_i = carry_div.find("i", class_=re.compile(r"carry"))
             if carry_i:
-                carry_classes = ' '.join(carry_i.get('class', []))
-                carry_full = 'full' in carry_classes
-            carry_span = carry_div.find('span', class_='value')
+                carry_classes = " ".join(carry_i.get("class", []))
+                carry_full = "full" in carry_classes
+            carry_span = carry_div.find("span", class_="value")
             if carry_span:
                 raw_carry = clean_unicode(carry_span.get_text(strip=True))
                 # Clean Unicode directional markers and non-digit/slash chars
-                cleaned = re.sub(r'[^\d/]', '', raw_carry)
-                parts = cleaned.split('/')
+                cleaned = re.sub(r"[^\d/]", "", raw_carry)
+                parts = cleaned.split("/")
                 if len(parts) == 2:
                     carry_used = int(parts[0]) if parts[0] else 0
                     carry_max = int(parts[1]) if parts[1] else 0
@@ -529,31 +534,32 @@ def parse_battle_report(html: str) -> BattleReportData:
     _combat_re = re.search(
         r'combatStatistic.*?<span[^>]*class="value"[^>]*>\s*([\d\s,.]+)</span>'
         r'.*?<span[^>]*class="value"[^>]*>\s*([\d\s,.]+)</span>',
-        html, re.DOTALL | re.IGNORECASE,
+        html,
+        re.DOTALL | re.IGNORECASE,
     )
     if _combat_re:
         try:
-            attacker_combat_strength = int(re.sub(r'[^\d]', '', _combat_re.group(1)))
-            defender_combat_strength = int(re.sub(r'[^\d]', '', _combat_re.group(2)))
+            attacker_combat_strength = int(re.sub(r"[^\d]", "", _combat_re.group(1)))
+            defender_combat_strength = int(re.sub(r"[^\d]", "", _combat_re.group(2)))
         except (ValueError, IndexError):
             attacker_combat_strength = 0
             defender_combat_strength = 0
 
     # BS4 fallback if regex didn't find values
-    combat_table = soup.find('table', class_='combatStatistic') if not _combat_re else None
+    combat_table = soup.find("table", class_="combatStatistic") if not _combat_re else None
     if combat_table:
-        for tr in combat_table.find_all('tr'):
-            th = tr.find('th')
+        for tr in combat_table.find_all("tr"):
+            th = tr.find("th")
             if not th:
                 continue
             header = th.get_text(strip=True).lower()
-            if 'combat' in header or 'kampfkraft' in header or 'strength' in header:
-                tds = tr.find_all('td')
+            if "combat" in header or "kampfkraft" in header or "strength" in header:
+                tds = tr.find_all("td")
                 for i, td in enumerate(tds):
-                    value_span = td.find('span', class_='value')
+                    value_span = td.find("span", class_="value")
                     if value_span:
                         raw = clean_unicode(value_span.get_text(strip=True))
-                        cleaned = re.sub(r'[^\d]', '', raw)
+                        cleaned = re.sub(r"[^\d]", "", raw)
                         if cleaned.isdigit():
                             if i == 0:
                                 attacker_combat_strength = int(cleaned)
@@ -584,19 +590,19 @@ def parse_battle_report(html: str) -> BattleReportData:
 # u14 = Scout (Teuton scout, tribe slot t4, offset u11+3)
 # u23 = Pathfinder (Gaul scout, tribe slot t3, offset u21+2)
 # Also include u44/u54/u64 for Egyptians/Huns/Spartans and hero
-SCOUT_UNIT_IDS = {'u4', 'u14', 'u23', 'u44', 'u54', 'u64', 'uhero'}
+SCOUT_UNIT_IDS = {"u4", "u14", "u23", "u44", "u54", "u64", "uhero"}
 
 
 def _has_troop_losses(soup: BeautifulSoup) -> bool:
     """Check if the report shows troop losses (indicates a battle, not a scout)."""
     # Loss rows in troop tables have class 'losses' or contain struck-through numbers
-    for tbody in soup.find_all('tbody', class_='units last'):
-        for td in tbody.find_all('td', class_='unit'):
-            text = td.get_text(strip=True).replace(',', '')
-            if text.lstrip('-').isdigit() and int(text) != 0:
+    for tbody in soup.find_all("tbody", class_="units last"):
+        for td in tbody.find_all("td", class_="unit"):
+            text = td.get_text(strip=True).replace(",", "")
+            if text.lstrip("-").isdigit() and int(text) != 0:
                 return True
     # Also check for casualty rows explicitly
-    for span in soup.find_all('span', class_='casualty'):
+    for span in soup.find_all("span", class_="casualty"):
         return True
     return False
 
@@ -604,10 +610,10 @@ def _has_troop_losses(soup: BeautifulSoup) -> bool:
 def _get_attacker_unit_ids(soup: BeautifulSoup) -> set:
     """Extract set of unit IDs (e.g. {'u4'}) from the attacker's troop table."""
     unit_ids = set()
-    attacker_role = soup.find('div', class_=re.compile(r'\brole\s+attacker\b'))
+    attacker_role = soup.find("div", class_=re.compile(r"\brole\s+attacker\b"))
     if not attacker_role:
         return unit_ids
-    for table in attacker_role.find_all('table'):
+    for table in attacker_role.find_all("table"):
         troops = _parse_troops_table(table)
         for uid, count in troops.items():
             if count > 0:
@@ -628,18 +634,18 @@ def parse_individual_report(html: str) -> Dict[str, Any]:
 
     Returns dict with keys: type, data
     """
-    soup = BeautifulSoup(html, 'html.parser')
+    soup = BeautifulSoup(html, "html.parser")
 
-    has_attacker = bool(soup.find('div', class_=re.compile(r'\brole\s+attacker\b')))
-    has_defender = bool(soup.find('div', class_=re.compile(r'\brole\s+defender\b')))
+    has_attacker = bool(soup.find("div", class_=re.compile(r"\brole\s+attacker\b")))
+    has_defender = bool(soup.find("div", class_=re.compile(r"\brole\s+defender\b")))
 
     # Check for additionalInformation table with Resources header
-    ai_table = soup.find('table', class_='additionalInformation')
+    ai_table = soup.find("table", class_="additionalInformation")
     has_resources_row = False
     if ai_table:
-        for th in ai_table.find_all('th'):
+        for th in ai_table.find_all("th"):
             header_text = th.get_text(strip=True).lower()
-            if header_text == 'resources':
+            if header_text == "resources":
                 has_resources_row = True
                 break
 
@@ -651,17 +657,16 @@ def parse_individual_report(html: str) -> Dict[str, Any]:
         has_losses = _has_troop_losses(soup)
 
         if is_scout_only and not has_losses:
-            return {'type': 'scout', 'data': parse_scout_report(html)}
-        else:
-            # Battle with bounty — parse as battle (bounty captured in parse_battle_report)
-            return {'type': 'battle', 'data': parse_battle_report(html)}
+            return {"type": "scout", "data": parse_scout_report(html)}
+        # Battle with bounty — parse as battle (bounty captured in parse_battle_report)
+        return {"type": "battle", "data": parse_battle_report(html)}
 
     if has_attacker or has_defender:
-        return {'type': 'battle', 'data': parse_battle_report(html)}
+        return {"type": "battle", "data": parse_battle_report(html)}
 
     return {
-        'type': 'unknown',
-        'data': {'html_snippet': html[:500]},
+        "type": "unknown",
+        "data": {"html_snippet": html[:500]},
     }
 
 
@@ -671,14 +676,14 @@ def parse_individual_report(html: str) -> Dict[str, Any]:
 
 # iReport icon → battle result classification
 _BATTLE_RESULT_MAP = {
-    1: 'attacker_won_no_losses',
-    2: 'attacker_won_with_losses',
-    3: 'attacker_lost',
-    4: 'defender_won_no_losses',
-    5: 'defender_won_with_losses',
-    6: 'defender_lost',
-    7: 'attacker_partial_losses',
-    8: 'mixed',
+    1: "attacker_won_no_losses",
+    2: "attacker_won_with_losses",
+    3: "attacker_lost",
+    4: "defender_won_no_losses",
+    5: "defender_won_with_losses",
+    6: "defender_lost",
+    7: "attacker_partial_losses",
+    8: "mixed",
 }
 
 
@@ -694,118 +699,128 @@ def parse_map_tile_reports(html: str) -> Dict[str, Any]:
         reports: List of dicts with {report_id, aid, date_str, icon_type,
                  battle_result, battle_result_text, carry_info, carry_current, carry_max}
     """
-    soup = BeautifulSoup(html, 'html.parser')
-    result: Dict[str, Any] = {'village': {}, 'reports': []}
+    soup = BeautifulSoup(html, "html.parser")
+    result: Dict[str, Any] = {"village": {}, "reports": []}
 
     # ── Village metadata ───────────────────────────────────────────
     village: Dict[str, Any] = {
-        'name': '', 'owner': '', 'tribe': '', 'alliance': '',
-        'population': 0, 'distance': '', 'village_id': 0,
-        'coordinates': {'x': 0, 'y': 0},
+        "name": "",
+        "owner": "",
+        "tribe": "",
+        "alliance": "",
+        "population": 0,
+        "distance": "",
+        "village_id": 0,
+        "coordinates": {"x": 0, "y": 0},
     }
 
-    heading = soup.find('h1', class_='titleInHeader') or soup.find('h1')
+    heading = soup.find("h1", class_="titleInHeader") or soup.find("h1")
     if heading:
         raw = clean_unicode(heading.get_text(strip=True))
-        village['name'] = raw
-        coord_match = re.search(r'\(?(-?\d+)\s*\|?\s*(-?\d+)\)?', raw)
+        village["name"] = raw
+        coord_match = re.search(r"\(?(-?\d+)\s*\|?\s*(-?\d+)\)?", raw)
         if coord_match:
-            village['coordinates'] = {
-                'x': int(coord_match.group(1)),
-                'y': int(coord_match.group(2)),
+            village["coordinates"] = {
+                "x": int(coord_match.group(1)),
+                "y": int(coord_match.group(2)),
             }
 
     # Village info table — rows keyed by <th> label
-    vi_table = soup.find('table', id='village_info')
+    vi_table = soup.find("table", id="village_info")
     if vi_table:
-        for row in vi_table.find_all('tr'):
-            th = row.find('th')
-            td = row.find('td')
+        for row in vi_table.find_all("tr"):
+            th = row.find("th")
+            td = row.find("td")
             if not th or not td:
                 continue
             label = clean_unicode(th.get_text(strip=True)).lower()
             value = clean_unicode(td.get_text(strip=True))
-            if 'tribe' in label:
-                village['tribe'] = value
-            elif 'alliance' in label:
-                village['alliance'] = value
-            elif 'owner' in label or 'player' in label:
-                village['owner'] = value
-            elif 'population' in label:
+            if "tribe" in label:
+                village["tribe"] = value
+            elif "alliance" in label:
+                village["alliance"] = value
+            elif "owner" in label or "player" in label:
+                village["owner"] = value
+            elif "population" in label:
                 try:
-                    village['population'] = int(value.replace(',', '').replace('.', ''))
+                    village["population"] = int(value.replace(",", "").replace(".", ""))
                 except ValueError:
                     pass
-            elif 'distance' in label:
-                village['distance'] = value
+            elif "distance" in label:
+                village["distance"] = value
 
     # village_id from "Show reports of village" link
-    vid_link = soup.find('a', href=re.compile(r'report/overview\?villageId='))
+    vid_link = soup.find("a", href=re.compile(r"report/overview\?villageId="))
     if vid_link:
-        vid_match = re.search(r'villageId=(\d+)', vid_link.get('href', ''))
+        vid_match = re.search(r"villageId=(\d+)", vid_link.get("href", ""))
         if vid_match:
-            village['village_id'] = int(vid_match.group(1))
+            village["village_id"] = int(vid_match.group(1))
 
-    result['village'] = village
+    result["village"] = village
 
     # ── Reports from the Reports/troop_info tab ────────────────────
-    rep_table = (
-        soup.find('table', id='troop_info')
-        or soup.find('table', class_=re.compile(r'\brep\b'))
+    rep_table = soup.find("table", id="troop_info") or soup.find(
+        "table", class_=re.compile(r"\brep\b")
     )
     if not rep_table:
         return result
 
-    for row in rep_table.find_all('tr'):
-        td = row.find('td')
+    for row in rep_table.find_all("tr"):
+        td = row.find("td")
         if not td:
             continue
 
-        links = td.find_all('a', href=re.compile(r'/report\?'))
+        links = td.find_all("a", href=re.compile(r"/report\?"))
         if not links:
             continue
 
         entry: Dict[str, Any] = {
-            'report_id': '', 'aid': '', 'date_str': '',
-            'icon_type': 0, 'battle_result': '', 'battle_result_text': '',
-            'carry_info': '', 'carry_current': 0, 'carry_max': 0,
+            "report_id": "",
+            "aid": "",
+            "date_str": "",
+            "icon_type": 0,
+            "battle_result": "",
+            "battle_result_text": "",
+            "carry_info": "",
+            "carry_current": 0,
+            "carry_max": 0,
         }
 
         # Icon: <img class="iReport iReport{N}" alt="..."/>
-        icon_img = td.find('img', class_=re.compile(r'iReport'))
+        icon_img = td.find("img", class_=re.compile(r"iReport"))
         if icon_img:
-            classes = ' '.join(icon_img.get('class', []))
-            type_match = re.search(r'iReport(\d+)', classes)
+            classes = " ".join(icon_img.get("class", []))
+            type_match = re.search(r"iReport(\d+)", classes)
             if type_match:
                 icon_num = int(type_match.group(1))
-                entry['icon_type'] = icon_num
-                entry['battle_result'] = _BATTLE_RESULT_MAP.get(icon_num, 'unknown')
-            entry['battle_result_text'] = clean_unicode(icon_img.get('alt', ''))
+                entry["icon_type"] = icon_num
+                entry["battle_result"] = _BATTLE_RESULT_MAP.get(icon_num, "unknown")
+            entry["battle_result_text"] = clean_unicode(icon_img.get("alt", ""))
 
         # Links: first = date link, may have carry img in second
         for link in links:
-            href = link.get('href', '')
-            id_match = re.search(r'[?&]id=(\d+)', href)
-            aid_match = re.search(r'[?&]aid=(\d+)', href)
-            if id_match and not entry['report_id']:
-                entry['report_id'] = id_match.group(1)
-            if aid_match and not entry['aid']:
-                entry['aid'] = aid_match.group(1)
+            href = link.get("href", "")
+            id_match = re.search(r"[?&]id=(\d+)", href)
+            aid_match = re.search(r"[?&]aid=(\d+)", href)
+            if id_match and not entry["report_id"]:
+                entry["report_id"] = id_match.group(1)
+            if aid_match and not entry["aid"]:
+                entry["aid"] = aid_match.group(1)
 
-            carry_img = link.find('img', class_=re.compile(r'reportInfoIcon'))
+            carry_img = link.find("img", class_=re.compile(r"reportInfoIcon"))
             if carry_img:
-                carry_alt = carry_img.get('alt', '')
-                entry['carry_info'] = carry_alt
-                carry_match = re.match(r'(\d+)\s*/\s*(\d+)', carry_alt)
+                carry_alt = carry_img.get("alt", "")
+                entry["carry_info"] = carry_alt
+                carry_match = re.match(r"(\d+)\s*/\s*(\d+)", carry_alt)
                 if carry_match:
-                    entry['carry_current'] = int(carry_match.group(1))
-                    entry['carry_max'] = int(carry_match.group(2))
+                    entry["carry_current"] = int(carry_match.group(1))
+                    entry["carry_max"] = int(carry_match.group(2))
             else:
                 date_text = clean_unicode(link.get_text(strip=True))
-                if date_text and not entry['date_str']:
-                    entry['date_str'] = date_text
+                if date_text and not entry["date_str"]:
+                    entry["date_str"] = date_text
 
-        if entry['report_id']:
-            result['reports'].append(entry)
+        if entry["report_id"]:
+            result["reports"].append(entry)
 
     return result

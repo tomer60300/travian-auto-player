@@ -449,7 +449,7 @@ export default function BuildQueue() {
       mountedRef.current = false
       timersRef.current.forEach(({ type, id }) => type === 'interval' ? clearInterval(id) : clearTimeout(id))
       timersRef.current = []
-      if (wsRef.current) { try { wsRef.current.close() } catch {} ; wsRef.current = null }
+      if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } ; wsRef.current = null }
     }
   }, [])
 

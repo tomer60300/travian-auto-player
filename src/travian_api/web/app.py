@@ -14,36 +14,35 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
+# Import DB models so init_db() creates their tables
+from travian_api.web.models import farm_builder as _fb_models  # noqa: F401
 from travian_api.web.models.db import init_db
-from travian_api.web.sessions import session_manager
+from travian_api.web.routes.buildings import router as buildings_router
+from travian_api.web.routes.captcha import router as captcha_router
+from travian_api.web.routes.exec_sessions import router as exec_sessions_router
+from travian_api.web.routes.farm import router as farm_router
+from travian_api.web.routes.farm_builder import router as farm_builder_router
+from travian_api.web.routes.military import router as military_router
+from travian_api.web.routes.queue import router as queue_router
+from travian_api.web.routes.reports import router as reports_router
+from travian_api.web.routes.scout import router as scout_router
+from travian_api.web.routes.status_export import router as status_export_router
+from travian_api.web.routes.travian_auth import router as travian_auth_router
 
 # Import all route routers
 from travian_api.web.routes.users import router as users_router
-from travian_api.web.routes.travian_auth import router as travian_auth_router
-from travian_api.web.routes.villages import router as villages_router
-from travian_api.web.routes.buildings import router as buildings_router
-from travian_api.web.routes.military import router as military_router
-from travian_api.web.routes.reports import router as reports_router
 from travian_api.web.routes.video import router as video_router
-from travian_api.web.routes.farm import router as farm_router
-from travian_api.web.routes.scout import router as scout_router
-from travian_api.web.routes.queue import router as queue_router
-from travian_api.web.routes.status_export import router as status_export_router
-from travian_api.web.routes.captcha import router as captcha_router
-from travian_api.web.routes.exec_sessions import router as exec_sessions_router
-from travian_api.web.routes.farm_builder import router as farm_builder_router
+from travian_api.web.routes.villages import router as villages_router
+from travian_api.web.sessions import session_manager
+from travian_api.web.ws.analyzer_ws import router as analyzer_ws_router
+from travian_api.web.ws.farm_builder import router as farm_builder_ws_router
 
 # Import WebSocket routers
 from travian_api.web.ws.farm_ws import router as farm_ws_router
-from travian_api.web.ws.scout_ws import router as scout_ws_router
-from travian_api.web.ws.queue_ws import router as queue_ws_router
 from travian_api.web.ws.logs_ws import router as logs_ws_router
-from travian_api.web.ws.analyzer_ws import router as analyzer_ws_router
 from travian_api.web.ws.oasis_raider import router as oasis_raider_ws_router
-from travian_api.web.ws.farm_builder import router as farm_builder_ws_router
-
-# Import DB models so init_db() creates their tables
-from travian_api.web.models import farm_builder as _fb_models  # noqa: F401
+from travian_api.web.ws.queue_ws import router as queue_ws_router
+from travian_api.web.ws.scout_ws import router as scout_ws_router
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +61,9 @@ def _quiet_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> 
     """
     exc = context.get("exception")
     if isinstance(exc, ConnectionResetError):
-        logger.debug("Suppressed connection-reset during socket teardown: %s", context.get("message", ""))
+        logger.debug(
+            "Suppressed connection-reset during socket teardown: %s", context.get("message", "")
+        )
         return
     # Fall back to the default handler for everything else
     loop.default_exception_handler(context)
@@ -73,6 +74,7 @@ async def lifespan(app: FastAPI):
     """Application lifecycle: init DB on startup, disconnect sessions on shutdown."""
     # Attach the log broadcast handler so server logs stream to web UI
     from travian_api.logging_config import setup_logging
+
     setup_logging(attach_broadcast=True)
 
     # Suppress Windows ProactorEventLoop socket teardown noise
@@ -83,6 +85,7 @@ async def lifespan(app: FastAPI):
     logger.info("Database initialized")
 
     from travian_api.web.execution_sessions import exec_session_manager
+
     exec_session_manager.start_cleanup()
 
     yield
@@ -97,6 +100,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
 
 # Correlation ID middleware — tags each request with a unique ID for tracing
 class CorrelationIdMiddleware(BaseHTTPMiddleware):
@@ -141,6 +145,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 "frame-ancestors 'none'"
             )
         return response
+
 
 # CORS for development (Vite dev server runs on port 5173)
 app.add_middleware(

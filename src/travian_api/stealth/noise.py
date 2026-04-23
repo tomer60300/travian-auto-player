@@ -10,10 +10,9 @@ who occasionally gets distracted.
 import asyncio
 import logging
 import random
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
-from .human_delay import HumanDelay, ActionType
-from .timing import HumanTiming
+from .human_delay import HumanDelay
 
 if TYPE_CHECKING:
     from .navigator import PageNavigator
@@ -73,9 +72,7 @@ class NoiseInjector:
         self._actions_since_break += 1
 
         if random.random() < self._noise_rate:
-            logger.debug(
-                f"Noise injection triggered (after {self._actions_since_noise} actions)"
-            )
+            logger.debug(f"Noise injection triggered (after {self._actions_since_noise} actions)")
             self._actions_since_noise = 0
 
             try:

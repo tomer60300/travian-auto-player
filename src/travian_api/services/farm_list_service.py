@@ -8,10 +8,8 @@ from typing import Dict, List, Optional
 from ..clients.http_client import HttpClient
 from ..models.farm_list import (
     FarmList,
-    FarmListSlot,
     FarmListSendResult,
     FarmListSendTargetResult,
-    SlotTroop,
 )
 
 logger = logging.getLogger(__name__)
@@ -202,8 +200,7 @@ class FarmListService:
         error = resp.get("error", "")
         if error:
             return [
-                FarmListSendTargetResult(id=sid, status="error", error=error)
-                for sid in slot_ids
+                FarmListSendTargetResult(id=sid, status="error", error=error) for sid in slot_ids
             ]
 
         result_lists = resp.get("lists", [])
@@ -258,10 +255,14 @@ class FarmListService:
                 results = await self._send_batch(list_id, target_slot_ids)
             except Exception as e:
                 if "goldclub" in str(e).lower():
-                    return FarmListSendResult(targets=[
-                        FarmListSendTargetResult(id=s, status="error", error="plus.error_goldclub")
-                        for s in target_slot_ids
-                    ])
+                    return FarmListSendResult(
+                        targets=[
+                            FarmListSendTargetResult(
+                                id=s, status="error", error="plus.error_goldclub"
+                            )
+                            for s in target_slot_ids
+                        ]
+                    )
                 raise
             return FarmListSendResult(targets=results)
 
@@ -272,23 +273,30 @@ class FarmListService:
 
         logger.info(
             "Farm list %d: round-robin cursor=%d/%d, sending in batches of %d",
-            list_id, cursor, total, self.BATCH_SIZE,
+            list_id,
+            cursor,
+            total,
+            self.BATCH_SIZE,
         )
 
         all_results: List[FarmListSendTargetResult] = []
         troops_exhausted = False
 
         for batch_start in range(0, total, self.BATCH_SIZE):
-            batch = rotated[batch_start:batch_start + self.BATCH_SIZE]
+            batch = rotated[batch_start : batch_start + self.BATCH_SIZE]
 
             try:
                 batch_results = await self._send_batch(list_id, batch)
             except Exception as e:
                 if "goldclub" in str(e).lower():
-                    all_results.extend([
-                        FarmListSendTargetResult(id=s, status="error", error="plus.error_goldclub")
-                        for s in batch
-                    ])
+                    all_results.extend(
+                        [
+                            FarmListSendTargetResult(
+                                id=s, status="error", error="plus.error_goldclub"
+                            )
+                            for s in batch
+                        ]
+                    )
                     troops_exhausted = True
                     break
                 raise
@@ -298,14 +306,14 @@ class FarmListService:
             # Check if this entire batch failed with troop errors → stop
             batch_sent = sum(1 for t in batch_results if not t.error)
             batch_troop_errors = sum(
-                1 for t in batch_results
-                if t.error and "troops" in t.error.lower()
+                1 for t in batch_results if t.error and "troops" in t.error.lower()
             )
             if batch_sent == 0 and batch_troop_errors == len(batch_results):
                 troops_exhausted = True
                 logger.info(
                     "Farm list %d: troops exhausted at batch offset %d",
-                    list_id, batch_start,
+                    list_id,
+                    batch_start,
                 )
                 break
 
@@ -315,7 +323,11 @@ class FarmListService:
         self._cursors[list_id] = new_cursor
         logger.info(
             "Farm list %d: %d/%d sent, cursor %d → %d%s",
-            list_id, sent_ok, len(all_results), cursor, new_cursor,
+            list_id,
+            sent_ok,
+            len(all_results),
+            cursor,
+            new_cursor,
             " (troops exhausted)" if troops_exhausted else "",
         )
 
@@ -352,8 +364,9 @@ class FarmListService:
             # Stealth: delay between farm list sends
             if i < len(list_ids) - 1:
                 from ..stealth.human_delay import ActionType
+
                 await self.http_client.human_delay.wait(
-                    ActionType.BETWEEN_RAIDS, f"pause between farm list sends ({i+1}/{len(list_ids)})"
+                    ActionType.BETWEEN_RAIDS,
+                    f"pause between farm list sends ({i + 1}/{len(list_ids)})",
                 )
         return results
-

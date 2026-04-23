@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import traceback
 from collections import deque
 from threading import Lock

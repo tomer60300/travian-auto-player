@@ -1,35 +1,40 @@
 """Command Line Interface for Travian API."""
+
 from __future__ import annotations
 
 import asyncio
-import sys
 import io
-from typing import Any, Dict, Optional, List
+import sys
+from typing import Any, Dict, List, Optional
 
 # Force UTF-8 output on Windows so non-ASCII village names display correctly
-if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-if sys.stderr.encoding and sys.stderr.encoding.lower() not in ('utf-8', 'utf8'):
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stderr.encoding and sys.stderr.encoding.lower() not in ("utf-8", "utf8"):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from .config import Settings
 from .clients.http_client import HttpClient
+from .config import Settings
+from .constants import BUILDING_NAMES
 from .services.auth_service import AuthService
+from .services.auto_scout_service import AutoScoutService
+from .services.build_queue_service import BuildPlan, BuildQueueService
 from .services.building_service import BuildingService
-from .services.build_queue_service import BuildQueueService, BuildPlan
+from .services.farm_list_service import FarmListService
 from .services.military_service import MilitaryService
 from .services.reports_service import ReportsService
 from .services.target_resolver import TargetResolver
-from .services.video_reward_service import VideoRewardService, REWARD_TYPES
-from .services.farm_list_service import FarmListService
-from .services.auto_scout_service import AutoScoutService
-from .constants import BUILDING_NAMES
+from .services.video_reward_service import REWARD_TYPES, VideoRewardService
 
-app = typer.Typer(name="travian", help="Travian Legends API - Game automation library and CLI", add_completion=False)
+app = typer.Typer(
+    name="travian",
+    help="Travian Legends API - Game automation library and CLI",
+    add_completion=False,
+)
 console = Console(highlight=False)
 
 # Global overrides (set by top-level options)
@@ -46,12 +51,22 @@ _max_hours_override: Optional[float] = None
 
 @app.callback()
 def main_callback(
-    server: Optional[str] = typer.Option(None, "--server", "-s", help="Game server URL", envvar="TRAVIAN_BASE_URL"),
+    server: Optional[str] = typer.Option(
+        None, "--server", "-s", help="Game server URL", envvar="TRAVIAN_BASE_URL"
+    ),
     username: Optional[str] = typer.Option(None, "--username", "-u", help="Account username/email"),
     password: Optional[str] = typer.Option(None, "--password", "-p", help="Account password"),
-    stealth: Optional[bool] = typer.Option(None, "--stealth/--no-stealth", help="Enable/disable stealth mode (anti-bot). Default: enabled"),
-    noise_rate: Optional[float] = typer.Option(None, "--noise-rate", help="Noise injection probability 0.0-1.0 (default: 0.15)"),
-    max_hours: Optional[float] = typer.Option(None, "--max-hours", help="Maximum daily active hours (default: 10.0)"),
+    stealth: Optional[bool] = typer.Option(
+        None,
+        "--stealth/--no-stealth",
+        help="Enable/disable stealth mode (anti-bot). Default: enabled",
+    ),
+    noise_rate: Optional[float] = typer.Option(
+        None, "--noise-rate", help="Noise injection probability 0.0-1.0 (default: 0.15)"
+    ),
+    max_hours: Optional[float] = typer.Option(
+        None, "--max-hours", help="Maximum daily active hours (default: 10.0)"
+    ),
 ):
     """Global options applied before any command."""
     global _server_override, _username_override, _password_override, _stealth_override
@@ -90,19 +105,21 @@ def _settings(interactive: bool = True) -> Settings:
     missing_server = not s.base_url
     missing_username = not s.username
     missing_password = not s.password
-    
+
     if not any([missing_server, missing_username, missing_password]):
         return s
-    
+
     # If interactive (TTY), prompt for missing values
     if interactive and sys.stdin.isatty():
         if missing_server:
-            s.base_url = typer.prompt("Server URL (e.g. https://ts1.x1.europe.travian.com)").rstrip("/")
+            s.base_url = typer.prompt("Server URL (e.g. https://ts1.x1.europe.travian.com)").rstrip(
+                "/"
+            )
         if missing_username:
             s.username = typer.prompt("Username/email")
         if missing_password:
             s.password = typer.prompt("Password", hide_input=True)
-        
+
         # Offer to save to .env
         if any([missing_server, missing_username, missing_password]):
             save = typer.confirm("Save credentials to .env?", default=True)
@@ -117,20 +134,21 @@ def _settings(interactive: bool = True) -> Settings:
             missing.append("username (--username or TRAVIAN_USERNAME)")
         if missing_password:
             missing.append("password (--password or TRAVIAN_PASSWORD)")
-        console.print(f"[red]Missing required auth config:[/red]")
+        console.print("[red]Missing required auth config:[/red]")
         for m in missing:
             console.print(f"  - {m}")
         console.print("\nSet in .env file or pass as CLI options.")
         raise typer.Exit(1)
-    
+
     return s
 
 
 def _save_env(s: Settings) -> None:
     """Save settings to .env file."""
     from pathlib import Path
+
     env_path = Path(".env")
-    
+
     # Read existing .env if it exists (preserve other settings)
     existing = {}
     if env_path.exists():
@@ -139,12 +157,12 @@ def _save_env(s: Settings) -> None:
             if line and not line.startswith("#") and "=" in line:
                 key, _, val = line.partition("=")
                 existing[key.strip()] = val.strip()
-    
+
     # Update with new values
     existing["TRAVIAN_BASE_URL"] = s.base_url
     existing["TRAVIAN_USERNAME"] = s.username
     existing["TRAVIAN_PASSWORD"] = s.password
-    
+
     # Write back
     lines = [f"{k}={v}" for k, v in existing.items()]
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -164,9 +182,9 @@ def _run(coro):
     process — if the parent (bash wrapper) dies, we self-terminate.
     This covers the case where SIGTERM is not delivered to the child.
     """
+    import os
     import signal
     import sys
-    import os
     import threading
 
     def _sigterm_handler(signum, frame):
@@ -188,9 +206,10 @@ def _run(coro):
 
         def _watch_parent():
             import ctypes
+
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             SYNCHRONIZE = 0x00100000
-            WAIT_OBJECT_0 = 0x00000000
+            _WAIT_OBJECT_0 = 0x00000000
             INFINITE = 0xFFFFFFFF
 
             # Open a handle to the parent process
@@ -198,6 +217,7 @@ def _run(coro):
             if not handle:
                 # Can't open parent — fall back to polling
                 import time
+
                 while True:
                     time.sleep(2)
                     try:
@@ -225,6 +245,7 @@ app.add_typer(auth_app)
 @auth_app.command("login")
 def auth_login():
     """Login to Travian server and show player info."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -240,12 +261,14 @@ def auth_login():
                     console.print(f"    {v.id}  {v.name}  ({v.x}|{v.y}){main_tag}")
             else:
                 console.print(f"  Village: {result.village_id}")
+
     _run(_do())
 
 
 @auth_app.command("token")
 def auth_token():
     """Print current JWT token."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -256,6 +279,7 @@ def auth_token():
                 console.print(jwt)
             else:
                 console.print("[red]No JWT available[/red]")
+
     _run(_do())
 
 
@@ -267,6 +291,7 @@ app.add_typer(village_app)
 @village_app.command("list")
 def village_list():
     """List all player villages."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -289,6 +314,7 @@ def village_list():
                 table.add_row(str(v.id), v.name, str(v.x), str(v.y), main)
 
             console.print(table)
+
     _run(_do())
 
 
@@ -297,6 +323,7 @@ def village_switch(
     village_id: int = typer.Argument(..., help="Village ID to switch to"),
 ):
     """Switch active village context (via newdid)."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -304,6 +331,7 @@ def village_switch(
             await auth.login()
             await client.get_html(f"/dorf1.php?newdid={village_id}")
             console.print(f"[green]Switched to village {village_id}[/green]")
+
     _run(_do())
 
 
@@ -314,9 +342,12 @@ app.add_typer(building_app)
 
 @building_app.command("list")
 def building_list(
-    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Village ID (default: current village)"),
+    village_id: Optional[int] = typer.Option(
+        None, "--village-id", "-v", help="Village ID (default: current village)"
+    ),
 ):
     """List all village buildings."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -335,41 +366,63 @@ def building_list(
                 table.add_row(str(b.slot_id), b.name, str(b.gid), str(b.level))
 
             console.print(table)
+
     _run(_do())
 
 
 @building_app.command("upgrade")
 def building_upgrade(
     slot_id: int = typer.Option(..., "--slot-id", "-s", help="Building slot ID (1-40)"),
-    allow_gold: bool = typer.Option(False, "--allow-gold", help="Allow spending gold (master builder). Default: REFUSE if queue occupied."),
-    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Village ID (default: current village)"),
+    allow_gold: bool = typer.Option(
+        False,
+        "--allow-gold",
+        help="Allow spending gold (master builder). Default: REFUSE if queue occupied.",
+    ),
+    village_id: Optional[int] = typer.Option(
+        None, "--village-id", "-v", help="Village ID (default: current village)"
+    ),
 ):
     """Upgrade a building by slot ID. Refuses if queue occupied (would cost gold) unless --allow-gold."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
             auth = AuthService(client, s)
             await auth.login()
             bs = BuildingService(client)
-            result = await bs.upgrade_building(slot_id, allow_gold=allow_gold, village_id=village_id)
+            result = await bs.upgrade_building(
+                slot_id, allow_gold=allow_gold, village_id=village_id
+            )
             if result.success:
-                console.print(f"[green]✓ Upgrade started![/green]")
-                console.print(f"  {result.building_name}: Level {result.old_level} → {result.new_level}")
+                console.print("[green]✓ Upgrade started![/green]")
+                console.print(
+                    f"  {result.building_name}: Level {result.old_level} → {result.new_level}"
+                )
                 console.print(f"  Construction time: {result.construction_time}")
             else:
-                console.print(f"[red]✗ Upgrade failed[/red]")
-                console.print(f"  {result.raw_response[:200] if result.raw_response else 'Unknown error'}")
+                console.print("[red]✗ Upgrade failed[/red]")
+                console.print(
+                    f"  {result.raw_response[:200] if result.raw_response else 'Unknown error'}"
+                )
+
     _run(_do())
 
 
 @building_app.command("construct")
 def building_construct(
     slot_id: int = typer.Option(..., "--slot-id", "-s", help="Empty building slot ID (19-40)"),
-    building: str = typer.Option(..., "--building", "-b", help="Building name to construct (e.g. 'Cranny', 'Embassy')"),
-    allow_gold: bool = typer.Option(False, "--allow-gold", help="Allow spending gold (master builder)."),
-    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Village ID (default: current village)"),
+    building: str = typer.Option(
+        ..., "--building", "-b", help="Building name to construct (e.g. 'Cranny', 'Embassy')"
+    ),
+    allow_gold: bool = typer.Option(
+        False, "--allow-gold", help="Allow spending gold (master builder)."
+    ),
+    village_id: Optional[int] = typer.Option(
+        None, "--village-id", "-v", help="Village ID (default: current village)"
+    ),
 ):
     """Construct a new building on an empty slot."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -390,21 +443,29 @@ def building_construct(
                 console.print(f"[red]Unknown building: {building}[/red]")
                 raise typer.Exit(1)
 
-            result = await bs.construct_building(slot_id, gid, allow_gold=allow_gold, village_id=village_id)
+            result = await bs.construct_building(
+                slot_id, gid, allow_gold=allow_gold, village_id=village_id
+            )
             if result.success:
-                console.print(f"[green]Construction started![/green]")
+                console.print("[green]Construction started![/green]")
                 console.print(f"  {result.building_name} on slot {slot_id}")
             else:
-                console.print(f"[red]Construction failed[/red]")
-                console.print(f"  {result.raw_response[:200] if result.raw_response else 'Unknown error'}")
+                console.print("[red]Construction failed[/red]")
+                console.print(
+                    f"  {result.raw_response[:200] if result.raw_response else 'Unknown error'}"
+                )
+
     _run(_do())
 
 
 @building_app.command("resources")
 def building_resources(
-    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Village ID (default: current village)"),
+    village_id: Optional[int] = typer.Option(
+        None, "--village-id", "-v", help="Village ID (default: current village)"
+    ),
 ):
     """Show current village resources."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -417,14 +478,18 @@ def building_resources(
             console.print(f"  Iron:   [yellow]{res.iron:>6}[/yellow] / {res.max_iron}")
             console.print(f"  Crop:   [yellow]{res.crop:>6}[/yellow] / {res.max_crop}")
             console.print(f"  Free crop: {res.free_crop}")
+
     _run(_do())
 
 
 @building_app.command("queue")
 def building_queue(
-    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Village ID (default: current village)"),
+    village_id: Optional[int] = typer.Option(
+        None, "--village-id", "-v", help="Village ID (default: current village)"
+    ),
 ):
     """Show construction queue."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -436,7 +501,10 @@ def building_queue(
                 console.print("Queue is empty")
             else:
                 for q in queue:
-                    console.print(f"  {q.building_name} → Level {q.target_level}  ({q.remaining_seconds}s remaining)")
+                    console.print(
+                        f"  {q.building_name} → Level {q.target_level}  ({q.remaining_seconds}s remaining)"
+                    )
+
     _run(_do())
 
 
@@ -450,26 +518,34 @@ def military_scout(
     x: int = typer.Option(..., "--x", help="Target X coordinate"),
     y: int = typer.Option(..., "--y", help="Target Y coordinate"),
     amount: int = typer.Option(1, "--amount", "-n", help="Number of scouts to send"),
-    scout_type: str = typer.Option("resources", "--type", "-t", help="Scout type: resources or defenses"),
+    scout_type: str = typer.Option(
+        "resources", "--type", "-t", help="Scout type: resources or defenses"
+    ),
     village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Source village ID"),
 ):
     """Send scouts to target coordinates."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
             auth = AuthService(client, s)
-            state = await auth.login()
+            await auth.login()
             resolver = TargetResolver(client)
             ms = MilitaryService(client, resolver)
-            result = await ms.send_scouts(x=x, y=y, amount=amount, scout_type=scout_type, village_id=village_id)
+            result = await ms.send_scouts(
+                x=x, y=y, amount=amount, scout_type=scout_type, village_id=village_id
+            )
             if result.success:
-                console.print(f"[green]✓ Scouts sent![/green]")
-                console.print(f"  Target: ({result.target_x}, {result.target_y}) {result.target_name}")
+                console.print("[green]✓ Scouts sent![/green]")
+                console.print(
+                    f"  Target: ({result.target_x}, {result.target_y}) {result.target_name}"
+                )
                 console.print(f"  Troops: {result.troops_sent}")
                 if result.travel_time:
                     console.print(f"  Travel time: {result.travel_time}")
             else:
                 console.print(f"[red]✗ Scout failed: {result.raw_response}[/red]")
+
     _run(_do())
 
 
@@ -491,16 +567,19 @@ def military_raid(
         s = _settings()
         async with HttpClient(s) as client:
             auth = AuthService(client, s)
-            state = await auth.login()
+            await auth.login()
             resolver = TargetResolver(client)
             ms = MilitaryService(client, resolver)
             result = await ms.send_raid(x=x, y=y, troops=troops)
             if result.success:
-                console.print(f"[green]✓ Raid sent![/green]")
-                console.print(f"  Target: ({result.target_x}, {result.target_y}) {result.target_name}")
+                console.print("[green]✓ Raid sent![/green]")
+                console.print(
+                    f"  Target: ({result.target_x}, {result.target_y}) {result.target_name}"
+                )
                 console.print(f"  Troops: {result.troops_sent}")
             else:
                 console.print(f"[red]✗ Raid failed: {result.raw_response}[/red]")
+
     _run(_do())
 
 
@@ -515,6 +594,7 @@ def reports_list(
     max_pages: int = typer.Option(5, "--max-pages", help="Max pages to fetch"),
 ):
     """List recent reports."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -536,10 +616,11 @@ def reports_list(
 
             for r in reports:
                 read = "yes" if r.is_read else "[red]no[/red]"
-                safe_subject = r.subject[:50].encode('ascii', errors='replace').decode('ascii')
+                safe_subject = r.subject[:50].encode("ascii", errors="replace").decode("ascii")
                 table.add_row(r.report_id, r.report_type, safe_subject, r.date_str, read)
 
             console.print(table)
+
     _run(_do())
 
 
@@ -548,6 +629,7 @@ def reports_show(
     report_id: str = typer.Argument(..., help="Report ID"),
 ):
     """Show detailed report content."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -555,71 +637,105 @@ def reports_show(
             await auth.login()
             rs = ReportsService(client)
             detail = await rs.fetch_report_detail(report_id)
-            rtype = detail.get('type', 'unknown')
-            data = detail.get('data')
+            rtype = detail.get("type", "unknown")
+            data = detail.get("data")
 
-            if rtype == 'scout' and data:
+            if rtype == "scout" and data:
                 d = data if isinstance(data, dict) else data.model_dump()
-                target = d.get('target', {})
-                res = d.get('resources', {})
-                steal = d.get('stealable_resources', {})
-                troops = {k: v for k, v in d.get('troops', {}).items() if v}
+                target = d.get("target", {})
+                res = d.get("resources", {})
+                steal = d.get("stealable_resources", {})
+                troops = {k: v for k, v in d.get("troops", {}).items() if v}
                 console.print(f"[bold cyan]Scout Report[/bold cyan]  ID: {report_id}")
-                console.print(f"  Target village: [yellow]{target.get('village_name','')}[/yellow]"
-                              f"  (id={target.get('village_id',0)})")
-                if target.get('coordinates', {}).get('x'):
-                    c = target['coordinates']
+                console.print(
+                    f"  Target village: [yellow]{target.get('village_name', '')}[/yellow]"
+                    f"  (id={target.get('village_id', 0)})"
+                )
+                if target.get("coordinates", {}).get("x"):
+                    c = target["coordinates"]
                     console.print(f"  Coords: ({c['x']}|{c['y']})")
-                console.print(f"\n  [green]Resources at target:[/green]")
-                console.print(f"    Lumber: {res.get('lumber',0):>6}  Clay: {res.get('clay',0):>6}"
-                              f"  Iron: {res.get('iron',0):>6}  Crop: {res.get('crop',0):>6}")
-                raidable = steal.get('raidable', steal.get('lumber', 0) + steal.get('clay', 0) +
-                                     steal.get('iron', 0) + steal.get('crop', 0))
-                cranny = steal.get('cranny', 0)
-                console.print(f"    Cranny: {cranny}  →  Raidable: [bold green]{raidable}[/bold green]")
+                console.print("\n  [green]Resources at target:[/green]")
+                console.print(
+                    f"    Lumber: {res.get('lumber', 0):>6}  Clay: {res.get('clay', 0):>6}"
+                    f"  Iron: {res.get('iron', 0):>6}  Crop: {res.get('crop', 0):>6}"
+                )
+                raidable = steal.get(
+                    "raidable",
+                    steal.get("lumber", 0)
+                    + steal.get("clay", 0)
+                    + steal.get("iron", 0)
+                    + steal.get("crop", 0),
+                )
+                cranny = steal.get("cranny", 0)
+                console.print(
+                    f"    Cranny: {cranny}  →  Raidable: [bold green]{raidable}[/bold green]"
+                )
                 if troops:
                     console.print(f"\n  [red]Defender troops:[/red] {troops}")
                 else:
-                    console.print(f"\n  Defenders: none visible")
+                    console.print("\n  Defenders: none visible")
 
-            elif rtype == 'battle' and data:
+            elif rtype == "battle" and data:
                 d = data if isinstance(data, dict) else data.model_dump()
-                atk = d.get('attacker', {})
-                dfn = d.get('defender', {})
-                atk_t = {k: v for k, v in d.get('attacker_troops', {}).items() if v}
-                dfn_t = {k: v for k, v in d.get('defender_troops', {}).items() if v}
-                bounty = d.get('bounty', {})
+                atk = d.get("attacker", {})
+                dfn = d.get("defender", {})
+                atk_t = {k: v for k, v in d.get("attacker_troops", {}).items() if v}
+                dfn_t = {k: v for k, v in d.get("defender_troops", {}).items() if v}
+                bounty = d.get("bounty", {})
                 console.print(f"[bold red]Battle Report[/bold red]  ID: {report_id}")
-                console.print(f"  Attacker: [yellow]{atk.get('village_name','')}[/yellow]  Troops: {atk_t}")
-                console.print(f"  Defender: [yellow]{dfn.get('village_name','')}[/yellow]  Troops: {dfn_t}")
-                console.print(f"  Result: {d.get('battle_result','?')}")
+                console.print(
+                    f"  Attacker: [yellow]{atk.get('village_name', '')}[/yellow]  Troops: {atk_t}"
+                )
+                console.print(
+                    f"  Defender: [yellow]{dfn.get('village_name', '')}[/yellow]  Troops: {dfn_t}"
+                )
+                console.print(f"  Result: {d.get('battle_result', '?')}")
                 if any(bounty.values()):
-                    console.print(f"  Bounty: L={bounty.get('lumber',0)} C={bounty.get('clay',0)}"
-                                  f" I={bounty.get('iron',0)} Cr={bounty.get('crop',0)}")
+                    console.print(
+                        f"  Bounty: L={bounty.get('lumber', 0)} C={bounty.get('clay', 0)}"
+                        f" I={bounty.get('iron', 0)} Cr={bounty.get('crop', 0)}"
+                    )
             else:
                 console.print(f"Type: {rtype}")
                 console.print(detail)
+
     _run(_do())
 
 
 @reports_app.command("analyze")
 def reports_analyze(
-    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Source village ID for distance calculations"),
-    min_resources: int = typer.Option(200, "--min-resources", "-m", help="Minimum estimated raidable resources"),
-    max_report_age: int = typer.Option(24, "--max-report-age", "-a", help="Maximum report age in hours"),
-    max_pages: int = typer.Option(20, "--max-pages", help="Max report list pages to scrape (30/page)"),
-    exclude_alliance: Optional[List[str]] = typer.Option(None, "--exclude-alliance", "-ea", help="Alliance tags to exclude (repeatable)"),
-    exclude_player: Optional[List[str]] = typer.Option(None, "--exclude-player", "-ep", help="Player names to exclude (repeatable)"),
-    smithy_level: int = typer.Option(0, "--smithy-level", "-sl", help="Your Clubswinger smithy upgrade level"),
+    village_id: Optional[int] = typer.Option(
+        None, "--village-id", "-v", help="Source village ID for distance calculations"
+    ),
+    min_resources: int = typer.Option(
+        200, "--min-resources", "-m", help="Minimum estimated raidable resources"
+    ),
+    max_report_age: int = typer.Option(
+        24, "--max-report-age", "-a", help="Maximum report age in hours"
+    ),
+    max_pages: int = typer.Option(
+        20, "--max-pages", help="Max report list pages to scrape (30/page)"
+    ),
+    exclude_alliance: Optional[List[str]] = typer.Option(
+        None, "--exclude-alliance", "-ea", help="Alliance tags to exclude (repeatable)"
+    ),
+    exclude_player: Optional[List[str]] = typer.Option(
+        None, "--exclude-player", "-ep", help="Player names to exclude (repeatable)"
+    ),
+    smithy_level: int = typer.Option(
+        0, "--smithy-level", "-sl", help="Your Clubswinger smithy upgrade level"
+    ),
     hero_offense: int = typer.Option(0, "--hero-offense", "-ho", help="Hero offense bonus points"),
     hero_strength: int = typer.Option(0, "--hero-strength", "-hs", help="Hero fighting strength"),
     radius: Optional[float] = typer.Option(None, "--radius", help="Max distance filter"),
-    include_alliance_reports: bool = typer.Option(False, "--include-alliance-reports", help="Also fetch alliance shared reports"),
+    include_alliance_reports: bool = typer.Option(
+        False, "--include-alliance-reports", help="Also fetch alliance shared reports"
+    ),
     output_json: bool = typer.Option(False, "--json", help="Output as JSON instead of table"),
 ):
     """Analyze reports and prioritize raid targets by score."""
     from .models.raid_analyzer import AnalyzerSettings
-    from .services.raid_analyzer_service import RaidAnalyzerService, UNIT_DEF_TABLE
+    from .services.raid_analyzer_service import UNIT_DEF_TABLE, RaidAnalyzerService
 
     async def _do():
         s = _settings()
@@ -651,10 +767,14 @@ def reports_analyze(
 
             if output_json:
                 import json
+
                 out = result.model_dump(mode="json")
                 # Convert tuple targets to list of dicts
                 out["targets"] = [
-                    {"state": t[0].model_dump(mode="json"), "recommendation": t[1].model_dump(mode="json")}
+                    {
+                        "state": t[0].model_dump(mode="json"),
+                        "recommendation": t[1].model_dump(mode="json"),
+                    }
                     for t in result.targets
                 ]
                 console.print(json.dumps(out, indent=2, default=str))
@@ -686,6 +806,7 @@ def reports_analyze(
                 table.add_column("RT", justify="right")
 
                 from .services.raid_analyzer_service import hours_since
+
                 for i, (state, rec) in enumerate(result.targets, 1):
                     coords = f"x={state.x}&y={state.y}"
                     dist = f"{state.distance:.1f}"
@@ -715,10 +836,19 @@ def reports_analyze(
                     rt = f"{rec.round_trip_minutes}m"
 
                     table.add_row(
-                        str(i), state.village_name or "?",
-                        state.player_name or "?", coords, dist,
-                        est_loot, score, defenders_str, scout_str,
-                        last_raid_str, send, mode_str, rt,
+                        str(i),
+                        state.village_name or "?",
+                        state.player_name or "?",
+                        coords,
+                        dist,
+                        est_loot,
+                        score,
+                        defenders_str,
+                        scout_str,
+                        last_raid_str,
+                        send,
+                        mode_str,
+                        rt,
                     )
 
                 wide_console.print(table)
@@ -776,7 +906,9 @@ def reports_village(
     x: int = typer.Argument(..., help="Target X coordinate"),
     y: int = typer.Argument(..., help="Target Y coordinate"),
     details: bool = typer.Option(False, "--details", "-d", help="Fetch full report details"),
-    max_details: Optional[int] = typer.Option(None, "--max-details", help="Max reports to fetch details for"),
+    max_details: Optional[int] = typer.Option(
+        None, "--max-details", help="Max reports to fetch details for"
+    ),
 ):
     """Gather all visible reports for a specific village from the map page.
 
@@ -786,6 +918,7 @@ def reports_village(
     Example: travian reports village 14 98
              travian reports village 14 98 --details --max-details 3
     """
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -793,13 +926,14 @@ def reports_village(
             await auth.login()
             rs = ReportsService(client)
             data = await rs.fetch_village_reports(
-                x=x, y=y,
+                x=x,
+                y=y,
                 fetch_details=details,
                 max_detail_count=max_details,
             )
 
-            village = data.get('village', {})
-            reports = data.get('reports', [])
+            village = data.get("village", {})
+            reports = data.get("reports", [])
 
             # Village header
             console.print(f"\n[bold cyan]Village Reports for ({x}|{y})[/bold cyan]")
@@ -823,84 +957,126 @@ def reports_village(
             table.add_column("Carry")
 
             for i, r in enumerate(reports, 1):
-                result_text = r.get('battle_result_text', '')
-                br = r.get('battle_result', '')
-                if 'won' in br or 'no_losses' in br:
+                result_text = r.get("battle_result_text", "")
+                br = r.get("battle_result", "")
+                if "won" in br or "no_losses" in br:
                     result_display = f"[green]{result_text}[/green]"
-                elif 'lost' in br:
+                elif "lost" in br:
                     result_display = f"[red]{result_text}[/red]"
                 else:
                     result_display = result_text
 
-                carry = r.get('carry_info', '')
-                cur = r.get('carry_current', 0)
-                mx = r.get('carry_max', 1)
+                carry = r.get("carry_info", "")
+                cur = r.get("carry_current", 0)
+                mx = r.get("carry_max", 1)
                 if carry and mx > 0:
                     ratio = cur / mx
                     carry_display = (
-                        f"[green]{carry}[/green]" if ratio >= 0.9
-                        else f"[yellow]{carry}[/yellow]" if ratio >= 0.5
+                        f"[green]{carry}[/green]"
+                        if ratio >= 0.9
+                        else f"[yellow]{carry}[/yellow]"
+                        if ratio >= 0.5
                         else f"[red]{carry}[/red]"
                     )
                 else:
                     carry_display = carry or ""
 
-                table.add_row(str(i), r.get('report_id', ''), r.get('date_str', ''), result_display, carry_display)
+                table.add_row(
+                    str(i),
+                    r.get("report_id", ""),
+                    r.get("date_str", ""),
+                    result_display,
+                    carry_display,
+                )
 
             console.print(table)
 
             # Detailed output
             if details:
                 for r in reports:
-                    detail = r.get('detail')
+                    detail = r.get("detail")
                     if not detail:
                         continue
-                    rid = detail.get('report_id', '?')
-                    rtype = detail.get('type', 'unknown')
-                    d = detail.get('data', {})
-                    if d and hasattr(d, 'model_dump'):
+                    rid = detail.get("report_id", "?")
+                    rtype = detail.get("type", "unknown")
+                    d = detail.get("data", {})
+                    if d and hasattr(d, "model_dump"):
                         d = d.model_dump()
 
                     console.print(f"\n{'─' * 60}")
-                    console.print(f"[bold]Report {rid}[/bold]  type={rtype}  date={r.get('date_str','')}")
+                    console.print(
+                        f"[bold]Report {rid}[/bold]  type={rtype}  date={r.get('date_str', '')}"
+                    )
 
-                    if rtype == 'battle' and isinstance(d, dict):
-                        attacker = d.get('attacker', {})
-                        defender = d.get('defender', {})
-                        bounty = d.get('bounty', {})
-                        result = d.get('battle_result', '?')
-                        result_color = 'green' if result == 'victory' else ('red' if result == 'defeat' else 'yellow')
+                    if rtype == "battle" and isinstance(d, dict):
+                        attacker = d.get("attacker", {})
+                        defender = d.get("defender", {})
+                        bounty = d.get("bounty", {})
+                        result = d.get("battle_result", "?")
+                        result_color = (
+                            "green"
+                            if result == "victory"
+                            else ("red" if result == "defeat" else "yellow")
+                        )
                         console.print(f"  Result: [{result_color}]{result}[/{result_color}]")
-                        console.print(f"  Attacker: {attacker.get('player_name', '?')} from {attacker.get('village_name', '?')}")
-                        console.print(f"  Defender: {defender.get('player_name', '?')} from {defender.get('village_name', '?')}")
-                        atk_troops = {k: v for k, v in d.get('attacker_troops', {}).items() if v > 0}
+                        console.print(
+                            f"  Attacker: {attacker.get('player_name', '?')} from {attacker.get('village_name', '?')}"
+                        )
+                        console.print(
+                            f"  Defender: {defender.get('player_name', '?')} from {defender.get('village_name', '?')}"
+                        )
+                        atk_troops = {
+                            k: v for k, v in d.get("attacker_troops", {}).items() if v > 0
+                        }
                         if atk_troops:
-                            console.print(f"  Attacker troops: {', '.join(f'{k}={v}' for k, v in atk_troops.items())}")
-                        atk_losses = {k: v for k, v in d.get('attacker_losses', {}).items() if v > 0}
+                            console.print(
+                                f"  Attacker troops: {', '.join(f'{k}={v}' for k, v in atk_troops.items())}"
+                            )
+                        atk_losses = {
+                            k: v for k, v in d.get("attacker_losses", {}).items() if v > 0
+                        }
                         if atk_losses:
-                            console.print(f"  [red]Attacker losses: {', '.join(f'{k}={v}' for k, v in atk_losses.items())}[/red]")
-                        def_troops = {k: v for k, v in d.get('defender_troops', {}).items() if v > 0}
+                            console.print(
+                                f"  [red]Attacker losses: {', '.join(f'{k}={v}' for k, v in atk_losses.items())}[/red]"
+                            )
+                        def_troops = {
+                            k: v for k, v in d.get("defender_troops", {}).items() if v > 0
+                        }
                         if def_troops:
-                            console.print(f"  Defender troops: {', '.join(f'{k}={v}' for k, v in def_troops.items())}")
-                        def_losses = {k: v for k, v in d.get('defender_losses', {}).items() if v > 0}
+                            console.print(
+                                f"  Defender troops: {', '.join(f'{k}={v}' for k, v in def_troops.items())}"
+                            )
+                        def_losses = {
+                            k: v for k, v in d.get("defender_losses", {}).items() if v > 0
+                        }
                         if def_losses:
-                            console.print(f"  [red]Defender losses: {', '.join(f'{k}={v}' for k, v in def_losses.items())}[/red]")
+                            console.print(
+                                f"  [red]Defender losses: {', '.join(f'{k}={v}' for k, v in def_losses.items())}[/red]"
+                            )
                         total_bounty = sum(bounty.values())
                         if total_bounty > 0:
-                            console.print(f"  Bounty: L:{bounty.get('lumber',0)} C:{bounty.get('clay',0)} I:{bounty.get('iron',0)} K:{bounty.get('crop',0)} ({d.get('carry_used',0)}/{d.get('carry_max',0)})")
+                            console.print(
+                                f"  Bounty: L:{bounty.get('lumber', 0)} C:{bounty.get('clay', 0)} I:{bounty.get('iron', 0)} K:{bounty.get('crop', 0)} ({d.get('carry_used', 0)}/{d.get('carry_max', 0)})"
+                            )
 
-                    elif rtype == 'scout' and isinstance(d, dict):
-                        res = d.get('resources', {})
-                        steal = d.get('stealable_resources', {})
-                        troops = {k: v for k, v in d.get('troops', {}).items() if v > 0}
+                    elif rtype == "scout" and isinstance(d, dict):
+                        res = d.get("resources", {})
+                        steal = d.get("stealable_resources", {})
+                        troops = {k: v for k, v in d.get("troops", {}).items() if v > 0}
                         total_res = sum(res.values())
                         if total_res > 0:
-                            console.print(f"  Resources: L:{res.get('lumber',0)} C:{res.get('clay',0)} I:{res.get('iron',0)} K:{res.get('crop',0)} (total: {total_res})")
-                        if steal.get('raidable', 0) > 0:
-                            console.print(f"  Raidable: {steal['raidable']}  Cranny: {steal.get('cranny', 0)}")
+                            console.print(
+                                f"  Resources: L:{res.get('lumber', 0)} C:{res.get('clay', 0)} I:{res.get('iron', 0)} K:{res.get('crop', 0)} (total: {total_res})"
+                            )
+                        if steal.get("raidable", 0) > 0:
+                            console.print(
+                                f"  Raidable: {steal['raidable']}  Cranny: {steal.get('cranny', 0)}"
+                            )
                         if troops:
-                            console.print(f"  Troops: {', '.join(f'{k}={v}' for k, v in troops.items())}")
-                    elif rtype == 'error':
+                            console.print(
+                                f"  Troops: {', '.join(f'{k}={v}' for k, v in troops.items())}"
+                            )
+                    elif rtype == "error":
                         console.print(f"  [red]Error: {detail.get('error', '')}[/red]")
 
     _run(_do())
@@ -916,11 +1092,22 @@ def queue_run(
     plan_file: str = typer.Argument(..., help="Path to YAML build plan file"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Only show what would be built"),
     poll: int = typer.Option(30, "--poll", help="Poll interval in seconds"),
-    use_video: bool = typer.Option(False, "--use-video", help="Claim buildingUpgrade video reward after each upgrade (~33s extra)"),
-    verbose: bool = typer.Option(False, "--verbose", help="Show current resources and detailed cost breakdown"),
-    log_file: Optional[str] = typer.Option(None, "--log-file", help="Path to a log file. All status messages are appended in real-time."),
+    use_video: bool = typer.Option(
+        False,
+        "--use-video",
+        help="Claim buildingUpgrade video reward after each upgrade (~33s extra)",
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", help="Show current resources and detailed cost breakdown"
+    ),
+    log_file: Optional[str] = typer.Option(
+        None,
+        "--log-file",
+        help="Path to a log file. All status messages are appended in real-time.",
+    ),
 ):
     """Execute a build plan in priority order. Waits for resources and empty queue."""
+
     async def _do():
         s = _settings()
         plan = BuildPlan.from_file(plan_file)
@@ -928,7 +1115,8 @@ def queue_run(
         # Open log file handle (stays open for the entire run)
         _log_fh = None
         if log_file:
-            import os, pathlib
+            import pathlib
+
             pathlib.Path(log_file).parent.mkdir(parents=True, exist_ok=True)
             _log_fh = open(log_file, "a", encoding="utf-8")
 
@@ -939,6 +1127,7 @@ def queue_run(
             console.print(f"  {msg}")
             if _log_fh:
                 from datetime import datetime
+
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 _log_fh.write(f"[{ts}] {msg}\n")
                 _log_fh.flush()  # flush immediately so nothing is lost on crash/kill
@@ -949,12 +1138,15 @@ def queue_run(
         # never reach _report().
         if _log_fh:
             import logging as _logging
+
             class _FileHandler(_logging.Handler):
                 def emit(self, record):
                     from datetime import datetime
+
                     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     _log_fh.write(f"[{ts}] [LOG/{record.levelname}] {record.getMessage()}\n")
                     _log_fh.flush()
+
             _fh = _FileHandler()
             _fh.setLevel(_logging.DEBUG)
             _logging.getLogger("travian_api").addHandler(_fh)
@@ -981,14 +1173,26 @@ def queue_run(
                     results = await bqs.execute_plan(plan, poll_interval_s=poll, dry_run=True)
                 else:
                     _log("Mode: LIVE EXECUTION")
-                    results = await bqs.execute_plan_continuous(plan, poll_interval_s=poll, use_video=use_video, verbose=verbose)
+                    results = await bqs.execute_plan_continuous(
+                        plan, poll_interval_s=poll, use_video=use_video, verbose=verbose
+                    )
 
                 _log("=== RESULTS ===")
                 for r in results:
-                    status = r.get('status', '?')
-                    color = 'green' if status == 'started' else 'yellow' if status == 'dry_run' else 'red'
-                    console.print(f"  [{color}]{r['building']} {r.get('level','')} - {status}[/{color}]  {r.get('time','')}")
-                    _log(f"RESULT: {r['building']} {r.get('level','')} - {status} {r.get('time','')}")
+                    status = r.get("status", "?")
+                    color = (
+                        "green"
+                        if status == "started"
+                        else "yellow"
+                        if status == "dry_run"
+                        else "red"
+                    )
+                    console.print(
+                        f"  [{color}]{r['building']} {r.get('level', '')} - {status}[/{color}]  {r.get('time', '')}"
+                    )
+                    _log(
+                        f"RESULT: {r['building']} {r.get('level', '')} - {status} {r.get('time', '')}"
+                    )
 
         except KeyboardInterrupt:
             _log("INTERRUPTED: Received Ctrl+C / SIGINT. Shutting down gracefully.")
@@ -1000,6 +1204,7 @@ def queue_run(
             _log("Session ended.")
             if _log_fh:
                 _log_fh.close()
+
     _run(_do())
 
 
@@ -1008,6 +1213,7 @@ def queue_validate(
     plan_file: str = typer.Argument(..., help="Path to YAML build plan file"),
 ):
     """Validate a build plan file and check current building levels."""
+
     async def _do():
         s = _settings()
         plan = BuildPlan.from_file(plan_file)
@@ -1038,9 +1244,12 @@ def queue_validate(
                     continue
                 console.print(f"\n  Priority {p}:")
                 for i in items:
-                    status_color = 'green' if i.status == 'done' else 'yellow'
-                    console.print(f"    [{status_color}]{i.building}[/{status_color}]"
-                                  f" slot={i.slot_id} Lv{i.current_level}->{i.target} [{i.status}]")
+                    status_color = "green" if i.status == "done" else "yellow"
+                    console.print(
+                        f"    [{status_color}]{i.building}[/{status_color}]"
+                        f" slot={i.slot_id} Lv{i.current_level}->{i.target} [{i.status}]"
+                    )
+
     _run(_do())
 
 
@@ -1059,6 +1268,7 @@ PRODUCTION_REWARDS = [
 @video_app.command("available")
 def video_available():
     """Check which video rewards are currently available."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -1087,17 +1297,23 @@ def video_available():
                 table.add_row(key, avail_str, active_str)
 
             console.print(table)
+
     _run(_do())
 
 
 @video_app.command("claim")
 def video_claim(
     reward_type: str = typer.Argument(..., help=f"Reward type: {', '.join(REWARD_TYPES.keys())}"),
-    village_id: Optional[int] = typer.Option(None, "--village-id", help="Village ID (for buildingUpgrade)"),
+    village_id: Optional[int] = typer.Option(
+        None, "--village-id", help="Village ID (for buildingUpgrade)"
+    ),
     slot_id: Optional[int] = typer.Option(None, "--slot-id", help="Slot ID (for buildingUpgrade)"),
-    building_id: Optional[int] = typer.Option(None, "--building-id", help="Building ID (for buildingUpgrade)"),
+    building_id: Optional[int] = typer.Option(
+        None, "--building-id", help="Building ID (for buildingUpgrade)"
+    ),
 ):
     """Claim a video reward. Takes ~33 seconds due to ATG timing requirements."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -1108,12 +1324,15 @@ def video_claim(
                 extra: Dict[str, Any] = {}
                 if reward_type == "buildingUpgrade":
                     if not all([village_id, slot_id, building_id]):
-                        console.print("[red]buildingUpgrade requires --village-id, --slot-id, --building-id[/red]")
+                        console.print(
+                            "[red]buildingUpgrade requires --village-id, --slot-id, --building-id[/red]"
+                        )
                         raise typer.Exit(1)
                     extra = {"villageId": village_id, "slotId": slot_id, "buildingId": building_id}
 
                 console.print(f"Claiming [cyan]{reward_type}[/cyan] — this takes ~33 seconds...")
-                from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+                from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+
                 with Progress(
                     SpinnerColumn(),
                     TextColumn("[progress.description]{task.description}"),
@@ -1140,12 +1359,14 @@ def video_claim(
                         console.print(f"  Raw: {result.raw[:200]}")
             finally:
                 await vrs.close()
+
     _run(_do())
 
 
 @video_app.command("claim-all")
 def video_claim_all():
     """Claim all available production boost rewards in sequence."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -1162,7 +1383,9 @@ def video_claim_all():
 
                 console.print(f"Found {len(available)} available reward(s): {', '.join(available)}")
                 for i, rtype in enumerate(available, 1):
-                    console.print(f"\n[{i}/{len(available)}] Claiming [cyan]{rtype}[/cyan] (~33s)...")
+                    console.print(
+                        f"\n[{i}/{len(available)}] Claiming [cyan]{rtype}[/cyan] (~33s)..."
+                    )
                     result = await vrs.claim_reward(rtype)
                     if result.success:
                         console.print(f"  [green]✓ {result.message}[/green]")
@@ -1172,6 +1395,7 @@ def video_claim_all():
                 console.print(f"\n[bold]Done — processed {len(available)} rewards[/bold]")
             finally:
                 await vrs.close()
+
     _run(_do())
 
 
@@ -1203,6 +1427,7 @@ def _time_ago(unix_ts: int | None) -> str:
     if not unix_ts:
         return "[dim]never[/dim]"
     import time
+
     diff = int(time.time()) - unix_ts
     if diff < 60:
         return f"{diff}s ago"
@@ -1214,9 +1439,16 @@ def _time_ago(unix_ts: int | None) -> str:
 
 
 _TEUTON_TROOP_NAMES = {
-    "t1": "Club", "t2": "Spear", "t3": "Axe", "t4": "Scout",
-    "t5": "Paladin", "t6": "TK", "t7": "Ram", "t8": "Cat",
-    "t9": "Chief", "t10": "Settler",
+    "t1": "Club",
+    "t2": "Spear",
+    "t3": "Axe",
+    "t4": "Scout",
+    "t5": "Paladin",
+    "t6": "TK",
+    "t7": "Ram",
+    "t8": "Cat",
+    "t9": "Chief",
+    "t10": "Settler",
 }
 
 
@@ -1233,12 +1465,14 @@ def _format_ts(unix_ts) -> str:
     if not unix_ts:
         return "\u2014"
     from datetime import datetime
+
     return datetime.fromtimestamp(unix_ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
 @farm_app.command("list")
 def farm_list_cmd():
     """List all farm lists with summary info."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -1273,6 +1507,7 @@ def farm_list_cmd():
                     f"{total_booty:,}",
                 )
             console.print(table)
+
     _run(_do())
 
 
@@ -1281,6 +1516,7 @@ def farm_show(
     list_id: int = typer.Argument(..., help="Farm list ID"),
 ):
     """Show a farm list's slots with detailed raid intelligence."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -1325,9 +1561,7 @@ def farm_show(
 
                 # Total booty
                 tb = slot.total_booty
-                booty_str = (
-                    f"{tb.booty:,} ({tb.raids} raids)" if tb.raids else "[dim]\u2014[/dim]"
-                )
+                booty_str = f"{tb.booty:,} ({tb.raids} raids)" if tb.raids else "[dim]\u2014[/dim]"
 
                 table.add_row(
                     str(i),
@@ -1342,6 +1576,7 @@ def farm_show(
                 )
 
             console.print(table)
+
     _run(_do())
 
 
@@ -1352,6 +1587,7 @@ def farm_send(
     confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ):
     """Send all active targets in a farm list."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -1366,8 +1602,7 @@ def farm_send(
                 return
 
             console.print(
-                f"Farm list: [bold]{fl.name}[/bold]  \u2014  "
-                f"{len(active)} active targets"
+                f"Farm list: [bold]{fl.name}[/bold]  \u2014  {len(active)} active targets"
             )
 
             if dry_run:
@@ -1394,6 +1629,7 @@ def farm_send(
             for t in result.targets:
                 icon = "[green]ok[/green]" if t.status == "success" else f"[red]{t.error}[/red]"
                 console.print(f"  Slot {t.id}: {icon}")
+
     _run(_do())
 
 
@@ -1403,6 +1639,7 @@ def farm_create(
     village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Source village ID"),
 ):
     """Create a new farm list."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -1412,6 +1649,7 @@ def farm_create(
             vid = village_id or state.village_id
             list_id = await fls.create_farm_list(vid, name)
             console.print(f"[green]Created farm list '{name}' (id={list_id})[/green]")
+
     _run(_do())
 
 
@@ -1438,6 +1676,7 @@ def farm_add_target(
             fls = FarmListService(client)
             await fls.add_slot(list_id, x=x, y=y, units=troops, force=force)
             console.print(f"[green]Added target ({x},{y}) to list {list_id}[/green]")
+
     _run(_do())
 
 
@@ -1447,6 +1686,7 @@ def farm_delete(
     confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ):
     """Delete a farm list."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -1462,16 +1702,20 @@ def farm_delete(
 
             await fls.delete_farm_list(list_id)
             console.print(f"[green]Deleted farm list {list_id}[/green]")
+
     _run(_do())
 
 
 @farm_app.command("send-all")
 def farm_send_all(
-    lists: Optional[str] = typer.Option(None, "--lists", "-l", help="Comma-separated list IDs (default: all)"),
+    lists: Optional[str] = typer.Option(
+        None, "--lists", "-l", help="Comma-separated list IDs (default: all)"
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show plan without sending"),
     confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ):
     """Send all farm lists (or a subset by ID)."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -1493,8 +1737,7 @@ def farm_send_all(
 
             total_active = sum(len(fl.active_slots) for fl in all_lists)
             console.print(
-                f"Sending {len(all_lists)} farm list(s) \u2014 "
-                f"{total_active} active targets total"
+                f"Sending {len(all_lists)} farm list(s) \u2014 {total_active} active targets total"
             )
             for fl in all_lists:
                 console.print(f"  {fl.id}: {fl.name} ({len(fl.active_slots)} active)")
@@ -1515,9 +1758,9 @@ def farm_send_all(
                     console.print(f"  [red]List {lid}: Gold Club not active[/red]")
                 else:
                     console.print(
-                        f"  List {lid}: Success={result.success_count} "
-                        f"Failed={result.fail_count}"
+                        f"  List {lid}: Success={result.success_count} Failed={result.fail_count}"
                     )
+
     _run(_do())
 
 
@@ -1530,6 +1773,7 @@ def farm_run(
     verbose: bool = typer.Option(False, "--verbose", help="Show per-send slot details"),
 ):
     """Loop-send a farm list at a fixed interval."""
+
     async def _do():
         import time as _time
         from datetime import datetime
@@ -1576,9 +1820,9 @@ def farm_run(
                         total_success += result.success_count
                         total_fail += result.fail_count
                         now = datetime.now().strftime("%H:%M:%S")
-                        next_dt = datetime.fromtimestamp(
-                            _time.time() + interval
-                        ).strftime("%H:%M:%S")
+                        next_dt = datetime.fromtimestamp(_time.time() + interval).strftime(
+                            "%H:%M:%S"
+                        )
                         total = result.success_count + result.fail_count
                         console.print(
                             f"[{now}] Sent: {result.success_count}/{total} | "
@@ -1609,18 +1853,22 @@ def farm_run(
                 f"\nFarm loop stopped. Sends: {sends} | "
                 f"Total success: {total_success} | Total failed: {total_fail}"
             )
+
     _run(_do())
 
 
 @farm_app.command("run-all")
 def farm_run_all(
-    lists: Optional[str] = typer.Option(None, "--lists", "-l", help="Comma-separated list IDs (default: all)"),
+    lists: Optional[str] = typer.Option(
+        None, "--lists", "-l", help="Comma-separated list IDs (default: all)"
+    ),
     interval: int = typer.Option(300, "--interval", "-i", help="Seconds between sends"),
     duration: int = typer.Option(0, "--duration", "-d", help="Total minutes (0=forever)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show plan without looping"),
     verbose: bool = typer.Option(False, "--verbose", help="Show per-send details"),
 ):
     """Loop-send all farm lists at a fixed interval."""
+
     async def _do():
         import time as _time
         from datetime import datetime
@@ -1676,10 +1924,7 @@ def farm_run_all(
                         round_success = 0
                         round_fail = 0
                         for lid, result in results.items():
-                            if (
-                                result.targets
-                                and result.targets[0].error == "plus.error_goldclub"
-                            ):
+                            if result.targets and result.targets[0].error == "plus.error_goldclub":
                                 gold_club_error = True
                                 break
                             round_success += result.success_count
@@ -1700,9 +1945,9 @@ def farm_run_all(
                         total_success += round_success
                         total_fail += round_fail
                         now = datetime.now().strftime("%H:%M:%S")
-                        next_dt = datetime.fromtimestamp(
-                            _time.time() + interval
-                        ).strftime("%H:%M:%S")
+                        next_dt = datetime.fromtimestamp(_time.time() + interval).strftime(
+                            "%H:%M:%S"
+                        )
                         total = round_success + round_fail
                         console.print(
                             f"[{now}] Sent: {round_success}/{total} | "
@@ -1725,6 +1970,7 @@ def farm_run_all(
                 f"\nFarm loop stopped. Sends: {sends} | "
                 f"Total success: {total_success} | Total failed: {total_fail}"
             )
+
     _run(_do())
 
 
@@ -1736,15 +1982,20 @@ app.add_typer(scout_app)
 @scout_app.command("scan")
 def scout_scan(
     radius: int = typer.Option(10, "--radius", "-r", help="Scan radius from village"),
-    village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Source village ID (default: main)"),
+    village_id: Optional[int] = typer.Option(
+        None, "--village-id", "-v", help="Source village ID (default: main)"
+    ),
     max_pop: Optional[int] = typer.Option(None, "--max-pop", help="Max population filter"),
     min_pop: Optional[int] = typer.Option(None, "--min-pop", help="Min population filter"),
     no_player: bool = typer.Option(False, "--no-player", help="Only show unoccupied villages"),
     show_oases: bool = typer.Option(False, "--show-oases", help="Include oases in results"),
-    enrich: bool = typer.Option(True, "--enrich/--no-enrich", help="Fetch population details (slower)"),
+    enrich: bool = typer.Option(
+        True, "--enrich/--no-enrich", help="Fetch population details (slower)"
+    ),
     limit: int = typer.Option(50, "--limit", "-l", help="Max results to show"),
 ):
     """Scan the map around your village and show potential targets."""
+
     async def _do():
         s = _settings()
         async with HttpClient(s) as client:
@@ -1755,17 +2006,14 @@ def scout_scan(
 
             # Determine center
             vid = village_id or state.village_id
-            center_village = next(
-                (v for v in state.villages if v.id == vid), None
-            )
+            center_village = next((v for v in state.villages if v.id == vid), None)
             if not center_village:
                 console.print(f"[red]Village {vid} not found[/red]")
                 return
 
             cx, cy = center_village.x, center_village.y
             console.print(
-                f"Scanning from [cyan]{center_village.name}[/cyan] "
-                f"({cx}|{cy}) radius={radius}"
+                f"Scanning from [cyan]{center_village.name}[/cyan] ({cx}|{cy}) radius={radius}"
             )
 
             # Scan
@@ -1786,7 +2034,6 @@ def scout_scan(
                 tiles = await svc.enrich_tiles(tiles)
 
             # Apply filters
-            from travian_api.services.auto_scout_service import AutoScoutService as _AS
             tiles = svc.filter_targets(
                 tiles,
                 max_population=max_pop,
@@ -1822,6 +2069,7 @@ def scout_scan(
                     t.tribe or "[dim]—[/dim]",
                 )
             console.print(table)
+
     _run(_do())
 
 
@@ -1831,20 +2079,36 @@ def scout_auto(
     village_id: Optional[int] = typer.Option(None, "--village-id", "-v", help="Source village ID"),
     max_pop: Optional[int] = typer.Option(None, "--max-pop", help="Max population filter"),
     min_pop: Optional[int] = typer.Option(None, "--min-pop", help="Min population filter"),
-    scout_type: str = typer.Option("resources", "--type", "-t", help="Scout type: resources or defenses"),
+    scout_type: str = typer.Option(
+        "resources", "--type", "-t", help="Scout type: resources or defenses"
+    ),
     amount: int = typer.Option(1, "--amount", "-n", help="Number of scouts per target"),
-    exclude: Optional[str] = typer.Option(None, "--exclude", "-e", help="Exclude file (one coord per line: x,y)"),
+    exclude: Optional[str] = typer.Option(
+        None, "--exclude", "-e", help="Exclude file (one coord per line: x,y)"
+    ),
     no_player: bool = typer.Option(False, "--no-player", help="Only scout unoccupied villages"),
     show_oases: bool = typer.Option(False, "--show-oases", help="Include oases"),
     limit: int = typer.Option(20, "--limit", "-l", help="Max targets to scout"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be scouted without sending"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be scouted without sending"
+    ),
     confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
     delay: float = typer.Option(1.0, "--delay", help="Seconds between scout sends"),
-    interval: int = typer.Option(0, "--interval", "-i", help="Seconds between rounds (0=single run)"),
-    duration_min: int = typer.Option(0, "--duration", "-d", help="Total minutes to loop (0=forever, requires --interval)"),
-    check_available: bool = typer.Option(False, "--check-available", "-c", help="Check available scouts first, send only what you have, skip round if 0"),
+    interval: int = typer.Option(
+        0, "--interval", "-i", help="Seconds between rounds (0=single run)"
+    ),
+    duration_min: int = typer.Option(
+        0, "--duration", "-d", help="Total minutes to loop (0=forever, requires --interval)"
+    ),
+    check_available: bool = typer.Option(
+        False,
+        "--check-available",
+        "-c",
+        help="Check available scouts first, send only what you have, skip round if 0",
+    ),
 ):
     """Scan the map, filter targets, and send scouts automatically."""
+
     async def _do():
         import time as _time
         from datetime import datetime
@@ -1857,9 +2121,7 @@ def scout_auto(
             svc.on_status(lambda msg: console.print(f"  {msg}"))
 
             vid = village_id or state.village_id
-            center_village = next(
-                (v for v in state.villages if v.id == vid), None
-            )
+            center_village = next((v for v in state.villages if v.id == vid), None)
             if not center_village:
                 console.print(f"[red]Village {vid} not found[/red]")
                 return
@@ -1875,6 +2137,7 @@ def scout_auto(
             exclude_coords: set = set()
             if exclude:
                 from pathlib import Path
+
                 p = Path(exclude)
                 if p.exists():
                     for line in p.read_text().splitlines():
@@ -1984,9 +2247,7 @@ def scout_auto(
                         tiles = tiles[:limit]
 
                         if not tiles:
-                            console.print(
-                                f"[{now_str}] No targets found this round"
-                            )
+                            console.print(f"[{now_str}] No targets found this round")
                         else:
                             if not looping and not confirm:
                                 # First single run — ask confirmation
@@ -2008,7 +2269,9 @@ def scout_auto(
                                         t.player_name or "[dim]\u2014[/dim]",
                                     )
                                 console.print(table)
-                                if not typer.confirm(f"Send {amount} scout(s) to {len(tiles)} targets?"):
+                                if not typer.confirm(
+                                    f"Send {amount} scout(s) to {len(tiles)} targets?"
+                                ):
                                     console.print("Cancelled.")
                                     return
 
@@ -2029,9 +2292,9 @@ def scout_auto(
                             rounds += 1
 
                             if looping:
-                                next_dt = datetime.fromtimestamp(
-                                    _time.time() + interval
-                                ).strftime("%H:%M:%S")
+                                next_dt = datetime.fromtimestamp(_time.time() + interval).strftime(
+                                    "%H:%M:%S"
+                                )
                                 console.print(
                                     f"[{now_str}] Round {rounds}: "
                                     f"Sent {sent}/{len(results)} | "
@@ -2063,6 +2326,7 @@ def scout_auto(
                     f"\nScout loop stopped. Rounds: {rounds} | "
                     f"Total sent: {total_sent} | Total failed: {total_failed}"
                 )
+
     _run(_do())
 
 

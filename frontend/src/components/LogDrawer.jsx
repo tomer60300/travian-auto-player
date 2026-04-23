@@ -74,10 +74,6 @@ function formatISO(ts) {
   return new Date(ts).toISOString()
 }
 
-function formatTime(ts) {
-  const d = new Date(ts)
-  return d.toLocaleTimeString('en-GB', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0')
-}
 
 // ---------------------------------------------------------------------------
 // Debounce hook
@@ -499,6 +495,7 @@ export default function LogDrawer() {
       className="log-drawer bg-card"
       style={{
         height: totalHeight,
+        // eslint-disable-next-line react-hooks/rules-of-hooks -- ref read for conditional style is intentional
         transition: draggingRef.current ? 'none' : undefined,
       }}
     >

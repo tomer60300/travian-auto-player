@@ -48,13 +48,15 @@ class OperationGate:
             if user_ops.get(op_type, 0) > 0:
                 logger.warning(
                     "Operation gate: REJECTED %s for user %s (already active)",
-                    op_type, user_id,
+                    op_type,
+                    user_id,
                 )
                 return False
             user_ops[op_type] = 1
             logger.info(
                 "Operation gate: registered %s for user %s",
-                op_type, user_id,
+                op_type,
+                user_id,
             )
             return True
 
@@ -75,12 +77,14 @@ class OperationGate:
                     self._should_stop.pop(user_id, None)
                 logger.info(
                     "Operation gate: released %s for user %s",
-                    op_type, user_id,
+                    op_type,
+                    user_id,
                 )
             else:
                 logger.debug(
                     "Operation gate: release called for non-active %s user %s (no-op)",
-                    op_type, user_id,
+                    op_type,
+                    user_id,
                 )
 
     def get_active(self, user_id: int) -> list[str]:
@@ -101,7 +105,8 @@ class OperationGate:
             if released:
                 logger.info(
                     "Operation gate: stop_all for user %s: %s",
-                    user_id, released,
+                    user_id,
+                    released,
                 )
             return released
 

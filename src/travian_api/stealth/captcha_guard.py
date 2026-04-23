@@ -82,13 +82,17 @@ class CaptchaGuard:
         logger.critical(
             "CAPTCHA GUARD ACTIVATED — pattern=%r | url=%s | status=%d — "
             "all requests blocked until resolved",
-            pattern, url, status_code,
+            pattern,
+            url,
+            status_code,
         )
 
         if self._on_trigger is not None:
             try:
                 await self._on_trigger(
-                    pattern, url=url, status_code=status_code,
+                    pattern,
+                    url=url,
+                    status_code=status_code,
                     response_snippet=response_snippet,
                 )
             except Exception:

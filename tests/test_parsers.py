@@ -1,26 +1,24 @@
 """Tests for HTML and report parsers."""
 
 import pytest
-from datetime import datetime
 
+from travian_api.constants import BuildingType
+from travian_api.exceptions import ChecksumError
 from travian_api.parsers.html_parser import (
+    parse_construction_queue,
     parse_dorf1,
     parse_dorf2,
     parse_resources,
-    parse_construction_queue,
 )
 from travian_api.parsers.report_parser import (
     parse_report_list,
-    parse_individual_report,
 )
 from travian_api.utils.checksum import (
+    clean_unicode_text,
     extract_checksum,
     extract_hidden_fields,
     parse_resources_from_script,
-    clean_unicode_text
 )
-from travian_api.exceptions import ParseError, ChecksumError
-from travian_api.constants import BuildingType
 
 
 class TestHTMLParsers:
@@ -29,7 +27,7 @@ class TestHTMLParsers:
     def test_parse_buildings_dorf1(self):
         """Test parsing resource field buildings."""
         # Mock dorf1.php HTML content — parse_dorf1 looks for buildingSlotN classes
-        html_content = '''
+        html_content = """
         <html>
         <body>
             <a href="/build.php?id=1" data-aid="1" data-gid="1" class="buildingSlot1 level5">
@@ -43,21 +41,21 @@ class TestHTMLParsers:
             </a>
         </body>
         </html>
-        '''
+        """
 
         buildings = parse_dorf1(html_content)
 
         assert len(buildings) == 3
-        by_slot = {b['slot_id']: b for b in buildings}
+        by_slot = {b["slot_id"]: b for b in buildings}
         assert 1 in by_slot
-        assert by_slot[1]['gid'] == BuildingType.WOODCUTTER
-        assert by_slot[1]['level'] == 5
-        assert by_slot[2]['gid'] == BuildingType.CLAY_PIT
-        assert by_slot[2]['level'] == 3
+        assert by_slot[1]["gid"] == BuildingType.WOODCUTTER
+        assert by_slot[1]["level"] == 5
+        assert by_slot[2]["gid"] == BuildingType.CLAY_PIT
+        assert by_slot[2]["level"] == 3
 
     def test_parse_buildings_dorf2(self):
         """Test parsing village buildings."""
-        html_content = '''
+        html_content = """
         <html>
         <body>
             <a href="/build.php?id=19" data-gid="15" class="level10"
@@ -68,21 +66,21 @@ class TestHTMLParsers:
             </a>
         </body>
         </html>
-        '''
+        """
 
         buildings = parse_dorf2(html_content)
 
         assert len(buildings) == 2
-        by_slot = {b['slot_id']: b for b in buildings}
+        by_slot = {b["slot_id"]: b for b in buildings}
         assert 19 in by_slot
-        assert by_slot[19]['gid'] == BuildingType.MAIN_BUILDING
-        assert by_slot[19]['level'] == 10
-        assert by_slot[20]['gid'] == BuildingType.RALLY_POINT
-        assert by_slot[20]['level'] == 1
+        assert by_slot[19]["gid"] == BuildingType.MAIN_BUILDING
+        assert by_slot[19]["level"] == 10
+        assert by_slot[20]["gid"] == BuildingType.RALLY_POINT
+        assert by_slot[20]["level"] == 1
 
     def test_parse_resources_from_script(self):
         """Test parsing resources from JavaScript."""
-        html_content = '''
+        html_content = """
         <html>
         <head>
             <script>
@@ -91,20 +89,20 @@ class TestHTMLParsers:
             </script>
         </head>
         </html>
-        '''
+        """
 
         resources_data = parse_resources_from_script(html_content)
 
         assert resources_data is not None
         assert resources_data["1"] == 1500  # Wood
         assert resources_data["2"] == 2300  # Clay
-        assert resources_data["3"] == 800   # Iron
+        assert resources_data["3"] == 800  # Iron
         assert resources_data["4"] == 1200  # Crop
 
     def test_parse_resources(self):
         """Test complete resource parsing via parse_resources."""
         # parse_resources expects Travian's real JS format with nested objects
-        html_content = '''
+        html_content = """
         <html>
         <head>
             <script>
@@ -116,7 +114,7 @@ class TestHTMLParsers:
             </script>
         </head>
         </html>
-        '''
+        """
 
         resources = parse_resources(html_content)
 
@@ -129,7 +127,7 @@ class TestHTMLParsers:
 
     def test_parse_construction_queue_empty(self):
         """Test parsing empty construction queue."""
-        html_content = '''
+        html_content = """
         <html>
         <body>
             <div class="buildingList">
@@ -137,7 +135,7 @@ class TestHTMLParsers:
             </div>
         </body>
         </html>
-        '''
+        """
 
         queue = parse_construction_queue(html_content)
 
@@ -146,10 +144,10 @@ class TestHTMLParsers:
 
 class TestChecksumUtils:
     """Test checksum and form utilities."""
-    
+
     def test_extract_checksum_valid(self):
         """Test extracting valid checksum."""
-        html_content = '''
+        html_content = """
         <html>
         <body>
             <form action="/dorf1.php?id=1&amp;gid=1&amp;action=build&amp;checksum=abc123">
@@ -157,26 +155,26 @@ class TestChecksumUtils:
             </form>
         </body>
         </html>
-        '''
-        
+        """
+
         checksum = extract_checksum(html_content)
         assert checksum == "abc123"
-    
+
     def test_extract_checksum_not_found(self):
         """Test checksum extraction when not found."""
-        html_content = '<html><body>No checksum here</body></html>'
-        
+        html_content = "<html><body>No checksum here</body></html>"
+
         with pytest.raises(ChecksumError):
             extract_checksum(html_content)
-    
+
     def test_extract_checksum_empty_content(self):
         """Test checksum extraction with empty content."""
         with pytest.raises(ChecksumError):
             extract_checksum("")
-    
+
     def test_extract_hidden_fields(self):
         """Test extracting hidden form fields."""
-        html_content = '''
+        html_content = """
         <html>
         <body>
             <form>
@@ -187,36 +185,36 @@ class TestChecksumUtils:
             </form>
         </body>
         </html>
-        '''
-        
+        """
+
         hidden_fields = extract_hidden_fields(html_content)
-        
+
         assert "checksum" in hidden_fields
         assert hidden_fields["checksum"] == "abc123"
         assert hidden_fields["villageId"] == "12345"
         assert hidden_fields["eventType"] == "2"
         assert "visible" not in hidden_fields  # Should skip non-hidden fields
-    
+
     def test_clean_unicode_text(self):
         """Test cleaning Unicode directional markers."""
-        dirty_text = "\u202DHello\u202CWorld\u202D123\u202C"
+        dirty_text = "\u202dHello\u202cWorld\u202d123\u202c"
         clean_text = clean_unicode_text(dirty_text)
-        
+
         assert clean_text == "HelloWorld123"
-        
+
         # Test with whitespace cleanup
-        dirty_text = "  \u202D  Hello   World  \u202C  "
+        dirty_text = "  \u202d  Hello   World  \u202c  "
         clean_text = clean_unicode_text(dirty_text)
-        
+
         assert clean_text == "Hello World"
 
 
 class TestReportParsers:
     """Test report parsing functions."""
-    
+
     def test_parse_report_list_empty(self):
         """Test parsing empty report list returns empty list."""
-        html_content = '''
+        html_content = """
         <html>
         <body>
             <table class="reports">
@@ -224,7 +222,7 @@ class TestReportParsers:
             </table>
         </body>
         </html>
-        '''
+        """
 
         reports = parse_report_list(html_content)
         assert isinstance(reports, list)
@@ -232,7 +230,7 @@ class TestReportParsers:
 
     def test_parse_report_list_with_reports(self):
         """Test parsing report list with actual reports."""
-        html_content = '''
+        html_content = """
         <html>
         <body>
             <table class="reports">
@@ -249,7 +247,7 @@ class TestReportParsers:
             </table>
         </body>
         </html>
-        '''
+        """
 
         reports = parse_report_list(html_content)
         assert isinstance(reports, list)
@@ -261,7 +259,7 @@ class TestReportParsers:
 
 class TestParsingErrorHandling:
     """Test error handling in parsers."""
-    
+
     def test_parse_malformed_html(self):
         """Test handling of malformed HTML."""
         malformed_html = "<html><body><div>Unclosed div<body></html>"
@@ -285,40 +283,40 @@ class TestParsingErrorHandling:
 
         buildings = parse_dorf1(html_no_data)
         assert len(buildings) == 0  # Should return empty list, not fail
-    
+
     def test_checksum_extraction_edge_cases(self):
         """Test checksum extraction edge cases."""
         # Multiple checksums - should return first
-        html_multiple = '''
+        html_multiple = """
         <html>
         <body>
             <a href="?checksum=abc123">Link 1</a>
             <a href="?checksum=def456">Link 2</a>
         </body>
         </html>
-        '''
-        
+        """
+
         checksum = extract_checksum(html_multiple)
         assert checksum == "abc123"  # Should return first match
-        
+
         # Checksum in different case
         html_case = '<html><body><a href="?CHECKSUM=ABC123">Link</a></body></html>'
-        
+
         checksum = extract_checksum(html_case)
         assert checksum == "abc123"  # Should normalize to lowercase
-    
+
     def test_unicode_text_edge_cases(self):
         """Test Unicode text cleaning edge cases."""
         # Empty string
         assert clean_unicode_text("") == ""
-        
+
         # None input
-        assert clean_unicode_text(None) == None
-        
+        assert clean_unicode_text(None) is None
+
         # Only Unicode markers
-        assert clean_unicode_text("\u202D\u202C") == ""
-        
+        assert clean_unicode_text("\u202d\u202c") == ""
+
         # Mixed content
-        mixed = "Normal text \u202D with markers \u202C and\u200E more\u200F text"
+        mixed = "Normal text \u202d with markers \u202c and\u200e more\u200f text"
         cleaned = clean_unicode_text(mixed)
         assert cleaned == "Normal text with markers and more text"

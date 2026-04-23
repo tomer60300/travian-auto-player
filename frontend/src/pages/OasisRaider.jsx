@@ -176,7 +176,7 @@ export default function OasisRaider() {
               lastConfigRef.current = null
               // Cleanly close the reconnect handle (no more retries)
               if (wsRef.current?.close) {
-                setTimeout(() => { try { wsRef.current?.close() } catch {} }, 500)
+                setTimeout(() => { try { wsRef.current?.close() } catch { /* empty */ } }, 500)
               }
             }
             break
@@ -199,7 +199,7 @@ export default function OasisRaider() {
             break
         }
       },
-      (event) => {
+      () => {
         if (mountedRef.current) {
           addLog('❌', 'SYSTEM', 'WebSocket error', 'error')
         }

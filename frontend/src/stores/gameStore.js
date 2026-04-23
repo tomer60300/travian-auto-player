@@ -14,7 +14,7 @@ function storeVillageId(id) {
   try {
     if (id != null) sessionStorage.setItem(VILLAGE_KEY, String(id))
     else sessionStorage.removeItem(VILLAGE_KEY)
-  } catch {}
+  } catch { /* empty */ }
 }
 
 let _checkingStatus = false
@@ -165,7 +165,6 @@ const useGameStore = create((set, get) => ({
       set({ buildings: arr, buildingsLoading: false });
     } catch (e) {
       console.warn('fetchBuildings failed:', e);
-      const status = e.response?.status;
       const detail = e.response?.data?.detail || 'Failed to load buildings';
       set({ buildingsLoading: false, buildingsError: typeof detail === 'string' ? detail : 'Failed to load buildings' });
       get()._handleFetchError(e);

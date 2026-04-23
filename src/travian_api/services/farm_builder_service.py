@@ -66,7 +66,9 @@ def chebyshev(x1: int, y1: int, x2: int, y2: int) -> int:
 # ─── Bucket / rule evaluation ──────────────────────────────────────────────
 
 
-def matrix_to_buckets(matrix_spec: Dict[str, Any], home_villages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def matrix_to_buckets(
+    matrix_spec: Dict[str, Any], home_villages: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     """Convert a matrix spec into a concrete list of buckets.
 
     matrix_spec shape::
@@ -108,22 +110,24 @@ def matrix_to_buckets(matrix_spec: Dict[str, Any], home_villages: List[Dict[str,
 
     buckets: List[Dict[str, Any]] = []
     for home in home_villages:
-        for (pmin, pmax, plabel) in ranges:
+        for pmin, pmax, plabel in ranges:
             name = template.format(
                 home_short=home.get("short", f"V{home['id']}"),
                 pop_label=plabel,
                 radius=radius,
                 home_id=home["id"],
             )
-            buckets.append({
-                "name": name,
-                "home_village_id": home["id"],
-                "home_short": home.get("short", f"V{home['id']}"),
-                "pop_label": plabel,
-                "pop_min": pmin,
-                "pop_max": pmax,
-                "closer_to_home_id": home["id"],
-            })
+            buckets.append(
+                {
+                    "name": name,
+                    "home_village_id": home["id"],
+                    "home_short": home.get("short", f"V{home['id']}"),
+                    "pop_label": plabel,
+                    "pop_min": pmin,
+                    "pop_max": pmax,
+                    "closer_to_home_id": home["id"],
+                }
+            )
     return buckets
 
 
@@ -177,7 +181,9 @@ def eval_advanced_rule(tile: MapTileInfo, rule: Dict[str, Any], ctx: Dict[str, A
     elif field == "distance_to_home":
         # value format: {"home_id": vid, "distance": n}
         if isinstance(value, dict) and "home_id" in value and "distance" in value:
-            home = next((h for h in ctx.get("home_villages", []) if h["id"] == value["home_id"]), None)
+            home = next(
+                (h for h in ctx.get("home_villages", []) if h["id"] == value["home_id"]), None
+            )
             if home is None:
                 return False
             lhs = chebyshev(tile.x, tile.y, home["x"], home["y"])
@@ -261,7 +267,9 @@ def classify_by_closest_home(
 ) -> Optional[Dict[str, Any]]:
     """Assign tile to closest home village, then first-match within that home's lists."""
     # Only consider homes that have lists defined
-    active_homes = [h for h in home_villages if h["id"] in per_home_lists and per_home_lists[h["id"]]]
+    active_homes = [
+        h for h in home_villages if h["id"] in per_home_lists and per_home_lists[h["id"]]
+    ]
     closest = find_closest_home(tile, active_homes, home_priority)
     if closest is None:
         return None
@@ -301,14 +309,17 @@ class FarmBuilderService:
         """Scan around each home village (with Euclidean overscan) and merge+dedupe."""
         # Chebyshev radius R → Euclidean scan radius ceil(sqrt(2) * R)
         import math as _m
+
         eu_radius = int(_m.ceil(_m.sqrt(2) * radius))
         seen: Dict[Tuple[int, int], MapTileInfo] = {}
         for home in home_villages:
-            await send_log("FB-SCAN", "🔍",
-                           f"Scanning around ({home['x']},{home['y']}) r={radius} (eu={eu_radius})...")
+            await send_log(
+                "FB-SCAN",
+                "🔍",
+                f"Scanning around ({home['x']},{home['y']}) r={radius} (eu={eu_radius})...",
+            )
             tiles = await self._scout_svc.scan_map(home["x"], home["y"], eu_radius)
-            await send_log("FB-SCAN", "🔍",
-                           f"({home['x']},{home['y']}) raw tiles: {len(tiles)}")
+            await send_log("FB-SCAN", "🔍", f"({home['x']},{home['y']}) raw tiles: {len(tiles)}")
             for t in tiles:
                 key = (t.x, t.y)
                 if key not in seen:
@@ -338,7 +349,9 @@ class FarmBuilderService:
         exclude_alliance_tags: List[str] = config.get("exclude_alliance_tags", [])
         exclude_player_names: List[str] = config.get("exclude_player_names", [])
 
-        await send_log("FB-SCAN", "🔍", f"Preview start — {len(home_villages)} home village(s), r={radius}")
+        await send_log(
+            "FB-SCAN", "🔍", f"Preview start — {len(home_villages)} home village(s), r={radius}"
+        )
 
         merged = await self._scan_all_home_villages(home_villages, radius, send_log)
         if await check_stop():
@@ -346,13 +359,17 @@ class FarmBuilderService:
 
         # Pre-filter BEFORE enrichment (drop oases/abandoned/no-player) to cut HTTP cost.
         pre = [
-            t for t in merged
+            t
+            for t in merged
             if not t.is_oasis
             and not t.is_abandoned
-            and t.player_id is not None and t.player_id > 0
+            and t.player_id is not None
+            and t.player_id > 0
             and t.village_id > 0
         ]
-        await send_log("FB-FILTER", "👥", f"Pre-filter (oasis/abandoned/no-player): {len(merged)} → {len(pre)}")
+        await send_log(
+            "FB-FILTER", "👥", f"Pre-filter (oasis/abandoned/no-player): {len(merged)} → {len(pre)}"
+        )
 
         # Enrich survivors (population, player_name, alliance_name, tribe)
         await send_log("FB-FILTER", "👥", f"Enriching {len(pre)} tiles (sequential, throttled)...")
@@ -365,7 +382,9 @@ class FarmBuilderService:
 
         # Unique alive player ids → fetch true totals
         player_ids = {t.player_id for t in enriched if t.player_id}
-        await send_log("FB-FILTER", "👥", f"Fetching true population for {len(player_ids)} unique players...")
+        await send_log(
+            "FB-FILTER", "👥", f"Fetching true population for {len(player_ids)} unique players..."
+        )
         player_pops = await self._scout_svc.fetch_player_populations(player_ids)
 
         # Canonical filter
@@ -409,20 +428,25 @@ class FarmBuilderService:
                 for lst in lists:
                     bucket_list.append({"name": lst["name"], "home_village_id": vid})
             for t in survivors:
-                match = classify_by_closest_home(t, per_home_lists, home_villages, home_priority, ctx)
+                match = classify_by_closest_home(
+                    t, per_home_lists, home_villages, home_priority, ctx
+                )
                 bname = match["name"] if match else "(unmatched)"
                 bucket_counts[bname] = bucket_counts.get(bname, 0) + 1
                 closest = find_closest_home(t, home_villages, home_priority)
-                survivor_records.append({
-                    "x": t.x, "y": t.y,
-                    "player_name": t.player_name,
-                    "player_id": t.player_id,
-                    "alliance_tag": t.alliance_name,
-                    "target_village_pop": t.population,
-                    "player_total_pop": player_pops.get(t.player_id, 0),
-                    "assigned_bucket": bname,
-                    "closest_home": closest["id"] if closest else None,
-                })
+                survivor_records.append(
+                    {
+                        "x": t.x,
+                        "y": t.y,
+                        "player_name": t.player_name,
+                        "player_id": t.player_id,
+                        "alliance_tag": t.alliance_name,
+                        "target_village_pop": t.population,
+                        "player_total_pop": player_pops.get(t.player_id, 0),
+                        "assigned_bucket": bname,
+                        "closest_home": closest["id"] if closest else None,
+                    }
+                )
         else:
             # Fallback: flat advanced_rows (legacy)
             spec_mode = config.get("spec_mode", "matrix")
@@ -432,32 +456,42 @@ class FarmBuilderService:
                     b = classify_matrix(t, buckets, home_villages, home_priority)
                     bname = b["name"] if b else "(unclassified)"
                     bucket_counts[bname] = bucket_counts.get(bname, 0) + 1
-                    survivor_records.append({
-                        "x": t.x, "y": t.y,
-                        "player_name": t.player_name,
-                        "player_id": t.player_id,
-                        "alliance_tag": t.alliance_name,
-                        "target_village_pop": t.population,
-                        "player_total_pop": player_pops.get(t.player_id, 0),
-                        "assigned_bucket": bname,
-                    })
-                bucket_list = [{"name": b["name"], "home_village_id": b["home_village_id"]} for b in buckets]
+                    survivor_records.append(
+                        {
+                            "x": t.x,
+                            "y": t.y,
+                            "player_name": t.player_name,
+                            "player_id": t.player_id,
+                            "alliance_tag": t.alliance_name,
+                            "target_village_pop": t.population,
+                            "player_total_pop": player_pops.get(t.player_id, 0),
+                            "assigned_bucket": bname,
+                        }
+                    )
+                bucket_list = [
+                    {"name": b["name"], "home_village_id": b["home_village_id"]} for b in buckets
+                ]
             else:
                 rows = config.get("advanced_rows") or []
                 for t in survivors:
                     row = classify_advanced(t, rows, ctx)
                     bname = row["name"] if row else "(unmatched)"
                     bucket_counts[bname] = bucket_counts.get(bname, 0) + 1
-                    survivor_records.append({
-                        "x": t.x, "y": t.y,
-                        "player_name": t.player_name,
-                        "player_id": t.player_id,
-                        "alliance_tag": t.alliance_name,
-                        "target_village_pop": t.population,
-                        "player_total_pop": player_pops.get(t.player_id, 0),
-                        "assigned_bucket": bname,
-                    })
-                bucket_list = [{"name": r["name"], "home_village_id": r.get("home_village_id")} for r in rows]
+                    survivor_records.append(
+                        {
+                            "x": t.x,
+                            "y": t.y,
+                            "player_name": t.player_name,
+                            "player_id": t.player_id,
+                            "alliance_tag": t.alliance_name,
+                            "target_village_pop": t.population,
+                            "player_total_pop": player_pops.get(t.player_id, 0),
+                            "assigned_bucket": bname,
+                        }
+                    )
+                bucket_list = [
+                    {"name": r["name"], "home_village_id": r.get("home_village_id")} for r in rows
+                ]
 
         return {
             "stopped": False,
@@ -486,13 +520,17 @@ class FarmBuilderService:
         architecturally preventing filter-parity divergence.
         """
         t_start = time.monotonic()
-        tribe_name = {1: "romans", 2: "teutons", 3: "gauls"}.get(self._session.tribe_id or 2, "teutons")
+        tribe_name = {1: "romans", 2: "teutons", 3: "gauls"}.get(
+            self._session.tribe_id or 2, "teutons"
+        )
         if tribe_name != "teutons":
-            await send_log("FB-ASSIGN", "❌", f"Tribe {tribe_name} not supported yet — aborting.", "error")
+            await send_log(
+                "FB-ASSIGN", "❌", f"Tribe {tribe_name} not supported yet — aborting.", "error"
+            )
             return {"error": f"Tribe {tribe_name} unsupported"}
 
         home_villages = config["home_villages"]
-        home_priority = config.get("home_priority") or [h["id"] for h in home_villages]
+        _home_priority = config.get("home_priority") or [h["id"] for h in home_villages]
         spec_mode = config.get("spec_mode", "matrix")
 
         # ── Phase 3: re-classify using the record's pre-assigned bucket ──
@@ -509,21 +547,23 @@ class FarmBuilderService:
         if raw_phl:
             for k, lists in raw_phl.items():
                 vid = int(k)
-                for lst in (lists or []):
+                for lst in lists or []:
                     bucket_home[lst["name"]] = vid
         elif spec_mode == "matrix":
             matrix_buckets = matrix_to_buckets(config.get("matrix_spec", {}), home_villages)
             for b in matrix_buckets:
                 bucket_home[b["name"]] = b["home_village_id"]
         else:
-            for row in (config.get("advanced_rows") or []):
+            for row in config.get("advanced_rows") or []:
                 bucket_home[row["name"]] = row["home_village_id"]
 
         # Skip unmatched/unclassified buckets
         real_buckets = {k: v for k, v in bucket_records.items() if k in bucket_home}
         unmatched = sum(len(v) for k, v in bucket_records.items() if k not in bucket_home)
         if unmatched:
-            await send_log("FB-ASSIGN", "⚠️", f"{unmatched} targets were unmatched — skipping.", "warning")
+            await send_log(
+                "FB-ASSIGN", "⚠️", f"{unmatched} targets were unmatched — skipping.", "warning"
+            )
 
         # ── Phase 4: create farm lists (primary only; overflow on demand) ─
         await send_log("FB-CREATE", "📝", f"Creating {len(real_buckets)} farm list(s)...")
@@ -556,10 +596,14 @@ class FarmBuilderService:
                 if key in seen_coords:
                     continue
                 seen_coords.add(key)
-                all_targets.append({
-                    "x": r["x"], "y": r["y"], "bucket": bname,
-                    "home_village_id": bucket_home[bname],
-                })
+                all_targets.append(
+                    {
+                        "x": r["x"],
+                        "y": r["y"],
+                        "bucket": bname,
+                        "home_village_id": bucket_home[bname],
+                    }
+                )
 
         await send_log("FB-DEFENSE", "🛡️", f"FB-DEFENSE start: {len(all_targets)} unique coords")
         defense_data: Dict[Tuple[int, int], Dict[str, Any]] = {}
@@ -595,10 +639,16 @@ class FarmBuilderService:
                                 "scouted_at": time.time(),
                             }
                             row = lookup_troop_row(cs, tribe_name)
-                            row_desc = ("SKIP:def_out_of_range" if row is None
-                                        else f"{','.join(f'{k}={v}' for k,v in row.items())}")
-                            await send_log("FB-DEFENSE", "🛡️",
-                                           f"FB-DEFENSE [{i+1}/{len(all_targets)}] ({x},{y}) EXISTING def={cs} row={row_desc}")
+                            row_desc = (
+                                "SKIP:def_out_of_range"
+                                if row is None
+                                else f"{','.join(f'{k}={v}' for k, v in row.items())}"
+                            )
+                            await send_log(
+                                "FB-DEFENSE",
+                                "🛡️",
+                                f"FB-DEFENSE [{i + 1}/{len(all_targets)}] ({x},{y}) EXISTING def={cs} row={row_desc}",
+                            )
                             continue
             except Exception as exc:
                 logger.debug("existing-report fetch failed (%s,%s): %s", x, y, exc)
@@ -620,7 +670,9 @@ class FarmBuilderService:
             for attempt in range(3):
                 try:
                     result = await self._military.send_scouts(
-                        x=x, y=y, amount=1,
+                        x=x,
+                        y=y,
+                        amount=1,
                         scout_type="defenses",
                         village_id=tgt["home_village_id"],
                     )
@@ -698,23 +750,32 @@ class FarmBuilderService:
                                     }
                                     break
                     except Exception as exc:
-                        logger.warning("report fetch (%s,%s) attempt %d: %s", x, y, attempt + 1, exc)
+                        logger.warning(
+                            "report fetch (%s,%s) attempt %d: %s", x, y, attempt + 1, exc
+                        )
                     if attempt < 2:
                         await asyncio.sleep(10)
                 if got:
                     defense_data[(x, y)] = got
                     cs = got["defender_combat_strength"]
                     row = lookup_troop_row(cs, tribe_name)
-                    row_desc = ("SKIP:def_out_of_range" if row is None
-                                else f"{','.join(f'{k}={v}' for k,v in row.items())}")
-                    await send_log("FB-DEFENSE", "🛡️",
-                                   f"FB-DEFENSE ({x},{y}) def={cs} row={row_desc}")
+                    row_desc = (
+                        "SKIP:def_out_of_range"
+                        if row is None
+                        else f"{','.join(f'{k}={v}' for k, v in row.items())}"
+                    )
+                    await send_log(
+                        "FB-DEFENSE", "🛡️", f"FB-DEFENSE ({x},{y}) def={cs} row={row_desc}"
+                    )
                 else:
                     defense_failed[(x, y)] = "report_fetch_failed"
                     await send_log("FB-DEFENSE", "⚠️", f"({x},{y}) report_fetch_failed", "warning")
 
-        await send_log("FB-DEFENSE", "✅",
-                       f"FB-DEFENSE-DONE data={len(defense_data)} failed={len(defense_failed)}")
+        await send_log(
+            "FB-DEFENSE",
+            "✅",
+            f"FB-DEFENSE-DONE data={len(defense_data)} failed={len(defense_failed)}",
+        )
 
         # ── Phase 6: assign troops & add to lists ────────────────────────
         await send_log("FB-ASSIGN", "🎯", f"FB-ASSIGN start for {len(all_targets)} targets")
@@ -763,49 +824,85 @@ class FarmBuilderService:
                     try:
                         await self._farm_svc.add_slot(list_id, x, y, units=units, active=False)
                         per_list_count[list_id] = per_list_count.get(list_id, 0) + 1
-                        added.append({
-                            "x": x, "y": y, "list_id": list_id, "list_name": list_name,
-                            "active": False, "troops": units, "def": 0, "reason": reason,
-                        })
-                        await send_log("FB-ASSIGN", "🎯",
-                                       f"FB-ASSIGN list={list_id} ({list_name}) ({x},{y}) INACTIVE troops={units} [{reason}]")
+                        added.append(
+                            {
+                                "x": x,
+                                "y": y,
+                                "list_id": list_id,
+                                "list_name": list_name,
+                                "active": False,
+                                "troops": units,
+                                "def": 0,
+                                "reason": reason,
+                            }
+                        )
+                        await send_log(
+                            "FB-ASSIGN",
+                            "🎯",
+                            f"FB-ASSIGN list={list_id} ({list_name}) ({x},{y}) INACTIVE troops={units} [{reason}]",
+                        )
                     except Exception as exc:
                         err = str(exc)
                         if "errorRaidListSlotLimit" in err or "Farm list is full" in err:
                             per_list_count[list_id] = SLOT_LIMIT
                             list_id, list_name = await _overflow_list(bname)
                             try:
-                                await self._farm_svc.add_slot(list_id, x, y, units=units, active=False)
+                                await self._farm_svc.add_slot(
+                                    list_id, x, y, units=units, active=False
+                                )
                                 per_list_count[list_id] = per_list_count.get(list_id, 0) + 1
-                                added.append({
-                                    "x": x, "y": y, "list_id": list_id, "list_name": list_name,
-                                    "active": False, "troops": units, "def": 0, "reason": reason,
-                                })
+                                added.append(
+                                    {
+                                        "x": x,
+                                        "y": y,
+                                        "list_id": list_id,
+                                        "list_name": list_name,
+                                        "active": False,
+                                        "troops": units,
+                                        "def": 0,
+                                        "reason": reason,
+                                    }
+                                )
                             except Exception as exc2:
-                                fail_add.append({"x": x, "y": y, "reason": f"add_slot_failed: {exc2}"})
-                                await send_log("FB-ASSIGN", "❌", f"({x},{y}) add_slot_failed: {exc2}", "error")
+                                fail_add.append(
+                                    {"x": x, "y": y, "reason": f"add_slot_failed: {exc2}"}
+                                )
+                                await send_log(
+                                    "FB-ASSIGN", "❌", f"({x},{y}) add_slot_failed: {exc2}", "error"
+                                )
                         else:
                             fail_add.append({"x": x, "y": y, "reason": f"add_slot_failed: {err}"})
-                            await send_log("FB-ASSIGN", "❌", f"({x},{y}) add_slot_failed: {err}", "error")
+                            await send_log(
+                                "FB-ASSIGN", "❌", f"({x},{y}) add_slot_failed: {err}", "error"
+                            )
                     continue
 
                 cs = d["defender_combat_strength"]
                 if cs < DEF_MIN:
                     skipped.append({"x": x, "y": y, "reason": f"def_too_low ({cs})"})
-                    await send_log("FB-ASSIGN", "⚠️",
-                                   f"FB-ASSIGN SKIP ({x},{y}) def={cs} < {DEF_MIN}", "warning")
+                    await send_log(
+                        "FB-ASSIGN",
+                        "⚠️",
+                        f"FB-ASSIGN SKIP ({x},{y}) def={cs} < {DEF_MIN}",
+                        "warning",
+                    )
                     continue
                 if cs > DEF_MAX:
                     skipped.append({"x": x, "y": y, "reason": f"def_too_high ({cs})"})
-                    await send_log("FB-ASSIGN", "⚠️",
-                                   f"FB-ASSIGN SKIP ({x},{y}) def={cs} > {DEF_MAX}", "warning")
+                    await send_log(
+                        "FB-ASSIGN",
+                        "⚠️",
+                        f"FB-ASSIGN SKIP ({x},{y}) def={cs} > {DEF_MAX}",
+                        "warning",
+                    )
                     continue
 
                 row = lookup_troop_row(cs, tribe_name)
                 if not row:
                     skipped.append({"x": x, "y": y, "reason": f"def_no_match ({cs})"})
-                    await send_log("FB-ASSIGN", "⚠️",
-                                   f"FB-ASSIGN SKIP ({x},{y}) def={cs} no_row", "warning")
+                    await send_log(
+                        "FB-ASSIGN", "⚠️", f"FB-ASSIGN SKIP ({x},{y}) def={cs} no_row", "warning"
+                    )
                     continue
 
                 list_id, list_name = _current_list(bname)
@@ -817,12 +914,22 @@ class FarmBuilderService:
                     try:
                         await self._farm_svc.add_slot(list_id, x, y, units=row, active=True)
                         per_list_count[list_id] = per_list_count.get(list_id, 0) + 1
-                        added.append({
-                            "x": x, "y": y, "list_id": list_id, "list_name": list_name,
-                            "active": True, "troops": row, "def": cs,
-                        })
-                        await send_log("FB-ASSIGN", "🎯",
-                                       f"FB-ASSIGN list={list_id} ({list_name}) ({x},{y}) active troops={row}")
+                        added.append(
+                            {
+                                "x": x,
+                                "y": y,
+                                "list_id": list_id,
+                                "list_name": list_name,
+                                "active": True,
+                                "troops": row,
+                                "def": cs,
+                            }
+                        )
+                        await send_log(
+                            "FB-ASSIGN",
+                            "🎯",
+                            f"FB-ASSIGN list={list_id} ({list_name}) ({x},{y}) active troops={row}",
+                        )
                         ok = True
                         break
                     except Exception as exc:
@@ -835,13 +942,17 @@ class FarmBuilderService:
                             await asyncio.sleep(5)
                         else:
                             fail_add.append({"x": x, "y": y, "reason": f"add_slot_failed: {err}"})
-                            await send_log("FB-ASSIGN", "❌",
-                                           f"({x},{y}) add_slot_failed: {err}", "error")
+                            await send_log(
+                                "FB-ASSIGN", "❌", f"({x},{y}) add_slot_failed: {err}", "error"
+                            )
                 if not ok and not fail_add or (fail_add and fail_add[-1]["x"] != x):
                     pass  # already handled above
 
-        await send_log("FB-ASSIGN", "✅",
-                       f"FB-ASSIGN-DONE added={len(added)} skipped={len(skipped)} failed={len(fail_add)}")
+        await send_log(
+            "FB-ASSIGN",
+            "✅",
+            f"FB-ASSIGN-DONE added={len(added)} skipped={len(skipped)} failed={len(fail_add)}",
+        )
 
         duration = round(time.monotonic() - t_start, 1)
         report = {
@@ -853,8 +964,7 @@ class FarmBuilderService:
             "defense_data_count": len(defense_data),
             "defense_failed_count": len(defense_failed),
             "bucket_lists": [
-                {"bucket": bname, "lists": lists}
-                for bname, lists in bucket_lists.items()
+                {"bucket": bname, "lists": lists} for bname, lists in bucket_lists.items()
             ],
             "per_target": added,
             "skipped_targets": skipped,

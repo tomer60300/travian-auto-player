@@ -13,7 +13,6 @@ Complements the existing HumanDelay class (triangular distributions)
 with more sophisticated heavy-tailed models for longer automation loops.
 """
 
-import math
 import random
 
 
@@ -79,7 +78,7 @@ class HumanTiming:
         """
         # Gaussian component: motor response variability
         mu = base_ms / 1000.0  # convert to seconds
-        sigma = mu * 0.15      # 15% CV for motor noise
+        sigma = mu * 0.15  # 15% CV for motor noise
 
         gaussian = random.gauss(mu, sigma)
 

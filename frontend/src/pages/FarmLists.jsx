@@ -368,7 +368,7 @@ export default function FarmLists() {
     try {
       const res = await api.get(`/farm/lists/${selectedListId}`)
       setDetail(res.data)
-    } catch {}
+    } catch { /* empty */ }
     await fetchLists()
 
     setSelectedSlotIds(new Set())

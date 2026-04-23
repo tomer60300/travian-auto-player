@@ -1,12 +1,11 @@
 """WebSocket connection manager with per-user channels and JWT authentication."""
 
 import asyncio
-import json
 import logging
 from typing import Optional
 
 import jwt
-from fastapi import WebSocket, WebSocketDisconnect, status
+from fastapi import WebSocket, status
 
 from travian_api.web.auth import decode_access_token
 from travian_api.web.sessions import session_manager
@@ -29,7 +28,10 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
 
     async def authenticate(
-        self, websocket: WebSocket, *, require_travian_session: bool = True,
+        self,
+        websocket: WebSocket,
+        *,
+        require_travian_session: bool = True,
     ) -> Optional[int]:
         """Authenticate a WebSocket connection via query parameter token.
 
@@ -61,7 +63,9 @@ class ConnectionManager:
         # Verify user has active Travian session (when required)
         if require_travian_session and session_manager.get(user_id) is None:
             await websocket.accept()
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="No active Travian session")
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION, reason="No active Travian session"
+            )
             return None
 
         return user_id
@@ -95,7 +99,7 @@ class ConnectionManager:
                 :meth:`connect` is used instead of *channel*.
         """
         ws_key = channel
-        if websocket and hasattr(websocket, '_ws_channel_key'):
+        if websocket and hasattr(websocket, "_ws_channel_key"):
             ws_key = websocket._ws_channel_key
         async with self._lock:
             if user_id in self._connections:

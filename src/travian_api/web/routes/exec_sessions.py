@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
 from travian_api.web.auth import get_current_user
 from travian_api.web.execution_sessions import exec_session_manager
@@ -93,14 +93,16 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
 
     try:
         # Send metadata
-        await websocket.send_json({
-            "type": "session_meta",
-            "id": session.id,
-            "session_type": session.session_type,
-            "label": session.label,
-            "status": session.status,
-            "created_at": session.created_at,
-        })
+        await websocket.send_json(
+            {
+                "type": "session_meta",
+                "id": session.id,
+                "session_type": session.session_type,
+                "label": session.label,
+                "status": session.status,
+                "created_at": session.created_at,
+            }
+        )
 
         # Send full history
         await websocket.send_json({"type": "history", "messages": history})
@@ -123,7 +125,9 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
         pass
     except Exception:
         logger.exception(
-            "Error in session stream WS: session=%s user=%s", session_id, user_id,
+            "Error in session stream WS: session=%s user=%s",
+            session_id,
+            user_id,
         )
     finally:
         exec_session_manager.unsubscribe(session_id, sub_id)

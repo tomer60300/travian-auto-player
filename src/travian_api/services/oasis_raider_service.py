@@ -44,29 +44,29 @@ BONUS_KEYWORDS: Dict[str, List[str]] = {
 
 # ── Anti-detection behavioral constants (tunable) ────────────────────
 # Mitigation 1 — Weighted shuffle
-SHUFFLE_WEIGHT_FACTOR = 1.5       # Higher = stronger distance bias in shuffle
+SHUFFLE_WEIGHT_FACTOR = 1.5  # Higher = stronger distance bias in shuffle
 
 # Mitigation 2 — Map browsing between enrichments
-BROWSE_FREQ_MIN = 2               # Browse every N enrichments (randomized)
+BROWSE_FREQ_MIN = 2  # Browse every N enrichments (randomized)
 BROWSE_FREQ_MAX = 4
 
 # Mitigation 3 — Decision delay before raids
-THINK_DELAY_MIN = 2.0             # Seconds: quick glance → immediate raid
-THINK_DELAY_MODE = 5.0            # Seconds: read page, open rally point
-THINK_DELAY_MAX = 12.0            # Seconds: careful read, check troops, hesitate
+THINK_DELAY_MIN = 2.0  # Seconds: quick glance → immediate raid
+THINK_DELAY_MODE = 5.0  # Seconds: read page, open rally point
+THINK_DELAY_MAX = 12.0  # Seconds: careful read, check troops, hesitate
 
 # Mitigation 5 — Random false skips
-SKIP_PROBABILITY = 0.10           # 10% chance to skip a valid empty target
-SKIP_MIN_REMAINING = 4            # Don't skip if fewer than this many targets left
+SKIP_PROBABILITY = 0.10  # 10% chance to skip a valid empty target
+SKIP_MIN_REMAINING = 4  # Don't skip if fewer than this many targets left
 
 # Mitigation 6 — Burst-and-break pacing
-BURST_SIZE_MIN = 3                # Raids before micro-break (randomized)
+BURST_SIZE_MIN = 3  # Raids before micro-break (randomized)
 BURST_SIZE_MAX = 5
-BREAK_DURATION_MIN = 30.0         # Micro-break length in seconds
+BREAK_DURATION_MIN = 30.0  # Micro-break length in seconds
 BREAK_DURATION_MAX = 90.0
 
 # Shared — Noisy sleep segments (Mitigations 4 & 6)
-NOISY_SLEEP_SEGMENT_MIN = 15.0    # Seconds per sleep chunk
+NOISY_SLEEP_SEGMENT_MIN = 15.0  # Seconds per sleep chunk
 NOISY_SLEEP_SEGMENT_MAX = 25.0
 
 # Pages a human might visit while idle / waiting for troops
@@ -144,8 +144,10 @@ class OasisRaiderService:
         await send_log("TROOPS", "🏠", "Fetching idle troops from village...", "info")
         available = await self._fetch_idle_troops(village_id)
         await send_log(
-            "TROOPS", "🏠",
-            f"Available: {self._format_troops(available, tribe_id)}", "info",
+            "TROOPS",
+            "🏠",
+            f"Available: {self._format_troops(available, tribe_id)}",
+            "info",
         )
 
         if not self._has_enough_troops(available, config.troops):
@@ -157,8 +159,10 @@ class OasisRaiderService:
         if await check_stop():
             return stats
         await send_log(
-            "SCAN", "🗺️",
-            f"Scanning radius {config.radius} around ({cx}, {cy})...", "info",
+            "SCAN",
+            "🗺️",
+            f"Scanning radius {config.radius} around ({cx}, {cy})...",
+            "info",
         )
         oases = await self._scan_for_oases(config.radius, cx, cy)
         await send_log("SCAN", "🗺️", f"Found {len(oases)} unoccupied oases", "info")
@@ -171,7 +175,8 @@ class OasisRaiderService:
         # ── STEP 3: Note bonus filter ────────────────────────────────
         if config.bonus_filter:
             await send_log(
-                "FILTER", "🔽",
+                "FILTER",
+                "🔽",
                 f"Bonus filter active: {config.bonus_filter} — will apply per-oasis during enrichment",
                 "info",
             )
@@ -179,35 +184,36 @@ class OasisRaiderService:
         # ── STEP 4: Sort by distance (for logging) ──────────────────
         oases.sort(key=lambda o: o.distance)
         if oases:
-            orig_order = ", ".join(
-                f"({o.x}|{o.y}) {o.distance:.2f}" for o in oases[:6]
-            )
+            orig_order = ", ".join(f"({o.x}|{o.y}) {o.distance:.2f}" for o in oases[:6])
             suffix = ", ..." if len(oases) > 6 else ""
             await send_log(
-                "SORT", "📏",
+                "SORT",
+                "📏",
                 f"Original distance order: {orig_order}{suffix}",
                 "info",
             )
 
         if config.max_targets > 0:
-            await send_log("SORT", "📏", f"Will stop after {config.max_targets} successful raids", "info")
+            await send_log(
+                "SORT", "📏", f"Will stop after {config.max_targets} successful raids", "info"
+            )
 
         # ── STEP 4b: Humanize target order (Mitigation 1) ───────────
         original_sorted = list(oases)
         oases = self._humanize_target_order(oases)
         stats["order_entropy"] = self._compute_order_entropy(original_sorted, oases)
 
-        humanized_order = ", ".join(
-            f"({o.x}|{o.y}) {o.distance:.2f}" for o in oases[:6]
-        )
+        humanized_order = ", ".join(f"({o.x}|{o.y}) {o.distance:.2f}" for o in oases[:6])
         suffix = ", ..." if len(oases) > 6 else ""
         await send_log(
-            "HUMANIZE", "🎲",
+            "HUMANIZE",
+            "🎲",
             f"Weighted shuffle applied (factor: {SHUFFLE_WEIGHT_FACTOR})",
             "info",
         )
         await send_log(
-            "HUMANIZE", "🎲",
+            "HUMANIZE",
+            "🎲",
             f"Raiding order: {humanized_order}{suffix}",
             "info",
         )
@@ -230,12 +236,14 @@ class OasisRaiderService:
                 needed_str = self._format_troops(config.troops, tribe_id)
                 have_str = self._format_troops(available, tribe_id)
                 await send_log(
-                    "TROOPS", "⚠️",
+                    "TROOPS",
+                    "⚠️",
                     f"Insufficient (have {have_str}, need {needed_str}) — entering sleep",
                     "warning",
                 )
                 await send_log(
-                    "SLEEP", "💤",
+                    "SLEEP",
+                    "💤",
                     f"Progress: {i}/{stats['total']} processed, {stats['sent']} raids sent",
                     "info",
                 )
@@ -247,11 +255,15 @@ class OasisRaiderService:
                     sleep_start = time.monotonic()
                     # Mitigation 4 — Noisy sleep instead of silent wait
                     await send_log(
-                        "SLEEP", "💤",
-                        "Waiting for troops (browsing game meanwhile)...", "info",
+                        "SLEEP",
+                        "💤",
+                        "Waiting for troops (browsing game meanwhile)...",
+                        "info",
                     )
                     await self._noisy_sleep(
-                        config.sleep_interval, send_log, check_stop,
+                        config.sleep_interval,
+                        send_log,
+                        check_stop,
                         village_id=village_id,
                     )
                     stats["sleep_time"] += time.monotonic() - sleep_start
@@ -259,7 +271,8 @@ class OasisRaiderService:
                     avail_str = self._format_troops(available, tribe_id)
                     sufficient = self._has_enough_troops(available, config.troops)
                     await send_log(
-                        "SLEEP", "💤",
+                        "SLEEP",
+                        "💤",
                         f"Checking troops... {avail_str} — "
                         f"{'SUFFICIENT! Resuming...' if sufficient else 'still insufficient'}",
                         "info",
@@ -286,14 +299,17 @@ class OasisRaiderService:
             if self._should_randomly_skip(remaining):
                 stats["skipped_random"] += 1
                 await send_log(
-                    "SKIP", "🎲",
+                    "SKIP",
+                    "🎲",
                     f"Randomly skipping ({oasis.x}|{oasis.y}) — simulating human selectivity",
                     "info",
                 )
                 if i < len(oases) - 1:
                     await send_log(
-                        "NEXT", "➡️",
-                        f"Moving to target {i + 2}/{stats['total']}", "info",
+                        "NEXT",
+                        "➡️",
+                        f"Moving to target {i + 2}/{stats['total']}",
+                        "info",
                     )
                 continue
 
@@ -307,15 +323,19 @@ class OasisRaiderService:
 
             # 5b — Enrich this single oasis
             await send_log(
-                "ENRICH", "🔍",
-                f"Fetching oasis details for ({oasis.x}|{oasis.y})...", "info",
+                "ENRICH",
+                "🔍",
+                f"Fetching oasis details for ({oasis.x}|{oasis.y})...",
+                "info",
             )
             try:
                 detail = await self._fetch_oasis_detail(oasis.x, oasis.y)
             except Exception as e:
                 await send_log(
-                    "ENRICH", "❌",
-                    f"Failed to fetch ({oasis.x}|{oasis.y}): {e} — skipping", "error",
+                    "ENRICH",
+                    "❌",
+                    f"Failed to fetch ({oasis.x}|{oasis.y}): {e} — skipping",
+                    "error",
                 )
                 continue
 
@@ -325,7 +345,8 @@ class OasisRaiderService:
             dist = detail.get("distance") or oasis.distance
 
             await send_log(
-                "ENRICH", "🔍",
+                "ENRICH",
+                "🔍",
                 f"({oasis.x}|{oasis.y}): Bonus {bonus_str} | Troops: {troops_str} | Distance: {dist:.2f}",
                 "info",
             )
@@ -334,33 +355,42 @@ class OasisRaiderService:
             if config.bonus_filter:
                 if not self._matches_bonus_filter(bonus_str, config.bonus_filter):
                     await send_log(
-                        "FILTER", "❌",
-                        f"({oasis.x}|{oasis.y}) removed: {bonus_str} — no match", "info",
+                        "FILTER",
+                        "❌",
+                        f"({oasis.x}|{oasis.y}) removed: {bonus_str} — no match",
+                        "info",
                     )
                     continue
                 await send_log(
-                    "FILTER", "✅",
-                    f"({oasis.x}|{oasis.y}) kept: {bonus_str} — matches", "info",
+                    "FILTER",
+                    "✅",
+                    f"({oasis.x}|{oasis.y}) kept: {bonus_str} — matches",
+                    "info",
                 )
 
             # 5c — Classify
             if troops_dict:
                 await send_log(
-                    "CLASSIFY", "⛔",
+                    "CLASSIFY",
+                    "⛔",
                     f"({oasis.x}|{oasis.y}) has troops ({troops_str}) — SKIPPING",
                     "warning",
                 )
                 stats["skipped_animals"].append(f"({oasis.x}|{oasis.y})")
                 if i < len(oases) - 1:
                     await send_log(
-                        "NEXT", "➡️",
-                        f"Moving to target {i + 2}/{stats['total']}", "info",
+                        "NEXT",
+                        "➡️",
+                        f"Moving to target {i + 2}/{stats['total']}",
+                        "info",
                     )
                 continue
 
             await send_log(
-                "CLASSIFY", "✅",
-                f"({oasis.x}|{oasis.y}) is EMPTY — proceeding to raid", "info",
+                "CLASSIFY",
+                "✅",
+                f"({oasis.x}|{oasis.y}) is EMPTY — proceeding to raid",
+                "info",
             )
 
             # 5d-pre — Decision delay (Mitigation 3)
@@ -376,9 +406,14 @@ class OasisRaiderService:
                     jit_detail = await self._fetch_oasis_detail(oasis.x, oasis.y)
                     if jit_detail.get("has_any_troops"):
                         jit_troops = jit_detail.get("troops", {})
-                        jit_str = self._format_animal_troops(jit_troops) if jit_troops else "player troops"
+                        jit_str = (
+                            self._format_animal_troops(jit_troops)
+                            if jit_troops
+                            else "player troops"
+                        )
                         await send_log(
-                            "JIT", "⚠️",
+                            "JIT",
+                            "⚠️",
                             f"({oasis.x}|{oasis.y}) now occupied ({jit_str}) — skipping",
                             "warning",
                         )
@@ -386,7 +421,8 @@ class OasisRaiderService:
                         continue
                 except Exception as exc:
                     await send_log(
-                        "JIT", "⚠️",
+                        "JIT",
+                        "⚠️",
                         f"JIT recheck failed for ({oasis.x}|{oasis.y}): {exc} — proceeding",
                         "warning",
                     )
@@ -395,14 +431,16 @@ class OasisRaiderService:
             raid_troops_str = self._format_troops(config.troops, tribe_id)
             if config.dry_run:
                 await send_log(
-                    "DRY RUN", "🔍",
+                    "DRY RUN",
+                    "🔍",
                     f"Would raid ({oasis.x}|{oasis.y}): {raid_troops_str} | Oasis troops: {troops_str}",
                     "info",
                 )
                 stats["sent"] += 1
             else:
                 await send_log(
-                    "RAID", "⚔️",
+                    "RAID",
+                    "⚔️",
                     f"Sending to ({oasis.x}|{oasis.y}): {raid_troops_str} | Oasis troops: {troops_str}",
                     "info",
                 )
@@ -410,14 +448,18 @@ class OasisRaiderService:
                     result = await self._send_raid(oasis.x, oasis.y, config.troops, village_id)
                     if result.success:
                         await send_log(
-                            "RAID", "✅",
-                            f"Successfully sent to ({oasis.x}|{oasis.y})", "success",
+                            "RAID",
+                            "✅",
+                            f"Successfully sent to ({oasis.x}|{oasis.y})",
+                            "success",
                         )
                         stats["sent"] += 1
                     else:
                         await send_log(
-                            "RAID", "❌",
-                            f"Failed: {result.raw_response[:200]}", "error",
+                            "RAID",
+                            "❌",
+                            f"Failed: {result.raw_response[:200]}",
+                            "error",
                         )
                 except Exception as e:
                     await send_log("RAID", "❌", f"Failed: {e}", "error")
@@ -438,7 +480,8 @@ class OasisRaiderService:
             # Check max raids limit
             if config.max_targets > 0 and stats["sent"] >= config.max_targets:
                 await send_log(
-                    "DONE", "🎯",
+                    "DONE",
+                    "🎯",
                     f"Reached target of {config.max_targets} successful raid(s) — stopping",
                     "info",
                 )
@@ -459,48 +502,61 @@ class OasisRaiderService:
         await send_log("SUMMARY", "📊", f"Raids sent: {stats['sent']}", "info")
         if stats["skipped_animals"]:
             await send_log(
-                "SUMMARY", "📊",
+                "SUMMARY",
+                "📊",
                 f"Skipped (animals): {len(stats['skipped_animals'])} — {stats['skipped_animals']}",
                 "info",
             )
         if stats["skipped_troops"] > 0:
             await send_log(
-                "SUMMARY", "📊",
-                f"Skipped (troops depleted): {stats['skipped_troops']}", "info",
+                "SUMMARY",
+                "📊",
+                f"Skipped (troops depleted): {stats['skipped_troops']}",
+                "info",
             )
         if stats["skipped_random"] > 0:
             await send_log(
-                "SUMMARY", "📊",
-                f"Skipped (random human-skip): {stats['skipped_random']}", "info",
+                "SUMMARY",
+                "📊",
+                f"Skipped (random human-skip): {stats['skipped_random']}",
+                "info",
             )
         if stats["browse_pauses"] > 0:
             await send_log(
-                "SUMMARY", "📊",
-                f"Map browsing pauses: {stats['browse_pauses']}", "info",
+                "SUMMARY",
+                "📊",
+                f"Map browsing pauses: {stats['browse_pauses']}",
+                "info",
             )
         if stats["breaks_taken"] > 0:
             brk_min = int(stats["break_time"] // 60)
             brk_sec = int(stats["break_time"] % 60)
             await send_log(
-                "SUMMARY", "📊",
+                "SUMMARY",
+                "📊",
                 f"Micro-breaks taken: {stats['breaks_taken']} (total: {brk_min}m {brk_sec:02d}s)",
                 "info",
             )
         if stats["think_delays"]:
             avg_think = sum(stats["think_delays"]) / len(stats["think_delays"])
             await send_log(
-                "SUMMARY", "📊",
-                f"Avg decision delay: {avg_think:.1f}s", "info",
+                "SUMMARY",
+                "📊",
+                f"Avg decision delay: {avg_think:.1f}s",
+                "info",
             )
         if stats["sleep_cycles"] > 0:
             await send_log(
-                "SUMMARY", "📊",
+                "SUMMARY",
+                "📊",
                 f"Sleep cycles: {stats['sleep_cycles']} (total pause: {sleep_min}m {sleep_sec:02d}s)",
                 "info",
             )
         await send_log(
-            "SUMMARY", "📊",
-            f"Target order entropy: {stats['order_entropy']:.2f}/1.00", "info",
+            "SUMMARY",
+            "📊",
+            f"Target order entropy: {stats['order_entropy']:.2f}/1.00",
+            "info",
         )
         await send_log("SUMMARY", "📊", f"Duration: {dur_min}m {dur_sec:02d}s", "info")
 
@@ -521,10 +577,7 @@ class OasisRaiderService:
             return list(oases)
 
         indices = list(range(len(oases)))
-        weights = [
-            1.0 / (oases[idx].distance + 0.1) ** SHUFFLE_WEIGHT_FACTOR
-            for idx in indices
-        ]
+        weights = [1.0 / (oases[idx].distance + 0.1) ** SHUFFLE_WEIGHT_FACTOR for idx in indices]
 
         result: list = []
         while indices:
@@ -552,7 +605,9 @@ class OasisRaiderService:
         return round(inversions / max_inversions, 2) if max_inversions > 0 else 1.0
 
     async def _simulate_map_browsing(
-        self, send_log: Callable, village_id: int | None = None,
+        self,
+        send_log: Callable,
+        village_id: int | None = None,
     ) -> None:
         """Mitigation 2 — Simulate a human scrolling the map between oasis clicks.
 
@@ -560,8 +615,10 @@ class OasisRaiderService:
         through the full stealth pipeline (throttler, delays, headers).
         """
         await send_log(
-            "BROWSE", "🗺️",
-            "Simulating map browsing (natural navigation break)", "info",
+            "BROWSE",
+            "🗺️",
+            "Simulating map browsing (natural navigation break)",
+            "info",
         )
         try:
             await self._http.navigator.idle_browse(village_id=village_id)
@@ -569,7 +626,9 @@ class OasisRaiderService:
             logger.debug("Map browse noise failed (non-critical): %s", exc)
 
     async def _human_think_delay(
-        self, send_log: Callable, check_stop: Callable,
+        self,
+        send_log: Callable,
+        check_stop: Callable,
     ) -> float:
         """Mitigation 3 — Simulate human decision time before raiding.
 
@@ -583,8 +642,10 @@ class OasisRaiderService:
         """
         delay = random.triangular(THINK_DELAY_MIN, THINK_DELAY_MAX, THINK_DELAY_MODE)
         await send_log(
-            "THINK", "🤔",
-            "Reading oasis details... (simulating decision time)", "info",
+            "THINK",
+            "🤔",
+            "Reading oasis details... (simulating decision time)",
+            "info",
         )
         elapsed = 0.0
         while elapsed < delay:
@@ -594,8 +655,10 @@ class OasisRaiderService:
             await asyncio.sleep(chunk)
             elapsed += chunk
         await send_log(
-            "THINK", "🤔",
-            f"Decision made: proceeding to raid ({elapsed:.1f}s deliberation)", "info",
+            "THINK",
+            "🤔",
+            f"Decision made: proceeding to raid ({elapsed:.1f}s deliberation)",
+            "info",
         )
         return elapsed
 
@@ -638,8 +701,10 @@ class OasisRaiderService:
             try:
                 await self._http.get_html(url, skip_reauth=True)
                 await send_log(
-                    "SLEEP", "💤",
-                    f"Visited {page} (natural activity)", "info",
+                    "SLEEP",
+                    "💤",
+                    f"Visited {page} (natural activity)",
+                    "info",
                 )
             except Exception as exc:
                 logger.debug("Noisy sleep page visit failed (non-critical): %s", exc)
@@ -658,7 +723,9 @@ class OasisRaiderService:
         return random.random() < SKIP_PROBABILITY
 
     async def _take_micro_break(
-        self, send_log: Callable, check_stop: Callable,
+        self,
+        send_log: Callable,
+        check_stop: Callable,
         village_id: int | None = None,
     ) -> float:
         """Mitigation 6 — Burst-and-break session pacing.
@@ -670,15 +737,22 @@ class OasisRaiderService:
         """
         duration = random.uniform(BREAK_DURATION_MIN, BREAK_DURATION_MAX)
         await send_log(
-            "BREAK", "☕",
-            f"Micro-break after raid burst ({duration:.0f}s, natural pacing)", "info",
+            "BREAK",
+            "☕",
+            f"Micro-break after raid burst ({duration:.0f}s, natural pacing)",
+            "info",
         )
         elapsed = await self._noisy_sleep(
-            duration, send_log, check_stop, village_id=village_id,
+            duration,
+            send_log,
+            check_stop,
+            village_id=village_id,
         )
         await send_log(
-            "BREAK", "☕",
-            f"Break over ({elapsed:.0f}s). Resuming sweep.", "info",
+            "BREAK",
+            "☕",
+            f"Break over ({elapsed:.0f}s). Resuming sweep.",
+            "info",
         )
         return elapsed
 
@@ -712,11 +786,13 @@ class OasisRaiderService:
     async def _fetch_oasis_detail(self, x: int, y: int) -> dict:
         """Fetch oasis detail via tile-details API and parse bonus + troops."""
         resp = await self._http.post_json(
-            "/api/v1/map/tile-details", {"x": x, "y": y},
+            "/api/v1/map/tile-details",
+            {"x": x, "y": y},
         )
         html = resp.get("html", "")
 
         from bs4 import BeautifulSoup
+
         soup = BeautifulSoup(html, "html.parser")
 
         bonus = self._parse_oasis_bonus(soup)
@@ -821,6 +897,10 @@ class OasisRaiderService:
         return False
 
     async def _send_raid(
-        self, x: int, y: int, troops: Dict[str, int], village_id: int | None = None,
+        self,
+        x: int,
+        y: int,
+        troops: Dict[str, int],
+        village_id: int | None = None,
     ):
         return await self._military.send_raid(x=x, y=y, troops=troops, village_id=village_id)

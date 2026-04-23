@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from travian_api.exceptions import TravianError
 from travian_api.services.build_queue_service import BuildPlan, BuildPlanItem
-from travian_api.web.sessions import get_travian_session, TravianSession
+from travian_api.web.sessions import TravianSession, get_travian_session
 
 logger = logging.getLogger(__name__)
 

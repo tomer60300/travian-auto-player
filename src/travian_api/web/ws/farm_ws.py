@@ -85,7 +85,7 @@ async def _check_stop(ws: WebSocket) -> bool:
         msg = await asyncio.wait_for(ws.receive_json(), timeout=0.05)
         if isinstance(msg, dict) and msg.get("action", "").lower() == "stop":
             return True
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     except (WebSocketDisconnect, Exception):
         return True  # treat disconnect as stop
@@ -145,10 +145,13 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
         try:
             fl = await session.farm_service.get_farm_list(list_id)
         except Exception as exc:
-            await _tracked_send(websocket, {
-                "type": "error",
-                "message": f"Failed to fetch farm list {list_id}: {exc}",
-            })
+            await _tracked_send(
+                websocket,
+                {
+                    "type": "error",
+                    "message": f"Failed to fetch farm list {list_id}: {exc}",
+                },
+            )
             return
 
         exec_session.label = f"Farm Run - {fl.name}"
@@ -157,20 +160,26 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
         cli_parts = [f"travian farm run {fl.id} --interval {interval} --duration {duration}"]
         if verbose:
             cli_parts.append("--verbose")
-        await _tracked_send(websocket, {
-            "type": "trigger_info",
-            "command": " ".join(cli_parts),
-        })
-        await _tracked_send(websocket, {
-            "type": "info",
-            "list_id": fl.id,
-            "list_name": fl.name,
-            "active_slots": len(fl.active_slots),
-            "interval": interval,
-            "duration": duration,
-            "verbose": verbose,
-            "message": "Waiting for start command",
-        })
+        await _tracked_send(
+            websocket,
+            {
+                "type": "trigger_info",
+                "command": " ".join(cli_parts),
+            },
+        )
+        await _tracked_send(
+            websocket,
+            {
+                "type": "info",
+                "list_id": fl.id,
+                "list_name": fl.name,
+                "active_slots": len(fl.active_slots),
+                "interval": interval,
+                "duration": duration,
+                "verbose": verbose,
+                "message": "Waiting for start command",
+            },
+        )
 
         # ── Wait for client to send {"action": "start"} ─────────────
         if not await _wait_for_start_or_stop(websocket):
@@ -192,41 +201,53 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
             if await _check_stop(websocket):
                 break
             if operation_gate.check_should_stop(user_id, op_started_at):
-                await _tracked_send(websocket, {
-                    "type": "error",
-                    "message": "Stopped after captcha resolution — restart manually",
-                    "fatal": True,
-                })
+                await _tracked_send(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": "Stopped after captcha resolution — restart manually",
+                        "fatal": True,
+                    },
+                )
                 break
 
             # Activity budget check
             try:
                 session.http_client.check_activity_budget()
             except ActivityBudgetExhausted as exc:
-                await _tracked_send(websocket, {
-                    "type": "error",
-                    "message": str(exc),
-                    "fatal": True,
-                })
+                await _tracked_send(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": str(exc),
+                        "fatal": True,
+                    },
+                )
                 break
 
             cycle += 1
-            await _tracked_send(websocket, {
-                "type": "cycle_start",
-                "cycle": cycle,
-                "timestamp": _now_iso(),
-            })
+            await _tracked_send(
+                websocket,
+                {
+                    "type": "cycle_start",
+                    "cycle": cycle,
+                    "timestamp": _now_iso(),
+                },
+            )
 
             try:
                 result = await session.farm_service.send_farm_list(list_id)
 
                 # Check Gold Club error
                 if result.targets and result.targets[0].error == "plus.error_goldclub":
-                    await _tracked_send(websocket, {
-                        "type": "error",
-                        "message": "Gold Club not active - cannot send farm lists",
-                        "fatal": True,
-                    })
+                    await _tracked_send(
+                        websocket,
+                        {
+                            "type": "error",
+                            "message": "Gold Club not active - cannot send farm lists",
+                            "fatal": True,
+                        },
+                    )
                     break
 
                 cycle_success = result.success_count
@@ -238,14 +259,17 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                 for t in result.targets:
                     is_ok = t.error == ""
                     if verbose or not is_ok:
-                        await _tracked_send(websocket, {
-                            "type": "result",
-                            "cycle": cycle,
-                            "slot_id": t.id,
-                            "success": is_ok,
-                            "status": t.status,
-                            "error": t.error or None,
-                        })
+                        await _tracked_send(
+                            websocket,
+                            {
+                                "type": "result",
+                                "cycle": cycle,
+                                "slot_id": t.id,
+                                "success": is_ok,
+                                "status": t.status,
+                                "error": t.error or None,
+                            },
+                        )
 
                 # Compute next send time: None if the loop will end before then
                 next_time = time.time() + interval
@@ -254,28 +278,34 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                 else:
                     next_send = datetime.fromtimestamp(next_time).isoformat(timespec="seconds")
 
-                await _tracked_send(websocket, {
-                    "type": "cycle_end",
-                    "cycle": cycle,
-                    "sent": cycle_success,
-                    "failed": cycle_fail,
-                    "total": cycle_success + cycle_fail,
-                    "cumulative_success": total_success,
-                    "cumulative_fail": total_fail,
-                    "timestamp": _now_iso(),
-                    "next_send_at": next_send,
-                })
+                await _tracked_send(
+                    websocket,
+                    {
+                        "type": "cycle_end",
+                        "cycle": cycle,
+                        "sent": cycle_success,
+                        "failed": cycle_fail,
+                        "total": cycle_success + cycle_fail,
+                        "cumulative_success": total_success,
+                        "cumulative_fail": total_fail,
+                        "timestamp": _now_iso(),
+                        "next_send_at": next_send,
+                    },
+                )
 
             except WebSocketDisconnect:
                 raise
             except Exception as exc:
-                await _tracked_send(websocket, {
-                    "type": "error",
-                    "cycle": cycle,
-                    "message": str(exc),
-                    "fatal": False,
-                    "timestamp": _now_iso(),
-                })
+                await _tracked_send(
+                    websocket,
+                    {
+                        "type": "error",
+                        "cycle": cycle,
+                        "message": str(exc),
+                        "fatal": False,
+                        "timestamp": _now_iso(),
+                    },
+                )
 
             # Sleep between cycles with jitter (±15%) to avoid detection
             jitter = interval * random.uniform(-0.15, 0.15)
@@ -291,14 +321,19 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                 break
 
         # ── Send completion summary ──────────────────────────────────
-        await _tracked_send(websocket, {
-            "type": "complete",
-            "reason": "duration_elapsed" if (end_time and time.time() >= end_time) else "stopped",
-            "total_cycles": cycle,
-            "total_success": total_success,
-            "total_fail": total_fail,
-            "timestamp": _now_iso(),
-        })
+        await _tracked_send(
+            websocket,
+            {
+                "type": "complete",
+                "reason": "duration_elapsed"
+                if (end_time and time.time() >= end_time)
+                else "stopped",
+                "total_cycles": cycle,
+                "total_success": total_success,
+                "total_fail": total_fail,
+                "timestamp": _now_iso(),
+            },
+        )
         await websocket.close(code=1000, reason="Operation complete")
 
     except WebSocketDisconnect:
@@ -306,13 +341,21 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
     except Exception as exc:
         logger.exception("Unexpected error in farm run WS: user=%s list=%s", user_id, list_id)
         try:
-            await _tracked_send(websocket, {
-                "type": "error",
-                "message": f"Unexpected server error: {exc}",
-                "fatal": True,
-            })
+            await _tracked_send(
+                websocket,
+                {
+                    "type": "error",
+                    "message": f"Unexpected server error: {exc}",
+                    "fatal": True,
+                },
+            )
         except Exception:
-            logger.debug("Failed to send error message to farm run WS: user=%s list=%s", user_id, list_id, exc_info=True)
+            logger.debug(
+                "Failed to send error message to farm run WS: user=%s list=%s",
+                user_id,
+                list_id,
+                exc_info=True,
+            )
     finally:
         operation_gate.release(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
@@ -377,27 +420,33 @@ async def ws_farm_run_all(websocket: WebSocket):
         try:
             all_lists = await session.farm_service.get_all_farm_lists()
         except Exception as exc:
-            await _tracked_send_all(websocket, {
-                "type": "error",
-                "message": f"Failed to fetch farm lists: {exc}",
-            })
+            await _tracked_send_all(
+                websocket,
+                {
+                    "type": "error",
+                    "message": f"Failed to fetch farm lists: {exc}",
+                },
+            )
             return
 
         if requested_ids:
             all_lists = [fl for fl in all_lists if fl.id in requested_ids]
 
         if not all_lists:
-            await _tracked_send_all(websocket, {
-                "type": "error",
-                "message": "No farm lists found",
-                "fatal": True,
-            })
+            await _tracked_send_all(
+                websocket,
+                {
+                    "type": "error",
+                    "message": "No farm lists found",
+                    "fatal": True,
+                },
+            )
             return
 
         send_ids = [fl.id for fl in all_lists]
         total_active = sum(len(fl.active_slots) for fl in all_lists)
 
-        list_names = ", ".join(fl.name for fl in all_lists)
+        _list_names = ", ".join(fl.name for fl in all_lists)
         exec_session.label = f"Farm Run All ({len(all_lists)} lists)"
         await _tracked_send_all(websocket, {"type": "session_init", "session_id": exec_session.id})
         # Build equivalent CLI command for display
@@ -406,22 +455,28 @@ async def ws_farm_run_all(websocket: WebSocket):
             cli_parts.append(f"--lists {list_ids_param}")
         if verbose:
             cli_parts.append("--verbose")
-        await _tracked_send_all(websocket, {
-            "type": "trigger_info",
-            "command": " ".join(cli_parts),
-        })
-        await _tracked_send_all(websocket, {
-            "type": "info",
-            "lists": [
-                {"id": fl.id, "name": fl.name, "active_slots": len(fl.active_slots)}
-                for fl in all_lists
-            ],
-            "total_active_slots": total_active,
-            "interval": interval,
-            "duration": duration,
-            "verbose": verbose,
-            "message": "Waiting for start command",
-        })
+        await _tracked_send_all(
+            websocket,
+            {
+                "type": "trigger_info",
+                "command": " ".join(cli_parts),
+            },
+        )
+        await _tracked_send_all(
+            websocket,
+            {
+                "type": "info",
+                "lists": [
+                    {"id": fl.id, "name": fl.name, "active_slots": len(fl.active_slots)}
+                    for fl in all_lists
+                ],
+                "total_active_slots": total_active,
+                "interval": interval,
+                "duration": duration,
+                "verbose": verbose,
+                "message": "Waiting for start command",
+            },
+        )
 
         # ── Wait for start ───────────────────────────────────────────
         if not await _wait_for_start_or_stop(websocket):
@@ -441,30 +496,39 @@ async def ws_farm_run_all(websocket: WebSocket):
             if await _check_stop(websocket):
                 break
             if operation_gate.check_should_stop(user_id, op_started_at):
-                await _tracked_send_all(websocket, {
-                    "type": "error",
-                    "message": "Stopped after captcha resolution — restart manually",
-                    "fatal": True,
-                })
+                await _tracked_send_all(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": "Stopped after captcha resolution — restart manually",
+                        "fatal": True,
+                    },
+                )
                 break
 
             # Activity budget check
             try:
                 session.http_client.check_activity_budget()
             except ActivityBudgetExhausted as exc:
-                await _tracked_send_all(websocket, {
-                    "type": "error",
-                    "message": str(exc),
-                    "fatal": True,
-                })
+                await _tracked_send_all(
+                    websocket,
+                    {
+                        "type": "error",
+                        "message": str(exc),
+                        "fatal": True,
+                    },
+                )
                 break
 
             cycle += 1
-            await _tracked_send_all(websocket, {
-                "type": "cycle_start",
-                "cycle": cycle,
-                "timestamp": _now_iso(),
-            })
+            await _tracked_send_all(
+                websocket,
+                {
+                    "type": "cycle_start",
+                    "cycle": cycle,
+                    "timestamp": _now_iso(),
+                },
+            )
 
             try:
                 results = await session.farm_service.send_all_farm_lists(send_ids)
@@ -487,29 +551,35 @@ async def ws_farm_run_all(websocket: WebSocket):
                     failed_targets = [t for t in result.targets if t.error != ""]
                     if verbose or failed_targets:
                         targets_to_report = result.targets if verbose else failed_targets
-                        await _tracked_send_all(websocket, {
-                            "type": "result",
-                            "cycle": cycle,
-                            "list_id": lid,
-                            "success": list_success,
-                            "fail": list_fail,
-                            "targets": [
-                                {
-                                    "slot_id": t.id,
-                                    "success": t.error == "",
-                                    "status": t.status,
-                                    "error": t.error or None,
-                                }
-                                for t in targets_to_report
-                            ],
-                        })
+                        await _tracked_send_all(
+                            websocket,
+                            {
+                                "type": "result",
+                                "cycle": cycle,
+                                "list_id": lid,
+                                "success": list_success,
+                                "fail": list_fail,
+                                "targets": [
+                                    {
+                                        "slot_id": t.id,
+                                        "success": t.error == "",
+                                        "status": t.status,
+                                        "error": t.error or None,
+                                    }
+                                    for t in targets_to_report
+                                ],
+                            },
+                        )
 
                 if gold_club_error:
-                    await _tracked_send_all(websocket, {
-                        "type": "error",
-                        "message": "Gold Club not active - cannot send farm lists",
-                        "fatal": True,
-                    })
+                    await _tracked_send_all(
+                        websocket,
+                        {
+                            "type": "error",
+                            "message": "Gold Club not active - cannot send farm lists",
+                            "fatal": True,
+                        },
+                    )
                     break
 
                 total_success += cycle_success
@@ -522,28 +592,34 @@ async def ws_farm_run_all(websocket: WebSocket):
                 else:
                     next_send = datetime.fromtimestamp(next_time).isoformat(timespec="seconds")
 
-                await _tracked_send_all(websocket, {
-                    "type": "cycle_end",
-                    "cycle": cycle,
-                    "sent": cycle_success,
-                    "failed": cycle_fail,
-                    "total": cycle_success + cycle_fail,
-                    "cumulative_success": total_success,
-                    "cumulative_fail": total_fail,
-                    "timestamp": _now_iso(),
-                    "next_send_at": next_send,
-                })
+                await _tracked_send_all(
+                    websocket,
+                    {
+                        "type": "cycle_end",
+                        "cycle": cycle,
+                        "sent": cycle_success,
+                        "failed": cycle_fail,
+                        "total": cycle_success + cycle_fail,
+                        "cumulative_success": total_success,
+                        "cumulative_fail": total_fail,
+                        "timestamp": _now_iso(),
+                        "next_send_at": next_send,
+                    },
+                )
 
             except WebSocketDisconnect:
                 raise
             except Exception as exc:
-                await _tracked_send_all(websocket, {
-                    "type": "error",
-                    "cycle": cycle,
-                    "message": str(exc),
-                    "fatal": False,
-                    "timestamp": _now_iso(),
-                })
+                await _tracked_send_all(
+                    websocket,
+                    {
+                        "type": "error",
+                        "cycle": cycle,
+                        "message": str(exc),
+                        "fatal": False,
+                        "timestamp": _now_iso(),
+                    },
+                )
 
             # Sleep between cycles with jitter (±15%) to avoid detection
             jitter = interval * random.uniform(-0.15, 0.15)
@@ -559,14 +635,19 @@ async def ws_farm_run_all(websocket: WebSocket):
                 break
 
         # ── Completion ───────────────────────────────────────────────
-        await _tracked_send_all(websocket, {
-            "type": "complete",
-            "reason": "duration_elapsed" if (end_time and time.time() >= end_time) else "stopped",
-            "total_cycles": cycle,
-            "total_success": total_success,
-            "total_fail": total_fail,
-            "timestamp": _now_iso(),
-        })
+        await _tracked_send_all(
+            websocket,
+            {
+                "type": "complete",
+                "reason": "duration_elapsed"
+                if (end_time and time.time() >= end_time)
+                else "stopped",
+                "total_cycles": cycle,
+                "total_success": total_success,
+                "total_fail": total_fail,
+                "timestamp": _now_iso(),
+            },
+        )
         await websocket.close(code=1000, reason="Operation complete")
 
     except WebSocketDisconnect:
@@ -574,13 +655,18 @@ async def ws_farm_run_all(websocket: WebSocket):
     except Exception as exc:
         logger.exception("Unexpected error in farm run-all WS: user=%s", user_id)
         try:
-            await _tracked_send_all(websocket, {
-                "type": "error",
-                "message": f"Unexpected server error: {exc}",
-                "fatal": True,
-            })
+            await _tracked_send_all(
+                websocket,
+                {
+                    "type": "error",
+                    "message": f"Unexpected server error: {exc}",
+                    "fatal": True,
+                },
+            )
         except Exception:
-            logger.debug("Failed to send error message to farm run-all WS: user=%s", user_id, exc_info=True)
+            logger.debug(
+                "Failed to send error message to farm run-all WS: user=%s", user_id, exc_info=True
+            )
     finally:
         operation_gate.release(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)

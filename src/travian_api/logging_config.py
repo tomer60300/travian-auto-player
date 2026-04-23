@@ -54,6 +54,7 @@ def setup_logging(level: Optional[str] = None, *, attach_broadcast: bool = False
     if attach_broadcast:
         try:
             from travian_api.web.log_broadcast import log_broadcast_handler
+
             log_broadcast_handler.setFormatter(formatter)
             root_logger.addHandler(log_broadcast_handler)
         except ImportError:

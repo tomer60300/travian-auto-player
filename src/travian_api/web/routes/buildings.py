@@ -1,14 +1,13 @@
 """Building management routes."""
 
 import logging
-
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from travian_api.web.rate_limit import action_limiter
-from travian_api.web.sessions import get_travian_session, TravianSession
+from travian_api.web.sessions import TravianSession, get_travian_session
 
 logger = logging.getLogger(__name__)
 

@@ -314,7 +314,7 @@ export default function Buildings() {
       if (fetchingSlotRef.current === slotId) {
         setDetail(res.data)
       }
-    } catch (err) {
+    } catch {
       if (fetchingSlotRef.current === slotId) {
         toast.error('Failed to load building details')
         setDetail(null)

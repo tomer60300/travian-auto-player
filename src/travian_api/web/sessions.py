@@ -9,6 +9,7 @@ import asyncio
 import logging
 import os
 import tempfile
+from datetime import UTC
 from pathlib import Path
 from typing import Optional
 
@@ -24,10 +25,10 @@ from travian_api.services.build_queue_service import BuildQueueService
 from travian_api.services.building_service import BuildingService
 from travian_api.services.farm_list_service import FarmListService
 from travian_api.services.military_service import MilitaryService
+from travian_api.services.raid_analyzer_service import RaidAnalyzerService
 from travian_api.services.reports_service import ReportsService
 from travian_api.services.target_resolver import TargetResolver
 from travian_api.services.video_reward_service import VideoRewardService
-from travian_api.services.raid_analyzer_service import RaidAnalyzerService
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User, get_db
 
@@ -57,14 +58,16 @@ class TravianSession:
         # FORCE override all identity fields so .env credentials never leak
         # between users.
         base_settings = Settings()
-        self.settings: Settings = base_settings.model_copy(update={
-            "base_url": server_url.rstrip("/"),
-            "username": username,
-            "password": password,
-            # Isolate JWT + cookie cache per user so files never collide
-            "jwt_cache_file": str(self._data_dir / "jwt_cache.json"),
-            "jwt_cache_path": str(self._data_dir / "jwt_cache.json"),
-        })
+        self.settings: Settings = base_settings.model_copy(
+            update={
+                "base_url": server_url.rstrip("/"),
+                "username": username,
+                "password": password,
+                # Isolate JWT + cookie cache per user so files never collide
+                "jwt_cache_file": str(self._data_dir / "jwt_cache.json"),
+                "jwt_cache_path": str(self._data_dir / "jwt_cache.json"),
+            }
+        )
 
         # ── Isolated HTTP client ──────────────────────────────────────
         # Pass per-user cookie path so persona/scheduler files land in the
@@ -73,9 +76,7 @@ class TravianSession:
         self.http_client = HttpClient(self.settings, cookie_file=self._cookie_file)
 
         # ── Captcha guard notification callback ─────────────────────
-        self.http_client.captcha_guard.set_trigger_callback(
-            self._on_captcha_triggered
-        )
+        self.http_client.captcha_guard.set_trigger_callback(self._on_captcha_triggered)
 
         # ── Services (all share the same isolated http_client) ────────
         self.auth_service = AuthService(self.http_client, self.settings)
@@ -111,31 +112,37 @@ class TravianSession:
     ) -> None:
         """Broadcast captcha alert to all user's WS connections + log stream."""
         import time as _time
-        from travian_api.web.ws.manager import ws_manager
+
         from travian_api.web.log_broadcast import log_stream_manager
+        from travian_api.web.ws.manager import ws_manager
 
-        await ws_manager.broadcast_to_user(self.user_id, {
-            "type": "captcha_alert",
-            "active": True,
-            "pattern": pattern,
-            "triggered_at": _time.time(),
-            "url": url,
-            "status_code": status_code,
-            "response_snippet": response_snippet,
-            "message": f"Bot detection triggered ({pattern}). All operations paused.",
-        })
+        await ws_manager.broadcast_to_user(
+            self.user_id,
+            {
+                "type": "captcha_alert",
+                "active": True,
+                "pattern": pattern,
+                "triggered_at": _time.time(),
+                "url": url,
+                "status_code": status_code,
+                "response_snippet": response_snippet,
+                "message": f"Bot detection triggered ({pattern}). All operations paused.",
+            },
+        )
 
-        log_stream_manager.push({
-            "timestamp": _time.time(),
-            "level": "error",
-            "source": "stealth",
-            "message": (
-                f"CAPTCHA/BOT DETECTION: '{pattern}' | url={url} | "
-                f"status={status_code} | All operations halted until resolved."
-            ),
-            "detail": response_snippet or None,
-            "user_id": self.user_id,
-        })
+        log_stream_manager.push(
+            {
+                "timestamp": _time.time(),
+                "level": "error",
+                "source": "stealth",
+                "message": (
+                    f"CAPTCHA/BOT DETECTION: '{pattern}' | url={url} | "
+                    f"status={status_code} | All operations halted until resolved."
+                ),
+                "detail": response_snippet or None,
+                "user_id": self.user_id,
+            }
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -283,8 +290,9 @@ async def get_travian_session(
 
         # Try auto-reconnect from saved credentials
         from sqlalchemy import select
-        from travian_api.web.models.db import TravianCredential
+
         from travian_api.web.auth import decrypt_credential
+        from travian_api.web.models.db import TravianCredential
 
         result = await db.execute(
             select(TravianCredential)
@@ -308,8 +316,9 @@ async def get_travian_session(
                 username=cred.travian_username,
                 password=password,
             )
-            from datetime import datetime, timezone
-            cred.last_connected = datetime.now(timezone.utc)
+            from datetime import datetime
+
+            cred.last_connected = datetime.now(UTC)
             await db.commit()
             logger.info("Auto-reconnected user %s to %s", user.id, cred.server_url)
             return session

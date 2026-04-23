@@ -29,7 +29,7 @@ from travian_api.services.build_queue_service import BuildPlan, BuildPlanItem
 from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.log_broadcast import log_stream_manager
 from travian_api.web.operation_gate import operation_gate
-from travian_api.web.sessions import session_manager, TravianSession
+from travian_api.web.sessions import TravianSession, session_manager
 from travian_api.web.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,9 @@ def _parse_yaml_to_plan(yaml_content: str) -> BuildPlan:
     items: list[BuildPlanItem] = []
     for entry in plan_entries:
         if not isinstance(entry, dict):
-            raise ValueError(f"Each plan entry must be a mapping, got {type(entry).__name__}: {entry!r}")
+            raise ValueError(
+                f"Each plan entry must be a mapping, got {type(entry).__name__}: {entry!r}"
+            )
         items.append(
             BuildPlanItem(
                 building=entry.get("building", ""),
@@ -131,13 +133,15 @@ async def queue_run_ws(websocket: WebSocket):
 
         def _broadcast_log(message: str, level: str = "info") -> None:
             """Push a log entry to the shared log stream for the Logs page."""
-            log_stream_manager.push({
-                "timestamp": time.time(),
-                "level": level,
-                "source": "build_queue",
-                "message": message,
-                "user_id": user_id,
-            })
+            log_stream_manager.push(
+                {
+                    "timestamp": time.time(),
+                    "level": level,
+                    "source": "build_queue",
+                    "message": message,
+                    "user_id": user_id,
+                }
+            )
 
         # ── Event used to signal cancellation from a client "stop" message ──
         stop_event = asyncio.Event()
@@ -146,8 +150,10 @@ async def queue_run_ws(websocket: WebSocket):
         try:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=30)
             config = json.loads(raw)
-        except asyncio.TimeoutError:
-            await _tracked_send(websocket, {"type": "error", "message": "Timed out waiting for config message"})
+        except TimeoutError:
+            await _tracked_send(
+                websocket, {"type": "error", "message": "Timed out waiting for config message"}
+            )
             return
         except (json.JSONDecodeError, WebSocketDisconnect) as exc:
             await _tracked_send(websocket, {"type": "error", "message": f"Invalid config: {exc}"})
@@ -166,7 +172,9 @@ async def queue_run_ws(websocket: WebSocket):
         try:
             plan = _parse_yaml_to_plan(yaml_content)
         except (yaml.YAMLError, ValueError) as exc:
-            await _tracked_send(websocket, {"type": "error", "message": f"Invalid build plan: {exc}"})
+            await _tracked_send(
+                websocket, {"type": "error", "message": f"Invalid build plan: {exc}"}
+            )
             return
 
         # Fall back to session active village when YAML has no village_id
@@ -176,10 +184,13 @@ async def queue_run_ws(websocket: WebSocket):
         # Per-village gate: different villages can run queues in parallel
         op_type = f"queue:{plan.village_id}"
         if not operation_gate.acquire(user_id, op_type):
-            await _tracked_send(websocket, {
-                "type": "error",
-                "message": f"A queue is already running for this village",
-            })
+            await _tracked_send(
+                websocket,
+                {
+                    "type": "error",
+                    "message": "A queue is already running for this village",
+                },
+            )
             return
         gate_acquired = True
 
@@ -194,20 +205,28 @@ async def queue_run_ws(websocket: WebSocket):
         exec_session.label = f"Build Queue - {village_label}"
         await _tracked_send(websocket, {"type": "session_init", "session_id": exec_session.id})
         # Build equivalent CLI command for display
-        cli_parts = [f"travian queue run plan.yaml --village {village_label} --poll {poll_interval}"]
+        cli_parts = [
+            f"travian queue run plan.yaml --village {village_label} --poll {poll_interval}"
+        ]
         if use_video:
             cli_parts.append("--use-video")
         if verbose:
             cli_parts.append("--verbose")
-        await _tracked_send(websocket, {
-            "type": "trigger_info",
-            "command": " ".join(cli_parts),
-            "plan_yaml": yaml_content,
-        })
-        await _tracked_send(websocket, {
-            "type": "status",
-            "message": f"Parsed plan: village {village_label}, {len(plan.items)} items",
-        })
+        await _tracked_send(
+            websocket,
+            {
+                "type": "trigger_info",
+                "command": " ".join(cli_parts),
+                "plan_yaml": yaml_content,
+            },
+        )
+        await _tracked_send(
+            websocket,
+            {
+                "type": "status",
+                "message": f"Parsed plan: village {village_label}, {len(plan.items)} items",
+            },
+        )
         _broadcast_log(f"Build queue started: {village_label}, {len(plan.items)} items")
 
         # ── Wire up the on_status callback ────────────────────────────
@@ -236,7 +255,10 @@ async def queue_run_ws(websocket: WebSocket):
 
         # Check if captcha was just resolved
         if operation_gate.check_should_stop(user_id, op_started_at):
-            await _tracked_send(websocket, {"type": "error", "message": "Stopped after captcha resolution — restart manually"})
+            await _tracked_send(
+                websocket,
+                {"type": "error", "message": "Stopped after captcha resolution — restart manually"},
+            )
             return
 
         # Activity budget check before starting execution
@@ -260,10 +282,13 @@ async def queue_run_ws(websocket: WebSocket):
                         continue
                     if msg.get("action") == "stop":
                         stop_event.set()
-                        await _tracked_send(websocket, {
-                            "type": "status",
-                            "message": "Stop requested -- aborting after current step",
-                        })
+                        await _tracked_send(
+                            websocket,
+                            {
+                                "type": "status",
+                                "message": "Stop requested -- aborting after current step",
+                            },
+                        )
                         return
             except WebSocketDisconnect:
                 stop_event.set()
@@ -296,19 +321,24 @@ async def queue_run_ws(websocket: WebSocket):
                     await exec_task
                 except asyncio.CancelledError:
                     pass
-                await _tracked_try_send(websocket, {
-                    "type": "status",
-                    "message": "Execution stopped by client",
-                })
+                await _tracked_try_send(
+                    websocket,
+                    {
+                        "type": "status",
+                        "message": "Execution stopped by client",
+                    },
+                )
                 results = []
                 for item in plan.items:
                     if item.status != "pending":
-                        results.append({
-                            "building": item.building,
-                            "slot_id": item.slot_id,
-                            "level": f"{item.current_level}/{item.target}",
-                            "status": item.status,
-                        })
+                        results.append(
+                            {
+                                "building": item.building,
+                                "slot_id": item.slot_id,
+                                "level": f"{item.current_level}/{item.target}",
+                                "status": item.status,
+                            }
+                        )
                 await _tracked_try_send(websocket, {"type": "complete", "results": results})
                 _broadcast_log("Build queue stopped by user", "warning")
             else:
@@ -317,13 +347,18 @@ async def queue_run_ws(websocket: WebSocket):
 
                 for r in results:
                     status_str = "OK" if r.get("status") == "started" else "FAIL"
-                    _broadcast_log(f"{r.get('building', '?')} -> Lv{r.get('level', '?')}: {status_str}")
-                    await _tracked_try_send(websocket, {
-                        "type": "step_complete",
-                        "building": r.get("building", ""),
-                        "level": r.get("level", ""),
-                        "success": r.get("status") == "started",
-                    })
+                    _broadcast_log(
+                        f"{r.get('building', '?')} -> Lv{r.get('level', '?')}: {status_str}"
+                    )
+                    await _tracked_try_send(
+                        websocket,
+                        {
+                            "type": "step_complete",
+                            "building": r.get("building", ""),
+                            "level": r.get("level", ""),
+                            "success": r.get("status") == "started",
+                        },
+                    )
 
                 await _tracked_try_send(websocket, {"type": "complete", "results": results})
                 _broadcast_log(f"Build queue completed ({len(results)} steps)", "success")

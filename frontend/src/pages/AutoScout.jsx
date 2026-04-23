@@ -84,7 +84,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const wsRef = useRef(null)
   const mountedRef = useRef(true)
 
-  useEffect(() => { return () => { mountedRef.current = false; if (wsRef.current) { try { wsRef.current.close() } catch {} } } }, [])
+  useEffect(() => { return () => { mountedRef.current = false; if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } } } }, [])
 
   // Persist to localStorage on change
   useEffect(() => { localStorage.setItem(LS_KEY_ALLIANCES, JSON.stringify(excludeAlliances)) }, [excludeAlliances])
@@ -237,7 +237,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   }
 
   const handleCancel = () => {
-    if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null }
+    if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } wsRef.current = null }
     setScanPhase(null)
     setScanning(false)
     addScanMsg('warning', 'Scan cancelled by user')
@@ -505,7 +505,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
     mountedRef.current = false
     loopStoppedRef.current = true
     if (loopTimerRef.current) clearTimeout(loopTimerRef.current)
-    if (wsRef.current) { try { wsRef.current.close() } catch {} wsRef.current = null }
+    if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } wsRef.current = null }
   } }, [])
 
   const msgIdRef = useRef(0)
@@ -643,10 +643,10 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
 
       if (!ws) { addMessage('error', 'No auth token'); setWsStatus('disconnected'); clearTimeout(safetyTimer); safeResolve(); return }
       // Close any previous WS before assigning new one
-      if (wsRef.current) { try { wsRef.current.close() } catch {} }
+      if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } }
       wsRef.current = ws
       ws.addEventListener('open', () => {
-        if (!mountedRef.current) { try { ws.close() } catch {} clearTimeout(safetyTimer); safeResolve(); return }
+        if (!mountedRef.current) { try { ws.close() } catch { /* empty */ } clearTimeout(safetyTimer); safeResolve(); return }
         setWsStatus('running')
         ws.send(JSON.stringify({
           radius: scanConfigRef.current.radius || 10,

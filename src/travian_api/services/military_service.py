@@ -1,18 +1,23 @@
 """Military service for Travian API — with stealth-aware delays."""
+
 from __future__ import annotations
 
+import logging
 import re
 from typing import Dict, Optional
 
 from ..clients.http_client import HttpClient
-from ..exceptions import TravianError, InvalidTargetError
-from ..models.military import TroopSendResult
-from ..parsers.html_parser import parse_rally_point_troops, parse_troop_confirm_page, parse_troop_overview, clean_unicode
 from ..constants import EVENT_TYPES
-from ..stealth.human_delay import HumanDelay, ActionType
+from ..models.military import TroopSendResult
+from ..parsers.html_parser import (
+    clean_unicode,
+    parse_rally_point_troops,
+    parse_troop_confirm_page,
+    parse_troop_overview,
+)
+from ..stealth.human_delay import ActionType
 from .target_resolver import TargetResolver
 
-import logging
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +29,10 @@ class MilitaryService:
         self.target_resolver = target_resolver
 
     async def send_scouts(
-        self, x: int, y: int, amount: int,
+        self,
+        x: int,
+        y: int,
+        amount: int,
         scout_type: str = "resources",
         village_id: Optional[int] = None,
     ) -> TroopSendResult:
@@ -39,36 +47,48 @@ class MilitaryService:
         """
         # Teuton scout = t4, Gaul = t3, Roman = t4
         troops = {"t4": amount}
-        
+
         # scoutTarget values: "1" = resources, "2" = defenses
         scout_target_value = "1" if scout_type == "resources" else "2"
-        
+
         # eventType=4 (raid) — server auto-detects scout when only scout units present
         return await self._send_troops(
-            x=x, y=y, troops=troops,
+            x=x,
+            y=y,
+            troops=troops,
             event_type=EVENT_TYPES.get("raid", 4),
             scout_target=scout_target_value,
             village_id=village_id,
         )
 
     async def send_raid(
-        self, x: int, y: int, troops: Dict[str, int],
+        self,
+        x: int,
+        y: int,
+        troops: Dict[str, int],
         village_id: Optional[int] = None,
     ) -> TroopSendResult:
         """Send a raid (eventType=4)."""
         return await self._send_troops(
-            x=x, y=y, troops=troops,
+            x=x,
+            y=y,
+            troops=troops,
             event_type=EVENT_TYPES.get("raid", 4),
             village_id=village_id,
         )
 
     async def send_attack(
-        self, x: int, y: int, troops: Dict[str, int],
+        self,
+        x: int,
+        y: int,
+        troops: Dict[str, int],
         village_id: Optional[int] = None,
     ) -> TroopSendResult:
         """Send a normal attack (eventType=3)."""
         return await self._send_troops(
-            x=x, y=y, troops=troops,
+            x=x,
+            y=y,
+            troops=troops,
             event_type=EVENT_TYPES.get("attack", 3),
             village_id=village_id,
         )
@@ -82,7 +102,9 @@ class MilitaryService:
         return parse_rally_point_troops(html)
 
     async def get_village_troop_totals(
-        self, village_id: Optional[int] = None, tribe_id: int = 0,
+        self,
+        village_id: Optional[int] = None,
+        tribe_id: int = 0,
     ) -> Dict[str, int]:
         """Get total troops for a village (in-village + outgoing + incoming).
 
@@ -97,7 +119,9 @@ class MilitaryService:
     # ── internal ─────────────────────────────────────────────────────
 
     async def _send_troops(
-        self, x: int, y: int,
+        self,
+        x: int,
+        y: int,
         troops: Dict[str, int],
         event_type: int,
         scout_target: str = "",
@@ -113,7 +137,7 @@ class MilitaryService:
         try:
             # Stealth: navigate to rally point first
             await self.http_client.navigator.navigate_to_rally_point(village_id)
-            
+
             # Use newdid in the POST URL to set village context
             if village_id:
                 rally_url = f"/build.php?newdid={village_id}&gid=16&tt=2"
@@ -123,62 +147,75 @@ class MilitaryService:
             # ── Step 1: Submit troop selection form ──
             form_data = {}
             for i in range(1, 11):
-                form_data[f'troop[t{i}]'] = str(troops.get(f't{i}', 0))
-            form_data['villagename'] = ''
-            form_data['x'] = str(x)
-            form_data['y'] = str(y)
-            form_data['eventType'] = str(event_type)
-            form_data['ok'] = 'ok'
+                form_data[f"troop[t{i}]"] = str(troops.get(f"t{i}", 0))
+            form_data["villagename"] = ""
+            form_data["x"] = str(x)
+            form_data["y"] = str(y)
+            form_data["eventType"] = str(event_type)
+            form_data["ok"] = "ok"
 
             # Stealth: human-like delay before submitting troop form
             delay = self.http_client.human_delay
             await delay.wait(ActionType.FORM_FILL, "filling troop selection form")
-            
-            logger.info(f"Step 1: Sending troop form to ({x},{y}) type={event_type} troops={troops}")
-            confirm_html = await self.http_client.post_form(rally_url, form_data, safe_to_retry=False)
+
+            logger.info(
+                f"Step 1: Sending troop form to ({x},{y}) type={event_type} troops={troops}"
+            )
+            confirm_html = await self.http_client.post_form(
+                rally_url, form_data, safe_to_retry=False
+            )
 
             # Check for error — but only if we DON'T have a confirmation form
-            has_confirm = 'troopSendForm' in confirm_html or 'confirmSendTroops' in confirm_html
+            has_confirm = "troopSendForm" in confirm_html or "confirmSendTroops" in confirm_html
             if not has_confirm:
                 error_msg = self._extract_error(confirm_html)
                 if error_msg and error_msg != "Unknown error":
                     return TroopSendResult(
-                        success=False, target_x=x, target_y=y,
+                        success=False,
+                        target_x=x,
+                        target_y=y,
                         raw_response=f"Step 1 error: {error_msg}",
                     )
                 # Also check for "No troops" text
-                if 'No troops' in confirm_html or 'no troops' in confirm_html.lower():
+                if "No troops" in confirm_html or "no troops" in confirm_html.lower():
                     return TroopSendResult(
-                        success=False, target_x=x, target_y=y,
+                        success=False,
+                        target_x=x,
+                        target_y=y,
                         raw_response="Step 1 error: No troops have been selected.",
                     )
                 # No confirmation form and no recognized error — the server
                 # returned a generic page (rate-limit, session issue, etc.).
                 # Do NOT fall through to Step 2; bail out immediately.
-                logger.warning(f"Step 1: No confirmation form for ({x},{y}), HTML length={len(confirm_html)}")
+                logger.warning(
+                    f"Step 1: No confirmation form for ({x},{y}), HTML length={len(confirm_html)}"
+                )
                 return TroopSendResult(
-                    success=False, target_x=x, target_y=y,
+                    success=False,
+                    target_x=x,
+                    target_y=y,
                     raw_response=f"Step 1 error: No confirmation form returned (server returned {len(confirm_html)} bytes — possible rate limit or session issue)",
                 )
 
             # ── Step 2: Parse confirmation page (with human delay for reading) ──
             await self.http_client.human_delay.wait(ActionType.RAPID, "reading troop confirmation")
-            
+
             confirm_fields = parse_troop_confirm_page(confirm_html)
-            checksum = confirm_fields.pop('checksum', '')
+            checksum = confirm_fields.pop("checksum", "")
 
             if not checksum:
                 # Try harder — look in button onclick
                 cs_match = re.search(
-                    r"input\[name=checksum\]'\)\.value\s*=\s*'([a-f0-9]+)'",
-                    confirm_html
+                    r"input\[name=checksum\]'\)\.value\s*=\s*'([a-f0-9]+)'", confirm_html
                 )
                 if cs_match:
                     checksum = cs_match.group(1)
 
             if not checksum:
                 return TroopSendResult(
-                    success=False, target_x=x, target_y=y,
+                    success=False,
+                    target_x=x,
+                    target_y=y,
                     raw_response="No checksum found in confirmation page",
                 )
 
@@ -188,28 +225,30 @@ class MilitaryService:
                 final_data[key] = value
 
             # Add checksum
-            final_data['checksum'] = checksum
+            final_data["checksum"] = checksum
 
             # Set scout target when sending only scouts
             # Values: "" = default (defense), "1" = resources, "2" = defenses
             if scout_target:
-                final_data['troops[0][scoutTarget]'] = scout_target
+                final_data["troops[0][scoutTarget]"] = scout_target
 
             # Stealth: human reads the confirmation page before clicking send
             await delay.wait(ActionType.PAGE_LOAD, "reading troop confirmation")
-            
+
             logger.info(f"Step 2: Confirming with checksum={checksum}")
-            result_html = await self.http_client.post_form(rally_url, final_data, safe_to_retry=False)
+            result_html = await self.http_client.post_form(
+                rally_url, final_data, safe_to_retry=False
+            )
 
             # Success detection: after confirming, the server returns the rally point
             # page. The key negative indicator is the confirmation form reappearing
             # with the SAME action token (means it wasn't processed).
             # Positive indicators: troop movements, rally overview, or simply
             # a valid page without the form reappearing or an error message.
-            action_token = final_data.get('action', '')
+            action_token = final_data.get("action", "")
             form_reappeared = action_token and f'value="{action_token}"' in result_html
             has_error = bool(re.search(r'class="error[^"]*"', result_html))
-            has_troop_movement = 'troopMovement' in result_html
+            has_troop_movement = "troopMovement" in result_html
 
             # Success: the old action token was consumed (not reappearing),
             # no error divs, and ideally we see troop movements on the page.
@@ -244,7 +283,9 @@ class MilitaryService:
         except Exception as e:
             logger.error(f"Troop send failed: {e}")
             return TroopSendResult(
-                success=False, target_x=x, target_y=y,
+                success=False,
+                target_x=x,
+                target_y=y,
                 raw_response=str(e),
             )
 
@@ -253,7 +294,7 @@ class MilitaryService:
         # Check class="error" divs
         match = re.search(r'class="error[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
         if match:
-            return clean_unicode(re.sub(r'<[^>]+>', '', match.group(1)).strip())
+            return clean_unicode(re.sub(r"<[^>]+>", "", match.group(1)).strip())
         # Check for common Travian error patterns outside error divs
         for pattern in [
             r"beginner.{0,5}s?\s*protection",
@@ -269,7 +310,6 @@ class MilitaryService:
                 # Extract surrounding text for context
                 start = max(0, err_match.start() - 20)
                 end = min(len(html), err_match.end() + 80)
-                snippet = re.sub(r'<[^>]+>', '', html[start:end]).strip()
+                snippet = re.sub(r"<[^>]+>", "", html[start:end]).strip()
                 return clean_unicode(snippet)
         return "Unknown error"
-

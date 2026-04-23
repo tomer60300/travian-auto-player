@@ -96,7 +96,7 @@ function scheduleReconnect() {
 export function disconnectLogStream() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
   reconnectAttempts = MAX_RECONNECT // prevent reconnect
-  if (ws) { try { ws.close() } catch {} ws = null }
+  if (ws) { try { ws.close() } catch { /* empty */ } ws = null }
 }
 
 export function setLogLevel(level) {

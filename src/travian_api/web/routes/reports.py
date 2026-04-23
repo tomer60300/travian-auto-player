@@ -8,8 +8,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from travian_api.exceptions import TravianError, ReportError, ReportNotFoundError
-from travian_api.web.sessions import get_travian_session, TravianSession
+from travian_api.exceptions import ReportError, ReportNotFoundError, TravianError
+from travian_api.web.sessions import TravianSession, get_travian_session
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,9 @@ router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 @router.get("")
 async def list_reports(
-    max_age_hours: Optional[int] = Query(default=None, description="Only fetch reports newer than this many hours"),
+    max_age_hours: Optional[int] = Query(
+        default=None, description="Only fetch reports newer than this many hours"
+    ),
     max_pages: int = Query(default=10, ge=1, le=100, description="Maximum pages to fetch"),
     session: TravianSession = Depends(get_travian_session),
 ):
@@ -79,7 +81,8 @@ async def village_reports(
     """
     try:
         result = await session.reports_service.fetch_village_reports(
-            x=body.x, y=body.y,
+            x=body.x,
+            y=body.y,
             fetch_details=body.fetch_details,
             max_detail_count=body.max_detail_count,
         )
@@ -147,10 +150,12 @@ async def analyze_reports(
 
         targets = []
         for target_state, rec in result.targets:
-            targets.append({
-                "state": target_state.model_dump(mode="json"),
-                "recommendation": rec.model_dump(mode="json"),
-            })
+            targets.append(
+                {
+                    "state": target_state.model_dump(mode="json"),
+                    "recommendation": rec.model_dump(mode="json"),
+                }
+            )
 
         return {
             "source_village": result.source_village_name,

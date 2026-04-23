@@ -53,7 +53,9 @@ async def ws_logs(websocket: WebSocket):
     try:
         # Send history as catch-up (filtered to this user)
         history = log_stream_manager.get_history(100, user_id=user_id)
-        filtered_history = [e for e in history if _LEVEL_MAP.get(e.get("level", "info"), logging.INFO) >= min_level]
+        filtered_history = [
+            e for e in history if _LEVEL_MAP.get(e.get("level", "info"), logging.INFO) >= min_level
+        ]
         await websocket.send_json({"type": "history", "entries": filtered_history})
 
         # Concurrent tasks: stream logs + listen for filter updates
@@ -84,7 +86,8 @@ async def ws_logs(websocket: WebSocket):
         ]
         try:
             done, _pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED,
+                tasks,
+                return_when=asyncio.FIRST_COMPLETED,
             )
             # Retrieve result so the exception propagates to the outer
             # handler instead of triggering "Task exception was never retrieved".

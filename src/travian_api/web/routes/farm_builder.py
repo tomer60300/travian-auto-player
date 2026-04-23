@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -72,14 +72,15 @@ async def list_presets(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(FarmBuilderPreset).where(FarmBuilderPreset.user_id == user.id)
-    )
+    result = await db.execute(select(FarmBuilderPreset).where(FarmBuilderPreset.user_id == user.id))
     presets = result.scalars().all()
     return [
         PresetOut(
-            id=p.id, name=p.name, config=json.loads(p.config_json),
-            created_at=p.created_at, updated_at=p.updated_at,
+            id=p.id,
+            name=p.name,
+            config=json.loads(p.config_json),
+            created_at=p.created_at,
+            updated_at=p.updated_at,
         )
         for p in presets
     ]
@@ -111,8 +112,11 @@ async def save_preset(
     await db.commit()
     await db.refresh(preset)
     return PresetOut(
-        id=preset.id, name=preset.name, config=json.loads(preset.config_json),
-        created_at=preset.created_at, updated_at=preset.updated_at,
+        id=preset.id,
+        name=preset.name,
+        config=json.loads(preset.config_json),
+        created_at=preset.created_at,
+        updated_at=preset.updated_at,
     )
 
 
@@ -152,11 +156,16 @@ async def list_history(
     rows = result.scalars().all()
     return [
         RunHistoryOut(
-            id=r.id, session_id=r.session_id, status=r.status,
-            total_targets=r.total_targets, added=r.added,
-            skipped=r.skipped, failed=r.failed,
+            id=r.id,
+            session_id=r.session_id,
+            status=r.status,
+            total_targets=r.total_targets,
+            added=r.added,
+            skipped=r.skipped,
+            failed=r.failed,
             error_message=r.error_message,
-            started_at=r.started_at, ended_at=r.ended_at,
+            started_at=r.started_at,
+            ended_at=r.ended_at,
         )
         for r in rows
     ]
@@ -180,7 +189,7 @@ async def get_scan_cache(
     if not row:
         return ScanCacheOut(has_cache=False)
     # Check age
-    age = datetime.now(timezone.utc) - row.updated_at
+    age = datetime.now(UTC) - row.updated_at
     if age > timedelta(seconds=SCAN_CACHE_MAX_AGE_SECONDS):
         return ScanCacheOut(has_cache=False)
     return ScanCacheOut(

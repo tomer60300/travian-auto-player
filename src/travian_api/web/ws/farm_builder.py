@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import UTC
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -105,16 +106,27 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
 
         async def send_log(category: str, emoji: str, message: str, level: str = "info") -> None:
             ts = time.time()
-            await tracked_send({
-                "type": "log",
-                "data": {"timestamp": ts, "emoji": emoji, "category": category,
-                         "message": message, "level": level},
-            })
-            log_stream_manager.push({
-                "timestamp": ts, "level": level, "source": "farm_builder",
-                "message": f"[{category}] {emoji} {message}",
-                "user_id": user_id,
-            })
+            await tracked_send(
+                {
+                    "type": "log",
+                    "data": {
+                        "timestamp": ts,
+                        "emoji": emoji,
+                        "category": category,
+                        "message": message,
+                        "level": level,
+                    },
+                }
+            )
+            log_stream_manager.push(
+                {
+                    "timestamp": ts,
+                    "level": level,
+                    "source": "farm_builder",
+                    "message": f"[{category}] {emoji} {message}",
+                    "user_id": user_id,
+                }
+            )
 
         await tracked_send({"type": "session_init", "session_id": exec_session.id})
 
@@ -148,7 +160,9 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
 
         # Check if captcha was just resolved
         if operation_gate.check_should_stop(user_id, op_started_at):
-            await tracked_send({"type": "error", "message": "Stopped after captcha resolution — restart manually"})
+            await tracked_send(
+                {"type": "error", "message": "Stopped after captcha resolution — restart manually"}
+            )
             await tracked_send({"type": "status", "data": {"state": "stopped"}})
             return
 
@@ -176,15 +190,19 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
             else:  # run
                 survivors = msg.get("survivors") or []
                 if not survivors:
-                    await tracked_send({"type": "error", "message": "No survivors list provided for run"})
+                    await tracked_send(
+                        {"type": "error", "message": "No survivors list provided for run"}
+                    )
                     await tracked_send({"type": "status", "data": {"state": "stopped"}})
                 else:
                     # Record history row
                     try:
                         async with async_session_factory() as db:
                             row = FarmBuilderRunHistory(
-                                user_id=user_id, session_id=exec_session.id,
-                                status="running", total_targets=len(survivors),
+                                user_id=user_id,
+                                session_id=exec_session.id,
+                                status="running",
+                                total_targets=len(survivors),
                             )
                             db.add(row)
                             await db.commit()
@@ -201,9 +219,11 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
                     # Update history
                     if history_id is not None:
                         try:
-                            from datetime import datetime, timezone
+                            from datetime import datetime
+
                             async with async_session_factory() as db:
                                 from sqlalchemy import update
+
                                 await db.execute(
                                     update(FarmBuilderRunHistory)
                                     .where(FarmBuilderRunHistory.id == history_id)
@@ -213,7 +233,7 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
                                         skipped=report.get("skipped", 0),
                                         failed=report.get("failed", 0),
                                         report_json=json.dumps(report),
-                                        ended_at=datetime.now(timezone.utc),
+                                        ended_at=datetime.now(UTC),
                                     )
                                 )
                                 await db.commit()

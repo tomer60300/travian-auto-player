@@ -17,7 +17,6 @@ import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +59,10 @@ class ExecutionSessionManager:
         self._sessions[session_id] = session
         logger.info(
             "Execution session created: id=%s type=%s user=%s label=%s",
-            session_id, session_type, user_id, label,
+            session_id,
+            session_type,
+            user_id,
+            label,
         )
         return session
 
@@ -74,17 +76,23 @@ class ExecutionSessionManager:
         for s in self._sessions.values():
             if s.user_id != user_id:
                 continue
-            if s.status == "disconnected" and s.disconnected_at and (now - s.disconnected_at) > _SESSION_TTL:
+            if (
+                s.status == "disconnected"
+                and s.disconnected_at
+                and (now - s.disconnected_at) > _SESSION_TTL
+            ):
                 continue
-            result.append({
-                "id": s.id,
-                "session_type": s.session_type,
-                "label": s.label,
-                "status": s.status,
-                "created_at": s.created_at,
-                "disconnected_at": s.disconnected_at,
-                "message_count": len(s.messages),
-            })
+            result.append(
+                {
+                    "id": s.id,
+                    "session_type": s.session_type,
+                    "label": s.label,
+                    "status": s.status,
+                    "created_at": s.created_at,
+                    "disconnected_at": s.disconnected_at,
+                    "message_count": len(s.messages),
+                }
+            )
         # Running first, then disconnected; within each group, newest first
         result.sort(key=lambda x: (0 if x["status"] == "running" else 1, -x["created_at"]))
         return result
@@ -121,7 +129,12 @@ class ExecutionSessionManager:
         history = list(session.messages)
         queue: asyncio.Queue = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_SIZE)
         session._subscribers[sub_id] = queue
-        logger.info("Session %s: subscriber %s added (%d existing)", session_id, sub_id, len(session._subscribers))
+        logger.info(
+            "Session %s: subscriber %s added (%d existing)",
+            session_id,
+            sub_id,
+            len(session._subscribers),
+        )
         return history, queue
 
     def unsubscribe(self, session_id: str, sub_id: int) -> None:
@@ -169,7 +182,8 @@ class ExecutionSessionManager:
                 await asyncio.sleep(_CLEANUP_INTERVAL)
                 now = time.time()
                 expired = [
-                    sid for sid, s in self._sessions.items()
+                    sid
+                    for sid, s in self._sessions.items()
                     if s.status == "disconnected"
                     and s.disconnected_at
                     and (now - s.disconnected_at) > _SESSION_TTL

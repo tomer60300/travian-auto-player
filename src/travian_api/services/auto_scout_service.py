@@ -9,7 +9,7 @@ import re
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from ..clients.http_client import HttpClient
-from ..models.farm_list import FarmListSlot, MapTileInfo
+from ..models.farm_list import MapTileInfo
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +53,12 @@ class AutoScoutService:
             for cy in range(center_y - radius, center_y + radius + 1, step * 2):
                 scan_centers.append((cx, cy))
 
-        self._report(f"Scanning {len(scan_centers)} map region(s) around ({center_x},{center_y}) r={radius}")
+        self._report(
+            f"Scanning {len(scan_centers)} map region(s) around ({center_x},{center_y}) r={radius}"
+        )
 
         # Establish map context once before the scan batch (stealth)
-        if hasattr(self.http_client, 'navigator') and self.http_client.navigator.enabled:
+        if hasattr(self.http_client, "navigator") and self.http_client.navigator.enabled:
             await self.http_client.navigator._visit("/karte.php", "opening map")
 
         for sx, sy in scan_centers:
@@ -118,9 +120,7 @@ class AutoScoutService:
 
     async def get_tile_details(self, x: int, y: int) -> MapTileInfo:
         """Get detailed info for a single tile via tile-details API."""
-        resp = await self.http_client.post_json(
-            "/api/v1/map/tile-details", {"x": x, "y": y}
-        )
+        resp = await self.http_client.post_json("/api/v1/map/tile-details", {"x": x, "y": y})
         html = resp.get("html", "")
         return self._parse_tile_details(x, y, html)
 
@@ -248,8 +248,7 @@ class AutoScoutService:
                     continue
             if within_chebyshev_of:
                 ok = any(
-                    max(abs(t.x - cx), abs(t.y - cy)) <= r
-                    for cx, cy, r in within_chebyshev_of
+                    max(abs(t.x - cx), abs(t.y - cy)) <= r for cx, cy, r in within_chebyshev_of
                 )
                 if not ok:
                     _drop("outside_chebyshev_radius")
@@ -433,7 +432,7 @@ class AutoScoutService:
                 # Retry once with backoff if we got a "no confirmation form" error
                 # (likely rate limit or transient server issue)
                 if not result.success and "No confirmation form" in result.raw_response:
-                    self._report(f"  -> Retrying after 3s (possible rate limit)...")
+                    self._report("  -> Retrying after 3s (possible rate limit)...")
                     await asyncio.sleep(3)
                     result = await military.send_scouts(
                         x=target.x,
@@ -443,16 +442,18 @@ class AutoScoutService:
                         village_id=village_id,
                     )
                 status = "sent" if result.success else f"failed: {result.raw_response[:100]}"
-                results.append({
-                    "x": target.x,
-                    "y": target.y,
-                    "name": target.village_name,
-                    "population": target.population,
-                    "distance": target.distance,
-                    "success": result.success,
-                    "status": status,
-                    "travel_time": result.travel_time,
-                })
+                results.append(
+                    {
+                        "x": target.x,
+                        "y": target.y,
+                        "name": target.village_name,
+                        "population": target.population,
+                        "distance": target.distance,
+                        "success": result.success,
+                        "status": status,
+                        "travel_time": result.travel_time,
+                    }
+                )
                 if result.success:
                     self._report(f"  -> Scouts sent! Travel: {result.travel_time or '?'}")
                 else:
@@ -460,17 +461,20 @@ class AutoScoutService:
 
             except Exception as e:
                 self._report(f"  -> ERROR: {e}")
-                results.append({
-                    "x": target.x,
-                    "y": target.y,
-                    "name": target.village_name,
-                    "success": False,
-                    "status": f"error: {e}",
-                })
+                results.append(
+                    {
+                        "x": target.x,
+                        "y": target.y,
+                        "name": target.village_name,
+                        "success": False,
+                        "status": f"error: {e}",
+                    }
+                )
 
             if i < len(targets) - 1:
                 # Stealth: heavy-tailed delay between scout sends
                 from ..stealth.timing import HumanTiming
+
                 await asyncio.sleep(HumanTiming.delay(delay_between))
                 # Stealth: occasional noise between scouts
                 try:
@@ -489,9 +493,7 @@ class AutoScoutService:
         info = MapTileInfo(x=x, y=y)
 
         # Population
-        pop_match = re.search(
-            r"<th>\s*Population\s*</th>\s*<td>\s*(\d+)\s*</td>", html, re.DOTALL
-        )
+        pop_match = re.search(r"<th>\s*Population\s*</th>\s*<td>\s*(\d+)\s*</td>", html, re.DOTALL)
         if pop_match:
             info.population = int(pop_match.group(1))
 
@@ -506,14 +508,12 @@ class AutoScoutService:
             info.player_name = player_match.group(2).strip()
 
         # Tribe
-        tribe_match = re.search(
-            r"<th>\s*Tribe\s*</th>\s*<td>\s*(\w+)\s*</td>", html, re.DOTALL
-        )
+        tribe_match = re.search(r"<th>\s*Tribe\s*</th>\s*<td>\s*(\w+)\s*</td>", html, re.DOTALL)
         if tribe_match:
             info.tribe = tribe_match.group(1)
 
         # Village name from h1
-        name_match = re.search(r'<h1[^>]*>([^<]+)', html)
+        name_match = re.search(r"<h1[^>]*>([^<]+)", html)
         if name_match:
             info.village_name = name_match.group(1).strip()
 
@@ -548,4 +548,3 @@ class AutoScoutService:
             info.is_oasis = True
 
         return info
-

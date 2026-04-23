@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+
 from pydantic import BaseModel, Field
 
 
@@ -98,7 +99,7 @@ class AnalysisResult(BaseModel):
     skipped_player: int = 0
 
     # v2 pipeline stats
-    re_scout_targets: List["ReScoutTarget"] = Field(default_factory=list)
+    re_scout_targets: List[ReScoutTarget] = Field(default_factory=list)
     village_reports_fetched: int = 0
     village_reports_cached: int = 0
     village_reports_failed: int = 0
@@ -112,6 +113,7 @@ class AnalysisResult(BaseModel):
 
 class ReScoutTarget(BaseModel):
     """A target that needs re-scouting."""
+
     x: int = 0
     y: int = 0
     village_name: str = ""

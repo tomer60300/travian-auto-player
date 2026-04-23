@@ -62,20 +62,22 @@ async def ws_analyze_reports(websocket: WebSocket):
             return ok
 
         def broadcast_log(message: str, level: str = "info") -> None:
-            log_stream_manager.push({
-                "timestamp": time.time(),
-                "level": level,
-                "source": "raid_analyzer",
-                "message": message,
-                "user_id": user_id,
-            })
+            log_stream_manager.push(
+                {
+                    "timestamp": time.time(),
+                    "level": level,
+                    "source": "raid_analyzer",
+                    "message": message,
+                    "user_id": user_id,
+                }
+            )
 
         await tracked_send({"type": "session_init", "session_id": exec_session.id})
 
         # Wait for config message
         try:
             msg = await asyncio.wait_for(websocket.receive_json(), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await tracked_send({"type": "error", "message": "Timeout waiting for config"})
             return
         except (WebSocketDisconnect, RuntimeError):
@@ -98,19 +100,23 @@ async def ws_analyze_reports(websocket: WebSocket):
         )
 
         analyzer = session.raid_analyzer
-        broadcast_log(f"Raid analysis started (radius={settings.radius}, min_res={settings.min_resources})")
+        broadcast_log(
+            f"Raid analysis started (radius={settings.radius}, min_res={settings.min_resources})"
+        )
 
         # Progress queue for async delivery
         progress_queue: asyncio.Queue = asyncio.Queue()
 
         def on_progress(phase: str, message: str, detail: dict):
             try:
-                progress_queue.put_nowait({
-                    "type": "progress",
-                    "phase": phase,
-                    "message": message,
-                    **detail,
-                })
+                progress_queue.put_nowait(
+                    {
+                        "type": "progress",
+                        "phase": phase,
+                        "message": message,
+                        **detail,
+                    }
+                )
             except asyncio.QueueFull:
                 pass
 
@@ -122,7 +128,7 @@ async def ws_analyze_reports(websocket: WebSocket):
                 try:
                     item = await asyncio.wait_for(progress_queue.get(), timeout=0.5)
                     await tracked_send(item)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     continue
                 except (WebSocketDisconnect, Exception):
                     break
@@ -130,7 +136,9 @@ async def ws_analyze_reports(websocket: WebSocket):
         progress_task = asyncio.create_task(send_progress())
 
         try:
-            await tracked_send({"type": "progress", "phase": "start", "message": "Analysis starting..."})
+            await tracked_send(
+                {"type": "progress", "phase": "start", "message": "Analysis starting..."}
+            )
 
             result = await analyzer.analyze(settings)
 
@@ -152,10 +160,12 @@ async def ws_analyze_reports(websocket: WebSocket):
             # Build final results
             targets = []
             for target_state, rec in result.targets:
-                targets.append({
-                    "state": target_state.model_dump(mode="json"),
-                    "recommendation": rec.model_dump(mode="json"),
-                })
+                targets.append(
+                    {
+                        "state": target_state.model_dump(mode="json"),
+                        "recommendation": rec.model_dump(mode="json"),
+                    }
+                )
 
             complete_msg = {
                 "type": "complete",
@@ -170,7 +180,9 @@ async def ws_analyze_reports(websocket: WebSocket):
                     "reports_fetched_fail": getattr(result, "reports_fetched_fail", None),
                     "pages_fetched": getattr(result, "pages_fetched", None),
                     "pages_failed": getattr(result, "pages_failed", None),
-                    "analysis_duration_seconds": round(getattr(result, "analysis_duration_seconds", 0), 1),
+                    "analysis_duration_seconds": round(
+                        getattr(result, "analysis_duration_seconds", 0), 1
+                    ),
                     "warnings": getattr(result, "warnings", []),
                 },
             }

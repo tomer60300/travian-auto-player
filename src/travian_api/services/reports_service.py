@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..clients.http_client import HttpClient
 from ..exceptions import ReportError
 from ..logging_config import get_logger
-from ..models.reports import ReportListItem, Report
+from ..models.reports import ReportListItem
 from ..parsers.report_parser import (
-    parse_report_list,
     parse_individual_report,
-    parse_scout_report,
-    parse_battle_report,
     parse_map_tile_reports,
+    parse_report_list,
 )
 
 logger = get_logger(__name__)
@@ -89,8 +87,9 @@ class ReportsService:
         Returns:
             Tuple of (reports, pages_fetched, pages_failed, failed_page_numbers)
         """
-        from ..services.raid_analyzer_service import parse_report_date
         from datetime import datetime, timedelta
+
+        from ..services.raid_analyzer_service import parse_report_date
 
         all_reports: List[ReportListItem] = []
         pages_fetched = 0
@@ -125,8 +124,7 @@ class ReportsService:
                     oldest_date = parse_report_date(page_reports[-1].date_str)
                     if oldest_date and oldest_date < cutoff:
                         logger.debug(
-                            f"Page {page}: oldest report ({oldest_date}) "
-                            f"exceeds max age, stopping"
+                            f"Page {page}: oldest report ({oldest_date}) exceeds max age, stopping"
                         )
                         break
 
@@ -137,8 +135,7 @@ class ReportsService:
                 continue  # Continue to next page, do NOT break
 
         logger.info(
-            f"Fetched {len(all_reports)} reports from {pages_fetched} pages "
-            f"({pages_failed} failed)"
+            f"Fetched {len(all_reports)} reports from {pages_fetched} pages ({pages_failed} failed)"
         )
         return all_reports, pages_fetched, pages_failed, failed_pages
 
@@ -155,14 +152,12 @@ class ReportsService:
         try:
             html = await self.client.get_html(f"/report?id={report_id}")
             result = parse_individual_report(html)
-            result['report_id'] = report_id
+            result["report_id"] = report_id
             return result
         except Exception as e:
             raise ReportError(f"Failed to fetch report {report_id}: {e}") from e
 
-    async def fetch_report_batch_metadata(
-        self, report_ids: List[str]
-    ) -> Dict[str, Dict[str, Any]]:
+    async def fetch_report_batch_metadata(self, report_ids: List[str]) -> Dict[str, Dict[str, Any]]:
         """
         Fetch metadata for multiple reports using GraphQL batch.
 
@@ -217,9 +212,10 @@ class ReportsService:
         Returns:
             Tuple of (reports_list, success_bool)
         """
-        from ..services.raid_analyzer_service import parse_report_date
-        from ..parsers.report_parser import parse_alliance_report_list
         from datetime import datetime, timedelta
+
+        from ..parsers.report_parser import parse_alliance_report_list
+        from ..services.raid_analyzer_service import parse_report_date
 
         ALLIANCE_FILTER = "1,2,3,4,5,6,7,15,16,17,18,19"
         base_url = f"/alliance/reports?filter={ALLIANCE_FILTER}"
@@ -249,16 +245,12 @@ class ReportsService:
         if cutoff is not None and first_page:
             oldest_date = parse_report_date(first_page[-1].date_str)
             if oldest_date and oldest_date < cutoff:
-                logger.info(
-                    f"Alliance reports: {len(all_reports)} from 1 page (age cutoff hit)"
-                )
+                logger.info(f"Alliance reports: {len(all_reports)} from 1 page (age cutoff hit)")
                 return all_reports, True
 
         for page in range(2, max_pages + 1):
             try:
-                page_html = await self.client.get_html(
-                    f"{base_url}&page={page}"
-                )
+                page_html = await self.client.get_html(f"{base_url}&page={page}")
                 page_reports = parse_alliance_report_list(page_html)
                 pages_fetched += 1
 
@@ -330,14 +322,12 @@ class ReportsService:
             # Stealth: navigate to the map first (like clicking "Map" in the menu)
             navigator = self.client.navigator
             if navigator.enabled:
-                if not navigator.current_page or 'karte' not in navigator.current_page:
+                if not navigator.current_page or "karte" not in navigator.current_page:
                     await navigator._visit("/karte.php", "opening map")
                 await self.client.human_delay.wait(ActionType.CLICK, "clicking map tile")
 
             # The tile popup is loaded via the tile-details API (not karte.php HTML)
-            resp = await self.client.post_json(
-                "/api/v1/map/tile-details", {"x": x, "y": y}
-            )
+            resp = await self.client.post_json("/api/v1/map/tile-details", {"x": x, "y": y})
             html = resp.get("html", "")
             if not html:
                 raise ReportError(f"Empty tile-details response for ({x}, {y})")
@@ -347,7 +337,7 @@ class ReportsService:
             raise ReportError(f"Failed to fetch map tile for ({x}, {y}): {e}") from e
 
         parsed = parse_map_tile_reports(html)
-        reports = parsed.get('reports', [])
+        reports = parsed.get("reports", [])
         logger.info("Found %d reports on map tile (%d, %d)", len(reports), x, y)
 
         if fetch_details and reports:
@@ -356,30 +346,37 @@ class ReportsService:
             for entry in reports[:limit]:
                 # Optional: only fetch details for specific icon types
                 # detail_filter="battle_only" skips scouts, "scout_priority" fetches scouts first
-                if detail_filter == "battle_only" and entry.get("icon_type", 0) not in (1,2,3,4,5,6,7,8):
+                if detail_filter == "battle_only" and entry.get("icon_type", 0) not in (
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                ):
                     continue
-                rid = entry['report_id']
-                aid = entry.get('aid', '')
+                rid = entry["report_id"]
+                aid = entry.get("aid", "")
                 try:
                     # Stealth: human reading delay before clicking next report
                     if fetched > 0 and navigator.enabled:
-                        await self.client.human_delay.wait(
-                            ActionType.PAGE_LOAD, "reading report"
-                        )
+                        await self.client.human_delay.wait(ActionType.PAGE_LOAD, "reading report")
 
                     url = f"/report?id={rid}"
                     if aid:
                         url += f"&aid={aid}"
                     detail_html = await self.client.get_html(url)
                     detail = parse_individual_report(detail_html)
-                    detail['report_id'] = rid
-                    data = detail.get('data')
-                    if data and hasattr(data, 'model_dump'):
-                        detail['data'] = data.model_dump()
-                    entry['detail'] = detail
+                    detail["report_id"] = rid
+                    data = detail.get("data")
+                    if data and hasattr(data, "model_dump"):
+                        detail["data"] = data.model_dump()
+                    entry["detail"] = detail
                     fetched += 1
                 except Exception as e:
                     logger.warning("Failed to fetch detail for report %s: %s", rid, e)
-            parsed['details_fetched'] = fetched
+            parsed["details_fetched"] = fetched
 
         return parsed

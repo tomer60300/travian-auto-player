@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import logging
-from typing import Optional
-
 import json as _json
+import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from travian_api.exceptions import TravianError
 from travian_api.web.auth import get_current_user
-from travian_api.web.sessions import get_travian_session, TravianSession
+from travian_api.web.sessions import TravianSession, get_travian_session
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +124,7 @@ def _farm_list_to_summary(fl) -> FarmListSummaryResponse:
 def _slot_to_response(slot) -> SlotResponse:
     last_raid = None
     if slot.last_raid:
-        raided = getattr(slot.last_raid, 'raided_resources', None)
+        raided = getattr(slot.last_raid, "raided_resources", None)
         last_raid = LastRaidResponse(
             icon=slot.last_raid.icon_label,
             resources=raided.total if raided else None,
@@ -157,8 +155,7 @@ def _slot_to_response(slot) -> SlotResponse:
 
 def _send_result_response(list_id: int, result) -> SendResultResponse:
     targets = [
-        TargetResultResponse(id=t.id, status=t.status, error=t.error)
-        for t in result.targets
+        TargetResultResponse(id=t.id, status=t.status, error=t.error) for t in result.targets
     ]
     return SendResultResponse(
         list_id=list_id,
@@ -230,9 +227,7 @@ async def get_coord_map(
     for fl in lists:
         for slot in fl.slots:
             key = f"{slot.target.x},{slot.target.y}"
-            result.setdefault(key, []).append(
-                {"list_id": fl.id, "list_name": fl.name}
-            )
+            result.setdefault(key, []).append({"list_id": fl.id, "list_name": fl.name})
     return result
 
 
@@ -338,40 +333,44 @@ class SlotDefenseInfo(BaseModel):
 
 
 async def _fetch_defense_for_coord(
-    session, x: int, y: int,
+    session,
+    x: int,
+    y: int,
 ) -> dict | None:
     """Fetch defense data for a single coordinate (tile-details + report HTML)."""
     try:
         village_data = await session.reports_service.fetch_village_reports(
-            x=x, y=y, fetch_details=False,
+            x=x,
+            y=y,
+            fetch_details=False,
         )
     except Exception as exc:
         logger.debug("Defense scan: tile-details failed for (%s,%s): %s", x, y, exc)
         return None
 
-    tile_reports = village_data.get('reports', [])
+    tile_reports = village_data.get("reports", [])
     battle_report = next(
-        (r for r in tile_reports if 1 <= r.get('icon_type', 0) <= 8),
+        (r for r in tile_reports if 1 <= r.get("icon_type", 0) <= 8),
         None,
     )
     if not battle_report:
         return None
 
-    report_id = battle_report.get('report_id', '')
-    aid = battle_report.get('aid', '')
+    report_id = battle_report.get("report_id", "")
+    aid = battle_report.get("aid", "")
 
     try:
         detail = await session.reports_service.fetch_report_detail(
             f"{report_id}&aid={aid}" if aid else report_id
         )
-        if detail and detail.get('type') == 'battle':
-            battle = detail.get('data')
+        if detail and detail.get("type") == "battle":
+            battle = detail.get("data")
             if battle:
                 defender_troops = dict(battle.defender_troops) if battle.defender_troops else {}
                 return {
                     "defender_troops": defender_troops,
                     "defender_total": sum(defender_troops.values()),
-                    "defender_combat_strength": getattr(battle, 'defender_combat_strength', 0) or 0,
+                    "defender_combat_strength": getattr(battle, "defender_combat_strength", 0) or 0,
                     "report_id": report_id,
                 }
     except Exception as exc:
@@ -437,26 +436,36 @@ async def scan_defense_strength(
         total = len(fl.slots)
         to_fetch = len(needs_fetch)
 
-        yield _line({
-            "type": "progress",
-            "total": total,
-            "cached": cached_count,
-            "to_fetch": to_fetch,
-            "fetched": 0,
-        })
+        yield _line(
+            {
+                "type": "progress",
+                "total": total,
+                "cached": cached_count,
+                "to_fetch": to_fetch,
+                "fetched": 0,
+            }
+        )
 
-        yield _line({
-            "type": "log",
-            "message": f"Scan started: {total} targets, {cached_count} cached, {to_fetch} to fetch",
-        })
+        yield _line(
+            {
+                "type": "log",
+                "message": f"Scan started: {total} targets, {cached_count} cached, {to_fetch} to fetch",
+            }
+        )
 
         # ── Phase 2: emit cached results instantly ────────────────────
         for slot in fl.slots:
             if not slot.last_raid or not slot.last_raid.time:
-                yield _line(SlotDefenseInfo(
-                    slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                    name=slot.target.name, never_raided=True,
-                ).model_dump() | {"type": "result"})
+                yield _line(
+                    SlotDefenseInfo(
+                        slot_id=slot.id,
+                        x=slot.target.x,
+                        y=slot.target.y,
+                        name=slot.target.name,
+                        never_raided=True,
+                    ).model_dump()
+                    | {"type": "result"}
+                )
                 continue
 
             coord_key = (slot.target.x, slot.target.y)
@@ -466,14 +475,20 @@ async def scan_defense_strength(
                 # This is a cache hit
                 cached = defense_cache.get(slot.target.x, slot.target.y, slot.last_raid.time)
                 if cached is not None:
-                    yield _line(SlotDefenseInfo(
-                        slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                        name=slot.target.name, report_age_hours=age_hours,
-                        defender_troops=cached.get("defender_troops", {}),
-                        defender_total=cached.get("defender_total", 0),
-                        defender_combat_strength=cached.get("defender_combat_strength", 0),
-                        report_id=cached.get("report_id"),
-                    ).model_dump() | {"type": "result"})
+                    yield _line(
+                        SlotDefenseInfo(
+                            slot_id=slot.id,
+                            x=slot.target.x,
+                            y=slot.target.y,
+                            name=slot.target.name,
+                            report_age_hours=age_hours,
+                            defender_troops=cached.get("defender_troops", {}),
+                            defender_total=cached.get("defender_total", 0),
+                            defender_combat_strength=cached.get("defender_combat_strength", 0),
+                            report_id=cached.get("report_id"),
+                        ).model_dump()
+                        | {"type": "result"}
+                    )
 
         # ── Phase 3: fetch uncached coordinates one by one ────────────
         fetched_count = 0
@@ -482,10 +497,12 @@ async def scan_defense_strength(
             x, y = coord_key
             first_slot = slots[0]
 
-            yield _line({
-                "type": "log",
-                "message": f"Fetching ({x},{y}) {first_slot.target.name}... [{fetched_count + 1}/{to_fetch}]",
-            })
+            yield _line(
+                {
+                    "type": "log",
+                    "message": f"Fetching ({x},{y}) {first_slot.target.name}... [{fetched_count + 1}/{to_fetch}]",
+                }
+            )
 
             # Request coalescing
             inflight = defense_cache.get_inflight(x, y)
@@ -508,39 +525,63 @@ async def scan_defense_strength(
             fetched_count += 1
 
             for slot in slots:
-                age_hours = round((now_ts - slot.last_raid.time) / 3600, 1) if slot.last_raid and slot.last_raid.time else None
+                age_hours = (
+                    round((now_ts - slot.last_raid.time) / 3600, 1)
+                    if slot.last_raid and slot.last_raid.time
+                    else None
+                )
                 if defense_data:
-                    yield _line(SlotDefenseInfo(
-                        slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                        name=slot.target.name, report_age_hours=age_hours,
-                        **defense_data,
-                    ).model_dump() | {"type": "result"})
-                    defense_cache.put(slot.target.x, slot.target.y, slot.last_raid.time, defense_data)
+                    yield _line(
+                        SlotDefenseInfo(
+                            slot_id=slot.id,
+                            x=slot.target.x,
+                            y=slot.target.y,
+                            name=slot.target.name,
+                            report_age_hours=age_hours,
+                            **defense_data,
+                        ).model_dump()
+                        | {"type": "result"}
+                    )
+                    defense_cache.put(
+                        slot.target.x, slot.target.y, slot.last_raid.time, defense_data
+                    )
                 else:
-                    yield _line(SlotDefenseInfo(
-                        slot_id=slot.id, x=slot.target.x, y=slot.target.y,
-                        name=slot.target.name, report_age_hours=age_hours,
-                    ).model_dump() | {"type": "result"})
+                    yield _line(
+                        SlotDefenseInfo(
+                            slot_id=slot.id,
+                            x=slot.target.x,
+                            y=slot.target.y,
+                            name=slot.target.name,
+                            report_age_hours=age_hours,
+                        ).model_dump()
+                        | {"type": "result"}
+                    )
 
-            yield _line({
-                "type": "progress",
-                "total": total,
-                "cached": cached_count,
-                "to_fetch": to_fetch,
-                "fetched": fetched_count,
-            })
+            yield _line(
+                {
+                    "type": "progress",
+                    "total": total,
+                    "cached": cached_count,
+                    "to_fetch": to_fetch,
+                    "fetched": fetched_count,
+                }
+            )
 
         elapsed = round(_time.monotonic() - scan_start, 1)
-        yield _line({
-            "type": "log",
-            "message": f"Scan complete: {total} targets, {fetched_count} fetched in {elapsed}s",
-        })
-        yield _line({
-            "type": "complete",
-            "total": total,
-            "fetched": fetched_count,
-            "elapsed": elapsed,
-        })
+        yield _line(
+            {
+                "type": "log",
+                "message": f"Scan complete: {total} targets, {fetched_count} fetched in {elapsed}s",
+            }
+        )
+        yield _line(
+            {
+                "type": "complete",
+                "total": total,
+                "fetched": fetched_count,
+                "elapsed": elapsed,
+            }
+        )
 
     return StreamingResponse(_generate(), media_type="application/x-ndjson")
 
@@ -569,15 +610,12 @@ async def send_farm_list(
         ) from exc
 
     if not fl.active_slots:
-        return SendResultResponse(
-            list_id=list_id, success_count=0, fail_count=0, targets=[]
-        )
+        return SendResultResponse(list_id=list_id, success_count=0, fail_count=0, targets=[])
 
     if dry_run:
         # Return a preview — targets with status="dry_run"
         targets = [
-            TargetResultResponse(id=s.id, status="dry_run", error="")
-            for s in fl.active_slots
+            TargetResultResponse(id=s.id, status="dry_run", error="") for s in fl.active_slots
         ]
         return SendResultResponse(
             list_id=list_id,
@@ -624,8 +662,7 @@ async def send_all_farm_lists(
         results = []
         for fl in all_lists:
             targets = [
-                TargetResultResponse(id=s.id, status="dry_run", error="")
-                for s in fl.active_slots
+                TargetResultResponse(id=s.id, status="dry_run", error="") for s in fl.active_slots
             ]
             results.append(
                 SendResultResponse(
@@ -646,7 +683,4 @@ async def send_all_farm_lists(
             detail=exc.message,
         ) from exc
 
-    return [
-        _send_result_response(lid, result)
-        for lid, result in result_map.items()
-    ]
+    return [_send_result_response(lid, result) for lid, result in result_map.items()]

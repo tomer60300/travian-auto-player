@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from travian_api.web.sessions import get_travian_session, TravianSession
+from travian_api.web.sessions import TravianSession, get_travian_session
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +23,20 @@ class ScanRequest(BaseModel):
     village_id: int | None = Field(None, description="Source village ID (default: active village)")
     max_pop: int | None = Field(None, description="Max village population filter")
     min_pop: int | None = Field(None, description="Min village population filter")
-    max_player_pop: int | None = Field(None, description="Max player population sum from visible villages in scan radius")
+    max_player_pop: int | None = Field(
+        None, description="Max player population sum from visible villages in scan radius"
+    )
     show_oases: bool = Field(False, description="Include unoccupied oases in results")
     limit: int = Field(50, ge=1, le=500, description="Max results to return")
-    exclude_alliance_ids: list[int] = Field(default_factory=list, description="Alliance IDs to exclude")
-    exclude_alliance_names: list[str] = Field(default_factory=list, description="Alliance names/tags to exclude (case-insensitive)")
-    exclude_player_names: list[str] = Field(default_factory=list, description="Player names to exclude")
+    exclude_alliance_ids: list[int] = Field(
+        default_factory=list, description="Alliance IDs to exclude"
+    )
+    exclude_alliance_names: list[str] = Field(
+        default_factory=list, description="Alliance names/tags to exclude (case-insensitive)"
+    )
+    exclude_player_names: list[str] = Field(
+        default_factory=list, description="Player names to exclude"
+    )
 
 
 class MapTileResponse(BaseModel):
@@ -75,9 +83,7 @@ async def scan_map(
 
     # Resolve center village
     vid = body.village_id or session.active_village_id
-    center_village = next(
-        (v for v in session.auth_state.villages if v.id == vid), None
-    )
+    center_village = next((v for v in session.auth_state.villages if v.id == vid), None)
     if not center_village:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -119,13 +125,20 @@ async def scan_map(
         # Post-enrichment: exclude alliances by name
         logger.info(
             "Alliance filter: exclude_alliance_names=%s, exclude_alliance_ids=%s",
-            body.exclude_alliance_names, body.exclude_alliance_ids,
+            body.exclude_alliance_names,
+            body.exclude_alliance_ids,
         )
         if body.exclude_alliance_names:
             excluded_names = {n.lower() for n in body.exclude_alliance_names}
             before = len(tiles)
-            tiles = [t for t in tiles if not t.alliance_name or t.alliance_name.lower() not in excluded_names]
-            logger.info("Alliance name filter: %d -> %d (excluded %s)", before, len(tiles), excluded_names)
+            tiles = [
+                t
+                for t in tiles
+                if not t.alliance_name or t.alliance_name.lower() not in excluded_names
+            ]
+            logger.info(
+                "Alliance name filter: %d -> %d (excluded %s)", before, len(tiles), excluded_names
+            )
 
         # Exclude players by name
         exclude_player_ids: set[int] = set()
@@ -168,9 +181,9 @@ async def scan_map(
         # Filter by max player total population (uses pre-computed sums)
         if body.max_player_pop is not None:
             tiles = [
-                t for t in tiles
-                if not t.player_id
-                or player_pops.get(t.player_id, 0) <= body.max_player_pop
+                t
+                for t in tiles
+                if not t.player_id or player_pops.get(t.player_id, 0) <= body.max_player_pop
             ]
 
         # Apply limit

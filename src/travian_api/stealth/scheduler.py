@@ -107,8 +107,7 @@ class ActivityScheduler:
         if idle_seconds >= self.min_break_minutes * 60:
             if self._session_seconds > 0:
                 logger.info(
-                    "Session auto-reset: idle %.0fs >= break threshold %.0fs "
-                    "(was %.1fh session)",
+                    "Session auto-reset: idle %.0fs >= break threshold %.0fs (was %.1fh session)",
                     idle_seconds,
                     self.min_break_minutes * 60,
                     self._session_seconds / 3600.0,
@@ -128,9 +127,7 @@ class ActivityScheduler:
             # Load hourly buckets (prune old ones)
             buckets = data.get("hourly_buckets", {})
             if isinstance(buckets, dict):
-                self._hourly_buckets = {
-                    k: float(v) for k, v in buckets.items()
-                }
+                self._hourly_buckets = {k: float(v) for k, v in buckets.items()}
                 self._prune_old_buckets()
 
             # Migrate from old format: discard stale daily_seconds.
@@ -217,7 +214,8 @@ class ActivityScheduler:
         if rolling_hours >= self.max_daily_hours:
             logger.info(
                 "Rolling 24h limit reached: %.1fh / %.1fh",
-                rolling_hours, self.max_daily_hours,
+                rolling_hours,
+                self.max_daily_hours,
             )
             return False
 
@@ -226,7 +224,8 @@ class ActivityScheduler:
         if session_hours >= self.max_continuous_hours:
             logger.info(
                 "Continuous limit reached: %.1fh / %.1fh",
-                session_hours, self.max_continuous_hours,
+                session_hours,
+                self.max_continuous_hours,
             )
             return False
 
@@ -286,7 +285,7 @@ class ActivityScheduler:
             # Seconds until the next hour boundary
             dt = datetime.fromtimestamp(cursor)
             next_hour = dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-            secs_to_boundary = (next_hour.timestamp() - cursor)
+            secs_to_boundary = next_hour.timestamp() - cursor
             chunk = min(remaining, secs_to_boundary)
             self._hourly_buckets[key] = self._hourly_buckets.get(key, 0.0) + chunk
             remaining -= chunk

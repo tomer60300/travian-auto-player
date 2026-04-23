@@ -1,77 +1,74 @@
 """Pydantic models for Travian API data structures."""
 
-from .auth import LoginRequest, LoginResponse, AuthStatus
+from .auth import AuthStatus, LoginRequest, LoginResponse
 from .buildings import (
     BuildingInfo,
-    VillageBuildings, 
-    UpgradeRequest,
-    UpgradeResult,
     ConstructionItem,
     ConstructionQueue,
     Resources,
-)
-from .military import (
-    TroopDispatch,
-    TroopComposition,
-    ScoutRequest,
-    ScoutResult,
-    RaidRequest, 
-    RaidResult,
-    AttackRequest,
-    AttackResult,
-    TargetInfo,
-)
-from .reports import (
-    Report,
-    ReportList,
-    ScoutReport,
-    BattleReport,
-    TradeReport,
-    AdventureReport,
-    ReportSummary,
+    UpgradeRequest,
+    UpgradeResult,
+    VillageBuildings,
 )
 from .common import (
     Coordinates,
-    VillageInfo,
     PlayerInfo,
+    VillageInfo,
 )
 from .farm_list import (
     FarmList,
-    FarmListSlot,
     FarmListSendResult,
+    FarmListSlot,
     LastRaid,
+    MapTileInfo,
     RaidedResources,
     SlotTarget,
     SlotTroop,
-    MapTileInfo,
+)
+from .military import (
+    AttackRequest,
+    AttackResult,
+    RaidRequest,
+    RaidResult,
+    ScoutRequest,
+    ScoutResult,
+    TargetInfo,
+    TroopComposition,
+    TroopDispatch,
+)
+from .reports import (
+    AdventureReport,
+    BattleReport,
+    Report,
+    ReportList,
+    ReportSummary,
+    ScoutReport,
+    TradeReport,
 )
 
 __all__ = [
     # Auth models
     "LoginRequest",
-    "LoginResponse", 
+    "LoginResponse",
     "AuthStatus",
-    
     # Building models
     "BuildingInfo",
     "VillageBuildings",
     "UpgradeRequest",
-    "UpgradeResult", 
+    "UpgradeResult",
     "ConstructionItem",
     "ConstructionQueue",
     "Resources",
-    
     # Military models
     "TroopDispatch",
     "TroopComposition",
     "ScoutRequest",
     "ScoutResult",
     "RaidRequest",
-    "RaidResult", 
+    "RaidResult",
     "AttackRequest",
     "AttackResult",
     "TargetInfo",
-    
     # Report models
     "Report",
     "ReportList",
@@ -80,12 +77,10 @@ __all__ = [
     "TradeReport",
     "AdventureReport",
     "ReportSummary",
-    
     # Common models
     "Coordinates",
     "VillageInfo",
     "PlayerInfo",
-
     # Farm list models
     "FarmList",
     "FarmListSlot",

@@ -1,10 +1,10 @@
 """Travian server connection and saved-credentials management routes."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -112,7 +112,7 @@ async def _update_last_connected(
     )
     cred = result.scalar_one_or_none()
     if cred is not None:
-        cred.last_connected = datetime.now(timezone.utc)
+        cred.last_connected = datetime.now(UTC)
         await db.commit()
 
 
@@ -297,14 +297,16 @@ async def connect_saved_server(
             password=password,
         )
     except Exception as exc:
-        logger.exception("Travian connect via saved server %s failed for user %s", server_id, user.id)
+        logger.exception(
+            "Travian connect via saved server %s failed for user %s", server_id, user.id
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to connect to Travian server: {exc}",
         )
 
     # 4. Update last_connected timestamp
-    cred.last_connected = datetime.now(timezone.utc)
+    cred.last_connected = datetime.now(UTC)
     await db.commit()
 
     return _session_to_status(session)

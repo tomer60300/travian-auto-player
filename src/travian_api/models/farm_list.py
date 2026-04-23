@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from typing import Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
 class RaidedResources(BaseModel):
     """Resources obtained from a raid."""
+
     lumber: int = 0
     clay: int = 0
     iron: int = 0
@@ -20,6 +22,7 @@ class RaidedResources(BaseModel):
 
 class LastRaid(BaseModel):
     """Last raid information for a farm list slot."""
+
     report_object_id: Optional[str] = Field(default="", alias="reportObjectId")
     auth_key: Optional[str] = Field(default="", alias="authKey")
     time: Optional[int] = None
@@ -38,12 +41,14 @@ class LastRaid(BaseModel):
 
 class TotalBooty(BaseModel):
     """Cumulative raid statistics for a slot."""
+
     booty: int = 0
     raids: int = 0
 
 
 class SlotTarget(BaseModel):
     """Target village info for a farm list slot."""
+
     id: int = 0
     map_id: int = Field(default=0, alias="mapId")
     x: int = 0
@@ -57,6 +62,7 @@ class SlotTarget(BaseModel):
 
 class SlotTroop(BaseModel):
     """Troop composition for a farm list slot."""
+
     t1: int = 0
     t2: int = 0
     t3: int = 0
@@ -71,8 +77,18 @@ class SlotTroop(BaseModel):
     @property
     def total(self) -> int:
         return sum(
-            [self.t1, self.t2, self.t3, self.t4, self.t5,
-             self.t6, self.t7, self.t8, self.t9, self.t10]
+            [
+                self.t1,
+                self.t2,
+                self.t3,
+                self.t4,
+                self.t5,
+                self.t6,
+                self.t7,
+                self.t8,
+                self.t9,
+                self.t10,
+            ]
         )
 
     def to_dict(self) -> Dict[str, int]:
@@ -81,6 +97,7 @@ class SlotTroop(BaseModel):
 
 class FarmListSlot(BaseModel):
     """A single target/slot within a farm list."""
+
     id: int = 0
     target: SlotTarget = Field(default_factory=SlotTarget)
     troop: SlotTroop = Field(default_factory=SlotTroop)
@@ -98,6 +115,7 @@ class FarmListSlot(BaseModel):
 
 class OwnerVillageTroops(BaseModel):
     """Available troops in the owner village."""
+
     units: SlotTroop = Field(default_factory=SlotTroop)
 
 
@@ -110,6 +128,7 @@ class OwnerVillageOwnTroops(BaseModel):
 
 class OwnerVillage(BaseModel):
     """Source village info for a farm list."""
+
     id: int = 0
     troops: Optional[OwnerVillageOwnTroops] = None
 
@@ -121,6 +140,7 @@ class OwnerVillage(BaseModel):
 
 class FarmList(BaseModel):
     """A farm list with all its slots."""
+
     id: int = 0
     name: str = ""
     running_raids_amount: int = Field(default=0, alias="runningRaidsAmount")
@@ -131,12 +151,8 @@ class FarmList(BaseModel):
     sort_direction: Optional[str] = Field(default=None, alias="sortDirection")
     use_ship: bool = Field(default=False, alias="useShip")
     only_losses: bool = Field(default=False, alias="onlyLosses")
-    owner_village: OwnerVillage = Field(
-        default_factory=OwnerVillage, alias="ownerVillage"
-    )
-    default_troop: SlotTroop = Field(
-        default_factory=SlotTroop, alias="defaultTroop"
-    )
+    owner_village: OwnerVillage = Field(default_factory=OwnerVillage, alias="ownerVillage")
+    default_troop: SlotTroop = Field(default_factory=SlotTroop, alias="defaultTroop")
     slots: List[FarmListSlot] = Field(default_factory=list)
     slots_amount: int = Field(default=0, alias="slotsAmount")
 
@@ -149,6 +165,7 @@ class FarmList(BaseModel):
 
 class FarmListSendTargetResult(BaseModel):
     """Result for a single target in a farm list send."""
+
     id: int = 0
     status: str = ""
     error: str = ""
@@ -156,6 +173,7 @@ class FarmListSendTargetResult(BaseModel):
 
 class FarmListSendResult(BaseModel):
     """Result of sending a farm list."""
+
     targets: List[FarmListSendTargetResult] = Field(default_factory=list)
 
     @property
@@ -169,6 +187,7 @@ class FarmListSendResult(BaseModel):
 
 class MapTileInfo(BaseModel):
     """Parsed info from a map tile for auto-scout scanning."""
+
     x: int = 0
     y: int = 0
     village_id: int = 0  # did

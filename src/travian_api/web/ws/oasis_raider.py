@@ -122,26 +122,33 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
         stop_event = asyncio.Event()
 
         async def send_log(
-            category: str, emoji: str, message: str, level: str = "info",
+            category: str,
+            emoji: str,
+            message: str,
+            level: str = "info",
         ) -> None:
             ts = time.time()
-            await tracked_send({
-                "type": "log",
-                "data": {
+            await tracked_send(
+                {
+                    "type": "log",
+                    "data": {
+                        "timestamp": ts,
+                        "emoji": emoji,
+                        "category": category,
+                        "message": message,
+                        "level": level,
+                    },
+                }
+            )
+            log_stream_manager.push(
+                {
                     "timestamp": ts,
-                    "emoji": emoji,
-                    "category": category,
-                    "message": message,
                     "level": level,
-                },
-            })
-            log_stream_manager.push({
-                "timestamp": ts,
-                "level": level,
-                "source": "oasis_raider",
-                "message": f"[{category}] {emoji} {message}",
-                "user_id": user_id,
-            })
+                    "source": "oasis_raider",
+                    "message": f"[{category}] {emoji} {message}",
+                    "user_id": user_id,
+                }
+            )
 
         async def check_stop() -> bool:
             return stop_event.is_set()
@@ -154,7 +161,12 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
             while not stop_event.is_set():
                 # Check if captcha was just resolved — stop instead of auto-resuming
                 if operation_gate.check_should_stop(user_id, op_started_at):
-                    await tracked_send({"type": "error", "message": "Stopped after captcha resolution — restart manually"})
+                    await tracked_send(
+                        {
+                            "type": "error",
+                            "message": "Stopped after captcha resolution — restart manually",
+                        }
+                    )
                     await tracked_send({"type": "status", "data": {"state": "stopped"}})
                     break
 
@@ -169,7 +181,8 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
                 iteration += 1
                 if iteration > 1:
                     await send_log(
-                        "RECURRING", "🔁",
+                        "RECURRING",
+                        "🔁",
                         f"Starting iteration #{iteration} (repeat_interval={config.repeat_interval_seconds}s)",
                         "info",
                     )
@@ -185,7 +198,8 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
                 # Wait for repeat_interval_seconds (interruptible by stop)
                 wait_secs = config.repeat_interval_seconds
                 await send_log(
-                    "RECURRING", "⏱️",
+                    "RECURRING",
+                    "⏱️",
                     f"Iteration #{iteration} complete — next run in {wait_secs}s",
                     "info",
                 )
@@ -195,7 +209,7 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
                     await asyncio.wait_for(stop_event.wait(), timeout=wait_secs)
                     # stop_event fired → user stopped during wait
                     break
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass  # timeout reached, run next iteration
 
             state = "stopped" if stop_event.is_set() else "completed"
