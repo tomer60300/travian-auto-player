@@ -144,7 +144,9 @@ const useGameStore = create((set, get) => ({
 
   fetchResources: async () => {
     try {
-      const res = await api.get('/buildings/resources');
+      const vid = get().activeVillageId
+      const params = vid ? { village_id: vid } : {}
+      const res = await api.get('/buildings/resources', { params });
       if (res.data && typeof res.data === 'object' && !Array.isArray(res.data)) {
         set({ resources: res.data });
       }
@@ -157,7 +159,9 @@ const useGameStore = create((set, get) => ({
   fetchBuildings: async () => {
     set({ buildingsLoading: true, buildingsError: null });
     try {
-      const res = await api.get('/buildings');
+      const vid = get().activeVillageId
+      const params = vid ? { village_id: vid } : {}
+      const res = await api.get('/buildings', { params });
       // API returns { village_id, buildings: [...] } or possibly a plain array
       const arr = Array.isArray(res.data) ? res.data
         : Array.isArray(res.data?.buildings) ? res.data.buildings
@@ -173,7 +177,9 @@ const useGameStore = create((set, get) => ({
 
   fetchQueue: async () => {
     try {
-      const res = await api.get('/buildings/queue');
+      const vid = get().activeVillageId
+      const params = vid ? { village_id: vid } : {}
+      const res = await api.get('/buildings/queue', { params });
       // API returns { village_id, queue: [...] } or possibly a plain array
       const arr = Array.isArray(res.data) ? res.data
         : Array.isArray(res.data?.queue) ? res.data.queue

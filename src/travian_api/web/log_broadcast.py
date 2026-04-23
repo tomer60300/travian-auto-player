@@ -97,25 +97,29 @@ class LogStreamManager:
     def push(self, entry: dict) -> None:
         """Push a log entry to the ring buffer and matching subscribers.
 
-        Delivery rules: an entry is sent to a subscriber if the entry has
-        no ``user_id`` (system log), the subscriber has no ``user_id``
-        filter, or both IDs match.  On queue overflow the oldest entry
-        is silently dropped.
+        Delivery rules: an entry is sent to a subscriber when:
+        - Both entry and subscriber have the same ``user_id``, OR
+        - The subscriber has no ``user_id`` filter (admin/system viewer).
+        Entries without ``user_id`` (generic Python logger output) are
+        only delivered to unscoped subscribers — never to user-scoped
+        ones — to prevent cross-user log leakage.
         """
         entry_user = entry.get("user_id")
         with self._lock:
             self._buffer.append(entry)
             for sub_id, (q, sub_user) in self._subscribers.items():
-                # Deliver if: entry has no user_id (system log), or user matches
-                if entry_user is None or sub_user is None or entry_user == sub_user:
+                # Scoped subscriber only sees entries tagged with their user_id
+                if sub_user is not None and (entry_user is None or entry_user != sub_user):
+                    continue
+                # Deliver: unscoped subscriber sees everything, or user_id matches
+                try:
+                    q.put_nowait(entry)
+                except asyncio.QueueFull:
                     try:
+                        q.get_nowait()
                         q.put_nowait(entry)
-                    except asyncio.QueueFull:
-                        try:
-                            q.get_nowait()
-                            q.put_nowait(entry)
-                        except (asyncio.QueueEmpty, asyncio.QueueFull):
-                            pass
+                    except (asyncio.QueueEmpty, asyncio.QueueFull):
+                        pass
 
     def subscribe(self, subscriber_id: int, user_id: int | None = None) -> asyncio.Queue:
         """Register a subscriber and return its queue.
@@ -149,7 +153,8 @@ class LogStreamManager:
         with self._lock:
             items = list(self._buffer)
         if user_id is not None:
-            items = [e for e in items if e.get("user_id") is None or e.get("user_id") == user_id]
+            # Only return entries explicitly tagged with this user_id (no cross-user leakage)
+            items = [e for e in items if e.get("user_id") == user_id]
         return items[-count:]
 
 

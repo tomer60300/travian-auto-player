@@ -165,12 +165,11 @@ class BuildingService:
                     getattr(q, "slot_id", 0) > 18 for q in queue if hasattr(q, "slot_id")
                 )
 
-                # If we can't determine slot_ids from queue, fall back to queue length check
-                # Romans can have up to 2 items (1 resource + 1 building) without gold
+                # If we can't determine slot_ids from queue, block by default.
+                # Without slot data we can't verify Roman dual-queue eligibility,
+                # so the safe choice is to prevent accidental gold usage.
                 if not any(hasattr(q, "slot_id") for q in queue):
-                    # Can't determine queue slot types — check tribe from login cache
-                    # For now, allow if queue has only 1 item (might be Roman dual queue)
-                    roman_dual_ok = len(queue) < 2
+                    roman_dual_ok = False
                 else:
                     # We know slot types — Roman can add if different category
                     roman_dual_ok = (is_resource_field and not queue_has_resource) or (

@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/web-ui]
+    branches: [main, feature/web-ui, travian-developer-platform]
   pull_request:
-    branches: [main, feature/web-ui]
+    branches: [main, feature/web-ui, travian-developer-platform]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

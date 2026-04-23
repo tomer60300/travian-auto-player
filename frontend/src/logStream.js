@@ -9,7 +9,7 @@ const BASE_DELAY = 1000
 
 export function connectLogStream() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
-  reconnectAttempts = 0 // reset so reconnect works after a disconnect/reconnect cycle
+  // Don't reset reconnectAttempts here — it's reset in onopen after successful connection
 
   const token = localStorage.getItem('token')
   if (!token) return
@@ -95,8 +95,14 @@ function scheduleReconnect() {
 
 export function disconnectLogStream() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-  reconnectAttempts = MAX_RECONNECT // prevent reconnect
+  reconnectAttempts = MAX_RECONNECT // prevent auto-reconnect from onclose
   if (ws) { try { ws.close() } catch { /* empty */ } ws = null }
+}
+
+/** Call before connectLogStream() to allow a fresh connection after disconnect. */
+export function resetLogStream() {
+  disconnectLogStream()
+  reconnectAttempts = 0
 }
 
 export function setLogLevel(level) {

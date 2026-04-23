@@ -20,6 +20,18 @@ function logSource(url) {
   return 'api'
 }
 
+const SENSITIVE_URLS = ['/users/login', '/users/register', '/travian/connect', '/travian/servers']
+const SENSITIVE_KEYS = ['password', 'access_token', 'token', 'jwt']
+
+function redactSensitive(data) {
+  if (!data || typeof data !== 'object') return data
+  const copy = { ...data }
+  for (const key of SENSITIVE_KEYS) {
+    if (key in copy) copy[key] = '[REDACTED]'
+  }
+  return copy
+}
+
 function summarizeData(data, maxLen) {
   if (data === undefined || data === null) return null
   try {
@@ -36,7 +48,10 @@ api.interceptors.request.use((config) => {
   }
   const method = (config.method || 'get').toUpperCase()
   const url = config.url || ''
-  const body = config.data ? summarizeData(config.data, 500) : null
+  const isSensitive = SENSITIVE_URLS.some(s => url.includes(s))
+  const body = config.data
+    ? summarizeData(isSensitive ? redactSensitive(config.data) : config.data, 500)
+    : null
   useLogStore.getState().addLog('info', logSource(url), `>> ${method} ${url}`, body)
   return config
 })
@@ -48,7 +63,8 @@ api.interceptors.response.use(
     const method = (response.config.method || 'get').toUpperCase()
     const url = response.config.url || ''
     const status = response.status
-    const data = response.data
+    const isSensitive = SENSITIVE_URLS.some(s => url.includes(s))
+    const data = isSensitive ? redactSensitive(response.data) : response.data
 
     // Build detail summary
     let detail = null
