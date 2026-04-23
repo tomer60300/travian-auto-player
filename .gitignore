@@ -52,6 +52,12 @@ memory/
 frontend/.travian_cookies.json
 frontend/.travian_persona.json
 
+# Generated review/verification reports
+oasis-raider-*.md
+
+# Runtime data & cache
+data/
+
 # Session logs & personal plans
 cli-log.md
 plans/*.yaml
