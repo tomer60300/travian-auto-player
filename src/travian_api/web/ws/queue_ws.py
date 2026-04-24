@@ -28,7 +28,7 @@ from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.services.build_queue_service import BuildPlan, BuildPlanItem
 from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.log_broadcast import log_stream_manager
-from travian_api.web.operation_gate import operation_gate
+from travian_api.web.operation_gate import active_ops, captcha_stop
 from travian_api.web.sessions import TravianSession, session_manager
 from travian_api.web.ws.manager import ws_manager
 
@@ -181,9 +181,11 @@ async def queue_run_ws(websocket: WebSocket):
         if not plan.village_id and session.active_village_id:
             plan.village_id = session.active_village_id
 
-        # Per-village gate: different villages can run queues in parallel
+        # Policy (not a mutex): a second queue loop on the same village would
+        # just duplicate polling work — the service-layer slot lock already
+        # prevents double-upgrades. Refuse cleanly so the user sees feedback.
         op_type = f"queue:{plan.village_id}"
-        if not operation_gate.acquire(user_id, op_type):
+        if op_type in active_ops.get_active(user_id):
             await _tracked_send(
                 websocket,
                 {
@@ -192,6 +194,7 @@ async def queue_run_ws(websocket: WebSocket):
                 },
             )
             return
+        active_ops.register(user_id, op_type)
         gate_acquired = True
 
         # Resolve village name for logging
@@ -254,7 +257,7 @@ async def queue_run_ws(websocket: WebSocket):
                 pass
 
         # Check if captcha was just resolved
-        if operation_gate.check_should_stop(user_id, op_started_at):
+        if captcha_stop.should_stop(user_id, op_started_at):
             await _tracked_send(
                 websocket,
                 {"type": "error", "message": "Stopped after captcha resolution — restart manually"},
@@ -396,6 +399,6 @@ async def queue_run_ws(websocket: WebSocket):
         await _tracked_try_send(websocket, {"type": "error", "message": f"Internal error: {exc}"})
     finally:
         if gate_acquired and op_type:
-            operation_gate.release(user_id, op_type)
+            active_ops.unregister(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)

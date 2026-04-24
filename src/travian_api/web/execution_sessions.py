@@ -18,6 +18,9 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+# NOTE: Not thread-safe — assumes all mutations happen on the asyncio event loop.
+# If a background thread ever needs to push/subscribe, add a threading.Lock.
+
 logger = logging.getLogger(__name__)
 
 _SESSION_TTL = 86400  # 24 hours
@@ -44,7 +47,6 @@ class ExecutionSessionManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, ExecutionSession] = {}
-        self._lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task | None = None
 
     def create(self, user_id: int, session_type: str, label: str) -> ExecutionSession:

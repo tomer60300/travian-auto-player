@@ -22,7 +22,7 @@ from travian_api.parsers.html_parser import parse_troop_confirm_page
 from travian_api.stealth.human_delay import ActionType
 from travian_api.stealth.timing import HumanTiming
 from travian_api.web.execution_sessions import exec_session_manager
-from travian_api.web.operation_gate import operation_gate
+from travian_api.web.operation_gate import active_ops, captcha_stop
 from travian_api.web.routes.military import _resolve_scout_unit
 from travian_api.web.sessions import TravianSession, session_manager
 from travian_api.web.ws.manager import ws_manager
@@ -180,12 +180,24 @@ async def auto_scout_ws(websocket: WebSocket):
 
     op_type = "scout"
 
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.close(code=4009, reason="A scout operation is already running")
+    # Policy (not a mutex): a second auto-scout loop for the same user would
+    # walk the same target set and re-dispatch scouts to the same coords.
+    # The per-tile KeyedLock only serializes individual sends, not loops.
+    if op_type in active_ops.get_active(user_id):
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": "An auto-scout operation is already running for this account",
+                "fatal": True,
+            }
+        )
+        await websocket.close(code=4009, reason="Auto-scout already running")
         return
 
     try:
         op_started_at = time.monotonic()
+        active_ops.register(user_id, op_type)
 
         await ws_manager.connect(websocket, user_id, CHANNEL)
 
@@ -493,7 +505,7 @@ async def auto_scout_ws(websocket: WebSocket):
 
                 # ── Phase 2: Send scouts (stealth mode) ─────────────
                 # Check if captcha was just resolved
-                if operation_gate.check_should_stop(user_id, op_started_at):
+                if captcha_stop.should_stop(user_id, op_started_at):
                     await _tracked_send(
                         websocket,
                         {
@@ -763,7 +775,7 @@ async def auto_scout_ws(websocket: WebSocket):
     except Exception:
         logger.exception("Unexpected error in scout WS for user %s", user_id)
     finally:
-        operation_gate.release(user_id, op_type)
+        active_ops.unregister(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)
 
@@ -808,11 +820,23 @@ async def scout_scan_ws(websocket: WebSocket):
 
     scan_op_type = "scout-scan"
 
-    if not operation_gate.acquire(user_id, scan_op_type):
-        await websocket.close(code=4009, reason="A map scan operation is already running")
+    # Policy (not a mutex): a second map scan for the same user would replay
+    # the same scan_map / enrich_tiles batch against one shared Travian
+    # session, doubling map requests and burning the stealth activity budget.
+    if scan_op_type in active_ops.get_active(user_id):
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": "A map scan is already running for this account",
+                "fatal": True,
+            }
+        )
+        await websocket.close(code=4009, reason="Map scan already running")
         return
 
     try:
+        active_ops.register(user_id, scan_op_type)
         await ws_manager.connect(websocket, user_id, SCAN_CHANNEL)
 
         exec_session = exec_session_manager.create(user_id, "scout-scan", "Map Scan")
@@ -1354,6 +1378,6 @@ async def scout_scan_ws(websocket: WebSocket):
         logger.exception("Unexpected error in scout scan WS for user %s", user_id)
         await _tracked_send(websocket, {"type": "error", "message": "Internal scan error"})
     finally:
-        operation_gate.release(user_id, scan_op_type)
+        active_ops.unregister(user_id, scan_op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, SCAN_CHANNEL, websocket)

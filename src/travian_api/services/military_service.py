@@ -7,6 +7,7 @@ import re
 from typing import Dict, Optional
 
 from ..clients.http_client import HttpClient
+from ..concurrency import KeyedLock
 from ..constants import EVENT_TYPES
 from ..models.military import TroopSendResult
 from ..parsers.html_parser import (
@@ -27,6 +28,10 @@ class MilitaryService:
     def __init__(self, http_client: HttpClient, target_resolver: TargetResolver):
         self.http_client = http_client
         self.target_resolver = target_resolver
+        # Serializes scout/raid/attack dispatch per target tile so the same
+        # coord isn't hit twice concurrently (would burn a second raid slot
+        # and likely trip anti-bot heuristics).
+        self._tile_lock = KeyedLock()
 
     async def send_scouts(
         self,
@@ -134,6 +139,20 @@ class MilitaryService:
         3. Human delay (reading confirmation)
         4. Parse hidden fields + checksum, POST confirmation -> troops dispatched
         """
+        async with self._tile_lock((x, y)):
+            return await self._send_troops_unlocked(
+                x, y, troops, event_type, scout_target, village_id
+            )
+
+    async def _send_troops_unlocked(
+        self,
+        x: int,
+        y: int,
+        troops: Dict[str, int],
+        event_type: int,
+        scout_target: str,
+        village_id: Optional[int],
+    ) -> TroopSendResult:
         try:
             # Stealth: navigate to rally point first
             await self.http_client.navigator.navigate_to_rally_point(village_id)

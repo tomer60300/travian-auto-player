@@ -14,7 +14,7 @@ from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.services.oasis_raider_service import OasisRaiderConfig, OasisRaiderService
 from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.log_broadcast import log_stream_manager
-from travian_api.web.operation_gate import operation_gate
+from travian_api.web.operation_gate import active_ops, captcha_stop
 from travian_api.web.sessions import TravianSession, session_manager
 from travian_api.web.ws.manager import ws_manager
 
@@ -64,12 +64,24 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
 
     op_type = "oasis-raider"
 
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.close(code=4009, reason="An oasis raider operation is already running")
+    # Policy (not a mutex): a second oasis-raider sweep would scan the same
+    # candidate oases and burn troops on duplicate raids. The per-tile lock
+    # only serializes the dispatch on one coord, not the overall sweep.
+    if op_type in active_ops.get_active(user_id):
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": "An oasis raider is already running for this account",
+                "fatal": True,
+            }
+        )
+        await websocket.close(code=4009, reason="Oasis raider already running")
         return
 
     try:
         op_started_at = time.monotonic()
+        active_ops.register(user_id, op_type)
 
         await ws_manager.connect(websocket, user_id, CHANNEL)
         exec_session = exec_session_manager.create(user_id, "oasis-raider", "Oasis Raider")
@@ -160,7 +172,7 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
             iteration = 0
             while not stop_event.is_set():
                 # Check if captcha was just resolved — stop instead of auto-resuming
-                if operation_gate.check_should_stop(user_id, op_started_at):
+                if captcha_stop.should_stop(user_id, op_started_at):
                     await tracked_send(
                         {
                             "type": "error",
@@ -232,6 +244,6 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
     except Exception:
         logger.exception("Unexpected error in oasis raider WS for user %s", user_id)
     finally:
-        operation_gate.release(user_id, op_type)
+        active_ops.unregister(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)

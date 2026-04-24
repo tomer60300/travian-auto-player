@@ -230,6 +230,9 @@ class SessionManager:
         """Disconnect and remove a user's session (no-op if none exists)."""
         async with self._lock:
             session = self._sessions.pop(user_id, None)
+            lock = self._reconnect_locks.get(user_id)
+            if lock is not None and not lock.locked():
+                self._reconnect_locks.pop(user_id, None)
         if session:
             await session.disconnect()
             logger.info("User %s disconnected from %s", user_id, session.server_url)

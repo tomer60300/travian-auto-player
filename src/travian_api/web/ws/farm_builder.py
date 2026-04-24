@@ -41,7 +41,7 @@ from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.log_broadcast import log_stream_manager
 from travian_api.web.models.db import async_session_factory
 from travian_api.web.models.farm_builder import FarmBuilderRunHistory
-from travian_api.web.operation_gate import operation_gate
+from travian_api.web.operation_gate import active_ops, captcha_stop
 from travian_api.web.sessions import TravianSession, session_manager
 from travian_api.web.ws.manager import ws_manager
 
@@ -88,12 +88,24 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
 
     op_type = "farm-builder"
 
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.close(code=4009, reason="A farm builder operation is already running")
+    # Policy (not a mutex): a second farm-builder run would create duplicate
+    # farm lists (with numeric suffixes on name collisions) and double the
+    # scout traffic. Keep it serialized per user.
+    if op_type in active_ops.get_active(user_id):
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": "A farm builder is already running for this account",
+                "fatal": True,
+            }
+        )
+        await websocket.close(code=4009, reason="Farm builder already running")
         return
 
     try:
         op_started_at = time.monotonic()
+        active_ops.register(user_id, op_type)
 
         await ws_manager.connect(websocket, user_id, CHANNEL)
         exec_session = exec_session_manager.create(user_id, "farm-builder", "Farm Builder")
@@ -159,7 +171,7 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
             return stop_event.is_set()
 
         # Check if captcha was just resolved
-        if operation_gate.check_should_stop(user_id, op_started_at):
+        if captcha_stop.should_stop(user_id, op_started_at):
             await tracked_send(
                 {"type": "error", "message": "Stopped after captcha resolution — restart manually"}
             )
@@ -257,5 +269,5 @@ async def farm_builder_ws(websocket: WebSocket) -> None:
     except Exception:
         logger.exception("Unexpected error in farm builder WS for user %s", user_id)
     finally:
-        operation_gate.release(user_id, op_type)
+        active_ops.unregister(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)

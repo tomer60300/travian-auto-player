@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
 from travian_api.web.auth import get_current_user
 from travian_api.web.execution_sessions import exec_session_manager
-from travian_api.web.operation_gate import operation_gate
+from travian_api.web.operation_gate import active_ops, captcha_stop
 from travian_api.web.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -39,8 +39,8 @@ async def list_sessions(user=Depends(get_current_user)):
 @router.post("/api/sessions/stop-all")
 async def stop_all_sessions(user=Depends(get_current_user)):
     """Signal all active operations for this user to stop gracefully."""
-    operation_gate.set_should_stop(user.id)
-    active = operation_gate.get_active(user.id)
+    captcha_stop.signal(user.id)
+    active = active_ops.get_active(user.id)
     logger.info("Stop-all requested by user %s, active ops: %s", user.id, active)
     return {"stopped": True, "active_operations": active}
 

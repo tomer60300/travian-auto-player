@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..clients.http_client import HttpClient
+from ..concurrency import KeyedLock
 from ..constants import BUILDING_NAMES
 from ..exceptions import TravianError
 from ..models.buildings import Building, BuildingDetail, QueueItem, Resources, UpgradeResult
@@ -23,6 +24,9 @@ class BuildingService:
 
     def __init__(self, http_client: HttpClient):
         self.http_client = http_client
+        # Serializes upgrade/construct calls for the same (village_id, slot_id).
+        # Prevents double-upgrade races when two clients hit the same slot.
+        self._slot_lock = KeyedLock()
 
     async def get_village_buildings(self, village_id: Optional[int] = None) -> List[Building]:
         """
@@ -149,6 +153,12 @@ class BuildingService:
         Raises:
             TravianError: If upgrade fails or would cost gold
         """
+        async with self._slot_lock((village_id, slot_id)):
+            return await self._upgrade_building_unlocked(slot_id, allow_gold, village_id)
+
+    async def _upgrade_building_unlocked(
+        self, slot_id: int, allow_gold: bool, village_id: Optional[int]
+    ) -> UpgradeResult:
         try:
             # SAFETY CHECK: Check construction queue BEFORE upgrading
             # If queue is occupied and allow_gold is False, REFUSE.
@@ -301,6 +311,18 @@ class BuildingService:
         Returns:
             UpgradeResult object
         """
+        async with self._slot_lock((village_id, slot_id)):
+            return await self._construct_building_unlocked(
+                slot_id, building_gid, allow_gold, village_id
+            )
+
+    async def _construct_building_unlocked(
+        self,
+        slot_id: int,
+        building_gid: int,
+        allow_gold: bool,
+        village_id: Optional[int],
+    ) -> UpgradeResult:
         try:
             # Gold guard — same as upgrade_building
             queue = await self.get_construction_queue(village_id=village_id)

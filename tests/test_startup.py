@@ -1,4 +1,4 @@
-"""Regression tests for HttpClient construction, OperationGate, and persona."""
+"""Regression tests for HttpClient construction, op tracking, and persona."""
 
 from pathlib import Path
 
@@ -67,84 +67,103 @@ class TestHttpClientConstruction:
         assert version == "999"
 
 
-class TestOperationGate:
-    """Test OperationGate concurrency and stop signal semantics."""
+class TestActiveOpRegistry:
+    """Active-op tracking is visibility-only — never rejects."""
 
-    def test_acquire_release(self):
-        """Acquire grants first request, rejects duplicate op_type for same user."""
-        from travian_api.web.operation_gate import OperationGate
+    def test_register_allows_concurrent_same_label(self):
+        from travian_api.web.operation_gate import ActiveOpRegistry
 
-        gate = OperationGate()
-        assert gate.acquire(1, "farm") is True
-        assert gate.acquire(1, "farm") is False  # duplicate rejected (mutual exclusion)
-        assert gate.acquire(1, "scout") is True  # different op_type allowed
-        assert sorted(gate.get_active(1)) == ["farm", "scout"]
-        gate.release(1, "farm")
-        assert gate.get_active(1) == ["scout"]
-        assert gate.acquire(1, "farm") is True  # can re-acquire after release
+        reg = ActiveOpRegistry()
+        reg.register(1, "farm-all")
+        reg.register(1, "farm-all")  # second instance — no longer blocked
+        assert reg.get_active(1) == ["farm-all"]
+        reg.unregister(1, "farm-all")
+        assert reg.get_active(1) == ["farm-all"]  # still one left
+        reg.unregister(1, "farm-all")
+        assert reg.get_active(1) == []
 
-    def test_stop_signal_seen_by_all_operations(self):
-        """should_stop flag visible to all ops started before the signal."""
+    def test_distinct_labels_coexist(self):
+        from travian_api.web.operation_gate import ActiveOpRegistry
+
+        reg = ActiveOpRegistry()
+        reg.register(1, "farm")
+        reg.register(1, "scout")
+        assert sorted(reg.get_active(1)) == ["farm", "scout"]
+
+    def test_users_isolated(self):
+        from travian_api.web.operation_gate import ActiveOpRegistry
+
+        reg = ActiveOpRegistry()
+        reg.register(1, "farm")
+        reg.register(2, "scout")
+        assert reg.get_active(1) == ["farm"]
+        assert reg.get_active(2) == ["scout"]
+
+    def test_unregister_last_op_clears_captcha_stop(self):
+        """When a user's last op ends, any lingering stop signal is cleared."""
+        from travian_api.web.operation_gate import active_ops, captcha_stop
+
+        user_id = 9999
+        active_ops.register(user_id, "farm")
+        captcha_stop.signal(user_id)
+        # Stop timestamp is recorded.
+        assert user_id in captcha_stop._ts
+
+        active_ops.unregister(user_id, "farm")
+        # Last op gone → stop signal dropped, no leak.
+        assert user_id not in captcha_stop._ts
+
+
+class TestCaptchaStopSignal:
+    """Captcha stop signals halt in-flight ops but not fresh ones."""
+
+    def test_signal_seen_by_ops_started_before(self):
         import time as _time
 
-        from travian_api.web.operation_gate import OperationGate
+        from travian_api.web.operation_gate import CaptchaStopSignal
 
-        gate = OperationGate()
+        sig = CaptchaStopSignal()
         started = _time.monotonic()
-        gate.acquire(1, "farm")
-        gate.acquire(1, "scout")
-        gate.set_should_stop(1)
+        _time.sleep(0.02)  # Windows monotonic resolution is ~15ms
+        sig.signal(1)
+        assert sig.should_stop(1, started_after=started) is True
+        # Non-destructive: re-reading returns the same answer.
+        assert sig.should_stop(1, started_after=started) is True
 
-        # Both operations started before the signal see it
-        assert gate.check_should_stop(1, started_after=started) is True
-        assert gate.check_should_stop(1, started_after=started) is True  # non-destructive
-
-    def test_stop_signal_not_seen_by_new_operation(self):
-        """Operations started AFTER the stop signal don't see it."""
+    def test_signal_not_seen_by_ops_started_after(self):
         import time as _time
 
-        from travian_api.web.operation_gate import OperationGate
+        from travian_api.web.operation_gate import CaptchaStopSignal
 
-        gate = OperationGate()
-        gate.acquire(1, "farm")
-        gate.set_should_stop(1)
-        new_start = _time.monotonic()  # after the signal
-        gate.acquire(1, "scout")
+        sig = CaptchaStopSignal()
+        sig.signal(1)
+        _time.sleep(0.02)
+        new_start = _time.monotonic()
+        assert sig.should_stop(1, started_after=new_start) is False
 
-        assert gate.check_should_stop(1, started_after=new_start) is False
-
-    def test_stop_signal_cleared_on_last_release(self):
-        """should_stop flag clears when last operation releases."""
+    def test_clear_removes_signal(self):
         import time as _time
 
-        from travian_api.web.operation_gate import OperationGate
+        from travian_api.web.operation_gate import CaptchaStopSignal
 
-        gate = OperationGate()
+        sig = CaptchaStopSignal()
         started = _time.monotonic()
-        gate.acquire(1, "farm")
-        gate.acquire(1, "scout")
-        gate.set_should_stop(1)
+        _time.sleep(0.02)
+        sig.signal(1)
+        sig.clear(1)
+        assert sig.should_stop(1, started_after=started) is False
 
-        gate.release(1, "farm")
-        assert gate.check_should_stop(1, started_after=started) is True
-
-        gate.release(1, "scout")  # last op released
-        assert gate.check_should_stop(1, started_after=started) is False
-
-    def test_different_users_independent(self):
-        """Different users don't interfere."""
+    def test_users_independent(self):
         import time as _time
 
-        from travian_api.web.operation_gate import OperationGate
+        from travian_api.web.operation_gate import CaptchaStopSignal
 
-        gate = OperationGate()
+        sig = CaptchaStopSignal()
         started = _time.monotonic()
-        gate.acquire(1, "farm")
-        gate.acquire(2, "farm")
-        gate.set_should_stop(1)
-
-        assert gate.check_should_stop(1, started_after=started) is True
-        assert gate.check_should_stop(2, started_after=started) is False
+        _time.sleep(0.02)
+        sig.signal(1)
+        assert sig.should_stop(1, started_after=started) is True
+        assert sig.should_stop(2, started_after=started) is False
 
 
 class TestPersona:

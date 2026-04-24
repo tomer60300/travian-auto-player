@@ -10,7 +10,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.log_broadcast import log_stream_manager
-from travian_api.web.operation_gate import operation_gate
+from travian_api.web.operation_gate import active_ops
 from travian_api.web.sessions import session_manager
 from travian_api.web.ws.manager import ws_manager
 
@@ -47,11 +47,23 @@ async def ws_analyze_reports(websocket: WebSocket):
 
     op_type = "raid-analyzer"
 
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.close(code=4009, reason="An analysis is already running")
+    # Policy (not a mutex): session.raid_analyzer.on_progress stores a single
+    # callback, so two concurrent analyses would clobber each other's progress
+    # delivery. Keep it serialized per user.
+    if op_type in active_ops.get_active(user_id):
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": "A raid analysis is already running for this account",
+                "fatal": True,
+            }
+        )
+        await websocket.close(code=4009, reason="Raid analysis already running")
         return
 
     try:
+        active_ops.register(user_id, op_type)
         await ws_manager.connect(websocket, user_id, CHANNEL)
         exec_session = exec_session_manager.create(user_id, "raid-analyzer", "Raid Analysis")
 
@@ -212,6 +224,6 @@ async def ws_analyze_reports(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        operation_gate.release(user_id, op_type)
+        active_ops.unregister(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)

@@ -497,7 +497,7 @@ export default function FarmLists() {
     }
     setWsMessages([])
     setLoopRunning(true)
-    setWsStatus('connected')
+    setWsStatus('connecting')
 
     const qs = `interval=${loopInterval}&duration=${loopDuration}&list_ids=${loopListIds.join(',')}`
 

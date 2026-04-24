@@ -33,7 +33,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.web.execution_sessions import exec_session_manager
-from travian_api.web.operation_gate import operation_gate
+from travian_api.web.operation_gate import active_ops, captcha_stop
 from travian_api.web.sessions import session_manager
 from travian_api.web.ws.manager import ws_manager
 
@@ -123,14 +123,26 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
         interval, duration = 300, 0
     verbose = params.get("verbose", "false").lower() in ("true", "1", "yes")
 
-    op_type = "farm"
-
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.close(code=4009, reason="A farm run operation is already running")
+    # Policy (not a mutex): FarmListService._cursors[list_id] is shared state,
+    # so two loops on the same list would alternate through the same cursor
+    # and effectively double the send rate. The service-layer per-list lock
+    # prevents slot-level double-send but not this loop-level interference.
+    op_type = f"farm:{list_id}"
+    if op_type in active_ops.get_active(user_id):
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": f"A farm loop is already running for list {list_id}",
+                "fatal": True,
+            }
+        )
+        await websocket.close(code=4009, reason="Farm loop already running for this list")
         return
 
     try:
         op_started_at = time.monotonic()
+        active_ops.register(user_id, op_type)
 
         channel = f"farm_run_{list_id}"
         await ws_manager.connect(websocket, user_id, channel)
@@ -200,7 +212,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
             # Check for stop from client or captcha resolution
             if await _check_stop(websocket):
                 break
-            if operation_gate.check_should_stop(user_id, op_started_at):
+            if captcha_stop.should_stop(user_id, op_started_at):
                 await _tracked_send(
                     websocket,
                     {
@@ -357,7 +369,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int):
                 exc_info=True,
             )
     finally:
-        operation_gate.release(user_id, op_type)
+        active_ops.unregister(user_id, op_type)
         exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, channel, websocket)
 
@@ -398,34 +410,26 @@ async def ws_farm_run_all(websocket: WebSocket):
     if list_ids_param:
         requested_ids = [int(x.strip()) for x in list_ids_param.split(",") if x.strip()]
 
-    op_type = "farm-all"
-
-    if not operation_gate.acquire(user_id, op_type):
-        await websocket.close(code=4009, reason="A farm-all operation is already running")
-        return
+    # Per-list policy: reserve f"farm:{lid}" for every list we'll be looping.
+    # Two run-alls on disjoint lists coexist (different keys); overlapping
+    # sets get rejected with a clear message. No mutex — the service-layer
+    # per-list lock still prevents slot-level double-send.
+    registered_list_ops: list[str] = []
+    exec_session = None
+    channel = "farm_run_all"
 
     try:
         op_started_at = time.monotonic()
-
-        channel = "farm_run_all"
         await ws_manager.connect(websocket, user_id, channel)
 
-        exec_session = exec_session_manager.create(user_id, "farm-run-all", "Farm Run All")
-
-        async def _tracked_send_all(ws, data):
-            await _send(ws, data)
-            exec_session_manager.push(exec_session.id, data)
-
         # ── Fetch lists and resolve IDs ──────────────────────────────
+        # These early-return paths intentionally avoid creating an exec_session
+        # so rejected attempts don't leave phantom entries in /sessions.
         try:
             all_lists = await session.farm_service.get_all_farm_lists()
         except Exception as exc:
-            await _tracked_send_all(
-                websocket,
-                {
-                    "type": "error",
-                    "message": f"Failed to fetch farm lists: {exc}",
-                },
+            await websocket.send_json(
+                {"type": "error", "message": f"Failed to fetch farm lists: {exc}"}
             )
             return
 
@@ -433,21 +437,45 @@ async def ws_farm_run_all(websocket: WebSocket):
             all_lists = [fl for fl in all_lists if fl.id in requested_ids]
 
         if not all_lists:
-            await _tracked_send_all(
-                websocket,
-                {
-                    "type": "error",
-                    "message": "No farm lists found",
-                    "fatal": True,
-                },
+            await websocket.send_json(
+                {"type": "error", "message": "No farm lists found", "fatal": True}
             )
             return
 
         send_ids = [fl.id for fl in all_lists]
         total_active = sum(len(fl.active_slots) for fl in all_lists)
 
+        # Policy check: bail if any requested list is already being looped.
+        already_active = active_ops.get_active(user_id)
+        conflicts = [lid for lid in send_ids if f"farm:{lid}" in already_active]
+        if conflicts:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": (
+                        f"Farm loop already running for list(s): {conflicts}. "
+                        "Stop them first or choose disjoint lists."
+                    ),
+                    "fatal": True,
+                }
+            )
+            return
+
+        # Commit: from here on, the run is starting for real.
+        for lid in send_ids:
+            label = f"farm:{lid}"
+            active_ops.register(user_id, label)
+            registered_list_ops.append(label)
+
+        exec_session = exec_session_manager.create(
+            user_id, "farm-run-all", f"Farm Run All ({len(all_lists)} lists)"
+        )
+
+        async def _tracked_send_all(ws, data):
+            await _send(ws, data)
+            exec_session_manager.push(exec_session.id, data)
+
         _list_names = ", ".join(fl.name for fl in all_lists)
-        exec_session.label = f"Farm Run All ({len(all_lists)} lists)"
         await _tracked_send_all(websocket, {"type": "session_init", "session_id": exec_session.id})
         # Build equivalent CLI command for display
         cli_parts = [f"travian farm run-all --interval {interval} --duration {duration}"]
@@ -495,7 +523,7 @@ async def ws_farm_run_all(websocket: WebSocket):
 
             if await _check_stop(websocket):
                 break
-            if operation_gate.check_should_stop(user_id, op_started_at):
+            if captcha_stop.should_stop(user_id, op_started_at):
                 await _tracked_send_all(
                     websocket,
                     {
@@ -668,6 +696,8 @@ async def ws_farm_run_all(websocket: WebSocket):
                 "Failed to send error message to farm run-all WS: user=%s", user_id, exc_info=True
             )
     finally:
-        operation_gate.release(user_id, op_type)
-        exec_session_manager.mark_disconnected(exec_session.id)
+        for label in registered_list_ops:
+            active_ops.unregister(user_id, label)
+        if exec_session is not None:
+            exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, channel, websocket)

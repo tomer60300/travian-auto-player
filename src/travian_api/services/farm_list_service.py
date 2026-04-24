@@ -6,6 +6,7 @@ import logging
 from typing import Dict, List, Optional
 
 from ..clients.http_client import HttpClient
+from ..concurrency import KeyedLock
 from ..models.farm_list import (
     FarmList,
     FarmListSendResult,
@@ -69,6 +70,9 @@ class FarmListService:
         # Round-robin cursors: {list_id: cursor_index}
         # Persisted across cycles so each send starts where the last one left off.
         self._cursors: Dict[int, int] = {}
+        # Serializes sends for the same list_id (two loops on the same list
+        # won't double-dispatch the same slots). Disjoint lists stay parallel.
+        self._list_lock = KeyedLock()
 
     # ── Queries ──────────────────────────────────────────────────────
 
@@ -240,6 +244,14 @@ class FarmListService:
             target_slot_ids: Specific slot IDs to send (skips round-robin).
                 If None, fetches all active slots and applies batched rotation.
         """
+        async with self._list_lock(list_id):
+            return await self._send_farm_list_unlocked(list_id, target_slot_ids)
+
+    async def _send_farm_list_unlocked(
+        self,
+        list_id: int,
+        target_slot_ids: Optional[List[int]],
+    ) -> FarmListSendResult:
         use_round_robin = target_slot_ids is None
 
         if target_slot_ids is None:

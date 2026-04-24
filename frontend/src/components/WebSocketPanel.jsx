@@ -9,6 +9,7 @@ const typeClassMap = {
 
 const statusConfig = {
   connected: { label: 'Connected', dotClass: 'status-dot-success' },
+  connecting: { label: 'Connecting...', dotClass: 'status-dot-warning' },
   disconnected: { label: 'Disconnected', dotClass: 'status-dot-danger' },
   running: { label: 'Running', dotClass: 'status-dot-warning' },
   reconnecting: { label: 'Reconnecting...', dotClass: 'status-dot-warning' },
