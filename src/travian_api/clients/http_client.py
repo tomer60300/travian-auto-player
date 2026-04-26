@@ -683,13 +683,6 @@ class HttpClient:
         self._sync_cookies_from_curl(response)
         return response
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type(
-            (httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ())
-        ),
-    )
     async def post_json(
         self,
         url: str,
@@ -785,13 +778,6 @@ class HttpClient:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type(
-            (httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ())
-        ),
-    )
     async def delete_json(
         self,
         url: str,
@@ -881,13 +867,6 @@ class HttpClient:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type(
-            (httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ())
-        ),
-    )
     async def post_form(self, url: str, data: Dict[str, str], *, safe_to_retry: bool = True) -> str:
         """Make a POST request with form data."""
         if not url.startswith("http"):
