@@ -940,13 +940,46 @@ class HttpClient:
                 response = await self.client.post(url, content=form_str.encode(), headers=headers)
 
             if response.status_code == 302:
-                await self._handle_session_expired()
-                if self._use_curl:
-                    response = await self._curl_post_form(url, form_str, headers)
-                else:
-                    response = await self.client.post(
-                        url, content=form_str.encode(), headers=headers
+                location = response.headers.get("Location") or response.headers.get(
+                    "location", ""
+                )
+                location_lower = location.lower()
+                # Travian uses POST -> 302 -> GET (PRG pattern) for every
+                # state-mutating endpoint. The 302 means the action already
+                # succeeded server-side; re-posting after a re-auth dispatches
+                # the action twice (the oasis-raider double-raid bug).
+                # Only treat 302s pointing at a login/auth page as real
+                # session expiry; otherwise follow the redirect with a GET.
+                is_login_redirect = bool(location_lower) and (
+                    "login" in location_lower
+                    or ("auth" in location_lower and "code" not in location_lower)
+                )
+                if is_login_redirect:
+                    logger.info(
+                        "POST returned 302 to login (%s) — re-authenticating and retrying", location
                     )
+                    await self._handle_session_expired()
+                    if self._use_curl:
+                        response = await self._curl_post_form(url, form_str, headers)
+                    else:
+                        response = await self.client.post(
+                            url, content=form_str.encode(), headers=headers
+                        )
+                else:
+                    target_url = (
+                        location
+                        if location.startswith("http")
+                        else urljoin(self.base_url, location)
+                    )
+                    logger.debug("POST 302 PRG: GET %s", target_url)
+                    if self._use_curl:
+                        response = await self._curl_get(
+                            target_url, headers, follow_redirects=True
+                        )
+                    else:
+                        response = await self.client.get(
+                            target_url, headers=headers, follow_redirects=True
+                        )
 
             await self._check_suspicious_response(
                 response.text, url=url, status_code=response.status_code
