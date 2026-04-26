@@ -84,12 +84,15 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
 
+    from travian_api.debug_dump import debug_dumper
     from travian_api.web.execution_sessions import exec_session_manager
 
     exec_session_manager.start_cleanup()
+    debug_dumper.start_cleanup()
 
     yield
 
+    debug_dumper.stop_cleanup()
     exec_session_manager.stop_cleanup()
     await session_manager.disconnect_all()
     logger.info("All sessions disconnected")

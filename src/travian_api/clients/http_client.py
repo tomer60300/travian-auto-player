@@ -28,6 +28,7 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ..config import Settings
+from ..debug_dump import debug_dumper
 from ..exceptions import ActivityBudgetExhausted, NetworkError, SessionExpiredError
 from ..utils.helpers import mask_sensitive_data
 
@@ -414,6 +415,35 @@ class HttpClient:
             self._browser_headers.update_last_page(target_url)
 
     @staticmethod
+    def _dump_http_error(
+        *,
+        method: str,
+        url: str,
+        status: int,
+        body: str,
+        error: str = "",
+    ) -> None:
+        """Persist an unexpected HTTP response for later inspection."""
+        # Use last path segment + query hash in the key so related errors
+        # group together without exploding filename length.
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        key_base = (parsed.path.rstrip("/").rsplit("/", 1)[-1] or "root")[:40]
+        key = f"{method.lower()}_{key_base}_{status}"
+        debug_dumper.dump(
+            "http_error",
+            body,
+            key=key,
+            context={
+                "method": method,
+                "url": url,
+                "status": status,
+                "error": error,
+            },
+        )
+
+    @staticmethod
     def _extract_snippet(text: str, pattern: str, context_chars: int = 200) -> str:
         """Extract a snippet around the first occurrence of *pattern*.
 
@@ -472,6 +502,18 @@ class HttpClient:
                 resp_len,
                 snippet,
             )
+            debug_dumper.dump(
+                "captcha",
+                response_text,
+                key=f"{label}_{status_code}",
+                context={
+                    "label": label,
+                    "url": url,
+                    "status_code": status_code,
+                    "response_len": resp_len,
+                    "snippet": snippet,
+                },
+            )
             await self._captcha_guard.trigger(
                 label,
                 url=url,
@@ -495,6 +537,19 @@ class HttpClient:
                 status_code,
                 resp_len,
                 snippet,
+            )
+            debug_dumper.dump(
+                "soft_block",
+                response_text,
+                key=f"{label}_{status_code}",
+                context={
+                    "label": label,
+                    "url": url,
+                    "status_code": status_code,
+                    "response_len": resp_len,
+                    "snippet": snippet,
+                    "penalty_seconds": penalty_seconds,
+                },
             )
             if penalty_seconds > 0 and self._stealth_enabled:
                 self._throttler.add_penalty(penalty_seconds)
@@ -901,6 +956,12 @@ class HttpClient:
                 if response.status_code == 429:
                     if self._stealth_enabled:
                         self._throttler.add_penalty(120.0)
+                self._dump_http_error(
+                    method="POST",
+                    url=url,
+                    status=response.status_code,
+                    body=response.text,
+                )
                 raise NetworkError(
                     f"HTTP {response.status_code}: {response.text}", response.status_code
                 )
@@ -915,6 +976,13 @@ class HttpClient:
             if e.response.status_code == 429:
                 if self._stealth_enabled:
                     self._throttler.add_penalty(120.0)
+            self._dump_http_error(
+                method="POST",
+                url=url,
+                status=e.response.status_code,
+                body=e.response.text,
+                error=str(e),
+            )
             raise NetworkError(
                 f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
             )
@@ -995,12 +1063,28 @@ class HttpClient:
                         url,
                         resp_url,
                     )
+                    debug_dumper.dump(
+                        "session_expired",
+                        response.text,
+                        key="skip_reauth_login_redirect",
+                        context={
+                            "requested_url": url,
+                            "landed_url": resp_url,
+                            "status_code": response.status_code,
+                        },
+                    )
                     raise SessionExpiredError(f"Session expired (redirected to login): {resp_url}")
 
             if follow_redirects and response.status_code >= 400:
                 if response.status_code == 429 and self._stealth_enabled:
                     self._throttler.add_penalty(120.0)
                     logger.warning("429 Too Many Requests on GET — adding 120s penalty")
+                self._dump_http_error(
+                    method="GET",
+                    url=url,
+                    status=response.status_code,
+                    body=response.text,
+                )
                 raise NetworkError(
                     f"HTTP {response.status_code}: {response.text}", response.status_code
                 )
@@ -1015,6 +1099,13 @@ class HttpClient:
             if e.response.status_code == 429:
                 if self._stealth_enabled:
                     self._throttler.add_penalty(120.0)
+            self._dump_http_error(
+                method="GET",
+                url=url,
+                status=e.response.status_code,
+                body=e.response.text,
+                error=str(e),
+            )
             raise NetworkError(
                 f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
             )

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from ..clients.http_client import HttpClient
 from ..concurrency import KeyedLock
 from ..constants import BUILDING_NAMES
+from ..debug_dump import debug_dumper
 from ..exceptions import TravianError
 from ..models.buildings import Building, BuildingDetail, QueueItem, Resources, UpgradeResult
 from ..parsers.html_parser import (
@@ -95,11 +96,33 @@ class BuildingService:
             TravianError: If request fails
         """
         try:
-            url = f"/build.php?id={slot_id}"
+            # Buildings with tabs (Rally Point, Marketplace, Embassy, Residence,
+            # Palace, etc.) remember the user's favourite tab server-side, so a
+            # bare `build.php?id=N` can land on a tab that has no upgrade
+            # button. Rally Point with the Farm-List tab favourited is the
+            # canonical case. `tt=0` pins the request to the Management tab
+            # where the upgrade URL/checksum always lives. Single-tab
+            # buildings and resource fields ignore the parameter.
+            url = f"/build.php?id={slot_id}&tt=0"
             if village_id:
-                url = f"/build.php?newdid={village_id}&id={slot_id}"
+                url = f"/build.php?newdid={village_id}&id={slot_id}&tt=0"
             build_html = await self.http_client.get_html(url)
-            return parse_build_page(build_html, slot_id=slot_id)
+            detail = parse_build_page(build_html, slot_id=slot_id)
+            if not detail.checksum:
+                debug_dumper.dump(
+                    "no_checksum",
+                    build_html,
+                    key=f"slot{slot_id}_v{village_id or 'NA'}",
+                    context={
+                        "slot_id": slot_id,
+                        "village_id": village_id,
+                        "url": url,
+                        "parsed_name": detail.name,
+                        "parsed_level": detail.level,
+                        "parsed_gid": detail.gid,
+                    },
+                )
+            return detail
 
         except Exception as e:
             raise TravianError(f"Failed to get building detail for slot {slot_id}: {e}") from e

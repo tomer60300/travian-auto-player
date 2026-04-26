@@ -318,9 +318,14 @@ class BuildQueueService:
             if res in current and current[res] < needed:
                 missing[res] = needed - current[res]
 
+        # `detail.checksum` defaults to "" (not None) when the build page
+        # returned no upgrade URL — must match the truthy check in
+        # BuildingService.upgrade_building, otherwise the queue falsely
+        # reports READY and the subsequent upgrade_building() raises
+        # "No upgrade available".
         return {
-            "can_build": len(missing) == 0 and detail.checksum is not None,
-            "has_checksum": detail.checksum is not None,
+            "can_build": len(missing) == 0 and bool(detail.checksum),
+            "has_checksum": bool(detail.checksum),
             "missing": missing,
             "costs": costs,
             "current": current,
@@ -625,6 +630,8 @@ class BuildQueueService:
 
             # Try each item at this priority
             built = False
+            any_resource_short = False
+            any_no_checksum = False
             for item in prio_items:
                 try:
                     check = await self.check_resources(
@@ -635,14 +642,30 @@ class BuildQueueService:
                 except Exception as e:
                     self._report(f"  {item.building} (slot {item.slot_id}): error checking - {e}")
                     continue
+                if not check.get("can_build"):
+                    if not check.get("has_checksum"):
+                        any_no_checksum = True
+                    elif check.get("missing"):
+                        any_resource_short = True
                 if verbose:
                     costs = check.get("costs", {})
                     missing = check.get("missing", {})
                     can = check.get("can_build", False)
+                    has_checksum = check.get("has_checksum", False)
                     costs_str = ", ".join(f"{k}={v}" for k, v in costs.items()) if costs else "n/a"
                     if can:
                         self._report(
                             f"  {item.building} (slot {item.slot_id}): READY costs({costs_str})"
+                        )
+                    elif not has_checksum:
+                        # The build page returned no upgrade URL — common when
+                        # the building is maxed, another tab is selected
+                        # (rally-point defaults to troops), or the session
+                        # landed on an error page. Not a resource problem.
+                        self._report(
+                            f"  {item.building} (slot {item.slot_id}): "
+                            "no upgrade URL on build page — skipping "
+                            "(building may be maxed, wrong tab, or session stale)"
                         )
                     else:
                         missing_str = (
@@ -869,10 +892,19 @@ class BuildQueueService:
                 pass
 
             if not built:
-                # No resources for any item at this priority — wait and retry
-                self._report(
-                    f"Insufficient resources for priority {next_prio} items. Waiting {poll_interval_s}s..."
-                )
+                # Distinguish "no money" from "no upgrade URL on build page" —
+                # the second is a transient Travian-state issue and 30s may be
+                # too long, but we still retry with the same cadence for now.
+                if any_no_checksum and not any_resource_short:
+                    reason = (
+                        f"Priority {next_prio}: build page returned no upgrade URL "
+                        "(rally-point tab default, maxed building, or stale session)"
+                    )
+                elif any_resource_short and not any_no_checksum:
+                    reason = f"Insufficient resources for priority {next_prio} items"
+                else:
+                    reason = f"No items completed for priority {next_prio}"
+                self._report(f"{reason}. Waiting {poll_interval_s}s...")
                 await asyncio.sleep(HumanTiming.delay(poll_interval_s))
 
         return all_results
