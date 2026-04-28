@@ -1,8 +1,14 @@
 # Stealth & Anti-Bot System
 
-The stealth system makes the CLI's network traffic and behavior look like a real
-player using a browser. It operates across seven layers -- from TLS fingerprinting
-to daily activity scheduling -- and is enabled by default on every command.
+The stealth system makes the CLI's and web UI's network traffic and behavior
+look like a real player using a browser. It operates across ten layers -- from
+TLS fingerprinting to per-account build-action staggering -- and is enabled by
+default on every command.
+
+This document describes **what** each layer does. For the **why** (trade-off
+analysis behind each design choice), see `docs/23-stealth-decisions.md`. For
+the **resumable cross-device session** layer that interacts with activity
+scheduling, see `docs/22-resumable-operations.md`.
 
 ## Quick Start
 
@@ -106,19 +112,22 @@ travian --max-hours 6 <command>
 **Problem:** Python's default TLS libraries produce a JA3 fingerprint that
 identifies the connection as Python/httpx, not a real browser.
 
-**Solution:** The HTTP client uses `curl_cffi` with `impersonate="chrome"` to
-produce a Chrome-identical TLS ClientHello, HTTP/2 SETTINGS frames, and cipher
-suite ordering.
+**Solution:** The HTTP client uses `curl_cffi` with a persona-matched
+`impersonate=` target (e.g. `chrome131`, `chrome133a`, `chrome136`) so the
+TLS ClientHello, HTTP/2 SETTINGS frames, and cipher suite ordering match
+the UA the persona claims.
 
 ```
-# Dependency in pyproject.toml
+# Hard dependency in pyproject.toml
 curl_cffi>=0.7.0
 ```
 
-If `curl_cffi` is not installed, the client falls back to `httpx` with a
-warning. This fallback is detectable -- keep `curl_cffi` installed.
+**Fail closed:** if `stealth=true` and `curl_cffi` is not importable, the
+HttpClient now **raises RuntimeError on construction** rather than degrading
+silently to `httpx`. Sending Chrome-shaped headers over a Python TLS handshake
+is a stronger tell than running stealth-off, so we refuse the misconfiguration.
 
-**Files:** `clients/http_client.py`
+**Files:** `clients/http_client.py`, `stealth/persona.py`
 
 ---
 
@@ -137,26 +146,56 @@ selected by request type:
 All requests include `Accept-Language`, `Accept-Encoding`, and the `X-Version`
 game client header.
 
+**`Accept-Encoding`:** Chromium personas advertise `gzip, deflate, br, zstd`
+to match Chrome 124+ stable; non-Chromium personas advertise `gzip, deflate, br`.
+The encoding string is derived from the persona's browser type so it can't
+drift from the UA.
+
+**`request_type="xhr"`:** services calling endpoints that the Travian frontend
+JavaScript invokes via `fetch`/`XMLHttpRequest` — `/api/v1/map/position`,
+`/api/v1/map/tile-details`, `/api/v1/farm-list/send`, `/api/v1/farm-list/slot`
+(POST and DELETE) — pass `request_type="xhr"` to `post_json`/`delete_json`.
+This selects `BrowserHeaders.for_xhr()` (XHR shape with `X-Requested-With` +
+`Sec-Fetch-Mode: cors`) and merges in `Content-Type: application/json` for
+the body. Generic JSON-client traffic still uses `for_json_post()`.
+
+**PRG-redirected GET:** when `post_form` follows a `302` to a GET, the GET now
+uses fresh page-load headers (not the form POST's `Content-Type`/`Origin`/etc).
+Real browsers issue redirected GETs as fresh document navigations.
+
 **Referer tracking:** The last visited `.php` page is tracked and sent as the
-`Referer` header on subsequent requests, simulating natural browsing flow.
+`Referer` header on subsequent requests, simulating natural browsing flow. API
+and XHR responses do not advance page context (only document-like requests do).
 
 **Firefox awareness:** Sec-Fetch-* and sec-ch-ua headers are omitted when the
 selected User-Agent is Firefox, matching real Firefox behavior.
 
 ---
 
-### Layer 3: User-Agent Rotation (stealth/user_agents.py)
+### Layer 3: Persona — Coherent Identity (stealth/persona.py)
 
-A pool of 11 real browser User-Agent strings:
+A `Persona` ties together User-Agent, `curl_cffi` impersonate target,
+`sec-ch-ua` headers, platform, and `accept-language` so every layer of the
+stealth stack presents the same browser identity.
 
-- Chrome 132-135 on Windows (4 variants)
-- Chrome 134-135 on macOS (2 variants)
-- Firefox 135-137 on Windows (3 variants)
-- Firefox 137 on macOS (1 variant)
-- Edge 133-134 on Windows (2 variants)
+Pool: Chrome on Windows with versions matching `curl_cffi`'s exact impersonate
+support (Chrome 131 / 133 / 136 currently). UA, `sec-ch-ua`, and TLS
+fingerprint always match — no version skew.
 
-One UA is randomly selected at session start and used for the entire session.
-This matches real browser behavior -- browsers don't change their UA mid-session.
+**Pinned to cookie lifetime:** persona is persisted to
+`.travian_persona.json` alongside cookies, with a 365-day TTL (was 7d). A
+real browser profile keeps its UA/TLS for the install lifetime; rotating
+mid-cookie-jar is itself a tell — same auth cookie keeps showing up with
+different Chrome versions and different TLS fingerprints.
+
+**Server-URL scoped:** the persisted persona file records the server URL
+it was created against. If the current `settings.base_url` differs (e.g.
+switching from `.de` to `.com`, or between game worlds), the persona
+rotates automatically since a player who switched servers would
+realistically be on a different machine or browser profile.
+
+**Explicit identity reset:** delete `.travian_persona.json` (and the
+matching cookie file) to force a fresh persona.
 
 ---
 
@@ -230,6 +269,31 @@ Login -> dorf1.php (resource overview) -> dorf2.php (village center)
 dorf1.php or dorf2.php -> build.php?id=X -> (read costs) -> upgrade
 ```
 
+**Pre-construct flow:**
+```
+dorf2.php -> build.php?id=X (empty slot picker) -> (read options) -> construct
+```
+Mirrors the upgrade flow for new building construction. Fires AFTER the
+queue/can-build guards in `_construct_building_unlocked` so we don't
+waste page loads on requests that will be rejected.
+
+**Map navigation (`navigate_to_map`):**
+```
+karte.php (with optional newdid)
+```
+Called before any `tile-details` or `map/position` XHR. Without this,
+those XHRs carry whatever Referer was set last (e.g. `/profile.php`),
+which is impossible from a real browser since tile popups are opened
+from the map page.
+
+**Farm-list navigation (`navigate_to_farm_list`):**
+```
+dorf2.php -> rally point -> build.php?gid=16&tt=99
+```
+Establishes Referer/Origin context before any farm-list mutation API
+(`/api/v1/farm-list/slot` add/remove, `/api/v1/farm-list/send`). Run
+once per village handoff.
+
 **Idle browsing** (between automation actions):
 Random visits to dorf1, dorf2, statistics, or player profile pages.
 
@@ -286,21 +350,73 @@ travian farm send 123 --yes # Same session continues
 
 ### Layer 10: Bot Detection Response (clients/http_client.py)
 
-The HTTP client inspects every response for signs that the server has detected
-bot activity:
+The HTTP client inspects every response for signs that the server has
+detected bot activity. Detection is tiered: high-confidence block-page
+signals on a short error response trigger the **captcha guard** (a hard
+stop on all outbound traffic until the user resolves it); transient or
+embedded-in-bundle signals trigger a **throttler penalty** (cooldown +
+continue).
 
-| Pattern | Severity | Response |
+| Pattern | Context | Action |
 |---|---|---|
-| recaptcha, bot-detection | HIGH | 120s cooldown |
-| suspicious activity, automated access | HIGH | 120s cooldown |
-| your ip has been, access denied | HIGH | 120s cooldown |
-| Captcha form/div/iframe | HIGH | 120s cooldown |
-| too many requests (short page) | MEDIUM | 60s cooldown |
-| your account has been banned | CRITICAL | 300s cooldown |
-| HTTP 429 | HIGH | 120s cooldown |
+| structural `g-recaptcha` HTML | always | Hard stop (captcha guard) |
+| `recaptcha` text + short page (<5KB) or 403/429/503 | | Soft penalty 120s |
+| `bot-detection` / `suspicious activity` / `automated access` / `your ip has been` / `access denied` | short page (<5KB) AND status in (403, 503) | Hard stop (captcha guard) |
+| Same patterns | short page OR error status (not the AND) | Soft penalty 90s |
+| `<form\|div\|iframe ...captcha` HTML | always | Hard stop |
+| `too many requests` text + short page | | Soft penalty 120s |
+| `your account has been banned` | always | Hard stop |
+| HTTP 429 | any body | Throttler penalty 120s |
+| HTTP 403/503 + non-game body | short page | Soft penalty 90s |
 
-When detection is suspected, the throttler automatically adds a penalty delay
-before the next request.
+The hard-stop path (captcha guard) blocks every subsequent outbound
+request — including those from concurrent operations — until the user
+acknowledges the captcha modal in the web UI (or calls
+`/api/captcha/resolve` from the CLI). This prevents the "bot keeps
+probing through a real block" pattern.
+
+The soft-penalty path adds a one-off cooldown to the next request via
+`throttler.add_penalty(seconds)` and continues normally.
+
+---
+
+### Layer 11: Per-Account Action Coordination (build_queue_service.py)
+
+A single Travian account can have multiple build queues running (one
+per village). Without coordination, two queues whose builds finish at
+the same instant would fire upgrade POSTs on the same second — a
+pattern impossible for a single human operator to produce.
+
+`build_queue_service` keeps a module-level `_account_build_locks` dict
+keyed by `id(http_client)` (which is per-account). Before every
+`upgrade_building` / `construct_building` call:
+
+1. Acquire the per-account `asyncio.Lock` (serializes build POSTs).
+2. Check `_last_account_build_action_ts[account]` — if another queue
+   acted within the last 60 seconds, sleep a heavy-tailed 10-90s
+   stagger.
+3. Update the timestamp BEFORE sleeping so concurrent waiters stack
+   behind this stagger rather than stacking on top of it.
+
+This adds latency only when multiple village queues collide; isolated
+single-village runs see no overhead.
+
+### Layer 12: Operation Identity & Activity Logging
+
+The cross-device session-control feature (see
+`docs/22-resumable-operations.md`) feeds the activity scheduler with
+real elapsed time:
+
+- `farm_list_service._send_farm_list_unlocked` measures
+  `time.monotonic()` around the work in a `try/finally` and calls
+  `activity_scheduler.log_activity(elapsed)` on every exit path.
+- `build_queue_service.execute_plan_continuous` logs activity per
+  cycle.
+- Cross-device subscribe/unsubscribe events do NOT trigger fresh
+  activity entries — only actual API work does.
+
+This keeps the activity scheduler's daily/session caps honest even when
+ops run unattended for hours.
 
 ---
 
@@ -347,6 +463,13 @@ When disabled:
 - No noise injection or activity limits
 - No cookie persistence
 - Uses httpx directly (no curl_cffi TLS impersonation)
+- Per-account build-action stagger is a no-op
+- Stealth floors on user-configurable intervals (e.g. farm-list 60s
+  floor) drop to the legacy minimums
+
+**Note:** when stealth is OFF, `request_type="xhr"` callers still get a
+JSON `Content-Type` (the empty-string-safe guard in the http_client
+ensures this), so feature code that assumes XHR shape doesn't break.
 
 ---
 
@@ -358,12 +481,23 @@ src/travian_api/stealth/
   timing.py            # HumanTiming: heavy-tailed delay engine
   human_delay.py       # HumanDelay: action-specific timing profiles
   headers.py           # BrowserHeaders: Chrome-accurate header sets
-  user_agents.py       # UserAgentRotator: 11 real browser UA strings
+  persona.py           # Persona: coherent identity (UA + TLS + sec-ch-ua)
+  user_agents.py       # UserAgentRotator: persona-driven UA selection
   throttler.py         # RequestThrottler: rate limiting + burst detection
-  navigator.py         # PageNavigator: page simulation + warm-up
+  navigator.py         # PageNavigator: page simulation + warm-up + map/farm-list
   noise.py             # NoiseInjector: random browsing between actions
   scheduler.py         # ActivityScheduler: daily/session hour limits
   session_manager.py   # SessionManager: session lifetime + break timing
+  captcha_guard.py     # CaptchaGuard: hard-stop gate on detection
+```
+
+Plus per-account coordination at the service layer:
+
+```
+src/travian_api/services/
+  build_queue_service.py
+    # Module-level: _account_build_locks, _last_account_build_action_ts
+    # Helpers: _account_build_lock_for(), _stagger_account_build()
 ```
 
 **Dependency rule:** The stealth module imports only from stdlib. Services
@@ -373,9 +507,11 @@ import from stealth, never the reverse. No circular dependencies.
 
 ## Troubleshooting
 
-**"curl_cffi not found" warning:**
-Install with `pip install curl_cffi>=0.7.0`. Without it, TLS fingerprinting
-falls back to Python's default (detectable).
+**RuntimeError: stealth mode requires curl_cffi:**
+Install with `pip install curl_cffi>=0.7.0`. Stealth mode now refuses to
+start without it (the previous fallback to `httpx` was a stronger tell
+than running stealth-off). If you need to run without TLS impersonation,
+explicitly disable stealth: `TRAVIAN_STEALTH=false` or `--no-stealth`.
 
 **Commands are very slow:**
 Lower the speed factor: `TRAVIAN_STEALTH_SPEED=0.5`. Or disable stealth for

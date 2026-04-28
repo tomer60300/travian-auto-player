@@ -1,50 +1,62 @@
 # Anti-Bot Feature Progress
 
-## Branch: cli-anti-bot
-## Started: 2026-04-02 18:27
-## Last Updated: 2026-04-02 22:40
+## Status: PRODUCTION ✅ — Multiple hardening passes complete
 
-## Status: CORE COMPLETE ✅ — Pushed to GitHub
+**Last major pass:** 2026-04-28 (the "stealth-vs-performance" review,
+covering 49 findings across 6 features). Most P1/P2 items addressed in
+that pass; remaining deferred items are documented in
+`docs/23-stealth-decisions.md`.
 
-### Completed ✅
+For the current architecture see `docs/21-stealth-anti-bot.md`. For the
+trade-off analysis behind each design choice see
+`docs/23-stealth-decisions.md`. For the cross-device session control
+that integrates with activity scheduling see
+`docs/22-resumable-operations.md`.
 
-#### New Stealth Module (`src/travian_api/stealth/`)
-- [x] `__init__.py` — module entry point
-- [x] `user_agents.py` — 14 real browser UAs (Chrome/Firefox/Edge on Win/Mac)
-- [x] `headers.py` — browser-accurate headers with Sec-Fetch-*, Referer chains
-- [x] `throttler.py` — global rate limiter with burst detection + auto-penalty
-- [x] `human_delay.py` — 10 action types, triangular distribution, micro-pauses
-- [x] `navigator.py` — page navigation simulation before actions
-- [x] `session_manager.py` — session lifetime tracking with break suggestions
+## Completed milestones
 
-#### Core Integration
-- [x] `http_client.py` — stealth middleware on ALL requests
-- [x] `config.py` — stealth settings (env vars: TRAVIAN_STEALTH, etc.)
-- [x] `cli.py` — `--stealth/--no-stealth` global flag
+### Foundation (2026-04-02 / `cli-anti-bot` branch)
+- Stealth module created with timing, headers, throttler, human_delay,
+  navigator, session_manager, user_agents.
+- HTTP client middleware: stealth applied to all requests.
+- CLI integration: `--stealth/--no-stealth`, env vars.
+- Service updates: military, build queue, auto-scout, video reward.
 
-#### Service Updates
-- [x] `military_service.py` — delays between troop send steps
-- [x] `build_queue_service.py` — pre-upgrade browsing, idle during waits
-- [x] `auto_scout_service.py` — randomized jitter on delays
-- [x] `video_reward_service.py` — jitter on ATG timing
+### Captcha guard (2026-04-13)
+- `CaptchaGuard` async-event gate blocking all outbound traffic.
+- Structural HTML evidence required for high-confidence patterns to
+  avoid false positives from `upgradeBlocked` and similar.
+- Frontend modal + REST endpoints (`/api/captcha/{status,resolve}`).
 
-### Testing
-- [x] All stealth modules import cleanly
-- [x] `--no-stealth auth login` works (fast mode)
-- [x] `--stealth building resources` works (with delays)
-- [x] Committed and pushed to `cli-anti-bot` branch
+### Persona / TLS coherence (later passes)
+- `Persona` dataclass tying UA + curl_cffi impersonate target +
+  sec-ch-ua + platform + accept-language together.
+- Persistent persona file with creation timestamp.
 
-### Bug Fixes (Apr 3)
-- [x] **FALSE POSITIVE FIX:** `_check_suspicious_response` was matching "blocked" in Travian's normal `upgradeBlocked` CSS class, triggering 60s throttle penalty on every upgrade. Replaced naive substring matching with context-aware detection (high-confidence patterns + structural checks for captcha/ban).
-- [x] **Service attribute fix:** Services used `http_client.delay` instead of `http_client.human_delay` — would crash at runtime.
-- [x] **ActionType fix:** Services referenced non-existent enums (`THINKING`, `BETWEEN_ACTIONS`, `FARM_SEND`, `PAGE_READ`) — fixed to use correct values.
-- [x] **Navigator integration:** `building_service.upgrade()` now calls `navigator.pre_upgrade_flow()` for realistic page navigation before upgrades (was only doing a bare delay).
-- [x] **User-Agent update:** Updated browser UA strings from Chrome 120-124 era to Chrome 132-135 / Firefox 135-137 (current for April 2026).
+### Stealth pass — 2026-04-28
+- TLS: fail-closed without curl_cffi.
+- Headers: zstd Accept-Encoding for Chromium personas; XHR shape on
+  endpoints called by Travian frontend JS (map, farm-list, tile
+  details); page-load headers on PRG-redirected GET.
+- Persona: TTL 7d → 365d; server-URL scoped.
+- Retry: jittered (`wait_random_exponential`).
+- Captcha: short 403/503 with high-confidence phrases now hard-fire
+  the guard (was soft-only).
+- Per-feature stealth fixes for oasis raider, farm-list, auto-scout,
+  build queue, farm builder. Detailed in `docs/23-stealth-decisions.md`.
 
-### Remaining / Future Enhancements
-- [ ] Integration tests (mock server, verify timing patterns)
-- [ ] Session manager integration into auto-builder loop
-- [ ] Configurable "play schedule" (active hours, break patterns)
-- [ ] Cookie persistence across sessions (save/load jar)
-- [ ] Anti-fingerprint: randomize X-Version per session
-- [ ] Captcha detection → Discord alert to human
+## Currently deferred (lower-priority; documented in stealth-decisions)
+
+- Globally switching `HumanDelay` from triangular to log-normal
+  distributions.
+- Endpoint-aware throttler with separate gap profiles per
+  endpoint class.
+- Cookie jar with full attribute preservation (domain/path/expires/
+  secure/httpOnly/sameSite/ordering).
+- Workflow-aware noise injection (correlated with current action
+  rather than independent Bernoulli).
+- Captcha post-resolution warm-up window.
+- Tile-detail caching to deduplicate enrich+JIT call pairs.
+
+These are tracked in the per-feature Codex review threads and can be
+revisited if Travian changes their detection.

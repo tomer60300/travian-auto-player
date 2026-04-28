@@ -290,6 +290,28 @@ travian-auto-player/
 | `TRAVIAN_LOG_LEVEL` | `INFO` | Logging level |
 | `TRAVIAN_TIMEOUT` | `30` | Request timeout (seconds) |
 
+## Documentation
+
+In-depth docs live under `docs/`:
+
+| Topic | Doc |
+|---|---|
+| Travian REST API | [`docs/03-rest-api.md`](docs/03-rest-api.md) |
+| Travian GraphQL API | [`docs/04-graphql-api.md`](docs/04-graphql-api.md) |
+| Map system | [`docs/05-map-system.md`](docs/05-map-system.md) |
+| Authentication | [`docs/19-authentication-full.md`](docs/19-authentication-full.md) |
+| Buildings & resources | [`docs/16-buildings-resources.md`](docs/16-buildings-resources.md) |
+| Farm-list API | [`docs/14-farm-list-api.md`](docs/14-farm-list-api.md) |
+| Troop sending | [`docs/13-troop-sending.md`](docs/13-troop-sending.md) |
+| Multi-village | [`docs/18-multi-village.md`](docs/18-multi-village.md) |
+| Reports system | [`docs/12-reports-system.md`](docs/12-reports-system.md) |
+| Resource production | [`docs/20-resource-production.md`](docs/20-resource-production.md) |
+| Video reward protocol | [`docs/11-video-reward-protocol.md`](docs/11-video-reward-protocol.md) |
+| **Stealth / anti-bot system** | [`docs/21-stealth-anti-bot.md`](docs/21-stealth-anti-bot.md) |
+| **Resumable cross-device operations** | [`docs/22-resumable-operations.md`](docs/22-resumable-operations.md) |
+| **Stealth vs performance — design decisions** | [`docs/23-stealth-decisions.md`](docs/23-stealth-decisions.md) |
+| Changelog | [`CHANGELOG.md`](CHANGELOG.md) |
+
 ## Known Limitations
 
 - **Farm List Send**: Requires Gold Club

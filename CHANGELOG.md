@@ -1,6 +1,125 @@
 # Changelog
 
-## [Unreleased] — 2026-04-13
+## [Unreleased] — 2026-04-28
+
+### Added — Resumable Cross-Device Operations
+
+Long-running ops (oasis raid, farm-list run, auto-scout, build queue, farm
+builder) now survive Safari background, page reloads, bfcache restores, and
+cross-device control — a stop pressed from a laptop terminates an op that
+was started from an iPhone, and vice versa.
+
+- **`OperationManager` + `ExecutionSession` registry** — every long op runs
+  inside `OperationContext` whose messages are buffered in a 24h ring buffer
+  and fanned out to any number of subscribers via per-subscriber asyncio
+  queues. Sessions persist after the starter WS drops; subscribers reattach
+  via `WS /ws/sessions/{id}/stream`.
+- **`useResumableOperation` React hook** — single hook each page mounts
+  with `(opType, {onMessage, onStatusChange})`. Internally manages the
+  starter WS → session-stream WS handoff, persists `session_id` in
+  `localStorage`, deduplicates history-replay frames by server-side `ts`,
+  and exposes a `stop()` that works through whichever socket is open.
+- **Cross-device stop** — `WS /ws/sessions/{id}/stream` accepts
+  `{action:"stop"}` from any subscribed client; the `_listen_for_stop`
+  task forwards it to `operation_manager.request_stop(session_id)` so
+  `ctx.should_stop()` flips for the running coro.
+- **Stop-while-reconnecting** — `pendingStopRef` queue + drain on
+  `session_init` / `session_meta(running)`, plus active reattach via
+  `subscribeToExisting()` when the user taps Stop with no live socket.
+- **Auto-reconnect-on-terminal fix** — `closeWs()` now fires from every
+  terminal frame (`session_ended`, `error`, `operation_complete`) so the
+  captured WS path doesn't keep reopening after the server closes the
+  session-stream. (This was producing a 1-second connect/close loop that
+  silently swallowed Stop presses.)
+- **Race hardening** — `mountedRef` so unmount-cleanup doesn't reattach;
+  `inConstruction` flag for sync-onClose-during-construction races;
+  handle-specific `closeIfStillCurrent()` so a terminal frame that
+  triggers a sync reattach doesn't close the new socket.
+
+See `docs/22-resumable-operations.md` for the full protocol contract and
+client behavior.
+
+### Added — Stealth Hardening Pass
+
+The stealth stack got a layer-by-layer review focused on bot-tells that
+wouldn't show up in fixed-cost benchmarks (timing patterns, identical
+permutations, header-shape mismatches, request-ordering desync). Most
+fixes are zero-cost or sub-second; the few that aren't are gated on
+glaring tells.
+
+- **TLS fail-closed** — stealth + missing `curl_cffi` now raises instead
+  of degrading to `httpx` with Chrome headers (mismatch was a stronger
+  tell than running stealth-off).
+- **PRG redirect headers** — `post_form` now generates fresh page-load
+  headers for the redirected GET instead of reusing the form POST's
+  `Content-Type`/`Origin` (a real browser issues the GET as a fresh
+  document navigation).
+- **`request_type="xhr"` plumbing** — `post_json`/`delete_json` now
+  accept `request_type="xhr"` so endpoints that the Travian frontend
+  calls via fetch (map/position, tile-details, /api/v1/farm-list/*)
+  send the XHR header shape (`X-Requested-With`, `Sec-Fetch-Mode: cors`)
+  instead of generic JSON-client headers.
+- **Persona scoping** — TTL bumped from 7d to 365d (rotating UA/TLS
+  mid-cookie-jar was itself a tell); persona file now tracks the server
+  URL and rotates on a server change.
+- **Jittered `get_html` retry** — `wait_random_exponential` instead of
+  the textbook 1s/2s/4s power-of-two cadence.
+- **Captcha guard escalation** — short 403/503 pages with high-confidence
+  block phrases (`access denied`, `bot-detection`, `automated access`,
+  `your ip has been`) now hard-fire the captcha guard; soft-penalty
+  reserved for transient signals (429, embedded-in-bundle false
+  positives).
+- **`zstd` Accept-Encoding** — Chromium personas advertise zstd to match
+  current Chrome stable (mismatch is checked against UA in modern
+  detectors).
+- **Navigator helpers** — new `navigate_to_map`, `navigate_to_farm_list`,
+  `pre_construct_flow` so feature code stops calling private `_visit`.
+
+#### Per-feature stealth fixes
+
+- **Oasis raider** — pre-tile-details navigation is now `navigate_to_map`
+  (not random `idle_browse` which produced impossible Referer chains);
+  troop deduction + burst counter only on `result.success` (soft failure
+  applies a 60s throttle penalty and breaks the sweep — no more "ghost
+  sends" with locally-deducted-but-server-untouched troops); recurring
+  interval gets `micro_jitter(0.10)`; tile XHRs route through
+  `request_type="xhr"`.
+- **Auto-scout** — scan centers sorted by distance from player village
+  then shuffled within 4-tile buckets (in-place, not a slice copy); same
+  bucket-shuffle on `filter_targets` so target permutation varies across
+  runs; `navigate_to_map` before tile loop; tile XHRs via XHR header
+  shape; jittered scout-retry replaces fixed 3s.
+- **Farm-list** — stealth floor of 60s on `interval` when stealth is on;
+  `time.monotonic()` activity logging in try/finally so every exit path
+  feeds the scheduler; `navigate_to_farm_list(owner_vid)` before send;
+  `send_all_farm_lists` groups by owner village so cross-village handoffs
+  trigger fresh navigation; per-cycle batch size jitter (4-7) instead of
+  invariant 5; 0.25-0.9s pause between batches; troop-exhaustion now
+  advances the cursor PAST the depleted batch (no more bot-like
+  instant-retry on the same empty slots); send + add_slot + delete_slots
+  use `request_type="xhr"`.
+- **Build queue** — `_post_build_reaction()` heavy-tailed 20-300s wakeup
+  window after every queue→empty transition (real players don't return
+  to the browser exactly 3 seconds after a timer hits zero);
+  `pre_construct_flow` for new construction (after queue/can-build
+  guards so no wasted page loads on requests that will be rejected);
+  client `poll_interval` clamped to [30s, 1h]; resource-short waits
+  2-10min planner-style instead of polling every 30s; per-account
+  build-action lock + 10-90s stagger when multiple village queues
+  collide on the same account.
+- **Farm builder** — `_pace_add(list_id)` before every add_slot
+  (RAPID-class delay + per-8-slots heavy-tailed pause, gated on
+  `stealth_enabled` AND `human_delay.enabled`); pacing inside retry loop
+  and after overflow handoff; `navigate_to_farm_list()` once before bulk
+  edit; per-bucket shuffle so target order varies between runs;
+  jittered scout-send / report-fetch retries.
+
+See `docs/23-stealth-decisions.md` for the trade-off analysis behind each
+choice.
+
+---
+
+## [Previous] — 2026-04-13
 
 ### Added
 
