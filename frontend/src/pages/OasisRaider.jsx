@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { createWebSocket } from '../ws'
+import { useResumableOperation } from '../hooks/useResumableOperation'
 import { useToast } from '../components/Toast'
 import VillageSelector from '../components/VillageSelector'
 import useGameStore from '../stores/gameStore'
@@ -38,11 +38,13 @@ const CATEGORY_COLORS = {
 
 const STATUS_CONFIG = {
   idle: { label: 'Idle', dot: 'status-dot-secondary' },
+  connecting: { label: 'Connecting...', dot: 'status-dot-warning' },
   running: { label: 'Running', dot: 'status-dot-warning' },
   sleeping: { label: 'Sleeping', dot: 'status-dot-warning' },
   reconnecting: { label: 'Reconnecting...', dot: 'status-dot-warning' },
   completed: { label: 'Completed', dot: 'status-dot-success' },
   stopped: { label: 'Stopped', dot: 'status-dot-danger' },
+  failed: { label: 'Failed', dot: 'status-dot-danger' },
 }
 
 function formatTime(ts) {
@@ -63,12 +65,11 @@ export default function OasisRaider() {
   const [sleepInterval, setSleepInterval] = useState(60)
   const [repeatIntervalSeconds, setRepeatIntervalSeconds] = useState(0)
 
-  // Operation state
+  // Operation state — driven by the resumable hook + per-message updates.
   const [status, setStatus] = useState('idle')
   const [logs, setLogs] = useState([])
   const [summary, setSummary] = useState(null)
 
-  const wsRef = useRef(null)
   const logEndRef = useRef(null)
   const mountedRef = useRef(true)
   const msgIdRef = useRef(0)
@@ -81,12 +82,6 @@ export default function OasisRaider() {
   useEffect(() => {
     return () => {
       mountedRef.current = false
-      if (wsRef.current) {
-        // Handle both reconnect wrapper { ws, close() } and raw WebSocket
-        try {
-          if (typeof wsRef.current.close === 'function') wsRef.current.close()
-        } catch { /* ignore */ }
-      }
     }
   }, [])
 
@@ -121,8 +116,72 @@ export default function OasisRaider() {
     return troops
   }
 
-  // Store the last config so onReconnected can re-send it
-  const lastConfigRef = useRef(null)
+  // ── Resumable op handler — survives Safari background, tab reload, bfcache.
+  // The op runs server-side (operation_manager); this hook just subscribes
+  // to the session stream. Disconnect ≠ stop.
+  const handleOpMessage = useCallback((data) => {
+    if (!mountedRef.current || !data) return
+    switch (data.type) {
+      case 'session_init':
+        addLog('📡', 'SYSTEM', `Session: ${data.session_id}`, 'info')
+        break
+      case 'status': {
+        const state = data.data?.state
+        if (state === 'sleeping') setStatus('sleeping')
+        else if (state === 'running') setStatus('running')
+        else if (state === 'stopped') setStatus('stopped')
+        else if (state === 'completed') setStatus('completed')
+        break
+      }
+      case 'log': {
+        const d = data.data || {}
+        addLog(d.emoji || '', d.category || '', d.message || '', d.level || 'info')
+        if (d.category === 'TROOPS' && d.message?.includes('entering sleep')) setStatus('sleeping')
+        if (d.category === 'SLEEP' && d.message?.includes('SUFFICIENT')) setStatus('running')
+        break
+      }
+      case 'summary':
+        setSummary(data.data)
+        break
+      case 'error':
+        addLog('❌', 'ERROR', data.message || 'Unknown error', 'error')
+        toast.error(data.message || 'Error')
+        break
+      case 'already_running':
+        // Hook reattaches automatically; just surface a hint.
+        addLog('🔁', 'SYSTEM', 'Reattached to a running sweep on the server', 'info')
+        break
+      case 'operation_complete':
+        // Hook drives the status; just leave a breadcrumb.
+        addLog('🏁', 'SYSTEM', `Operation ${data.status}`, 'info')
+        break
+      default:
+        break
+    }
+  }, [addLog, toast])
+
+  const handleStatusChange = useCallback((next) => {
+    // Only let the hook drive top-level status transitions that aren't
+    // already managed by per-message updates above (e.g. reconnecting,
+    // failed). 'running'/'sleeping' come from server status messages.
+    if (next === 'reconnecting' || next === 'connecting' || next === 'failed') {
+      setStatus(next)
+    }
+  }, [])
+
+  const op = useResumableOperation('oasis-raider', {
+    onMessage: handleOpMessage,
+    onStatusChange: handleStatusChange,
+  })
+
+  // If the hook has a session_id at mount, surface it so the user knows
+  // we're rejoining an existing operation.
+  useEffect(() => {
+    if (op.sessionId && logs.length === 0) {
+      addLog('🔁', 'SYSTEM', `Resumed running session ${op.sessionId}`, 'info')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [op.sessionId])
 
   const handleStart = (dryRun = false) => {
     const troops = buildTroopsDict()
@@ -130,135 +189,29 @@ export default function OasisRaider() {
       toast.warning('No troops configured')
       return
     }
-
     setLogs([])
     setSummary(null)
-    setStatus('running')
-
-    const startPayload = {
-      action: 'start',
-      config: {
-        radius,
-        troops,
-        max_targets: maxTargets,
-        bonus_filter:
-          bonusFilter.length === BONUS_TYPES.length
-            ? []
-            : bonusFilter.map((b) => b.toLowerCase()),
-        sleep_interval: sleepInterval,
-        dry_run: dryRun,
-        village_id: activeVillageId || undefined,
-        repeat_interval_seconds: repeatIntervalSeconds,
-      },
-    }
-    lastConfigRef.current = startPayload
-
-    const handle = createWebSocket(
-      '/ws/oasis-raider',
-      (data) => {
-        if (!mountedRef.current) return
-        switch (data.type) {
-          case 'session_init':
-            addLog('📡', 'SYSTEM', `Session: ${data.session_id}`, 'info')
-            // Send config as soon as backend session is ready (first connect + reconnect)
-            if (lastConfigRef.current) {
-              const rawWs = wsRef.current?.ws || wsRef.current
-              if (rawWs && rawWs.readyState === WebSocket.OPEN) {
-                rawWs.send(JSON.stringify(lastConfigRef.current))
-              }
-            }
-            break
-          case 'status': {
-            const state = data.data?.state || 'idle'
-            setStatus(state)
-            // Sweep finished — stop reconnecting so we don't restart it
-            if (state === 'completed' || state === 'stopped') {
-              lastConfigRef.current = null
-              // Cleanly close the reconnect handle (no more retries)
-              if (wsRef.current?.close) {
-                setTimeout(() => { try { wsRef.current?.close() } catch { /* empty */ } }, 500)
-              }
-            }
-            break
-          }
-          case 'log': {
-            const d = data.data || {}
-            addLog(d.emoji || '', d.category || '', d.message || '', d.level || 'info')
-            if (d.category === 'TROOPS' && d.message?.includes('entering sleep')) setStatus('sleeping')
-            if (d.category === 'SLEEP' && d.message?.includes('SUFFICIENT')) setStatus('running')
-            break
-          }
-          case 'summary':
-            setSummary(data.data)
-            break
-          case 'error':
-            addLog('❌', 'ERROR', data.message || 'Unknown error', 'error')
-            toast.error(data.message || 'Error')
-            break
-          default:
-            break
-        }
-      },
-      () => {
-        if (mountedRef.current) {
-          addLog('❌', 'SYSTEM', 'WebSocket error', 'error')
-        }
-      },
-      (event) => {
-        // Only fires on final close (after all retries exhausted or non-retryable)
-        if (!mountedRef.current) return
-        if (event?.code === 4009) {
-          addLog('🚫', 'SYSTEM', event.reason || 'This operation is already running in another tab', 'error')
-          toast.error(event.reason || 'Operation already running')
-        }
-        setStatus((prev) => (prev === 'completed' ? prev : 'stopped'))
-      },
-      {
-        reconnect: true,
-        maxRetries: 5,
-        onReconnecting: () => {
-          if (mountedRef.current) {
-            addLog('🔄', 'SYSTEM', 'Connection lost — reconnecting...', 'warning')
-            setStatus('reconnecting')
-          }
-        },
-        onReconnected: () => {
-          if (mountedRef.current) {
-            addLog('✅', 'SYSTEM', 'Reconnected — resuming operation', 'success')
-            setStatus('running')
-            // Config is re-sent when session_init arrives (see case above)
-          }
-        },
-      },
-    )
-
-    if (!handle) {
-      toast.error('No auth token')
-      setStatus('idle')
-      return
-    }
-    wsRef.current = handle
+    setStatus('connecting')
+    op.start('/ws/oasis-raider', {
+      radius,
+      troops,
+      max_targets: maxTargets,
+      bonus_filter:
+        bonusFilter.length === BONUS_TYPES.length
+          ? []
+          : bonusFilter.map((b) => b.toLowerCase()),
+      sleep_interval: sleepInterval,
+      dry_run: dryRun,
+      village_id: activeVillageId || undefined,
+      repeat_interval_seconds: repeatIntervalSeconds,
+    })
   }
 
   const handleStop = () => {
-    lastConfigRef.current = null
-    if (wsRef.current) {
-      // Send stop action through the current live socket
-      const ws = wsRef.current.ws || wsRef.current
-      try {
-        ws.send(JSON.stringify({ action: 'stop' }))
-      } catch { /* ignore */ }
-      // Close the reconnect handle (prevents auto-reconnect)
-      setTimeout(() => {
-        if (wsRef.current) {
-          try {
-            wsRef.current.close()
-          } catch { /* ignore */ }
-        }
-      }, 1000)
-    }
-    setStatus('stopped')
+    op.stop()
     addLog('⛔', 'STOP', 'Stop requested by user', 'warning')
+    // Server will emit operation_complete with status="stopped"; we let
+    // that flip the UI rather than racing it locally.
   }
 
   // Troop row management

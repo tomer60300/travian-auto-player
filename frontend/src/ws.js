@@ -94,8 +94,13 @@ export function createWebSocket(path, onMessage, onError, onClose, options = {})
       currentWs = null
 
       // Don't reconnect on: 4009 (already running), 4003 (no session),
-      // 1000 (normal close — operation completed cleanly)
-      const noRetry = event.code === 4009 || event.code === 4003 || event.code === 1000
+      // 4004 (session not found / expired — 24h TTL, server restart,
+      // or a different user's id), 1000 (normal close).
+      const noRetry =
+        event.code === 4009
+        || event.code === 4003
+        || event.code === 4004
+        || event.code === 1000
 
       // Auto-reconnect if enabled and not manually stopped
       if (reconnect && !stopped && !noRetry && attempts < maxRetries) {

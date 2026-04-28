@@ -70,15 +70,26 @@ class ConnectionManager:
 
         return user_id
 
-    async def connect(self, websocket: WebSocket, user_id: int, channel: str):
-        """Accept and register a WebSocket connection.
+    async def connect(
+        self,
+        websocket: WebSocket,
+        user_id: int,
+        channel: str,
+        *,
+        accept: bool = True,
+    ):
+        """Accept (optional) and register a WebSocket connection.
 
         Each connection gets a unique key ``channel_<id(ws)>`` so that
         multiple tabs on the same logical channel coexist without evicting
         each other.  The key is stored on ``websocket._ws_channel_key`` for
         later retrieval by :meth:`disconnect`.
+
+        Pass ``accept=False`` when the caller has already accepted the
+        websocket itself (Starlette rejects a second ``accept`` call).
         """
-        await websocket.accept()
+        if accept:
+            await websocket.accept()
         # Use unique key per connection so different tabs don't replace each other
         ws_key = f"{channel}_{id(websocket)}"
         async with self._lock:

@@ -2,6 +2,11 @@
 
 Endpoint: WS /ws/queue/run?token=<JWT>
 
+The plan execution runs as a managed background operation, decoupled from
+the WebSocket lifetime — backgrounding Safari (or any WS drop) does NOT
+abort the queue. Reconnect via ``/ws/sessions/{id}/stream`` to resume the
+live status feed with full message history.
+
 Protocol:
     1. Client connects with JWT in query param.
     2. Client sends config message:
@@ -11,7 +16,8 @@ Protocol:
        - {"type": "step_complete", "building": "...", "level": N, "success": true/false}
        - {"type": "complete", "results": [...]}       -- plan finished
        - {"type": "error", "message": "..."}          -- fatal error
-    4. Client can send {"action": "stop"} to abort execution.
+       - {"type": "operation_complete", "status": ...} -- terminal, pushed by manager
+    4. Client can send {"action": "stop"} to request graceful abort.
 """
 
 from __future__ import annotations
@@ -19,17 +25,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 
 import yaml
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from travian_api.exceptions import ActivityBudgetExhausted
+from travian_api.operation_manager import OperationContext, operation_manager
 from travian_api.services.build_queue_service import BuildPlan, BuildPlanItem
-from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.log_broadcast import log_stream_manager
-from travian_api.web.operation_gate import active_ops, captcha_stop
+from travian_api.web.operation_gate import active_ops
 from travian_api.web.sessions import TravianSession, session_manager
+from travian_api.web.ws._resumable import subscribe_and_tail
 from travian_api.web.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -48,8 +54,6 @@ def _parse_yaml_to_plan(yaml_content: str) -> BuildPlan:
         raise ValueError("YAML must be a mapping with 'village' and 'plan' keys.")
 
     raw_vid = data.get("village", data.get("village_id", 0))
-    # Sanitise: YAML may parse "auto" as a string or 0 as falsy.
-    # Ensure we always end up with an int (0 means "use session default").
     try:
         village_id = int(raw_vid)
     except (TypeError, ValueError):
@@ -78,136 +82,23 @@ def _parse_yaml_to_plan(yaml_content: str) -> BuildPlan:
     return BuildPlan(village_id=village_id, items=items)
 
 
-async def _send(ws: WebSocket, data: dict) -> None:
-    """Send JSON to the WebSocket; raise on failure so callers can handle disconnect."""
-    try:
-        await ws.send_json(data)
-    except (RuntimeError, WebSocketDisconnect):
-        raise WebSocketDisconnect()
+def _build_queue_coro(
+    plan: BuildPlan,
+    village_label: str,
+    yaml_content: str,
+    poll_interval: int,
+    use_video: bool,
+    verbose: bool,
+):
+    """Returns the OperationManager coroutine that executes a build plan."""
 
+    async def coro(ctx: OperationContext) -> None:
+        session: TravianSession = ctx.session
+        service = session.build_queue_service
 
-async def _try_send(ws: WebSocket, data: dict) -> bool:
-    """Best-effort send — returns False (no exception) if the WS is already closed."""
-    try:
-        await ws.send_json(data)
-        return True
-    except (RuntimeError, WebSocketDisconnect, Exception):
-        return False
+        # Resync exec_session label now that the village is known.
+        ctx.exec_session.label = f"Build Queue - {village_label}"
 
-
-@router.websocket("/ws/queue/run")
-async def queue_run_ws(websocket: WebSocket):
-    """Execute a build plan over WebSocket with real-time status streaming."""
-
-    # ── Authenticate ──────────────────────────────────────────────────
-    user_id = await ws_manager.authenticate(websocket)
-    if user_id is None:
-        return  # authenticate() already closed the socket
-
-    session: TravianSession | None = session_manager.get(user_id)
-    if session is None:
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="No active Travian session",
-        )
-        return
-
-    op_type = None  # Set after village_id is known (per-village gate)
-    gate_acquired = False
-
-    try:
-        op_started_at = time.monotonic()
-
-        await ws_manager.connect(websocket, user_id, CHANNEL)
-
-        exec_session = exec_session_manager.create(user_id, "queue", "Build Queue")
-
-        async def _tracked_send(ws: WebSocket, data: dict) -> None:
-            await _send(ws, data)
-            exec_session_manager.push(exec_session.id, data)
-
-        async def _tracked_try_send(ws: WebSocket, data: dict) -> bool:
-            ok = await _try_send(ws, data)
-            exec_session_manager.push(exec_session.id, data)
-            return ok
-
-        def _broadcast_log(message: str, level: str = "info") -> None:
-            """Push a log entry to the shared log stream for the Logs page."""
-            log_stream_manager.push(
-                {
-                    "timestamp": time.time(),
-                    "level": level,
-                    "source": "build_queue",
-                    "message": message,
-                    "user_id": user_id,
-                }
-            )
-
-        # ── Event used to signal cancellation from a client "stop" message ──
-        stop_event = asyncio.Event()
-
-        # ── Wait for the config message ───────────────────────────────
-        try:
-            raw = await asyncio.wait_for(websocket.receive_text(), timeout=30)
-            config = json.loads(raw)
-        except TimeoutError:
-            await _tracked_send(
-                websocket, {"type": "error", "message": "Timed out waiting for config message"}
-            )
-            return
-        except (json.JSONDecodeError, WebSocketDisconnect) as exc:
-            await _tracked_send(websocket, {"type": "error", "message": f"Invalid config: {exc}"})
-            return
-
-        yaml_content: str = config.get("yaml_content", "")
-        poll_interval: int = config.get("poll_interval", 30)
-        use_video: bool = config.get("use_video", False)
-        verbose: bool = config.get("verbose", False)
-
-        if not yaml_content:
-            await _tracked_send(websocket, {"type": "error", "message": "yaml_content is required"})
-            return
-
-        # ── Parse the YAML plan ───────────────────────────────────────
-        try:
-            plan = _parse_yaml_to_plan(yaml_content)
-        except (yaml.YAMLError, ValueError) as exc:
-            await _tracked_send(
-                websocket, {"type": "error", "message": f"Invalid build plan: {exc}"}
-            )
-            return
-
-        # Fall back to session active village when YAML has no village_id
-        if not plan.village_id and session.active_village_id:
-            plan.village_id = session.active_village_id
-
-        # Policy (not a mutex): a second queue loop on the same village would
-        # just duplicate polling work — the service-layer slot lock already
-        # prevents double-upgrades. Refuse cleanly so the user sees feedback.
-        op_type = f"queue:{plan.village_id}"
-        if op_type in active_ops.get_active(user_id):
-            await _tracked_send(
-                websocket,
-                {
-                    "type": "error",
-                    "message": "A queue is already running for this village",
-                },
-            )
-            return
-        active_ops.register(user_id, op_type)
-        gate_acquired = True
-
-        # Resolve village name for logging
-        village_label = str(plan.village_id)
-        if session.auth_state:
-            for v in session.auth_state.villages:
-                if v.id == plan.village_id:
-                    village_label = f"{v.name} ({v.id})"
-                    break
-
-        exec_session.label = f"Build Queue - {village_label}"
-        await _tracked_send(websocket, {"type": "session_init", "session_id": exec_session.id})
-        # Build equivalent CLI command for display
         cli_parts = [
             f"travian queue run plan.yaml --village {village_label} --poll {poll_interval}"
         ]
@@ -215,30 +106,38 @@ async def queue_run_ws(websocket: WebSocket):
             cli_parts.append("--use-video")
         if verbose:
             cli_parts.append("--verbose")
-        await _tracked_send(
-            websocket,
+
+        ctx.push(
             {
                 "type": "trigger_info",
                 "command": " ".join(cli_parts),
                 "plan_yaml": yaml_content,
-            },
+            }
         )
-        await _tracked_send(
-            websocket,
+        ctx.push(
             {
                 "type": "status",
                 "message": f"Parsed plan: village {village_label}, {len(plan.items)} items",
-            },
+            }
         )
-        _broadcast_log(f"Build queue started: {village_label}, {len(plan.items)} items")
+        log_stream_manager.push(
+            {
+                "level": "info",
+                "source": "build_queue",
+                "message": (f"Build queue started: {village_label}, {len(plan.items)} items"),
+                "user_id": ctx.user_id,
+            }
+        )
 
-        # ── Wire up the on_status callback ────────────────────────────
-        # Use add/remove to register a per-connection callback instead of
-        # overwriting the shared _on_status — safe for concurrent WS/REST calls.
-        service = session.build_queue_service
+        # Up-front guards.
+        try:
+            session.http_client.check_activity_budget()
+        except ActivityBudgetExhausted as exc:
+            ctx.push({"type": "error", "message": str(exc), "fatal": True})
+            return
 
-        # Use a thread-safe queue so the sync callback never blocks and
-        # messages are drained in order by an async task.
+        # Service status callbacks come from a worker thread; bridge them to
+        # the loop via a thread-safe queue + drainer task.
         status_queue: asyncio.Queue[str | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
@@ -246,61 +145,24 @@ async def queue_run_ws(websocket: WebSocket):
             loop.call_soon_threadsafe(status_queue.put_nowait, msg)
 
         async def _drain_status_queue() -> None:
-            """Continuously drain status messages and send them over WS."""
-            try:
-                while True:
-                    msg = await status_queue.get()
-                    if msg is None:
-                        break
-                    await _tracked_send(websocket, {"type": "status", "message": msg})
-            except WebSocketDisconnect:
-                pass
-
-        # Check if captcha was just resolved
-        if captcha_stop.should_stop(user_id, op_started_at):
-            await _tracked_send(
-                websocket,
-                {"type": "error", "message": "Stopped after captcha resolution — restart manually"},
-            )
-            return
-
-        # Activity budget check before starting execution
-        try:
-            session.http_client.check_activity_budget()
-        except ActivityBudgetExhausted as exc:
-            await _tracked_send(websocket, {"type": "error", "message": str(exc)})
-            return
+            while True:
+                msg = await status_queue.get()
+                if msg is None:
+                    return
+                ctx.push({"type": "status", "message": msg})
 
         service.add_status_callback(_sync_status_callback)
         drainer_task = asyncio.create_task(_drain_status_queue())
 
-        # ── Listener task: watch for client "stop" messages ───────────
-        async def _listen_for_stop() -> None:
-            try:
-                while True:
-                    raw_msg = await websocket.receive_text()
-                    try:
-                        msg = json.loads(raw_msg)
-                    except json.JSONDecodeError:
-                        continue
-                    if msg.get("action") == "stop":
-                        stop_event.set()
-                        await _tracked_send(
-                            websocket,
-                            {
-                                "type": "status",
-                                "message": "Stop requested -- aborting after current step",
-                            },
-                        )
-                        return
-            except WebSocketDisconnect:
-                stop_event.set()
+        # Watch for stop while the plan runs and cancel the exec task if so.
+        async def _wait_for_stop() -> None:
+            while not ctx.should_stop():
+                if await ctx.wait_or_stop(0.5):
+                    return
 
-        listener_task = asyncio.create_task(_listen_for_stop())
-
-        # ── Execute the plan ──────────────────────────────────────────
+        exec_task: asyncio.Task | None = None
+        stop_watcher: asyncio.Task | None = None
         try:
-            # Wrap execute_plan_continuous so we can cancel it on stop
             exec_task = asyncio.create_task(
                 service.execute_plan_continuous(
                     plan,
@@ -309,29 +171,21 @@ async def queue_run_ws(websocket: WebSocket):
                     verbose=verbose,
                 )
             )
+            stop_watcher = asyncio.create_task(_wait_for_stop())
 
-            # Wait for either execution to finish or stop signal
-            stop_task = asyncio.create_task(stop_event.wait())
-            done, pending = await asyncio.wait(
-                {exec_task, stop_task},
+            done, _pending = await asyncio.wait(
+                {exec_task, stop_watcher},
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            # If stop was triggered, cancel the execution
-            if stop_event.is_set() and not exec_task.done():
+            if ctx.should_stop() and exec_task and not exec_task.done():
                 exec_task.cancel()
                 try:
                     await exec_task
                 except asyncio.CancelledError:
                     pass
-                await _tracked_try_send(
-                    websocket,
-                    {
-                        "type": "status",
-                        "message": "Execution stopped by client",
-                    },
-                )
-                results = []
+                ctx.push({"type": "status", "message": "Execution stopped by client"})
+                results: list[dict] = []
                 for item in plan.items:
                     if item.status != "pending":
                         results.append(
@@ -342,63 +196,191 @@ async def queue_run_ws(websocket: WebSocket):
                                 "status": item.status,
                             }
                         )
-                await _tracked_try_send(websocket, {"type": "complete", "results": results})
-                _broadcast_log("Build queue stopped by user", "warning")
-            else:
-                # Normal completion
-                results = exec_task.result()
+                ctx.push({"type": "complete", "results": results})
+                log_stream_manager.push(
+                    {
+                        "level": "warning",
+                        "source": "build_queue",
+                        "message": "Build queue stopped by user",
+                        "user_id": ctx.user_id,
+                    }
+                )
+                return
 
-                for r in results:
-                    status_str = "OK" if r.get("status") == "started" else "FAIL"
-                    _broadcast_log(
-                        f"{r.get('building', '?')} -> Lv{r.get('level', '?')}: {status_str}"
-                    )
-                    await _tracked_try_send(
-                        websocket,
-                        {
-                            "type": "step_complete",
-                            "building": r.get("building", ""),
-                            "level": r.get("level", ""),
-                            "success": r.get("status") == "started",
-                        },
-                    )
-
-                await _tracked_try_send(websocket, {"type": "complete", "results": results})
-                _broadcast_log(f"Build queue completed ({len(results)} steps)", "success")
-
-            # Cancel any pending wait tasks
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-
-        except WebSocketDisconnect:
-            logger.info("Queue WS disconnected mid-execution: user=%s", user_id)
-        except Exception as exc:
-            logger.exception("Build queue execution failed for user %s", user_id)
-            await _tracked_try_send(websocket, {"type": "error", "message": str(exc)})
-            _broadcast_log(f"Build queue error: {exc}", "error")
+            # Normal completion path.
+            results = exec_task.result() if exec_task in done else []
+            for r in results:
+                ok = r.get("status") == "started"
+                log_stream_manager.push(
+                    {
+                        "level": "info",
+                        "source": "build_queue",
+                        "message": (
+                            f"{r.get('building', '?')} -> Lv{r.get('level', '?')}: "
+                            f"{'OK' if ok else 'FAIL'}"
+                        ),
+                        "user_id": ctx.user_id,
+                    }
+                )
+                ctx.push(
+                    {
+                        "type": "step_complete",
+                        "building": r.get("building", ""),
+                        "level": r.get("level", ""),
+                        "success": ok,
+                    }
+                )
+            ctx.push({"type": "complete", "results": results})
+            log_stream_manager.push(
+                {
+                    "level": "success",
+                    "source": "build_queue",
+                    "message": f"Build queue completed ({len(results)} steps)",
+                    "user_id": ctx.user_id,
+                }
+            )
         finally:
-            # Unregister this connection's callback and stop the drainer
             service.remove_status_callback(_sync_status_callback)
-            status_queue.put_nowait(None)  # signal drainer to exit
-            drainer_task.cancel()
-            listener_task.cancel()
-            for t in (drainer_task, listener_task):
+            status_queue.put_nowait(None)
+            for t in (drainer_task, stop_watcher):
+                if t is not None and not t.done():
+                    t.cancel()
+            for t in (drainer_task, stop_watcher):
+                if t is None:
+                    continue
                 try:
                     await t
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, Exception):
                     pass
 
-    except WebSocketDisconnect:
-        logger.info("Queue WS disconnected: user=%s", user_id)
-    except Exception as exc:
-        logger.exception("Unexpected error in queue WS for user %s", user_id)
-        await _tracked_try_send(websocket, {"type": "error", "message": f"Internal error: {exc}"})
-    finally:
-        if gate_acquired and op_type:
-            active_ops.unregister(user_id, op_type)
-        exec_session_manager.mark_disconnected(exec_session.id)
-        await ws_manager.disconnect(user_id, CHANNEL, websocket)
+    return coro
+
+
+@router.websocket("/ws/queue/run")
+async def queue_run_ws(websocket: WebSocket) -> None:
+    """Execute a build plan over WebSocket with real-time status streaming."""
+
+    user_id = await ws_manager.authenticate(websocket)
+    if user_id is None:
+        return
+
+    session: TravianSession | None = session_manager.get(user_id)
+    if session is None:
+        await websocket.close(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="No active Travian session",
+        )
+        return
+
+    await websocket.accept()
+
+    # Receive config first so we can do the per-village policy check before
+    # spawning anything (and avoid creating an exec_session for a rejected run).
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+        config = json.loads(raw)
+    except TimeoutError:
+        await websocket.send_json(
+            {"type": "error", "message": "Timed out waiting for config message", "fatal": True}
+        )
+        await websocket.close(code=4002)
+        return
+    except (json.JSONDecodeError, WebSocketDisconnect, RuntimeError) as exc:
+        try:
+            await websocket.send_json(
+                {"type": "error", "message": f"Invalid config: {exc}", "fatal": True}
+            )
+        except Exception:
+            pass
+        return
+
+    # Accept both bare-config and {action:"start", config:{...}} shapes so
+    # the resumable-hook frontend and any older clients both work.
+    if (
+        isinstance(config, dict)
+        and config.get("action") == "start"
+        and isinstance(config.get("config"), dict)
+    ):
+        config = config["config"]
+
+    yaml_content: str = config.get("yaml_content", "") if isinstance(config, dict) else ""
+    raw_poll: int = config.get("poll_interval", 30) if isinstance(config, dict) else 30
+    # Stealth floor on poll cadence: a configured 1s poll forces bot-like
+    # retry timing regardless of what the inner service does. Clamp to a
+    # 30s floor and 1h ceiling — humans don't reload faster than that, and
+    # don't wait longer than that for a queue check either.
+    poll_interval: int = max(30, min(int(raw_poll), 3600))
+    use_video: bool = bool(config.get("use_video", False)) if isinstance(config, dict) else False
+    verbose: bool = bool(config.get("verbose", False)) if isinstance(config, dict) else False
+
+    if not yaml_content:
+        await websocket.send_json(
+            {"type": "error", "message": "yaml_content is required", "fatal": True}
+        )
+        await websocket.close(code=4002)
+        return
+
+    try:
+        plan = _parse_yaml_to_plan(yaml_content)
+    except (yaml.YAMLError, ValueError) as exc:
+        await websocket.send_json(
+            {"type": "error", "message": f"Invalid build plan: {exc}", "fatal": True}
+        )
+        await websocket.close(code=4002)
+        return
+
+    if not plan.village_id and session.active_village_id:
+        plan.village_id = session.active_village_id
+
+    op_label = f"queue:{plan.village_id}"
+    if op_label in active_ops.get_active(user_id):
+        existing = next(
+            (op for op in operation_manager.list_for_user(user_id) if op.label == op_label),
+            None,
+        )
+        await websocket.send_json(
+            {
+                "type": "already_running",
+                "session_id": existing.session_id if existing else None,
+                "message": "A queue is already running for this village",
+            }
+        )
+        await websocket.close(code=4009)
+        return
+
+    village_label = str(plan.village_id)
+    if session.auth_state:
+        for v in session.auth_state.villages:
+            if v.id == plan.village_id:
+                village_label = f"{v.name} ({v.id})"
+                break
+
+    op = operation_manager.start(
+        user_id=user_id,
+        label=op_label,
+        session_type="queue",
+        session_label=f"Build Queue - {village_label}",
+        session=session,
+        coro=_build_queue_coro(
+            plan=plan,
+            village_label=village_label,
+            yaml_content=yaml_content,
+            poll_interval=poll_interval,
+            use_video=use_video,
+            verbose=verbose,
+        ),
+        require_unique_label=True,
+    )
+    if op is None:
+        existing = operation_manager.find_by_label(user_id, op_label)
+        await websocket.send_json(
+            {
+                "type": "already_running",
+                "session_id": existing.session_id if existing else None,
+                "message": "A queue is already running for this village",
+            }
+        )
+        await websocket.close(code=4009)
+        return
+
+    await subscribe_and_tail(websocket, user_id, CHANNEL, op.session_id)

@@ -683,7 +683,8 @@ class FarmBuilderService:
                 except Exception as exc:
                     logger.warning("scout send (%s,%s) attempt %d: %s", x, y, attempt + 1, exc)
                 if attempt < 2:
-                    await asyncio.sleep(5)
+                    from ..stealth.timing import HumanTiming as _HT_local
+                    await asyncio.sleep(_HT_local.micro_jitter(5.0, 0.35))
             if not success:
                 defense_failed[(x, y)] = "scout_send_failed"
                 await send_log("FB-DEFENSE", "⚠️", f"({x},{y}) scout_send_failed", "warning")
@@ -754,7 +755,8 @@ class FarmBuilderService:
                             "report fetch (%s,%s) attempt %d: %s", x, y, attempt + 1, exc
                         )
                     if attempt < 2:
-                        await asyncio.sleep(10)
+                        from ..stealth.timing import HumanTiming as _HT_local
+                        await asyncio.sleep(_HT_local.micro_jitter(10.0, 0.35))
                 if got:
                     defense_data[(x, y)] = got
                     cs = got["defender_combat_strength"]
@@ -783,6 +785,50 @@ class FarmBuilderService:
         added: List[Dict[str, Any]] = []
         skipped: List[Dict[str, Any]] = []
         fail_add: List[Dict[str, Any]] = []
+
+        # Stealth: shuffle within each bucket so the slot-add order varies
+        # across runs. Pure bucket-iteration order is identical for the same
+        # scan input, which produces an invariant cross-list insertion
+        # signature that's easy to fingerprint.
+        import random as _rand
+        for _bname in real_buckets:
+            real_buckets[_bname] = list(real_buckets[_bname])
+            _rand.shuffle(real_buckets[_bname])
+
+        # Stealth: establish farm-list page Referer chain ONCE before the
+        # bulk-edit phase. Real users open the rally → farm-list tab to
+        # edit; the API mutations should look like they originate from
+        # that page, not whichever scan/scout page was last visited.
+        navigator = getattr(self._http, "navigator", None)
+        if navigator is not None and navigator.enabled:
+            try:
+                await navigator.navigate_to_farm_list()
+            except Exception as exc:
+                logger.debug("Farm-list navigation noise failed (non-critical): %s", exc)
+
+        # Stealth: pacing helper for between-slot adds and periodic per-list
+        # think pauses. Keep it cheap (RAPID-class wait, ~0.4-2s) so it
+        # doesn't tank throughput on a 200-target run.
+        from ..stealth.human_delay import ActionType as _AT
+        from ..stealth.timing import HumanTiming as _HT
+
+        async def _pace_add(list_id: int) -> None:
+            try:
+                await self._http.human_delay.wait(_AT.RAPID, "adding farm-list target")
+            except Exception:
+                pass
+            # Periodic per-list "checking values" pause — only when stealth/
+            # human-delay is enabled, otherwise this turns into a hard-
+            # coded sleep regardless of the operator's stealth setting.
+            count = per_list_count.get(list_id, 0)
+            if count > 0 and count % 8 == 0:
+                stealth_on = bool(getattr(self._http, "stealth_enabled", False))
+                hd_on = bool(getattr(getattr(self._http, "human_delay", None), "enabled", False))
+                if stealth_on and hd_on:
+                    try:
+                        await asyncio.sleep(_HT.delay(2.0, variance_factor=0.6))
+                    except Exception:
+                        pass
 
         async def _overflow_list(bname: str) -> Tuple[int, str]:
             base_home = bucket_home[bname]
@@ -821,6 +867,7 @@ class FarmBuilderService:
                     if list_id is None:
                         list_id, list_name = await _overflow_list(bname)
                     units = {"t1": 2}
+                    await _pace_add(list_id)
                     try:
                         await self._farm_svc.add_slot(list_id, x, y, units=units, active=False)
                         per_list_count[list_id] = per_list_count.get(list_id, 0) + 1
@@ -846,6 +893,7 @@ class FarmBuilderService:
                         if "errorRaidListSlotLimit" in err or "Farm list is full" in err:
                             per_list_count[list_id] = SLOT_LIMIT
                             list_id, list_name = await _overflow_list(bname)
+                            await _pace_add(list_id)
                             try:
                                 await self._farm_svc.add_slot(
                                     list_id, x, y, units=units, active=False
@@ -911,6 +959,10 @@ class FarmBuilderService:
 
                 ok = False
                 for attempt in range(3):
+                    # Pace before EVERY attempt (including post-overflow)
+                    # so a retry after a list switch still gets a fresh
+                    # human-delay window on the new list.
+                    await _pace_add(list_id)
                     try:
                         await self._farm_svc.add_slot(list_id, x, y, units=row, active=True)
                         per_list_count[list_id] = per_list_count.get(list_id, 0) + 1
@@ -939,7 +991,8 @@ class FarmBuilderService:
                             list_id, list_name = await _overflow_list(bname)
                             continue
                         if attempt < 2:
-                            await asyncio.sleep(5)
+                            # Jittered retry — fixed 5s every time is a tell.
+                            await asyncio.sleep(_HT.micro_jitter(5.0, 0.35))
                         else:
                             fail_add.append({"x": x, "y": y, "reason": f"add_slot_failed: {err}"})
                             await send_log(

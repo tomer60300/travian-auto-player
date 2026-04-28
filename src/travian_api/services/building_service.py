@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from ..clients.http_client import HttpClient
@@ -18,6 +19,8 @@ from ..parsers.html_parser import (
     parse_empty_slot_buildings,
     parse_resources,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class BuildingService:
@@ -401,6 +404,21 @@ class BuildingService:
                     reward_used=False,
                     raw_response=f"{target['name']} requirements not met (no construct button).",
                 )
+
+            # Stealth: a real player constructing a NEW building opens the
+            # village center, clicks the empty slot, reviews the available
+            # building list, then clicks Build. upgrade_building uses
+            # pre_upgrade_flow for the same purpose; mirror it here so the
+            # construct path doesn't deep-link into build.php with a stale
+            # Referer chain. Run AFTER the queue/gold and "is target
+            # available" guards so the pre-flow doesn't waste page loads
+            # on requests that are about to be rejected anyway.
+            navigator = getattr(self.http_client, "navigator", None)
+            if navigator is not None and navigator.enabled:
+                try:
+                    await navigator.pre_construct_flow(slot_id, village_id=village_id)
+                except Exception as exc:
+                    logger.debug("pre_construct_flow noise failed (non-critical): %s", exc)
 
             build_url = target["build_url"]
             if village_id and f"newdid={village_id}" not in build_url:

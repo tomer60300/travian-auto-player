@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from ..stealth.throttler import RequestThrottler
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_random_exponential
 
 from ..config import Settings
 from ..debug_dump import debug_dumper
@@ -74,9 +74,13 @@ class HttpClient:
         self._curl_session: Optional[Any] = None  # CurlAsyncSession (lazy init)
 
         if not HAS_CURL_CFFI and settings.stealth:
-            logger.warning(
-                "curl_cffi not found — using httpx (TLS fingerprint will be detectable). "
-                "Install with: pip install curl_cffi"
+            # Fail closed: stealth mode + httpx-only means we'd send Chrome-shaped
+            # headers over a non-Chrome TLS/JA3 fingerprint. That mismatch is a
+            # stronger bot-tell than running with stealth disabled. Force the
+            # operator to either install curl_cffi or explicitly turn off stealth.
+            raise RuntimeError(
+                "stealth mode requires curl_cffi for matching TLS fingerprints. "
+                "Install with: pip install curl_cffi — or disable stealth in settings."
             )
 
         # Create httpx client (used as fallback or when stealth is off)
@@ -138,10 +142,10 @@ class HttpClient:
 
         # ── Persistent persona: same cookies = same browser identity ──
         self._persona_file = self._cookie_file.parent / ".travian_persona.json"
-        persona = load_persona(self._persona_file)
+        persona = load_persona(self._persona_file, server_url=settings.base_url)
         if persona is None:
             persona = build_persona(server_url=settings.base_url)
-            save_persona(persona, self._persona_file)
+            save_persona(persona, self._persona_file, server_url=settings.base_url)
             logger.info(
                 "Created new persona: %s (impersonate=%s)", persona.user_agent, persona.impersonate
             )
@@ -594,8 +598,13 @@ class HttpClient:
         #
         # These phrases don't normally appear in game HTML, but they can
         # show up in large JS bundles or error messages embedded in normal
-        # pages.  Only fire if the response is a short error page (<5000
-        # chars) or the HTTP status is an error code.
+        # pages. Distinguish:
+        #   - Short page (<5000) with 403/503 → real block page → hard stop
+        #     via captcha guard (a human would notice and stop, so should we)
+        #   - Otherwise but still suspicious → soft penalty (transient or
+        #     embedded-in-bundle false positive)
+        # 429 stays soft regardless because Travian rate-limits legitimate
+        # browser sessions too.
         error_page_patterns = [
             "bot-detection",
             "suspicious activity",
@@ -607,8 +616,12 @@ class HttpClient:
         for pattern in error_page_patterns:
             if pattern in response_lower:
                 is_short = resp_len < 5000
-                is_error = status_code in (0, 403, 429, 503)
-                if is_short or is_error:
+                is_block_status = status_code in (403, 503)
+                is_rate_limit = status_code == 429
+                if is_short and is_block_status:
+                    await _fire(pattern)
+                    return
+                if is_short or is_rate_limit or status_code in (0, 403, 503):
                     _soft_fire(pattern, _soft_penalty_seconds(90.0))
                     return
                 logger.debug(
@@ -745,13 +758,31 @@ class HttpClient:
         *,
         skip_reauth: bool = False,
         safe_to_retry: bool = True,
+        request_type: str = "json",
         _retry: int = 0,
     ) -> Dict[str, Any]:
-        """Make a POST request with JSON data."""
+        """Make a POST request with JSON data.
+
+        Args:
+            request_type: "json" (default, generic API client) or "xhr" — use
+                "xhr" for endpoints that the Travian frontend JavaScript calls
+                via fetch/XMLHttpRequest (map/position, tile-details,
+                /api/v1/farm-list/*). The XHR shape adds X-Requested-With and
+                Sec-Fetch-Mode: cors so browser-frontend traffic is not
+                fingerprinted as a generic JSON client.
+        """
         if not url.startswith("http"):
             url = urljoin(self.base_url, url.lstrip("/"))
 
-        headers = await self._stealth_pre_request(url, "json")
+        # XHR requests still send a JSON body; merge in JSON Content-Type on top
+        # of the XHR header shape so the request stays a valid fetch+json POST.
+        rt = "xhr" if request_type == "xhr" else "json"
+        headers = await self._stealth_pre_request(url, rt)
+        # The non-stealth header path returns Content-Type="" which would
+        # bypass the `not in` form of this guard. `not headers.get(...)`
+        # treats both "missing" and "empty string" identically.
+        if rt == "xhr" and not headers.get("Content-Type"):
+            headers["Content-Type"] = "application/json"
 
         try:
             masked_data = mask_sensitive_data(json.dumps(data))
@@ -821,6 +852,7 @@ class HttpClient:
                     data,
                     skip_reauth=skip_reauth,
                     safe_to_retry=safe_to_retry,
+                    request_type=request_type,
                     _retry=_retry + 1,
                 )
             raise NetworkError(f"Connection reset: {e}")
@@ -840,16 +872,21 @@ class HttpClient:
         data: Dict[str, Any] | None = None,
         skip_reauth: bool = False,
         safe_to_retry: bool = True,
+        request_type: str = "json",
     ) -> Dict[str, Any]:
         """Make a DELETE request (JSON response expected).
 
         Args:
             data: Optional JSON body to include with the DELETE request.
+            request_type: "json" (default) or "xhr" — see post_json.
         """
         if not url.startswith("http"):
             url = urljoin(self.base_url, url.lstrip("/"))
 
-        headers = await self._stealth_pre_request(url, "json")
+        rt = "xhr" if request_type == "xhr" else "json"
+        headers = await self._stealth_pre_request(url, rt)
+        if rt == "xhr" and data is not None and not headers.get("Content-Type"):
+            headers["Content-Type"] = "application/json"
 
         try:
             logger.debug(f"DELETE {url}")
@@ -940,9 +977,7 @@ class HttpClient:
                 response = await self.client.post(url, content=form_str.encode(), headers=headers)
 
             if response.status_code == 302:
-                location = response.headers.get("Location") or response.headers.get(
-                    "location", ""
-                )
+                location = response.headers.get("Location") or response.headers.get("location", "")
                 location_lower = location.lower()
                 # Travian uses POST -> 302 -> GET (PRG pattern) for every
                 # state-mutating endpoint. The 302 means the action already
@@ -972,13 +1007,24 @@ class HttpClient:
                         else urljoin(self.base_url, location)
                     )
                     logger.debug("POST 302 PRG: GET %s", target_url)
+                    # Real browsers issue the redirected GET as a fresh document
+                    # navigation — they do NOT carry the form POST's
+                    # Content-Type/Origin/Sec-Fetch-Dest=document headers across.
+                    # Reusing form headers on the GET is a recognizable
+                    # automation tell, so build page-load headers for the
+                    # redirected GET instead.
+                    if self._stealth_enabled:
+                        redirect_headers = self._browser_headers.for_page_load(target_url)
+                        redirect_headers["X-Version"] = await self._fetch_x_version()
+                    else:
+                        redirect_headers = {"X-Version": await self._fetch_x_version()}
                     if self._use_curl:
                         response = await self._curl_get(
-                            target_url, headers, follow_redirects=True
+                            target_url, redirect_headers, follow_redirects=True
                         )
                     else:
                         response = await self.client.get(
-                            target_url, headers=headers, follow_redirects=True
+                            target_url, headers=redirect_headers, follow_redirects=True
                         )
 
             await self._check_suspicious_response(
@@ -1034,7 +1080,11 @@ class HttpClient:
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
+        # Random-exponential backoff: avoids the textbook 1s, 2s, 4s, 8s
+        # cadence (a recognizable bot signature) by sampling each wait
+        # uniformly between 0 and 2^attempt — same expected throughput, no
+        # power-of-two stripes in request timing.
+        wait=wait_random_exponential(multiplier=0.8, max=12),
         retry=retry_if_exception_type(
             (httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ())
         ),

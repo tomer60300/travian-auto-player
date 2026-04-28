@@ -153,6 +153,53 @@ class PageNavigator:
         rally_url = f"/build.php?gid=16&tt=2{newdid_amp}"
         await self._visit(rally_url, "opening rally point")
 
+    async def navigate_to_map(self, village_id: Optional[int] = None) -> None:
+        """Navigate to the world map page (/karte.php).
+
+        Map tile XHRs (map/position, tile-details) are fired by frontend JS
+        from the map page. If we POST those without first opening
+        karte.php, the Referer chain points at whatever page we last
+        visited — a clear desync from how a real browser produces those
+        requests.
+        """
+        if not self.enabled:
+            return
+
+        newdid = f"?newdid={village_id}" if village_id else ""
+
+        if self._current_page != f"/karte.php{newdid}":
+            await self._visit(f"/karte.php{newdid}", "opening world map")
+
+    async def navigate_to_farm_list(self, village_id: Optional[int] = None) -> None:
+        """Navigate to the farm-list edit page on the rally point.
+
+        Chain: dorf2.php → rally point → farm-list tab. Used before any
+        bulk farm-list mutation API (slot add/remove, send) so the
+        Referer/Origin header chain matches what the browser would send
+        when a player is editing the list through the UI.
+        """
+        if not self.enabled:
+            return
+
+        await self.navigate_to_rally_point(village_id)
+        await self._delay.wait(ActionType.CLICK, "opening farm list tab")
+        newdid_amp = f"&newdid={village_id}" if village_id else ""
+        farm_url = f"/build.php?gid=16&tt=99{newdid_amp}"
+        await self._visit(farm_url, "opening farm-list tab")
+
+    async def pre_construct_flow(self, slot_id: int, village_id: Optional[int] = None) -> None:
+        """Full navigation flow before constructing a NEW building.
+
+        Mirrors the upgrade pre-flow but for empty slots: dorf2 → click
+        empty slot (opens construction picker) → review options. The
+        actual construct POST happens after this returns.
+        """
+        if not self.enabled:
+            return
+
+        await self.navigate_to_building(slot_id, village_id)
+        await self._delay.wait(ActionType.DECISION, "reviewing buildings to construct")
+
     async def navigate_to_reports(self) -> None:
         """Navigate to reports page."""
         if not self.enabled:

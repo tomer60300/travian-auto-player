@@ -427,7 +427,13 @@ class OasisRaiderService:
                         "warning",
                     )
 
-            # 5d — Send raid (or dry-run)
+            # 5d — Send raid (or dry-run). raid_succeeded gates the local
+            # troop deduction and burst counter — without this, a soft
+            # failure (no confirmation form, rate-limit hint) would still
+            # decrement the local count and the sweep would press on as if
+            # the send happened.
+            raid_succeeded = config.dry_run
+            soft_failure = False
             raid_troops_str = self._format_troops(config.troops, tribe_id)
             if config.dry_run:
                 await send_log(
@@ -454,28 +460,53 @@ class OasisRaiderService:
                             "success",
                         )
                         stats["sent"] += 1
+                        raid_succeeded = True
                     else:
+                        raw = (result.raw_response or "")[:200]
                         await send_log(
                             "RAID",
                             "❌",
-                            f"Failed: {result.raw_response[:200]}",
+                            f"Failed: {raw}",
                             "error",
                         )
+                        # No-confirmation-form / rate-limit / generic page is
+                        # a soft block. Pause this sweep — a real player who
+                        # saw the form stop appearing would close the tab,
+                        # not fire 30 more raids in 60 seconds.
+                        soft_failure = True
                 except Exception as e:
                     await send_log("RAID", "❌", f"Failed: {e}", "error")
+                    soft_failure = True
 
-            # 5e — Deduct troops (optimistic local count)
-            for key, amount in config.troops.items():
-                available[key] = available.get(key, 0) - amount
-            remaining_str = self._format_troops(available, tribe_id)
-            await send_log("TROOPS", "🏠", f"Remaining: {remaining_str}", "info")
-            if self._has_enough_troops(available, config.troops):
-                await send_log("TROOPS", "✅", "Sufficient for next raid", "info")
-            else:
-                await send_log("TROOPS", "⚠️", "Insufficient — will check on next loop", "warning")
-
-            # 5e-post — Increment burst counter (Mitigation 6 tracking)
-            raids_in_burst += 1
+            if raid_succeeded:
+                # 5e — Deduct troops only when the send actually went through.
+                for key, amount in config.troops.items():
+                    available[key] = available.get(key, 0) - amount
+                remaining_str = self._format_troops(available, tribe_id)
+                await send_log("TROOPS", "🏠", f"Remaining: {remaining_str}", "info")
+                if self._has_enough_troops(available, config.troops):
+                    await send_log("TROOPS", "✅", "Sufficient for next raid", "info")
+                else:
+                    await send_log(
+                        "TROOPS", "⚠️", "Insufficient — will check on next loop", "warning"
+                    )
+                # 5e-post — Increment burst counter (Mitigation 6 tracking)
+                raids_in_burst += 1
+            elif soft_failure:
+                # Apply throttler penalty and abort the rest of the sweep.
+                # Continuing through "ghost sends" with deducted-but-unsent
+                # troops is exactly the pattern Travian's anti-bot scopes for.
+                try:
+                    self._http.throttler.add_penalty(60.0)
+                except Exception:
+                    pass
+                await send_log(
+                    "STOP",
+                    "🛑",
+                    "Soft failure detected — pausing sweep (60s throttle penalty applied)",
+                    "warning",
+                )
+                break
 
             # Check max raids limit
             if config.max_targets > 0 and stats["sent"] >= config.max_targets:
@@ -611,8 +642,10 @@ class OasisRaiderService:
     ) -> None:
         """Mitigation 2 — Simulate a human scrolling the map between oasis clicks.
 
-        Uses the navigator's idle_browse which visits a random game page
-        through the full stealth pipeline (throttler, delays, headers).
+        Use navigate_to_map (karte.php) so the next tile-details XHR
+        carries a Referer chain consistent with what the browser would
+        produce — a tile-details popup is opened from the map page, not
+        from /profile.php or /statistiken.php.
         """
         await send_log(
             "BROWSE",
@@ -621,9 +654,11 @@ class OasisRaiderService:
             "info",
         )
         try:
-            await self._http.navigator.idle_browse(village_id=village_id)
+            navigator = getattr(self._http, "navigator", None)
+            if navigator is not None and navigator.enabled:
+                await navigator.navigate_to_map(village_id=village_id)
         except Exception as exc:
-            logger.debug("Map browse noise failed (non-critical): %s", exc)
+            logger.debug("Map browse navigation failed (non-critical): %s", exc)
 
     async def _human_think_delay(
         self,
@@ -784,10 +819,17 @@ class OasisRaiderService:
         return [t for t in tiles if t.is_oasis and not t.player_id]
 
     async def _fetch_oasis_detail(self, x: int, y: int) -> dict:
-        """Fetch oasis detail via tile-details API and parse bonus + troops."""
+        """Fetch oasis detail via tile-details API and parse bonus + troops.
+
+        Uses ``request_type="xhr"`` so the request carries the same
+        X-Requested-With / Sec-Fetch-Mode=cors headers the Travian
+        frontend would send when a player opens a tile popup from the
+        map page.
+        """
         resp = await self._http.post_json(
             "/api/v1/map/tile-details",
             {"x": x, "y": y},
+            request_type="xhr",
         )
         html = resp.get("html", "")
 

@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import api from '../api'
-import { createWebSocket } from '../ws'
+import { useResumableOperation } from '../hooks/useResumableOperation'
 import WebSocketPanel from '../components/WebSocketPanel'
 import { useToast } from '../components/Toast'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -406,7 +406,6 @@ export default function BuildQueue() {
   const [wsMessages, setWsMessages] = useState([])
   const [wsStatus, setWsStatus] = useState('disconnected')
   const [running, setRunning] = useState(false)
-  const wsRef = useRef(null)
   const timersRef = useRef([])
   const mountedRef = useRef(true)
 
@@ -449,7 +448,6 @@ export default function BuildQueue() {
       mountedRef.current = false
       timersRef.current.forEach(({ type, id }) => type === 'interval' ? clearInterval(id) : clearTimeout(id))
       timersRef.current = []
-      if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } ; wsRef.current = null }
     }
   }, [])
 
@@ -492,93 +490,79 @@ export default function BuildQueue() {
     }
   }
 
+  // ── Resumable hook handler ──────────────────────────────────────
+  const msgIdRef = useRef(Date.now())
+  const addMessage = useCallback((type, text, extra) => {
+    setWsMessages((prev) => [
+      ...prev,
+      { id: ++msgIdRef.current, type, text, timestamp: new Date().toISOString(), ...extra },
+    ])
+  }, [])
+
+  const handleQueueMessage = useCallback((data) => {
+    if (!mountedRef.current || !data) return
+    if (data.type === 'session_init') {
+      addMessage('info', `Session: ${data.session_id} (viewable from /sessions)`)
+    } else if (data.type === 'trigger_info') {
+      addMessage('warning', `$ ${data.command}`, data.plan_yaml ? { detail: data.plan_yaml, detailLabel: 'Show plan.yaml' } : undefined)
+    } else if (data.type === 'status') {
+      addMessage('info', data.message)
+    } else if (data.type === 'step_complete') {
+      addMessage(data.success ? 'success' : 'error', `${data.building} -> Level ${data.level}: ${data.success ? 'Done' : 'Failed'}`)
+    } else if (data.type === 'complete') {
+      addMessage('success', 'Build queue completed!')
+      setRunning(false); setWsStatus('disconnected')
+    } else if (data.type === 'error') {
+      addMessage('error', data.message)
+    } else if (data.type === 'already_running') {
+      addMessage('warning', data.message || 'A queue is already running for this village')
+    } else if (data.message) {
+      addMessage('info', data.message)
+    }
+  }, [addMessage])
+
+  const handleQueueStatusChange = useCallback((next) => {
+    if (next === 'connecting' || next === 'reconnecting' || next === 'running') {
+      // On page reload / Safari resume, the hook reattaches to a still-
+      // running session and only flips status. Mirror that into `running`
+      // so the Stop button is visible (otherwise the UI shows the Execute
+      // button as if nothing were live).
+      setRunning(true)
+      setWsStatus(next === 'running' ? 'running' : next)
+    } else if (next === 'completed' || next === 'stopped' || next === 'failed') {
+      setRunning(false); setWsStatus('disconnected')
+    }
+  }, [])
+
+  const queueOp = useResumableOperation('queue', {
+    onMessage: handleQueueMessage,
+    onStatusChange: handleQueueStatusChange,
+  })
+
   // Execute
   const startExecution = useCallback(() => {
     setShowConfirm(false)
-    // Clear any leftover timers from previous execution
     timersRef.current.forEach(({ type, id }) => type === 'interval' ? clearInterval(id) : clearTimeout(id))
     timersRef.current = []
 
     setWsMessages([])
-    setWsStatus('connected')
+    setWsStatus('connecting')
     setRunning(true)
 
-    let msgId = Date.now()
-    const addMessage = (type, text, extra) => {
-      setWsMessages((prev) => [...prev, { id: ++msgId, type, text, timestamp: new Date().toISOString(), ...extra }])
-    }
-
-    const configPayload = { yaml_content: generatedYaml, poll_interval: pollInterval, use_video: useVideo, verbose }
     const itemCount = queueItems.length
+    addMessage('info', `Executing ${itemCount} items${useVideo ? ' with video speed-up' : ''}...`)
 
-    const sendConfig = (ws) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        setWsStatus('running')
-        ws.send(JSON.stringify(configPayload))
-        addMessage('info', `Executing ${itemCount} items${useVideo ? ' with video speed-up' : ''}...`)
-      }
-    }
-
-    addMessage('info', 'Connecting to build queue executor...')
-
-    const handle = createWebSocket(
-      '/ws/queue/run',
-      (data) => {
-        if (!mountedRef.current) return
-        if (data.type === 'session_init') addMessage('info', `Session: ${data.session_id} (viewable from /sessions)`)
-        else if (data.type === 'trigger_info') addMessage('warning', `$ ${data.command}`, data.plan_yaml ? { detail: data.plan_yaml, detailLabel: 'Show plan.yaml' } : undefined)
-        else if (data.type === 'status') addMessage('info', data.message)
-        else if (data.type === 'step_complete') {
-          addMessage(data.success ? 'success' : 'error', `${data.building} -> Level ${data.level}: ${data.success ? 'Done' : 'Failed'}`)
-        }
-        else if (data.type === 'complete') { addMessage('success', 'Build queue completed!'); setRunning(false); setWsStatus('disconnected') }
-        else if (data.type === 'error') addMessage('error', data.message)
-        else if (data.message) addMessage('info', data.message)
-      },
-      () => { if (mountedRef.current) { addMessage('error', 'WebSocket connection lost — max retries reached'); setRunning(false); setWsStatus('disconnected') } },
-      (event) => {
-        if (!mountedRef.current) return
-        if (event?.code === 4009) addMessage('error', event.reason || 'This operation is already running in another tab')
-        setRunning(false); setWsStatus('disconnected')
-      },
-      {
-        reconnect: true,
-        maxRetries: 20,
-        onReconnecting: () => {
-          if (!mountedRef.current) return
-          setWsStatus('reconnecting')
-          addMessage('warning', 'Connection lost — reconnecting...')
-        },
-        onReconnected: (ws) => {
-          if (!mountedRef.current) return
-          addMessage('success', 'Reconnected — resuming queue execution')
-          sendConfig(ws)
-        },
-      }
-    )
-
-    if (!handle) { addMessage('error', 'No auth token'); setRunning(false); setWsStatus('disconnected'); return }
-    wsRef.current = handle
-
-    // First connect — send config once open
-    const waitForOpen = setInterval(() => {
-      const ws = handle.ws
-      if (ws?.readyState === WebSocket.OPEN) {
-        clearInterval(waitForOpen)
-        sendConfig(ws)
-      } else if (!ws || ws.readyState >= 2) clearInterval(waitForOpen)
-    }, 100)
-    timersRef.current.push({ type: 'interval', id: waitForOpen })
-    const safety = setTimeout(() => clearInterval(waitForOpen), 10000)
-    timersRef.current.push({ type: 'timeout', id: safety })
-  }, [generatedYaml, pollInterval, useVideo, verbose, queueItems.length])
+    queueOp.start('/ws/queue/run', {
+      yaml_content: generatedYaml,
+      poll_interval: pollInterval,
+      use_video: useVideo,
+      verbose,
+    })
+  }, [generatedYaml, pollInterval, useVideo, verbose, queueItems.length, queueOp, addMessage])
 
   const handleStop = () => {
-    const ws = wsRef.current?.ws ?? wsRef.current
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ action: 'stop' }))
-      toast.warning('Stop signal sent')
-    }
+    queueOp.stop()
+    toast.warning('Stop signal sent')
   }
 
   return (

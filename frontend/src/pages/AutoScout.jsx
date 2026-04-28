@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
+import { useResumableOperation } from '../hooks/useResumableOperation'
 import { createWebSocket } from '../ws'
 import { useToast } from '../components/Toast'
 import WebSocketPanel from '../components/WebSocketPanel'
@@ -81,10 +82,9 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const [scanMessages, setScanMessages] = useState([])
   const [enrichProgress, setEnrichProgress] = useState(null)
   const [scanStats, setScanStats] = useState(null)
-  const wsRef = useRef(null)
   const mountedRef = useRef(true)
 
-  useEffect(() => { return () => { mountedRef.current = false; if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } } } }, [])
+  useEffect(() => { return () => { mountedRef.current = false } }, [])
 
   // Persist to localStorage on change
   useEffect(() => { localStorage.setItem(LS_KEY_ALLIANCES, JSON.stringify(excludeAlliances)) }, [excludeAlliances])
@@ -118,6 +118,94 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     setNewPlayer('')
   }
 
+  const PHASE_LABELS = useMemo(() => ({
+    map_scan: 'Scanning map regions...',
+    map_scan_done: 'Map scan complete',
+    pre_filter: 'Filtering tiles...',
+    enriching: 'Enriching tile details...',
+    enrich_done: 'Enrichment complete',
+    player_pop: 'Querying player populations...',
+    player_pop_done: 'Player populations loaded',
+    post_filter: 'Applying filters...',
+  }), [])
+
+  const handleScanMessage = useCallback((data) => {
+    if (!mountedRef.current || !data) return
+    switch (data.type) {
+      case 'session_init':
+        addScanMsg('info', `Session: ${data.session_id} (viewable from /sessions)`)
+        break
+      case 'phase':
+        setScanPhase(PHASE_LABELS[data.phase] || data.phase)
+        addScanMsg(data.phase?.includes('done') || data.phase?.includes('complete') ? 'success' : 'info', data.message)
+        if (data.detail) addScanMsg('detail', data.detail)
+        break
+      case 'scan_region':
+        addScanMsg('detail', `  Fetching map region ${data.index}/${data.total} at (${data.center.x},${data.center.y})`)
+        break
+      case 'enrich_progress':
+        setEnrichProgress({ index: data.index, total: data.total, eta: data.eta, name: data.tile?.name })
+        break
+      case 'enrich_detail': {
+        const t = data.tile
+        if (t.error) {
+          addScanMsg('error', `  [${data.index}/${data.total}] (${t.x},${t.y}) Failed: ${t.error}`)
+        } else {
+          addScanMsg('detail', `  [${data.index}/${data.total}] (${t.x},${t.y}) ${t.name || '?'} — pop:${t.pop ?? '?'} player:${t.player || '-'} ally:${t.alliance || '-'}`)
+        }
+        break
+      }
+      case 'player_pops': {
+        const players = data.players || []
+        const source = data.source || 'visible'
+        if (players.length > 0) {
+          addScanMsg('info', source === 'profile'
+            ? 'Player populations (from profile pages):'
+            : 'Player populations (sum of visible villages):')
+          for (const p of players) {
+            const parts = p.villages.map((v) => `${v.name}(${v.x},${v.y})=${v.pop}`).join(' + ')
+            const visibleSum = p.visible_total ?? p.total
+            if (p.source === 'profile' && p.total !== visibleSum) {
+              addScanMsg('info', `  ${p.name}: ${p.total} (profile) | visible: ${visibleSum} = ${parts}`)
+            } else {
+              addScanMsg('info', `  ${p.name}: ${p.total} = ${parts}`)
+            }
+          }
+        }
+        break
+      }
+      case 'complete': {
+        const tiles = data.tiles || []
+        setScanPhase(null)
+        setEnrichProgress(null)
+        setScanStats(data.stats || null)
+        addScanMsg('success', `Scan complete: ${tiles.length} targets found in ${data.stats?.time_seconds || '?'}s`)
+        onScanComplete(tiles)
+        setScanning(false)
+        toast.success(`Scan complete: ${tiles.length} targets found`)
+        break
+      }
+      case 'error':
+        addScanMsg('error', data.message || 'Error')
+        setScanPhase(null)
+        setScanning(false)
+        toast.error(data.message || 'Scan failed')
+        break
+      case 'already_running':
+        addScanMsg('warning', 'A scan is already running on the server — reattaching')
+        break
+      default:
+        if (data.message) addScanMsg('info', data.message)
+    }
+  }, [PHASE_LABELS, addScanMsg, onScanComplete, toast])
+
+  const scanOp = useResumableOperation('scout-scan', {
+    onMessage: handleScanMessage,
+    onStatusChange: (next) => {
+      if (next === 'reconnecting' && mountedRef.current) setScanPhase('Reconnecting...')
+    },
+  })
+
   const handleScan = () => {
     setScanning(true)
     setScanMessages([])
@@ -144,100 +232,13 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     if (allianceIds.length > 0) body.exclude_alliance_ids = allianceIds
     if (allianceNames.length > 0) body.exclude_alliance_names = allianceNames
 
-    const PHASE_LABELS = {
-      map_scan: 'Scanning map regions...',
-      map_scan_done: 'Map scan complete',
-      pre_filter: 'Filtering tiles...',
-      enriching: 'Enriching tile details...',
-      enrich_done: 'Enrichment complete',
-      player_pop: 'Querying player populations...',
-      player_pop_done: 'Player populations loaded',
-      post_filter: 'Applying filters...',
-    }
-
-    const ws = createWebSocket('/ws/scout/scan',
-      (data) => {
-        if (!mountedRef.current) return
-        switch (data.type) {
-          case 'session_init':
-            addScanMsg('info', `Session: ${data.session_id} (viewable from /sessions)`)
-            break
-          case 'phase':
-            setScanPhase(PHASE_LABELS[data.phase] || data.phase)
-            addScanMsg(data.phase?.includes('done') || data.phase?.includes('complete') ? 'success' : 'info', data.message)
-            if (data.detail) addScanMsg('detail', data.detail)
-            break
-          case 'scan_region':
-            addScanMsg('detail', `  Fetching map region ${data.index}/${data.total} at (${data.center.x},${data.center.y})`)
-            break
-          case 'enrich_progress':
-            setEnrichProgress({ index: data.index, total: data.total, eta: data.eta, name: data.tile?.name })
-            break
-          case 'enrich_detail': {
-            const t = data.tile
-            if (t.error) {
-              addScanMsg('error', `  [${data.index}/${data.total}] (${t.x},${t.y}) Failed: ${t.error}`)
-            } else {
-              addScanMsg('detail', `  [${data.index}/${data.total}] (${t.x},${t.y}) ${t.name || '?'} — pop:${t.pop ?? '?'} player:${t.player || '-'} ally:${t.alliance || '-'}`)
-            }
-            break
-          }
-          case 'player_pops': {
-            const players = data.players || []
-            const source = data.source || 'visible'
-            if (players.length > 0) {
-              addScanMsg('info', source === 'profile'
-                ? 'Player populations (from profile pages):'
-                : 'Player populations (sum of visible villages):')
-              for (const p of players) {
-                const parts = p.villages.map((v) => `${v.name}(${v.x},${v.y})=${v.pop}`).join(' + ')
-                const visibleSum = p.visible_total ?? p.total
-                if (p.source === 'profile' && p.total !== visibleSum) {
-                  addScanMsg('info', `  ${p.name}: ${p.total} (profile) | visible: ${visibleSum} = ${parts}`)
-                } else {
-                  addScanMsg('info', `  ${p.name}: ${p.total} = ${parts}`)
-                }
-              }
-            }
-            break
-          }
-          case 'complete': {
-            const tiles = data.tiles || []
-            setScanPhase(null)
-            setEnrichProgress(null)
-            setScanStats(data.stats || null)
-            addScanMsg('success', `Scan complete: ${tiles.length} targets found in ${data.stats?.time_seconds || '?'}s`)
-            onScanComplete(tiles)
-            setScanning(false)
-            toast.success(`Scan complete: ${tiles.length} targets found`)
-            break
-          }
-          case 'error':
-            addScanMsg('error', data.message || 'Error')
-            setScanPhase(null)
-            setScanning(false)
-            toast.error(data.message || 'Scan failed')
-            break
-          default:
-            if (data.message) addScanMsg('info', data.message)
-        }
-      },
-      () => { if (mountedRef.current) { addScanMsg('error', 'WebSocket error'); setScanPhase(null); setScanning(false) } },
-      () => { if (mountedRef.current) { setScanPhase(null); setScanning(false) } }
-    )
-
-    if (!ws) { addScanMsg('error', 'No auth token'); setScanPhase(null); setScanning(false); return }
-    wsRef.current = ws
-
-    ws.addEventListener('open', () => {
-      setScanPhase('Scanning map...')
-      addScanMsg('info', `Starting scan: radius=${radius}, pop=${minPop}–${maxPop}`)
-      ws.send(JSON.stringify(body))
-    })
+    setScanPhase('Scanning map...')
+    addScanMsg('info', `Starting scan: radius=${radius}, pop=${minPop}–${maxPop}`)
+    scanOp.start('/ws/scout/scan', body)
   }
 
   const handleCancel = () => {
-    if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } wsRef.current = null }
+    scanOp.stop()
     setScanPhase(null)
     setScanning(false)
     addScanMsg('warning', 'Scan cancelled by user')
@@ -462,8 +463,11 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   const [wsStatus, setWsStatus] = useState('disconnected')
   const [messages, setMessages] = useState([])
   const [progress, setProgress] = useState(null)
-  const wsRef = useRef(null)
   const mountedRef = useRef(true)
+  // The auto-scout op runs server-side via OperationManager. We use the
+  // resumable hook so iOS Safari background / page reload / network drop
+  // doesn't kill the sweep — the next pageshow reattaches.
+  const passResolverRef = useRef(null)
   const activeVillageId = useGameStore((s) => s.activeVillageId)
   const toast = useToast()
 
@@ -505,7 +509,6 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
     mountedRef.current = false
     loopStoppedRef.current = true
     if (loopTimerRef.current) clearTimeout(loopTimerRef.current)
-    if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } wsRef.current = null }
   } }, [])
 
   const msgIdRef = useRef(0)
@@ -535,11 +538,136 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   useEffect(() => { resumeIndexRef.current = resumeIndex }, [resumeIndex])
   useEffect(() => { loopDurationRef.current = loopDuration }, [loopDuration])
 
-  // Core: run one scout pass via WS, returns a promise that resolves when complete
+  // Hook handler: this runs for EVERY message, including history replay
+  // after a page reload / Safari resume reattaches via localStorage. The
+  // earlier per-pass router design dropped resumed messages because
+  // runOnePass hadn't yet installed it. Inlining the UI updates here
+  // means a backgrounded sweep that ends while you were away still
+  // updates progress + appends results when you come back.
+  // Pass-completion still resolves only on `operation_complete` so the
+  // next loop cycle waits for OperationManager cleanup (the inner
+  // `complete` frame fires before the per-user `scout` label is
+  // released; resolving on it would race the next start).
+  const handleAutoMessage = useCallback((data) => {
+    if (!data || !mountedRef.current) return
+    switch (data.type) {
+      case 'session_init': addMessage('info', `Session: ${data.session_id} (viewable from /sessions)`); break
+      case 'trigger_info': addMessage('warning', `$ ${data.command}`); break
+      case 'scanning': addMessage('info', data.message || 'Scanning map...'); break
+      case 'scan_complete': addMessage('success', `Scan: ${data.targets} targets`); break
+      case 'target_list':
+        addMessage('info', `Targets queued: ${(data.targets || []).length} villages`)
+        break
+      case 'player_pops': {
+        const players = data.players || []
+        const popSource = data.source || 'visible'
+        if (players.length > 0) {
+          addMessage('info', popSource === 'profile'
+            ? 'Player populations (from profile pages):'
+            : 'Player max population (visible villages sum):')
+          for (const p of players) {
+            const parts = p.villages.map((v) => `${v.name}(${v.x},${v.y})=${v.pop}`).join(' + ')
+            const visibleSum = p.visible_total ?? p.total
+            if (p.source === 'profile' && p.total !== visibleSum) {
+              addMessage('info', `  ${p.name}: ${p.total} (profile) | visible: ${visibleSum} = ${parts}`)
+            } else {
+              addMessage('info', `  ${p.name}: ${p.total} = ${parts}`)
+            }
+          }
+        }
+        break
+      }
+      case 'scouting':
+        setProgress({ index: data.index, total: data.total, eta: data.eta })
+        addMessage('info', `[${data.index}/${data.total}] Scouting (${data.target.x},${data.target.y}) ${data.target.name || ''}${data.eta ? ' | ' + data.eta : ''}`)
+        break
+      case 'scout_result': {
+        const ok = data.success
+        const errStr = !ok && data.error ? `: ${data.error}` : ''
+        const ttStr = data.travel_time ? ` | ${data.travel_time}` : ''
+        const t = data.target || {}
+        addMessage(ok ? 'success' : 'warning', `[${data.index || '?'}/${data.total || '?'}] (${t.x ?? '?'},${t.y ?? '?'}) ${ok ? 'Sent' : 'Failed'}${errStr}${ttStr}`)
+        break
+      }
+      case 'waiting':
+        setProgress((prev) => prev ? { ...prev, waitRemaining: data.remaining } : prev)
+        break
+      case 'complete': {
+        const timeStr = data.total_time_seconds ? ` in ${data.total_time_seconds}s` : ''
+        const avgStr = data.avg_time_per_target ? ` (avg ${data.avg_time_per_target}s/target)` : ''
+        addMessage('success', `Pass done: ${data.successful}/${data.total_sent} sent${timeStr}${avgStr}`)
+        setProgress(null); setWsStatus('disconnected')
+        if (data.next_start_index != null) setResumeIndex(data.next_start_index)
+        else setResumeIndex((prev) => (prev + (data.total_sent || 0)) % (scanResultsRef.current?.length || 1))
+        break
+      }
+      case 'scout_preflight':
+        addMessage('info', `Scouts available: ${data.available}${data.needed_per_target > 1 ? ` (${data.needed_per_target} per target)` : ''} — can send to ${data.can_send_to}/${data.total_targets} targets`)
+        break
+      case 'scouts_capped':
+        addMessage('warning', data.message || `Capped to ${data.can_send_to} targets (${data.available} scouts idle)`)
+        break
+      case 'scouts_exhausted':
+        addMessage('warning', data.message || `Scouts ran out after ${data.sent_so_far} sends`)
+        setProgress(null)
+        break
+      case 'scouts_low':
+        addMessage('warning', `Scouts running low: ${data.remaining} remaining`)
+        break
+      case 'noise_action':
+        addMessage('info', data.message || 'Stealth: idle browsing...')
+        break
+      case 're_navigate':
+        addMessage('info', data.message || 'Stealth: breaking request pattern...')
+        break
+      case 'error': addMessage('error', data.message || 'Error'); break
+      case 'already_running':
+        addMessage('warning', data.message || 'Auto-scout already running on the server — reattaching')
+        if (!running) setRunning(true)
+        break
+      case 'operation_complete': {
+        const resolver = passResolverRef.current
+        passResolverRef.current = null
+        resolver?.()
+        break
+      }
+      default: if (data.message) addMessage('info', data.message); break
+    }
+  }, [addMessage, running])
+
+  const handleAutoStatus = useCallback((next) => {
+    if (next === 'running') setWsStatus('running')
+    if (next === 'reconnecting') setWsStatus('reconnecting')
+    if (next === 'failed' || next === 'stopped') {
+      setWsStatus('disconnected')
+      const resolver = passResolverRef.current
+      passResolverRef.current = null
+      resolver?.()
+    }
+  }, [])
+
+  const scoutAutoOp = useResumableOperation('scout-auto', {
+    onMessage: handleAutoMessage,
+    onStatusChange: handleAutoStatus,
+  })
+
+  // If we mount with a stored session_id, the op is running server-side.
+  // Reflect that in `running` so the Stop button is visible and Start
+  // is hidden — otherwise the page would offer to start a duplicate.
+  useEffect(() => {
+    if (scoutAutoOp.sessionId && !running) {
+      setRunning(true)
+      addMessage('info', `Resumed running auto-scout (session ${scoutAutoOp.sessionId})`)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scoutAutoOp.sessionId])
+
+  // Core: run one scout pass via the resumable hook, returns a promise that
+  // resolves on the terminal `complete`/`operation_complete` frame OR a 5-min
+  // safety timeout.
   const runOnePass = useCallback((cycleNum) => {
     return new Promise((resolve) => {
       if (!mountedRef.current || loopStoppedRef.current) { resolve(); return }
-      // Safety timeout — resolve if WS never completes (5 min max per pass)
       let resolved = false
       const safeResolve = () => { if (!resolved) { resolved = true; resolve() } }
       const safetyTimer = setTimeout(() => {
@@ -547,120 +675,32 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
         setWsStatus('disconnected')
         safeResolve()
       }, 300000)
+      passResolverRef.current = () => { clearTimeout(safetyTimer); safeResolve() }
 
-      // Send selected targets with enriched data — don't let the backend re-scan
       const curResults = scanResultsRef.current
       const curSelected = selectedRef.current
       const targets = curResults
         .filter((_, i) => curSelected.has(i))
         .map((r) => ({ x: r.x, y: r.y, name: r.village_name || r.name || '', pop: r.population || 0, player: r.player_name || '' }))
-      setWsStatus('connected')
+      setWsStatus('connecting')
       if (cycleNum > 0) addMessage('info', `--- Loop cycle ${cycleNum + 1} ---`)
 
-      const ws = createWebSocket('/ws/scout/auto',
-        (data) => {
-          if (!mountedRef.current) return
-          switch (data.type) {
-            case 'session_init': addMessage('info', `Session: ${data.session_id} (viewable from /sessions)`); break
-            case 'trigger_info': addMessage('warning', `$ ${data.command}`); break
-            case 'scanning': addMessage('info', data.message || 'Scanning map...'); break
-            case 'scan_complete': addMessage('success', `Scan: ${data.targets} targets`); break
-            case 'target_list':
-              addMessage('info', `Targets queued: ${(data.targets || []).length} villages`)
-              break
-            case 'player_pops': {
-              const players = data.players || []
-              const popSource = data.source || 'visible'
-              if (players.length > 0) {
-                addMessage('info', popSource === 'profile'
-                  ? 'Player populations (from profile pages):'
-                  : 'Player max population (visible villages sum):')
-                for (const p of players) {
-                  const parts = p.villages.map((v) => `${v.name}(${v.x},${v.y})=${v.pop}`).join(' + ')
-                  const visibleSum = p.visible_total ?? p.total
-                  if (p.source === 'profile' && p.total !== visibleSum) {
-                    addMessage('info', `  ${p.name}: ${p.total} (profile) | visible: ${visibleSum} = ${parts}`)
-                  } else {
-                    addMessage('info', `  ${p.name}: ${p.total} = ${parts}`)
-                  }
-                }
-              }
-              break
-            }
-            case 'scouting':
-              setProgress({ index: data.index, total: data.total, eta: data.eta })
-              addMessage('info', `[${data.index}/${data.total}] Scouting (${data.target.x},${data.target.y}) ${data.target.name || ''}${data.eta ? ' | ' + data.eta : ''}`)
-              break
-            case 'scout_result': {
-              const ok = data.success
-              const errStr = !ok && data.error ? `: ${data.error}` : ''
-              const ttStr = data.travel_time ? ` | ${data.travel_time}` : ''
-              const t = data.target || {}
-              addMessage(ok ? 'success' : 'warning', `[${data.index || '?'}/${data.total || '?'}] (${t.x ?? '?'},${t.y ?? '?'}) ${ok ? 'Sent' : 'Failed'}${errStr}${ttStr}`)
-              break
-            }
-            case 'waiting':
-              // Update progress bar remaining but don't spam the log
-              setProgress((prev) => prev ? { ...prev, waitRemaining: data.remaining } : prev)
-              break
-            case 'complete': {
-              const timeStr = data.total_time_seconds ? ` in ${data.total_time_seconds}s` : ''
-              const avgStr = data.avg_time_per_target ? ` (avg ${data.avg_time_per_target}s/target)` : ''
-              addMessage('success', `Pass done: ${data.successful}/${data.total_sent} sent${timeStr}${avgStr}`)
-              setProgress(null); setWsStatus('disconnected')
-              // Update round-robin resume index (prefer backend-computed value)
-              if (data.next_start_index != null) setResumeIndex(data.next_start_index)
-              else setResumeIndex((prev) => (prev + (data.total_sent || 0)) % (scanResultsRef.current?.length || 1))
-              clearTimeout(safetyTimer); safeResolve()
-              break
-            }
-            case 'scout_preflight':
-              addMessage('info', `Scouts available: ${data.available}${data.needed_per_target > 1 ? ` (${data.needed_per_target} per target)` : ''} — can send to ${data.can_send_to}/${data.total_targets} targets`)
-              break
-            case 'scouts_capped':
-              addMessage('warning', data.message || `Capped to ${data.can_send_to} targets (${data.available} scouts idle)`)
-              break
-            case 'scouts_exhausted':
-              addMessage('warning', data.message || `Scouts ran out after ${data.sent_so_far} sends`)
-              setProgress(null)
-              break
-            case 'scouts_low':
-              addMessage('warning', `Scouts running low: ${data.remaining} remaining`)
-              break
-            case 'noise_action':
-              addMessage('info', data.message || 'Stealth: idle browsing...')
-              break
-            case 're_navigate':
-              addMessage('info', data.message || 'Stealth: breaking request pattern...')
-              break
-            case 'error': addMessage('error', data.message || 'Error'); break
-            default: if (data.message) addMessage('info', data.message); break
-          }
-        },
-        () => { if (mountedRef.current) { addMessage('error', 'WS error'); setWsStatus('disconnected') }; clearTimeout(safetyTimer); safeResolve() },
-        () => { if (mountedRef.current) { setWsStatus('disconnected') }; clearTimeout(safetyTimer); safeResolve() }
-      )
-
-      if (!ws) { addMessage('error', 'No auth token'); setWsStatus('disconnected'); clearTimeout(safetyTimer); safeResolve(); return }
-      // Close any previous WS before assigning new one
-      if (wsRef.current) { try { wsRef.current.close() } catch { /* empty */ } }
-      wsRef.current = ws
-      ws.addEventListener('open', () => {
-        if (!mountedRef.current) { try { ws.close() } catch { /* empty */ } clearTimeout(safetyTimer); safeResolve(); return }
-        setWsStatus('running')
-        ws.send(JSON.stringify({
-          radius: scanConfigRef.current.radius || 10,
-          amount: amountRef.current,
-          type: scoutTypeRef.current,
-          delay_min: delayMinRef.current,
-          delay_max: delayMaxRef.current,
-          targets: targets,
-          village_id: villageIdRef.current,
-          start_index: resumeIndexRef.current,
-        }))
+      // Spawn the detached op via the resumable hook. Message handling
+      // is shared by the always-running handleAutoMessage so resumes
+      // restored via localStorage still update the UI even if no pass
+      // is locally in flight.
+      scoutAutoOp.start('/ws/scout/auto', {
+        radius: scanConfigRef.current.radius || 10,
+        amount: amountRef.current,
+        type: scoutTypeRef.current,
+        delay_min: delayMinRef.current,
+        delay_max: delayMaxRef.current,
+        targets: targets,
+        village_id: villageIdRef.current,
+        start_index: resumeIndexRef.current,
       })
     })
-  }, [addMessage]) // refs are stable — no deps needed for values read from refs
+  }, [addMessage])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleStart = async () => {
     if (selected.size === 0) { toast.warning('No targets selected'); return }
@@ -705,7 +745,10 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   const handleStop = () => {
     loopStoppedRef.current = true
     if (loopTimerRef.current) { clearTimeout(loopTimerRef.current); loopTimerRef.current = null }
-    if (wsRef.current) { wsRef.current.close(); wsRef.current = null }
+    // Op is detached server-side; send stop via the hook (which routes
+    // through the live WS — starter or session-stream — depending on
+    // whether we're tailing a fresh op or a resumed one).
+    scoutAutoOp.stop()
     setRunning(false); setWsStatus('disconnected')
     addMessage('warning', 'Stopped by user')
     toast.warning('Auto-scout stopped')

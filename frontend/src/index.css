@@ -1027,6 +1027,69 @@ h1, h2, h3 {
   .report-row { grid-template-columns: 60px 50px 1fr 60px; font-size: 0.8rem; }
   .report-header { grid-template-columns: 60px 50px 1fr 60px; font-size: 0.8rem; }
   .dialog-card { border-radius: 20px; }
+
+  /* iOS Safari zooms in when an input <16px is focused, reflowing the
+     whole page. Force 16px on every form control on small viewports.
+     Visual sizing is still controlled by padding + width. */
+  input, select, textarea,
+  .input-field, .input-troop, .input-sm {
+    font-size: 16px !important;
+  }
+
+  /* Min 44×44 hit-area for icon buttons (Apple HIG / Material). */
+  button, a.tab-active, a.nav-link, [role="button"] {
+    min-height: 44px;
+  }
+  .btn-xs, .btn-sm {
+    min-height: 44px;
+    padding-top: 0.6rem;
+    padding-bottom: 0.6rem;
+  }
+
+  /* Long URLs in WS panels and log streams must wrap, not horizontally
+     scroll the whole viewport. */
+  .ws-panel, .ws-panel-line {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  /* Tables that don't fit: let them scroll horizontally instead of
+     squeezing rows. */
+  .data-table, .report-row, .report-header {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Touch / iOS niceties — apply on all viewports, harmless on desktop. */
+* {
+  /* Disable the grey tap flash on iOS without disabling :active. */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Strip iOS's default rounded-corner / inner-shadow look from text-like
+   inputs ONLY. Touching this rule for checkbox / radio / range / file /
+   color / submit erases the browser's native control styling and we
+   don't ship replacement track/thumb/check-mark styling for them. */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="search"],
+input[type="tel"],
+input[type="url"],
+input[type="date"],
+input[type="datetime-local"],
+input[type="time"],
+input:not([type]),
+textarea {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+html {
+  /* Stop iOS from auto-resizing text on orientation change. */
+  -webkit-text-size-adjust: 100%;
 }
 
 /* Tablet: 768px–1023px */

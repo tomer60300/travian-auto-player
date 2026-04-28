@@ -36,6 +36,18 @@ class BrowserHeaders:
         else:
             self._last_page = f"{self._base_url}/{path.lstrip('/')}"
 
+    def _accept_encoding(self) -> str:
+        """Accept-Encoding string matching the persona's browser capabilities.
+
+        Chromium 124+ stable advertises zstd alongside the older codecs.
+        Sending only "gzip, deflate, br" while claiming a recent Chrome UA
+        is a subtle fingerprint mismatch — capability strings are checked
+        against UA in modern bot detectors.
+        """
+        if self._persona.is_chromium:
+            return "gzip, deflate, br, zstd"
+        return "gzip, deflate, br"
+
     def _sec_ch_headers(self) -> Dict[str, str]:
         """Return sec-ch-ua headers derived from the persona.
 
@@ -55,7 +67,7 @@ class BrowserHeaders:
             "User-Agent": self._ua.ua,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": self._persona.accept_language,
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": self._accept_encoding(),
             "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
             "Cache-Control": "max-age=0",
@@ -81,7 +93,7 @@ class BrowserHeaders:
             "User-Agent": self._ua.ua,
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": self._persona.accept_language,
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": self._accept_encoding(),
             "Content-Type": "application/json",
             "Connection": "keep-alive",
             "Origin": self._base_url,
@@ -104,7 +116,7 @@ class BrowserHeaders:
             "User-Agent": self._ua.ua,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": self._persona.accept_language,
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": self._accept_encoding(),
             "Content-Type": "application/x-www-form-urlencoded",
             "Connection": "keep-alive",
             "Origin": self._base_url,
@@ -130,7 +142,7 @@ class BrowserHeaders:
             "User-Agent": self._ua.ua,
             "Accept": "*/*",
             "Accept-Language": self._persona.accept_language,
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": self._accept_encoding(),
             "Connection": "keep-alive",
             "X-Requested-With": "XMLHttpRequest",
         }

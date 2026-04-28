@@ -1,8 +1,20 @@
-"""WebSocket handler for Oasis Raider — live raid progress streaming."""
+"""WebSocket handler for Oasis Raider.
+
+Thin wrapper around :class:`OperationManager`: this WS only
+
+* parses the start config and spawns the managed background task,
+* forwards client ``{"action": "stop"}`` messages to that task,
+* tails the task's :class:`ExecutionSession` so the initiating client sees
+  live progress.
+
+Crucially, dropping the WS (Safari background, page reload, network blip)
+does **not** stop the sweep — the op coroutine keeps running to completion,
+and the client can reconnect via ``/ws/sessions/{id}/stream`` to resume the
+live tail with full message history.
+"""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -11,11 +23,11 @@ from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from travian_api.exceptions import ActivityBudgetExhausted
+from travian_api.operation_manager import OperationContext, operation_manager
 from travian_api.services.oasis_raider_service import OasisRaiderConfig, OasisRaiderService
-from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.log_broadcast import log_stream_manager
-from travian_api.web.operation_gate import active_ops, captcha_stop
 from travian_api.web.sessions import TravianSession, session_manager
+from travian_api.web.ws._resumable import subscribe_and_tail
 from travian_api.web.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -23,6 +35,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 CHANNEL = "oasis_raider"
+
+OP_LABEL = "oasis-raider"
 
 
 async def _send(ws: WebSocket, data: dict) -> bool:
@@ -33,114 +47,15 @@ async def _send(ws: WebSocket, data: dict) -> bool:
         return False
 
 
-async def _listen_for_stop(websocket: WebSocket, stop_event: asyncio.Event) -> None:
-    """Background task: listen for stop messages while sweep runs."""
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-                if msg.get("action") == "stop":
-                    stop_event.set()
-                    return
-            except (json.JSONDecodeError, TypeError):
-                pass
-    except (WebSocketDisconnect, RuntimeError):
-        stop_event.set()
+def _build_oasis_coro(config: OasisRaiderConfig):
+    """Return the coroutine OperationManager will run in the background."""
 
+    async def coro(ctx: OperationContext) -> None:
+        service = OasisRaiderService(ctx.session)
 
-@router.websocket("/ws/oasis-raider")
-async def oasis_raider_ws(websocket: WebSocket) -> None:
-    """Oasis Raider WS: auth, receive config, run sweep with live log streaming."""
-
-    user_id = await ws_manager.authenticate(websocket)
-    if user_id is None:
-        return
-
-    session: Optional[TravianSession] = session_manager.get(user_id)
-    if session is None or session.auth_state is None:
-        await websocket.close(code=4003, reason="No active Travian session")
-        return
-
-    op_type = "oasis-raider"
-
-    # Policy (not a mutex): a second oasis-raider sweep would scan the same
-    # candidate oases and burn troops on duplicate raids. The per-tile lock
-    # only serializes the dispatch on one coord, not the overall sweep.
-    if op_type in active_ops.get_active(user_id):
-        await websocket.accept()
-        await websocket.send_json(
-            {
-                "type": "error",
-                "message": "An oasis raider is already running for this account",
-                "fatal": True,
-            }
-        )
-        await websocket.close(code=4009, reason="Oasis raider already running")
-        return
-
-    try:
-        op_started_at = time.monotonic()
-        active_ops.register(user_id, op_type)
-
-        await ws_manager.connect(websocket, user_id, CHANNEL)
-        exec_session = exec_session_manager.create(user_id, "oasis-raider", "Oasis Raider")
-
-        async def tracked_send(data: dict) -> bool:
-            ok = await _send(websocket, data)
-            if ok:
-                exec_session_manager.push(exec_session.id, data)
-            return ok
-
-        await tracked_send({"type": "session_init", "session_id": exec_session.id})
-
-        # ── Wait for start command ───────────────────────────────────
-        try:
-            raw = await websocket.receive_text()
-        except (WebSocketDisconnect, RuntimeError):
-            return
-
-        try:
-            msg = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            await tracked_send({"type": "error", "message": "Invalid JSON"})
-            return
-
-        if msg.get("action") != "start":
-            await tracked_send({"type": "error", "message": "Expected start action"})
-            return
-
-        # ── Parse config ─────────────────────────────────────────────
-        cfg = msg.get("config", {})
-        config = OasisRaiderConfig(
-            radius=cfg.get("radius", 15),
-            troops=cfg.get("troops", {}),
-            max_targets=cfg.get("max_targets", 0),
-            bonus_filter=cfg.get("bonus_filter", []),
-            sleep_interval=cfg.get("sleep_interval", 60),
-            dry_run=cfg.get("dry_run", False),
-            village_id=cfg.get("village_id"),
-            repeat_interval_seconds=cfg.get("repeat_interval_seconds", 0),
-        )
-
-        if not config.troops:
-            await tracked_send({"type": "error", "message": "No troops configured"})
-            return
-
-        await tracked_send({"type": "status", "data": {"state": "running"}})
-
-        # ── Set up service + callbacks ───────────────────────────────
-        service = OasisRaiderService(session)
-        stop_event = asyncio.Event()
-
-        async def send_log(
-            category: str,
-            emoji: str,
-            message: str,
-            level: str = "info",
-        ) -> None:
+        async def send_log(category: str, emoji: str, message: str, level: str = "info") -> None:
             ts = time.time()
-            await tracked_send(
+            ctx.push(
                 {
                     "type": "log",
                     "data": {
@@ -158,92 +73,163 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
                     "level": level,
                     "source": "oasis_raider",
                     "message": f"[{category}] {emoji} {message}",
-                    "user_id": user_id,
+                    "user_id": ctx.user_id,
                 }
             )
 
         async def check_stop() -> bool:
-            return stop_event.is_set()
+            return ctx.should_stop()
 
-        # ── Run sweep with background stop listener ──────────────────
-        listener = asyncio.create_task(_listen_for_stop(websocket, stop_event))
+        ctx.push({"type": "status", "data": {"state": "running"}})
+        iteration = 0
+        while not ctx.should_stop():
+            try:
+                ctx.session.http_client.check_activity_budget()
+            except ActivityBudgetExhausted as exc:
+                # fatal=True so OperationManager terminal-status detection
+                # marks this as FAILED rather than COMPLETED.
+                ctx.push({"type": "error", "message": str(exc), "fatal": True})
+                ctx.push({"type": "status", "data": {"state": "stopped"}})
+                return
 
-        try:
-            iteration = 0
-            while not stop_event.is_set():
-                # Check if captcha was just resolved — stop instead of auto-resuming
-                if captcha_stop.should_stop(user_id, op_started_at):
-                    await tracked_send(
-                        {
-                            "type": "error",
-                            "message": "Stopped after captcha resolution — restart manually",
-                        }
-                    )
-                    await tracked_send({"type": "status", "data": {"state": "stopped"}})
-                    break
-
-                # Activity budget check
-                try:
-                    session.http_client.check_activity_budget()
-                except ActivityBudgetExhausted as exc:
-                    await tracked_send({"type": "error", "message": str(exc)})
-                    await tracked_send({"type": "status", "data": {"state": "stopped"}})
-                    break
-
-                iteration += 1
-                if iteration > 1:
-                    await send_log(
-                        "RECURRING",
-                        "🔁",
-                        f"Starting iteration #{iteration} (repeat_interval={config.repeat_interval_seconds}s)",
-                        "info",
-                    )
-                    await tracked_send({"type": "status", "data": {"state": "running"}})
-
-                stats = await service.run_sweep(config, send_log, check_stop)
-                await tracked_send({"type": "summary", "data": stats})
-
-                # If user stopped mid-sweep or recurring is disabled — exit
-                if stop_event.is_set() or config.repeat_interval_seconds <= 0:
-                    break
-
-                # Wait for repeat_interval_seconds (interruptible by stop)
-                wait_secs = config.repeat_interval_seconds
+            iteration += 1
+            if iteration > 1:
                 await send_log(
                     "RECURRING",
-                    "⏱️",
-                    f"Iteration #{iteration} complete — next run in {wait_secs}s",
+                    "🔁",
+                    f"Starting iteration #{iteration} "
+                    f"(repeat_interval={config.repeat_interval_seconds}s)",
                     "info",
                 )
-                await tracked_send({"type": "status", "data": {"state": "sleeping"}})
+                ctx.push({"type": "status", "data": {"state": "running"}})
 
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=wait_secs)
-                    # stop_event fired → user stopped during wait
-                    break
-                except TimeoutError:
-                    pass  # timeout reached, run next iteration
+            stats = await service.run_sweep(config, send_log, check_stop)
+            ctx.push({"type": "summary", "data": stats})
 
-            state = "stopped" if stop_event.is_set() else "completed"
-            await tracked_send({"type": "status", "data": {"state": state}})
-        except (WebSocketDisconnect, RuntimeError):
-            pass
-        except Exception as exc:
-            logger.exception("Oasis raider error for user %s", user_id)
-            await tracked_send({"type": "error", "message": str(exc)})
-            await tracked_send({"type": "status", "data": {"state": "stopped"}})
-        finally:
-            listener.cancel()
-            try:
-                await listener
-            except asyncio.CancelledError:
-                pass
+            if ctx.should_stop() or config.repeat_interval_seconds <= 0:
+                break
 
+            # Stealth: micro-jitter the recurring interval so the request
+            # bursts don't sit on perfect second boundaries indefinitely.
+            from travian_api.stealth.timing import HumanTiming as _HT
+            wait_secs = _HT.micro_jitter(float(config.repeat_interval_seconds), 0.10)
+            await send_log(
+                "RECURRING",
+                "⏱️",
+                f"Iteration #{iteration} complete — next run in {wait_secs:.0f}s",
+                "info",
+            )
+            ctx.push({"type": "status", "data": {"state": "sleeping"}})
+
+            # round + 1s floor: micro_jitter on a 1s configured interval can
+            # land below 1.0; int() would truncate to 0 and create a tight
+            # busy loop.
+            stopped_during_sleep = await ctx.wait_or_stop(max(1, round(wait_secs)))
+            if stopped_during_sleep:
+                break
+
+        terminal = "stopped" if ctx.should_stop() else "completed"
+        ctx.push({"type": "status", "data": {"state": terminal}})
+
+    return coro
+
+
+@router.websocket("/ws/oasis-raider")
+async def oasis_raider_ws(websocket: WebSocket) -> None:
+    """Oasis Raider WS: receive start config, spawn detached op, tail its stream."""
+
+    user_id = await ws_manager.authenticate(websocket)
+    if user_id is None:
+        return
+
+    session: Optional[TravianSession] = session_manager.get(user_id)
+    if session is None or session.auth_state is None:
+        await websocket.close(code=4003, reason="No active Travian session")
+        return
+
+    # Already running? Hand the client the existing session_id so it can
+    # subscribe via /ws/sessions/{id}/stream instead of starting a duplicate.
+    existing = operation_manager.find_by_label(user_id, OP_LABEL)
+    if existing is not None:
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "already_running",
+                "session_id": existing.session_id,
+                "message": (
+                    "An oasis raider is already running for this account. "
+                    "Subscribe to /ws/sessions/{id}/stream to view it."
+                ),
+            }
+        )
+        await websocket.close(code=4009, reason="Oasis raider already running")
+        return
+
+    await websocket.accept()
+
+    # ── Receive start config ─────────────────────────────────────────────
+    try:
+        raw = await websocket.receive_text()
     except (WebSocketDisconnect, RuntimeError):
-        pass
-    except Exception:
-        logger.exception("Unexpected error in oasis raider WS for user %s", user_id)
-    finally:
-        active_ops.unregister(user_id, op_type)
-        exec_session_manager.mark_disconnected(exec_session.id)
-        await ws_manager.disconnect(user_id, CHANNEL, websocket)
+        return
+
+    try:
+        msg = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        await _send(websocket, {"type": "error", "message": "Invalid JSON"})
+        await websocket.close(code=4002)
+        return
+
+    if not isinstance(msg, dict) or msg.get("action") != "start":
+        await _send(websocket, {"type": "error", "message": "Expected start action"})
+        await websocket.close(code=4002)
+        return
+
+    cfg = msg.get("config", {}) or {}
+    config = OasisRaiderConfig(
+        radius=cfg.get("radius", 15),
+        troops=cfg.get("troops", {}),
+        max_targets=cfg.get("max_targets", 0),
+        bonus_filter=cfg.get("bonus_filter", []),
+        sleep_interval=cfg.get("sleep_interval", 60),
+        dry_run=cfg.get("dry_run", False),
+        village_id=cfg.get("village_id"),
+        repeat_interval_seconds=cfg.get("repeat_interval_seconds", 0),
+    )
+
+    if not config.troops:
+        await _send(websocket, {"type": "error", "message": "No troops configured"})
+        await websocket.close(code=4002)
+        return
+
+    # ── Spawn the detached op (atomic uniqueness) ───────────────────────
+    op = operation_manager.start(
+        user_id=user_id,
+        label=OP_LABEL,
+        session_type="oasis-raider",
+        session_label="Oasis Raider",
+        session=session,
+        coro=_build_oasis_coro(config),
+        require_unique_label=True,
+    )
+    if op is None:
+        # Lost the race against another tab that started the same op while
+        # we were waiting for the start payload. Surface the existing
+        # session_id so the client can subscribe to it instead.
+        existing = operation_manager.find_by_label(user_id, OP_LABEL)
+        await _send(
+            websocket,
+            {
+                "type": "already_running",
+                "session_id": existing.session_id if existing else None,
+                "message": (
+                    "An oasis raider is already running for this account. "
+                    "Subscribe to /ws/sessions/{id}/stream to view it."
+                ),
+            },
+        )
+        await websocket.close(code=4009, reason="Oasis raider already running")
+        return
+
+    # Tail the session — WS death is independent of op lifetime.
+    await subscribe_and_tail(websocket, user_id, CHANNEL, op.session_id)

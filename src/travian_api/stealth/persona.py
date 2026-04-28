@@ -141,13 +141,25 @@ def build_persona(ua: str | None = None, server_url: str = "") -> Persona:
 
 # ── Persistence (F2) ──────────────────────────────────────────────────
 
-_PERSONA_TTL_DAYS = 7
+# A real browser profile keeps its UA/TLS for the lifetime of the install,
+# not 7 days. Rotating UA mid-cookie-jar is itself a tell: same auth cookie,
+# different Chrome version, different TLS fingerprint. Pin the persona to
+# roughly cookie lifetime so it only rotates on a deliberate identity reset.
+_PERSONA_TTL_DAYS = 365
 
 
-def save_persona(persona: Persona, path: Path) -> None:
-    """Persist persona to a JSON file with a creation timestamp."""
+def save_persona(persona: Persona, path: Path, server_url: str = "") -> None:
+    """Persist persona to a JSON file with a creation timestamp.
+
+    The server URL is recorded alongside the persona so a server change
+    (e.g. switching from .com to .de, or moving to a new world) rotates
+    the persona automatically — language pack and timezone implications
+    of accept_language wouldn't survive a server migration realistically.
+    """
     data = asdict(persona)
     data["created_at"] = datetime.now(UTC).isoformat()
+    if server_url:
+        data["server_url"] = server_url
     try:
         path.write_text(json.dumps(data, indent=2))
         logger.debug("Saved persona to %s", path)
@@ -155,8 +167,19 @@ def save_persona(persona: Persona, path: Path) -> None:
         logger.warning("Failed to save persona to %s: %s", path, exc)
 
 
-def load_persona(path: Path, ttl_days: int = _PERSONA_TTL_DAYS) -> Persona | None:
-    """Load persona from JSON file, returning None if missing or expired."""
+def load_persona(
+    path: Path,
+    ttl_days: int = _PERSONA_TTL_DAYS,
+    *,
+    server_url: str = "",
+) -> Persona | None:
+    """Load persona from JSON file, returning None if missing/expired/mismatched.
+
+    Returns None — forcing a fresh persona — when the saved server URL
+    doesn't match the current ``server_url`` argument. Same cookie file
+    against a different server is the same scenario as an account change:
+    we don't want to reuse the old TLS/locale identity.
+    """
     try:
         if not path.exists():
             return None
@@ -170,6 +193,14 @@ def load_persona(path: Path, ttl_days: int = _PERSONA_TTL_DAYS) -> Persona | Non
         if age_days > ttl_days:
             logger.info(
                 "Persona expired (%.1f days old, ttl=%d), will create new", age_days, ttl_days
+            )
+            return None
+        saved_server = data.get("server_url", "")
+        if server_url and saved_server and saved_server != server_url:
+            logger.info(
+                "Persona server mismatch (saved=%s, current=%s) — rotating identity",
+                saved_server,
+                server_url,
             )
             return None
         return Persona(

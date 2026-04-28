@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import api from '../api'
-import { createWebSocket } from '../ws'
+import { useResumableOperation } from '../hooks/useResumableOperation'
 import { useToast } from '../components/Toast'
 import WebSocketPanel from '../components/WebSocketPanel'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -149,7 +149,6 @@ export default function FarmLists() {
   const [loopRunning, setLoopRunning] = useState(false)
   const [wsStatus, setWsStatus] = useState('disconnected')
   const [wsMessages, setWsMessages] = useState([])
-  const wsRef = useRef(null)
   const mountedRef = useRef(true)
   useEffect(() => { return () => { mountedRef.current = false } }, [])
 
@@ -490,6 +489,46 @@ export default function FarmLists() {
     )
   }
 
+  // ── Resumable hook: server-side op survives Safari background, page
+  // reload, bfcache. Status comes from the hook + per-message updates.
+  const handleOpMessage = useCallback((data) => {
+    if (!mountedRef.current || !data) return
+    const msg = transformWsMessage(data)
+    setWsMessages((prev) => [...prev, ...(Array.isArray(msg) ? msg : [msg])])
+    if (data.type === 'complete') {
+      setLoopRunning(false)
+      setWsStatus('disconnected')
+      toast.success('Loop completed')
+    }
+    if (data.type === 'already_running') {
+      setLoopRunning(true)
+    }
+  }, [toast])
+
+  const handleStatusChange = useCallback((next) => {
+    if (next === 'connecting') setWsStatus('connecting')
+    else if (next === 'reconnecting') setWsStatus('reconnecting')
+    else if (next === 'running') setWsStatus('running')
+    else if (next === 'completed' || next === 'stopped' || next === 'failed') {
+      setLoopRunning(false)
+      setWsStatus('disconnected')
+    }
+  }, [])
+
+  const farmAllOp = useResumableOperation('farm-all', {
+    onMessage: handleOpMessage,
+    onStatusChange: handleStatusChange,
+  })
+
+  // If there's a stored session_id at mount, surface that we're rejoining.
+  useEffect(() => {
+    if (farmAllOp.sessionId && wsMessages.length === 0) {
+      setLoopRunning(true)
+      setWsStatus('reconnecting')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [farmAllOp.sessionId])
+
   const startLoop = () => {
     if (loopListIds.length === 0) {
       toast.warning('Select at least one list')
@@ -498,90 +537,17 @@ export default function FarmLists() {
     setWsMessages([])
     setLoopRunning(true)
     setWsStatus('connecting')
-
     const qs = `interval=${loopInterval}&duration=${loopDuration}&list_ids=${loopListIds.join(',')}`
-
-    const sendStart = (ws) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        setWsStatus('running')
-        ws.send(JSON.stringify({ action: 'start' }))
-      }
-    }
-
-    const handle = createWebSocket(
-      `/ws/farm/run-all?${qs}`,
-      (data) => {
-        if (!mountedRef.current) return
-        const msg = transformWsMessage(data)
-        setWsMessages((prev) => [...prev, ...(Array.isArray(msg) ? msg : [msg])])
-        if (data.type === 'complete') {
-          setLoopRunning(false)
-          setWsStatus('disconnected')
-          toast.success('Loop completed')
-        }
-      },
-      () => {
-        if (!mountedRef.current) return
-        setWsStatus('disconnected')
-        setLoopRunning(false)
-        toast.error('WebSocket connection lost — max retries reached')
-      },
-      () => {
-        if (!mountedRef.current) return
-        setWsStatus('disconnected')
-        setLoopRunning(false)
-      },
-      {
-        reconnect: true,
-        maxRetries: 20,
-        onReconnecting: () => {
-          if (!mountedRef.current) return
-          setWsStatus('reconnecting')
-          setWsMessages((prev) => [...prev, { id: Date.now(), type: 'warning', text: 'Connection lost — reconnecting...', timestamp: new Date().toISOString() }])
-        },
-        onReconnected: (ws) => {
-          if (!mountedRef.current) return
-          setWsMessages((prev) => [...prev, { id: Date.now(), type: 'success', text: 'Reconnected — resuming loop', timestamp: new Date().toISOString() }])
-          sendStart(ws)
-        },
-      }
-    )
-
-    if (!handle) {
-      toast.error('No auth token — cannot connect')
-      setLoopRunning(false)
-      setWsStatus('disconnected')
-      return
-    }
-
-    // First connect — send start action
-    handle.ws.addEventListener('open', () => sendStart(handle.ws))
-
-    wsRef.current = handle
+    farmAllOp.start(`/ws/farm/run-all?${qs}`, {})
   }
 
   const stopLoop = () => {
-    if (wsRef.current) {
-      const ws = wsRef.current.ws ?? wsRef.current
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ action: 'stop' }))
-      }
-      wsRef.current.close()
-      wsRef.current = null
-    }
+    farmAllOp.stop()
+    // Server emits operation_complete with status="stopped"; status flips
+    // when that arrives, but flip locally too for snappier feedback.
     setLoopRunning(false)
     setWsStatus('disconnected')
   }
-
-  // Clean up WS on unmount
-  useEffect(() => {
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close()
-        wsRef.current = null
-      }
-    }
-  }, [])
 
   // ===========================================================================
   //  FILTERING + SORTING

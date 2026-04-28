@@ -19,6 +19,8 @@ const moreTabs = [
   { to: '/reports', label: 'Reports', icon: '📜' },
   { to: '/video', label: 'Video', icon: '🎬' },
   { to: '/queue', label: 'Queue', icon: '📋' },
+  { to: '/oasis-raider', label: 'Oasis Raider', icon: '🏕' },
+  { to: '/farm-builder', label: 'Farm Builder', icon: '🔨' },
   { to: '/logs', label: 'Logs', icon: '📊' },
   { to: '/sessions', label: 'Sessions', icon: '📡' },
 ]

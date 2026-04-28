@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import random
 import re
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -48,18 +49,35 @@ class AutoScoutService:
         step = 15  # half of the 31x31 grid
 
         # Calculate grid of center points needed to cover the radius
-        scan_centers = []
+        scan_centers: List[Tuple[int, int]] = []
         for cx in range(center_x - radius, center_x + radius + 1, step * 2):
             for cy in range(center_y - radius, center_y + radius + 1, step * 2):
                 scan_centers.append((cx, cy))
+
+        # Stealth: a player panning around their map clicks the area near
+        # their village first and pans outward in clusters — not raster
+        # left-to-right top-to-bottom. Sort by distance from the requested
+        # center, then shuffle within small buckets of 4 so the visit order
+        # is "nearby cluster, slightly varied" instead of a deterministic
+        # nested-coordinate grid.
+        scan_centers.sort(key=lambda p: (p[0] - center_x) ** 2 + (p[1] - center_y) ** 2)
+        for i in range(0, len(scan_centers), 4):
+            # NOTE: list slice creates a copy; random.shuffle on the slice
+            # alone is a no-op. Assign the shuffled bucket back in-place.
+            bucket = scan_centers[i : i + 4]
+            random.shuffle(bucket)
+            scan_centers[i : i + 4] = bucket
 
         self._report(
             f"Scanning {len(scan_centers)} map region(s) around ({center_x},{center_y}) r={radius}"
         )
 
-        # Establish map context once before the scan batch (stealth)
-        if hasattr(self.http_client, "navigator") and self.http_client.navigator.enabled:
-            await self.http_client.navigator._visit("/karte.php", "opening map")
+        # Establish map context once before the scan batch (stealth) — the
+        # tile XHRs are fired by the map page's frontend JS, so the Referer
+        # chain must lead from karte.php.
+        navigator = getattr(self.http_client, "navigator", None)
+        if navigator is not None and navigator.enabled:
+            await navigator.navigate_to_map()
 
         for sx, sy in scan_centers:
             resp = await self.http_client.post_json(
@@ -72,6 +90,7 @@ class AutoScoutService:
                         "ignorePositions": [],
                     }
                 },
+                request_type="xhr",
             )
             for t in resp.get("tiles", []):
                 pos = t.get("position", {})
@@ -120,7 +139,9 @@ class AutoScoutService:
 
     async def get_tile_details(self, x: int, y: int) -> MapTileInfo:
         """Get detailed info for a single tile via tile-details API."""
-        resp = await self.http_client.post_json("/api/v1/map/tile-details", {"x": x, "y": y})
+        resp = await self.http_client.post_json(
+            "/api/v1/map/tile-details", {"x": x, "y": y}, request_type="xhr"
+        )
         html = resp.get("html", "")
         return self._parse_tile_details(x, y, html)
 
@@ -295,7 +316,28 @@ class AutoScoutService:
                 continue
             result.append(t)
 
-        return sorted(result, key=lambda t: t.distance)
+        # Stealth: a pure distance sort produces an identical permutation
+        # across runs with the same scan input, which is a recognizable
+        # automation pattern even for a player who consistently prefers
+        # nearby targets. Bucket by rounded distance, then shuffle within
+        # each bucket so order varies between runs while still favoring
+        # close targets first.
+        result.sort(key=lambda t: t.distance)
+        bucketed: List[MapTileInfo] = []
+        bucket: List[MapTileInfo] = []
+        last_key: Optional[int] = None
+        for t in result:
+            key = int(t.distance)  # 1-tile buckets
+            if last_key is not None and key != last_key and bucket:
+                random.shuffle(bucket)
+                bucketed.extend(bucket)
+                bucket = []
+            bucket.append(t)
+            last_key = key
+        if bucket:
+            random.shuffle(bucket)
+            bucketed.extend(bucket)
+        return bucketed
 
     # ── Player profile population lookup ────────────────────────────
 
@@ -430,10 +472,13 @@ class AutoScoutService:
                     village_id=village_id,
                 )
                 # Retry once with backoff if we got a "no confirmation form" error
-                # (likely rate limit or transient server issue)
+                # (likely rate limit or transient server issue). Jittered so the
+                # retry interval isn't a fixed clockwork tell.
                 if not result.success and "No confirmation form" in result.raw_response:
-                    self._report("  -> Retrying after 3s (possible rate limit)...")
-                    await asyncio.sleep(3)
+                    from ..stealth.timing import HumanTiming as _HT
+                    backoff = _HT.micro_jitter(3.0, 0.35)
+                    self._report(f"  -> Retrying after {backoff:.1f}s (possible rate limit)...")
+                    await asyncio.sleep(backoff)
                     result = await military.send_scouts(
                         x=target.x,
                         y=target.y,

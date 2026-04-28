@@ -34,6 +34,7 @@ Execution rules:
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -45,6 +46,57 @@ from ..constants import BUILDING_NAMES
 from ..logging_config import get_logger
 from ..stealth.timing import HumanTiming
 from .building_service import BuildingService
+
+# ── Per-account build-action coordination (stealth) ────────────────────
+#
+# Two queues on different villages of the same account would otherwise
+# fire build POSTs at the same instant — a tell that no human can
+# produce. _account_build_locks holds one asyncio.Lock per http_client
+# (id-keyed) so build actions serialize within an account, and
+# _last_account_build_action_ts records when the last action fired so
+# back-to-back actions on the same account can insert a randomized
+# 10–90s stagger. State is process-local; cross-process coordination
+# isn't needed because a single process owns each account session.
+_account_build_locks: Dict[int, asyncio.Lock] = {}
+_account_build_locks_meta_lock = asyncio.Lock()
+_last_account_build_action_ts: Dict[int, float] = {}
+
+
+async def _account_build_lock_for(http_client: HttpClient) -> asyncio.Lock:
+    """Return (creating if needed) the per-account build-action lock."""
+    key = id(http_client)
+    async with _account_build_locks_meta_lock:
+        lock = _account_build_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _account_build_locks[key] = lock
+        return lock
+
+
+async def _stagger_account_build(http_client: HttpClient) -> None:
+    """Insert a 10-90s stagger when another queue on this account acted recently.
+
+    No-op when stealth is disabled or there's no prior action. Updates the
+    timestamp BEFORE sleeping so concurrent waiters see the latest commit
+    time and stack their staggers correctly.
+    """
+    if not getattr(http_client, "stealth_enabled", False):
+        _last_account_build_action_ts[id(http_client)] = time.monotonic()
+        return
+    key = id(http_client)
+    last_ts = _last_account_build_action_ts.get(key, 0.0)
+    now = time.monotonic()
+    gap = now - last_ts
+    stagger = 0.0
+    if last_ts > 0.0 and gap < 60.0:
+        stagger = HumanTiming.delay(45.0, variance_factor=0.6)
+        stagger = max(10.0, min(stagger, 90.0))
+    # Reserve our slot first so other waiters stack after this stagger,
+    # not on top of it.
+    _last_account_build_action_ts[key] = now + stagger
+    if stagger > 0.0:
+        await asyncio.sleep(stagger)
+    _last_account_build_action_ts[key] = time.monotonic()
 
 logger = get_logger(__name__)
 
@@ -137,6 +189,28 @@ class BuildQueueService:
             self._on_status(msg)
         for cb in self._status_callbacks:
             cb(msg)
+
+    async def _post_build_reaction(self) -> None:
+        """Sleep a randomized reaction window after a build slot frees.
+
+        Travian's anti-bot scopes for the 'wakes up exactly 3s after the
+        timer hits zero' fingerprint — a human takes 30s-5min to notice a
+        push notification, glance at the tab, decide to queue the next
+        build. Heavy-tailed: most reactions are quick, occasional ones are
+        long (player walked away). Cheap to implement, expensive in pure
+        wall-clock — but only fires once per slot-free transition, not
+        per polling cycle.
+        """
+        if not getattr(self.http_client, "stealth_enabled", False):
+            return
+        try:
+            # Heavy-tailed: 70% short (~30s), 25% medium (~90s), 5% long (~300s).
+            reaction = HumanTiming.delay(45.0, variance_factor=0.8)
+            reaction = max(20.0, min(reaction, 300.0))
+            self._report(f"  Noticing slot freed... ({reaction:.0f}s reaction window)")
+            await asyncio.sleep(reaction)
+        except Exception:
+            pass
 
     async def resolve_slots(self, plan: BuildPlan):
         """Resolve building names to slot IDs."""
@@ -465,18 +539,23 @@ class BuildQueueService:
                             built_one = True
                             break
 
-                        # Actually upgrade or construct
-                        if item.is_construction:
-                            result = await self.building_service.construct_building(
-                                item.slot_id,
-                                item.construct_gid,
-                                allow_gold=False,
-                                village_id=vid,
-                            )
-                        else:
-                            result = await self.building_service.upgrade_building(
-                                item.slot_id, allow_gold=False, village_id=vid
-                            )
+                        # Actually upgrade or construct (per-account stagger
+                        # so concurrent queues on the same account don't
+                        # fire build POSTs at the same instant).
+                        account_lock = await _account_build_lock_for(self.http_client)
+                        async with account_lock:
+                            await _stagger_account_build(self.http_client)
+                            if item.is_construction:
+                                result = await self.building_service.construct_building(
+                                    item.slot_id,
+                                    item.construct_gid,
+                                    allow_gold=False,
+                                    village_id=vid,
+                                )
+                            else:
+                                result = await self.building_service.upgrade_building(
+                                    item.slot_id, allow_gold=False, village_id=vid
+                                )
 
                         if result.success:
                             item.status = "done"
@@ -567,6 +646,12 @@ class BuildQueueService:
                 # Sleep for the actual remaining time + small buffer instead of polling
                 wait = max(remaining + 3, 5)
                 await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.05))
+            # Stealth: a real player doesn't return to the browser exactly
+            # 3 seconds after a build timer ends. Add a human reaction
+            # window before continuing — short for fast follow-ups, longer
+            # otherwise so the wakeup doesn't sit on perfect completion
+            # boundaries every single time.
+            await self._post_build_reaction()
 
         await self.resolve_slots(plan)
 
@@ -586,11 +671,16 @@ class BuildQueueService:
                 )
 
             # Wait for queue to be empty — sleep for actual remaining time
+            queue_was_busy = False
             while not await self.is_queue_empty(village_id=vid):
+                queue_was_busy = True
                 remaining = await self.get_queue_remaining(village_id=vid)
                 self._report(f"Queue busy ({remaining}s remaining). Sleeping until done...")
                 wait = max(remaining + 3, 5)
                 await asyncio.sleep(HumanTiming.micro_jitter(wait, jitter_pct=0.05))
+            if queue_was_busy:
+                # Wakeup reaction window — see _post_build_reaction docstring.
+                await self._post_build_reaction()
 
             # Show current resources if verbose
             if verbose:
@@ -742,17 +832,25 @@ class BuildQueueService:
                         else None
                     )
 
-                    if item.is_construction:
-                        result = await self.building_service.construct_building(
-                            item.slot_id,
-                            item.construct_gid,
-                            allow_gold=False,
-                            village_id=vid,
-                        )
-                    else:
-                        result = await self.building_service.upgrade_building(
-                            item.slot_id, allow_gold=False, village_id=vid
-                        )
+                    # Stealth: per-account stagger so two village queues
+                    # on the same account don't fire build POSTs at the
+                    # same instant. Serializes build actions per http_client
+                    # and inserts a 10-90s pause when another queue acted
+                    # within the last 60s.
+                    account_lock = await _account_build_lock_for(self.http_client)
+                    async with account_lock:
+                        await _stagger_account_build(self.http_client)
+                        if item.is_construction:
+                            result = await self.building_service.construct_building(
+                                item.slot_id,
+                                item.construct_gid,
+                                allow_gold=False,
+                                village_id=vid,
+                            )
+                        else:
+                            result = await self.building_service.upgrade_building(
+                                item.slot_id, allow_gold=False, village_id=vid
+                            )
                     if not result.success:
                         action = "CONSTRUCT" if item.is_construction else "UPGRADE"
                         self._report(
@@ -893,18 +991,30 @@ class BuildQueueService:
 
             if not built:
                 # Distinguish "no money" from "no upgrade URL on build page" —
-                # the second is a transient Travian-state issue and 30s may be
-                # too long, but we still retry with the same cadence for now.
+                # the second is a transient Travian-state issue, the first is
+                # an economic wait. A real player who can't afford a build
+                # plans and returns later; they don't poll every 30s.
                 if any_no_checksum and not any_resource_short:
                     reason = (
                         f"Priority {next_prio}: build page returned no upgrade URL "
                         "(rally-point tab default, maxed building, or stale session)"
                     )
+                    wait_s = float(poll_interval_s)
                 elif any_resource_short and not any_no_checksum:
                     reason = f"Insufficient resources for priority {next_prio} items"
+                    # Planner pause: heavy-tailed wait centered on ~3 min,
+                    # clamped to [2 min, 10 min]. Resource gates rarely
+                    # resolve in 30s; rechecking sooner just generates
+                    # bot-shaped polling traffic.
+                    if getattr(self.http_client, "stealth_enabled", False):
+                        wait_s = HumanTiming.delay(180.0, variance_factor=0.7)
+                        wait_s = max(120.0, min(wait_s, 600.0))
+                    else:
+                        wait_s = float(poll_interval_s)
                 else:
                     reason = f"No items completed for priority {next_prio}"
-                self._report(f"{reason}. Waiting {poll_interval_s}s...")
-                await asyncio.sleep(HumanTiming.delay(poll_interval_s))
+                    wait_s = float(poll_interval_s)
+                self._report(f"{reason}. Waiting {wait_s:.0f}s...")
+                await asyncio.sleep(HumanTiming.delay(wait_s))
 
         return all_results
