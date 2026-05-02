@@ -682,6 +682,12 @@ def _build_scout_scan_coro(config: dict):
         max_pop = config.get("max_pop")
         max_player_pop = config.get("max_player_pop")
         show_oases = config.get("show_oases", False)
+        # Mutually exclusive with show_oases: when oasis_only is True, the
+        # result contains ONLY oases (occupied + unoccupied) and villages
+        # are filtered out. Implies show_oases.
+        oasis_only = bool(config.get("oasis_only", False))
+        if oasis_only:
+            show_oases = True
         limit = config.get("limit", 99999)
         exclude_alliance_ids = config.get("exclude_alliance_ids", [])
         exclude_alliance_names = config.get("exclude_alliance_names", [])
@@ -990,6 +996,11 @@ def _build_scout_scan_coro(config: dict):
         # ── Phase 3b: Compute player populations ───────────────────
         visible_pops = _sum_visible_player_pops(tiles)
 
+        # Capital map (player_id → capital village_id) — populated when we
+        # fetch profile pages anyway. Empty when profile fetch is skipped
+        # (no max_player_pop), in which case no tile gets is_capital=True.
+        capital_map: dict[int, int] = {}
+
         if max_player_pop is not None and visible_pops:
             unique_pids = set(visible_pops.keys())
             ctx.push(
@@ -1001,10 +1012,34 @@ def _build_scout_scan_coro(config: dict):
                     ),
                 }
             )
-            profile_pops = await svc.fetch_player_populations(unique_pids)
+
+            # Per-profile progress callback. Without it the profile fetch
+            # phase is silent for minutes (one phase message at start, one
+            # player_pops dump at end), the WS times out on the wire, and
+            # the page appears stuck — see "Map Scan stuck" bug.
+            def _on_profile(done: int, total: int) -> None:
+                # Report at every profile when small, every N when large.
+                step = 1 if total <= 30 else (5 if total <= 200 else 10)
+                if done == total or done % step == 0:
+                    ctx.push(
+                        {
+                            "type": "phase",
+                            "phase": "profile_progress",
+                            "index": done,
+                            "total": total,
+                            "message": f"Profile fetch: {done}/{total}",
+                        }
+                    )
+
+            profiles = await svc.fetch_player_profiles(unique_pids, progress_cb=_on_profile)
             player_pops = {
-                pid: profile_pops.get(pid) or visible_pops.get(pid, 0) for pid in unique_pids
+                pid: (profiles.get(pid, {}).get("pop") or visible_pops.get(pid, 0))
+                for pid in unique_pids
             }
+            for pid, info in profiles.items():
+                cap = info.get("capital_id")
+                if cap:
+                    capital_map[pid] = cap
             pop_source = "profile"
 
             for t in tiles:
@@ -1015,6 +1050,16 @@ def _build_scout_scan_coro(config: dict):
         else:
             player_pops = visible_pops
             pop_source = "visible"
+
+        # Mark each tile owned by a known player whose capital we resolved.
+        if capital_map:
+            for t in tiles:
+                if (
+                    not t.is_oasis
+                    and t.player_id
+                    and capital_map.get(t.player_id) == t.village_id
+                ):
+                    t.is_capital = True
 
         if player_pops:
             pv_map: dict[int, list[dict]] = {}
@@ -1090,6 +1135,16 @@ def _build_scout_scan_coro(config: dict):
                 f"Filters ({', '.join(parts) if parts else 'combined'}): -{removed}"
             )
 
+        if oasis_only:
+            # Oasis-only mode: drop any tile that isn't an oasis (occupied or
+            # unoccupied both stay). Applied AFTER population filters so a
+            # max_pop on the oasis owner still works.
+            before = len(tiles)
+            tiles = [t for t in tiles if t.is_oasis]
+            removed = before - len(tiles)
+            if removed > 0:
+                post_filter_msgs.append(f"Oasis-only: -{removed} villages removed")
+
         if max_player_pop is not None:
             before = len(tiles)
             removed_players = set()
@@ -1145,6 +1200,7 @@ def _build_scout_scan_coro(config: dict):
                 "distance": t.distance,
                 "is_oasis": t.is_oasis,
                 "is_abandoned": t.is_abandoned,
+                "is_capital": t.is_capital,
             }
             for t in tiles
         ]

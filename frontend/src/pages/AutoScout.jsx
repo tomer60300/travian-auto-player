@@ -70,6 +70,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const [maxPop, setMaxPop] = useState(100)
   const [maxPlayerPop, setMaxPlayerPop] = useState('')
   const [showOases, setShowOases] = useState(false)
+  const [oasisOnly, setOasisOnly] = useState(false)
 
   // Alliance & player exclusion — persisted in localStorage
   const [excludeAlliances, setExcludeAlliances] = useState(() => loadJson(LS_KEY_ALLIANCES, []))
@@ -213,14 +214,15 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     setEnrichProgress(null)
     setScanStats(null)
 
-    const config = { radius, minPop, maxPop, maxPlayerPop, showOases, excludeAlliances, excludePlayers }
+    const config = { radius, minPop, maxPop, maxPlayerPop, showOases, oasisOnly, excludeAlliances, excludePlayers }
     onConfigChange?.(config)
 
     const body = {
       radius,
       min_pop: minPop,
       max_pop: maxPop,
-      show_oases: showOases,
+      show_oases: showOases || oasisOnly,
+      oasis_only: oasisOnly,
       exclude_player_names: excludePlayers.flatMap((p) => p.split(',').map(s => s.trim())).filter(Boolean),
       village_id: activeVillageId || undefined,
     }
@@ -275,8 +277,23 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       {/* Options */}
       <div className="flex gap-6 mb-4 flex-wrap">
         <label className="check-label">
-          <input type="checkbox" checked={showOases} onChange={(e) => setShowOases(e.target.checked)} className="checkbox-gold" />
+          <input
+            type="checkbox"
+            checked={showOases}
+            onChange={(e) => setShowOases(e.target.checked)}
+            disabled={oasisOnly}
+            className="checkbox-gold"
+          />
           Include unoccupied oases
+        </label>
+        <label className="check-label">
+          <input
+            type="checkbox"
+            checked={oasisOnly}
+            onChange={(e) => setOasisOnly(e.target.checked)}
+            className="checkbox-gold"
+          />
+          Oases only (occupied + unoccupied; ignore villages)
         </label>
       </div>
       <p className="text-xs text-secondary mb-4">Scans only player-owned villages (and oases if checked). Wilderness, abandoned valleys, and empty tiles are automatically skipped.</p>
@@ -418,12 +435,22 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
                 <tr key={origIdx} onClick={() => toggleRow(origIdx)} className={`row-clickable ${isSelected ? 'row-selected' : ''}`}>
                   <td><input type="checkbox" checked={isSelected} onChange={() => toggleRow(origIdx)} onClick={(e) => e.stopPropagation()} className="checkbox-gold" /></td>
                   <td className="font-mono text-gold">({row.x}, {row.y})</td>
-                  <td>{row.village_name || row.name || '---'}</td>
+                  <td>
+                    {row.village_name || row.name || '---'}
+                    {row.is_capital && (
+                      <span className="ml-1 text-gold" title="Capital village">★</span>
+                    )}
+                  </td>
                   <td className="text-center font-mono">{row.population ?? '---'}</td>
                   <td className="text-center font-mono">{row.distance != null ? row.distance.toFixed(1) : '---'}</td>
                   <td className={row.player_name ? 'text-primary' : 'text-secondary italic'}>{row.player_name || 'Unoccupied'}</td>
                   <td className="text-secondary text-xs">{row.alliance_name || '---'}</td>
-                  <td>{row.is_oasis ? 'Oasis' : row.is_abandoned ? 'Abandoned' : 'Village'}</td>
+                  <td>
+                    {row.is_oasis ? 'Oasis' : row.is_abandoned ? 'Abandoned' : 'Village'}
+                    {row.is_capital && !row.is_oasis && (
+                      <span className="ml-1 text-xs px-1 py-0.5 rounded bg-surface border-default text-gold">capital</span>
+                    )}
+                  </td>
                   <td>
                     {(coordMap?.[`${row.x},${row.y}`] || []).map((entry) => (
                       <span key={entry.list_id} className="inline-flex items-center px-1.5 py-0.5 rounded text-xs bg-surface border-default text-gold mr-1 mb-0.5">

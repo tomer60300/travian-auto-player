@@ -7,7 +7,7 @@ import logging
 import math
 import random
 import re
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ..clients.http_client import HttpClient
 from ..models.farm_list import MapTileInfo
@@ -342,25 +342,38 @@ class AutoScoutService:
     # ── Player profile population lookup ────────────────────────────
 
     async def get_player_population(self, player_id: int) -> int:
-        """Fetch a player's **true** total population from their profile page.
+        """Fetch a player's true total population from their profile page.
+
+        Thin wrapper around :meth:`get_player_profile_info` that drops the
+        capital_village_id and keeps only the integer population, so older
+        callers don't have to deal with the dict shape.
+
+        Returns 0 on failure so callers can fall back gracefully.
+        """
+        info = await self.get_player_profile_info(player_id)
+        return info.get("pop", 0)
+
+    async def get_player_profile_info(self, player_id: int) -> Dict[str, Any]:
+        """Fetch population AND capital village id from one profile page.
 
         The profile page ``/profile/<player_id>`` embeds a React
         ``PlayerProfile.render(...)`` call whose ``viewData`` JSON
-        contains ``"ranks":{"populationRank":N,"population":N,...}``.
+        contains ``"ranks":{"populationRank":N,"population":N,...}`` and a
+        per-village list. The capital is marked with ``"isMainVillage":true``
+        inside the village entry.
 
-        NOTE: The ``<div class="population">`` footer on that page shows
-        the **logged-in** user's population, NOT the profile owner's.
-        We must extract from the embedded JSON data instead.
-
-        Returns 0 on failure so callers can fall back gracefully.
+        Returns ``{"pop": int, "capital_id": int | None}``. Both fields are
+        defaulted (0 / None) so callers don't need separate error paths;
+        the capital flag is best-effort and silently skipped when the
+        profile page changes shape.
         """
         try:
             page_html = await self.http_client.get_html(f"/profile/{player_id}")
         except Exception as exc:
             logger.warning("Failed to fetch profile for player %d: %s", player_id, exc)
-            return 0
+            return {"pop": 0, "capital_id": None}
 
-        # Extract population from the React JSON: "ranks":{..."population":NNN...}
+        pop = 0
         m = re.search(
             r'"ranks"\s*:\s*\{[^}]*"population"\s*:\s*(\d+)',
             page_html,
@@ -368,10 +381,34 @@ class AutoScoutService:
         if m:
             pop = int(m.group(1))
             logger.debug("Player %d profile population: %d", player_id, pop)
-            return pop
+        else:
+            logger.warning("Could not extract population from profile for player %d", player_id)
 
-        logger.warning("Could not extract population from profile for player %d", player_id)
-        return 0
+        capital_id: Optional[int] = None
+        # Capital marker — try the JSON form first ("isMainVillage":true / "isCapital":true).
+        cap_match = re.search(
+            r'\{[^{}]*?"id"\s*:\s*(\d+)[^{}]*?"(?:isMainVillage|isCapital)"\s*:\s*true',
+            page_html,
+        )
+        if cap_match:
+            capital_id = int(cap_match.group(1))
+        else:
+            # Fallback: HTML form with a class-based capital marker. The exact
+            # markup varies by server localization, but typically a <tr> for
+            # the capital village carries either class="capital" or contains
+            # an icon with class "iconCapital"/"capitalIcon".
+            cap_html = re.search(
+                r'<a[^>]*newdid=(\d+)[^>]*>[^<]*</a>[^<]*<[^>]+(?:capital|iconCapital|capitalIcon)',
+                page_html,
+                re.IGNORECASE,
+            )
+            if cap_html:
+                try:
+                    capital_id = int(cap_html.group(1))
+                except (TypeError, ValueError):
+                    capital_id = None
+
+        return {"pop": pop, "capital_id": capital_id}
 
     async def fetch_player_populations(
         self,
@@ -389,6 +426,37 @@ class AutoScoutService:
             result[pid] = pop
             if (i + 1) % 5 == 0 or i == total - 1:
                 self._report(f"Fetched player profiles: {i + 1}/{total}")
+        return result
+
+    async def fetch_player_profiles(
+        self,
+        player_ids: Set[int],
+        *,
+        progress_cb: Optional[Callable[[int, int], None]] = None,
+    ) -> Dict[int, Dict[str, Any]]:
+        """Fetch (population + capital_id) for a set of players in one pass.
+
+        Returns ``{player_id: {"pop": int, "capital_id": int | None}}``.
+
+        ``progress_cb(done, total)`` fires after EVERY profile so callers can
+        push a per-profile ``phase`` message to the WebSocket — without it,
+        long profile-fetch phases (hundreds of players) sit silent for many
+        minutes and the client WS times out before any output arrives.
+        """
+        result: Dict[int, Dict[str, Any]] = {}
+        total = len(player_ids)
+        for i, pid in enumerate(player_ids):
+            info = await self.get_player_profile_info(pid)
+            result[pid] = info
+            done = i + 1
+            if progress_cb is not None:
+                try:
+                    progress_cb(done, total)
+                except Exception:
+                    # Progress reporting must never block the fetch loop.
+                    pass
+            if done % 5 == 0 or done == total:
+                self._report(f"Fetched player profiles: {done}/{total}")
         return result
 
     # ── Scout sending ────────────────────────────────────────────────

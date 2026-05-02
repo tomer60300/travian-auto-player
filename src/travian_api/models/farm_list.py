@@ -201,3 +201,4 @@ class MapTileInfo(BaseModel):
     distance: float = 0.0
     is_oasis: bool = False
     is_abandoned: bool = False  # did=-1 with no uid
+    is_capital: bool = False  # owner's capital village (extracted during enrichment)
