@@ -308,10 +308,17 @@ class AutoScoutService:
                 continue
             if exclude_oases and t.is_oasis:
                 continue
-            if max_population is not None and t.population > max_population:
-                continue
-            if min_population is not None and t.population < min_population:
-                continue
+            # Village-pop filters only apply to actual VILLAGES. Oases
+            # don't have a village population (their own `population`
+            # field is always 0 — owner total is tracked separately as
+            # `owner_population` and gated by Max Player Pop). Without
+            # this guard, "Min Village Pop ≥ 1" would silently drop every
+            # unoccupied oasis the user explicitly asked to see.
+            if not t.is_oasis:
+                if max_population is not None and t.population > max_population:
+                    continue
+                if min_population is not None and t.population < min_population:
+                    continue
             if max_distance is not None and t.distance > max_distance:
                 continue
             result.append(t)

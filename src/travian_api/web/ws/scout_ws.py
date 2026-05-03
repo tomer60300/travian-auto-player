@@ -1077,15 +1077,29 @@ def _build_scout_scan_coro(config: dict):
                 if cap:
                     capital_map[pid] = cap
             pop_source = "profile"
-
-            for t in tiles:
-                if t.is_oasis and t.player_id and t.population == 0:
-                    owner_pop = player_pops.get(t.player_id, 0)
-                    if owner_pop > 0:
-                        t.population = owner_pop
         else:
             player_pops = visible_pops
             pop_source = "visible"
+
+        # ── Populate owner_population on EVERY owned tile ────────────
+        # Hard semantic split:
+        #   t.population        = the village's own population. Oases have
+        #                         no village, so it's ALWAYS 0 for them
+        #                         (occupied or not). Min/Max Village Pop
+        #                         filters apply only to non-oasis tiles.
+        #   t.owner_population  = the player who owns this tile's TOTAL
+        #                         population summed across all their
+        #                         villages. 0 for unoccupied oases (no
+        #                         owner). Max Player Pop filters apply
+        #                         to this field for any tile with an owner.
+        # This replaces the prior code that overwrote t.population on
+        # occupied oases — that conflated the two concepts and made
+        # filters unpredictable.
+        for t in tiles:
+            if t.player_id:
+                t.owner_population = player_pops.get(t.player_id, 0)
+            else:
+                t.owner_population = 0
 
         # Mark each tile owned by a known player whose capital we resolved.
         if capital_map:
@@ -1187,9 +1201,15 @@ def _build_scout_scan_coro(config: dict):
             filtered = []
             for t in tiles:
                 if not t.player_id:
+                    # Unoccupied tiles (oases without owner, abandoned
+                    # valleys) have no player to gate against — keep them.
                     filtered.append(t)
                     continue
-                ppop = player_pops.get(t.player_id, 0)
+                # Use the tile's own owner_population (populated above
+                # from profile fetch or visible-village sum). Fall back
+                # to player_pops dict for safety in case the field
+                # wasn't set, but the assignment loop covers all cases.
+                ppop = t.owner_population or player_pops.get(t.player_id, 0)
                 if ppop <= max_player_pop:
                     filtered.append(t)
                 else:
@@ -1232,7 +1252,13 @@ def _build_scout_scan_coro(config: dict):
                 "village_name": t.village_name,
                 "player_name": t.player_name,
                 "tribe": t.tribe,
-                "population": t.population,
+                # `population` is the village's own pop. Always 0 for
+                # oases (occupied or unoccupied) — see model docstring.
+                "population": 0 if t.is_oasis else t.population,
+                # `owner_population` is the player's TOTAL pop. 0 for
+                # unoccupied. The frontend renders these as separate
+                # columns (V.Pop and Player Pop).
+                "owner_population": t.owner_population,
                 "distance": t.distance,
                 "is_oasis": t.is_oasis,
                 "is_abandoned": t.is_abandoned,

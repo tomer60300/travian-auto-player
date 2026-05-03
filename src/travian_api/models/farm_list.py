@@ -198,6 +198,13 @@ class MapTileInfo(BaseModel):
     player_name: str = ""
     tribe: str = ""
     population: int = 0
+    # Owner's TOTAL population summed across all their villages.
+    # 0 when the tile has no owner (unoccupied oasis, abandoned valley).
+    # For player villages: filled with the player's profile total OR the
+    # visible-village sum if profile fetch was skipped.
+    # For occupied oases: same — the oasis's own `population` stays 0
+    # (oases don't have village pop), and the OWNER's total goes here.
+    owner_population: int = 0
     distance: float = 0.0
     is_oasis: bool = False
     is_abandoned: bool = False  # did=-1 with no uid

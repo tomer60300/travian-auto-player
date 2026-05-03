@@ -522,6 +522,7 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
               <th>Coords</th>
               <SortableHeader label="Village" field="village_name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <SortableHeader label="V.Pop" field="population" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
+              <SortableHeader label="Player Pop" field="owner_population" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
               <SortableHeader label="Distance" field="distance" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
               <SortableHeader label="Player" field="player_name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <th>Alliance</th>
@@ -540,7 +541,17 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
                   <td><input type="checkbox" checked={isSelected} onChange={() => toggleRow(origIdx)} onClick={(e) => e.stopPropagation()} className="checkbox-gold" /></td>
                   <td className="font-mono text-gold">({row.x}, {row.y})</td>
                   <td>{row.village_name || row.name || '---'}</td>
-                  <td className="text-center font-mono">{row.population ?? '---'}</td>
+                  <td
+                    className="text-center font-mono"
+                    title={row.is_oasis ? 'Oases have no village population' : ''}
+                  >
+                    {row.is_oasis ? <span className="text-secondary opacity-50">0</span> : (row.population ?? 0)}
+                  </td>
+                  <td className="text-center font-mono">
+                    {row.player_id
+                      ? (row.owner_population || <span className="text-secondary opacity-50">?</span>)
+                      : <span className="text-secondary opacity-50">0</span>}
+                  </td>
                   <td className="text-center font-mono">{row.distance != null ? row.distance.toFixed(1) : '---'}</td>
                   <td className={row.player_name ? 'text-primary' : 'text-secondary italic'}>{row.player_name || 'Unoccupied'}</td>
                   <td className="text-secondary text-xs">{row.alliance_name || '---'}</td>
