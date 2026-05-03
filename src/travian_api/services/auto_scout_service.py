@@ -385,28 +385,37 @@ class AutoScoutService:
             logger.warning("Could not extract population from profile for player %d", player_id)
 
         capital_id: Optional[int] = None
-        # Capital marker — try the JSON form first ("isMainVillage":true / "isCapital":true).
-        cap_match = re.search(
-            r'\{[^{}]*?"id"\s*:\s*(\d+)[^{}]*?"(?:isMainVillage|isCapital)"\s*:\s*true',
-            page_html,
-        )
-        if cap_match:
-            capital_id = int(cap_match.group(1))
-        else:
-            # Fallback: HTML form with a class-based capital marker. The exact
-            # markup varies by server localization, but typically a <tr> for
-            # the capital village carries either class="capital" or contains
-            # an icon with class "iconCapital"/"capitalIcon".
-            cap_html = re.search(
-                r'<a[^>]*newdid=(\d+)[^>]*>[^<]*</a>[^<]*<[^>]+(?:capital|iconCapital|capitalIcon)',
-                page_html,
-                re.IGNORECASE,
-            )
-            if cap_html:
-                try:
-                    capital_id = int(cap_html.group(1))
-                except (TypeError, ValueError):
-                    capital_id = None
+        # Capital marker — JSON serialization key order isn't guaranteed, so
+        # we walk per-village JSON objects and check both directions instead
+        # of forcing one ordering with a single regex.
+        for obj in re.finditer(r'\{[^{}]{0,800}\}', page_html):
+            chunk = obj.group(0)
+            if '"isMainVillage"' not in chunk and '"isCapital"' not in chunk:
+                continue
+            if not re.search(r'"(?:isMainVillage|isCapital)"\s*:\s*true', chunk):
+                continue
+            id_match = re.search(r'"id"\s*:\s*(\d+)', chunk)
+            if id_match:
+                capital_id = int(id_match.group(1))
+                break
+
+        if capital_id is None:
+            # HTML fallback — Travian's profile village table marks the
+            # capital with one of several classes that differ by skin/locale.
+            # Look for any newdid=N link followed within ~120 chars by a
+            # capital marker. Bidirectional: check both orderings since the
+            # marker can sit before or after the link in the row.
+            for marker_pat in (
+                r'<a[^>]*newdid=(\d+)[^>]*>.{0,120}?(?:capital|hauptdorf|stolica|kapital)',
+                r'(?:capital|hauptdorf|stolica|kapital)[^<>]{0,120}?<a[^>]*newdid=(\d+)',
+            ):
+                m2 = re.search(marker_pat, page_html, re.IGNORECASE | re.DOTALL)
+                if m2:
+                    try:
+                        capital_id = int(m2.group(1))
+                        break
+                    except (TypeError, ValueError):
+                        pass
 
         return {"pop": pop, "capital_id": capital_id}
 

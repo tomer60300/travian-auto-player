@@ -1,6 +1,5 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import { useResumableOperation } from '../hooks/useResumableOperation'
-import { createWebSocket } from '../ws'
 import { useToast } from '../components/Toast'
 import WebSocketPanel from '../components/WebSocketPanel'
 import VillageSelector from '../components/VillageSelector'
@@ -69,8 +68,14 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const [minPop, setMinPop] = useState(0)
   const [maxPop, setMaxPop] = useState(100)
   const [maxPlayerPop, setMaxPlayerPop] = useState('')
-  const [showOases, setShowOases] = useState(false)
-  const [oasisOnly, setOasisOnly] = useState(false)
+  // Single-pick filter mode replaces the prior dual-checkbox arrangement
+  // (showOases + oasisOnly with disable cross-talk) — clearer UX, no
+  // confusion about which combination produces what.
+  //   "villages"     — player villages only (default; matches old: showOases=false)
+  //   "with-oases"   — player villages + unoccupied oases (old: showOases=true)
+  //   "oasis-only"   — only oases, both occupied and unoccupied (old: oasisOnly=true)
+  const [filterMode, setFilterMode] = useState('villages')
+  const [showCapitals, setShowCapitals] = useState(true)
 
   // Alliance & player exclusion — persisted in localStorage
   const [excludeAlliances, setExcludeAlliances] = useState(() => loadJson(LS_KEY_ALLIANCES, []))
@@ -84,6 +89,12 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const [enrichProgress, setEnrichProgress] = useState(null)
   const [scanStats, setScanStats] = useState(null)
   const mountedRef = useRef(true)
+  // True only for scans started in THIS mount. Suppresses the "Scan
+  // complete" toast and selection reset that would otherwise fire on
+  // history-replay when the user navigates back to /scout after a run
+  // completed in the background.
+  const startedHereRef = useRef(false)
+  const lastScanIdRef = useRef(null)
 
   useEffect(() => { return () => { mountedRef.current = false } }, [])
 
@@ -127,20 +138,37 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     enrich_done: 'Enrichment complete',
     player_pop: 'Querying player populations...',
     player_pop_done: 'Player populations loaded',
+    player_profiles: 'Fetching player profiles...',
+    profile_progress: 'Fetching player profiles...',
     post_filter: 'Applying filters...',
   }), [])
 
   const handleScanMessage = useCallback((data) => {
     if (!mountedRef.current || !data) return
     switch (data.type) {
+      case 'heartbeat':
+        // Keepalive frame from the server — keeps the WS warm during long
+        // silent phases. Nothing to render.
+        break
       case 'session_init':
         addScanMsg('info', `Session: ${data.session_id} (viewable from /sessions)`)
+        lastScanIdRef.current = data.session_id
         break
-      case 'phase':
-        setScanPhase(PHASE_LABELS[data.phase] || data.phase)
-        addScanMsg(data.phase?.includes('done') || data.phase?.includes('complete') ? 'success' : 'info', data.message)
+      case 'phase': {
+        // profile_progress: {index, total, message: "Profile fetch: N/M"}
+        // — show a phase line instead of letting the raw key leak through.
+        if (data.phase === 'profile_progress' && data.total) {
+          setScanPhase(`Fetching player profiles ${data.index}/${data.total}…`)
+        } else {
+          setScanPhase(PHASE_LABELS[data.phase] || data.phase)
+        }
+        addScanMsg(
+          data.phase?.includes('done') || data.phase?.includes('complete') ? 'success' : 'info',
+          data.message
+        )
         if (data.detail) addScanMsg('detail', data.detail)
         break
+      }
       case 'scan_region':
         addScanMsg('detail', `  Fetching map region ${data.index}/${data.total} at (${data.center.x},${data.center.y})`)
         break
@@ -181,16 +209,26 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         setEnrichProgress(null)
         setScanStats(data.stats || null)
         addScanMsg('success', `Scan complete: ${tiles.length} targets found in ${data.stats?.time_seconds || '?'}s`)
-        onScanComplete(tiles)
+        // History-replay: don't reset selections or pop a stale toast for
+        // a scan the user already saw. startedHereRef is only true when
+        // the user clicked Scan in THIS mount.
+        const fresh = startedHereRef.current
+        onScanComplete(tiles, { preserveSelection: !fresh })
         setScanning(false)
-        toast.success(`Scan complete: ${tiles.length} targets found`)
+        if (fresh) {
+          toast.success(`Scan complete: ${tiles.length} targets found`)
+          startedHereRef.current = false
+        }
         break
       }
       case 'error':
         addScanMsg('error', data.message || 'Error')
         setScanPhase(null)
         setScanning(false)
-        toast.error(data.message || 'Scan failed')
+        if (startedHereRef.current) {
+          toast.error(data.message || 'Scan failed')
+          startedHereRef.current = false
+        }
         break
       case 'already_running':
         addScanMsg('warning', 'A scan is already running on the server — reattaching')
@@ -198,14 +236,36 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       default:
         if (data.message) addScanMsg('info', data.message)
     }
-  }, [PHASE_LABELS, addScanMsg, onScanComplete, toast])
+  }, [PHASE_LABELS, addScanMsg, onScanComplete, setScanning, toast])
 
   const scanOp = useResumableOperation('scout-scan', {
     onMessage: handleScanMessage,
     onStatusChange: (next) => {
-      if (next === 'reconnecting' && mountedRef.current) setScanPhase('Reconnecting...')
+      if (!mountedRef.current) return
+      if (next === 'reconnecting') setScanPhase('Reconnecting...')
+      // Keep the parent's `scanning` flag in sync with whichever
+      // direction the hook is moving — without this, returning to /scout
+      // mid-scan leaves the Scan button enabled (and a duplicate start
+      // becomes possible).
+      if (next === 'connecting' || next === 'running' || next === 'reconnecting') {
+        setScanning(true)
+      } else if (next === 'completed' || next === 'failed' || next === 'stopped' || next === 'idle') {
+        setScanning(false)
+      }
     },
   })
+
+  // Mount-time reattach indicator — when the hook restored an existing
+  // session_id from localStorage we're tailing a scan that started in a
+  // previous mount; surface that in the UI so the user understands why
+  // the Cancel button is showing without them having clicked anything.
+  useEffect(() => {
+    if (scanOp.sessionId && scanOp.status === 'reconnecting') {
+      setScanPhase('Reconnecting to running scan...')
+      setScanning(true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const handleScan = () => {
     setScanning(true)
@@ -213,16 +273,21 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     setScanPhase('Connecting...')
     setEnrichProgress(null)
     setScanStats(null)
+    startedHereRef.current = true
 
-    const config = { radius, minPop, maxPop, maxPlayerPop, showOases, oasisOnly, excludeAlliances, excludePlayers }
+    const config = {
+      radius, minPop, maxPop, maxPlayerPop, filterMode, showCapitals,
+      excludeAlliances, excludePlayers,
+    }
     onConfigChange?.(config)
 
     const body = {
       radius,
       min_pop: minPop,
       max_pop: maxPop,
-      show_oases: showOases || oasisOnly,
-      oasis_only: oasisOnly,
+      show_oases: filterMode !== 'villages',
+      oasis_only: filterMode === 'oasis-only',
+      show_capitals: showCapitals,
       exclude_player_names: excludePlayers.flatMap((p) => p.split(',').map(s => s.trim())).filter(Boolean),
       village_id: activeVillageId || undefined,
     }
@@ -274,29 +339,67 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         </div>
       </div>
 
-      {/* Options */}
-      <div className="flex gap-6 mb-4 flex-wrap">
+      {/* Target type — single-pick radio replaces the prior pair of
+          checkboxes (showOases + oasisOnly with disable cross-talk). */}
+      <div className="mb-4">
+        <label className="field-label-lg mb-2">Target type</label>
+        <div className="flex flex-col gap-1.5">
+          <label className="check-label">
+            <input
+              type="radio"
+              name="filterMode"
+              value="villages"
+              checked={filterMode === 'villages'}
+              onChange={() => setFilterMode('villages')}
+              className="accent-radio"
+              disabled={scanning}
+            />
+            Player villages only
+          </label>
+          <label className="check-label">
+            <input
+              type="radio"
+              name="filterMode"
+              value="with-oases"
+              checked={filterMode === 'with-oases'}
+              onChange={() => setFilterMode('with-oases')}
+              className="accent-radio"
+              disabled={scanning}
+            />
+            Villages + unoccupied oases
+          </label>
+          <label className="check-label">
+            <input
+              type="radio"
+              name="filterMode"
+              value="oasis-only"
+              checked={filterMode === 'oasis-only'}
+              onChange={() => setFilterMode('oasis-only')}
+              className="accent-radio"
+              disabled={scanning}
+            />
+            Oases only (occupied + unoccupied; ignore villages)
+          </label>
+        </div>
+      </div>
+
+      {/* Capital marker — costs ~1 profile fetch per unique player but
+          surfaces the "★" capital flag in results. Off → faster scan,
+          On → richer info. */}
+      <div className="mb-4">
         <label className="check-label">
           <input
             type="checkbox"
-            checked={showOases}
-            onChange={(e) => setShowOases(e.target.checked)}
-            disabled={oasisOnly}
+            checked={showCapitals}
+            onChange={(e) => setShowCapitals(e.target.checked)}
+            disabled={scanning}
             className="checkbox-gold"
           />
-          Include unoccupied oases
-        </label>
-        <label className="check-label">
-          <input
-            type="checkbox"
-            checked={oasisOnly}
-            onChange={(e) => setOasisOnly(e.target.checked)}
-            className="checkbox-gold"
-          />
-          Oases only (occupied + unoccupied; ignore villages)
+          Mark capital villages (★) — adds 1 profile fetch per player
         </label>
       </div>
-      <p className="text-xs text-secondary mb-4">Scans only player-owned villages (and oases if checked). Wilderness, abandoned valleys, and empty tiles are automatically skipped.</p>
+
+      <p className="text-xs text-secondary mb-4">Wilderness, abandoned valleys, and empty tiles are always skipped.</p>
 
       {/* Alliance exclusion */}
       <div className="mb-4">
@@ -422,7 +525,8 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
               <SortableHeader label="Distance" field="distance" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
               <SortableHeader label="Player" field="player_name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <th>Alliance</th>
-              <th>Type</th>
+              <SortableHeader label="Type" field="is_oasis" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <SortableHeader label="★" field="is_capital" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
               <th>Farm Lists</th>
               <th className="w-10"></th>
             </tr>
@@ -435,21 +539,14 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
                 <tr key={origIdx} onClick={() => toggleRow(origIdx)} className={`row-clickable ${isSelected ? 'row-selected' : ''}`}>
                   <td><input type="checkbox" checked={isSelected} onChange={() => toggleRow(origIdx)} onClick={(e) => e.stopPropagation()} className="checkbox-gold" /></td>
                   <td className="font-mono text-gold">({row.x}, {row.y})</td>
-                  <td>
-                    {row.village_name || row.name || '---'}
-                    {row.is_capital && (
-                      <span className="ml-1 text-gold" title="Capital village">★</span>
-                    )}
-                  </td>
+                  <td>{row.village_name || row.name || '---'}</td>
                   <td className="text-center font-mono">{row.population ?? '---'}</td>
                   <td className="text-center font-mono">{row.distance != null ? row.distance.toFixed(1) : '---'}</td>
                   <td className={row.player_name ? 'text-primary' : 'text-secondary italic'}>{row.player_name || 'Unoccupied'}</td>
                   <td className="text-secondary text-xs">{row.alliance_name || '---'}</td>
-                  <td>
-                    {row.is_oasis ? 'Oasis' : row.is_abandoned ? 'Abandoned' : 'Village'}
-                    {row.is_capital && !row.is_oasis && (
-                      <span className="ml-1 text-xs px-1 py-0.5 rounded bg-surface border-default text-gold">capital</span>
-                    )}
+                  <td>{row.is_oasis ? 'Oasis' : row.is_abandoned ? 'Abandoned' : 'Village'}</td>
+                  <td className="text-center" title={row.is_capital ? 'Capital village' : ''}>
+                    {row.is_capital ? <span className="text-gold text-base">★</span> : <span className="text-secondary opacity-30">—</span>}
                   </td>
                   <td>
                     {(coordMap?.[`${row.x},${row.y}`] || []).map((entry) => (
@@ -697,11 +794,18 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
       if (!mountedRef.current || loopStoppedRef.current) { resolve(); return }
       let resolved = false
       const safeResolve = () => { if (!resolved) { resolved = true; resolve() } }
+      // Pass safety timeout: 5 minutes was too aggressive — a real auto-
+      // scout pass with stealth delays + 50+ targets routinely takes
+      // 10-30 minutes. The op runs detached server-side anyway; this is
+      // just a watchdog so loop mode doesn't deadlock if the WS drops
+      // and we never see operation_complete. Bumping to 60 minutes
+      // covers practical sweep sizes; loop mode handles longer sessions
+      // by restarting passes.
       const safetyTimer = setTimeout(() => {
-        addMessage('warning', 'Pass timed out after 5 minutes')
+        addMessage('warning', 'Pass timed out after 60 minutes (server may still be running — check /sessions)')
         setWsStatus('disconnected')
         safeResolve()
-      }, 300000)
+      }, 60 * 60 * 1000)
       passResolverRef.current = () => { clearTimeout(safetyTimer); safeResolve() }
 
       const curResults = scanResultsRef.current
@@ -927,9 +1031,14 @@ export default function AutoScout() {
     }))
   }, [farmLists])
 
-  const handleScanComplete = (results) => {
+  const handleScanComplete = (results, opts = {}) => {
     setScanResults(results)
-    setSelected(new Set(results.map((_, i) => i)))
+    // History-replay (user navigated back to /scout after a scan
+    // completed in the background): keep prior selections so the user
+    // doesn't lose their deselect work. Fresh scans select-all by default.
+    if (!opts.preserveSelection) {
+      setSelected(new Set(results.map((_, i) => i)))
+    }
     fetchFarmData() // refresh farm data after scan
   }
 

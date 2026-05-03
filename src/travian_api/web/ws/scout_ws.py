@@ -15,6 +15,7 @@ Optimised stealth flow preserved from the original:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -710,6 +711,8 @@ def _build_scout_scan_coro(config: dict):
             cli_parts.append(f"--max-player-pop {max_player_pop}")
         if show_oases:
             cli_parts.append("--show-oases")
+        if oasis_only:
+            cli_parts.append("--oasis-only")
         if limit != 99999:
             cli_parts.append(f"--limit {limit}")
         if exclude_alliance_names:
@@ -719,6 +722,33 @@ def _build_scout_scan_coro(config: dict):
         ctx.push({"type": "trigger_info", "command": " ".join(cli_parts)})
 
         t_total_start = time.monotonic()
+
+        # Top-level keepalive task: pushes a small heartbeat frame every
+        # ~10s so the WebSocket wire stays warm even when the inner phase
+        # produces no client-visible output for a stretch (rare with
+        # per-tile / per-profile pushes, but a defense-in-depth against
+        # Safari background timeouts and aggressive intermediaries).
+        async def _keepalive_loop() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(10.0)
+                    ctx.push({"type": "heartbeat", "ts": time.time()})
+            except asyncio.CancelledError:
+                return
+
+        keepalive_task = asyncio.create_task(_keepalive_loop(), name="scout-keepalive")
+
+        # Cancel the heartbeat whenever the coro task itself is done, no
+        # matter how it finishes (normal return, raise, CancelledError
+        # from a user stop). The done_callback fires synchronously and
+        # avoids having to re-indent the entire scan body in a try/finally.
+        _outer = asyncio.current_task()
+        if _outer is not None:
+            _outer.add_done_callback(
+                lambda _t: keepalive_task.cancel()
+                if not keepalive_task.done()
+                else None
+            )
 
         # ── Phase 1: Map scan ───────────────────────────────────────
         step = 15
@@ -996,12 +1026,19 @@ def _build_scout_scan_coro(config: dict):
         # ── Phase 3b: Compute player populations ───────────────────
         visible_pops = _sum_visible_player_pops(tiles)
 
-        # Capital map (player_id → capital village_id) — populated when we
-        # fetch profile pages anyway. Empty when profile fetch is skipped
-        # (no max_player_pop), in which case no tile gets is_capital=True.
+        # Capital map (player_id → capital village_id). Built whenever we
+        # fetch profile pages — both for max_player_pop (where we need the
+        # accurate total) and for the new "show capitals" flag, so behavior
+        # is consistent across configurations.
         capital_map: dict[int, int] = {}
 
-        if max_player_pop is not None and visible_pops:
+        # Profile fetching is needed when EITHER:
+        # - the user wants accurate per-player population (max_player_pop), OR
+        # - the user wants capital flags shown on village rows.
+        want_capital_info = bool(config.get("show_capitals", True))
+        need_profiles = (max_player_pop is not None or want_capital_info) and bool(visible_pops)
+
+        if need_profiles:
             unique_pids = set(visible_pops.keys())
             ctx.push(
                 {
@@ -1013,23 +1050,22 @@ def _build_scout_scan_coro(config: dict):
                 }
             )
 
-            # Per-profile progress callback. Without it the profile fetch
-            # phase is silent for minutes (one phase message at start, one
-            # player_pops dump at end), the WS times out on the wire, and
-            # the page appears stuck — see "Map Scan stuck" bug.
+            # Per-profile progress callback — fires AFTER every profile.
+            # Each fetch already costs a stealth-throttled HTTP request
+            # (~1.5-3s typical), so a per-profile push is the strongest
+            # WS keepalive we can give: every gap between client-visible
+            # frames is bounded by one profile fetch, well under any
+            # reasonable proxy / Safari background timeout.
             def _on_profile(done: int, total: int) -> None:
-                # Report at every profile when small, every N when large.
-                step = 1 if total <= 30 else (5 if total <= 200 else 10)
-                if done == total or done % step == 0:
-                    ctx.push(
-                        {
-                            "type": "phase",
-                            "phase": "profile_progress",
-                            "index": done,
-                            "total": total,
-                            "message": f"Profile fetch: {done}/{total}",
-                        }
-                    )
+                ctx.push(
+                    {
+                        "type": "phase",
+                        "phase": "profile_progress",
+                        "index": done,
+                        "total": total,
+                        "message": f"Profile fetch: {done}/{total}",
+                    }
+                )
 
             profiles = await svc.fetch_player_profiles(unique_pids, progress_cb=_on_profile)
             player_pops = {
