@@ -20,6 +20,7 @@ const Logs = lazy(() => import('./pages/Logs'))
 const Sessions = lazy(() => import('./pages/Sessions'))
 const OasisRaider = lazy(() => import('./pages/OasisRaider'))
 const FarmBuilder = lazy(() => import('./pages/FarmBuilder'))
+const RaidOptimizer = lazy(() => import('./pages/RaidOptimizer'))
 
 export const TabContext = createContext(null)
 
@@ -89,6 +90,7 @@ export default function App() {
               <Route path="/farm-builder" element={<GuardedPage><FarmBuilder /></GuardedPage>} />
               <Route path="/scout" element={<GuardedPage><AutoScout /></GuardedPage>} />
               <Route path="/oasis-raider" element={<GuardedPage><OasisRaider /></GuardedPage>} />
+              <Route path="/raid-optimizer" element={<GuardedPage><RaidOptimizer /></GuardedPage>} />
               <Route path="/queue" element={<GuardedPage><BuildQueue /></GuardedPage>} />
               <Route path="/logs" element={<GuardedPage><Logs /></GuardedPage>} />
               <Route path="/sessions" element={<GuardedPage><Sessions /></GuardedPage>} />

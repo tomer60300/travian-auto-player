@@ -21,6 +21,7 @@ const moreTabs = [
   { to: '/queue', label: 'Queue', icon: '📋' },
   { to: '/oasis-raider', label: 'Oasis Raider', icon: '🏕' },
   { to: '/farm-builder', label: 'Farm Builder', icon: '🔨' },
+  { to: '/raid-optimizer', label: 'Raid Optimizer', icon: '🧮' },
   { to: '/logs', label: 'Logs', icon: '📊' },
   { to: '/sessions', label: 'Sessions', icon: '📡' },
 ]
