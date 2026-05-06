@@ -4,6 +4,7 @@ import { useResumableOperation } from '../hooks/useResumableOperation'
 import { useToast } from '../components/Toast'
 import WebSocketPanel from '../components/WebSocketPanel'
 import ConfirmDialog from '../components/ConfirmDialog'
+import { MapCoord } from '../components/MapCoord'
 import useGameStore from '../stores/gameStore'
 
 // ---------------------------------------------------------------------------
@@ -967,7 +968,7 @@ export default function FarmLists() {
                           <td onClick={(e) => e.stopPropagation()}>
                             <input type="checkbox" className="checkbox-gold" checked={selectedSlotIds.has(slotId)} onChange={() => toggleSlotSelection(slotId)} />
                           </td>
-                          <td className="font-mono text-primary whitespace-nowrap">({slot.x ?? '?'},{slot.y ?? '?'})</td>
+                          <td className="font-mono text-primary whitespace-nowrap"><MapCoord x={slot.x} y={slot.y} separator="," /></td>
                           <td className="text-primary">{slot.name ?? '---'}</td>
                           <td className="text-center font-mono">{slot.population ?? '---'}</td>
                           <td className="text-center font-mono">{slot.distance != null ? slot.distance.toFixed(1) : '---'}</td>

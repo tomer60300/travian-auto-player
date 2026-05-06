@@ -4,6 +4,7 @@ import { useToast } from '../components/Toast'
 import WebSocketPanel from '../components/WebSocketPanel'
 import VillageSelector from '../components/VillageSelector'
 import AddToFarmDialog from '../components/AddToFarmDialog'
+import { MapCoord } from '../components/MapCoord'
 import useGameStore from '../stores/gameStore'
 import api from '../api'
 
@@ -539,7 +540,7 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
               return (
                 <tr key={origIdx} onClick={() => toggleRow(origIdx)} className={`row-clickable ${isSelected ? 'row-selected' : ''}`}>
                   <td><input type="checkbox" checked={isSelected} onChange={() => toggleRow(origIdx)} onClick={(e) => e.stopPropagation()} className="checkbox-gold" /></td>
-                  <td className="font-mono text-gold">({row.x}, {row.y})</td>
+                  <td className="font-mono text-gold"><MapCoord x={row.x} y={row.y} /></td>
                   <td>{row.village_name || row.name || '---'}</td>
                   <td
                     className="text-center font-mono"
