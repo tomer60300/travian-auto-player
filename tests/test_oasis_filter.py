@@ -5,6 +5,7 @@ before `show_oases` flag is checked, causing oases to never appear in results.
 """
 
 from travian_api.models.farm_list import MapTileInfo
+from travian_api.services.auto_scout_service import AutoScoutService
 
 
 def build_test_tiles():
@@ -216,3 +217,128 @@ class TestOasisFilter:
 
         assert len(result_show) == 2, "All oases should be included when show_oases=True"
         assert len(result_hide) == 0, "All oases should be excluded when show_oases=False"
+
+
+class TestPopulationFilterAppliesToOases:
+    """`filter_targets` must apply min/max village-pop to oases too.
+
+    Prior behaviour carved oases out of the village-pop check so the user
+    couldn't drop pop=0 unoccupied oases via min_population. After the
+    fix, scout_ws inherits the owning village's pop into occupied oases
+    and the filter is uniform.
+    """
+
+    def test_min_population_drops_unoccupied_oasis_with_pop_zero(self):
+        svc = AutoScoutService(http_client=None)  # filter_targets is pure
+        tiles = [
+            MapTileInfo(x=1, y=1, village_id=0, is_oasis=True, population=0, distance=1.0),
+            MapTileInfo(
+                x=2, y=2, village_id=42, player_id=7, population=600, distance=2.0
+            ),
+        ]
+        result = svc.filter_targets(tiles, min_population=1, exclude_oases=False)
+        coords = {(t.x, t.y) for t in result}
+        assert (1, 1) not in coords, "Unoccupied oasis (pop=0) must be filtered out by min_pop=1"
+        assert (2, 2) in coords, "Village with pop=600 must pass min_pop=1"
+
+    def test_min_population_keeps_occupied_oasis_with_inherited_pop(self):
+        svc = AutoScoutService(http_client=None)
+        # Occupied oasis whose population was already inherited from the
+        # owning village (post-enrichment in scout_ws sets this).
+        tiles = [
+            MapTileInfo(
+                x=28, y=96, village_id=0, player_id=99, is_oasis=True,
+                population=600, distance=9.4,
+            ),
+            MapTileInfo(
+                x=29, y=93, village_id=0, is_oasis=True, population=0, distance=7.8
+            ),
+        ]
+        result = svc.filter_targets(
+            tiles, min_population=1, max_population=800, exclude_oases=False
+        )
+        coords = {(t.x, t.y) for t in result}
+        assert (28, 96) in coords, "Occupied oasis with inherited pop=600 must pass 1..800"
+        assert (29, 93) not in coords, "Unoccupied oasis (pop=0) must be dropped by min_pop=1"
+
+    def test_max_population_drops_oasis_above_cap(self):
+        svc = AutoScoutService(http_client=None)
+        tiles = [
+            MapTileInfo(
+                x=5, y=5, village_id=0, player_id=99, is_oasis=True,
+                population=2000, distance=5.0,
+            ),
+        ]
+        result = svc.filter_targets(tiles, max_population=800, exclude_oases=False)
+        assert result == [], "Occupied oasis with pop=2000 must be dropped by max_pop=800"
+
+
+class TestParserStripsBidiMarkers:
+    """`_parse_tile_details` must clean U+202D / U+202C and their HTML
+    entity forms from village_name so the UI doesn't render `&#x202d;`.
+    """
+
+    def test_html_entity_form_is_stripped(self):
+        svc = AutoScoutService(http_client=None)
+        html = "<h1>Occupied oasis &#x202d;101&#x202c;</h1>"
+        info = svc._parse_tile_details(28, 96, html)
+        assert "&#x202d;" not in info.village_name
+        assert "‭" not in info.village_name
+        assert "‬" not in info.village_name
+        assert "Occupied oasis" in info.village_name
+        assert "101" in info.village_name
+
+    def test_raw_codepoint_form_is_stripped(self):
+        svc = AutoScoutService(http_client=None)
+        html = "<h1>Unoccupied oasis ‭‬</h1>"
+        info = svc._parse_tile_details(29, 93, html)
+        assert "‭" not in info.village_name
+        assert "‬" not in info.village_name
+
+
+class TestParserExtractsOasisOwnerCoords:
+    """For occupied oases, the parser captures the owning village's
+    coords from the karte.php link so scout_ws can copy that village's
+    pop into the oasis row.
+    """
+
+    def test_owner_coords_extracted_when_link_present(self):
+        svc = AutoScoutService(http_client=None)
+        html = (
+            '<h1>Occupied oasis</h1>'
+            '<th>Occupied by</th>'
+            '<td><a href="/profile/123">THE NOBODY</a></td>'
+            '<th>Owner village</th>'
+            '<td><a href="/karte.php?x=27&amp;y=96">101</a></td>'
+            '<th>Tribe</th><td>Roman</td>'
+            '<div class="oasis"></div>'
+        )
+        info = svc._parse_tile_details(28, 96, html)
+        assert info.is_oasis is True
+        assert info.player_id == 123
+        assert info.oasis_owner_x == 27
+        assert info.oasis_owner_y == 96
+
+    def test_owner_coords_skip_self_link(self):
+        svc = AutoScoutService(http_client=None)
+        # Some popups may link to the tile itself before the owner-village
+        # link. The parser must skip the self-link and pick the next.
+        html = (
+            '<h1>Occupied oasis</h1>'
+            '<a href="/karte.php?x=28&y=96">this tile</a>'
+            '<th>Occupied by</th><td><a href="/profile/7">P</a></td>'
+            '<a href="/karte.php?x=27&y=96">owner village</a>'
+            '<div class="oasis"></div>'
+        )
+        info = svc._parse_tile_details(28, 96, html)
+        assert info.oasis_owner_x == 27
+        assert info.oasis_owner_y == 96
+
+    def test_owner_coords_left_unset_for_unoccupied_oasis(self):
+        svc = AutoScoutService(http_client=None)
+        html = '<h1>Unoccupied oasis</h1><div class="oasis"></div>'
+        info = svc._parse_tile_details(5, 5, html)
+        assert info.is_oasis is True
+        assert info.player_id is None
+        assert info.oasis_owner_x is None
+        assert info.oasis_owner_y is None

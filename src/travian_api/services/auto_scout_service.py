@@ -7,10 +7,12 @@ import logging
 import math
 import random
 import re
+from html import unescape as html_unescape
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from ..clients.http_client import HttpClient
 from ..models.farm_list import MapTileInfo
+from ..parsers.html_parser import clean_unicode
 
 logger = logging.getLogger(__name__)
 
@@ -113,11 +115,14 @@ class AutoScoutService:
             aid = t.get("aid")
             title = t.get("title", "")
 
-            # Parse village name from title like "{k.dt} VillageName"
+            # Parse village name from title like "{k.dt} VillageName".
+            # Strip Travian's bidi-override markers (U+202D / U+202C, also
+            # served as &#x202d; entities) so the UI doesn't render them
+            # as literal "&#x202d;" text.
             village_name = ""
             name_match = re.search(r"\{k\.dt\}\s*(.+)", title)
             if name_match:
-                village_name = name_match.group(1).strip()
+                village_name = clean_unicode(html_unescape(name_match.group(1)))
 
             is_oasis = "{k.fo}" in title or "{k.bt}" in title
 
@@ -308,17 +313,16 @@ class AutoScoutService:
                 continue
             if exclude_oases and t.is_oasis:
                 continue
-            # Village-pop filters only apply to actual VILLAGES. Oases
-            # don't have a village population (their own `population`
-            # field is always 0 — owner total is tracked separately as
-            # `owner_population` and gated by Max Player Pop). Without
-            # this guard, "Min Village Pop ≥ 1" would silently drop every
-            # unoccupied oasis the user explicitly asked to see.
-            if not t.is_oasis:
-                if max_population is not None and t.population > max_population:
-                    continue
-                if min_population is not None and t.population < min_population:
-                    continue
+            # Min/Max village-pop applies uniformly to villages AND to
+            # oases. For occupied oases, scout_ws inherits the owning
+            # village's population into `t.population` before this filter
+            # runs, so the comparison is meaningful. Unoccupied oases keep
+            # `population = 0`, which means "Min Village Pop ≥ 1" drops
+            # them — that is the intended behaviour.
+            if max_population is not None and t.population > max_population:
+                continue
+            if min_population is not None and t.population < min_population:
+                continue
             if max_distance is not None and t.distance > max_distance:
                 continue
             result.append(t)
@@ -641,10 +645,12 @@ class AutoScoutService:
         if tribe_match:
             info.tribe = tribe_match.group(1)
 
-        # Village name from h1
+        # Village name from h1. Travian wraps text with bidi-override
+        # markers (&#x202d; / &#x202c;) — decode entities AND strip the
+        # raw codepoints so neither leaks to the UI.
         name_match = re.search(r"<h1[^>]*>([^<]+)", html)
         if name_match:
-            info.village_name = name_match.group(1).strip()
+            info.village_name = clean_unicode(html_unescape(name_match.group(1)))
 
         # Village ID from links (e.g., villageId=69344)
         vid_match = re.search(r"villageId=(\d+)", html)
@@ -675,5 +681,19 @@ class AutoScoutService:
         # Check if oasis
         if "oasis" in html.lower() or 'class="oasis' in html:
             info.is_oasis = True
+
+        # For occupied oases, the popup links to the owning village via
+        # /karte.php?x=&y=. Capture those coords so the post-enrichment
+        # phase can copy that village's population into the oasis row
+        # (otherwise V.Pop would always be 0 for occupied oases).
+        if info.is_oasis and info.player_id:
+            for m in re.finditer(
+                r"karte\.php\?x=(-?\d+)&(?:amp;)?y=(-?\d+)", html
+            ):
+                ox, oy = int(m.group(1)), int(m.group(2))
+                if (ox, oy) != (x, y):
+                    info.oasis_owner_x = ox
+                    info.oasis_owner_y = oy
+                    break
 
         return info

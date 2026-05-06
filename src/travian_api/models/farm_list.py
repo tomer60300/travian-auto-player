@@ -197,15 +197,27 @@ class MapTileInfo(BaseModel):
     village_name: str = ""
     player_name: str = ""
     tribe: str = ""
+    # Population shown as "V.Pop" in the UI. For player villages it's
+    # the village's own pop. For OCCUPIED oases the post-enrichment phase
+    # in scout_ws inherits the owning village's pop into this field, so
+    # the same min/max-pop filter applies uniformly. UNOCCUPIED oases
+    # and abandoned valleys stay at 0.
     population: int = 0
     # Owner's TOTAL population summed across all their villages.
     # 0 when the tile has no owner (unoccupied oasis, abandoned valley).
     # For player villages: filled with the player's profile total OR the
     # visible-village sum if profile fetch was skipped.
-    # For occupied oases: same — the oasis's own `population` stays 0
-    # (oases don't have village pop), and the OWNER's total goes here.
+    # For occupied oases: same — the OWNER's total goes here, separate
+    # from the per-village pop in `population`.
     owner_population: int = 0
     distance: float = 0.0
     is_oasis: bool = False
     is_abandoned: bool = False  # did=-1 with no uid
     is_capital: bool = False  # owner's capital village (extracted during enrichment)
+    # Coords of the village that occupies this oasis (parsed from the
+    # `karte.php?x=&y=` link in the tile-details popup). Only set on
+    # occupied oases; used to copy the owner-village's population into
+    # `population` so the V.Pop column and min/max-pop filters are
+    # uniform across villages and occupied oases.
+    oasis_owner_x: Optional[int] = None
+    oasis_owner_y: Optional[int] = None

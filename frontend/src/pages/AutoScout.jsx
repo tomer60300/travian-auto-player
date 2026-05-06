@@ -544,9 +544,11 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
                   <td>{row.village_name || row.name || '---'}</td>
                   <td
                     className="text-center font-mono"
-                    title={row.is_oasis ? 'Oases have no village population' : ''}
+                    title={row.is_oasis && !row.player_id ? 'Unoccupied oasis — no owning village' : ''}
                   >
-                    {row.is_oasis ? <span className="text-secondary opacity-50">0</span> : (row.population ?? 0)}
+                    {(row.population ?? 0) === 0
+                      ? <span className="text-secondary opacity-50">0</span>
+                      : row.population}
                   </td>
                   <td className="text-center font-mono">
                     {row.player_id

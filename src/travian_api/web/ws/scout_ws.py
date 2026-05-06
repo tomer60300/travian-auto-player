@@ -1101,6 +1101,28 @@ def _build_scout_scan_coro(config: dict):
             else:
                 t.owner_population = 0
 
+        # ── Occupied-oasis V.Pop inheritance ────────────────────────
+        # Oases have no population of their own. For OCCUPIED oases, the
+        # tile-details parser captured the coords of the owning village
+        # (oasis_owner_x/y); look that village up among the scanned tiles
+        # and copy its `population` so the V.Pop column shows a real
+        # number and the village-pop filter applies uniformly. Owner
+        # villages outside the scan radius can't be resolved → pop stays
+        # 0, which the user-supplied min-pop filter will drop.
+        village_pop_by_xy = {
+            (t.x, t.y): t.population for t in tiles if not t.is_oasis
+        }
+        for t in tiles:
+            if (
+                t.is_oasis
+                and t.player_id
+                and t.oasis_owner_x is not None
+                and t.oasis_owner_y is not None
+            ):
+                t.population = village_pop_by_xy.get(
+                    (t.oasis_owner_x, t.oasis_owner_y), 0
+                )
+
         # Mark each tile owned by a known player whose capital we resolved.
         if capital_map:
             for t in tiles:
@@ -1252,9 +1274,10 @@ def _build_scout_scan_coro(config: dict):
                 "village_name": t.village_name,
                 "player_name": t.player_name,
                 "tribe": t.tribe,
-                # `population` is the village's own pop. Always 0 for
-                # oases (occupied or unoccupied) — see model docstring.
-                "population": 0 if t.is_oasis else t.population,
+                # `population` is the village's own pop for villages and
+                # the owner-village's pop for occupied oases (set above).
+                # Unoccupied oases stay at 0 because they have no owner.
+                "population": t.population,
                 # `owner_population` is the player's TOTAL pop. 0 for
                 # unoccupied. The frontend renders these as separate
                 # columns (V.Pop and Player Pop).
