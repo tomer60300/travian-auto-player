@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
 from travian_api.operation_manager import operation_manager
 from travian_api.web.auth import get_current_user
@@ -41,6 +41,35 @@ async def list_sessions(user=Depends(get_current_user)):
     return exec_session_manager.list_for_user(user.id)
 
 
+@router.get("/api/__diag/sessions")
+async def diag_sessions(user=Depends(get_current_user)):
+    """Diagnostic snapshot of this user's execution sessions.
+
+    Returns subscriber counts, message-count, status, etc. — meant to be
+    cross-referenced against the client-side `__resumableDebug.history()`
+    when the page appears to hang. Read-only, no side effects.
+    """
+    sessions = exec_session_manager.list_for_user(user.id)
+    enriched = []
+    for s in sessions:
+        sess = exec_session_manager.get(s["id"])
+        sub_count = len(sess._subscribers) if sess is not None else 0
+        last_msg_ts = None
+        last_msg_type = None
+        if sess is not None and sess.messages:
+            last = sess.messages[-1]
+            if isinstance(last, dict):
+                last_msg_ts = last.get("ts")
+                last_msg_type = last.get("type")
+        enriched.append({
+            **s,
+            "subscriber_count": sub_count,
+            "last_message_ts": last_msg_ts,
+            "last_message_type": last_msg_type,
+        })
+    return {"sessions": enriched, "user_id": user.id}
+
+
 @router.post("/api/sessions/stop-all")
 async def stop_all_sessions(user=Depends(get_current_user)):
     """Signal all active operations for this user to stop gracefully."""
@@ -48,6 +77,28 @@ async def stop_all_sessions(user=Depends(get_current_user)):
     active = active_ops.get_active(user.id)
     logger.info("Stop-all requested by user %s, active ops: %s", user.id, active)
     return {"stopped": True, "active_operations": active}
+
+
+@router.post("/api/sessions/{session_id}/stop")
+async def stop_one_session(session_id: str, user=Depends(get_current_user)):
+    """Signal a single operation to stop gracefully.
+
+    The bulk ``/stop-all`` is appropriate for "kill switch" UX. This
+    endpoint lets the per-session detail view target one op without
+    collateral. Returns 404 when the session doesn't exist or doesn't
+    belong to the caller.
+    """
+    session = exec_session_manager.get(session_id)
+    if session is None or session.user_id != user.id:
+        # FastAPI does not honor Flask-style ``return body, status_code``
+        # tuples — raise HTTPException so the client actually sees 404.
+        raise HTTPException(status_code=404, detail="Session not found")
+    ok = operation_manager.request_stop(session_id)
+    logger.info(
+        "Stop requested for session %s by user %s (op_found=%s)",
+        session_id, user.id, ok,
+    )
+    return {"stopped": True, "op_running": ok, "session_id": session_id}
 
 
 # ---------------------------------------------------------------------------
@@ -90,13 +141,23 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
     sub_id = id(websocket)
     result = exec_session_manager.subscribe(session_id, sub_id)
     if result is None:
+        logger.warning(
+            "session_stream subscriber: subscribe() returned None — session vanished. "
+            "user=%s session=%s", user_id, session_id,
+        )
         await websocket.send_json({"type": "error", "message": "Session not found"})
         await ws_manager.disconnect(user_id, channel, websocket)
         return
 
     history, queue = result
+    logger.info(
+        "session_stream subscriber attached: user=%s session=%s sub_id=%s "
+        "session.status=%s history_len=%d",
+        user_id, session_id, sub_id, session.status, len(history),
+    )
 
     stop_listener: asyncio.Task | None = None
+    sent_count = 0
 
     try:
         # Send metadata
@@ -110,13 +171,21 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
                 "created_at": session.created_at,
             }
         )
+        sent_count += 1
 
         # Send full history
         await websocket.send_json({"type": "history", "messages": history})
+        sent_count += 1
 
         # If session already ended, tell the client and close gracefully
         if session.status == "disconnected":
             await websocket.send_json({"type": "session_ended"})
+            sent_count += 1
+            logger.info(
+                "session_stream subscriber: session already disconnected, sent "
+                "session_ended and closing. user=%s session=%s sub_id=%s sent=%d",
+                user_id, session_id, sub_id, sent_count,
+            )
             return
 
         # Cross-device stop: a client connected to the stream can ask the
@@ -132,16 +201,26 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
             if data is None:
                 # None sentinel = session ended
                 await websocket.send_json({"type": "session_ended"})
+                sent_count += 1
+                logger.info(
+                    "session_stream subscriber: None sentinel received, sent "
+                    "session_ended. session=%s sub_id=%s sent=%d",
+                    session_id, sub_id, sent_count,
+                )
                 break
             await websocket.send_json({"type": "message", "data": data})
+            sent_count += 1
 
     except WebSocketDisconnect:
-        pass
+        logger.info(
+            "session_stream subscriber: WebSocketDisconnect. "
+            "session=%s sub_id=%s sent=%d",
+            session_id, sub_id, sent_count,
+        )
     except Exception:
         logger.exception(
-            "Error in session stream WS: session=%s user=%s",
-            session_id,
-            user_id,
+            "Error in session stream WS: session=%s user=%s sub_id=%s sent=%d",
+            session_id, user_id, sub_id, sent_count,
         )
     finally:
         if stop_listener is not None:
@@ -152,6 +231,10 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
                 pass
         exec_session_manager.unsubscribe(session_id, sub_id)
         await ws_manager.disconnect(user_id, channel, websocket)
+        logger.info(
+            "session_stream subscriber detached. session=%s sub_id=%s total_sent=%d",
+            session_id, sub_id, sent_count,
+        )
 
 
 async def _listen_for_stop(websocket: WebSocket, session_id: str) -> None:

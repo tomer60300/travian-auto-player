@@ -208,6 +208,20 @@ class OperationManager:
     ) -> None:
         """Execute the op coro and translate every termination to a terminal
         message + cleanup. This is the only function that touches op.status."""
+        # Global heartbeat. Every op gets a frame pushed every 10s so:
+        #   - The client-side watchdog in useResumableOperation.js has a
+        #     constant signal-of-life and won't false-positive on legitimately
+        #     silent phases (build queue waits, oasis raider between sweeps,
+        #     farm run-all between lists, etc.).
+        #   - Aggressive proxies / mobile-network NATs are kept warm so the
+        #     starter WS doesn't get culled mid-op.
+        # The heartbeat is OWNED by the manager, not the op coro, so every
+        # op gets it for free — adding ad-hoc keepalive loops per WS handler
+        # (the way scout_ws did) is no longer needed.
+        keepalive_task = asyncio.create_task(
+            _global_keepalive(ctx),
+            name=f"keepalive:{ctx.session_id}",
+        )
         try:
             await coro(ctx)
             # Decide the terminal status from observable signals:
@@ -249,6 +263,14 @@ class OperationManager:
             )
             ctx.push({"type": "operation_complete", "status": FAILED})
         finally:
+            # Stop the heartbeat before the terminal cleanup runs — otherwise
+            # one more heartbeat could arrive after operation_complete and
+            # confuse subscribers (and pad the ring buffer past the terminal).
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except (asyncio.CancelledError, Exception):
+                pass
             for extra in extra_labels:
                 active_ops.unregister(ctx.user_id, extra)
             active_ops.unregister(ctx.user_id, label)
@@ -314,6 +336,23 @@ def _last_message_was_fatal_error(exec_session: ExecutionSession) -> bool:
         ):
             return True
     return False
+
+
+async def _global_keepalive(ctx: "OperationContext") -> None:
+    """Heartbeat loop owned by the operation manager (not the op coro).
+
+    Pushes a ``{"type": "heartbeat", "ts": <unix>}`` frame every 10s to
+    keep the client-side message watchdog (useResumableOperation.js)
+    armed during legitimately silent phases. The frame is intentionally
+    cheap and contains no operation-specific state — UI handlers should
+    silently consume it.
+    """
+    try:
+        while True:
+            await asyncio.sleep(10.0)
+            ctx.push({"type": "heartbeat", "ts": time.time()})
+    except asyncio.CancelledError:
+        return
 
 
 # Module-level singleton — every WS handler imports this.

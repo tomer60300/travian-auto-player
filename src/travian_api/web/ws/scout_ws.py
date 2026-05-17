@@ -723,32 +723,11 @@ def _build_scout_scan_coro(config: dict):
 
         t_total_start = time.monotonic()
 
-        # Top-level keepalive task: pushes a small heartbeat frame every
-        # ~10s so the WebSocket wire stays warm even when the inner phase
-        # produces no client-visible output for a stretch (rare with
-        # per-tile / per-profile pushes, but a defense-in-depth against
-        # Safari background timeouts and aggressive intermediaries).
-        async def _keepalive_loop() -> None:
-            try:
-                while True:
-                    await asyncio.sleep(10.0)
-                    ctx.push({"type": "heartbeat", "ts": time.time()})
-            except asyncio.CancelledError:
-                return
-
-        keepalive_task = asyncio.create_task(_keepalive_loop(), name="scout-keepalive")
-
-        # Cancel the heartbeat whenever the coro task itself is done, no
-        # matter how it finishes (normal return, raise, CancelledError
-        # from a user stop). The done_callback fires synchronously and
-        # avoids having to re-indent the entire scan body in a try/finally.
-        _outer = asyncio.current_task()
-        if _outer is not None:
-            _outer.add_done_callback(
-                lambda _t: keepalive_task.cancel()
-                if not keepalive_task.done()
-                else None
-            )
+        # Note: the scout no longer maintains its own keepalive loop. The
+        # operation manager (operation_manager._global_keepalive) pushes a
+        # heartbeat every 10s for every op, so the WebSocket wire stays
+        # warm during long silent phases and the client-side watchdog
+        # (useResumableOperation.js) has a constant signal-of-life.
 
         # ── Phase 1: Map scan ───────────────────────────────────────
         step = 15
@@ -987,6 +966,8 @@ def _build_scout_scan_coro(config: dict):
                             "alliance": detail.alliance_name or None,
                             "tribe": detail.tribe or None,
                             "distance": detail.distance,
+                            "is_oasis": detail.is_oasis,
+                            "bonus": detail.bonus or None,
                         },
                     }
                 )
@@ -1286,6 +1267,10 @@ def _build_scout_scan_coro(config: dict):
                 "is_oasis": t.is_oasis,
                 "is_abandoned": t.is_abandoned,
                 "is_capital": t.is_capital,
+                # Oasis bonus string (e.g. "25% Clay" or "25% Iron, 25% Crop").
+                # Empty for non-oasis tiles. Frontend renders it in the Type
+                # column on oasis rows.
+                "bonus": t.bonus,
             }
             for t in tiles
         ]

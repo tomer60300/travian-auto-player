@@ -214,6 +214,10 @@ class MapTileInfo(BaseModel):
     is_oasis: bool = False
     is_abandoned: bool = False  # did=-1 with no uid
     is_capital: bool = False  # owner's capital village (extracted during enrichment)
+    # Oasis bonus summary as a human-readable string, e.g. "25% Clay" or
+    # "25% Iron, 25% Crop" or "50% Crop". Empty for non-oasis tiles or
+    # when the bonus table can't be parsed from the tile-details popup.
+    bonus: str = ""
     # Coords of the village that occupies this oasis (parsed from the
     # `karte.php?x=&y=` link in the tile-details popup). Only set on
     # occupied oases; used to copy the owner-village's population into

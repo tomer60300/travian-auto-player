@@ -17,6 +17,44 @@ from ..parsers.html_parser import clean_unicode
 logger = logging.getLogger(__name__)
 
 
+# Module-level — module-private. Used by _parse_tile_details below.
+# Matches a single <td class="desc">Resource</td>...<td class="val">+25%</td>
+# row anywhere inside the bonus table. The outer table is gated by id
+# attribute first to keep the bonus parse anchored to the right block.
+_OASIS_BONUS_TABLE_RE = re.compile(
+    r'<table[^>]*\bid="distribution"[^>]*>(.*?)</table>', re.DOTALL
+)
+_OASIS_BONUS_ROW_RE = re.compile(
+    r'<td[^>]*\bclass="desc"[^>]*>\s*([^<]+?)\s*</td>\s*'
+    r'<td[^>]*\bclass="val"[^>]*>\s*\+?(\d+)\s*%?\s*</td>',
+    re.DOTALL,
+)
+
+
+def _parse_oasis_bonus_html(html: str) -> str:
+    """Return a human-readable oasis bonus string like ``"25% Clay"`` or
+    ``"25% Iron, 25% Crop"``. Empty string when no bonus table or no rows.
+
+    Mirrors :py:meth:`OasisRaiderService._parse_oasis_bonus` (BS4-based)
+    but uses regex so this module stays BS4-free (consistent with the
+    rest of ``_parse_tile_details``).
+
+    Resource names get HTML-unescaped and run through ``clean_unicode`` —
+    Travian wraps some labels in bidi-override markers for non-English
+    locales (same treatment the village-name parser applies above).
+    """
+    m = _OASIS_BONUS_TABLE_RE.search(html)
+    if not m:
+        return ""
+    bonuses: list[str] = []
+    for row in _OASIS_BONUS_ROW_RE.finditer(m.group(1)):
+        resource = clean_unicode(html_unescape(row.group(1))).strip()
+        pct = row.group(2).strip()
+        if resource and pct:
+            bonuses.append(f"{pct}% {resource}")
+    return ", ".join(bonuses)
+
+
 class AutoScoutService:
     """Scan the map for villages and send scouts based on filters."""
 
@@ -681,6 +719,16 @@ class AutoScoutService:
         # Check if oasis
         if "oasis" in html.lower() or 'class="oasis' in html:
             info.is_oasis = True
+
+        # Oasis resource bonus(es). Travian renders these in a
+        # <table id="distribution"> with one row per non-zero bonus:
+        #   <td class="desc">Wood</td>  <td class="val">+25%</td>
+        # We capture the same data the operator sees in the popup so the
+        # scout UI can show "Oasis 25% Clay" instead of just "Oasis".
+        # Matches oasis_raider_service._parse_oasis_bonus output format,
+        # regex-based to avoid pulling BS4 into this module.
+        if info.is_oasis:
+            info.bonus = _parse_oasis_bonus_html(html)
 
         # For occupied oases, the popup links to the owning village via
         # /karte.php?x=&y=. Capture those coords so the post-enrichment

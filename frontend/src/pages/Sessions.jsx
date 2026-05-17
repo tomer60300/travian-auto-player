@@ -106,15 +106,57 @@ export default function Sessions() {
     return () => clearInterval(id)
   }, [fetchSessions])
 
-  // Stop all operations
+  // Stop ALL active operations (destructive global action). Guarded by a
+  // confirm() so a misclick from the per-session detail view (where the
+  // single-session "Stop" used to incorrectly invoke this) and from the
+  // session-list top-bar don't fan out a kill to every running op.
   const handleStopAll = async () => {
+    const n = running.length
+    if (n > 1) {
+      const ok = window.confirm(
+        `Stop ALL ${n} active operations? This signals every running op to halt; reruns must be initiated manually.`
+      )
+      if (!ok) return
+    }
     setStopping(true)
     try {
       await api.post('/sessions/stop-all')
-      toast.success('Stop signal sent to all active operations')
+      toast.success(`Stop signal sent to ${n} operation${n === 1 ? '' : 's'}`)
       setTimeout(fetchSessions, 1000)
     } catch {
       toast.error('Failed to send stop signal')
+    } finally {
+      setStopping(false)
+    }
+  }
+
+  // Stop ONE specific operation by session_id. Used by the per-session
+  // detail-view "Stop" button so the operator can halt one op without
+  // collateral. Falls back to the WS-channel {"action":"stop"} if the
+  // REST endpoint is unreachable (older server build), since both paths
+  // ultimately call operation_manager.request_stop(session_id).
+  const handleStopOne = async (sessionId) => {
+    if (!sessionId) return
+    setStopping(true)
+    try {
+      await api.post(`/sessions/${sessionId}/stop`)
+      toast.success('Stop signal sent')
+      setTimeout(fetchSessions, 1000)
+    } catch {
+      // REST path failed — try the WS action channel.
+      const handle = wsRef.current
+      const ws = handle?.ws ?? handle
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ action: 'stop' }))
+          toast.success('Stop signal sent (via WebSocket)')
+          setTimeout(fetchSessions, 1000)
+        } catch {
+          toast.error('Failed to send stop signal')
+        }
+      } else {
+        toast.error('Failed to send stop signal')
+      }
     } finally {
       setStopping(false)
     }
@@ -260,7 +302,12 @@ export default function Sessions() {
                 {isLive ? 'Live' : 'Ended'}
               </span>
               {isLive && (
-                <button onClick={handleStopAll} className="btn-danger btn-sm" disabled={stopping}>
+                <button
+                  onClick={() => handleStopOne(selected)}
+                  className="btn-danger btn-sm"
+                  disabled={stopping}
+                  title="Stop this operation only (does not affect other running operations)"
+                >
                   {stopping ? 'Stopping...' : 'Stop'}
                 </button>
               )}

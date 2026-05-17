@@ -51,7 +51,11 @@ class ExecutionSessionManager:
 
     def create(self, user_id: int, session_type: str, label: str) -> ExecutionSession:
         """Create and register a new execution session."""
-        session_id = os.urandom(4).hex()
+        # 16 bytes (128 bits) of entropy — 32 bits was thin for 24h URLs
+        # even with auth in front of the WS endpoint. Same length as a
+        # UUID4 hex; cheap defense-in-depth against ID collision and
+        # online guessing.
+        session_id = os.urandom(16).hex()
         session = ExecutionSession(
             id=session_id,
             user_id=user_id,
@@ -104,9 +108,24 @@ class ExecutionSessionManager:
         session = self._sessions.get(session_id)
         if session is None:
             return
-        # Add timestamp if not present
         if "ts" not in data:
-            data = {**data, "ts": time.time()}
+            # Strictly monotonic across consecutive pushes. time.time() on
+            # Windows can return the same value for two rapid pushes (e.g.
+            # OperationManager._run pushing `complete` followed by
+            # `operation_complete` within microseconds). The client's
+            # resume-dedup uses `ts <= lastSeen` → identical ts dedups one
+            # of the two distinct frames out of existence, skipping its
+            # terminal handler. Bumping by 1µs guarantees uniqueness.
+            now = time.time()
+            last_ts = 0.0
+            if session.messages:
+                prev = session.messages[-1]
+                if isinstance(prev, dict):
+                    prev_ts = prev.get("ts")
+                    if isinstance(prev_ts, (int, float)):
+                        last_ts = float(prev_ts)
+            ts = now if now > last_ts else last_ts + 1e-6
+            data = {**data, "ts": ts}
         session.messages.append(data)
         # Fan-out to subscribers (snapshot to avoid dict-changed-during-iteration)
         for sub_id, queue in list(session._subscribers.items()):

@@ -112,22 +112,39 @@ async def subscribe_and_tail(
         name=f"stop-listener:{session_id}",
     )
 
+    logger.info(
+        "Resumable WS subscriber attached: user=%s channel=%s session=%s sub_id=%s",
+        user_id, channel, session_id, sub_id,
+    )
+    sent_count = 0
     try:
         while True:
             data = await queue.get()
             if data is None:
                 # Op terminated; ExecutionSession marked disconnected.
+                logger.info(
+                    "Resumable WS subscriber: None sentinel received "
+                    "(op terminated). session=%s sub_id=%s sent=%d",
+                    session_id, sub_id, sent_count,
+                )
                 break
             if not await _send(websocket, data):
+                logger.warning(
+                    "Resumable WS subscriber: send_json failed (client gone). "
+                    "session=%s sub_id=%s sent=%d msg_type=%s",
+                    session_id, sub_id, sent_count, data.get("type") if isinstance(data, dict) else "?",
+                )
                 break
-    except (WebSocketDisconnect, RuntimeError):
-        pass
+            sent_count += 1
+    except (WebSocketDisconnect, RuntimeError) as exc:
+        logger.info(
+            "Resumable WS subscriber disconnect: session=%s sub_id=%s sent=%d reason=%s",
+            session_id, sub_id, sent_count, type(exc).__name__,
+        )
     except Exception:
         logger.exception(
-            "Resumable WS tail error: user=%s channel=%s session=%s",
-            user_id,
-            channel,
-            session_id,
+            "Resumable WS tail error: user=%s channel=%s session=%s sub_id=%s sent=%d",
+            user_id, channel, session_id, sub_id, sent_count,
         )
     finally:
         stop_listener.cancel()
@@ -137,3 +154,7 @@ async def subscribe_and_tail(
             pass
         exec_session_manager.unsubscribe(session_id, sub_id)
         await ws_manager.disconnect(user_id, channel, websocket)
+        logger.info(
+            "Resumable WS subscriber detached: session=%s sub_id=%s total_sent=%d",
+            session_id, sub_id, sent_count,
+        )

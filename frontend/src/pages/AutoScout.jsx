@@ -180,6 +180,13 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         const t = data.tile
         if (t.error) {
           addScanMsg('error', `  [${data.index}/${data.total}] (${t.x},${t.y}) Failed: ${t.error}`)
+        } else if (t.is_oasis) {
+          // Oasis row: show bonus instead of pop/player/alliance — those
+          // are usually empty for oases anyway. "Unoccupied" vs owner is
+          // surfaced via the dedicated Type/Player columns in the table.
+          const bonusStr = t.bonus ? ` — ${t.bonus}` : ''
+          const ownerStr = t.player ? ` (owner: ${t.player})` : ''
+          addScanMsg('detail', `  [${data.index}/${data.total}] (${t.x},${t.y}) Oasis${bonusStr}${ownerStr}`)
         } else {
           addScanMsg('detail', `  [${data.index}/${data.total}] (${t.x},${t.y}) ${t.name || '?'} — pop:${t.pop ?? '?'} player:${t.player || '-'} ally:${t.alliance || '-'}`)
         }
@@ -234,6 +241,29 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       case 'already_running':
         addScanMsg('warning', 'A scan is already running on the server — reattaching')
         break
+      case 'operation_complete': {
+        // Multi-tab / cross-device stop, or a stop initiated via the
+        // /sessions page. Tab A clicked Stop; tab B was just viewing
+        // — without this case, tab B's progress UI sat there silently.
+        // Note: 'completed' status is normal end — `complete` was
+        // already emitted with the results table, so we don't need to
+        // do anything here for that. Only stopped/failed need a UI
+        // hint since `complete` is never emitted in those paths.
+        if (data.status === 'stopped') {
+          setScanPhase(null)
+          setEnrichProgress(null)
+          setScanning(false)
+          addScanMsg('warning', 'Scan stopped (from another tab or via /sessions)')
+          startedHereRef.current = false
+        } else if (data.status === 'failed') {
+          setScanPhase(null)
+          setEnrichProgress(null)
+          setScanning(false)
+          addScanMsg('error', 'Scan failed on the server')
+          startedHereRef.current = false
+        }
+        break
+      }
       default:
         if (data.message) addScanMsg('info', data.message)
     }
@@ -306,11 +336,25 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   }
 
   const handleCancel = () => {
+    // If the hook is already in a terminal state (op finished server-side
+    // during a reconnect), the cancel intent is moot — suppress the
+    // misleading "Scan cancelled by user" toast. Status from the hook is
+    // authoritative; the cancel only fires the WS action when status is
+    // actually running/reconnecting.
+    const liveStatus = scanOp.status
+    const isTerminal = (
+      liveStatus === 'completed'
+      || liveStatus === 'failed'
+      || liveStatus === 'stopped'
+      || liveStatus === 'idle'
+    )
     scanOp.stop()
     setScanPhase(null)
     setScanning(false)
-    addScanMsg('warning', 'Scan cancelled by user')
-    toast.warning('Scan cancelled')
+    if (!isTerminal) {
+      addScanMsg('warning', 'Scan cancelled by user')
+      toast.warning('Scan cancelled')
+    }
   }
 
   return (
@@ -558,7 +602,11 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
                   <td className="text-center font-mono">{row.distance != null ? row.distance.toFixed(1) : '---'}</td>
                   <td className={row.player_name ? 'text-primary' : 'text-secondary italic'}>{row.player_name || 'Unoccupied'}</td>
                   <td className="text-secondary text-xs">{row.alliance_name || '---'}</td>
-                  <td>{row.is_oasis ? 'Oasis' : row.is_abandoned ? 'Abandoned' : 'Village'}</td>
+                  <td title={row.is_oasis && row.bonus ? `Bonus: ${row.bonus}` : ''}>
+                    {row.is_oasis
+                      ? (row.bonus ? `Oasis · ${row.bonus}` : 'Oasis')
+                      : row.is_abandoned ? 'Abandoned' : 'Village'}
+                  </td>
                   <td className="text-center" title={row.is_capital ? 'Capital village' : ''}>
                     {row.is_capital ? <span className="text-gold text-base">★</span> : <span className="text-secondary opacity-30">—</span>}
                   </td>
@@ -1060,7 +1108,15 @@ export default function AutoScout() {
     <div className="p-6 max-w-[1100px] mx-auto">
       <div className="flex justify-between items-center mb-5">
         <h2 className="heading-gold text-2xl">Auto Scout</h2>
-        <VillageSelector />
+        <div className="flex items-center gap-3">
+          <span
+            className="text-[10px] text-secondary opacity-50 font-mono"
+            title="Bundle build marker. wd6 = wd5 + server-side ts monotonicity fix. Root cause: Windows time.time() collisions made `complete` + `operation_complete` share a ts → client dedup `<=` skipped operation_complete's terminal handler, leaving status='running' and forcing recovery through session-stream session_ended."
+          >
+            build: wd6
+          </span>
+          <VillageSelector />
+        </div>
       </div>
       <div className="flex flex-col gap-4">
         <ScanConfigPanel onScanComplete={handleScanComplete} scanning={scanning} setScanning={setScanning} onConfigChange={setScanConfig} activeVillageId={activeVillageId} />

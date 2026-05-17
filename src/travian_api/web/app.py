@@ -191,7 +191,22 @@ app.include_router(farm_builder_ws_router)
 if STATIC_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
-    # Catch-all route: serve index.html for any non-API path (SPA routing)
+    # Catch-all route: serve index.html for any non-API path (SPA routing).
+    #
+    # index.html MUST NOT be browser-cached without revalidation. Vite emits
+    # asset filenames with content hashes (e.g. ``index-BXYj2OuC.js``) so the
+    # hashed chunks themselves are immutable and safely cacheable forever —
+    # but index.html is the pointer that tells the browser WHICH hash to
+    # fetch. If the browser caches index.html aggressively, a backend deploy
+    # leaves running tabs pinned to the old chunk hashes and the user sees
+    # "I rebuilt and the fix isn't showing up." Force revalidation per
+    # request so a refresh / new tab picks up the new index.
+    _SPA_NO_CACHE_HEADERS = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
     @app.get("/{full_path:path}")
     async def serve_spa(request: Request, full_path: str):
         # Don't intercept API or WebSocket paths
@@ -200,8 +215,15 @@ if STATIC_DIR.is_dir():
 
         file_path = STATIC_DIR / full_path
         if file_path.is_file():
-            return FileResponse(file_path)
-        return FileResponse(STATIC_DIR / "index.html")
+            # Loose static files at the SPA root (favicon.svg, robots.txt,
+            # etc.). The content-hashed assets live under /assets via the
+            # mount above, so anything reaching this branch is rare and
+            # no-cache is the safer default.
+            return FileResponse(file_path, headers=_SPA_NO_CACHE_HEADERS)
+        # SPA fallback — always serve a fresh index.html (see note above).
+        return FileResponse(
+            STATIC_DIR / "index.html", headers=_SPA_NO_CACHE_HEADERS,
+        )
 
 
 def main():
