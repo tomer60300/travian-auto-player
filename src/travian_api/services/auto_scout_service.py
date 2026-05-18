@@ -155,27 +155,46 @@ def _parse_capital_id_from_profile_html(html: str) -> Optional[int]:
 
 
 def _extract_villages_array(html: str) -> Optional[list]:
-    """Pull the ``"villages":[ ... ]`` JSON array out of profile HTML.
+    """Pull the profile target's ``"villages":[ ... ]`` JSON array out
+    of the page HTML.
 
-    Returns a Python list of dicts on success, or None if the array
-    isn't present or can't be parsed as JSON. The structural balancer
-    handles nested objects (e.g. populated ``occupiedOases``) and
-    string-value braces correctly.
+    Returns a Python list of dicts on success, or None if no suitable
+    array is found. The structural balancer handles nested objects
+    (e.g. populated ``occupiedOases``) and string-value braces.
+
+    A profile page can legitimately contain multiple ``"villages"``
+    keys (e.g. profile target's villages, an alliance roster, hero
+    villages on future redesigns). Pick the one whose entries look
+    like village descriptors — i.e. carry the ``typeText`` marker
+    (modern Travian) or one of the legacy boolean keys. Falls back
+    to the first parseable list when no entry has any marker, so an
+    unfamiliar locale doesn't break detection completely.
     """
-    m = re.search(r'"villages"\s*:\s*\[', html)
-    if not m:
-        return None
-    bracket_start = m.end() - 1  # position of '['
-    array_str = _extract_balanced(html, bracket_start, "[", "]")
-    if array_str is None:
-        return None
-    try:
-        parsed = json.loads(array_str)
-    except (ValueError, TypeError):
-        return None
-    if isinstance(parsed, list):
-        return parsed
-    return None
+    fallback: Optional[list] = None
+    for m in re.finditer(r'"villages"\s*:\s*\[', html):
+        bracket_start = m.end() - 1  # position of '['
+        array_str = _extract_balanced(html, bracket_start, "[", "]")
+        if array_str is None:
+            continue
+        try:
+            parsed = json.loads(array_str)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(parsed, list):
+            continue
+        if fallback is None:
+            fallback = parsed
+        if any(
+            isinstance(v, dict)
+            and (
+                "typeText" in v
+                or "isMainVillage" in v
+                or "isCapital" in v
+            )
+            for v in parsed
+        ):
+            return parsed
+    return fallback
 
 
 def _parse_oasis_bonus_html(html: str) -> str:

@@ -1111,9 +1111,9 @@ export default function AutoScout() {
         <div className="flex items-center gap-3">
           <span
             className="text-[10px] text-secondary opacity-50 font-mono"
-            title="Bundle build marker. wd6 = wd5 + server-side ts monotonicity fix. Root cause: Windows time.time() collisions made `complete` + `operation_complete` share a ts → client dedup `<=` skipped operation_complete's terminal handler, leaving status='running' and forcing recovery through session-stream session_ended."
+            title="Bundle build marker. wd7 = wd6 + Codex review P2 follow-ups: capital_id=0 guard, user-stop emits phase frame (not error toast), villages-array picker prefers entries with capital markers, monotonic performance.now() timing for zombie-WS detection."
           >
-            build: wd6
+            build: wd7
           </span>
           <VillageSelector />
         </div>

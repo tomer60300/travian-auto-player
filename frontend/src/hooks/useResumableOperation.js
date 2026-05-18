@@ -146,17 +146,24 @@ export function useResumableOperation(opType, { onMessage, onStatusChange } = {}
   const watchdogIntervalRef = useRef(null)
   const WATCHDOG_POLL_MS = 5_000
 
-  // Wall-clock timestamp of the last inbound WS frame (or, on the synthetic
-  // path, the last attempt to communicate). Backup signal for detecting a
-  // half-open zombie connection: in Chrome under memory pressure or with
-  // DevTools open, `setTimeout` can be silently delayed or coalesced even
-  // on a foreground tab, so the watchdog's setTimeout-based check is not
-  // 100% reliable. The visibilitychange/pageshow handlers use this
-  // timestamp as a second defense — if `readyState === OPEN` but no frame
-  // has arrived for >WATCHDOG_MS, treat the socket as dead and reconnect.
-  // Initialized to 0 deliberately so the first armWatchdog call records a
-  // real timestamp; refreshed at every WS open/subscribe so the recovery
-  // guard has a sane starting point.
+  // Monotonic timestamp (performance.now()) of the last inbound WS frame.
+  // Backup signal for detecting a half-open zombie connection: in Chrome
+  // under memory pressure or with DevTools open, `setTimeout` can be
+  // silently delayed or coalesced even on a foreground tab, so the
+  // watchdog's setTimeout-based check is not 100% reliable. The
+  // visibilitychange/pageshow handlers use this timestamp as a second
+  // defense — if `readyState === OPEN` but no frame has arrived for
+  // >WATCHDOG_MS, treat the socket as dead and reconnect.
+  //
+  // performance.now() not Date.now(): wall-clock can step backwards
+  // (NTP correction, laptop sleep/wake, manual time change) and a
+  // negative elapsed value would falsely pass the `elapsed < WATCHDOG_MS`
+  // check, leaving the page stranded on a zombie socket exactly when
+  // the user was most likely to need recovery.
+  //
+  // Initialized to 0 deliberately so the first armWatchdog call records
+  // a real timestamp; refreshed at every WS open/subscribe so the
+  // recovery guard has a sane starting point.
   const lastInboundAtRef = useRef(0)
 
   const clearWatchdog = useCallback(() => {
@@ -185,7 +192,7 @@ export function useResumableOperation(opType, { onMessage, onStatusChange } = {}
       if (live !== 'running' && live !== 'reconnecting' && live !== 'connecting') return
       if (!sessionIdRef.current) return
       if (lastInboundAtRef.current === 0) return
-      const elapsed = Date.now() - lastInboundAtRef.current
+      const elapsed = performance.now() - lastInboundAtRef.current
       if (elapsed <= WATCHDOG_MS) return
       const handle = wsHandleRef.current
       const ws = handle?.ws ?? handle
@@ -259,14 +266,14 @@ export function useResumableOperation(opType, { onMessage, onStatusChange } = {}
     // recovery handlers compare against this to bypass a falsely-OPEN
     // zombie socket even when setTimeout fires reliably (cf. Chrome
     // memory-pressure throttling).
-    lastInboundAtRef.current = Date.now()
+    lastInboundAtRef.current = performance.now()
     startWatchdogInterval()
     watchdogRef.current = setTimeout(() => {
       watchdogRef.current = null
       _dbg(opType, 'watchdog.fire', {
         status: statusRef.current,
         hasSessionId: !!sessionIdRef.current,
-        lastInboundAgeMs: Date.now() - lastInboundAtRef.current,
+        lastInboundAgeMs: performance.now() - lastInboundAtRef.current,
       })
       const live = statusRef.current
       // Only act mid-operation. Terminal states are absorbing; idle never
@@ -691,9 +698,10 @@ export function useResumableOperation(opType, { onMessage, onStatusChange } = {}
           mounted: mountedRef.current,
           wsReadyState: ws?.readyState ?? null,
           wsReadyStateName: ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws?.readyState] ?? 'NONE',
-          lastInboundAt: lastInboundAtRef.current,
+          // performance.now()-based, monotonic from page load
+          lastInboundPerfMs: lastInboundAtRef.current,
           lastInboundAgeMs: lastInboundAtRef.current
-            ? Date.now() - lastInboundAtRef.current
+            ? performance.now() - lastInboundAtRef.current
             : null,
           watchdogActive: watchdogRef.current !== null,
           watchdogIntervalActive: watchdogIntervalRef.current !== null,
@@ -734,12 +742,14 @@ export function useResumableOperation(opType, { onMessage, onStatusChange } = {}
       //      and leaves the page stranded.
       const open = ws && ws.readyState === WebSocket.OPEN
       const connecting = ws && ws.readyState === WebSocket.CONNECTING
-      const staleSinceLastInbound = lastInboundAtRef.current > 0
-        && (Date.now() - lastInboundAtRef.current) > WATCHDOG_MS
+      const ageMs = lastInboundAtRef.current > 0
+        ? performance.now() - lastInboundAtRef.current
+        : null
+      const staleSinceLastInbound = ageMs !== null && ageMs > WATCHDOG_MS
       _dbg(opType, 'onVisible', {
         readyState: ws?.readyState,
         open, connecting, staleSinceLastInbound,
-        lastInboundAgeMs: lastInboundAtRef.current ? Date.now() - lastInboundAtRef.current : null,
+        lastInboundAgeMs: ageMs,
       })
       if (!open && !connecting) {
         subscribeToExisting()
@@ -758,8 +768,10 @@ export function useResumableOperation(opType, { onMessage, onStatusChange } = {}
       const ws = handle?.ws ?? handle
       const open = ws && ws.readyState === WebSocket.OPEN
       const connecting = ws && ws.readyState === WebSocket.CONNECTING
-      const staleSinceLastInbound = lastInboundAtRef.current > 0
-        && (Date.now() - lastInboundAtRef.current) > WATCHDOG_MS
+      const ageMs = lastInboundAtRef.current > 0
+        ? performance.now() - lastInboundAtRef.current
+        : null
+      const staleSinceLastInbound = ageMs !== null && ageMs > WATCHDOG_MS
       if (!open && !connecting) {
         subscribeToExisting()
       } else if (open && staleSinceLastInbound) {

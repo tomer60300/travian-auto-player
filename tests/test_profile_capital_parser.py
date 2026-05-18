@@ -246,6 +246,36 @@ def test_slovak_capital_marker_still_works() -> None:
     assert _parse_capital_id_from_profile_html(html) == 99
 
 
+def test_picks_villages_array_with_capital_marker_when_multiple_exist() -> None:
+    """A profile page can carry multiple ``"villages":[...]`` arrays
+    (target's villages, alliance roster, hero data, ...). The parser
+    must prefer the one with village-descriptor entries (typeText or
+    legacy bool markers) over an array that merely shares the key
+    name."""
+    html = (
+        # Decoy first: an array of objects without any village markers.
+        '"villages":[{"id":1,"name":"alliance-ref"},'
+        '{"id":2,"name":"alliance-ref"}],'
+        # Real target villages second, with the typeText marker.
+        '"villages":[{"id":7777,"typeText":"(Capital)","typeTitle":""}]'
+    )
+    assert _parse_capital_id_from_profile_html(html) == 7777
+
+
+def test_falls_back_to_first_villages_array_when_no_markers_anywhere() -> None:
+    """If no entry has a recognizable village marker (e.g. a brand-new
+    Travian schema we haven't catalogued yet), return None — but the
+    parser still picks A villages array internally for the legacy
+    boolean check, not crashing on the unfamiliar shape."""
+    html = (
+        '"villages":[{"id":1,"name":"sidebar"}],'
+        '"villages":[{"id":99,"name":"some-other-block"}]'
+    )
+    # No marker → returns None; the goal of the test is "no crash, no
+    # spurious match", not a specific id.
+    assert _parse_capital_id_from_profile_html(html) is None
+
+
 def test_villages_array_with_string_containing_braces() -> None:
     """Village names occasionally contain literal { or } — the
     structural extractor's string awareness must not confuse them

@@ -766,7 +766,16 @@ def _build_scout_scan_coro(config: dict):
         all_tile_data: dict[tuple[int, int], dict] = {}
         for idx, (scx, scy) in enumerate(scan_centers):
             if ctx.should_stop():
-                ctx.push({"type": "error", "message": "Scan stopped by user"})
+                # User-initiated stop is not an error. Push a phase
+                # frame (frontend renders it as an info line) so the user
+                # sees WHY their scan ended without a misleading red toast.
+                # operation_manager will still mark the terminal status as
+                # STOPPED via ctx.should_stop() detection after we return.
+                ctx.push({
+                    "type": "phase",
+                    "phase": "stopped",
+                    "message": "Scan stopped by user",
+                })
                 return
             ctx.push(
                 {
@@ -906,7 +915,16 @@ def _build_scout_scan_coro(config: dict):
 
         for i, tile in enumerate(tiles):
             if ctx.should_stop():
-                ctx.push({"type": "error", "message": "Scan stopped by user"})
+                # User-initiated stop is not an error. Push a phase
+                # frame (frontend renders it as an info line) so the user
+                # sees WHY their scan ended without a misleading red toast.
+                # operation_manager will still mark the terminal status as
+                # STOPPED via ctx.should_stop() detection after we return.
+                ctx.push({
+                    "type": "phase",
+                    "phase": "stopped",
+                    "message": "Scan stopped by user",
+                })
                 return
 
             t_enrich_start = time.monotonic()
@@ -1056,7 +1074,13 @@ def _build_scout_scan_coro(config: dict):
             capital_misses = 0
             for pid, info in profiles.items():
                 cap = info.get("capital_id")
-                if cap:
+                # Be explicit about both Nones and zeros. A capital_id of
+                # 0 would otherwise pass the falsy check and silently
+                # drop, AND if we accepted it it would match wilderness
+                # tiles (village_id=0 sentinel from map scan) and mark
+                # them as capitals. Travian village ids are positive in
+                # practice; this guard is defensive.
+                if cap is not None and isinstance(cap, int) and cap > 0:
                     capital_map[pid] = cap
                 elif want_capital_info:
                     capital_misses += 1
