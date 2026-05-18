@@ -45,6 +45,18 @@ from travian_api.services.snapshot_history_service import (  # noqa: E402
     load_recent_snapshots,
     throughput_dict,
 )
+from travian_api.services.target_aggregate_service import (  # noqa: E402
+    TargetAggregate,
+    build_target_inventory,
+)
+from travian_api.services.rebalance_planner import (  # noqa: E402
+    DeadDecision,
+    Placement,
+    RebalancePlan,
+    UNIT_DISPLAY_NAME as REBAL_UNIT_DISPLAY,
+    VillagePosition,
+    plan_rebalance,
+)
 
 # ─── Stdout UTF-8 (Windows-safe) ──────────────────────────────────────────
 if sys.platform == "win32":
@@ -2552,10 +2564,391 @@ async def fetch_gap_targets(api: ApiClient, villages: dict[str, Any], existing_c
     return list(gaps.values())
 
 
+# ─── Path 3 rebalance helpers (v4.0) ─────────────────────────────────────
+
+
+def _run_rebalance_pass(
+    slot_ms: list[dict[str, Any]],
+    village_label_by_vid: dict[int, str],
+    now_unix: float,
+) -> tuple[
+    RebalancePlan,
+    list[dict[str, Any]],
+    dict[str, Any],
+    dict[str, dict[str, Any]],
+]:
+    """Execute the full Path 3 pass and return (plan, actions, summary, post_structure).
+
+    Builds village positions and troop supplies from the global BUDGET dict
+    (live counts at mission time, the same data the rest of the script uses),
+    runs ``plan_rebalance``, then converts placements/dead-decisions into the
+    MOVE_SLOT / RELOCATE_TO_DEAD action dicts the rest of the pipeline expects.
+    """
+    village_positions: list[VillagePosition] = []
+    troop_supplies: dict[tuple[str, str], int] = {}
+    for label in SOURCE_VILLAGES:
+        cfg = BUDGET.get(label)
+        if not cfg:
+            continue
+        coords = cfg.get("coords")
+        if not coords:
+            continue
+        village_positions.append(VillagePosition(name=label, x=coords[0], y=coords[1]))
+        for unit_id in ("t1", "t3", "t5", "t6"):
+            troop_supplies[(label, unit_id)] = int(cfg.get(unit_id) or 0)
+
+    inventory = build_target_inventory(slot_ms, village_label_by_vid)
+    plan = plan_rebalance(
+        inventory, village_positions, troop_supplies, now_unix=now_unix
+    )
+
+    # Index slot_ms by slot_id so we can attach the "primary" slot dict to each
+    # action — the pipeline expects actions[i]["slot"] to exist.
+    slot_by_id: dict[int, dict[str, Any]] = {
+        s["slot_id"]: s for s in slot_ms if s.get("slot_id") is not None
+    }
+
+    # Compute current daily-booty estimate for a coord: avg_loot × 4 cycles/day
+    # (matches the proxy in expected_daily_delta). Used as the subtraction
+    # baseline so the action's delta is a comparable lift number.
+    def _current_daily_booty(coord: tuple[int, int]) -> float:
+        agg = inventory.get(coord)
+        if agg is None:
+            return 0.0
+        return float(agg.avg_loot or 0.0) * 4.0
+
+    actions: list[dict[str, Any]] = []
+
+    for placement in plan.placements:
+        primary_slot = _primary_slot_for_coord(
+            placement.target_coord, placement.slot_instances, slot_by_id
+        )
+        if primary_slot is None:
+            continue  # planner produced a placement for a coord with no usable slot
+        current_list = primary_slot.get("list_name") or ""
+        current_owner = village_label_by_vid.get(
+            primary_slot.get("owner_village_id"), ""
+        )
+        # Don't emit MOVE_SLOT if the slot is already in its optimal list (the
+        # spec's "anti-pattern" guard).
+        if current_list == placement.target_list_name:
+            continue
+        unit_display = REBAL_UNIT_DISPLAY.get(placement.optimal_unit, placement.optimal_unit)
+        delta_booty = max(
+            0.0, placement.expected_daily_booty - _current_daily_booty(placement.target_coord)
+        )
+        action = {
+            "slot": primary_slot,
+            "action": "MOVE_SLOT",
+            "reason": (
+                f"rebalance: optimal home is {placement.target_list_name} "
+                f"(score {placement.objective_score:.2f}; "
+                f"rt {placement.round_trip_min:.0f}m; "
+                f"~{placement.expected_raids_per_day:.1f} raids/day)"
+            ),
+            "tier": 1,
+            "expected_daily_delta_booty": float(round(delta_booty)),
+            "current_str": f"{current_list or '?'} ({current_owner or '?'})",
+            "recommended_str": (
+                f"{placement.optimal_count}× {unit_display} in {placement.target_list_name}"
+            ),
+            "extra": {
+                "rebalance": True,
+                "target_name": placement.target_name,
+                "current_list_name": current_list,
+                "current_list_owner": current_owner,
+                "recommended_list_name": placement.target_list_name,
+                "recommended_list_owner": placement.optimal_village,
+                "recommended_unit": placement.optimal_unit,
+                "recommended_unit_display": unit_display,
+                "recommended_count": placement.optimal_count,
+                "round_trip_min": round(placement.round_trip_min, 1),
+                "expected_raids_per_day": round(placement.expected_raids_per_day, 2),
+                "expected_daily_booty": round(placement.expected_daily_booty, 1),
+                "objective_score": round(placement.objective_score, 3),
+                "target_list_role": placement.target_list_role,
+                "duplicate_slot_instances": [
+                    {"list_name": ln, "slot_id": sid}
+                    for ln, sid in placement.slot_instances
+                    if sid != primary_slot.get("slot_id")
+                ],
+                "manual_steps": [
+                    f"Open {current_list or '<source list>'}, find slot at "
+                    f"{placement.target_coord} (target: {placement.target_name or '?'})",
+                    f"If {placement.target_list_name} doesn't exist: create it "
+                    f"(owner = {placement.optimal_village})",
+                    f"Duplicate the entry to {placement.target_list_name} with composition: "
+                    f"{placement.optimal_count}× {unit_display}",
+                    f"Delete the original entry from {current_list or '<source list>'} "
+                    f"and any duplicate entries in other lists for this coord",
+                ],
+            },
+        }
+        actions.append(action)
+
+    for dead in plan.dead_decisions:
+        primary_slot = _primary_slot_for_coord(
+            dead.target_coord, dead.slot_instances, slot_by_id
+        )
+        if primary_slot is None:
+            continue
+        current_list = primary_slot.get("list_name") or ""
+        current_owner = village_label_by_vid.get(
+            primary_slot.get("owner_village_id"), ""
+        )
+        action = {
+            "slot": primary_slot,
+            "action": "RELOCATE_TO_DEAD",
+            "reason": dead.reason,
+            "tier": 2,
+            "expected_daily_delta_booty": 0.0,
+            "current_str": f"{current_list or '?'} ({current_owner or '?'})",
+            "recommended_str": f"move to {dead.target_list_name} (deactivated)",
+            "extra": {
+                "rebalance": True,
+                "target_name": dead.target_name,
+                "current_list_name": current_list,
+                "current_list_owner": current_owner,
+                "recommended_list_name": dead.target_list_name,
+                "recommended_list_owner": dead.primary_owner_village,
+                "avg_loot": dead.avg_loot,
+                "total_raids": dead.total_raids,
+                "last_raid_days_ago": (
+                    round(dead.last_raid_days_ago, 2)
+                    if dead.last_raid_days_ago is not None
+                    else None
+                ),
+                "duplicate_slot_instances": [
+                    {"list_name": ln, "slot_id": sid}
+                    for ln, sid in dead.slot_instances
+                    if sid != primary_slot.get("slot_id")
+                ],
+                "manual_steps": [
+                    f"If {dead.target_list_name} doesn't exist: create it "
+                    f"(owner = {dead.primary_owner_village}) and leave it deactivated",
+                    f"Duplicate the slot at {dead.target_coord} into {dead.target_list_name}",
+                    f"Delete the original slot from {current_list or '<source list>'} "
+                    f"and any duplicate entries in other lists for this coord",
+                    f"Ensure {dead.target_list_name} is deactivated in Send All rotation",
+                ],
+            },
+        }
+        actions.append(action)
+
+    # Summary + post-rebalance structure.
+    current_total_daily = sum(_current_daily_booty(c) for c in inventory)
+    post_total_daily = sum(p.expected_daily_booty for p in plan.placements)
+    new_lists_needed = sorted({
+        a["extra"]["recommended_list_name"] for a in actions
+    })
+    summary = {
+        "targets_analyzed": len(inventory),
+        "moved_to_active": sum(1 for a in actions if a["action"] == "MOVE_SLOT"),
+        "relocated_to_dead": sum(1 for a in actions if a["action"] == "RELOCATE_TO_DEAD"),
+        "new_lists_to_create": new_lists_needed,
+        "current_estimated_daily_booty": float(round(current_total_daily, 1)),
+        "post_rebalance_estimated_daily_booty": float(round(post_total_daily, 1)),
+        "expected_lift_pct": (
+            round((post_total_daily - current_total_daily) / current_total_daily * 100.0, 1)
+            if current_total_daily > 0
+            else 0.0
+        ),
+        "unplaceable_as_dead": plan.unplaceable_as_dead,
+    }
+
+    post_structure: dict[str, dict[str, Any]] = {}
+    for p in plan.placements:
+        v_entry = post_structure.setdefault(
+            p.optimal_village, {"lists": {}}
+        )
+        l_entry = v_entry["lists"].setdefault(
+            p.target_list_name,
+            {"name": p.target_list_name, "role": p.target_list_role, "slot_count": 0},
+        )
+        l_entry["slot_count"] += 1
+    for dead in plan.dead_decisions:
+        if not dead.primary_owner_village:
+            continue
+        v_entry = post_structure.setdefault(dead.primary_owner_village, {"lists": {}})
+        l_entry = v_entry["lists"].setdefault(
+            dead.target_list_name,
+            {"name": dead.target_list_name, "role": "DEAD", "slot_count": 0},
+        )
+        l_entry["slot_count"] += 1
+    # Flatten the per-village list dicts into ordered lists for stable output.
+    post_structure_flat: dict[str, dict[str, Any]] = {
+        v: {"lists": sorted(entry["lists"].values(), key=lambda lst: lst["name"])}
+        for v, entry in post_structure.items()
+    }
+
+    return plan, actions, summary, post_structure_flat
+
+
+def _primary_slot_for_coord(
+    coord: tuple[int, int],
+    slot_instances: list[tuple[str, int]],
+    slot_by_id: dict[int, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Pick the slot-instance with the highest total_raids for a coord."""
+    candidates: list[dict[str, Any]] = []
+    for _list_name, sid in slot_instances:
+        sm = slot_by_id.get(sid)
+        if sm is not None and tuple(sm.get("coords") or ()) == coord:
+            candidates.append(sm)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda s: int(s.get("total_raids") or 0))
+
+
+def _build_rebalance_json(
+    *,
+    enabled: bool,
+    summary: dict[str, Any] | None,
+    actions: list[dict[str, Any]],
+    post_structure: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Serialise the rebalance pass into the top-level rebalance_plan JSON key."""
+    if not enabled or summary is None:
+        return {"enabled": False}
+
+    def _serialise(a: dict[str, Any]) -> dict[str, Any]:
+        slot = a.get("slot") or {}
+        coord = slot.get("coords")
+        return {
+            "tier": a.get("tier"),
+            "action": a.get("action"),
+            "coords": list(coord) if coord else None,
+            "target_name": (a.get("extra") or {}).get("target_name"),
+            "current_list_name": (a.get("extra") or {}).get("current_list_name"),
+            "current_list_owner": (a.get("extra") or {}).get("current_list_owner"),
+            "recommended_list_name": (a.get("extra") or {}).get("recommended_list_name"),
+            "recommended_list_owner": (a.get("extra") or {}).get("recommended_list_owner"),
+            "reason": a.get("reason"),
+            "expected_daily_delta_booty": a.get("expected_daily_delta_booty"),
+            "extra": a.get("extra"),
+        }
+
+    phase_a = [_serialise(a) for a in actions if a["action"] == "RELOCATE_TO_DEAD"]
+    phase_b = [
+        _serialise(a)
+        for a in actions
+        if a["action"] == "MOVE_SLOT"
+        and (a.get("extra") or {}).get("target_list_role") in ("HIGH", "MID")
+    ]
+    phase_c = [
+        _serialise(a)
+        for a in actions
+        if a["action"] == "MOVE_SLOT"
+        and (a.get("extra") or {}).get("target_list_role") == "INACTIVE"
+    ]
+
+    return {
+        "enabled": True,
+        "summary": summary,
+        "phase_a_dead_relocations": phase_a,
+        "phase_b_high_mid_moves": phase_b,
+        "phase_c_inactive_moves": phase_c,
+        "post_rebalance_structure": post_structure or {},
+    }
+
+
+def _print_rebalance_summary(
+    summary: dict[str, Any],
+    *,
+    file: Any = sys.stderr,
+) -> None:
+    """Emit the operator-facing summary printout when --rebalance is on."""
+    new_lists: list[str] = summary.get("new_lists_to_create") or []
+    dead_lists = [name for name in new_lists if name.endswith("-DEAD")]
+    other_lists = [name for name in new_lists if not name.endswith("-DEAD")]
+    lift = summary.get("expected_lift_pct") or 0.0
+    delta = (
+        summary.get("post_rebalance_estimated_daily_booty", 0.0)
+        - summary.get("current_estimated_daily_booty", 0.0)
+    )
+    n_dead = summary.get("relocated_to_dead", 0)
+    n_active = summary.get("moved_to_active", 0)
+
+    def _phase_minutes(n: int, per_action_min: float, floor_min: int) -> int:
+        return max(floor_min, int(round(n * per_action_min)))
+
+    # Rough operator-workload estimates: dead moves ~30s each (single-list cleanup),
+    # active HIGH/MID moves ~60s each (cross-list duplication), INACTIVE ~30s.
+    phase_a_min = _phase_minutes(n_dead, 0.5, 30) if n_dead else 0
+    phase_b_min = _phase_minutes(int(round(n_active * 0.7)), 1.0, 90) if n_active else 0
+    phase_c_min = _phase_minutes(int(round(n_active * 0.3)), 0.5, 45) if n_active else 0
+
+    print("=== REBALANCE PLAN SUMMARY ===", file=file)
+    print(f"Targets analyzed:                 {summary.get('targets_analyzed', 0)}", file=file)
+    print(f"Relocated to V*-DEAD:             {n_dead}", file=file)
+    print(f"Moved to optimal active list:     {n_active}", file=file)
+    print(f"New lists to create:              {len(new_lists)}", file=file)
+    if dead_lists:
+        print(f"  - {', '.join(dead_lists)} (DEAD pool)", file=file)
+    if other_lists:
+        for nm in other_lists:
+            print(f"  - {nm}", file=file)
+    print("", file=file)
+    print(
+        f"Current estimated daily booty:    {summary.get('current_estimated_daily_booty', 0):.0f}",
+        file=file,
+    )
+    print(
+        f"Post-rebalance estimated:         {summary.get('post_rebalance_estimated_daily_booty', 0):.0f}",
+        file=file,
+    )
+    print(f"Expected lift:                    +{delta:.0f} ({lift:+.1f}%)", file=file)
+    print("", file=file)
+    total_min = phase_a_min + phase_b_min + phase_c_min
+    print("Operator workload (manual UI):", file=file)
+    print(f"  Phase A (DEAD cleanup):         ~{phase_a_min} min", file=file)
+    print(f"  Phase B (HIGH/MID build):       ~{phase_b_min} min", file=file)
+    print(f"  Phase C (INACTIVE build):       ~{phase_c_min} min", file=file)
+    print(f"  Total:                          ~{total_min/60.0:.2f} hours across multiple sessions", file=file)
+    print("=== END REBALANCE SUMMARY ===", file=file)
+
+
+def _suppress_actions_for_moved_coords(
+    all_actions: list[dict[str, Any]],
+    rebalance_actions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Drop conflicting per-slot actions for coords being moved/relocated.
+
+    Keeps the rebalance actions themselves, DELETE def>500 (game-state safety),
+    FLAG_CT2_CT3 (legal-risk surface), and all SPLIT_LIST/REORDER (per-list
+    structural actions independent of the coord-level move).
+    """
+    moved_coords: set[tuple[int, int]] = set()
+    for a in rebalance_actions:
+        slot = a.get("slot") or {}
+        coord = slot.get("coords")
+        if coord:
+            moved_coords.add(tuple(coord))
+    if not moved_coords:
+        return all_actions
+
+    keep_action_types = {
+        "DELETE",
+        "FLAG_CT2_CT3",
+        "MOVE_SLOT",
+        "RELOCATE_TO_DEAD",
+        "SPLIT_LIST",
+        "REORDER",
+    }
+    pruned: list[dict[str, Any]] = []
+    for a in all_actions:
+        slot = a.get("slot") or {}
+        coord = slot.get("coords")
+        if coord and tuple(coord) in moved_coords and a["action"] not in keep_action_types:
+            continue
+        pruned.append(a)
+    return pruned
+
+
 # ─── Main ────────────────────────────────────────────────────────────────
 
 
-async def main_async(api_base: str) -> int:
+async def main_async(api_base: str, *, rebalance: bool = False) -> int:
     api = ApiClient(api_base)
     try:
         await ensure_jwt(api)
@@ -2820,12 +3213,36 @@ async def main_async(api_base: str) -> int:
         print(f"  split: {len(split_actions)} SPLIT_LIST actions emitted "
               f"(REORDER actions pruned for: {sorted(split_list_names) or 'none'})", file=sys.stderr)
 
+        # v4.0 — Path 3 full rebalance pass (opt-in via --rebalance)
+        rebalance_plan: RebalancePlan | None = None
+        rebalance_actions: list[dict[str, Any]] = []
+        rebalance_summary: dict[str, Any] | None = None
+        rebalance_post_structure: dict[str, dict[str, Any]] | None = None
+        if rebalance:
+            print("Running Path 3 rebalance pass...", file=sys.stderr)
+            rebalance_plan, rebalance_actions, rebalance_summary, rebalance_post_structure = (
+                _run_rebalance_pass(
+                    slot_ms=slot_ms,
+                    village_label_by_vid=village_label_by_vid,
+                    now_unix=datetime.now(timezone.utc).timestamp(),
+                )
+            )
+            actions.extend(rebalance_actions)
+            # Suppress upstream per-slot actions for coords being moved/relocated.
+            actions = _suppress_actions_for_moved_coords(actions, rebalance_actions)
+            print(
+                f"  rebalance: {rebalance_summary['moved_to_active']} MOVE_SLOT, "
+                f"{rebalance_summary['relocated_to_dead']} RELOCATE_TO_DEAD",
+                file=sys.stderr,
+            )
+
         # Tier assignment + ordering
         ACTION_PRIORITY = {
             "SPLIT_LIST": 0,    # surface first — most impactful structural change
             "DELETE": 1,
             "FLAG_CT2_CT3": 2,
             "THROUGHPUT_DROP": 2,  # v3.4: dying slot → high operator visibility
+            "MOVE_SLOT": 3,     # v4.0: Path 3 rebalance — relocate to optimal home
             "CHANGE_UNIT": 3,
             "ADD_NEW_SLOT": 3,  # v3.3: cross-village stacking (creates a new slot)
             "BOOST": 4,
@@ -2834,6 +3251,7 @@ async def main_async(api_base: str) -> int:
             "MOVE": 6,
             "SHRINK": 7,
             "REORDER": 8,
+            "RELOCATE_TO_DEAD": 8,  # v4.0: Path 3 rebalance — bulk DEAD migration
             "DEACTIVATE": 9,
             "KEEP": 10,
         }
@@ -2944,6 +3362,10 @@ async def main_async(api_base: str) -> int:
             "throughput_by_slot_id": throughput_by_slot_id,  # v3.4
             "throughput_drop_actions": throughput_drop_actions_only,
             "historical_snapshot_count": len(historical),
+            "rebalance_enabled": rebalance,
+            "rebalance_summary": rebalance_summary,
+            "rebalance_actions": rebalance_actions,
+            "rebalance_post_structure": rebalance_post_structure,
         }
 
         md = render_markdown(ctx)
@@ -3077,6 +3499,12 @@ async def main_async(api_base: str) -> int:
                 for a in throughput_drop_actions_only
             ],
             "historical_snapshot_count": len(historical),
+            "rebalance_plan": _build_rebalance_json(
+                enabled=rebalance,
+                summary=rebalance_summary,
+                actions=rebalance_actions,
+                post_structure=rebalance_post_structure,
+            ),
         }
 
         md_path.write_text(md, encoding="utf-8")
@@ -3101,6 +3529,10 @@ async def main_async(api_base: str) -> int:
             throughput_drop_actions=throughput_drop_actions_only,
             file=sys.stderr,
         )
+
+        # v4.0 — Path 3 rebalance summary (operator-facing)
+        if rebalance and rebalance_summary is not None:
+            _print_rebalance_summary(rebalance_summary, file=sys.stderr)
 
         return 0 if verify_ok else 1
     finally:
@@ -3257,8 +3689,18 @@ def _print_delta_summary(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api", default=DEFAULT_API, help=f"API base (default: {DEFAULT_API})")
+    parser.add_argument(
+        "--rebalance",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable Path 3 full rebalance pass. WARNING: this produces a "
+            "comprehensive rewrite plan affecting hundreds of slots. Review "
+            "before executing."
+        ),
+    )
     args = parser.parse_args()
-    return asyncio.run(main_async(args.api))
+    return asyncio.run(main_async(args.api, rebalance=args.rebalance))
 
 
 if __name__ == "__main__":
