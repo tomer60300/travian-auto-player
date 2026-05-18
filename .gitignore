@@ -7,6 +7,12 @@ start.sh
 STRATEGY.md
 agent-logs/
 
+# Operational scratch from PowerShell-launched uvicorn workers
+.server_*.pid
+.server_*.out
+.server_*.err
+logs/
+
 # Python
 __pycache__/
 *.py[cod]
