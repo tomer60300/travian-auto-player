@@ -2503,6 +2503,41 @@ def render_markdown(ctx: dict[str, Any]) -> str:
         f"per-slot history")
     add("- `POST /api/reports/analyze` for gap-target discovery (per source village)")
     add("")
+    add("### Rebalance pass — Path 3 (v4.0, opt-in via `--rebalance`)")
+    add("")
+    add("Target-centric replanner that ignores the existing farm-list structure and ")
+    add("re-decides every coord's home from scratch. Objective:")
+    add("")
+    add("    0.80 × normalised(expected_raids_per_day)  +  0.20 × normalised(expected_daily_booty)")
+    add("")
+    add("Frequency dominates because the operator runs Start All at irregular cadences ")
+    add("(roughly 25 min to 3 hours). `expected_raids_per_day` is a weighted sum across ")
+    add("the operator-stated cadence distribution:")
+    add("")
+    add("    (32.5 min, weight 0.60)  →  bucket A — fast cadence")
+    add("    (82.5 min, weight 0.30)  →  bucket B — medium cadence")
+    add("    (150  min, weight 0.10)  →  bucket C — slow cadence")
+    add("")
+    add("At each bucket the slot fires once per `max(round_trip, cadence)` minutes. ")
+    add("Changing these constants reshapes which (village, unit) pairing wins for a ")
+    add("given coord; surface any change here when tuned.")
+    add("")
+    add("Dead-farm verdict (any condition triggers `RELOCATE_TO_DEAD` → `V{n}-DEAD`):")
+    add("")
+    add("- `avg_loot < 30` with `total_raids ≥ 5`")
+    add("- last raid > 14 days ago AND `avg_loot < 50`")
+    add("- `max_def_proxy > 500` (defended)")
+    add("- pushing-protection (CT2/CT3) suspect")
+    add("")
+    add("DEAD lists are per-owner-village (V1-DEAD, V2-DEAD, …) so the operator's mental ")
+    add("model of which village owns a slot survives the rebalance. The optimizer never ")
+    add("DELETEs dead farms — it only proposes moves; the operator manually creates the ")
+    add("DEAD list and leaves it deactivated.")
+    add("")
+
+    # 19. Rebalance plan — opt-in (--rebalance)
+    if ctx.get("rebalance_enabled"):
+        _render_rebalance_section(add, ctx)
 
     # Verification errors
     if ctx["verify_errors"]:
@@ -2565,6 +2600,157 @@ async def fetch_gap_targets(api: ApiClient, villages: dict[str, Any], existing_c
 
 
 # ─── Path 3 rebalance helpers (v4.0) ─────────────────────────────────────
+
+
+def _render_rebalance_section(add: Any, ctx: dict[str, Any]) -> None:
+    """Render `## 19. Rebalance plan (Path 3 full rewrite)` and its 19a/19b/19c subsections.
+
+    Spec section number 17 is already used by the v3.4 Action checklist; this
+    section is placed at the end of the report as 19 so the existing numbering
+    survives.
+    """
+    summary = ctx.get("rebalance_summary") or {}
+    actions: list[dict[str, Any]] = ctx.get("rebalance_actions") or []
+    post_structure: dict[str, dict[str, Any]] = ctx.get("rebalance_post_structure") or {}
+
+    add("## 19. Rebalance plan (Path 3 full rewrite)")
+    add("")
+    add("Opt-in pass (gated by `--rebalance`). Re-decides every target's home list,")
+    add("village, unit and count under the objective:")
+    add("")
+    add("    0.80 × normalised(expected_raids_per_day)")
+    add("    + 0.20 × normalised(expected_daily_booty)")
+    add("")
+    add("Dead farms are routed to per-owner-village `V{n}-DEAD` lists that the")
+    add("operator manually creates and leaves deactivated.")
+    add("")
+
+    # 19a — Summary
+    delta = (
+        float(summary.get("post_rebalance_estimated_daily_booty", 0.0))
+        - float(summary.get("current_estimated_daily_booty", 0.0))
+    )
+    add("### 19a. Summary")
+    add("")
+    add(f"- Targets analyzed: **{summary.get('targets_analyzed', 0)}**")
+    add(f"- Dead-farm relocations: **{summary.get('relocated_to_dead', 0)}** "
+        f"(to `V{{n}}-DEAD` lists)")
+    add(f"- Active relocations: **{summary.get('moved_to_active', 0)}** "
+        f"(to optimal HIGH/MID/INACTIVE lists)")
+    new_lists = summary.get("new_lists_to_create") or []
+    add(f"- New lists to create: **{len(new_lists)}**")
+    if new_lists:
+        add(f"  - {', '.join(f'`{n}`' for n in new_lists)}")
+    add(f"- Current estimated daily booty: **{summary.get('current_estimated_daily_booty', 0):.0f} res**")
+    add(f"- Post-rebalance estimated: **{summary.get('post_rebalance_estimated_daily_booty', 0):.0f} res** "
+        f"(delta **{delta:+.0f}**, **{summary.get('expected_lift_pct', 0):+.1f}%**)")
+    if summary.get("unplaceable_as_dead"):
+        add(f"- Unplaceable targets routed to DEAD (no feasible village/unit fit): "
+            f"**{summary['unplaceable_as_dead']}**")
+    add("")
+
+    # 19b — Phased execution
+    dead_actions = [a for a in actions if a["action"] == "RELOCATE_TO_DEAD"]
+    move_actions = [a for a in actions if a["action"] == "MOVE_SLOT"]
+    high_mid = [
+        a for a in move_actions
+        if (a.get("extra") or {}).get("target_list_role") in ("HIGH", "MID")
+    ]
+    inactive_moves = [
+        a for a in move_actions
+        if (a.get("extra") or {}).get("target_list_role") == "INACTIVE"
+    ]
+
+    add("### 19b. Phased execution plan")
+    add("")
+    add("Execute in three phases across multiple sessions. Each phase groups its")
+    add("actions by destination list so the operator opens each list once.")
+    add("")
+
+    _render_rebalance_phase(
+        add,
+        phase_title="Phase A — Dead-farm cleanup (largest, lowest stakes)",
+        time_estimate_minutes=max(30, int(round(len(dead_actions) * 0.5))) if dead_actions else 0,
+        actions=dead_actions,
+        group_by_destination=True,
+    )
+    _render_rebalance_phase(
+        add,
+        phase_title="Phase B — Build HIGH / MID lists (highest value)",
+        time_estimate_minutes=max(90, int(round(len(high_mid) * 1.0))) if high_mid else 0,
+        actions=high_mid,
+        group_by_destination=True,
+    )
+    _render_rebalance_phase(
+        add,
+        phase_title="Phase C — Build INACTIVE / Tail lists (long tail, opportunistic)",
+        time_estimate_minutes=max(45, int(round(len(inactive_moves) * 0.5))) if inactive_moves else 0,
+        actions=inactive_moves,
+        group_by_destination=True,
+    )
+
+    # 19c — Post-rebalance structure preview
+    add("### 19c. Final structure preview")
+    add("")
+    if not post_structure:
+        add("_(no placements; see Phase A for dead routing)_")
+        add("")
+    else:
+        for v_label in sorted(post_structure):
+            entry = post_structure[v_label]
+            add(f"**{v_label}**")
+            add("")
+            for lst in entry.get("lists") or []:
+                add(f"- `{lst['name']}` — role {lst['role']}, {lst['slot_count']} slots")
+            add("")
+
+
+def _render_rebalance_phase(
+    add: Any,
+    *,
+    phase_title: str,
+    time_estimate_minutes: int,
+    actions: list[dict[str, Any]],
+    group_by_destination: bool,
+) -> None:
+    """Render one Phase A/B/C block with a destination-grouped action table."""
+    add(f"#### {phase_title}")
+    add("")
+    if not actions:
+        add("_(no actions in this phase)_")
+        add("")
+        return
+    add(f"- Actions: **{len(actions)}**")
+    add(f"- Time estimate: ~**{time_estimate_minutes} min**")
+    add("")
+
+    if group_by_destination:
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for a in actions:
+            dest = (a.get("extra") or {}).get("recommended_list_name") or "?"
+            grouped[dest].append(a)
+        for dest in sorted(grouped):
+            add(f"##### → `{dest}`")
+            add("")
+            add("| Coord | Target | Current list | Reason / composition |")
+            add("|---|---|---|---|")
+            for a in grouped[dest]:
+                slot = a.get("slot") or {}
+                coord = slot.get("coords") or ("?", "?")
+                extra = a.get("extra") or {}
+                tname = extra.get("target_name") or "?"
+                cur = extra.get("current_list_name") or "?"
+                if a["action"] == "MOVE_SLOT":
+                    composition = (
+                        f"{extra.get('recommended_count', '?')}× "
+                        f"{extra.get('recommended_unit_display', '?')} "
+                        f"(rt {extra.get('round_trip_min', '?')}m, "
+                        f"score {extra.get('objective_score', 0):.2f})"
+                    )
+                else:
+                    composition = f"DEAD: {a.get('reason') or ''}"
+                add(f"| ({coord[0]},{coord[1]}) | {tname} | `{cur}` | {composition} |")
+            add("")
 
 
 def _run_rebalance_pass(
