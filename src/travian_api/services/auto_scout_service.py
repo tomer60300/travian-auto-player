@@ -19,17 +19,60 @@ logger = logging.getLogger(__name__)
 
 
 # Module-level — module-private. Used by _parse_tile_details below.
-# Matches a single <td class="desc">Resource</td>...<td class="val">+25%</td>
-# row anywhere inside the bonus table. The outer table is gated by id
-# attribute first to keep the bonus parse anchored to the right block.
+# Outer wrapper to anchor parsing inside the right table block.
 _OASIS_BONUS_TABLE_RE = re.compile(
     r'<table[^>]*\bid="distribution"[^>]*>(.*?)</table>', re.DOTALL
 )
+# Each <tr> in the bonus table emits three cells in fixed order on modern
+# Travian (post-2025): ico → val → desc. The ``ico`` cell carries an
+# ``<i class="rN">`` icon (r1=wood, r2=clay, r3=iron, r4=crop); the
+# ``val`` cell carries the percentage, often bidi-wrapped and HTML-entity
+# encoded (``&#x202d;&#x202d;50&#x202c;&#37;&#x202c;``); the ``desc``
+# cell carries the localized resource name (used for display).
+#
+# Older skins emitted desc → val only; we keep that as a backstop by
+# searching for any (resource-class, percentage) pair within a row.
 _OASIS_BONUS_ROW_RE = re.compile(
-    r'<td[^>]*\bclass="desc"[^>]*>\s*([^<]+?)\s*</td>\s*'
-    r'<td[^>]*\bclass="val"[^>]*>\s*\+?(\d+)\s*%?\s*</td>',
-    re.DOTALL,
+    r'<tr[^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE
 )
+# Resource icon (modern shape). Catches `<i class="r4" ...>` and
+# `<img class="resource r4" ...>` variants. The group captures the
+# numeric ID alone.
+_OASIS_BONUS_ICON_RE = re.compile(
+    r'class="[^"]*\br(\d)\b[^"]*"', re.IGNORECASE
+)
+# Locale-stable canonical mapping. Travian's resource icon numbering is
+# stable across servers and locales: r1=Wood, r2=Clay, r3=Iron, r4=Crop.
+_RESOURCE_ID_BY_ICON = {
+    "1": "wood",
+    "2": "clay",
+    "3": "iron",
+    "4": "crop",
+}
+# Localized name fallback — only used when the icon class is missing
+# (very old skin). English plus common locales likely to be hit; new
+# locales will produce empty bonus and log a warning, surfacing the
+# need to extend this list.
+_RESOURCE_ID_BY_NAME = {
+    "wood": "wood", "lumber": "wood", "holz": "wood",
+    "drewno": "wood", "drevo": "wood", "ahşap": "wood",
+    "дерево": "wood", "ξύλο": "wood",
+    "clay": "clay", "lehm": "clay", "glina": "clay",
+    "hlina": "clay", "kil": "clay", "глина": "clay", "πηλός": "clay",
+    "iron": "iron", "eisen": "iron", "żelazo": "iron",
+    "železo": "iron", "demir": "iron", "железо": "iron", "σίδηρος": "iron",
+    "crop": "crop", "cereal": "crop", "cereals": "crop",
+    "getreide": "crop", "zboże": "crop", "obilie": "crop",
+    "tahıl": "crop", "зерно": "crop", "δημητριακά": "crop",
+}
+# Display labels in English. Used when rendering a locale-stable
+# string for users on any locale. Order = Wood, Clay, Iron, Crop.
+_RESOURCE_DISPLAY = {
+    "wood": "Wood",
+    "clay": "Clay",
+    "iron": "Iron",
+    "crop": "Crop",
+}
 
 
 # Capital marker keywords across Travian locales. Add new locales here
@@ -197,28 +240,114 @@ def _extract_villages_array(html: str) -> Optional[list]:
     return fallback
 
 
-def _parse_oasis_bonus_html(html: str) -> str:
-    """Return a human-readable oasis bonus string like ``"25% Clay"`` or
-    ``"25% Iron, 25% Crop"``. Empty string when no bonus table or no rows.
+def _extract_pct_from_val_cell(cell_html: str) -> Optional[int]:
+    """Pull the integer percentage out of a Travian ``<td class="val">``
+    cell. Travian wraps the number in HTML-entity-encoded bidi-override
+    markers (``&#x202d;&#x202d;50&#x202c;&#37;&#x202c;``) — we
+    HTML-unescape, run ``clean_unicode`` to strip the raw bidi
+    codepoints, then read the first run of digits.
 
-    Mirrors :py:meth:`OasisRaiderService._parse_oasis_bonus` (BS4-based)
-    but uses regex so this module stays BS4-free (consistent with the
-    rest of ``_parse_tile_details``).
-
-    Resource names get HTML-unescaped and run through ``clean_unicode`` —
-    Travian wraps some labels in bidi-override markers for non-English
-    locales (same treatment the village-name parser applies above).
+    Strips any nested tags first so digits living inside attributes
+    (``<i class="r4" title="2">``) or class names (``r4``) can't be
+    picked up before the actual percentage. Skinned skins emit varied
+    inner markup; tag-stripping makes the parse robust to all of them.
     """
+    text_only = re.sub(r"<[^>]+>", "", cell_html)
+    cleaned = clean_unicode(html_unescape(text_only))
+    m = re.search(r"\+?(\d+)", cleaned)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def _parse_oasis_bonus_breakdown(html: str) -> Dict[str, int]:
+    """Return ``{resource_id: pct}`` for every row in the oasis bonus
+    table — canonical IDs (``wood``/``clay``/``iron``/``crop``) regardless
+    of the user's Travian locale.
+
+    Strategy:
+      1. Identify each ``<tr>`` inside ``<table id="distribution">``.
+      2. For each row, extract a resource ID — first by the icon
+         ``class="rN"`` (locale-stable), falling back to localized
+         ``class="desc">Name</td>`` against the synonym dict.
+      3. Extract the percentage out of ``<td class="val">…</td>``,
+         stripping bidi/entity wrapping.
+
+    Returns ``{}`` for missing/empty tables or rows we can't classify
+    (locale we haven't catalogued, malformed HTML). A non-empty
+    dict where ``sum(values()) > 0`` indicates a usable bonus.
+    """
+    out: Dict[str, int] = {}
     m = _OASIS_BONUS_TABLE_RE.search(html)
     if not m:
-        return ""
-    bonuses: list[str] = []
-    for row in _OASIS_BONUS_ROW_RE.finditer(m.group(1)):
-        resource = clean_unicode(html_unescape(row.group(1))).strip()
-        pct = row.group(2).strip()
-        if resource and pct:
-            bonuses.append(f"{pct}% {resource}")
-    return ", ".join(bonuses)
+        return out
+    body = m.group(1)
+    for row_m in _OASIS_BONUS_ROW_RE.finditer(body):
+        row = row_m.group(1)
+
+        # Resource ID — prefer icon class.
+        resource_id: Optional[str] = None
+        icon_m = _OASIS_BONUS_ICON_RE.search(row)
+        if icon_m:
+            resource_id = _RESOURCE_ID_BY_ICON.get(icon_m.group(1))
+
+        # Fallback — pull text from the ``class="desc"`` cell.
+        if resource_id is None:
+            desc_m = re.search(
+                r'<td[^>]*\bclass="desc"[^>]*>\s*([^<]+?)\s*</td>',
+                row, re.DOTALL,
+            )
+            if desc_m:
+                name = clean_unicode(html_unescape(desc_m.group(1))).strip().lower()
+                resource_id = _RESOURCE_ID_BY_NAME.get(name)
+        if resource_id is None:
+            continue
+
+        # Percentage — from the ``class="val"`` cell.
+        val_m = re.search(
+            r'<td[^>]*\bclass="val"[^>]*>(.*?)</td>',
+            row, re.DOTALL,
+        )
+        if not val_m:
+            continue
+        pct = _extract_pct_from_val_cell(val_m.group(1))
+        if pct is None or pct <= 0:
+            continue
+
+        # If a row appears twice (defensive — shouldn't on real Travian),
+        # take the largest value to avoid dropping legitimate data.
+        prior = out.get(resource_id, 0)
+        if pct > prior:
+            out[resource_id] = pct
+    return out
+
+
+def _format_bonus_breakdown(breakdown: Dict[str, int]) -> str:
+    """Render a canonical breakdown into the human-readable string the
+    frontend column displays (e.g. ``"25% Iron, 25% Crop"``). Order is
+    fixed: wood → clay → iron → crop, so two oases with the same bonus
+    profile always read identically.
+    """
+    parts: list[str] = []
+    for rid in ("wood", "clay", "iron", "crop"):
+        pct = breakdown.get(rid, 0)
+        if pct > 0:
+            parts.append(f"{pct}% {_RESOURCE_DISPLAY[rid]}")
+    return ", ".join(parts)
+
+
+def _parse_oasis_bonus_html(html: str) -> str:
+    """Return a human-readable oasis bonus string for display.
+
+    Wraps :py:func:`_parse_oasis_bonus_breakdown` and uses the
+    canonical IDs to render a stable English label string regardless
+    of the user's Travian locale. Empty string when no bonus table or
+    no usable rows.
+    """
+    return _format_bonus_breakdown(_parse_oasis_bonus_breakdown(html))
 
 
 class AutoScoutService:
@@ -866,13 +995,22 @@ class AutoScoutService:
 
         # Oasis resource bonus(es). Travian renders these in a
         # <table id="distribution"> with one row per non-zero bonus:
-        #   <td class="desc">Wood</td>  <td class="val">+25%</td>
-        # We capture the same data the operator sees in the popup so the
-        # scout UI can show "Oasis 25% Clay" instead of just "Oasis".
-        # Matches oasis_raider_service._parse_oasis_bonus output format,
-        # regex-based to avoid pulling BS4 into this module.
-        if info.is_oasis:
-            info.bonus = _parse_oasis_bonus_html(html)
+        #   <td class="ico"><i class="rN" title="Crop"></i></td>
+        #   <td class="val">+25%</td>
+        #   <td class="desc">Wood</td>
+        # We capture the same data the operator sees in the popup so
+        # the scout UI can show the bonus in a dedicated column with
+        # per-resource minimum and total-bucket filtering.
+        #
+        # Always attempt the parse rather than gating on info.is_oasis.
+        # The map-scan's is_oasis (set from {k.fo}/{k.bt} title markers
+        # in the map JSON) is the authoritative signal and is applied
+        # by the caller AFTER this function returns; if it disagrees
+        # with the html "oasis" substring check above, we'd miss the
+        # bonus on a real oasis. The parser returns {} for non-oasis
+        # tiles (no distribution table) so this is cheap.
+        info.bonus_breakdown = _parse_oasis_bonus_breakdown(html)
+        info.bonus = _format_bonus_breakdown(info.bonus_breakdown)
 
         # For occupied oases, the popup links to the owning village via
         # /karte.php?x=&y=. Capture those coords so the post-enrichment

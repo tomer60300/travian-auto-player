@@ -11,6 +11,8 @@ import api from '../api'
 // ── localStorage helpers ─────────────────────────────────────────────
 const LS_KEY_ALLIANCES = 'autoscout_exclude_alliances'
 const LS_KEY_PLAYERS = 'autoscout_exclude_players'
+const LS_KEY_BONUS_MINS = 'autoscout_bonus_resource_mins'
+const LS_KEY_BONUS_LEVELS = 'autoscout_bonus_total_levels'
 
 function loadJson(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback }
@@ -81,6 +83,36 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   // Alliance & player exclusion — persisted in localStorage
   const [excludeAlliances, setExcludeAlliances] = useState(() => loadJson(LS_KEY_ALLIANCES, []))
   const [excludePlayers, setExcludePlayers] = useState(() => loadJson(LS_KEY_PLAYERS, []))
+
+  // Bonus filter state.
+  //   bonusResourceMins: per-resource minimum % constraint. 0 = no
+  //   constraint. The valid non-zero values are 25/50/75/100 (matching
+  //   Travian's only emitted bonus buckets). Unknown keys/values that
+  //   sneak in via localStorage are coerced back to defaults.
+  //   bonusTotalLevels: array of selected bucket values (subset of
+  //   [25, 50, 75, 100]). Empty = no total filter.
+  const _BONUS_MIN_DEFAULT = { wood: 0, clay: 0, iron: 0, crop: 0 }
+  const _BONUS_ALLOWED_VALUES = new Set([0, 25, 50, 75, 100])
+  const _sanitizeMins = (raw) => {
+    if (!raw || typeof raw !== 'object') return { ..._BONUS_MIN_DEFAULT }
+    const out = { ..._BONUS_MIN_DEFAULT }
+    for (const k of Object.keys(_BONUS_MIN_DEFAULT)) {
+      const v = Number(raw[k])
+      if (_BONUS_ALLOWED_VALUES.has(v)) out[k] = v
+    }
+    return out
+  }
+  const _sanitizeLevels = (raw) => {
+    if (!Array.isArray(raw)) return []
+    const allowed = new Set([25, 50, 75, 100])
+    return Array.from(new Set(raw.map(Number).filter((v) => allowed.has(v))))
+  }
+  const [bonusResourceMins, setBonusResourceMins] = useState(
+    () => _sanitizeMins(loadJson(LS_KEY_BONUS_MINS, _BONUS_MIN_DEFAULT)),
+  )
+  const [bonusTotalLevels, setBonusTotalLevels] = useState(
+    () => _sanitizeLevels(loadJson(LS_KEY_BONUS_LEVELS, [])),
+  )
   const [newAlliance, setNewAlliance] = useState('')
   const [newPlayer, setNewPlayer] = useState('')
 
@@ -102,6 +134,8 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   // Persist to localStorage on change
   useEffect(() => { localStorage.setItem(LS_KEY_ALLIANCES, JSON.stringify(excludeAlliances)) }, [excludeAlliances])
   useEffect(() => { localStorage.setItem(LS_KEY_PLAYERS, JSON.stringify(excludePlayers)) }, [excludePlayers])
+  useEffect(() => { localStorage.setItem(LS_KEY_BONUS_MINS, JSON.stringify(bonusResourceMins)) }, [bonusResourceMins])
+  useEffect(() => { localStorage.setItem(LS_KEY_BONUS_LEVELS, JSON.stringify(bonusTotalLevels)) }, [bonusTotalLevels])
 
   const toast = useToast()
 
@@ -330,6 +364,20 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     if (allianceIds.length > 0) body.exclude_alliance_ids = allianceIds
     if (allianceNames.length > 0) body.exclude_alliance_names = allianceNames
 
+    // Oasis bonus filters. Send only the non-zero per-resource entries
+    // (server treats absence as "no constraint"). Send the levels array
+    // only when at least one bucket is selected — empty array would be
+    // ambiguous between "no filter" and "explicitly nothing matches".
+    const resourceMinsToSend = Object.fromEntries(
+      Object.entries(bonusResourceMins).filter(([, v]) => v > 0)
+    )
+    if (Object.keys(resourceMinsToSend).length > 0) {
+      body.bonus_resource_mins = resourceMinsToSend
+    }
+    if (bonusTotalLevels.length > 0) {
+      body.bonus_total_levels = bonusTotalLevels.slice().sort((a, b) => a - b)
+    }
+
     setScanPhase('Scanning map...')
     addScanMsg('info', `Starting scan: radius=${radius}, pop=${minPop}–${maxPop}`)
     scanOp.start('/ws/scout/scan', body)
@@ -444,6 +492,108 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         </label>
       </div>
 
+      {/* Oasis bonus filter — only meaningful when oases are in scope.
+          Two axes that AND together: per-resource minimum % (must have
+          ≥N% of every set resource) and total-bucket multi-select
+          (sum must equal any selected bucket). Both axes empty = no
+          filter, all oases pass. */}
+      {(() => {
+        const RESOURCES = [
+          { id: 'wood', label: 'Wood' },
+          { id: 'clay', label: 'Clay' },
+          { id: 'iron', label: 'Iron' },
+          { id: 'crop', label: 'Crop' },
+        ]
+        const LEVELS = [25, 50, 75, 100]
+        const anyMinSet = Object.values(bonusResourceMins).some((v) => v > 0)
+        const anyLevelSet = bonusTotalLevels.length > 0
+        const filterActive = anyMinSet || anyLevelSet
+        const noOasesInScope = filterMode === 'villages'
+        const toggleLevel = (lv) => {
+          setBonusTotalLevels((prev) =>
+            prev.includes(lv) ? prev.filter((x) => x !== lv) : [...prev, lv]
+          )
+        }
+        const resetBonusFilter = () => {
+          setBonusResourceMins({ wood: 0, clay: 0, iron: 0, crop: 0 })
+          setBonusTotalLevels([])
+        }
+        return (
+          <div className="mb-4 p-3 rounded border-default bg-surface">
+            <div className="flex items-center justify-between mb-2">
+              <label className="field-label-lg">Oasis bonus filter</label>
+              {filterActive && (
+                <button
+                  type="button"
+                  className="text-xs text-secondary underline hover:text-primary"
+                  onClick={resetBonusFilter}
+                  disabled={scanning}
+                >Clear</button>
+              )}
+            </div>
+            <div className="mb-3">
+              <label className="field-label mb-1">Minimum % per resource</label>
+              <div className="grid grid-cols-4 gap-2">
+                {RESOURCES.map(({ id, label }) => (
+                  <label key={id} className="flex flex-col items-center gap-1">
+                    <span className="text-xs text-secondary">{label}</span>
+                    <select
+                      className="input-field text-center"
+                      value={bonusResourceMins[id] || 0}
+                      onChange={(e) =>
+                        setBonusResourceMins({
+                          ...bonusResourceMins,
+                          [id]: Number(e.target.value),
+                        })
+                      }
+                      disabled={scanning}
+                    >
+                      <option value={0}>—</option>
+                      <option value={25}>25%</option>
+                      <option value={50}>50%</option>
+                      <option value={75}>75%</option>
+                      <option value={100}>100%</option>
+                    </select>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="field-label mb-1">Total bonus level</label>
+              <div className="flex flex-wrap gap-2">
+                {LEVELS.map((lv) => {
+                  const selected = bonusTotalLevels.includes(lv)
+                  return (
+                    <button
+                      type="button"
+                      key={lv}
+                      className={
+                        'px-3 py-1 rounded text-sm transition ' +
+                        (selected
+                          ? 'border-gold text-gold bg-card'
+                          : 'border-default text-secondary hover:text-primary')
+                      }
+                      onClick={() => toggleLevel(lv)}
+                      disabled={scanning}
+                    >{lv}%</button>
+                  )
+                })}
+              </div>
+              <p className="text-xs text-secondary mt-1">
+                Multi-select. An oasis passes if its TOTAL bonus equals any selected bucket.
+                Empty = no total filter.
+              </p>
+            </div>
+            {filterActive && noOasesInScope && (
+              <p className="text-xs text-warning mt-2">
+                Filter set, but Target type is <span className="font-mono">villages</span>.
+                Switch to <span className="font-mono">with oases</span> or <span className="font-mono">oasis only</span> to apply.
+              </p>
+            )}
+          </div>
+        )
+      })()}
+
       <p className="text-xs text-secondary mb-4">Wilderness, abandoned valleys, and empty tiles are always skipped.</p>
 
       {/* Alliance exclusion */}
@@ -524,9 +674,23 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
   const originalIndices = useMemo(() => {
     if (!sortField) return results.map((_, i) => i)
     const indexed = results.map((r, i) => ({ r, i }))
+    // bonus_total is a derived sort key: sum the canonical breakdown.
+    // Non-oasis rows compute as -1 so they always sink (descending) or
+    // surface (ascending) but never interleave with oases.
+    const computeSortValue = (r) => {
+      if (sortField !== 'bonus_total') return r[sortField] ?? 0
+      if (!r.is_oasis) return -1
+      const bd = r.bonus_breakdown
+      if (!bd || typeof bd !== 'object') return 0
+      let total = 0
+      for (const v of Object.values(bd)) {
+        if (typeof v === 'number') total += v
+      }
+      return total
+    }
     indexed.sort((a, b) => {
-      let av = a.r[sortField] ?? 0
-      let bv = b.r[sortField] ?? 0
+      let av = computeSortValue(a.r)
+      let bv = computeSortValue(b.r)
       if (typeof av === 'string') { av = av.toLowerCase(); bv = (bv || '').toLowerCase() }
       if (av < bv) return sortDir === 'asc' ? -1 : 1
       if (av > bv) return sortDir === 'asc' ? 1 : -1
@@ -569,6 +733,7 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
               <SortableHeader label="V.Pop" field="population" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
               <SortableHeader label="Player Pop" field="owner_population" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
               <SortableHeader label="Distance" field="distance" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
+              <SortableHeader label="Bonus" field="bonus_total" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
               <SortableHeader label="Player" field="player_name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <th>Alliance</th>
               <SortableHeader label="Type" field="is_oasis" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
@@ -600,12 +765,17 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
                       : <span className="text-secondary opacity-50">0</span>}
                   </td>
                   <td className="text-center font-mono">{row.distance != null ? row.distance.toFixed(1) : '---'}</td>
+                  <td className="text-center font-mono whitespace-nowrap">
+                    {row.is_oasis
+                      ? (row.bonus
+                          ? <span className="text-gold">{row.bonus}</span>
+                          : <span className="text-secondary opacity-30" title="Oasis bonus could not be parsed">—</span>)
+                      : <span className="text-secondary opacity-15">·</span>}
+                  </td>
                   <td className={row.player_name ? 'text-primary' : 'text-secondary italic'}>{row.player_name || 'Unoccupied'}</td>
                   <td className="text-secondary text-xs">{row.alliance_name || '---'}</td>
-                  <td title={row.is_oasis && row.bonus ? `Bonus: ${row.bonus}` : ''}>
-                    {row.is_oasis
-                      ? (row.bonus ? `Oasis · ${row.bonus}` : 'Oasis')
-                      : row.is_abandoned ? 'Abandoned' : 'Village'}
+                  <td>
+                    {row.is_oasis ? 'Oasis' : row.is_abandoned ? 'Abandoned' : 'Village'}
                   </td>
                   <td className="text-center" title={row.is_capital ? 'Capital village' : ''}>
                     {row.is_capital ? <span className="text-gold text-base">★</span> : <span className="text-secondary opacity-30">—</span>}
@@ -1111,9 +1281,9 @@ export default function AutoScout() {
         <div className="flex items-center gap-3">
           <span
             className="text-[10px] text-secondary opacity-50 font-mono"
-            title="Bundle build marker. wd7 = wd6 + Codex review P2 follow-ups: capital_id=0 guard, user-stop emits phase frame (not error toast), villages-array picker prefers entries with capital markers, monotonic performance.now() timing for zombie-WS detection."
+            title="Bundle build marker. wd8 = wd7 + oasis bonus feature: parser fix for post-2025 Travian HTML (ico/val/desc order, bidi-wrapped values), canonical resource IDs from icon class, dedicated Bonus column with sort, per-resource min + total-bucket filters."
           >
-            build: wd7
+            build: wd8
           </span>
           <VillageSelector />
         </div>

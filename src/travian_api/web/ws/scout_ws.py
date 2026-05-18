@@ -694,6 +694,31 @@ def _build_scout_scan_coro(config: dict):
         exclude_alliance_names = config.get("exclude_alliance_names", [])
         exclude_player_names = config.get("exclude_player_names", [])
 
+        # Oasis bonus filters (see Auto-Scout bonus-feature plan).
+        # bonus_resource_mins maps canonical resource_id ("wood"/"clay"/
+        # "iron"/"crop") to a minimum percentage (one of 25/50/75/100).
+        # bonus_total_levels is the multi-select bucket set — an oasis
+        # passes if its TOTAL bonus sum equals any selected level.
+        # Both fail closed on malformed shapes: filter is a no-op rather
+        # than an error.
+        _ALLOWED_RESOURCES = {"wood", "clay", "iron", "crop"}
+        _ALLOWED_LEVELS = {25, 50, 75, 100}
+        raw_mins = config.get("bonus_resource_mins") or {}
+        bonus_resource_mins: dict[str, int] = {}
+        if isinstance(raw_mins, dict):
+            for k, v in raw_mins.items():
+                if (
+                    isinstance(k, str) and k in _ALLOWED_RESOURCES
+                    and isinstance(v, (int, float)) and int(v) > 0
+                ):
+                    bonus_resource_mins[k] = int(v)
+        raw_levels = config.get("bonus_total_levels") or []
+        bonus_total_levels: set[int] = set()
+        if isinstance(raw_levels, list):
+            for v in raw_levels:
+                if isinstance(v, (int, float)) and int(v) in _ALLOWED_LEVELS:
+                    bonus_total_levels.add(int(v))
+
         center_village = next((v for v in session.auth_state.villages if v.id == village_id), None)
         if not center_village:
             ctx.push({"type": "error", "message": f"Village {village_id} not found", "fatal": True})
@@ -1269,6 +1294,63 @@ def _build_scout_scan_coro(config: dict):
             if removed > 0:
                 post_filter_msgs.append(f"Oasis-only: -{removed} villages removed")
 
+        # ── Bonus filter ────────────────────────────────────────────
+        # Two independent axes that AND together: per-resource minimum
+        # percentage (a tile must have ≥N% of every named resource) and
+        # total-bucket match (sum of all resource percentages must equal
+        # any selected bucket from {25, 50, 75, 100}). Applied only to
+        # oasis tiles — villages have no bonus concept and pass through
+        # unconditionally so a user with filterMode='with-oases' still
+        # sees their villages.
+        if bonus_resource_mins or bonus_total_levels:
+            before = len(tiles)
+            out: list = []
+            misses_unparseable = 0
+            for t in tiles:
+                if not t.is_oasis:
+                    out.append(t)
+                    continue
+                breakdown = t.bonus_breakdown or {}
+                if not breakdown:
+                    # Oasis with unparseable bonus AND a filter is set:
+                    # drop. Count so the warning can fire if many.
+                    misses_unparseable += 1
+                    continue
+                # Per-resource minimums — ALL must hold.
+                if any(
+                    breakdown.get(res, 0) < min_pct
+                    for res, min_pct in bonus_resource_mins.items()
+                ):
+                    continue
+                # Total bucket — if any selected, the total must equal one.
+                if bonus_total_levels and sum(breakdown.values()) not in bonus_total_levels:
+                    continue
+                out.append(t)
+            tiles = out
+            removed = before - len(tiles)
+            if removed > 0:
+                parts = []
+                if bonus_resource_mins:
+                    parts.append(
+                        "mins=" + ",".join(
+                            f"{r}>={p}%"
+                            for r, p in sorted(bonus_resource_mins.items())
+                        )
+                    )
+                if bonus_total_levels:
+                    parts.append(
+                        "totals=" + ",".join(f"{lv}%" for lv in sorted(bonus_total_levels))
+                    )
+                post_filter_msgs.append(
+                    f"Bonus filter ({'; '.join(parts)}): -{removed}"
+                )
+            if misses_unparseable:
+                logger.warning(
+                    "Bonus filter dropped %d oasis tile(s) with unparseable bonus "
+                    "while a filter was active — Travian locale or HTML may have "
+                    "changed.", misses_unparseable,
+                )
+
         if max_player_pop is not None:
             before = len(tiles)
             removed_players = set()
@@ -1339,9 +1421,14 @@ def _build_scout_scan_coro(config: dict):
                 "is_abandoned": t.is_abandoned,
                 "is_capital": t.is_capital,
                 # Oasis bonus string (e.g. "25% Clay" or "25% Iron, 25% Crop").
-                # Empty for non-oasis tiles. Frontend renders it in the Type
-                # column on oasis rows.
+                # Empty for non-oasis tiles. Frontend renders it in the
+                # dedicated Bonus column.
                 "bonus": t.bonus,
+                # Canonical breakdown — locale-stable. Empty {} on
+                # non-oasis tiles AND on oases the parser couldn't
+                # classify. Frontend uses this to compute bonus_total
+                # for sorting and to render compact chips if desired.
+                "bonus_breakdown": t.bonus_breakdown,
             }
             for t in tiles
         ]
