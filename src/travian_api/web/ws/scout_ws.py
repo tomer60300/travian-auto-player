@@ -229,7 +229,7 @@ def _build_auto_scout_coro(config: dict):
         # only fronts the READ portion of the sweep (target list
         # resolution); the scout dispatch downstream stays on the
         # active user's primary because recon has no troops.
-        from ..services.recon_account import recon_account_manager
+        from ...services.recon_account import recon_account_manager
         recon_client = None
         if use_recon:
             try:
@@ -774,7 +774,7 @@ def _build_scout_scan_coro(config: dict):
         # eats ~5s; subsequent scans reuse the cached session. Falls
         # back to None (svc uses primary) when creds aren't configured,
         # the user opted out, or auth has failed (warning was logged).
-        from ..services.recon_account import recon_account_manager
+        from ...services.recon_account import recon_account_manager
         recon_client = None
         if use_recon:
             try:

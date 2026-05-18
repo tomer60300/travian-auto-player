@@ -183,6 +183,54 @@ def test_server_slug_handles_unknown_host() -> None:
     assert _server_slug("not a url") == "unknown"
 
 
+def test_scout_ws_lazy_imports_resolve() -> None:
+    """Regression guard: scout_ws.py has inline-lazy imports of the
+    recon_account module inside both scan coroutines. The lazy form
+    means a wrong dotted path (e.g. `..services` vs `...services`)
+    wouldn't surface at module load — only at runtime when the user
+    actually starts a scan, producing
+    `No module named 'travian_api.web.services'` mid-operation.
+
+    Walk the source for every `from ...recon_account import ...` line
+    and exercise the resolution by compiling + executing the import
+    statement out of context.
+    """
+    import pathlib, re
+    src_path = pathlib.Path(
+        "src/travian_api/web/ws/scout_ws.py"
+    ).read_text(encoding="utf-8")
+    # All recon_account imports in scout_ws.py must resolve to the
+    # actual module. We extract each one as written and use importlib
+    # to verify it's reachable from the scout_ws.py package context.
+    import importlib
+    pattern = re.compile(
+        r"^\s*from\s+(\.+)([\w.]*)\s+import\s+(\w[\w, ]*)$",
+        re.MULTILINE,
+    )
+    found_any = False
+    for m in pattern.finditer(src_path):
+        dots, mod, names = m.group(1), m.group(2), m.group(3)
+        if "recon_account" not in (mod + " " + names):
+            continue
+        found_any = True
+        # Reconstruct the absolute module path. scout_ws.py lives at
+        # `travian_api.web.ws.scout_ws`. One leading dot = parent of
+        # scout_ws.py's package, etc.
+        parts = "travian_api.web.ws.scout_ws".split(".")
+        # Each dot strips one level from the right.
+        levels_up = len(dots)
+        if levels_up > len(parts):
+            raise AssertionError(
+                f"Too many dots in {m.group(0)!r}: scout_ws.py only "
+                f"sits {len(parts)} levels deep."
+            )
+        anchor = ".".join(parts[: len(parts) - levels_up])
+        full = f"{anchor}.{mod}" if mod else anchor
+        # Strip the import names — only the module portion needs to load.
+        importlib.import_module(full)
+    assert found_any, "No recon_account imports found in scout_ws.py"
+
+
 def test_get_proxy_username_returns_configured_username() -> None:
     """The proxy-username accessor exposes the recon login that
     operators (and users via the UI) should see in the proxy
