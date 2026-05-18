@@ -355,7 +355,26 @@ class AutoScoutService:
 
     def __init__(self, http_client: HttpClient):
         self.http_client = http_client
+        # Optional secondary HttpClient routed through a disposable
+        # "recon" Travian account. Set by the WS orchestrator before
+        # a scan starts when the user toggles the background-account
+        # feature on and the recon account is configured + authed.
+        # When None, read paths transparently fall back to the user's
+        # primary http_client.
+        #
+        # Hard rule: WRITE operations (sending scouts, querying the
+        # user's rally point / village state) NEVER use this — recon
+        # has no villages. See _read_client() vs self.http_client at
+        # each call site.
+        self.recon_http_client: Optional[HttpClient] = None
         self._status_cb: Optional[Callable[[str], None]] = None
+
+    def _read_client(self) -> HttpClient:
+        """HttpClient for account-independent reads (map_position,
+        tile-details, profile pages). Prefers the recon account when
+        attached so bot-detection pressure stays off the user's
+        primary."""
+        return self.recon_http_client or self.http_client
 
     def on_status(self, cb: Callable[[str], None]) -> None:
         self._status_cb = cb
@@ -408,14 +427,18 @@ class AutoScoutService:
         )
 
         # Establish map context once before the scan batch (stealth) — the
-        # tile XHRs are fired by the map page's frontend JS, so the Referer
-        # chain must lead from karte.php.
-        navigator = getattr(self.http_client, "navigator", None)
+        # tile XHRs are fired by the map page's frontend JS, so the
+        # Referer chain must lead from karte.php. Navigate the SAME
+        # client that will actually fire the XHRs (recon when active,
+        # otherwise primary) — otherwise the Referer header doesn't
+        # match the requesting account's last page-load.
+        read_client = self._read_client()
+        navigator = getattr(read_client, "navigator", None)
         if navigator is not None and navigator.enabled:
             await navigator.navigate_to_map()
 
         for sx, sy in scan_centers:
-            resp = await self.http_client.post_json(
+            resp = await read_client.post_json(
                 "/api/v1/map/position",
                 {
                     "data": {
@@ -476,8 +499,14 @@ class AutoScoutService:
         return result
 
     async def get_tile_details(self, x: int, y: int) -> MapTileInfo:
-        """Get detailed info for a single tile via tile-details API."""
-        resp = await self.http_client.post_json(
+        """Get detailed info for a single tile via tile-details API.
+
+        Account-independent — the response is identical regardless of
+        which logged-in player queries it. Routes through the recon
+        HttpClient when configured (concentrates bot-detection on the
+        disposable account).
+        """
+        resp = await self._read_client().post_json(
             "/api/v1/map/tile-details", {"x": x, "y": y}, request_type="xhr"
         )
         html = resp.get("html", "")
@@ -712,7 +741,9 @@ class AutoScoutService:
         profile page changes shape.
         """
         try:
-            page_html = await self.http_client.get_html(f"/profile/{player_id}")
+            # Profile pages are account-independent reads — route
+            # through recon when active.
+            page_html = await self._read_client().get_html(f"/profile/{player_id}")
         except Exception as exc:
             logger.warning("Failed to fetch profile for player %d: %s", player_id, exc)
             return {"pop": 0, "capital_id": None}

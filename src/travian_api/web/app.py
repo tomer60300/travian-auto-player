@@ -95,6 +95,13 @@ async def lifespan(app: FastAPI):
     debug_dumper.stop_cleanup()
     exec_session_manager.stop_cleanup()
     await session_manager.disconnect_all()
+    # Close any recon-proxy HttpClients (curl_cffi / httpx connection
+    # pools leak across hot-reloads without this).
+    try:
+        from travian_api.services.recon_account import recon_account_manager
+        await recon_account_manager.shutdown()
+    except Exception:
+        logger.exception("recon_account_manager.shutdown failed")
     logger.info("All sessions disconnected")
 
 

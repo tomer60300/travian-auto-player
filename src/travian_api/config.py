@@ -19,6 +19,17 @@ class Settings(BaseSettings):
     username: str = Field(default="", description="Account email/username")
     password: str = Field(default="", description="Account password")
 
+    # Recon (background) account — disposable login used by AutoScout for
+    # the read-only sweep operations (map_position, tile-details, player
+    # profile fetches). Concentrates bot-detection / rate-limit pressure
+    # on a throwaway account so the primary account stays clean. When
+    # blank, recon is disabled and read ops fall back to the primary
+    # http_client. Single account is shared across all users hitting the
+    # same Travian server (Travian only allows one active session per
+    # account at a time anyway).
+    recon_username: str = Field(default="", description="Recon account email/username (optional)")
+    recon_password: str = Field(default="", description="Recon account password (optional)")
+
     # Debugging and logging
     debug: bool = Field(default=False)
     log_level: str = Field(default="INFO")

@@ -13,6 +13,7 @@ const LS_KEY_ALLIANCES = 'autoscout_exclude_alliances'
 const LS_KEY_PLAYERS = 'autoscout_exclude_players'
 const LS_KEY_BONUS_MINS = 'autoscout_bonus_resource_mins'
 const LS_KEY_BONUS_LEVELS = 'autoscout_bonus_total_levels'
+const LS_KEY_USE_RECON = 'autoscout_use_recon'
 
 function loadJson(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback }
@@ -113,6 +114,16 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const [bonusTotalLevels, setBonusTotalLevels] = useState(
     () => _sanitizeLevels(loadJson(LS_KEY_BONUS_LEVELS, [])),
   )
+
+  // Background recon account — routes the read-only sweep work
+  // (map_position, tile-details, profile pages) through a disposable
+  // Travian login configured server-side. Defaults to ON because the
+  // whole point of having it configured is to use it; users can
+  // disable per-scan for debugging / direct-account scans.
+  const [useRecon, setUseRecon] = useState(() => {
+    const raw = loadJson(LS_KEY_USE_RECON, true)
+    return raw === false ? false : true
+  })
   const [newAlliance, setNewAlliance] = useState('')
   const [newPlayer, setNewPlayer] = useState('')
 
@@ -136,6 +147,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   useEffect(() => { localStorage.setItem(LS_KEY_PLAYERS, JSON.stringify(excludePlayers)) }, [excludePlayers])
   useEffect(() => { localStorage.setItem(LS_KEY_BONUS_MINS, JSON.stringify(bonusResourceMins)) }, [bonusResourceMins])
   useEffect(() => { localStorage.setItem(LS_KEY_BONUS_LEVELS, JSON.stringify(bonusTotalLevels)) }, [bonusTotalLevels])
+  useEffect(() => { localStorage.setItem(LS_KEY_USE_RECON, JSON.stringify(useRecon)) }, [useRecon])
 
   const toast = useToast()
 
@@ -166,6 +178,8 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   }
 
   const PHASE_LABELS = useMemo(() => ({
+    recon_active: 'Background account active',
+    recon_unavailable: 'Background account unavailable — using primary',
     map_scan: 'Scanning map regions...',
     map_scan_done: 'Map scan complete',
     pre_filter: 'Filtering tiles...',
@@ -176,6 +190,8 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     player_profiles: 'Fetching player profiles...',
     profile_progress: 'Fetching player profiles...',
     post_filter: 'Applying filters...',
+    stopped: 'Scan stopped',
+    capital_parse_warning: 'Capital parser produced empty results',
   }), [])
 
   const handleScanMessage = useCallback((data) => {
@@ -353,6 +369,11 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       show_oases: filterMode !== 'villages',
       oasis_only: filterMode === 'oasis-only',
       show_capitals: showCapitals,
+      // Default true even when the user hasn't explicitly toggled —
+      // server side decides whether recon is actually used (it needs
+      // creds configured + a successful login). Sending false here
+      // forces fallback to the primary account.
+      use_recon: useRecon,
       exclude_player_names: excludePlayers.flatMap((p) => p.split(',').map(s => s.trim())).filter(Boolean),
       village_id: activeVillageId || undefined,
     }
@@ -489,6 +510,28 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             className="checkbox-gold"
           />
           Mark capital villages (★) — adds 1 profile fetch per player
+        </label>
+      </div>
+
+      {/* Background recon account — when configured server-side, the
+          read sweep (map_position, tile-details, profile pages) routes
+          through a disposable Travian login. The user's primary
+          account does no scout traffic at all, keeping bot-detection
+          pressure on the throwaway. Falls back gracefully when the
+          server-side recon credentials aren't set. */}
+      <div className="mb-4">
+        <label className="check-label">
+          <input
+            type="checkbox"
+            checked={useRecon}
+            onChange={(e) => setUseRecon(e.target.checked)}
+            disabled={scanning}
+            className="checkbox-gold"
+          />
+          Use background account for read ops (recommended) —{' '}
+          <span className="text-secondary text-xs">
+            keeps scout-request fingerprint off your main account
+          </span>
         </label>
       </div>
 
@@ -1281,9 +1324,9 @@ export default function AutoScout() {
         <div className="flex items-center gap-3">
           <span
             className="text-[10px] text-secondary opacity-50 font-mono"
-            title="Bundle build marker. wd8 = wd7 + oasis bonus feature: parser fix for post-2025 Travian HTML (ico/val/desc order, bidi-wrapped values), canonical resource IDs from icon class, dedicated Bonus column with sort, per-resource min + total-bucket filters."
+            title="Bundle build marker. wd9 = wd8 + background recon account: read sweep ops (map_position, tile-details, profile pages) route through a disposable Travian login when TRAVIAN_RECON_USERNAME/PASSWORD env vars are set, keeping bot-detection pressure off the user's primary account."
           >
-            build: wd8
+            build: wd9
           </span>
           <VillageSelector />
         </div>

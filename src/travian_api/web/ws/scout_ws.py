@@ -210,6 +210,11 @@ def _build_auto_scout_coro(config: dict):
         start_index = config.get("start_index", 0)
         village_id = config.get("village_id") or session.active_village_id
         targets_from_ui = config.get("targets")
+        # Recon (background) account toggle — applies only to the
+        # read portion of this sweep (the prep scan / target list
+        # resolution). Scout dispatch downstream stays on primary
+        # because the recon account has no troops to send.
+        use_recon = bool(config.get("use_recon", True))
 
         center_village = next((v for v in session.auth_state.villages if v.id == village_id), None)
         if not center_village:
@@ -218,6 +223,36 @@ def _build_auto_scout_coro(config: dict):
 
         cx, cy = center_village.x, center_village.y
         svc = session.scout_service
+
+        # Recon HttpClient wiring — same pattern as the map-scan coro.
+        # See _build_scout_scan_coro for full context. The recon proxy
+        # only fronts the READ portion of the sweep (target list
+        # resolution); the scout dispatch downstream stays on the
+        # active user's primary because recon has no troops.
+        from ..services.recon_account import recon_account_manager
+        recon_client = None
+        if use_recon:
+            try:
+                recon_client = await recon_account_manager.get_or_create_client(
+                    session.settings.base_url
+                )
+            except Exception:
+                logger.exception("recon_account_manager.get_or_create_client failed")
+                recon_client = None
+        svc.recon_http_client = recon_client
+        active_user = (
+            session.auth_state.player_name
+            if session.auth_state else session.settings.username
+        )
+        if recon_client is not None:
+            proxy_user = recon_account_manager.get_proxy_username() or "(recon)"
+            logger.info(
+                "AutoScout-sweep proxy ACTIVE: read portion (target "
+                "resolution) for active_user=%s dispatches through "
+                "recon proxy username=%s. Scout DISPATCH stays on the "
+                "active user's primary account (recon has no troops).",
+                active_user, proxy_user,
+            )
 
         cli_parts = [f"travian scout auto --radius {radius} --village-id {village_id}"]
         cli_parts.append(f"--amount {amount}")
@@ -719,6 +754,13 @@ def _build_scout_scan_coro(config: dict):
                 if isinstance(v, (int, float)) and int(v) in _ALLOWED_LEVELS:
                     bonus_total_levels.add(int(v))
 
+        # Recon (background) account toggle — when True AND the recon
+        # account is configured + authenticates successfully, all read
+        # ops in this scan (map_position, tile-details, profile pages)
+        # route through the recon HttpClient. Write ops stay on the
+        # user's primary http_client. Default: ON when configured.
+        use_recon = bool(config.get("use_recon", True))
+
         center_village = next((v for v in session.auth_state.villages if v.id == village_id), None)
         if not center_village:
             ctx.push({"type": "error", "message": f"Village {village_id} not found", "fatal": True})
@@ -726,6 +768,80 @@ def _build_scout_scan_coro(config: dict):
 
         cx, cy = center_village.x, center_village.y
         svc = session.scout_service
+
+        # Wire the recon HttpClient onto the scout service for the
+        # lifetime of this scan. Lazy auth — first scan of the process
+        # eats ~5s; subsequent scans reuse the cached session. Falls
+        # back to None (svc uses primary) when creds aren't configured,
+        # the user opted out, or auth has failed (warning was logged).
+        from ..services.recon_account import recon_account_manager
+        recon_client = None
+        if use_recon:
+            try:
+                recon_client = await recon_account_manager.get_or_create_client(
+                    session.settings.base_url
+                )
+            except Exception:
+                logger.exception("recon_account_manager.get_or_create_client failed")
+                recon_client = None
+        svc.recon_http_client = recon_client
+        # Active user's name — the primary account whose scan this is
+        # and whose bot-detection / rate-limit risk we're protecting.
+        active_user = (
+            session.auth_state.player_name
+            if session.auth_state else session.settings.username
+        )
+        if recon_client is not None:
+            proxy_user = recon_account_manager.get_proxy_username() or "(recon)"
+            # Server log — operators reading :8002.out see exactly
+            # which disposable account is fronting the recon traffic
+            # for which active user. Hard requirement: this MUST be
+            # present so a captcha event on the recon never gets
+            # mistakenly attributed to the active user's primary.
+            logger.info(
+                "AutoScout proxy ACTIVE: read ops for active_user=%s "
+                "will dispatch through recon proxy username=%s "
+                "(server=%s). Primary account makes zero scout reqs.",
+                active_user, proxy_user, session.settings.base_url,
+            )
+            ctx.push({
+                "type": "phase",
+                "phase": "recon_active",
+                "message": (
+                    f"Using background account [{proxy_user}] as a proxy "
+                    f"to dispatch read ops (map scan, tile-details, "
+                    f"profiles). Your active account [{active_user}] "
+                    "will not appear in any of these requests — bot-"
+                    "detection pressure stays on the proxy."
+                ),
+            })
+        elif use_recon and recon_account_manager.is_configured():
+            logger.warning(
+                "AutoScout proxy UNAVAILABLE: recon credentials are set "
+                "but the recon login isn't authenticated. Read ops for "
+                "active_user=%s will fall back to the user's primary "
+                "account, increasing bot-detection exposure.",
+                active_user,
+            )
+            ctx.push({
+                "type": "phase",
+                "phase": "recon_unavailable",
+                "message": (
+                    "Recon proxy is configured but couldn't authenticate — "
+                    f"falling back to your active account [{active_user}] "
+                    "for this scan. Check server logs for the recon login "
+                    "error and rotate credentials if needed."
+                ),
+            })
+        elif use_recon:
+            # Configured-off path — silent. User asked for recon but
+            # operator didn't set creds. Don't spam with a banner.
+            logger.info(
+                "AutoScout proxy DISABLED (no recon credentials in env): "
+                "read ops for active_user=%s will dispatch through the "
+                "user's primary account.",
+                active_user,
+            )
 
         cli_parts = [f"travian scout scan --radius {radius} --village-id {village_id}"]
         if min_pop is not None:
