@@ -1053,10 +1053,35 @@ def _build_scout_scan_coro(config: dict):
                 pid: (profiles.get(pid, {}).get("pop") or visible_pops.get(pid, 0))
                 for pid in unique_pids
             }
+            capital_misses = 0
             for pid, info in profiles.items():
                 cap = info.get("capital_id")
                 if cap:
                     capital_map[pid] = cap
+                elif want_capital_info:
+                    capital_misses += 1
+            # Capital parse failures need to be loud — a silent zero
+            # means every ★ in the UI is wrong without any error path.
+            # Tolerable when the user opted out of capital markers; a
+            # red flag when they're on. Push one summary frame instead
+            # of N per-profile entries so noisy reproductions stay
+            # legible.
+            if want_capital_info and capital_misses:
+                logger.warning(
+                    "Capital parser returned None for %d/%d profiles; "
+                    "the ★ column will be incomplete.",
+                    capital_misses, len(profiles),
+                )
+                ctx.push(
+                    {
+                        "type": "phase",
+                        "phase": "capital_parse_warning",
+                        "message": (
+                            f"Capital marker missing for {capital_misses}/{len(profiles)} "
+                            "profiles — Travian's profile layout may have changed."
+                        ),
+                    }
+                )
             pop_source = "profile"
         else:
             player_pops = visible_pops
@@ -1105,7 +1130,19 @@ def _build_scout_scan_coro(config: dict):
                 )
 
         # Mark each tile owned by a known player whose capital we resolved.
+        # The match relies on t.village_id (the ``did`` parsed from map
+        # JSON) equalling the village ``id`` returned in the profile
+        # payload. They ARE the same primary key in Travian's data model
+        # — both are the village's database id, distinct from the
+        # tile/map cell ``mapId``. Log the resolution rate so a future
+        # divergence (e.g. server schema change, a profile field swap)
+        # surfaces in :8001/:8002 logs rather than silently emitting an
+        # empty ★ column.
         if capital_map:
+            matched = 0
+            scanned_player_ids = {
+                t.player_id for t in tiles if t.player_id is not None
+            }
             for t in tiles:
                 if (
                     not t.is_oasis
@@ -1113,6 +1150,16 @@ def _build_scout_scan_coro(config: dict):
                     and capital_map.get(t.player_id) == t.village_id
                 ):
                     t.is_capital = True
+                    matched += 1
+            capitals_in_scan = sum(
+                1 for pid in capital_map if pid in scanned_player_ids
+            )
+            logger.info(
+                "Capital match: resolved=%d, matched_in_scan=%d, "
+                "capitals_of_scanned_players=%d (capitals outside scan "
+                "radius account for the gap).",
+                len(capital_map), matched, capitals_in_scan,
+            )
 
         if player_pops:
             pv_map: dict[int, list[dict]] = {}

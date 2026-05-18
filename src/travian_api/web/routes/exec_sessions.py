@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -23,6 +24,7 @@ from travian_api.operation_manager import operation_manager
 from travian_api.web.auth import get_current_user
 from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.operation_gate import active_ops, captcha_stop
+from travian_api.web.sessions import get_travian_session
 from travian_api.web.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,156 @@ async def diag_sessions(user=Depends(get_current_user)):
             "last_message_type": last_msg_type,
         })
     return {"sessions": enriched, "user_id": user.id}
+
+
+@router.get("/api/__diag/profile-parse")
+async def diag_profile_parse(
+    player_id: int | None = None,
+    name: str | None = None,
+    user=Depends(get_current_user),
+    tsess=Depends(get_travian_session),
+):
+    """Fetch /profile/{player_id} via the caller's authenticated session
+    and report exactly what the capital-id parser sees.
+
+    Accepts either ``?player_id=N`` directly OR ``?name=<player_name>``;
+    when a name is given, the most recent scout-scan session's complete
+    payload is searched for a matching tile (case-insensitive) to find
+    the player_id.
+
+    Read-only — temporary diagnostic for hunting capital-detection bugs.
+    """
+    if player_id is None and name:
+        target = name.strip().lower()
+        sessions = exec_session_manager.list_for_user(user.id)
+        scout_sessions = [s for s in sessions if s["session_type"] == "scout-scan"]
+        scout_sessions.sort(key=lambda s: -s["created_at"])
+        for s in scout_sessions:
+            sess = exec_session_manager.get(s["id"])
+            if sess is None:
+                continue
+            for msg in reversed(list(sess.messages)):
+                if not isinstance(msg, dict) or msg.get("type") != "complete":
+                    continue
+                for t in msg.get("tiles", []):
+                    pname = t.get("player_name") or ""
+                    if pname.strip().lower() == target:
+                        player_id = t.get("player_id")
+                        break
+                if player_id:
+                    break
+            if player_id:
+                break
+        if player_id is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No tile with player_name={name!r} found in your recent scout-scan sessions.",
+            )
+    if player_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide ?player_id=N or ?name=<player_name>",
+        )
+
+    try:
+        html = await tsess.http_client.get_html(f"/profile/{player_id}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Profile fetch failed: {exc}")
+
+    result: dict = {
+        "player_id": player_id,
+        "html_length": len(html),
+    }
+
+    pop_m = re.search(r'"ranks"\s*:\s*\{[^}]*"population"\s*:\s*(\d+)', html)
+    result["population"] = int(pop_m.group(1)) if pop_m else None
+
+    json_matches: list[dict] = []
+    for obj in re.finditer(r'\{[^{}]{0,800}\}', html):
+        chunk = obj.group(0)
+        has_main = '"isMainVillage"' in chunk
+        has_cap = '"isCapital"' in chunk
+        if not (has_main or has_cap):
+            continue
+        marker_true = bool(re.search(r'"(?:isMainVillage|isCapital)"\s*:\s*true', chunk))
+        id_match = re.search(r'"id"\s*:\s*(\d+)', chunk)
+        json_matches.append({
+            "snippet": chunk[:400],
+            "has_isMainVillage_key": has_main,
+            "has_isCapital_key": has_cap,
+            "marker_true": marker_true,
+            "id_found": int(id_match.group(1)) if id_match else None,
+        })
+    result["json_chunks_with_marker_key"] = json_matches[:10]
+
+    html_fallback: list[dict] = []
+    for pat_name, pat in (
+        ("link_before_marker", r'<a[^>]*newdid=(\d+)[^>]*>.{0,120}?(?:capital|hauptdorf|stolica|kapital)'),
+        ("marker_before_link", r'(?:capital|hauptdorf|stolica|kapital)[^<>]{0,120}?<a[^>]*newdid=(\d+)'),
+    ):
+        m = re.search(pat, html, re.IGNORECASE | re.DOTALL)
+        html_fallback.append({
+            "pattern": pat_name,
+            "matched_id": int(m.group(1)) if m else None,
+            "matched_excerpt": m.group(0)[:300] if m else None,
+        })
+    result["html_fallback"] = html_fallback
+
+    keyword_counts: dict[str, int] = {}
+    for kw in (
+        "isMainVillage", "isCapital", "mainVillage", "isMainVil",
+        "capital", "Hauptdorf", "stolica", "Kapital", "newdid",
+        "is_main_village", '"main"', "MainVillage",
+    ):
+        keyword_counts[kw] = html.lower().count(kw.lower())
+    result["keyword_counts"] = keyword_counts
+
+    excerpts: dict[str, str] = {}
+    for kw in (
+        "isMainVillage", "isCapital", "MainVillage",
+        "capital", "Capital", "crown", "wonder",
+        "&#x2605;", "&#9733;", "mainVillage", "main-village",
+    ):
+        idx = html.find(kw)
+        if idx >= 0:
+            excerpts[kw] = html[max(0, idx - 250):idx + 500]
+    result["excerpts"] = excerpts
+
+    newdid_contexts: list[dict] = []
+    for m in re.finditer(r'newdid=(\d+)', html):
+        start = max(0, m.start() - 400)
+        end = min(len(html), m.end() + 400)
+        newdid_contexts.append({
+            "newdid": int(m.group(1)),
+            "context": html[start:end],
+        })
+    result["newdid_contexts"] = newdid_contexts
+
+    villages_pat = re.search(
+        r'<table[^>]*class="[^"]*villages[^"]*"[^>]*>(.*?)</table>',
+        html,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if villages_pat:
+        result["villages_table_excerpt"] = villages_pat.group(0)[:3000]
+
+    class_matches: list[str] = []
+    for m in re.finditer(
+        r'class="([^"]*(?:capital|main|wonder|crown|hero)[^"]*)"',
+        html,
+        re.IGNORECASE,
+    ):
+        cls = m.group(1)
+        if cls not in class_matches:
+            class_matches.append(cls)
+    result["relevant_classes"] = class_matches[:20]
+
+    from travian_api.services.auto_scout_service import AutoScoutService
+    svc = AutoScoutService(tsess.http_client)
+    parsed = await svc.get_player_profile_info(player_id)
+    result["parser_output"] = parsed
+
+    return result
 
 
 @router.post("/api/sessions/stop-all")

@@ -104,27 +104,38 @@ class ExecutionSessionManager:
         return result
 
     def push(self, session_id: str, data: dict) -> None:
-        """Buffer a message and fan out to all live subscribers."""
+        """Buffer a message and fan out to all live subscribers.
+
+        Every buffered frame ends up with a ts that is strictly greater
+        than the previous frame's ts — whether the caller supplied a ts
+        or not. Windows ``time.time()`` resolves to ~1ms and can repeat
+        for back-to-back pushes (``OperationManager._run`` pushing
+        ``complete`` then ``operation_complete`` microseconds later;
+        ``_global_keepalive`` pushing two heartbeats inside one tick).
+        The client's resume-dedup uses ``ts <= lastSeen`` and would
+        silently drop one of the two distinct frames in that case,
+        skipping its terminal handler. Bumping by 1µs preserves
+        monotonicity without measurable drift.
+        """
         session = self._sessions.get(session_id)
         if session is None:
             return
-        if "ts" not in data:
-            # Strictly monotonic across consecutive pushes. time.time() on
-            # Windows can return the same value for two rapid pushes (e.g.
-            # OperationManager._run pushing `complete` followed by
-            # `operation_complete` within microseconds). The client's
-            # resume-dedup uses `ts <= lastSeen` → identical ts dedups one
-            # of the two distinct frames out of existence, skipping its
-            # terminal handler. Bumping by 1µs guarantees uniqueness.
-            now = time.time()
-            last_ts = 0.0
-            if session.messages:
-                prev = session.messages[-1]
-                if isinstance(prev, dict):
-                    prev_ts = prev.get("ts")
-                    if isinstance(prev_ts, (int, float)):
-                        last_ts = float(prev_ts)
-            ts = now if now > last_ts else last_ts + 1e-6
+        last_ts = 0.0
+        if session.messages:
+            prev = session.messages[-1]
+            if isinstance(prev, dict):
+                prev_ts = prev.get("ts")
+                if isinstance(prev_ts, (int, float)):
+                    last_ts = float(prev_ts)
+        caller_ts = data.get("ts")
+        if isinstance(caller_ts, (int, float)):
+            candidate = float(caller_ts)
+        else:
+            candidate = time.time()
+        ts = candidate if candidate > last_ts else last_ts + 1e-6
+        if data.get("ts") != ts:
+            # Copy so callers' dicts are never mutated, even when
+            # they pre-supplied a ts that we had to monotonicize.
             data = {**data, "ts": ts}
         session.messages.append(data)
         # Fan-out to subscribers (snapshot to avoid dict-changed-during-iteration)

@@ -37,13 +37,50 @@ def test_push_assigns_strictly_increasing_ts_for_back_to_back_calls() -> None:
     )
 
 
-def test_push_does_not_overwrite_caller_supplied_ts() -> None:
-    """Callers that provide their own ts (e.g. tests, replays) keep it."""
+def test_push_preserves_caller_supplied_ts_when_monotonic() -> None:
+    """Caller-supplied ts is preserved when it's strictly greater than
+    the previous buffered ts. The first message in an empty buffer always
+    qualifies."""
     mgr = ExecutionSessionManager()
     sess = mgr.create(user_id=1, session_type="scout-scan", label="test")
     mgr.push(sess.id, {"type": "phase", "ts": 42.0})
     msgs = list(sess.messages)
     assert msgs[0]["ts"] == 42.0
+
+
+def test_push_monotonicizes_caller_supplied_ts_on_collision() -> None:
+    """Two back-to-back heartbeats whose caller-supplied ts collide
+    (Windows time.time() resolves to ~1ms; the heartbeat task can land
+    two pushes in one tick) must still buffer as distinct timestamps,
+    or the client dedup `ts <= lastSeen` will drop the second one."""
+    mgr = ExecutionSessionManager()
+    sess = mgr.create(user_id=1, session_type="scout-scan", label="test")
+    mgr.push(sess.id, {"type": "heartbeat", "ts": 100.0})
+    mgr.push(sess.id, {"type": "heartbeat", "ts": 100.0})
+    msgs = list(sess.messages)
+    assert msgs[0]["ts"] == 100.0
+    assert msgs[1]["ts"] > msgs[0]["ts"], (
+        "Caller-supplied collision must be monotonicized just like the "
+        "no-ts path."
+    )
+
+
+def test_push_does_not_mutate_caller_dict() -> None:
+    """The dict passed to push() must not be mutated — callers
+    legitimately keep references for retries, logging, or fan-out."""
+    mgr = ExecutionSessionManager()
+    sess = mgr.create(user_id=1, session_type="scout-scan", label="test")
+    original_no_ts: dict = {"type": "phase"}
+    original_with_ts: dict = {"type": "heartbeat", "ts": 5.0}
+    mgr.push(sess.id, original_no_ts)
+    mgr.push(sess.id, original_with_ts)
+    assert "ts" not in original_no_ts, (
+        "push() must not inject ts into the caller's dict — it should "
+        "build a copy via {**data, 'ts': ts}."
+    )
+    assert original_with_ts == {"type": "heartbeat", "ts": 5.0}, (
+        "push() must not mutate caller dicts even when ts is bumped."
+    )
 
 
 def test_push_uses_real_clock_when_it_advances() -> None:

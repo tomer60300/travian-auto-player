@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import random
@@ -29,6 +30,152 @@ _OASIS_BONUS_ROW_RE = re.compile(
     r'<td[^>]*\bclass="val"[^>]*>\s*\+?(\d+)\s*%?\s*</td>',
     re.DOTALL,
 )
+
+
+# Capital marker keywords across Travian locales. Add new locales here
+# when discovered. Substring-and-case-insensitive against the value of
+# ``typeText`` (e.g. ``(Capital)``, ``(Hauptdorf)``). Avoid short prefix
+# stems (e.g. plain "hlavn"): those false-positive against unrelated
+# Czech/Slovak words. Stick to recognisable, locale-explicit forms.
+_CAPITAL_KEYWORDS_RE = re.compile(
+    r'capital'                # en/es/pt/it (also matches "capitale")
+    r'|hauptdorf'             # de
+    r'|stolica|stolnica'      # pl, sl
+    r'|kapital'               # also fragments of de "Hauptstadt"-style skins
+    r'|столица'               # ru/uk/sr
+    r'|başkent'               # tr
+    r'|hlavní|hlavné'         # cs, sk
+    r'|főváros'               # hu
+    r'|hoofdstad'             # nl
+    r'|huvudstad'             # sv
+    r'|pääkaupunki'           # fi
+    r'|首都'                  # cjk
+    r'|العاصمة',              # ar
+    re.IGNORECASE,
+)
+
+
+def _extract_balanced(text: str, start: int, opener: str, closer: str) -> Optional[str]:
+    """Return the substring from text[start] (must be ``opener``) through
+    its balanced ``closer``, treating JSON-style string literals as opaque
+    so braces/brackets inside string values don't fool the depth counter.
+
+    Returns None if start is past the end of ``text`` or no matching
+    closer is found.
+    """
+    if start >= len(text) or text[start] != opener:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    i = start
+    while i < len(text):
+        c = text[i]
+        if escape:
+            escape = False
+        elif c == "\\":
+            escape = True
+        elif c == '"':
+            in_string = not in_string
+        elif not in_string:
+            if c == opener:
+                depth += 1
+            elif c == closer:
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        i += 1
+    return None
+
+
+def _parse_capital_id_from_profile_html(html: str) -> Optional[int]:
+    """Locate the capital village ID inside a Travian profile page.
+
+    Modern Travian (post-2025 redesign) embeds the player's villages as a
+    JSON array inside the profile payload, with each village carrying a
+    localized ``"typeText":"(Capital)"`` marker on the capital row. Older
+    versions used boolean ``"isMainVillage":true`` / ``"isCapital":true``
+    keys instead. Very old skins drop both and only mark the capital row
+    in plain HTML next to the village's ``newdid=N`` link.
+
+    Strategies (in order):
+      1. Locate the ``"villages":[ ... ]`` array, extract it as a
+         structurally-balanced substring, ``json.loads`` it, and inspect
+         each entry. Handles nested ``occupiedOases``, arbitrarily large
+         village objects, and string values containing braces.
+      2. Same array — fall back to legacy boolean markers.
+      3. HTML pattern: capital keyword text adjacent to ``newdid=N``.
+
+    Returns the capital's village id (matches the ``did`` the map scan
+    stores in ``MapTileInfo.village_id``) or None if nothing matches.
+    """
+    villages = _extract_villages_array(html)
+    if villages:
+        for v in villages:
+            if not isinstance(v, dict):
+                continue
+            type_text = v.get("typeText")
+            if not isinstance(type_text, str) or not type_text:
+                continue
+            if not _CAPITAL_KEYWORDS_RE.search(type_text):
+                continue
+            vid = v.get("id")
+            if isinstance(vid, int):
+                return vid
+            if isinstance(vid, str) and vid.isdigit():
+                return int(vid)
+
+        for v in villages:
+            if not isinstance(v, dict):
+                continue
+            if v.get("isMainVillage") is True or v.get("isCapital") is True:
+                vid = v.get("id")
+                if isinstance(vid, int):
+                    return vid
+                if isinstance(vid, str) and vid.isdigit():
+                    return int(vid)
+
+    # Strategy 3 — HTML last resort. Reuse the consolidated keyword
+    # regex source via .pattern and widen the proximity window to 200
+    # chars. Use ``.`` with DOTALL so the match can span across HTML
+    # tag boundaries — the realistic case is a marker cell and a link
+    # cell sitting in the same table row separated by ``</td><td>``.
+    kw_src = _CAPITAL_KEYWORDS_RE.pattern
+    for marker_pat in (
+        rf'<a[^>]*newdid=(\d+)[^>]*>.{{0,200}}?(?:{kw_src})',
+        rf'(?:{kw_src}).{{0,200}}?<a[^>]*newdid=(\d+)',
+    ):
+        m = re.search(marker_pat, html, re.IGNORECASE | re.DOTALL)
+        if m:
+            try:
+                return int(m.group(1))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _extract_villages_array(html: str) -> Optional[list]:
+    """Pull the ``"villages":[ ... ]`` JSON array out of profile HTML.
+
+    Returns a Python list of dicts on success, or None if the array
+    isn't present or can't be parsed as JSON. The structural balancer
+    handles nested objects (e.g. populated ``occupiedOases``) and
+    string-value braces correctly.
+    """
+    m = re.search(r'"villages"\s*:\s*\[', html)
+    if not m:
+        return None
+    bracket_start = m.end() - 1  # position of '['
+    array_str = _extract_balanced(html, bracket_start, "[", "]")
+    if array_str is None:
+        return None
+    try:
+        parsed = json.loads(array_str)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, list):
+        return parsed
+    return None
 
 
 def _parse_oasis_bonus_html(html: str) -> str:
@@ -433,39 +580,7 @@ class AutoScoutService:
         else:
             logger.warning("Could not extract population from profile for player %d", player_id)
 
-        capital_id: Optional[int] = None
-        # Capital marker — JSON serialization key order isn't guaranteed, so
-        # we walk per-village JSON objects and check both directions instead
-        # of forcing one ordering with a single regex.
-        for obj in re.finditer(r'\{[^{}]{0,800}\}', page_html):
-            chunk = obj.group(0)
-            if '"isMainVillage"' not in chunk and '"isCapital"' not in chunk:
-                continue
-            if not re.search(r'"(?:isMainVillage|isCapital)"\s*:\s*true', chunk):
-                continue
-            id_match = re.search(r'"id"\s*:\s*(\d+)', chunk)
-            if id_match:
-                capital_id = int(id_match.group(1))
-                break
-
-        if capital_id is None:
-            # HTML fallback — Travian's profile village table marks the
-            # capital with one of several classes that differ by skin/locale.
-            # Look for any newdid=N link followed within ~120 chars by a
-            # capital marker. Bidirectional: check both orderings since the
-            # marker can sit before or after the link in the row.
-            for marker_pat in (
-                r'<a[^>]*newdid=(\d+)[^>]*>.{0,120}?(?:capital|hauptdorf|stolica|kapital)',
-                r'(?:capital|hauptdorf|stolica|kapital)[^<>]{0,120}?<a[^>]*newdid=(\d+)',
-            ):
-                m2 = re.search(marker_pat, page_html, re.IGNORECASE | re.DOTALL)
-                if m2:
-                    try:
-                        capital_id = int(m2.group(1))
-                        break
-                    except (TypeError, ValueError):
-                        pass
-
+        capital_id = _parse_capital_id_from_profile_html(page_html)
         return {"pop": pop, "capital_id": capital_id}
 
     async def fetch_player_populations(
@@ -503,6 +618,7 @@ class AutoScoutService:
         """
         result: Dict[int, Dict[str, Any]] = {}
         total = len(player_ids)
+        cb_logged = False
         for i, pid in enumerate(player_ids):
             info = await self.get_player_profile_info(pid)
             result[pid] = info
@@ -511,8 +627,17 @@ class AutoScoutService:
                 try:
                     progress_cb(done, total)
                 except Exception:
-                    # Progress reporting must never block the fetch loop.
-                    pass
+                    # Progress reporting must never block the fetch loop,
+                    # but a silent swallow makes broken callbacks
+                    # invisible — log the first occurrence per scan so a
+                    # bad callback surfaces without a per-tile flood.
+                    if not cb_logged:
+                        logger.warning(
+                            "Profile-fetch progress_cb raised; subsequent "
+                            "failures are suppressed for this scan.",
+                            exc_info=True,
+                        )
+                        cb_logged = True
             if done % 5 == 0 or done == total:
                 self._report(f"Fetched player profiles: {done}/{total}")
         return result
