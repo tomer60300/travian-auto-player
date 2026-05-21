@@ -754,6 +754,14 @@ def _build_scout_scan_coro(config: dict):
                 if isinstance(v, (int, float)) and int(v) in _ALLOWED_LEVELS:
                     bonus_total_levels.add(int(v))
 
+        # Target-type flag: "non-capitals" mode = player villages MINUS
+        # capital villages. Backward-compat alias path: the legacy
+        # `show_capitals` flag is intentionally NOT honored — capital
+        # identification is now strictly tied to the non-capitals
+        # filter, removing an entire profile-fetch phase for every
+        # other scan mode.
+        non_capitals = bool(config.get("non_capitals", False))
+
         # Recon (background) account toggle — when True AND the recon
         # account is configured + authenticates successfully, all read
         # ops in this scan (map_position, tile-details, profile pages)
@@ -1166,16 +1174,21 @@ def _build_scout_scan_coro(config: dict):
         # ── Phase 3b: Compute player populations ───────────────────
         visible_pops = _sum_visible_player_pops(tiles)
 
-        # Capital map (player_id → capital village_id). Built whenever we
-        # fetch profile pages — both for max_player_pop (where we need the
-        # accurate total) and for the new "show capitals" flag, so behavior
-        # is consistent across configurations.
+        # Capital map (player_id → capital village_id). Built whenever
+        # we fetch profile pages — required by both max_player_pop
+        # (which needs the accurate total) and the non-capitals target
+        # type (which needs to identify which villages to drop).
         capital_map: dict[int, int] = {}
 
         # Profile fetching is needed when EITHER:
         # - the user wants accurate per-player population (max_player_pop), OR
-        # - the user wants capital flags shown on village rows.
-        want_capital_info = bool(config.get("show_capitals", True))
+        # - the user picked the non-capitals target type and we need to
+        #   identify capitals to filter them out.
+        # Other modes (plain villages / with-oases / oasis-only) skip
+        # the profile-fetch phase entirely, saving ~N HTTP requests
+        # per scan where N is the unique-player count (~50–150 for a
+        # radius-10 scan).
+        want_capital_info = non_capitals
         need_profiles = (max_player_pop is not None or want_capital_info) and bool(visible_pops)
 
         if need_profiles:
@@ -1409,6 +1422,19 @@ def _build_scout_scan_coro(config: dict):
             removed = before - len(tiles)
             if removed > 0:
                 post_filter_msgs.append(f"Oasis-only: -{removed} villages removed")
+
+        # ── Non-capitals filter ────────────────────────────────────
+        # Drop every tile that the profile-fetch phase identified as a
+        # player's capital village. Runs only when the user picked
+        # "Non-capital villages only" — every other mode skipped the
+        # profile-fetch phase, so t.is_capital is unset on all tiles
+        # and this filter is a no-op even if accidentally triggered.
+        if non_capitals:
+            before = len(tiles)
+            tiles = [t for t in tiles if not t.is_capital]
+            removed = before - len(tiles)
+            if removed > 0:
+                post_filter_msgs.append(f"Non-capitals: -{removed} capital villages removed")
 
         # ── Bonus filter ────────────────────────────────────────────
         # Two independent axes that AND together: per-resource minimum

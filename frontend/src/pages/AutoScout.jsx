@@ -72,14 +72,16 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const [minPop, setMinPop] = useState(0)
   const [maxPop, setMaxPop] = useState(100)
   const [maxPlayerPop, setMaxPlayerPop] = useState('')
-  // Single-pick filter mode replaces the prior dual-checkbox arrangement
-  // (showOases + oasisOnly with disable cross-talk) — clearer UX, no
-  // confusion about which combination produces what.
-  //   "villages"     — player villages only (default; matches old: showOases=false)
-  //   "with-oases"   — player villages + unoccupied oases (old: showOases=true)
-  //   "oasis-only"   — only oases, both occupied and unoccupied (old: oasisOnly=true)
+  // Single-pick target type. Each mode dictates what reaches the
+  // results table and (crucially) which expensive recon work the
+  // server does — capital info is only fetched in "non-capitals"
+  // mode because that's the only mode that needs it to filter.
+  //   "villages"     — player villages only (default)
+  //   "non-capitals" — player villages MINUS capitals (requires
+  //                    profile-fetch per unique player)
+  //   "with-oases"   — player villages + unoccupied oases
+  //   "oasis-only"   — only oases (occupied + unoccupied)
   const [filterMode, setFilterMode] = useState('villages')
-  const [showCapitals, setShowCapitals] = useState(true)
 
   // Alliance & player exclusion — persisted in localStorage
   const [excludeAlliances, setExcludeAlliances] = useState(() => loadJson(LS_KEY_ALLIANCES, []))
@@ -357,7 +359,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     startedHereRef.current = true
 
     const config = {
-      radius, minPop, maxPop, maxPlayerPop, filterMode, showCapitals,
+      radius, minPop, maxPop, maxPlayerPop, filterMode,
       excludeAlliances, excludePlayers,
     }
     onConfigChange?.(config)
@@ -366,9 +368,16 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       radius,
       min_pop: minPop,
       max_pop: maxPop,
-      show_oases: filterMode !== 'villages',
+      // Oases participate in results when the target type explicitly
+      // includes them. The non-capitals mode is village-only territory,
+      // so it stays oasis-free just like the plain "villages" mode.
+      show_oases: filterMode === 'with-oases' || filterMode === 'oasis-only',
       oasis_only: filterMode === 'oasis-only',
-      show_capitals: showCapitals,
+      // Triggers the server's capital-identification path (profile
+      // fetches per unique player) AND the post-filter that drops
+      // is_capital tiles. Only the non-capitals target type needs
+      // this — every other mode skips the profile-fetch phase.
+      non_capitals: filterMode === 'non-capitals',
       // Default true even when the user hasn't explicitly toggled —
       // server side decides whether recon is actually used (it needs
       // creds configured + a successful login). Sending false here
@@ -474,6 +483,22 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             <input
               type="radio"
               name="filterMode"
+              value="non-capitals"
+              checked={filterMode === 'non-capitals'}
+              onChange={() => setFilterMode('non-capitals')}
+              className="accent-radio"
+              disabled={scanning}
+            />
+            Non-capital villages only
+            <span className="text-xs text-secondary ml-1">
+              (costs ~1 profile fetch per unique player to identify
+              capitals)
+            </span>
+          </label>
+          <label className="check-label">
+            <input
+              type="radio"
+              name="filterMode"
               value="with-oases"
               checked={filterMode === 'with-oases'}
               onChange={() => setFilterMode('with-oases')}
@@ -495,22 +520,6 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             Oases only (occupied + unoccupied; ignore villages)
           </label>
         </div>
-      </div>
-
-      {/* Capital marker — costs ~1 profile fetch per unique player but
-          surfaces the "★" capital flag in results. Off → faster scan,
-          On → richer info. */}
-      <div className="mb-4">
-        <label className="check-label">
-          <input
-            type="checkbox"
-            checked={showCapitals}
-            onChange={(e) => setShowCapitals(e.target.checked)}
-            disabled={scanning}
-            className="checkbox-gold"
-          />
-          Mark capital villages (★) — adds 1 profile fetch per player
-        </label>
       </div>
 
       {/* Background recon account — when configured server-side, the
@@ -754,11 +763,66 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
     })
   }
 
+  const downloadMarkdown = () => {
+    // Render the same columns the table shows. Pipe characters in
+    // village or player names would break the table row — escape
+    // them. Newlines in the same fields would as well; replace with
+    // a literal space.
+    const esc = (v) => String(v ?? '')
+      .replace(/\|/g, '\\|')
+      .replace(/[\r\n]+/g, ' ')
+    const headers = [
+      'Coords', 'Village', 'V.Pop', 'Player Pop',
+      'Distance', 'Bonus', 'Player', 'Alliance', 'Type',
+    ]
+    const rows = sorted.map((r) => [
+      `(${r.x},${r.y})`,
+      esc(r.village_name || r.name || '---'),
+      r.population ?? 0,
+      r.owner_population ?? 0,
+      r.distance != null ? r.distance.toFixed(1) : '---',
+      esc(r.bonus || ''),
+      esc(r.player_name || 'Unoccupied'),
+      esc(r.alliance_name || '---'),
+      r.is_oasis ? 'Oasis' : r.is_abandoned ? 'Abandoned' : 'Village',
+    ])
+    const now = new Date()
+    const stamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const lines = [
+      `# Auto-Scout Results`,
+      ``,
+      `- Captured at: ${now.toISOString()}`,
+      `- Targets: ${results.length}`,
+      ``,
+      `| ${headers.join(' | ')} |`,
+      `|${headers.map(() => '---').join('|')}|`,
+      ...rows.map((row) => `| ${row.join(' | ')} |`),
+      ``,
+    ]
+    const md = lines.join('\n')
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `scout-results-${stamp}.md`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <div className="card">
       <div className="flex justify-between items-center mb-3 flex-wrap gap-2">
         <h3 className="heading-gold text-lg">Scan Results ({results.length} targets)</h3>
         <div className="flex gap-2 items-center">
+          <button
+            className="btn-secondary btn-xs"
+            onClick={downloadMarkdown}
+            title="Export the current results table to a Markdown file (all visible columns)."
+          >
+            Download .md
+          </button>
           <button className="btn-secondary btn-xs" onClick={toggleAll}>{allSelected ? 'Deselect All' : 'Select All'}</button>
           <span className="text-xs text-secondary">{selected.size} selected</span>
         </div>
@@ -780,7 +844,6 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
               <SortableHeader label="Player" field="player_name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <th>Alliance</th>
               <SortableHeader label="Type" field="is_oasis" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
-              <SortableHeader label="★" field="is_capital" sortField={sortField} sortDir={sortDir} onSort={handleSort} className="text-center" />
               <th>Farm Lists</th>
               <th className="w-10"></th>
             </tr>
@@ -819,9 +882,6 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
                   <td className="text-secondary text-xs">{row.alliance_name || '---'}</td>
                   <td>
                     {row.is_oasis ? 'Oasis' : row.is_abandoned ? 'Abandoned' : 'Village'}
-                  </td>
-                  <td className="text-center" title={row.is_capital ? 'Capital village' : ''}>
-                    {row.is_capital ? <span className="text-gold text-base">★</span> : <span className="text-secondary opacity-30">—</span>}
                   </td>
                   <td>
                     {(coordMap?.[`${row.x},${row.y}`] || []).map((entry) => (
@@ -1324,9 +1384,9 @@ export default function AutoScout() {
         <div className="flex items-center gap-3">
           <span
             className="text-[10px] text-secondary opacity-50 font-mono"
-            title="Bundle build marker. wd9 = wd8 + background recon account: read sweep ops (map_position, tile-details, profile pages) route through a disposable Travian login when TRAVIAN_RECON_USERNAME/PASSWORD env vars are set, keeping bot-detection pressure off the user's primary account."
+            title="Bundle build marker. wd10 = wd9 + Non-capital target type (capital profile fetch only when needed) + Download .md export + dropped standalone capital toggle and ★ column."
           >
-            build: wd9
+            build: wd10
           </span>
           <VillageSelector />
         </div>
