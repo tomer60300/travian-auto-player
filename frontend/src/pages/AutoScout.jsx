@@ -14,6 +14,7 @@ const LS_KEY_PLAYERS = 'autoscout_exclude_players'
 const LS_KEY_BONUS_MINS = 'autoscout_bonus_resource_mins'
 const LS_KEY_BONUS_LEVELS = 'autoscout_bonus_total_levels'
 const LS_KEY_USE_RECON = 'autoscout_use_recon'
+const LS_KEY_RECON_STRICT = 'autoscout_recon_strict'
 
 function loadJson(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback }
@@ -126,6 +127,14 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
     const raw = loadJson(LS_KEY_USE_RECON, true)
     return raw === false ? false : true
   })
+  // Strict-recon mode — if recon is required AND can't authenticate,
+  // abort the scan rather than silently fall back to the primary
+  // account. Off by default: existing users keep the visible-warning
+  // + fallback path. On = power-users who'd rather see no results
+  // than have any scout request leak onto their main account.
+  const [reconStrict, setReconStrict] = useState(() => {
+    return loadJson(LS_KEY_RECON_STRICT, false) === true
+  })
   const [newAlliance, setNewAlliance] = useState('')
   const [newPlayer, setNewPlayer] = useState('')
 
@@ -150,6 +159,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   useEffect(() => { localStorage.setItem(LS_KEY_BONUS_MINS, JSON.stringify(bonusResourceMins)) }, [bonusResourceMins])
   useEffect(() => { localStorage.setItem(LS_KEY_BONUS_LEVELS, JSON.stringify(bonusTotalLevels)) }, [bonusTotalLevels])
   useEffect(() => { localStorage.setItem(LS_KEY_USE_RECON, JSON.stringify(useRecon)) }, [useRecon])
+  useEffect(() => { localStorage.setItem(LS_KEY_RECON_STRICT, JSON.stringify(reconStrict)) }, [reconStrict])
 
   const toast = useToast()
 
@@ -383,6 +393,10 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       // creds configured + a successful login). Sending false here
       // forces fallback to the primary account.
       use_recon: useRecon,
+      // Strict mode — if true AND use_recon is true AND recon
+      // can't authenticate, the server aborts the scan rather
+      // than silently falling back to the primary account.
+      recon_strict: reconStrict,
       exclude_player_names: excludePlayers.flatMap((p) => p.split(',').map(s => s.trim())).filter(Boolean),
       village_id: activeVillageId || undefined,
     }
@@ -542,6 +556,22 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             keeps scout-request fingerprint off your main account
           </span>
         </label>
+        {useRecon && (
+          <label className="check-label ml-6 mt-1">
+            <input
+              type="checkbox"
+              checked={reconStrict}
+              onChange={(e) => setReconStrict(e.target.checked)}
+              disabled={scanning}
+              className="checkbox-gold"
+            />
+            Require background account —{' '}
+            <span className="text-secondary text-xs">
+              abort scan if it can&apos;t authenticate (no silent
+              fallback to your active account)
+            </span>
+          </label>
+        )}
       </div>
 
       {/* Oasis bonus filter — only meaningful when oases are in scope.
@@ -1384,9 +1414,9 @@ export default function AutoScout() {
         <div className="flex items-center gap-3">
           <span
             className="text-[10px] text-secondary opacity-50 font-mono"
-            title="Bundle build marker. wd10 = wd9 + Non-capital target type (capital profile fetch only when needed) + Download .md export + dropped standalone capital toggle and ★ column."
+            title="Bundle build marker. wd11 = wd10 + full recon-proxy coverage: fixed map_position POST loop bypass; ContextVar-scoped recon client (race-safe under concurrent scan/auto-scout); strict-recon toggle aborts on auth failure; structural regression tests catch future primary-account leaks."
           >
-            build: wd10
+            build: wd11
           </span>
           <VillageSelector />
         </div>

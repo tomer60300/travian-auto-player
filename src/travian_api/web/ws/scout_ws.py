@@ -215,6 +215,7 @@ def _build_auto_scout_coro(config: dict):
         # resolution). Scout dispatch downstream stays on primary
         # because the recon account has no troops to send.
         use_recon = bool(config.get("use_recon", True))
+        recon_strict = bool(config.get("recon_strict", False))
 
         center_village = next((v for v in session.auth_state.villages if v.id == village_id), None)
         if not center_village:
@@ -230,6 +231,7 @@ def _build_auto_scout_coro(config: dict):
         # resolution); the scout dispatch downstream stays on the
         # active user's primary because recon has no troops.
         from ...services.recon_account import recon_account_manager
+        from ...services.auto_scout_service import _recon_context
         recon_client = None
         if use_recon:
             try:
@@ -239,7 +241,36 @@ def _build_auto_scout_coro(config: dict):
             except Exception:
                 logger.exception("recon_account_manager.get_or_create_client failed")
                 recon_client = None
-        svc.recon_http_client = recon_client
+        active_user_for_strict = (
+            session.auth_state.player_name
+            if session.auth_state else session.settings.username
+        )
+        if (
+            use_recon and recon_strict
+            and recon_client is None
+            and recon_account_manager.is_configured()
+        ):
+            logger.error(
+                "AutoScout-sweep STRICT-recon: recon proxy unavailable "
+                "AND strict mode is on. Aborting sweep for "
+                "active_user=%s.", active_user_for_strict,
+            )
+            ctx.push({
+                "type": "error",
+                "fatal": True,
+                "message": (
+                    "Strict background-account mode is on, but the "
+                    "background account couldn't authenticate. The "
+                    "sweep was aborted to prevent leaking scout traffic "
+                    "onto your active account."
+                ),
+            })
+            return
+        # ContextVar — race-safe per-coroutine routing. See the
+        # equivalent block in _build_scout_scan_coro for why this is
+        # preferred over the legacy `svc.recon_http_client` attribute.
+        _recon_context.set(recon_client)
+        svc.recon_http_client = recon_client  # belt-and-braces backward compat
         active_user = (
             session.auth_state.player_name
             if session.auth_state else session.settings.username
@@ -768,6 +799,14 @@ def _build_scout_scan_coro(config: dict):
         # route through the recon HttpClient. Write ops stay on the
         # user's primary http_client. Default: ON when configured.
         use_recon = bool(config.get("use_recon", True))
+        # Strict-recon mode — when True and use_recon is True, abort
+        # the scan with a fatal error if the recon account is
+        # configured but can't authenticate. Default OFF preserves
+        # the existing visible-warning + fallback-to-primary path
+        # for users who'd rather get results than no results. Strict
+        # mode is for users who consider any scout traffic on their
+        # primary unacceptable — they'd rather see the scan fail.
+        recon_strict = bool(config.get("recon_strict", False))
 
         center_village = next((v for v in session.auth_state.villages if v.id == village_id), None)
         if not center_village:
@@ -777,12 +816,13 @@ def _build_scout_scan_coro(config: dict):
         cx, cy = center_village.x, center_village.y
         svc = session.scout_service
 
-        # Wire the recon HttpClient onto the scout service for the
-        # lifetime of this scan. Lazy auth — first scan of the process
-        # eats ~5s; subsequent scans reuse the cached session. Falls
-        # back to None (svc uses primary) when creds aren't configured,
-        # the user opted out, or auth has failed (warning was logged).
+        # Wire the recon HttpClient via the per-coroutine ContextVar.
+        # Lazy auth — first scan of the process eats ~5s; subsequent
+        # scans reuse the cached session. Returns None when creds
+        # aren't configured, the user opted out, or auth has failed
+        # (the recon manager logs a warning).
         from ...services.recon_account import recon_account_manager
+        from ...services.auto_scout_service import _recon_context
         recon_client = None
         if use_recon:
             try:
@@ -792,13 +832,53 @@ def _build_scout_scan_coro(config: dict):
             except Exception:
                 logger.exception("recon_account_manager.get_or_create_client failed")
                 recon_client = None
-        svc.recon_http_client = recon_client
         # Active user's name — the primary account whose scan this is
         # and whose bot-detection / rate-limit risk we're protecting.
         active_user = (
             session.auth_state.player_name
             if session.auth_state else session.settings.username
         )
+        # Strict-mode abort path: user explicitly asked for recon AND
+        # opted into strict mode. If we couldn't authenticate the recon
+        # account, the right behavior is to fail loudly — falling back
+        # to primary would silently misrepresent the masking the user
+        # asked for.
+        if (
+            use_recon and recon_strict
+            and recon_client is None
+            and recon_account_manager.is_configured()
+        ):
+            logger.error(
+                "AutoScout STRICT-recon: recon proxy unavailable AND "
+                "user opted into strict mode. Aborting scan for "
+                "active_user=%s rather than leaking to primary.",
+                active_user,
+            )
+            ctx.push({
+                "type": "error",
+                "fatal": True,
+                "message": (
+                    "Strict background-account mode is on, but the "
+                    "background account couldn't authenticate. The "
+                    "scan was aborted to prevent leaking scout traffic "
+                    "onto your active account. Rotate the recon "
+                    "credentials, then retry — or uncheck 'Require "
+                    "background account' to fall back to your primary."
+                ),
+            })
+            return
+        # Set the ContextVar scoped to this coroutine task. ContextVar
+        # values are task-local in asyncio, so a concurrent scout-scan
+        # vs auto-scout sweep on the same AutoScoutService instance
+        # cannot race on this slot (each task has its own context).
+        # No reset needed — the task ends when the coro returns and
+        # its context is discarded.
+        _recon_context.set(recon_client)
+        # Keep the legacy attribute populated for any test paths /
+        # external callers that still rely on it. ContextVar wins in
+        # `_read_client` when both are set; this assignment is a
+        # belt-and-braces safety net, not the load-bearing path.
+        svc.recon_http_client = recon_client
         if recon_client is not None:
             proxy_user = recon_account_manager.get_proxy_username() or "(recon)"
             # Server log — operators reading :8002.out see exactly
@@ -838,7 +918,9 @@ def _build_scout_scan_coro(config: dict):
                     "Recon proxy is configured but couldn't authenticate — "
                     f"falling back to your active account [{active_user}] "
                     "for this scan. Check server logs for the recon login "
-                    "error and rotate credentials if needed."
+                    "error and rotate credentials if needed. Enable "
+                    "'Require background account' if you'd prefer the "
+                    "scan to abort instead of fall back."
                 ),
             })
         elif use_recon:
@@ -906,9 +988,15 @@ def _build_scout_scan_coro(config: dict):
             }
         )
 
-        # Establish map-page Referer chain before tile XHRs, matching the
-        # navigation a real browser would produce when scanning the map.
-        navigator = getattr(svc.http_client, "navigator", None)
+        # Establish map-page Referer chain before tile XHRs, matching
+        # the navigation a real browser would produce when scanning the
+        # map. Crucially, drive the navigator on the SAME HttpClient
+        # that fires the upcoming map_position POSTs — otherwise the
+        # primary's navigator records "/karte.php" but the actual
+        # XHRs go through the recon (or vice versa), breaking the
+        # Referer chain Travian's anti-bot inspects.
+        scan_client = svc._read_client()
+        navigator = getattr(scan_client, "navigator", None)
         if navigator is not None and navigator.enabled:
             await navigator.navigate_to_map()
 
@@ -934,7 +1022,11 @@ def _build_scout_scan_coro(config: dict):
                     "center": {"x": scx, "y": scy},
                 }
             )
-            resp = await svc.http_client.post_json(
+            # The map_position POSTs are the bulk of the scan traffic
+            # (one per region, ~4 regions for radius 10). Route them
+            # through the recon proxy when active — same data shape
+            # regardless of which logged-in player asks.
+            resp = await scan_client.post_json(
                 "/api/v1/map/position",
                 {"data": {"x": scx, "y": scy, "zoomLevel": 3, "ignorePositions": []}},
                 request_type="xhr",

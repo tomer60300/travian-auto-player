@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import math
 import random
 import re
+from contextlib import asynccontextmanager
 from html import unescape as html_unescape
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set, Tuple
 
 from ..clients.http_client import HttpClient
 from ..models.farm_list import MapTileInfo
@@ -350,31 +352,89 @@ def _parse_oasis_bonus_html(html: str) -> str:
     return _format_bonus_breakdown(_parse_oasis_bonus_breakdown(html))
 
 
+# Per-coroutine scope for the optional recon HttpClient used by
+# `AutoScoutService._read_client()`. ContextVar values are propagated
+# automatically to tasks created within the current task's context,
+# so an `async with svc.with_recon_client(...)` block inside the
+# scan coroutine will correctly route every sub-call's reads through
+# the recon, even if the calls fan out via `asyncio.gather` etc.
+# Concurrent operations on the same AutoScoutService instance see
+# independent values without racing on shared state.
+_recon_context: contextvars.ContextVar[Optional["HttpClient"]] = contextvars.ContextVar(
+    "auto_scout_recon_client", default=None,
+)
+
+
 class AutoScoutService:
     """Scan the map for villages and send scouts based on filters."""
 
     def __init__(self, http_client: HttpClient):
         self.http_client = http_client
-        # Optional secondary HttpClient routed through a disposable
-        # "recon" Travian account. Set by the WS orchestrator before
-        # a scan starts when the user toggles the background-account
-        # feature on and the recon account is configured + authed.
-        # When None, read paths transparently fall back to the user's
-        # primary http_client.
+        # Backward-compat slot. Tests and any callers that don't use
+        # the new async context manager can still set this directly
+        # and `_read_client()` will honor it as a fallback. New code
+        # should prefer the `with_recon_client` async context manager
+        # below, which scopes the recon client to one coroutine via
+        # a ContextVar — safe under concurrent scans without races
+        # between scan-and-auto-scout operations sharing the same
+        # AutoScoutService instance.
         #
         # Hard rule: WRITE operations (sending scouts, querying the
-        # user's rally point / village state) NEVER use this — recon
-        # has no villages. See _read_client() vs self.http_client at
-        # each call site.
+        # user's rally point / village state) NEVER consult this —
+        # recon has no villages. See `_read_client()` callers vs
+        # `self.http_client` direct callers at each site.
         self.recon_http_client: Optional[HttpClient] = None
         self._status_cb: Optional[Callable[[str], None]] = None
 
+    @asynccontextmanager
+    async def with_recon_client(
+        self, recon_client: Optional[HttpClient],
+    ) -> AsyncIterator[None]:
+        """Scope a recon HttpClient to a single coroutine tree.
+
+        Why a context manager + ContextVar instead of the simpler
+        mutable attribute pattern: two concurrent scout operations
+        (e.g. ``_build_scout_scan_coro`` and ``_build_auto_scout_coro``
+        for the same user) share the same ``AutoScoutService`` and
+        would otherwise race on a shared slot — one coroutine's
+        recon-failed `None` could clobber another's `recon` and
+        silently leak primary identity onto the leakier coroutine's
+        read traffic. ``ContextVar`` is per-asyncio-task by default;
+        ``set`` / ``reset`` is the standard pattern for scoped
+        injection.
+
+        Usage::
+
+            async with svc.with_recon_client(recon_client):
+                tiles = await svc.scan_map(cx, cy, radius)
+                ...
+        """
+        token = _recon_context.set(recon_client)
+        try:
+            yield
+        finally:
+            _recon_context.reset(token)
+
     def _read_client(self) -> HttpClient:
         """HttpClient for account-independent reads (map_position,
-        tile-details, profile pages). Prefers the recon account when
-        attached so bot-detection pressure stays off the user's
-        primary."""
-        return self.recon_http_client or self.http_client
+        tile-details, profile pages). Prefers, in order:
+
+          1. The recon client set via ``with_recon_client`` on the
+             current coroutine's context (race-safe per task).
+          2. The legacy mutable ``self.recon_http_client`` attribute
+             (backward compat for tests / pre-context-manager code).
+          3. ``self.http_client`` — the user's primary account.
+
+        Falls through to (3) only when both (1) and (2) are absent,
+        so callers can never accidentally lose recon routing
+        mid-scan to a concurrent operation's cleanup.
+        """
+        scoped = _recon_context.get()
+        if scoped is not None:
+            return scoped
+        if self.recon_http_client is not None:
+            return self.recon_http_client
+        return self.http_client
 
     def on_status(self, cb: Callable[[str], None]) -> None:
         self._status_cb = cb

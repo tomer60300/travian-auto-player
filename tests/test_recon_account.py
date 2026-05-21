@@ -63,6 +63,76 @@ def test_read_client_falls_back_to_primary_when_recon_cleared() -> None:
     assert svc._read_client() is primary
 
 
+@pytest.mark.asyncio
+async def test_with_recon_client_context_manager_scopes_routing() -> None:
+    """`with_recon_client` injects a recon HttpClient for the
+    duration of one coroutine via a ContextVar, then unwinds. This
+    is the race-safe alternative to the mutable attribute pattern
+    when concurrent scout-scan + auto-scout operations share the
+    same AutoScoutService instance."""
+    primary = _stub_client("primary")
+    recon = _stub_client("recon")
+    svc = AutoScoutService(primary)
+    # Outside the context: primary.
+    assert svc._read_client() is primary
+    async with svc.with_recon_client(recon):
+        # Inside the context: recon.
+        assert svc._read_client() is recon
+    # After exit: back to primary, even though attribute wasn't touched.
+    assert svc._read_client() is primary
+
+
+@pytest.mark.asyncio
+async def test_with_recon_client_context_manager_isolates_concurrent_tasks() -> None:
+    """Each asyncio task carries its own ContextVar context, so a
+    concurrent scan running with recon-A cannot have its read
+    routing clobbered by a concurrent scan running with recon-B (or
+    with no recon at all). The mutable-attribute pattern fails this
+    test; the ContextVar pattern passes."""
+    import asyncio
+    primary = _stub_client("primary")
+    recon_a = _stub_client("recon_a")
+    recon_b = _stub_client("recon_b")
+    svc = AutoScoutService(primary)
+
+    sentinels: dict[str, object] = {}
+
+    async def task_a() -> None:
+        async with svc.with_recon_client(recon_a):
+            # Yield to give task_b a chance to mutate the slot
+            # before we observe — proves isolation.
+            await asyncio.sleep(0)
+            sentinels["a"] = svc._read_client()
+
+    async def task_b() -> None:
+        async with svc.with_recon_client(recon_b):
+            await asyncio.sleep(0)
+            sentinels["b"] = svc._read_client()
+
+    await asyncio.gather(task_a(), task_b())
+    assert sentinels["a"] is recon_a, (
+        f"Task A's recon was clobbered by Task B; got {sentinels['a']!r}"
+    )
+    assert sentinels["b"] is recon_b, (
+        f"Task B's recon was clobbered by Task A; got {sentinels['b']!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_with_recon_client_none_falls_through_to_attribute() -> None:
+    """When the context manager's value is None, the legacy
+    attribute is consulted next (then primary). This is the
+    backward-compat fallback for test paths that pre-date the
+    context manager."""
+    primary = _stub_client("primary")
+    legacy_recon = _stub_client("legacy_recon")
+    svc = AutoScoutService(primary)
+    svc.recon_http_client = legacy_recon
+    async with svc.with_recon_client(None):
+        # ContextVar default (None) → fall through to attribute.
+        assert svc._read_client() is legacy_recon
+
+
 def test_write_paths_never_use_recon() -> None:
     """Construction of TargetResolver/MilitaryService inside AutoScout
     send-scout code paths must pass the PRIMARY http_client. This is
@@ -181,6 +251,79 @@ def test_server_slug_handles_trailing_slash() -> None:
 def test_server_slug_handles_unknown_host() -> None:
     """Defensive: a malformed URL shouldn't crash slug generation."""
     assert _server_slug("not a url") == "unknown"
+
+
+def test_recon_proxy_routing_completeness_scout_ws() -> None:
+    """Regression guard: every account-INDEPENDENT read endpoint in
+    scout_ws.py (map_position POSTs, tile-details POSTs, profile
+    GETs) must route through ``svc._read_client()`` or
+    ``scan_client`` (the local read-client alias), NOT through
+    ``svc.http_client`` / ``session.http_client`` directly. Without
+    this assertion, a refactor that duplicates the map-scan loop
+    inline (as happened pre-recon) would silently leak the bulk of
+    the scan's traffic onto the user's primary account again."""
+    import pathlib, re
+    src = pathlib.Path(
+        "src/travian_api/web/ws/scout_ws.py"
+    ).read_text(encoding="utf-8")
+    # Strip comments so commentary mentioning "/api/v1/map/position"
+    # doesn't false-positive.
+    src_no_comments = re.sub(r"#[^\n]*", "", src)
+    # Pattern: any call to .post_json or .get_html that targets one
+    # of the account-independent endpoints.
+    pattern = re.compile(
+        r"(?P<receiver>[\w.]+)\.(?:post_json|get_html)\s*\(\s*[^)]*?"
+        r"(?:/api/v1/map/position|/api/v1/map/tile-details|/profile/)",
+        re.DOTALL,
+    )
+    leaks: list[str] = []
+    for m in pattern.finditer(src_no_comments):
+        receiver = m.group("receiver")
+        # _read_client() returns the appropriate client; any local
+        # variable assigned from it (scan_client, read_client, etc.)
+        # is also acceptable. svc._read_client() and self._read_client()
+        # are the canonical access patterns.
+        if "_read_client" in receiver:
+            continue
+        if receiver in {"scan_client", "read_client"}:
+            continue
+        leaks.append(receiver)
+    assert not leaks, (
+        f"Recon-bypass leak in scout_ws.py: account-independent reads "
+        f"are calling primary http_client directly via receiver(s) "
+        f"{leaks!r}. Route them through `svc._read_client()` or a "
+        f"local alias assigned from it."
+    )
+
+
+def test_recon_proxy_routing_completeness_service() -> None:
+    """Same regression guard for auto_scout_service.py. The service
+    has tighter rules: read endpoints must call ``self._read_client()``
+    or use a local ``read_client = self._read_client()`` alias."""
+    import pathlib, re
+    src = pathlib.Path(
+        "src/travian_api/services/auto_scout_service.py"
+    ).read_text(encoding="utf-8")
+    src_no_comments = re.sub(r"#[^\n]*", "", src)
+    pattern = re.compile(
+        r"(?P<receiver>self\.\w+|\w+)\.(?:post_json|get_html)\s*\(\s*[^)]*?"
+        r"(?:/api/v1/map/position|/api/v1/map/tile-details|/profile/)",
+        re.DOTALL,
+    )
+    leaks: list[str] = []
+    for m in pattern.finditer(src_no_comments):
+        receiver = m.group("receiver")
+        if "_read_client" in receiver:
+            continue
+        if receiver in {"read_client", "scan_client"}:
+            continue
+        # Bare self.http_client on a read endpoint is the leak shape.
+        leaks.append(receiver)
+    assert not leaks, (
+        f"Recon-bypass leak in auto_scout_service.py: receiver(s) "
+        f"{leaks!r} fire account-independent reads directly through "
+        f"the primary http_client. Route them via self._read_client()."
+    )
 
 
 def test_scout_ws_lazy_imports_resolve() -> None:
