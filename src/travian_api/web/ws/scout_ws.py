@@ -961,11 +961,23 @@ def _build_scout_scan_coro(config: dict):
         # (useResumableOperation.js) has a constant signal-of-life.
 
         # ── Phase 1: Map scan ───────────────────────────────────────
-        step = 15
+        # Each /api/v1/map/position call returns a 31x31 tile region
+        # CENTERED on the requested point — so one call covers
+        # center ± HALF tiles in each axis. To span the user-requested
+        # radius around (cx, cy), we walk concentric rings of centers
+        # spaced STRIDE apart, just enough that the outer regions
+        # reach `radius` from (cx, cy). Critically: when radius <=
+        # HALF we issue ONE call AT (cx, cy) — the old algorithm
+        # placed the first center at (cx - radius, cy - radius)
+        # which only covered the bottom-left quadrant of the
+        # requested area for small radii.
+        HALF = 15
+        STRIDE = 30
+        extras = max(0, (radius - HALF + STRIDE - 1) // STRIDE)
         scan_centers: list[tuple[int, int]] = []
-        for scx in range(cx - radius, cx + radius + 1, step * 2):
-            for scy in range(cy - radius, cy + radius + 1, step * 2):
-                scan_centers.append((scx, scy))
+        for dx in range(-extras, extras + 1):
+            for dy in range(-extras, extras + 1):
+                scan_centers.append((cx + dx * STRIDE, cy + dy * STRIDE))
 
         # Stealth: nearby clusters first, shuffle inside small buckets so
         # the visit order isn't a deterministic raster grid.

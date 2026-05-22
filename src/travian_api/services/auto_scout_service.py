@@ -460,13 +460,24 @@ class AutoScoutService:
         For larger radii, multiple calls are made in a grid pattern.
         """
         tiles: Dict[Tuple[int, int], dict] = {}
-        step = 15  # half of the 31x31 grid
-
-        # Calculate grid of center points needed to cover the radius
+        # Each /api/v1/map/position call returns a 31x31 tile region
+        # CENTERED on the requested point — so one call covers
+        # center ± HALF tiles in each axis. To span the user-requested
+        # radius around (center_x, center_y), walk concentric rings
+        # of centers spaced STRIDE apart, just enough that the outer
+        # regions reach `radius` from the user-supplied center.
+        # Critically: when radius <= HALF we issue ONE call AT
+        # (center_x, center_y) — the old algorithm placed the first
+        # center at (center_x - radius, center_y - radius) which only
+        # covered the bottom-left quadrant of the requested area for
+        # small radii.
+        HALF = 15
+        STRIDE = 30
+        extras = max(0, (radius - HALF + STRIDE - 1) // STRIDE)
         scan_centers: List[Tuple[int, int]] = []
-        for cx in range(center_x - radius, center_x + radius + 1, step * 2):
-            for cy in range(center_y - radius, center_y + radius + 1, step * 2):
-                scan_centers.append((cx, cy))
+        for dx in range(-extras, extras + 1):
+            for dy in range(-extras, extras + 1):
+                scan_centers.append((center_x + dx * STRIDE, center_y + dy * STRIDE))
 
         # Stealth: a player panning around their map clicks the area near
         # their village first and pans outward in clusters — not raster
