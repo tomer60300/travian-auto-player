@@ -747,6 +747,13 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
   const [sortField, setSortField] = useState(null)
   const [sortDir, setSortDir] = useState('asc')
   const [addFarmTarget, setAddFarmTarget] = useState(null)
+  // Pagination — 10 rows per page so the table doesn't push the rest
+  // of the page below the fold on common viewports. Resets to page 1
+  // whenever the results list changes (new scan) or the sort changes,
+  // since page indexes would otherwise point at unintended rows.
+  const PAGE_SIZE = 10
+  const [page, setPage] = useState(1)
+  useEffect(() => { setPage(1) }, [results, sortField, sortDir])
 
   const handleSort = (field) => {
     if (sortField === field) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
@@ -782,6 +789,21 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
   }, [results, sortField, sortDir])
 
   const sorted = useMemo(() => originalIndices.map((i) => results[i]), [results, originalIndices])
+
+  // Page math, defensively clamped so a stale page index from a
+  // sort change can't overshoot when the results array shrinks.
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE))
+  const safePage = Math.min(Math.max(1, page), totalPages)
+  const pageStart = (safePage - 1) * PAGE_SIZE
+  const pageEnd = pageStart + PAGE_SIZE
+  const pageSlice = useMemo(
+    () => sorted.slice(pageStart, pageEnd),
+    [sorted, pageStart, pageEnd],
+  )
+  const pageOriginalIndices = useMemo(
+    () => originalIndices.slice(pageStart, pageEnd),
+    [originalIndices, pageStart, pageEnd],
+  )
 
   const allSelected = results.length > 0 && selected.size === results.length
   const toggleAll = () => setSelected(allSelected ? new Set() : new Set(results.map((_, i) => i)))
@@ -858,7 +880,12 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
         </div>
       </div>
 
-      <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+      {/* Drop the fixed max-height on the scroll container — with
+          pagination we never render more than PAGE_SIZE rows at a
+          time, so the table fits naturally and doesn't push the
+          page below the fold. Horizontal-scroll wrapper preserved
+          for narrow viewports. */}
+      <div className="overflow-x-auto">
         <table className="data-table">
           <thead className="sticky top-0 bg-card z-[1]">
             <tr>
@@ -879,8 +906,8 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
             </tr>
           </thead>
           <tbody>
-            {sorted.map((row, sortedIdx) => {
-              const origIdx = originalIndices[sortedIdx]
+            {pageSlice.map((row, sliceIdx) => {
+              const origIdx = pageOriginalIndices[sliceIdx]
               const isSelected = selected.has(origIdx)
               return (
                 <tr key={origIdx} onClick={() => toggleRow(origIdx)} className={`row-clickable ${isSelected ? 'row-selected' : ''}`}>
@@ -929,6 +956,48 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
           </tbody>
         </table>
       </div>
+      {/* Pagination controls — show only when there's more than one
+          page. Compact: First / Prev / "Page N of M (rows A–B of T)"
+          / Next / Last. Disabled buttons are visually muted so users
+          can see they're at a boundary. */}
+      {totalPages > 1 && (
+        <div className="flex justify-between items-center mt-3 flex-wrap gap-2 text-xs">
+          <div className="text-secondary">
+            Showing rows {pageStart + 1}–{Math.min(pageEnd, sorted.length)} of {sorted.length}
+          </div>
+          <div className="flex gap-1 items-center">
+            <button
+              type="button"
+              className="btn-secondary btn-xs"
+              disabled={safePage === 1}
+              onClick={() => setPage(1)}
+              title="First page"
+            >« First</button>
+            <button
+              type="button"
+              className="btn-secondary btn-xs"
+              disabled={safePage === 1}
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+            >‹ Prev</button>
+            <span className="px-2">
+              Page <span className="text-gold font-mono">{safePage}</span> of {totalPages}
+            </span>
+            <button
+              type="button"
+              className="btn-secondary btn-xs"
+              disabled={safePage === totalPages}
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+            >Next ›</button>
+            <button
+              type="button"
+              className="btn-secondary btn-xs"
+              disabled={safePage === totalPages}
+              onClick={() => setPage(totalPages)}
+              title="Last page"
+            >Last »</button>
+          </div>
+        </div>
+      )}
       {farmLists && farmLists.length > 0 && (
         <AddToFarmDialog
           open={!!addFarmTarget}
@@ -1414,9 +1483,9 @@ export default function AutoScout() {
         <div className="flex items-center gap-3">
           <span
             className="text-[10px] text-secondary opacity-50 font-mono"
-            title="Bundle build marker. wd11 = wd10 + full recon-proxy coverage: fixed map_position POST loop bypass; ContextVar-scoped recon client (race-safe under concurrent scan/auto-scout); strict-recon toggle aborts on auth failure; structural regression tests catch future primary-account leaks."
+            title="Bundle build marker. wd12 = wd11 + Scan Results pagination (10 rows/page) — removes the fixed-height scroll container so the table doesn't push the rest of the page below the fold."
           >
-            build: wd11
+            build: wd12
           </span>
           <VillageSelector />
         </div>
