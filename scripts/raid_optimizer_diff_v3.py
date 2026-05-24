@@ -68,7 +68,7 @@ DEFAULT_API = os.environ.get("RAID_OPT_API", "http://127.0.0.1:8001")
 SERVER_URL = os.environ.get("TRAVIAN_BASE_URL", "https://ts2.x1.europe.travian.com/")
 # Each version's diffs go in its own subdirectory so older runs don't pollute
 # the current view. Session files (.jwt, .script_creds) stay at OUT_ROOT.
-VERSION = "v3.4"
+VERSION = "v3.5"
 OUT_ROOT = Path.home() / ".travian" / "raid-optimizer"
 OUT_DIR = OUT_ROOT / VERSION
 OUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1264,22 +1264,46 @@ def _is_slow_wave_list_name(name: str) -> bool:
     return "-SLOW-" in (name or "").upper()
 
 
+_UNIT_DISPLAY_TO_ID = {
+    "clubs": "t1", "spear": "t2", "spears": "t2", "axe": "t3", "axes": "t3",
+    "scout": "t4", "scouts": "t4", "pal": "t5", "paladin": "t5",
+    "tk": "t6", "ram": "t7", "rams": "t7", "cata": "t8", "catapult": "t8",
+}
+
+
+def _parse_list_unit(list_name: str) -> str | None:
+    """Best-effort: return the unit id encoded in a list name like 'V3-HIGH-TK'.
+
+    Returns None if the trailing token isn't a recognised unit display name
+    (e.g., 'GoldMine-Paladin01', 'Profitable-Targets', 'Unsorted-list-poc').
+    """
+    if not list_name:
+        return None
+    tail = list_name.rsplit("-", 1)[-1].strip().lower()
+    return _UNIT_DISPLAY_TO_ID.get(tail)
+
+
 def consolidate_per_target(
     actions: list[dict[str, Any]],
     slot_ms: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], int]:
-    """Group actions by (x,y); collapse duplicates into one primary + N DEACTIVATEs.
+    """Group actions by (coord, village, unit); collapse duplicates → 1 primary + N DEACTIVATEs.
 
-    Primary slot = highest total_raids → highest total_booty → alphabetical list name.
-    Slow-wave lists are intentionally on the same coords as strike-wave slots
-    and are skipped from consolidation.
+    v5.0 change: dedup key is (coord, owner_village_id, unit_from_list_name)
+    instead of just coord. Same target appearing in V3-HIGH-Clubs AND
+    V3-HIGH-TK is now a legitimate wave-stack (different units), not a
+    duplicate. Same target appearing twice in V3-HIGH-Clubs (same village,
+    same unit, two slot rows) IS still a duplicate.
+
+    Primary slot tie-break unchanged: highest total_raids → highest
+    total_booty → alphabetical list name.
 
     Returns (consolidated_actions, num_duplicate_deactivates).
     """
     slot_lookup_by_id: dict[int, dict[str, Any]] = {
         sm["slot_id"]: sm for sm in slot_ms if sm.get("slot_id") is not None
     }
-    by_coord: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    by_key: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
     bypass: list[dict[str, Any]] = []
 
     for a in actions:
@@ -1290,6 +1314,8 @@ def consolidate_per_target(
         #   ADD_NEW — synthetic gap slot, not in any existing list
         #   ADD_NEW_SLOT — cross-village stacking recommendation (intentionally
         #                  shares coord with primary slot; NOT a duplicate)
+        #   ADD_TO_LIST — v5.0 wave-stacking action; each wave is distinct by
+        #                  (village, unit) and must NOT be consolidated
         #   SPLIT_LIST — list-level action with synthetic (0,0) coords
         #   REORDER — list-level action; coord is incidental
         #   slow-wave lists — same coords as strike lists by design
@@ -1297,17 +1323,24 @@ def consolidate_per_target(
             coords is None
             or _is_slow_wave_list_name(list_name)
             or a["action"] in (
-                "ADD_NEW", "ADD_NEW_SLOT", "SPLIT_LIST", "REORDER", "THROUGHPUT_DROP",
+                "ADD_NEW", "ADD_NEW_SLOT", "ADD_TO_LIST",
+                "SPLIT_LIST", "REORDER", "THROUGHPUT_DROP",
             )
         ):
             bypass.append(a)
             continue
-        by_coord[coords].append(a)
+        # Dedup key: (coord, owner_village, unit-from-list-name). Falls back
+        # to coord-only when the list has no parseable unit suffix.
+        owner_vid = sm.get("owner_village_id")
+        unit_id = _parse_list_unit(list_name)
+        key = (coords, owner_vid, unit_id)
+        by_key[key].append(a)
 
     consolidated: list[dict[str, Any]] = list(bypass)
     duplicate_count = 0
 
-    for coords, group in by_coord.items():
+    for key, group in by_key.items():
+        coords, _owner_vid, _unit_id = key
         if len(group) == 1:
             consolidated.append(group[0])
             continue
@@ -2692,13 +2725,14 @@ def _render_rebalance_section(add: Any, ctx: dict[str, Any]) -> None:
 
     # 19b — Phased execution
     dead_actions = [a for a in actions if a["action"] == "RELOCATE_TO_DEAD"]
-    move_actions = [a for a in actions if a["action"] == "MOVE_SLOT"]
+    # v5.0: ADD_TO_LIST (per-wave placements) joins MOVE_SLOT (cleanup) for B/C.
+    active_actions = [a for a in actions if a["action"] in ("ADD_TO_LIST", "MOVE_SLOT")]
     high_mid = [
-        a for a in move_actions
+        a for a in active_actions
         if (a.get("extra") or {}).get("target_list_role") in ("HIGH", "MID")
     ]
     inactive_moves = [
-        a for a in move_actions
+        a for a in active_actions
         if (a.get("extra") or {}).get("target_list_role") == "INACTIVE"
     ]
 
@@ -2781,12 +2815,17 @@ def _render_rebalance_phase(
                 extra = a.get("extra") or {}
                 tname = extra.get("target_name") or "?"
                 cur = extra.get("current_list_name") or "?"
-                if a["action"] == "MOVE_SLOT":
+                if a["action"] == "ADD_TO_LIST":
                     composition = (
+                        f"wave {extra.get('wave_index', '?')}/{extra.get('of_total_waves', '?')}: "
                         f"{extra.get('recommended_count', '?')}× "
                         f"{extra.get('recommended_unit_display', '?')} "
-                        f"(rt {extra.get('round_trip_min', '?')}m, "
-                        f"score {extra.get('objective_score', 0):.2f})"
+                        f"(arr {extra.get('arrival_min', '?')}m, "
+                        f"haul {extra.get('expected_haul_for_this_wave', 0)})"
+                    )
+                elif a["action"] == "MOVE_SLOT":
+                    composition = (
+                        f"cleanup: remove from {extra.get('current_list_name', '?')}"
                     )
                 else:
                     composition = f"DEAD: {a.get('reason') or ''}"
@@ -2846,72 +2885,104 @@ def _run_rebalance_pass(
 
     actions: list[dict[str, Any]] = []
 
+    # Group placements (= waves) by target_coord so the per-wave action can
+    # report wave_index of_total_waves and so wave 1's manual_steps can carry
+    # the cleanup instructions for any out-of-plan duplicates.
+    waves_by_coord: dict[tuple[int, int], list] = {}
     for placement in plan.placements:
+        waves_by_coord.setdefault(placement.target_coord, []).append(placement)
+    for waves in waves_by_coord.values():
+        waves.sort(key=lambda p: p.wave_index)
+
+    for coord, waves in waves_by_coord.items():
+        # Per-target totals — used for the wave-1 summary line in manual_steps
+        # and so the operator can see the cumulative extraction at a glance.
+        total_haul = sum(w.expected_haul for w in waves)
         primary_slot = _primary_slot_for_coord(
-            placement.target_coord, placement.slot_instances, slot_by_id
+            coord, waves[0].slot_instances, slot_by_id
         )
-        if primary_slot is None:
-            continue  # planner produced a placement for a coord with no usable slot
-        current_list = primary_slot.get("list_name") or ""
-        current_owner = village_label_by_vid.get(
-            primary_slot.get("owner_village_id"), ""
+        source_list = primary_slot.get("list_name") if primary_slot else None
+        source_owner = (
+            village_label_by_vid.get(primary_slot.get("owner_village_id"))
+            if primary_slot else None
         )
-        # Don't emit MOVE_SLOT if the slot is already in its optimal list (the
-        # spec's "anti-pattern" guard).
-        if current_list == placement.target_list_name:
-            continue
-        unit_display = REBAL_UNIT_DISPLAY.get(placement.optimal_unit, placement.optimal_unit)
-        delta_booty = max(
-            0.0, placement.expected_daily_booty - _current_daily_booty(placement.target_coord)
-        )
-        action = {
-            "slot": primary_slot,
-            "action": "MOVE_SLOT",
-            "reason": (
-                f"rebalance: optimal home is {placement.target_list_name} "
-                f"(score {placement.objective_score:.2f}; "
-                f"rt {placement.round_trip_min:.0f}m; "
-                f"~{placement.expected_raids_per_day:.1f} raids/day)"
-            ),
-            "tier": 1,
-            "expected_daily_delta_booty": float(round(delta_booty)),
-            "current_str": f"{current_list or '?'} ({current_owner or '?'})",
-            "recommended_str": (
-                f"{placement.optimal_count}× {unit_display} in {placement.target_list_name}"
-            ),
-            "extra": {
-                "rebalance": True,
-                "target_name": placement.target_name,
-                "current_list_name": current_list,
-                "current_list_owner": current_owner,
-                "recommended_list_name": placement.target_list_name,
-                "recommended_list_owner": placement.optimal_village,
-                "recommended_unit": placement.optimal_unit,
-                "recommended_unit_display": unit_display,
-                "recommended_count": placement.optimal_count,
-                "round_trip_min": round(placement.round_trip_min, 1),
-                "expected_raids_per_day": round(placement.expected_raids_per_day, 2),
-                "expected_daily_booty": round(placement.expected_daily_booty, 1),
-                "objective_score": round(placement.objective_score, 3),
-                "target_list_role": placement.target_list_role,
-                "duplicate_slot_instances": [
-                    {"list_name": ln, "slot_id": sid}
-                    for ln, sid in placement.slot_instances
-                    if sid != primary_slot.get("slot_id")
-                ],
-                "manual_steps": [
-                    f"Open {current_list or '<source list>'}, find slot at "
-                    f"{placement.target_coord} (target: {placement.target_name or '?'})",
-                    f"If {placement.target_list_name} doesn't exist: create it "
-                    f"(owner = {placement.optimal_village})",
-                    f"Duplicate the entry to {placement.target_list_name} with composition: "
-                    f"{placement.optimal_count}× {unit_display}",
-                    f"Delete the original entry from {current_list or '<source list>'} "
-                    f"and any duplicate entries in other lists for this coord",
-                ],
-            },
-        }
-        actions.append(action)
+        # Build the set of (list_name, unit) that the wave plan keeps so the
+        # cleanup step can name only the lists the operator should remove this
+        # coord from.
+        planned_lists: set[str] = {w.target_list_name for w in waves}
+        existing_lists = [ln for ln, _sid in waves[0].slot_instances]
+        out_of_plan_existing = [ln for ln in existing_lists if ln not in planned_lists]
+
+        for w in waves:
+            unit_display = REBAL_UNIT_DISPLAY.get(w.optimal_unit, w.optimal_unit)
+            delta_booty = max(0.0, w.expected_daily_booty)
+            arrival_str = f"T+{w.arrival_min:.0f}min"
+            manual_steps = [
+                f"Open {w.target_list_name} in Travian UI (create it owned by "
+                f"{w.optimal_village} if it doesn't exist)",
+                f"Add a new slot at {coord} (target: {w.target_name or '?'})",
+                f"Set composition: {w.optimal_count}× {unit_display}",
+                f"Activate the slot (Send All ON)",
+            ]
+            # Wave 1 carries the cleanup of any pre-existing slots not in the
+            # wave plan, so the operator can do all the work in one sitting.
+            if w.wave_index == 1 and out_of_plan_existing:
+                manual_steps.append(
+                    "After adding all waves for this target, remove pre-existing "
+                    f"slots at {coord} from these lists (not in the plan): "
+                    + ", ".join(f"`{ln}`" for ln in out_of_plan_existing)
+                )
+
+            action = {
+                "slot": primary_slot if primary_slot is not None else {
+                    "slot_id": None, "list_name": "<new>", "coords": list(coord),
+                    "name": w.target_name, "owner_village_id": None,
+                },
+                "action": "ADD_TO_LIST",
+                "reason": (
+                    f"wave {w.wave_index} of {w.of_total_waves} for target "
+                    f"avg_loot={w.expected_haul if w.wave_index == 1 else '~residual'}; "
+                    f"arrival at {arrival_str}"
+                ),
+                "tier": 1 if w.target_list_role == "HIGH" else 2,
+                "expected_daily_delta_booty": float(round(delta_booty)),
+                "current_str": (
+                    f"{source_list or '<no existing slot>'} ({source_owner or '?'})"
+                ),
+                "recommended_str": (
+                    f"{w.optimal_count}× {unit_display} in {w.target_list_name} "
+                    f"(wave {w.wave_index}/{w.of_total_waves}, {arrival_str})"
+                ),
+                "extra": {
+                    "rebalance": True,
+                    "target_name": w.target_name,
+                    "current_list_name": source_list or "",
+                    "current_list_owner": source_owner or "",
+                    "recommended_list_name": w.target_list_name,
+                    "recommended_list_owner": w.optimal_village,
+                    "recommended_unit": w.optimal_unit,
+                    "recommended_unit_display": unit_display,
+                    "recommended_count": w.optimal_count,
+                    "round_trip_min": round(w.round_trip_min, 1),
+                    "arrival_min": round(w.arrival_min, 1),
+                    "wave_index": w.wave_index,
+                    "of_total_waves": w.of_total_waves,
+                    "expected_raids_per_day": round(w.expected_raids_per_day, 2),
+                    "expected_haul_for_this_wave": int(w.expected_haul),
+                    "expected_daily_booty": round(w.expected_daily_booty, 1),
+                    "target_total_expected_haul": int(total_haul),
+                    "target_list_role": w.target_list_role,
+                    "is_part_of_wave_plan": True,
+                    "out_of_plan_existing_lists": out_of_plan_existing,
+                    "duplicate_slot_instances": [
+                        {"list_name": ln, "slot_id": sid}
+                        for ln, sid in w.slot_instances
+                        if primary_slot is None or sid != primary_slot.get("slot_id")
+                    ],
+                    "manual_steps": manual_steps,
+                },
+            }
+            actions.append(action)
 
     for dead in plan.dead_decisions:
         primary_slot = _primary_slot_for_coord(
@@ -2968,9 +3039,38 @@ def _run_rebalance_pass(
     new_lists_needed = sorted({
         a["extra"]["recommended_list_name"] for a in actions
     })
+    # v5.0 counts ADD_TO_LIST (wave placements). Keep moved_to_active as the
+    # operator-facing "active list build" total — that's the sum of all wave
+    # ADD_TO_LISTs across all targets.
+    add_to_list_count = sum(1 for a in actions if a["action"] == "ADD_TO_LIST")
+    move_slot_count = sum(1 for a in actions if a["action"] == "MOVE_SLOT")
+    targets_with_multi_wave = sum(
+        1 for waves in waves_by_coord.values() if len(waves) >= 2
+    )
+    wave_distribution = {
+        "1_wave": sum(1 for waves in waves_by_coord.values() if len(waves) == 1),
+        "2_wave": sum(1 for waves in waves_by_coord.values() if len(waves) == 2),
+        "3_wave": sum(1 for waves in waves_by_coord.values() if len(waves) == 3),
+        "4_wave": sum(1 for waves in waves_by_coord.values() if len(waves) == 4),
+    }
+    wave1_owner_counts: dict[str, int] = {}
+    total_wave1 = 0
+    for waves in waves_by_coord.values():
+        if waves:
+            wave1_owner_counts[waves[0].optimal_village] = (
+                wave1_owner_counts.get(waves[0].optimal_village, 0) + 1
+            )
+            total_wave1 += 1
+    v3_wave1 = wave1_owner_counts.get("V3", 0)
+    v3_wave1_pct = (v3_wave1 / total_wave1 * 100.0) if total_wave1 > 0 else 0.0
+
     summary = {
         "targets_analyzed": len(inventory),
-        "moved_to_active": sum(1 for a in actions if a["action"] == "MOVE_SLOT"),
+        "targets_with_multi_wave": targets_with_multi_wave,
+        "wave_distribution": wave_distribution,
+        "total_wave_slots": add_to_list_count,
+        "moved_to_active": add_to_list_count,
+        "move_slot_cleanups": move_slot_count,
         "relocated_to_dead": sum(1 for a in actions if a["action"] == "RELOCATE_TO_DEAD"),
         "new_lists_to_create": new_lists_needed,
         "current_estimated_daily_booty": float(round(current_total_daily, 1)),
@@ -2981,6 +3081,8 @@ def _run_rebalance_pass(
             else 0.0
         ),
         "unplaceable_as_dead": plan.unplaceable_as_dead,
+        "wave1_owner_distribution": wave1_owner_counts,
+        "v3_wave1_pct": round(v3_wave1_pct, 1),
     }
 
     post_structure: dict[str, dict[str, Any]] = {}
@@ -3056,18 +3158,19 @@ def _build_rebalance_json(
         }
 
     phase_a = [_serialise(a) for a in actions if a["action"] == "RELOCATE_TO_DEAD"]
-    # LOCAL slots (V4/V5/V6/V7 short-range micro-raiders) fire every cycle,
-    # same priority class as HIGH and MID; they go in Phase B alongside them.
+    # v5.0 — wave placements emit ADD_TO_LIST (one per wave). Legacy MOVE_SLOT
+    # actions (cleanup of out-of-plan existing slots) are also grouped here so
+    # the operator does add + cleanup in one Phase-B pass per destination list.
     phase_b = [
         _serialise(a)
         for a in actions
-        if a["action"] == "MOVE_SLOT"
-        and (a.get("extra") or {}).get("target_list_role") in ("HIGH", "MID", "LOCAL")
+        if a["action"] in ("ADD_TO_LIST", "MOVE_SLOT")
+        and (a.get("extra") or {}).get("target_list_role") in ("HIGH", "MID")
     ]
     phase_c = [
         _serialise(a)
         for a in actions
-        if a["action"] == "MOVE_SLOT"
+        if a["action"] in ("ADD_TO_LIST", "MOVE_SLOT")
         and (a.get("extra") or {}).get("target_list_role") == "INACTIVE"
     ]
 
@@ -3160,6 +3263,7 @@ def _suppress_actions_for_moved_coords(
         "DELETE",
         "FLAG_CT2_CT3",
         "MOVE_SLOT",
+        "ADD_TO_LIST",
         "RELOCATE_TO_DEAD",
         "SPLIT_LIST",
         "REORDER",
@@ -3461,7 +3565,9 @@ async def main_async(api_base: str, *, rebalance: bool = False) -> int:
             # Suppress upstream per-slot actions for coords being moved/relocated.
             actions = _suppress_actions_for_moved_coords(actions, rebalance_actions)
             print(
-                f"  rebalance: {rebalance_summary['moved_to_active']} MOVE_SLOT, "
+                f"  rebalance: {rebalance_summary.get('total_wave_slots', 0)} ADD_TO_LIST "
+                f"({rebalance_summary.get('targets_with_multi_wave', 0)} multi-wave targets), "
+                f"{rebalance_summary.get('move_slot_cleanups', 0)} MOVE_SLOT, "
                 f"{rebalance_summary['relocated_to_dead']} RELOCATE_TO_DEAD",
                 file=sys.stderr,
             )
@@ -3473,6 +3579,7 @@ async def main_async(api_base: str, *, rebalance: bool = False) -> int:
             "FLAG_CT2_CT3": 2,
             "THROUGHPUT_DROP": 2,  # v3.4: dying slot → high operator visibility
             "MOVE_SLOT": 3,     # v4.0: Path 3 rebalance — relocate to optimal home
+            "ADD_TO_LIST": 3,   # v5.0: wave-stacking — each wave is one ADD_TO_LIST
             "CHANGE_UNIT": 3,
             "ADD_NEW_SLOT": 3,  # v3.3: cross-village stacking (creates a new slot)
             "BOOST": 4,
