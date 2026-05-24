@@ -64,7 +64,7 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace", line_buffering=True)
 
 # ─── Constants ────────────────────────────────────────────────────────────
-DEFAULT_API = os.environ.get("RAID_OPT_API", "http://127.0.0.1:8002")
+DEFAULT_API = os.environ.get("RAID_OPT_API", "http://127.0.0.1:8001")
 SERVER_URL = os.environ.get("TRAVIAN_BASE_URL", "https://ts2.x1.europe.travian.com/")
 # Each version's diffs go in its own subdirectory so older runs don't pollute
 # the current view. Session files (.jwt, .script_creds) stay at OUT_ROOT.
