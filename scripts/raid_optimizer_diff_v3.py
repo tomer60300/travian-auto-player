@@ -2303,13 +2303,11 @@ def render_markdown(ctx: dict[str, Any]) -> str:
     add("")
     add("Send-All has no documented cross-list ordering. Manually trigger in this order:")
     add("")
-    add("1. **`V*-HIGH-*` lists** (fire every cycle) — V3 first (biggest army), then V1, V2")
-    add("2. **`V*-LOCAL-Clubs` lists** (V4/V5/V6/V7) — fire every cycle; short round-trips dominate")
-    add("3. **`V*-MID-*` lists** — same village order as HIGH")
-    add("4. **`V*-AUTO-SCOUT`** (refresh intel after primary strikes commit)")
-    add("5. **`V*-INACTIVE-*-Top` lists** (from any SPLIT_LIST) — top-20 every cycle")
-    add("6. **`V*-INACTIVE-*` and `*-Tail` lists** — fire opportunistically when supply remains")
-    add("7. **SKIP: `V*-DEAD`, `V*-SLOW-*`** — deactivated by design")
+    add("1. **All `V*-HIGH-*` lists** (fire every cycle; wave spacing is internal to each plan)")
+    add("2. **All `V*-MID-*` lists**")
+    add("3. **`V*-AUTO-SCOUT`** (refresh intel after primary strikes commit)")
+    add("4. **All `V*-INACTIVE-*` lists** (incl. `*-Top` from any SPLIT_LIST)")
+    add("5. **SKIP: `V*-DEAD`, `V*-SLOW-*`** — deactivated by design")
     add("")
 
     # 16b. Per-list sort recommendations (Bug 5 Part A)
@@ -3675,12 +3673,10 @@ async def main_async(api_base: str, *, rebalance: bool = False) -> int:
                 for sm in slot_ms if sm["defense_proxy"] > DEFENSE_HARD_LIMIT
             ],
             "trigger_order_recommendation": [
-                "V*-HIGH-* lists (V3 → V1 → V2)",
-                "V*-LOCAL-Clubs lists (V4, V5, V6, V7 — short round-trips)",
-                "V*-MID-* lists (same village order)",
+                "V*-HIGH-* lists (wave spacing is internal to each plan)",
+                "V*-MID-* lists",
                 "V*-AUTO-SCOUT",
-                "V*-INACTIVE-*-Top lists (post-split, top-20 every cycle)",
-                "V*-INACTIVE-* and *-Tail lists (opportunistic)",
+                "V*-INACTIVE-* lists (incl. *-Top from any SPLIT_LIST)",
                 "SKIP: V*-DEAD, V*-SLOW-*",
             ],
             "list_sort_recommendations": list(list_sort_recommendations.values()),
