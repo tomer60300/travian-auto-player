@@ -128,11 +128,14 @@ def render_phase_active_row(a: dict) -> str:
     )
 
 
-def render_phase_b_summary(phase_b_actions: list[dict], top_n: int = 30) -> list[str]:
-    """Build the per-target wave-plan summary for the top N targets by total expected_haul."""
-    # Group actions (waves) by target coord
+def render_phase_b_summary(all_active_actions: list[dict], top_n: int = 30) -> list[str]:
+    """Build the per-target wave-plan summary for the top N targets by total
+    expected daily booty. Includes waves across all phases (B and C) so a
+    target with mixed HIGH/INACTIVE wave roles still shows its full plan.
+    """
+    # Group actions (waves) by target coord — across Phase B AND C.
     by_target: dict[tuple, list[dict]] = defaultdict(list)
-    for a in phase_b_actions:
+    for a in all_active_actions:
         if a.get("action") != "ADD_TO_LIST":
             continue
         coord = tuple(a.get("coords") or [])
@@ -309,10 +312,10 @@ def main() -> None:
     add("### Phase B summary — per-target wave plans (top 30 by total daily booty)")
     add("")
     add("Read this table first to see the wave-stack structure at a glance. Each row is one "
-        "target; columns show which village + unit fires each wave. T+N is arrival time in "
-        "minutes after Send All.")
+        "target; columns show which village + unit fires each wave (across all phases). "
+        "T+N is arrival time in minutes after Send All.")
     add("")
-    for line in render_phase_b_summary(phase_b, top_n=30):
+    for line in render_phase_b_summary(phase_b + phase_c, top_n=30):
         add(line)
     add("")
 
