@@ -219,10 +219,10 @@ class TestComputePlacementScore:
 
 
 class TestAssignRoleAndListName:
-    def _make_placement(self, score: float) -> Placement:
+    def _make_placement(self, score: float, village: str = "V1") -> Placement:
         return Placement(
             target_coord=(1, 1),
-            optimal_village="V6",
+            optimal_village=village,
             optimal_unit="t1",
             optimal_count=1,
             round_trip_min=30.0,
@@ -233,19 +233,30 @@ class TestAssignRoleAndListName:
 
     def test_quartile_bucketing_high_mid_inactive(self):
         # 10 placements with descending scores. high_cut=2, mid_cut=7.
+        # Use V1 (non-LOCAL) so quartile bucketing applies.
         scores = [1.0 - i * 0.1 for i in range(10)]
         placements = [self._make_placement(s) for s in scores]
-        ordered = assign_role_and_list_name("V6", placements)
+        ordered = assign_role_and_list_name("V1", placements)
         roles = [p.target_list_role for p in ordered]
         assert roles[:2] == ["HIGH", "HIGH"]
         assert all(r == "MID" for r in roles[2:7])
         assert all(r == "INACTIVE" for r in roles[7:])
 
     def test_list_name_uses_display_unit_and_village(self):
-        p = self._make_placement(1.0)
+        p = self._make_placement(1.0, village="V3")
         assign_role_and_list_name("V3", [p])
         # 1 placement, high_cut=0, mid_cut=0 → idx 0 >= mid_cut → INACTIVE
         assert p.target_list_name == "V3-INACTIVE-Clubs"
+
+    def test_local_villages_always_get_local_role(self):
+        # V4/V5/V6/V7 skip quartile bucketing entirely.
+        scores = [1.0 - i * 0.1 for i in range(10)]
+        placements = [self._make_placement(s, village="V6") for s in scores]
+        ordered = assign_role_and_list_name("V6", placements)
+        assert all(p.target_list_role == "LOCAL" for p in ordered)
+        assert all(p.target_list_name == "V6-LOCAL-Clubs" for p in ordered)
+        # Sort order is still score desc.
+        assert [p.objective_score for p in ordered] == sorted(scores, reverse=True)
 
 
 # --- Dead-farm truth table (spec acceptance) -----------------------------
@@ -335,3 +346,72 @@ class TestPlanRebalance:
         assert plan.unplaceable_as_dead == 1
         assert len(plan.dead_decisions) == 1
         assert "no_feasible_placement" in plan.dead_decisions[0].reason
+
+
+class TestLocalRoleReach:
+    """V4/V5/V6/V7 are LOCAL micro-raiders. A target farther than
+    LOCAL_MAX_DISTANCE_FIELDS (8) must NOT pick a LOCAL village even if it
+    would otherwise win the objective.
+    """
+
+    def test_local_village_rejected_for_distant_target(self):
+        # V6 at (33, 83); target at (3, 50) → distance ~44 fields, well >8.
+        vps = [VillagePosition("V6", 33, 83), VillagePosition("V1", 15, 91)]
+        supplies = {("V6", "t1"): 100, ("V1", "t1"): 200}
+        target = FakeTarget(
+            coord=(3, 50), avg_loot=200.0, total_raids_all_lists=5,
+            last_raid_time_unix=int(NOW - 86400),
+        )
+        best = pick_best_placement(target, vps, supplies)
+        assert best is not None
+        assert best.optimal_village == "V1", (
+            f"V6 must be filtered out by LOCAL reach; got {best.optimal_village}"
+        )
+
+    def test_local_village_kept_for_near_target(self):
+        # V6 at (33, 83); target at (31, 83) → distance 2, within reach.
+        vps = [VillagePosition("V6", 33, 83), VillagePosition("V1", 15, 91)]
+        supplies = {("V6", "t1"): 100, ("V1", "t1"): 200}
+        target = FakeTarget(
+            coord=(31, 83), avg_loot=200.0, total_raids_all_lists=5,
+            last_raid_time_unix=int(NOW - 86400),
+        )
+        best = pick_best_placement(target, vps, supplies)
+        assert best is not None
+        # V6 should win because round-trip is ~34min vs V1's ~300min.
+        assert best.optimal_village == "V6"
+
+
+class TestLocalOverflow:
+    """When a LOCAL village wins more than LOCAL_MAX_SLOTS placements, the
+    surplus is routed to that village's DEAD pool with reason
+    'local_overflow_above_15_slots'.
+    """
+
+    def test_overflow_above_15_routes_to_dead(self):
+        # Place V6 only, with 20 near targets all winning V6.
+        vps = [VillagePosition("V6", 33, 83)]
+        supplies = {("V6", "t1"): 2000}  # plenty of supply
+        # 20 distinct coords all within 5 fields of V6.
+        offsets = [(dx, dy) for dx in range(-2, 3) for dy in range(-2, 3) if (dx, dy) != (0, 0)]
+        inventory = {}
+        for i, (dx, dy) in enumerate(offsets[:20]):
+            coord = (33 + dx, 83 + dy)
+            inventory[coord] = FakeTarget(
+                coord=coord,
+                avg_loot=100.0 + i,  # distinct scores to force a clean ordering
+                total_raids_all_lists=10,
+                last_raid_time_unix=int(NOW - 86400),
+                primary_owner_village="V6",
+            )
+        plan = plan_rebalance(inventory, vps, supplies, now_unix=NOW)
+        assert len(plan.placements) == 15, (
+            f"LOCAL list must cap at 15; got {len(plan.placements)}"
+        )
+        assert all(p.target_list_role == "LOCAL" for p in plan.placements)
+        assert all(p.target_list_name == "V6-LOCAL-Clubs" for p in plan.placements)
+        overflow_dead = [d for d in plan.dead_decisions if "local_overflow" in d.reason]
+        assert len(overflow_dead) == 5, (
+            f"5 overflow targets must land in DEAD; got {len(overflow_dead)}"
+        )
+        assert all(d.target_list_name == "V6-DEAD" for d in overflow_dead)

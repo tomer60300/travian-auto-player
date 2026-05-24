@@ -73,6 +73,17 @@ CARRY_SAFETY = 1.10
 HIGH_FRACTION = 0.20
 MID_FRACTION = 0.70  # bottom of MID; below this → INACTIVE
 
+# LOCAL-role villages: 100-Clubs micro-raiders that only grab nearby crannies
+# during Start All cycles. Distances are in map fields (Travian wrap-around
+# Euclidean). Reach beyond LOCAL_MAX_DISTANCE_FIELDS is rejected outright by
+# the candidate filter; LOCAL_PREFERRED_DISTANCE_FIELDS is informational.
+# LOCAL_MAX_SLOTS caps the per-list slot count; overflow is routed to the
+# village's DEAD pool with reason ``local_overflow_above_<N>_slots``.
+LOCAL_VILLAGES: frozenset[str] = frozenset({"V4", "V5", "V6", "V7"})
+LOCAL_MAX_DISTANCE_FIELDS = 8
+LOCAL_PREFERRED_DISTANCE_FIELDS = 6
+LOCAL_MAX_SLOTS = 15
+
 # Dead-farm thresholds — see is_dead_farm().
 DEAD_AVG_LOOT_THRESHOLD = 30.0
 DEAD_MIN_RAIDS_FOR_LOW_LOOT = 5
@@ -212,6 +223,17 @@ def compute_placement_score(
     )
 
 
+def _field_distance(vp: VillagePosition, coord: tuple[int, int]) -> float:
+    """Wrap-around Euclidean field distance from a village to a target."""
+    dx = abs(vp.x - coord[0])
+    dy = abs(vp.y - coord[1])
+    if dx > 200:
+        dx = 401 - dx
+    if dy > 200:
+        dy = 401 - dy
+    return math.sqrt(dx * dx + dy * dy)
+
+
 def pick_best_placement(
     target_agg: Any,
     village_positions: list[VillagePosition],
@@ -220,10 +242,15 @@ def pick_best_placement(
     """Enumerate (village, unit) candidates, score, normalise, pick the winner.
 
     troop_supplies is keyed by (village_label, unit_id) and the value is the
-    current available count in that village.
+    current available count in that village. LOCAL-role villages are rejected
+    as candidates when the target sits beyond LOCAL_MAX_DISTANCE_FIELDS — their
+    100-Clubs supply must stay on short round-trips for fast Start All cycles.
     """
     candidates: list[Placement] = []
     for vp in village_positions:
+        if vp.name in LOCAL_VILLAGES:
+            if _field_distance(vp, target_agg.coord) > LOCAL_MAX_DISTANCE_FIELDS:
+                continue
         for unit in STRIKE_UNIT_CANDIDATES:
             supply = int(troop_supplies.get((vp.name, unit), 0))
             if supply < 1:
@@ -253,13 +280,24 @@ def assign_role_and_list_name(
     village: str,
     placements_for_village: list[Placement],
 ) -> list[Placement]:
-    """Assign HIGH/MID/INACTIVE roles within a single village's placements.
+    """Assign HIGH/MID/INACTIVE (or LOCAL) roles within a single village's placements.
 
-    Top HIGH_FRACTION by objective_score → HIGH, then up to MID_FRACTION → MID,
-    rest → INACTIVE. Constructs target_list_name as ``V{n}-{ROLE}-{Unit}``.
-    Mutates the placements in-place and returns them sorted by score desc.
+    LOCAL villages (V4/V5/V6/V7) skip quartile bucketing: every placement is
+    role=LOCAL with list name ``V{n}-LOCAL-Clubs``. The caller is expected to
+    cap LOCAL lists at LOCAL_MAX_SLOTS and route the overflow elsewhere.
+
+    Non-LOCAL villages get the standard split: top HIGH_FRACTION by
+    objective_score → HIGH, then up to MID_FRACTION → MID, rest → INACTIVE.
+    Constructs target_list_name as ``V{n}-{ROLE}-{Unit}``. Mutates the
+    placements in-place and returns them sorted by score desc.
     """
     sorted_placements = sorted(placements_for_village, key=lambda p: -p.objective_score)
+    if village in LOCAL_VILLAGES:
+        for p in sorted_placements:
+            p.target_list_role = "LOCAL"
+            p.target_list_name = f"{village}-LOCAL-Clubs"
+        return sorted_placements
+
     n = len(sorted_placements)
     high_cut = int(n * HIGH_FRACTION)
     mid_cut = int(n * MID_FRACTION)
@@ -389,13 +427,30 @@ def plan_rebalance(
             continue
         placements.append(best)
 
-    # Bucket per chosen village and assign roles.
+    # Bucket per chosen village and assign roles. LOCAL villages cap at
+    # LOCAL_MAX_SLOTS — overflow targets get routed to the LOCAL village's
+    # DEAD pool with a distinct reason so the operator can manually re-home
+    # them later if supply grows.
     by_village: dict[str, list[Placement]] = {}
     for p in placements:
         by_village.setdefault(p.optimal_village, []).append(p)
     ordered_placements: list[Placement] = []
     for village, group in by_village.items():
-        ordered_placements.extend(assign_role_and_list_name(village, group))
+        assigned = assign_role_and_list_name(village, group)
+        if village in LOCAL_VILLAGES and len(assigned) > LOCAL_MAX_SLOTS:
+            ordered_placements.extend(assigned[:LOCAL_MAX_SLOTS])
+            for overflow in assigned[LOCAL_MAX_SLOTS:]:
+                agg = target_inventory.get(overflow.target_coord)
+                if agg is None:
+                    continue
+                dead_decisions.append(_build_dead_decision(
+                    agg,
+                    village,
+                    f"local_overflow_above_{LOCAL_MAX_SLOTS}_slots",
+                    now_unix,
+                ))
+        else:
+            ordered_placements.extend(assigned)
 
     logger.info(
         "rebalance_planner: %d targets, %d placements, %d dead (incl %d unplaceable)",

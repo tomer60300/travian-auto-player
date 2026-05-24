@@ -2303,13 +2303,13 @@ def render_markdown(ctx: dict[str, Any]) -> str:
     add("")
     add("Send-All has no documented cross-list ordering. Manually trigger in this order:")
     add("")
-    add("1. **Auto-scout list first** (refreshes intel before strikes commit)")
-    add("2. **`*-Top` lists** (from any SPLIT_LIST below) — these fire every cycle")
-    add("3. **HIGH-bucket lists** — V3 first (biggest army), then V1, V2, V6, V4")
-    add("4. **MID-bucket lists** — same village order")
-    add("5. **`*-Tail` lists** (from SPLIT_LIST) — fire opportunistically when supply remains")
-    add("6. **INACTIVE-low lists** last")
-    add("7. **Slow-wave lists** — only when you specifically want to slow a target's rebuild")
+    add("1. **`V*-HIGH-*` lists** (fire every cycle) — V3 first (biggest army), then V1, V2")
+    add("2. **`V*-LOCAL-Clubs` lists** (V4/V5/V6/V7) — fire every cycle; short round-trips dominate")
+    add("3. **`V*-MID-*` lists** — same village order as HIGH")
+    add("4. **`V*-AUTO-SCOUT`** (refresh intel after primary strikes commit)")
+    add("5. **`V*-INACTIVE-*-Top` lists** (from any SPLIT_LIST) — top-20 every cycle")
+    add("6. **`V*-INACTIVE-*` and `*-Tail` lists** — fire opportunistically when supply remains")
+    add("7. **SKIP: `V*-DEAD`, `V*-SLOW-*`** — deactivated by design")
     add("")
 
     # 16b. Per-list sort recommendations (Bug 5 Part A)
@@ -3673,13 +3673,13 @@ async def main_async(api_base: str, *, rebalance: bool = False) -> int:
                 for sm in slot_ms if sm["defense_proxy"] > DEFENSE_HARD_LIMIT
             ],
             "trigger_order_recommendation": [
-                "auto-scout list",
-                "*-Top lists (post-split, fire every cycle)",
-                "HIGH lists (V3 → V1 → V2 → V6 → V4)",
-                "MID lists (same order)",
-                "*-Tail lists (post-split, fire opportunistically)",
-                "INACTIVE-low lists",
-                "Slow-wave lists (opt-in only)",
+                "V*-HIGH-* lists (V3 → V1 → V2)",
+                "V*-LOCAL-Clubs lists (V4, V5, V6, V7 — short round-trips)",
+                "V*-MID-* lists (same village order)",
+                "V*-AUTO-SCOUT",
+                "V*-INACTIVE-*-Top lists (post-split, top-20 every cycle)",
+                "V*-INACTIVE-* and *-Tail lists (opportunistic)",
+                "SKIP: V*-DEAD, V*-SLOW-*",
             ],
             "list_sort_recommendations": list(list_sort_recommendations.values()),
             "split_list_proposals": [
