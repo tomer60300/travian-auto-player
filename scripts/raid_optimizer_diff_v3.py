@@ -3058,11 +3058,13 @@ def _build_rebalance_json(
         }
 
     phase_a = [_serialise(a) for a in actions if a["action"] == "RELOCATE_TO_DEAD"]
+    # LOCAL slots (V4/V5/V6/V7 short-range micro-raiders) fire every cycle,
+    # same priority class as HIGH and MID; they go in Phase B alongside them.
     phase_b = [
         _serialise(a)
         for a in actions
         if a["action"] == "MOVE_SLOT"
-        and (a.get("extra") or {}).get("target_list_role") in ("HIGH", "MID")
+        and (a.get("extra") or {}).get("target_list_role") in ("HIGH", "MID", "LOCAL")
     ]
     phase_c = [
         _serialise(a)
