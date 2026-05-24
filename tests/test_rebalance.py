@@ -306,6 +306,9 @@ class TestIsDeadFarm:
 
 class TestPlanRebalance:
     def test_dead_and_live_targets_route_correctly(self):
+        # v5.0: a live high-loot target produces MULTIPLE wave placements,
+        # not exactly one. We only assert routing correctness — the wave
+        # math has its own dedicated tests in TestWaveStacking below.
         vps = [VillagePosition("V6", 33, 83), VillagePosition("V1", 15, 91)]
         supplies = {("V6", "t1"): 100, ("V1", "t1"): 200}
         inventory = {
@@ -325,8 +328,10 @@ class TestPlanRebalance:
             ),
         }
         plan = plan_rebalance(inventory, vps, supplies, now_unix=NOW)
-        assert len(plan.placements) == 1
-        assert plan.placements[0].target_coord == (31, 83)
+        # The live target produces at least one wave placement.
+        assert len(plan.placements) >= 1
+        assert all(p.target_coord == (31, 83) for p in plan.placements)
+        # The dead target is routed to V1-DEAD (its primary owner).
         assert len(plan.dead_decisions) == 1
         assert plan.dead_decisions[0].target_coord == (16, 92)
         assert plan.dead_decisions[0].target_list_name == "V1-DEAD"
@@ -346,5 +351,118 @@ class TestPlanRebalance:
         assert plan.unplaceable_as_dead == 1
         assert len(plan.dead_decisions) == 1
         assert "no_feasible_placement" in plan.dead_decisions[0].reason
+
+
+class TestWaveStacking:
+    """v5.0 wave-stacking planner: adaptive_wave_count, pick_wave_set_greedy,
+    size_wave_with_residual_carry, plan_waves_for_target."""
+
+    def test_adaptive_wave_count_tiers(self):
+        from travian_api.services.rebalance_planner import adaptive_wave_count
+        assert adaptive_wave_count(500) == 4
+        assert adaptive_wave_count(200) == 4
+        assert adaptive_wave_count(199) == 3
+        assert adaptive_wave_count(100) == 3
+        assert adaptive_wave_count(99) == 2
+        assert adaptive_wave_count(50) == 2
+        assert adaptive_wave_count(49) == 1
+        assert adaptive_wave_count(30) == 1
+        assert adaptive_wave_count(29) == 0
+        assert adaptive_wave_count(0) == 0
+
+    def test_size_wave_residual_carry_threads_correctly(self):
+        from travian_api.services.rebalance_planner import size_wave_with_residual_carry
+        # Wave 0: empirical 200, unit carry 60 (Clubs); count = ceil(200*1.1/60) = 4, haul = min(240, 200) = 200.
+        c0, h0 = size_wave_with_residual_carry(200, 0, 0, 60)
+        assert c0 == 4
+        assert h0 == 200
+        # Wave 1: residual = max(0, 200 - 200) = 0; refill = 15/60 * 60 = 15; expected = 15.
+        # count = ceil(15*1.1/60) = 1; haul = min(60, 15) = 15.
+        c1, h1 = size_wave_with_residual_carry(200, 1, 200, 60)
+        assert c1 == 1
+        assert h1 == 15
+        # Wave 2: residual = max(0, 200 - 215) = 0; refill = 15; expected = 15. count=1, haul=15.
+        c2, h2 = size_wave_with_residual_carry(200, 2, 215, 60)
+        assert c2 == 1
+        assert h2 == 15
+
+    def test_pick_wave_set_greedy_enforces_spacing(self):
+        from travian_api.services.rebalance_planner import pick_wave_set_greedy
+        # Candidates with arrivals [5, 8, 25, 30, 50]; spacing 15.
+        # Greedy: pick 5, then next ≥20 → 25, then next ≥40 → 50.
+        candidates = [
+            ("V7", "t1", 5.0),
+            ("V6", "t1", 8.0),
+            ("V3", "t6", 25.0),
+            ("V1", "t6", 30.0),
+            ("V2", "t5", 50.0),
+        ]
+        picks = pick_wave_set_greedy(candidates, wanted_waves=4)
+        arrivals = [p[2] for p in picks]
+        assert arrivals == [5.0, 25.0, 50.0]
+        # Each consecutive pair is ≥15 apart.
+        for i in range(1, len(arrivals)):
+            assert arrivals[i] - arrivals[i-1] >= 15
+
+    def test_plan_waves_for_target_311_83_flagship(self):
+        # Operator's flagship target (31,83) with avg_loot ~480 → 4 waves wanted.
+        # Provide all 4 LOCAL-ish villages with Clubs supply; V3 with TK supply.
+        from travian_api.services.rebalance_planner import plan_waves_for_target
+        vps = [
+            VillagePosition("V1", 15, 91),
+            VillagePosition("V2", 22, 88),
+            VillagePosition("V3", 23, 88),
+            VillagePosition("V4", 39, 87),
+            VillagePosition("V6", 33, 83),
+            VillagePosition("V7", 30, 82),
+        ]
+        supplies = {
+            ("V1", "t1"): 689, ("V1", "t6"): 92,
+            ("V2", "t1"): 258, ("V2", "t5"): 111,
+            ("V3", "t3"): 2024, ("V3", "t6"): 2506,
+            ("V4", "t1"): 100, ("V6", "t1"): 100, ("V7", "t1"): 100,
+        }
+        target = FakeTarget(
+            coord=(31, 83), avg_loot=480.0, total_raids_all_lists=20,
+            last_raid_time_unix=int(NOW - 86400), primary_owner_village="V3",
+        )
+        waves = plan_waves_for_target(target, vps, supplies)
+        assert len(waves) >= 3, f"avg_loot=480 should produce 3+ waves, got {len(waves)}"
+        # Spacing ≥15min between consecutive waves.
+        for i in range(1, len(waves)):
+            gap = waves[i].arrival_min - waves[i-1].arrival_min
+            assert gap >= 15, f"Wave {i+1} arrives only {gap:.1f}min after wave {i}"
+        # No two waves share the same (village, unit) pair.
+        vu_pairs = {(w.optimal_village, w.optimal_unit) for w in waves}
+        assert len(vu_pairs) == len(waves), "duplicate (village, unit) pair"
+        # Wave-1 should be V7 (1.41 fields, fastest with Clubs at 7 f/h, but V7's t1 at 7 f/h
+        # ties with V6; V7 wins on closer distance).
+        assert waves[0].optimal_village == "V7", (
+            f"V7 (30,82) is 1.41 fields from (31,83) — should win wave 1; got {waves[0].optimal_village}"
+        )
+
+    def test_plan_waves_supply_decrement(self):
+        from travian_api.services.rebalance_planner import plan_waves_for_target
+        vps = [VillagePosition("V7", 30, 82)]
+        supplies = {("V7", "t1"): 100}
+        target = FakeTarget(
+            coord=(31, 83), avg_loot=300.0, total_raids_all_lists=10,
+            last_raid_time_unix=int(NOW - 86400),
+        )
+        waves = plan_waves_for_target(target, vps, supplies)
+        # Only one village so only one wave possible.
+        assert len(waves) == 1
+        # Supply was decremented.
+        assert supplies[("V7", "t1")] == 100 - waves[0].optimal_count
+
+    def test_dead_floor_returns_empty_plan(self):
+        from travian_api.services.rebalance_planner import plan_waves_for_target
+        vps = [VillagePosition("V7", 30, 82)]
+        supplies = {("V7", "t1"): 100}
+        target = FakeTarget(
+            coord=(31, 83), avg_loot=20.0, total_raids_all_lists=10,
+            last_raid_time_unix=int(NOW - 86400),
+        )
+        assert plan_waves_for_target(target, vps, supplies) == []
 
 

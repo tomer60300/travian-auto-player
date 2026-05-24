@@ -113,6 +113,12 @@ class Placement:
     Not frozen because objective_score and target_list_{name,role} are filled
     in after construction (normalisation requires the full candidate set, and
     role assignment requires the full per-village placement set).
+
+    In v5.0 wave-stacking, a single target can produce multiple Placement
+    objects — one per wave. ``wave_index`` (1-based) and ``of_total_waves``
+    identify the wave's position in the plan; ``arrival_min`` is the one-way
+    travel time for this specific wave; ``expected_haul`` is the per-wave
+    haul (residual cranny + refill, capped at the empirical avg_loot).
     """
 
     target_coord: tuple[int, int]
@@ -130,6 +136,12 @@ class Placement:
     target_name: str = ""
     primary_owner_village: str = ""
     slot_instances: list[tuple[str, int]] = field(default_factory=list)
+    # Wave-stacking fields (v5.0). For single-placement back-compat callers,
+    # wave_index=1, of_total_waves=1, arrival_min=round_trip_min/2.
+    wave_index: int = 1
+    of_total_waves: int = 1
+    arrival_min: float = 0.0
+    expected_haul: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +181,200 @@ def compute_expected_raids_per_day(round_trip_min: float) -> float:
             continue
         raids_per_day += prob * (1440.0 / gap)
     return raids_per_day
+
+
+def _field_distance(vp: VillagePosition, coord: tuple[int, int]) -> float:
+    """Wrap-around Euclidean field distance from a village to a target."""
+    dx = abs(vp.x - coord[0])
+    dy = abs(vp.y - coord[1])
+    if dx > 200:
+        dx = 401 - dx
+    if dy > 200:
+        dy = 401 - dy
+    return math.sqrt(dx * dx + dy * dy)
+
+
+# ---------------------------------------------------------------------------
+# Wave-stacking (v5.0)
+# ---------------------------------------------------------------------------
+
+# Minimum minutes between consecutive wave arrivals at the target. Cranny
+# refills slowly; without this gap, wave 2 lands on an empty cranny and
+# returns the carry-overhead of a wasted trip.
+WAVE_SPACING_MIN = 15
+
+# Average cranny refill rate across all resources combined (res/hour). Mirrors
+# the orchestrator's DEFAULT_FARM_REFILL_PER_HOUR (v3.1 cranny model). Used
+# inside size_wave_with_residual_carry to estimate haul of waves N≥2.
+DEFAULT_REFILL_PER_HOUR = 60.0
+
+
+def adaptive_wave_count(avg_loot: float) -> int:
+    """Wave count per target based on its empirical average loot per raid.
+
+    ≥200 res → 4 waves; 100-200 → 3; 50-100 → 2; 30-50 → 1; below 30 → 0
+    (caller routes to DEAD via the economic floor).
+    """
+    if avg_loot >= 200:
+        return 4
+    if avg_loot >= 100:
+        return 3
+    if avg_loot >= 50:
+        return 2
+    if avg_loot >= 30:
+        return 1
+    return 0
+
+
+def enumerate_candidate_waves(
+    target_coord: tuple[int, int],
+    village_positions: list[VillagePosition],
+    troop_supplies: dict[tuple[str, str], int],
+) -> list[tuple[str, str, float]]:
+    """Return every feasible (village, unit, arrival_min) for hitting one target.
+
+    Filters: village must have ≥1 of the unit in stock. No scoring; spacing is
+    enforced downstream by pick_wave_set_greedy.
+    """
+    candidates: list[tuple[str, str, float]] = []
+    for vp in village_positions:
+        for unit in STRIKE_UNIT_CANDIDATES:
+            supply = int(troop_supplies.get((vp.name, unit), 0))
+            if supply < 1:
+                continue
+            speed = UNIT_SPEED.get(unit, 0)
+            if speed <= 0:
+                continue
+            distance_fields = _field_distance(vp, target_coord)
+            arrival_min = (distance_fields / speed) * 60.0
+            candidates.append((vp.name, unit, arrival_min))
+    return candidates
+
+
+def pick_wave_set_greedy(
+    candidates: list[tuple[str, str, float]],
+    wanted_waves: int,
+    *,
+    spacing_min: float = WAVE_SPACING_MIN,
+) -> list[tuple[str, str, float]]:
+    """Greedy ≥spacing_min selector. Sort by arrival ASC, pick fastest, then
+    walk forward picking the next candidate whose arrival is ≥last+spacing.
+    Stops at wanted_waves. No two picks share a (village, unit) pair — the
+    spacing constraint enforces that naturally.
+    """
+    if wanted_waves <= 0 or not candidates:
+        return []
+    sorted_cand = sorted(candidates, key=lambda c: c[2])
+    picked: list[tuple[str, str, float]] = [sorted_cand[0]]
+    seen_vu: set[tuple[str, str]] = {(sorted_cand[0][0], sorted_cand[0][1])}
+    for cand in sorted_cand[1:]:
+        if len(picked) >= wanted_waves:
+            break
+        if cand[2] - picked[-1][2] >= spacing_min and (cand[0], cand[1]) not in seen_vu:
+            picked.append(cand)
+            seen_vu.add((cand[0], cand[1]))
+    return picked
+
+
+def size_wave_with_residual_carry(
+    avg_loot: float,
+    wave_index: int,
+    cumulative_carry_taken: int,
+    unit_carry: int,
+    *,
+    refill_per_hour: float = DEFAULT_REFILL_PER_HOUR,
+    interval_min: float = WAVE_SPACING_MIN,
+) -> tuple[int, int]:
+    """Return (unit_count, expected_haul_int) for one wave.
+
+    Wave 0 (the first arrival) hauls min(empirical_cranny, count*carry).
+    Subsequent waves haul residual_after_prior + refill_during_interval,
+    capped at the empirical avg_loot. Count is sized to cover the expected
+    haul with a 10% carry-safety margin, never below 1.
+    """
+    if wave_index <= 0:
+        expected = avg_loot
+    else:
+        residual = max(0.0, avg_loot - float(cumulative_carry_taken))
+        refilled = (interval_min / 60.0) * refill_per_hour
+        expected = min(avg_loot, residual + refilled)
+    if unit_carry <= 0:
+        return 0, 0
+    count = max(1, math.ceil(expected * CARRY_SAFETY / unit_carry))
+    actual_haul = int(min(count * unit_carry, expected))
+    return count, actual_haul
+
+
+def plan_waves_for_target(
+    target_agg: Any,
+    village_positions: list[VillagePosition],
+    troop_supplies: dict[tuple[str, str], int],
+) -> list[Placement]:
+    """Build the wave plan for one target. Returns one Placement per wave.
+
+    Side effect: decrements troop_supplies for each wave committed. Caller is
+    responsible for processing targets in value-descending order so the
+    highest-value targets claim supply first.
+
+    If wave count is 0 (avg_loot below DEAD_AVG_LOOT_THRESHOLD), returns an
+    empty list — caller routes to DEAD.
+    """
+    avg_loot = float(target_agg.avg_loot or 0.0)
+    wanted = adaptive_wave_count(avg_loot)
+    if wanted == 0:
+        return []
+
+    candidates = enumerate_candidate_waves(
+        target_agg.coord, village_positions, troop_supplies
+    )
+    picks = pick_wave_set_greedy(candidates, wanted)
+    if not picks:
+        return []
+
+    plan: list[Placement] = []
+    cumulative_taken = 0
+    of_total = len(picks)
+    target_name = getattr(target_agg, "target_name", "")
+    primary_owner = getattr(target_agg, "primary_owner_village", "")
+    slot_instances = list(getattr(target_agg, "slot_instances", []) or [])
+
+    for idx, (village, unit, arrival_min) in enumerate(picks):
+        carry = UNIT_CARRY.get(unit, 0)
+        if carry <= 0:
+            continue
+        count, haul = size_wave_with_residual_carry(
+            avg_loot,
+            wave_index=idx,
+            cumulative_carry_taken=cumulative_taken,
+            unit_carry=carry,
+        )
+        avail = int(troop_supplies.get((village, unit), 0))
+        if count > avail:
+            # Supply ran out mid-plan; truncate at the prior wave. The target
+            # gets fewer waves than wanted, which is fine — the operator may
+            # train more troops later and a future run will fill the gap.
+            break
+        round_trip = arrival_min * 2.0
+        raids_per_day = compute_expected_raids_per_day(round_trip)
+        plan.append(Placement(
+            target_coord=target_agg.coord,
+            optimal_village=village,
+            optimal_unit=unit,
+            optimal_count=count,
+            round_trip_min=round_trip,
+            expected_raids_per_day=raids_per_day,
+            expected_daily_booty=raids_per_day * haul,
+            target_name=target_name,
+            primary_owner_village=primary_owner,
+            slot_instances=slot_instances,
+            wave_index=idx + 1,            # 1-based for operator-facing output
+            of_total_waves=of_total,
+            arrival_min=arrival_min,
+            expected_haul=haul,
+        ))
+        troop_supplies[(village, unit)] = avail - count
+        cumulative_taken += haul
+    return plan
 
 
 # ---------------------------------------------------------------------------
@@ -212,17 +418,6 @@ def compute_placement_score(
         primary_owner_village=getattr(target_agg, "primary_owner_village", ""),
         slot_instances=list(getattr(target_agg, "slot_instances", []) or []),
     )
-
-
-def _field_distance(vp: VillagePosition, coord: tuple[int, int]) -> float:
-    """Wrap-around Euclidean field distance from a village to a target."""
-    dx = abs(vp.x - coord[0])
-    dy = abs(vp.y - coord[1])
-    if dx > 200:
-        dx = 401 - dx
-    if dy > 200:
-        dy = 401 - dy
-    return math.sqrt(dx * dx + dy * dy)
 
 
 def pick_best_placement(
@@ -375,22 +570,33 @@ def plan_rebalance(
     *,
     now_unix: float,
 ) -> RebalancePlan:
-    """Run the full rebalance pass over a target inventory.
+    """Run the v5.0 wave-stacking rebalance pass over a target inventory.
 
-    For each target:
+    For each target processed in avg_loot DESCENDING order so high-value
+    targets claim supply first:
       1. is_dead_farm → DeadDecision into V{n}-DEAD for the primary owner.
-      2. Otherwise pick_best_placement. If the planner finds no feasible
-         (village, unit) pairing the target also lands in V{n}-DEAD with reason
-         ``no_feasible_placement`` (counted in ``unplaceable_as_dead``).
-      3. After every survivor has a (village, unit) pick, group by village and
-         run assign_role_and_list_name so each placement gets its final
-         HIGH/MID/INACTIVE role and list name.
+      2. Otherwise plan_waves_for_target builds an ordered wave plan: 1-4
+         (village, unit, count) waves with ≥WAVE_SPACING_MIN spacing at the
+         target. Each wave decrements ``troop_supplies`` so the next target
+         sees the remaining pool.
+      3. If the wave plan is empty (no feasible waves; usually because every
+         village has 0 supply for every unit), the target lands in DEAD with
+         reason ``no_feasible_placement`` (counted in ``unplaceable_as_dead``).
+      4. After every target is planned, each (village, target) bucket is
+         ranked by total expected_haul across that target's waves and
+         assigned HIGH/MID/INACTIVE roles. The same target can have HIGH role
+         in V3 and MID role in V1 — list names are per-village-per-wave.
     """
     placements: list[Placement] = []
     dead_decisions: list[DeadDecision] = []
     unplaceable_as_dead = 0
 
-    for coord, target_agg in target_inventory.items():
+    # Value-descending iteration: top targets get first claim of supply.
+    sorted_targets = sorted(
+        target_inventory.items(),
+        key=lambda item: -float(item[1].avg_loot or 0.0),
+    )
+    for coord, target_agg in sorted_targets:
         owner = (
             target_agg.primary_owner_village
             if target_agg.primary_owner_village
@@ -403,25 +609,48 @@ def plan_rebalance(
             )
             continue
 
-        best = pick_best_placement(target_agg, village_positions, troop_supplies)
-        if best is None:
+        wave_plan = plan_waves_for_target(target_agg, village_positions, troop_supplies)
+        if not wave_plan:
             unplaceable_as_dead += 1
             dead_decisions.append(
                 _build_dead_decision(target_agg, owner, "no_feasible_placement", now_unix)
             )
             continue
-        placements.append(best)
+        placements.extend(wave_plan)
 
-    # Bucket per chosen village and assign roles. v5.0 wave-stacking groups
-    # per-(village, target) so multiple waves of the same target in the same
-    # village inherit one role. (In practice each (village, target) emits at
-    # most one wave because the spacing constraint forces distinct units.)
-    by_village: dict[str, list[Placement]] = {}
+    # Role assignment. v5.0 ranks per-(village, target) by total expected_haul
+    # of that target's waves; the same target_coord may earn HIGH in one
+    # village's bucket and MID in another's. To keep all of a target's waves
+    # in the same village under the same role we collapse to one ranking
+    # entry per (village, target) and apply the role back to every wave.
+    by_village_target: dict[str, dict[tuple[int, int], list[Placement]]] = {}
     for p in placements:
-        by_village.setdefault(p.optimal_village, []).append(p)
+        by_village_target.setdefault(p.optimal_village, {}).setdefault(p.target_coord, []).append(p)
+
     ordered_placements: list[Placement] = []
-    for village, group in by_village.items():
-        ordered_placements.extend(assign_role_and_list_name(village, group))
+    for village, by_target in by_village_target.items():
+        # Build one "representative" Placement per target for ranking, with
+        # objective_score = sum of expected_haul across that target's waves.
+        per_target_rep: list[Placement] = []
+        rep_to_waves: dict[int, list[Placement]] = {}
+        for coord, waves in by_target.items():
+            total_haul = float(sum(w.expected_haul for w in waves))
+            rep = waves[0]
+            rep.objective_score = total_haul
+            per_target_rep.append(rep)
+            rep_to_waves[id(rep)] = waves
+        assign_role_and_list_name(village, per_target_rep)
+        # Propagate the role + list_name back to every wave for this (village, target).
+        # The list's unit suffix comes from each wave's own unit (different
+        # waves of the same target can use different units, hence different
+        # list names within the same role).
+        for rep in per_target_rep:
+            role = rep.target_list_role
+            for w in rep_to_waves[id(rep)]:
+                w.target_list_role = role
+                unit_display = UNIT_DISPLAY_NAME.get(w.optimal_unit, w.optimal_unit)
+                w.target_list_name = f"{village}-{role}-{unit_display}"
+                ordered_placements.append(w)
 
     logger.info(
         "rebalance_planner: %d targets, %d placements, %d dead (incl %d unplaceable)",
