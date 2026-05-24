@@ -117,16 +117,24 @@ COLLAPSE_BULK_THRESHOLD = 10
 
 DEFENSE_PROXY = {"no_loss": 10, "some_loss": 200, "all_dead": 1000, "unknown": 0}
 
-# Section 3 — Per-village planning budget (live counts at mission time).
+# Section 3 — Per-village planning budget (operator-authoritative supply).
+# V4/V5/V6/V7 carry 100 Clubs each by operator design — micro-raider role
+# (local cranny grabs during Start All cycles); see LOCAL_VILLAGES below.
 BUDGET: dict[str, dict[str, int]] = {
-    "V1": {"coords": (15, 91),  "t1": 694, "t2": 2,   "t3": 0,    "t4": 131, "t5": 37,  "t6": 92,   "t7": 0,  "t8": 0},
-    "V2": {"coords": (22, 88),  "t1": 258, "t2": 116, "t3": 0,    "t4": 0,   "t5": 110, "t6": 49,   "t7": 0,  "t8": 0},
-    "V3": {"coords": (42, 17),  "t1": 44,  "t2": 0,   "t3": 2250, "t4": 9,   "t5": 0,   "t6": 1600, "t7": 70, "t8": 110},
-    "V4": {"coords": (39, 87),  "t1": 100, "t2": 0,   "t3": 0,    "t4": 2,   "t5": 0,   "t6": 0,    "t7": 0,  "t8": 0},
-    "V5": {"coords": (45, 90),  "t1": 0,   "t2": 0,   "t3": 0,    "t4": 0,   "t5": 0,   "t6": 0,    "t7": 0,  "t8": 0},
-    "V6": {"coords": (33, 83),  "t1": 100, "t2": 0,   "t3": 0,    "t4": 2,   "t5": 0,   "t6": 0,    "t7": 0,  "t8": 0},
+    "V1": {"coords": (15, 91), "t1": 689,  "t2": 2,   "t3": 102,  "t4": 81, "t5": 35,  "t6": 92,   "t7": 0,   "t8": 0},
+    "V2": {"coords": (22, 88), "t1": 258,  "t2": 104, "t3": 0,    "t4": 3,  "t5": 111, "t6": 49,   "t7": 0,   "t8": 0},
+    "V3": {"coords": (42, 17), "t1": 2332, "t2": 0,   "t3": 2024, "t4": 1,  "t5": 0,   "t6": 2506, "t7": 165, "t8": 140},
+    "V4": {"coords": (39, 87), "t1": 100,  "t2": 0,   "t3": 0,    "t4": 2,  "t5": 0,   "t6": 0,    "t7": 0,   "t8": 0},
+    "V5": {"coords": (45, 90), "t1": 100,  "t2": 0,   "t3": 0,    "t4": 0,  "t5": 0,   "t6": 0,    "t7": 0,   "t8": 0},
+    "V6": {"coords": (33, 83), "t1": 100,  "t2": 0,   "t3": 0,    "t4": 12, "t5": 0,   "t6": 0,    "t7": 0,   "t8": 0},
+    "V7": {"coords": (30, 82), "t1": 100,  "t2": 0,   "t3": 0,    "t4": 0,  "t5": 0,   "t6": 0,    "t7": 0,   "t8": 0},
 }
-SOURCE_VILLAGES = ("V1", "V2", "V3", "V4", "V6")  # V5 excluded
+SOURCE_VILLAGES = ("V1", "V2", "V3", "V4", "V5", "V6", "V7")
+
+# Live-vs-BUDGET diagnostic: warn when a (village, unit) supply has dropped
+# below this fraction of its operator-stated ceiling. Informational only;
+# BUDGET is the planning authority. See log_live_vs_budget().
+LIVE_VS_BUDGET_WARN_FRACTION = 0.30
 
 # Teuton unit profiles. t1=Clubs, t2=Spear, t3=Axe, t4=Scout, t5=Paladin,
 # t6=TK, t7=Ram, t8=Catapult. Carry/speed/attack from raid_analyzer_service
@@ -147,8 +155,10 @@ STRIKE_UNITS_BY_VILLAGE: dict[str, list[str]] = {
     "V1": ["t1", "t6"],          # Clubs bulk, TK premium
     "V2": ["t1", "t5"],          # Clubs bulk, Paladin premium
     "V3": ["t3", "t6"],          # Axe bulk, TK premium
-    "V4": ["t1"],                # Clubs only
-    "V6": ["t1"],                # Clubs only
+    "V4": ["t1"],                # Clubs only (LOCAL raider)
+    "V5": ["t1"],                # Clubs only (LOCAL raider)
+    "V6": ["t1"],                # Clubs only (LOCAL raider)
+    "V7": ["t1"],                # Clubs only (LOCAL raider)
 }
 PREMIUM_UNITS = {"t5", "t6"}
 
@@ -348,6 +358,39 @@ async def fetch_live_troops(api: ApiClient, villages: dict[str, Any]) -> dict[st
         else:
             out[label] = {"raw": payload}  # type: ignore[dict-item]
     return out
+
+
+def log_live_vs_budget(live_troops: dict[str, dict[str, int]]) -> None:
+    """Print a per-(village, unit) BUDGET vs live diff and WARN on supply gaps.
+
+    BUDGET is operator-authoritative (intended supply ceiling); live can drift
+    below — usually because troops are in transit at fetch time. Cells below
+    LIVE_VS_BUDGET_WARN_FRACTION emit a WARN to stderr. Read-only diagnostic;
+    never adjusts BUDGET.
+    """
+    print("BUDGET vs live troops diagnostic:", file=sys.stderr)
+    print(f"  {'village':>4}  {'unit':>6}  {'budget':>6}  {'live':>6}  {'delta%':>7}", file=sys.stderr)
+    for label, cfg in BUDGET.items():
+        live = live_troops.get(label) or {}
+        for unit in ("t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"):
+            budget_n = int(cfg.get(unit, 0) or 0)
+            if budget_n <= 0:
+                continue
+            raw = live.get(unit, 0)
+            live_n = int(raw) if isinstance(raw, int) else 0
+            ratio = live_n / budget_n
+            delta_pct = (ratio - 1.0) * 100.0
+            warn = "  ⚠ WARN" if ratio < LIVE_VS_BUDGET_WARN_FRACTION else ""
+            print(
+                f"  {label:>4}  {unit:>6}  {budget_n:>6}  {live_n:>6}  {delta_pct:>6.1f}%{warn}",
+                file=sys.stderr,
+            )
+            if ratio < LIVE_VS_BUDGET_WARN_FRACTION:
+                print(
+                    f"  WARN: live supply below {int(LIVE_VS_BUDGET_WARN_FRACTION*100)}% "
+                    f"of planned for ({label}, {unit}): live={live_n} budget={budget_n}",
+                    file=sys.stderr,
+                )
 
 
 async def fetch_all_lists(api: ApiClient) -> list[dict[str, Any]]:
@@ -3157,6 +3200,7 @@ async def main_async(api_base: str, *, rebalance: bool = False) -> int:
         # Live troops
         print("Fetching live troops per village...", file=sys.stderr)
         live_troops = await fetch_live_troops(api, villages)
+        log_live_vs_budget(live_troops)
 
         # Existing lists
         print("Fetching existing farm lists...", file=sys.stderr)
