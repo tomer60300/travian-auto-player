@@ -456,8 +456,8 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       {/* Radius slider */}
       <div className="mb-4">
         <label className="field-label-lg">Radius: {radius}</label>
-        <input type="range" min={5} max={50} value={radius} onChange={(e) => setRadius(Number(e.target.value))} className="w-full checkbox-gold" />
-        <div className="flex justify-between text-xs text-secondary"><span>5</span><span>50</span></div>
+        <input type="range" min={5} max={100} value={radius} onChange={(e) => setRadius(Number(e.target.value))} className="w-full checkbox-gold" />
+        <div className="flex justify-between text-xs text-secondary"><span>5</span><span>100</span></div>
       </div>
 
       {/* Population range — village */}
