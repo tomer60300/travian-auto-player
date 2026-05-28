@@ -729,3 +729,87 @@ def parse_troop_overview(html: str, tribe_id: int = 0) -> Dict[str, int]:
                 totals[f"t{relative}"] += count
 
     return totals
+
+
+def parse_smithy_research_levels(html: str, tribe_id: int = 0) -> Dict[str, int]:
+    """Parse smithy build page and return researched levels per troop slot.
+
+    The smithy page (build.php?id=<smithy_slot>&gid=13) lists every troop the
+    tribe can research. Each row follows roughly this layout:
+
+      <div class="research" id="research11">
+        <img class="unit u11" alt="Clubswinger" />
+        <div class="information">
+          <h4 class="title">
+            <span>Clubswinger</span>
+            <span class="level">Level 5</span>
+          </h4>
+        </div>
+      </div>
+
+    Unit CSS classes follow the same tribe-offset convention used elsewhere:
+    Romans u1–u10, Teutons u11–u20, Gauls u21–u30.
+
+    Returns a dict {t1..t10: level}. Missing rows stay at 0 (not researched).
+    If ``tribe_id`` is 0, we infer the offset from the smallest u-ID seen on
+    the page so we still work even when the caller hasn't passed tribe info.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    levels: Dict[str, int] = {f"t{i}": 0 for i in range(1, 11)}
+
+    # Each researchable troop sits inside a container that carries the unit
+    # icon. We find the icon first, then look in the surrounding ancestor for
+    # the "Level N" text. Walking up from the icon is the most version-stable
+    # anchor — the heading/level markup has moved between T4.4 and T5+.
+    icons = soup.find_all("img", class_=re.compile(r"\bunit\b"))
+    if not icons:
+        return levels
+
+    # Infer tribe offset from the lowest u-ID on the page when not provided.
+    inferred_offset = None
+    u_ids: List[int] = []
+    for icon in icons:
+        for cls in icon.get("class", []):
+            m = re.match(r"^u(\d+)$", cls)
+            if m:
+                u_ids.append(int(m.group(1)))
+                break
+    if u_ids:
+        # Player tribe units occupy a contiguous block of 10 u-IDs starting at
+        # 1+10*(tribe-1). Round the lowest down to that block boundary.
+        inferred_offset = ((min(u_ids) - 1) // 10) * 10
+
+    tribe_offset = max(0, (tribe_id - 1)) * 10 if tribe_id else (inferred_offset or 0)
+
+    for icon in icons:
+        uid_num = None
+        for cls in icon.get("class", []):
+            m = re.match(r"^u(\d+)$", cls)
+            if m:
+                uid_num = int(m.group(1))
+                break
+        if uid_num is None:
+            continue
+        relative = uid_num - tribe_offset
+        if not (1 <= relative <= 10):
+            continue
+
+        # Walk up to the nearest <div class="research"> (or any ancestor that
+        # contains the level text). Bounded to 5 hops so we don't sweep the
+        # whole page on a stray icon (e.g. ongoing-research banner).
+        container = icon
+        for _ in range(5):
+            parent = container.parent
+            if parent is None:
+                break
+            container = parent
+            if container.name == "div" and "research" in (container.get("class") or []):
+                break
+
+        text = container.get_text(" ", strip=True) if container else ""
+        # "Level 5" — case-insensitive, tolerant of "Lvl"/"Lv." abbreviations.
+        m = re.search(r"\b(?:level|lvl|lv\.?)\s+(\d+)", text, re.IGNORECASE)
+        if m:
+            levels[f"t{relative}"] = int(m.group(1))
+
+    return levels

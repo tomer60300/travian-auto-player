@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from travian_api.constants import SCOUT_UNITS, TribeType
+from travian_api.constants import SCOUT_UNITS, BuildingType, TribeType
 from travian_api.exceptions import InvalidTargetError, MilitaryError, TravianError
 from travian_api.web.rate_limit import action_limiter
 from travian_api.web.sessions import TravianSession, get_travian_session
@@ -152,6 +152,44 @@ async def get_available_troops(
     except Exception as exc:
         logger.warning("Failed to get troops: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/smithy")
+async def get_smithy_levels(
+    village_id: int | None = None,
+    session: TravianSession = Depends(get_travian_session),
+):
+    """Per-unit smithy research levels for the village.
+
+    Returns ``{"smithy_level": int, "research": {t1..t10: level}, "found": bool}``.
+    ``found=False`` means the village has no smithy built yet — research dict
+    stays all zeros.
+    """
+    try:
+        smithy = await session.building_service.find_building(
+            int(BuildingType.BLACKSMITH), village_id=village_id
+        )
+        if not smithy:
+            return {
+                "smithy_level": 0,
+                "research": {f"t{i}": 0 for i in range(1, 11)},
+                "found": False,
+            }
+        research = await session.military_service.get_smithy_research_levels(
+            smithy_slot=smithy.slot_id,
+            village_id=village_id,
+            tribe_id=session.tribe_id or 0,
+        )
+        return {
+            "smithy_level": smithy.level,
+            "research": research,
+            "found": True,
+        }
+    except TravianError as exc:
+        raise HTTPException(status_code=502, detail=exc.message) from exc
+    except Exception as exc:
+        logger.warning("Failed to get smithy levels: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/raid")
