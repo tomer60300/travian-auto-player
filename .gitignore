@@ -74,3 +74,6 @@ travian_web.db
 agent-logs/
 frontend/node_modules/
 src/travian_api/web/static/
+farm-list-creation/.travian_pw
+farm-list-creation/__pycache__/
+farm-list-creation/logs/run*.log
