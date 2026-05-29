@@ -383,23 +383,23 @@ export default function RaidOptimizer() {
   const persisted = useMemo(() => loadState(), [])
 
   // Inventory inputs (Teuton-only).
-  const [c,  setC]  = useState(0)
+  const [c,  setC]  = useState(1000)
   const [sp, setSp] = useState(0)
   const [a,  setA]  = useState(0)
   const [pa, setPa] = useState(0)
-  const [t,  setT]  = useState(0)
+  const [t,  setT]  = useState(1000)
 
   // Smithy levels per unit type (0–20).
-  const [smC,  setSmC]  = useState(persisted?.smithy?.c  ?? 0)
+  const [smC,  setSmC]  = useState(persisted?.smithy?.c  ?? 5)
   const [smSp, setSmSp] = useState(persisted?.smithy?.sp ?? 0)
   const [smA,  setSmA]  = useState(persisted?.smithy?.a  ?? 0)
   const [smPa, setSmPa] = useState(persisted?.smithy?.pa ?? 0)
-  const [smT,  setSmT]  = useState(persisted?.smithy?.t  ?? 0)
+  const [smT,  setSmT]  = useState(persisted?.smithy?.t  ?? 14)
 
   // Defense / budget constraints.
   const [defZero,   setDefZero]   = useState(persisted?.defZero   ?? 330)
   const [defBudget, setDefBudget] = useState(persisted?.defBudget ?? 420)
-  const [budget,    setBudget]    = useState(persisted?.budget    ?? 1525)
+  const [budget,    setBudget]    = useState(persisted?.budget    ?? 1500)
 
   useEffect(() => {
     saveState({
