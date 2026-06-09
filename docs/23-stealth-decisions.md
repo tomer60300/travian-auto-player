@@ -166,6 +166,43 @@ Cost: 0 mean-time change for either; the distributions just match real
 data better.
 Benefit: defeats simple variance-based timing fingerprints.
 
+### Throttler gap distribution
+
+**Decision:** the global request throttler draws its inter-request gap from
+a *shifted log-normal* instead of `random.uniform(min_gap, max_gap)`, and
+binds the distribution's shape to the persona.
+
+Before: `target_gap = random.uniform(min_gap_s, max_gap_s)`. This produced a
+flat gap histogram over `[min, max]` — the exact "uniform-random timing"
+pattern guiding principle #2 warns against. A detector fitting a
+distribution to inter-request gaps separates a flat band from human traffic
+(which is right-skewed) with a one-sample KS test on a few hundred requests.
+This also contradicted this very doc, which previously claimed the throttler
+used "random-exponential gaps" — it did not.
+
+Now: `min_gap_s + lognormvariate(log(span * frac), sigma)`, floored at
+`min_gap_s` (the shift means no spike piles up at the floor), body inside
+`[min_gap, max_gap]`, tail soft-capped at `3x max_gap`. The shape parameters
+(`frac` in [0.30, 0.48], `sigma` in [0.45, 0.85]) are drawn per instance by
+default and bound to a persona-stable identity via `seed_gap_shape()` when a
+persona exists, so:
+
+- two accounts on the same config don't emit an identical *normalized* gap
+  shape a cross-account likelihood-ratio test could fingerprint, and
+- one account doesn't *drift* to a new shape on every restart, which a
+  two-sample KS / Cramer-von Mises test across that account's sessions could
+  otherwise catch.
+
+Intra-session non-stationarity (rapid clusters, reading pauses, fatigue) is
+deliberately left to the upper layers (`NoiseInjector` breaks, `HumanDelay`
+think-pauses, `session_manager` caps) — the throttler is the global lower
+envelope, not the macro-behavior engine. Stacking regimes here would
+double-count.
+
+Cost: 0 expected mean-time change (the body is centered in the same band);
+the distribution just stops being flat.
+Benefit: removes a primary statistical timing tell at zero throughput cost.
+
 The reviewer flagged the triangular distributions as still detectable in
 principle. We have not switched HumanDelay to log-normal because:
 
@@ -321,8 +358,9 @@ means.
   marginal benefit at our scale. Triangular profiles are tuned and
   work.
 - **Endpoint-aware throttler with separate gap profiles.** The global
-  throttler with random-exponential gaps is good enough; per-endpoint
-  buckets would add complexity without removing a clear tell.
+  throttler with persona-bound log-normal gaps (see "Throttler gap
+  distribution" below) is good enough; per-endpoint buckets would add
+  complexity without removing a clear tell.
 - **Cookie jar with full attribute preservation** (domain, path,
   expires, secure, httpOnly, sameSite, ordering). The current flat
   `{name: value}` storage works for Travian's cookie set; structured

@@ -8,6 +8,7 @@ Also tracks request counts per time window for burst detection.
 
 import asyncio
 import logging
+import math
 import random
 import time
 from collections import deque
@@ -39,8 +40,11 @@ class RequestThrottler:
     ):
         """
         Args:
-            min_gap_s: Minimum seconds between requests
-            max_gap_s: Maximum seconds between requests (random within range)
+            min_gap_s: Minimum seconds between requests (hard floor)
+            max_gap_s: Nominal upper bound of the gap body. Gaps are drawn
+                from a right-skewed distribution whose body sits in
+                [min_gap_s, max_gap_s]; the tail can exceed it, soft-capped
+                at 3x max_gap_s.
             burst_window_s: Time window for burst detection
             burst_max_requests: Max requests in burst window before cooldown
             burst_cooldown_s: Extra delay when burst limit hit
@@ -59,9 +63,32 @@ class RequestThrottler:
         self._penalty_until: float = 0  # extra penalty from errors
         self._captcha_guard = None  # set via set_captcha_guard()
 
+        # Per-session gap-shape parameters. Drawn once per instance instead of
+        # using one global constant so two accounts on the same config don't
+        # emit an identical *normalized* gap shape — a cross-account
+        # likelihood-ratio/KS test could otherwise fingerprint the shared
+        # generator even though each marginal passes a uniform-rejection test.
+        self._gap_median_frac = random.uniform(0.30, 0.48)
+        self._gap_sigma = random.uniform(0.45, 0.85)
+
     def set_captcha_guard(self, guard) -> None:
         """Attach a CaptchaGuard so requests block when captcha is active."""
         self._captcha_guard = guard
+
+    def seed_gap_shape(self, identity: str) -> None:
+        """Bind the gap-shape params to a stable identity (e.g. the persona).
+
+        By default the params are drawn fresh per instance, so the same account
+        drifts to a new gap shape on every process restart — a two-sample
+        KS / Cramer-von Mises test across sessions of one account could flag the
+        change. Deriving them deterministically from a persona-stable identity
+        keeps one account's gap shape constant across restarts while still
+        differing between accounts. The persona already rotates only on cookie
+        expiry or server change, so the shape inherits that lifetime.
+        """
+        rng = random.Random(identity)
+        self._gap_median_frac = rng.uniform(0.30, 0.48)
+        self._gap_sigma = rng.uniform(0.45, 0.85)
 
     async def wait(self, context: str = "") -> float:
         """Wait until it's safe to make the next request.
@@ -109,10 +136,10 @@ class RequestThrottler:
                 now = time.monotonic()
                 self._cleanup_burst_window(now)
 
-            # Enforce minimum gap with jitter
+            # Enforce minimum gap with heavy-tailed jitter
             if self._last_request_time > 0:
                 elapsed = now - self._last_request_time
-                target_gap = random.uniform(self.min_gap_s, self.max_gap_s)
+                target_gap = self._sample_gap()
                 if elapsed < target_gap:
                     gap_wait = target_gap - elapsed
                     await asyncio.sleep(gap_wait)
@@ -127,6 +154,27 @@ class RequestThrottler:
                 logger.debug(f"Throttled {waited:.1f}s before: {context}")
 
             return waited
+
+    def _sample_gap(self) -> float:
+        """Sample an inter-request gap from a right-skewed distribution.
+
+        A uniform draw over ``[min_gap_s, max_gap_s]`` yields a flat gap
+        histogram — the exact "uniform-random timing" pattern that statistical
+        bot detectors flag with a KS test against real human traffic. Human
+        inter-action gaps are heavy-tailed: most are short, a few are much
+        longer. This uses a *shifted* log-normal so the gap is never below the
+        configured floor (the increment is always non-negative, so no spike
+        piles up at ``min_gap_s``), its body stays inside the configured band,
+        and an occasional draw lands in a longer tail. The tail is soft-capped
+        so a single draw can't stall a loop for minutes. The median fraction
+        and sigma are per-session (see ``__init__``) so the shape is not a
+        cross-account constant.
+        """
+        span = self.max_gap_s - self.min_gap_s
+        if span <= 0:
+            return self.min_gap_s
+        increment = random.lognormvariate(math.log(span * self._gap_median_frac), self._gap_sigma)
+        return min(self.min_gap_s + increment, self.max_gap_s * 3.0)
 
     def add_penalty(self, seconds: float) -> None:
         """Add a temporary penalty (e.g., after receiving a suspicious response).

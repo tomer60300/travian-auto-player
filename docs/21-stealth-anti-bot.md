@@ -203,7 +203,14 @@ matching cookie file) to force a fresh persona.
 
 Prevents machine-gun request patterns:
 
-- **Minimum gap:** 1.5-3.0 seconds between any two requests (randomized)
+- **Minimum gap:** drawn from a right-skewed (shifted log-normal)
+  distribution whose body sits in the configured `[min_gap, max_gap]` band
+  (default 1.5-3.0s) with an occasional longer tail, soft-capped at 3x
+  `max_gap`. This replaces a flat `uniform(min, max)` draw, whose flat gap
+  histogram a KS test against real human traffic flags as automation. The
+  distribution's shape (median fraction + sigma) is bound to the persona via
+  `seed_gap_shape()`, so one account keeps a stable timing fingerprint across
+  restarts while differing from other accounts.
 - **Burst detection:** If 20+ requests happen within 60 seconds, adds a 15-23
   second cooldown
 - **Adaptive penalties:** When bot detection is suspected (captcha, 429 status),

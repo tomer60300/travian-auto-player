@@ -128,3 +128,70 @@ def test_navigate_to_rally_point_fetches_document():
         "/build.php?gid=16&tt=2&newdid=123",
     ]
     assert navigator.current_page == "/build.php?gid=16&tt=2&newdid=123"
+
+
+def test_throttler_gap_is_right_skewed_not_uniform():
+    """Inter-request gaps must be heavy-tailed, not a flat uniform band.
+
+    A uniform draw over ``[min, max]`` produces the flat gap histogram that a
+    KS test against real human traffic flags as automation. The shifted
+    log-normal must keep the floor, skew right, and have an occasional tail.
+    """
+    import random
+
+    from travian_api.stealth.throttler import RequestThrottler
+
+    # Seed BEFORE constructing: the per-session gap-shape params are drawn in
+    # __init__, so seeding first makes the whole sample deterministic.
+    random.seed(1234)
+    throttler = RequestThrottler(min_gap_s=1.0, max_gap_s=2.5)
+
+    samples = [throttler._sample_gap() for _ in range(20000)]
+    n = len(samples)
+    ordered = sorted(samples)
+    mean = sum(samples) / n
+    median = ordered[n // 2]
+
+    # Floor preserved: a gap is never below the configured minimum, so no
+    # spike piles up below min_gap_s.
+    assert min(samples) >= 1.0
+    # Tail soft-capped so a single draw can't stall a loop.
+    assert max(samples) <= 2.5 * 3.0
+    # Right-skewed: a uniform distribution has mean == median; ours does not.
+    assert mean > median + 0.02
+    # Body stays in the lower half of the configured band (median fraction is
+    # drawn from [0.30, 0.48], so median in [1.45, 1.72]).
+    assert 1.0 < median < 1.75
+    # Heavy tail exists but is a minority — not the ~50% a uniform band over a
+    # wider range would give.
+    over_max = sum(1 for s in samples if s > 2.5) / n
+    assert 0.0 < over_max < 0.30
+
+
+def test_throttler_gap_shape_is_persona_stable_and_account_distinct():
+    """Gap shape must be stable per account across restarts, distinct between accounts.
+
+    Unseeded throttlers draw a fresh shape each time (so two accounts on the
+    same config don't share one shape). Seeding with a persona-stable identity
+    makes the shape deterministic for that account — no cross-session drift a
+    two-sample KS test could catch — while a different identity yields a
+    different shape.
+    """
+    from travian_api.stealth.throttler import RequestThrottler
+
+    def shape(identity: str) -> tuple[float, float]:
+        t = RequestThrottler(min_gap_s=1.0, max_gap_s=2.5)
+        t.seed_gap_shape(identity)
+        return (t._gap_median_frac, t._gap_sigma)
+
+    account_a = "Mozilla/5.0 Chrome/133|en-US,en;q=0.9|https://ts2.x1.europe.travian.com"
+    account_b = "Mozilla/5.0 Chrome/131|de-DE,de;q=0.9|https://ts1.x1.travian.de"
+
+    # Stable across restarts: same identity -> identical shape.
+    assert shape(account_a) == shape(account_a)
+    # Distinct between accounts.
+    assert shape(account_a) != shape(account_b)
+    # Within documented bounds.
+    frac, sigma = shape(account_a)
+    assert 0.30 <= frac <= 0.48
+    assert 0.45 <= sigma <= 0.85

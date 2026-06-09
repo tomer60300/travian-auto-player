@@ -168,6 +168,12 @@ class HttpClient:
             enabled=settings.stealth,
         )
         self._throttler.set_captcha_guard(self._captcha_guard)
+        # Bind the request-gap shape to the persona so one account keeps a
+        # stable timing fingerprint across restarts (no cross-session drift)
+        # while differing from other accounts.
+        self._throttler.seed_gap_shape(
+            f"{persona.user_agent}|{persona.accept_language}|{settings.base_url}"
+        )
         self._human_delay = HumanDelay(
             speed_factor=settings.stealth_speed,
             enabled=settings.stealth,
