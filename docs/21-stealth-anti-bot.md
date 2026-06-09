@@ -264,12 +264,35 @@ using triangular distributions (min, mode, max):
 Before performing an action, the navigator loads the pages a real player would
 visit. This creates realistic traffic patterns instead of direct API-only access.
 
-**Post-login warm-up:**
+**Post-login warm-up (persona-weighted, variable):**
 ```
-Login -> dorf1.php (resource overview) -> dorf2.php (village center)
-  -> [20% chance: statistics page] -> [10% chance: profile page]
-  -> back to dorf1.php
+Login -> dorf1.php (always; prevents "login -> immediate API blast")
+  -> persona-weighted subset of {dorf2, statistiken, spieler, karte},
+     visited in randomized order
+  -> settle on a persona-weighted home view (dorf1 or dorf2)
 ```
+The warm-up used to be a fixed skeleton (`dorf1 -> dorf2 -> [20%] -> [10%]
+-> dorf1`) with the same transitions every session. That is trivially
+clustered across accounts by an n-gram / first-order Markov-transition
+chi-square or edit-distance test: every session began `dorf1 -> dorf2`
+(transition prob ~1.0) and ended `-> dorf1` (prob 1.0).
+
+Now each account has a **stable browsing personality**: per-page inclusion
+probabilities (`dorf2` 0.65–0.95, `statistiken` 0.05–0.35, `spieler`
+0.03–0.20, `karte` 0.10–0.40) and an end-page bias are seeded once from the
+persona (`seed_routes`), so they are stable across that account's restarts
+but differ between accounts. The per-call realization (which pages, in what
+order) still varies. All candidates are top-level pages, so the Referer
+chain stays coherent. (Deferred: a persona-stable first-order Markov policy
+with bounded path length, which would also vary the transition structure,
+not just the visited set.)
+
+**Behavioral salt:** the persona carries a persisted per-account random
+`salt` (`secrets.token_hex(8)`, never sent to the server). It is folded into
+the identity that seeds both the request-gap shape and the warm-up routes,
+because UA/language/server alone are low-entropy on a single world (a few
+UAs, one server-derived language) — without the salt, accounts would collide
+into a handful of latent behavioral buckets a detector could cluster.
 
 **Pre-upgrade flow:**
 ```

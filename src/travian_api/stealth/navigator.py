@@ -44,6 +44,30 @@ class PageNavigator:
         self._delay = human_delay
         self.enabled = enabled
         self._current_page: Optional[str] = None
+        # Warm-up route preferences. Default from the global RNG; bound to the
+        # persona via seed_routes() so each account has a stable browsing
+        # "personality" rather than the fixed dorf1->dorf2->...->dorf1 skeleton.
+        self._init_route_prefs(random)
+
+    def _init_route_prefs(self, rng: "random.Random") -> None:
+        """Set per-persona warm-up route probabilities from ``rng``.
+
+        These are stable for one account (seeded from the persona) and differ
+        between accounts, so a detector clustering warm-up routes by n-gram /
+        Markov-transition frequency sees a distinct-but-internally-consistent
+        profile per account instead of one shared deterministic sequence. The
+        per-call *realization* still varies (sampled from the global RNG in
+        ``warm_up``); only the underlying distribution is persona-stable.
+        """
+        self._route_p_dorf2 = rng.uniform(0.65, 0.95)
+        self._route_p_stats = rng.uniform(0.05, 0.35)
+        self._route_p_profile = rng.uniform(0.03, 0.20)
+        self._route_p_map = rng.uniform(0.10, 0.40)
+        self._route_p_end_dorf2 = rng.uniform(0.20, 0.50)
+
+    def seed_routes(self, identity: str) -> None:
+        """Bind warm-up route preferences to a stable persona identity."""
+        self._init_route_prefs(random.Random(identity))
 
     @property
     def current_page(self) -> Optional[str]:
@@ -68,20 +92,38 @@ class PageNavigator:
         logger.debug("Running post-login warm-up sequence")
         newdid = f"?newdid={village_id}" if village_id else ""
 
-        # 1. Resource overview (dorf1) — already the landing page after login
+        # 1. Resource overview (dorf1) — the landing page after login. Always
+        #    visited so we never "login -> immediate API blast".
         await self._visit(f"/dorf1.php{newdid}", "checking resource overview after login")
 
-        # 2. Village center
-        await self._visit(f"/dorf2.php{newdid}", "looking at village buildings")
+        # 2. Persona-weighted curiosity: include each candidate with this
+        #    account's stable probability, then visit the chosen subset in a
+        #    randomized order. This breaks the old fixed skeleton — dorf2 is no
+        #    longer always second, the optional pages are no longer globally
+        #    20%/10%, and the order varies — so the warm-up has no single
+        #    deterministic n-gram/Markov signature shared across accounts. All
+        #    candidates are top-level pages, so the Referer chain stays coherent
+        #    (no impossible direct jumps).
+        candidates = [
+            (f"/dorf2.php{newdid}", "looking at village buildings", self._route_p_dorf2),
+            ("/statistiken.php", "checking statistics", self._route_p_stats),
+            ("/spieler.php", "checking own profile", self._route_p_profile),
+            (f"/karte.php{newdid}", "glancing at the map", self._route_p_map),
+        ]
+        chosen = [(path, desc) for path, desc, prob in candidates if random.random() < prob]
+        random.shuffle(chosen)
+        for path, desc in chosen:
+            await self._visit(path, desc)
 
-        # 3. Optional: curiosity browsing (20% chance each)
-        if random.random() < 0.2:
-            await self._visit("/statistiken.php", "checking statistics")
-        if random.random() < 0.1:
-            await self._visit("/spieler.php", "checking own profile")
-
-        # 4. Return to resource overview (common human pattern)
-        await self._visit(f"/dorf1.php{newdid}", "returning to resource overview")
+        # 3. Settle on a home view (persona-weighted dorf1 vs dorf2), skipping a
+        #    redundant reload if we're already there.
+        end_page = (
+            f"/dorf2.php{newdid}"
+            if random.random() < self._route_p_end_dorf2
+            else f"/dorf1.php{newdid}"
+        )
+        if self._current_page != end_page:
+            await self._visit(end_page, "settling on home view")
         logger.debug("Warm-up sequence complete")
 
     async def navigate_to_resource_field(

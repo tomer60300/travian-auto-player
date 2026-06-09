@@ -193,3 +193,67 @@ class TestPersona:
 
         persona = build_persona(server_url="https://ts2.x1.de.travian.com")
         assert "de-DE" in persona.accept_language
+
+    def test_persona_has_distinct_behavioral_salt(self):
+        """Each fresh persona gets a non-empty, high-entropy, distinct salt.
+
+        The salt is the entropy source that keeps behavioral seeds (gap shape,
+        warm-up routes) distinct between accounts on the same world, where
+        UA/lang/server collide into a few buckets.
+        """
+        from travian_api.stealth.persona import build_persona
+
+        server = "https://ts2.x1.europe.travian.com"
+        salts = {build_persona(server_url=server).salt for _ in range(20)}
+        assert "" not in salts
+        assert len(salts) == 20  # all distinct
+        assert all(len(s) >= 12 for s in salts)
+
+    def test_persona_salt_round_trips(self, tmp_path):
+        """The salt persists and reloads unchanged."""
+        from travian_api.stealth.persona import build_persona, load_persona, save_persona
+
+        server = "https://ts2.x1.europe.travian.com"
+        path = tmp_path / ".travian_persona.json"
+        persona = build_persona(server_url=server)
+        save_persona(persona, path, server_url=server)
+
+        loaded = load_persona(path, server_url=server)
+        assert loaded is not None
+        assert loaded.salt == persona.salt
+
+    def test_persona_salt_backfilled_for_legacy_file(self, tmp_path):
+        """A pre-salt persona file gets a stable salt backfilled and persisted."""
+        import json
+        from datetime import UTC, datetime
+
+        from travian_api.stealth.persona import load_persona
+
+        server = "https://ts2.x1.europe.travian.com"
+        path = tmp_path / ".travian_persona.json"
+        created_at = datetime.now(UTC).isoformat()
+        # Legacy file: no "salt" key.
+        path.write_text(
+            json.dumps(
+                {
+                    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+                    "impersonate": "chrome133a",
+                    "sec_ch_ua": '"Chromium";v="133"',
+                    "sec_ch_ua_platform": '"Windows"',
+                    "sec_ch_ua_mobile": "?0",
+                    "accept_language": "en-US,en;q=0.9",
+                    "is_chromium": True,
+                    "created_at": created_at,
+                    "server_url": server,
+                }
+            )
+        )
+
+        first = load_persona(path, server_url=server)
+        assert first is not None and first.salt  # backfilled
+        # Persisted: a second load returns the same salt (stable across runs).
+        second = load_persona(path, server_url=server)
+        assert second is not None and second.salt == first.salt
+        # TTL not reset: created_at preserved through the backfill re-save.
+        assert json.loads(path.read_text())["created_at"] == created_at

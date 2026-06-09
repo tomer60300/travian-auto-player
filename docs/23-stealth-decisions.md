@@ -193,6 +193,54 @@ Triangular removes the per-account point mass but all accounts still share
 the same support and midpoint; a fleet-wide density comparison could still
 cluster them.
 
+### Warm-up route randomization + behavioral salt
+
+**Decision:** `PageNavigator.warm_up()` draws a persona-weighted variable
+route instead of a fixed skeleton, and the persona gained a persisted
+per-account `salt` that seeds all local behavioral RNGs.
+
+Before: warm-up was `dorf1 -> dorf2 -> [20% stats] -> [10% profile] ->
+dorf1` — the same transitions every session. Request sequences are
+higher-volume and more server-visible than the session-length signal from
+the scheduler caps, and this one was deterministic: every session began
+`dorf1 -> dorf2` and ended `-> dorf1`. An n-gram / first-order
+Markov-transition chi-square or edit-distance clustering over warm-up routes
+separates these accounts from humans (and groups the bot's accounts
+together) immediately.
+
+Now: dorf1 is always first (still prevents the "login -> immediate API
+blast" tell), then each of `{dorf2, statistiken, spieler, karte}` is included
+with this account's stable probability, the chosen subset is visited in
+randomized order, and the bot settles on a persona-weighted home page. The
+inclusion probabilities are seeded once from the persona (`seed_routes`), so
+they are stable for one account across restarts but differ between accounts;
+the per-call realization still varies. All candidates are top-level pages so
+the Referer chain stays coherent.
+
+**Why not pure per-call randomness?** Then every account would share the
+*same* route distribution — a different but equally clusterable fleet-wide
+signature. Persona-stable preferences give each account a distinct,
+internally consistent browsing personality, the way a real player has
+habits.
+
+**Behavioral salt.** The seed identity was `UA|language|server`, which is
+low-entropy on a single world (a few UAs, one server-derived language) — so
+accounts collided into a handful of latent buckets for both the request-gap
+shape (cycle 1) and the warm-up routes. The persona now carries a persisted
+`salt` (`secrets.token_hex(8)`, never sent to the server); the identity is
+`UA|language|server|salt`, used to seed both. Legacy persona files without a
+salt get one backfilled on load (preserving `created_at` so the 365-day TTL
+isn't reset).
+
+Cost: 0 — same number of warm-up page loads in expectation; the salt is a
+local-only field.
+
+**Deferred (next step):** replace the independent-Bernoulli subset sampling
+with a persona-stable first-order Markov transition matrix (bounded path
+length), so the *transition structure* varies per account too, not just the
+visited set. Validate against transition-count chi-square / likelihood-ratio,
+route-length KS, and edit-distance clustering.
+
 ### Heavy-tailed timing
 
 **Decision:** kept `HumanDelay` (action-class triangular) but use

@@ -304,3 +304,81 @@ def test_scheduler_caps_survive_persistence(tmp_path):
     c = ActivityScheduler(max_continuous_hours=3.0, max_daily_hours=8.0, state_file=state_file)
     assert c._effective_continuous_hours <= 3.0
     assert c._effective_daily_hours <= 8.0
+
+
+class _RecordingHttp:
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+
+    async def get_html(self, url: str, skip_reauth: bool = True) -> str:
+        self.urls.append(url)
+        return "<html></html>"
+
+
+def test_warmup_route_prefs_are_persona_stable_and_distinct():
+    """Warm-up route preferences must be stable per account, distinct across.
+
+    A fixed warm-up skeleton (or pure per-call randomness, which makes every
+    account's route distribution identical) is clusterable. Persona-seeded
+    preferences give each account a stable-but-distinct browsing profile.
+    """
+    from travian_api.stealth.human_delay import HumanDelay
+    from travian_api.stealth.navigator import PageNavigator
+
+    def prefs(identity: str) -> tuple[float, ...]:
+        nav = PageNavigator(_RecordingHttp(), HumanDelay(enabled=False), enabled=True)
+        nav.seed_routes(identity)
+        return (
+            nav._route_p_dorf2,
+            nav._route_p_stats,
+            nav._route_p_profile,
+            nav._route_p_map,
+            nav._route_p_end_dorf2,
+        )
+
+    a = "Chrome/133|en-US|https://ts2.x1.europe.travian.com"
+    b = "Chrome/131|de-DE|https://ts1.x1.travian.de"
+
+    assert prefs(a) == prefs(a)  # stable across restarts
+    assert prefs(a) != prefs(b)  # distinct across accounts
+    p_dorf2, p_stats, p_profile, p_map, p_end = prefs(a)
+    assert 0.65 <= p_dorf2 <= 0.95
+    assert 0.05 <= p_stats <= 0.35
+    assert 0.03 <= p_profile <= 0.20
+    assert 0.10 <= p_map <= 0.40
+    assert 0.20 <= p_end <= 0.50
+
+
+def test_warmup_route_is_varied_and_coherent():
+    """Warm-up must not emit one fixed sequence, and never an impossible jump."""
+    import random
+
+    from travian_api.stealth.human_delay import HumanDelay
+    from travian_api.stealth.navigator import PageNavigator
+
+    allowed = {"/dorf1.php", "/dorf2.php", "/statistiken.php", "/spieler.php", "/karte.php"}
+
+    random.seed(2024)
+    sequences = []
+    dorf2_present = 0
+    n = 300
+    for _ in range(n):
+        http = _RecordingHttp()
+        nav = PageNavigator(http, HumanDelay(enabled=False), enabled=True)
+        nav.seed_routes("Chrome/133|en-US|https://ts2.x1.europe.travian.com")
+        asyncio.run(nav.warm_up(village_id=7))
+
+        seq = tuple(http.urls)
+        sequences.append(seq)
+        # Always lands on dorf1 first (no login -> immediate API blast).
+        assert seq[0].startswith("/dorf1.php")
+        # Every visited page is a coherent top-level page (no impossible jump).
+        for url in seq:
+            assert url.split("?")[0] in allowed
+        if any(u.startswith("/dorf2.php") for u in seq):
+            dorf2_present += 1
+
+    # The skeleton is no longer fixed — many distinct sequences appear.
+    assert len(set(sequences)) > 10
+    # dorf2 is visited often (persona-weighted high) but NOT every time.
+    assert 0 < dorf2_present < n

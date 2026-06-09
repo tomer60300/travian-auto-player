@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -105,6 +106,18 @@ class Persona:
     sec_ch_ua_mobile: str  # "?0"
     accept_language: str  # e.g. "en-US,en;q=0.9"
     is_chromium: bool  # True for Chrome/Edge
+    # Per-account random salt. The visible identity (UA/lang/server) has low
+    # entropy on a single world — only a few UAs and one server-derived
+    # language — so accounts would otherwise collide into a handful of latent
+    # behavioral buckets (gap shape, warm-up routes). The salt is the entropy
+    # source that makes each account's behavioral seeds genuinely distinct. It
+    # is never sent to the server; it only seeds local RNGs.
+    salt: str = ""
+
+
+def _new_salt() -> str:
+    """Generate a fresh high-entropy behavioral salt."""
+    return secrets.token_hex(8)
 
 
 # ── Factory ────────────────────────────────────────────────────────────
@@ -136,6 +149,7 @@ def build_persona(ua: str | None = None, server_url: str = "") -> Persona:
         sec_ch_ua_mobile="?0",
         accept_language=_accept_language_for(server_url),
         is_chromium=True,
+        salt=_new_salt(),
     )
 
 
@@ -148,16 +162,21 @@ def build_persona(ua: str | None = None, server_url: str = "") -> Persona:
 _PERSONA_TTL_DAYS = 365
 
 
-def save_persona(persona: Persona, path: Path, server_url: str = "") -> None:
+def save_persona(
+    persona: Persona, path: Path, server_url: str = "", created_at: str | None = None
+) -> None:
     """Persist persona to a JSON file with a creation timestamp.
 
     The server URL is recorded alongside the persona so a server change
     (e.g. switching from .com to .de, or moving to a new world) rotates
     the persona automatically — language pack and timezone implications
     of accept_language wouldn't survive a server migration realistically.
+
+    ``created_at`` lets a caller preserve the original timestamp (e.g. when
+    re-saving only to backfill a salt) so the persona TTL isn't reset.
     """
     data = asdict(persona)
-    data["created_at"] = datetime.now(UTC).isoformat()
+    data["created_at"] = created_at or datetime.now(UTC).isoformat()
     if server_url:
         data["server_url"] = server_url
     try:
@@ -203,7 +222,7 @@ def load_persona(
                 server_url,
             )
             return None
-        return Persona(
+        persona = Persona(
             user_agent=data["user_agent"],
             impersonate=data["impersonate"],
             sec_ch_ua=data["sec_ch_ua"],
@@ -211,7 +230,22 @@ def load_persona(
             sec_ch_ua_mobile=data["sec_ch_ua_mobile"],
             accept_language=data["accept_language"],
             is_chromium=data["is_chromium"],
+            salt=data.get("salt", ""),
         )
+        if not persona.salt:
+            # Migrate a pre-salt persona file: generate a stable salt and
+            # persist it (preserving created_at so the TTL isn't reset) so the
+            # account's behavioral seeds stay fixed across future restarts. If
+            # the legacy file also lacked a server_url, pin it to the current
+            # server now so future server-mismatch rotation works.
+            persona.salt = _new_salt()
+            save_persona(
+                persona,
+                path,
+                server_url=saved_server or server_url,
+                created_at=data["created_at"],
+            )
+        return persona
     except Exception as exc:
         logger.warning("Failed to load persona from %s: %s", path, exc)
         return None

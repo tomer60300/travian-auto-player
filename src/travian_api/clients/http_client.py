@@ -168,12 +168,17 @@ class HttpClient:
             enabled=settings.stealth,
         )
         self._throttler.set_captcha_guard(self._captcha_guard)
-        # Bind the request-gap shape to the persona so one account keeps a
+        # Stable per-account identity for all local behavioral seeds. Includes
+        # the persona salt because UA/lang/server alone are low-entropy on one
+        # world — without the salt, accounts collide into a few behavioral
+        # buckets a detector could cluster.
+        behavioral_identity = (
+            f"{persona.user_agent}|{persona.accept_language}|{settings.base_url}|{persona.salt}"
+        )
+        # Bind the request-gap shape to the identity so one account keeps a
         # stable timing fingerprint across restarts (no cross-session drift)
         # while differing from other accounts.
-        self._throttler.seed_gap_shape(
-            f"{persona.user_agent}|{persona.accept_language}|{settings.base_url}"
-        )
+        self._throttler.seed_gap_shape(behavioral_identity)
         self._human_delay = HumanDelay(
             speed_factor=settings.stealth_speed,
             enabled=settings.stealth,
@@ -183,6 +188,10 @@ class HttpClient:
             human_delay=self._human_delay,
             enabled=settings.stealth and settings.stealth_navigate,
         )
+        # Bind warm-up route preferences to the same identity so each account
+        # has a stable-but-distinct browsing pattern (no shared deterministic
+        # route, and no collision into a few buckets on one world).
+        self._navigator.seed_routes(behavioral_identity)
         self._noise_injector = NoiseInjector(
             navigator=self._navigator,
             human_delay=self._human_delay,
