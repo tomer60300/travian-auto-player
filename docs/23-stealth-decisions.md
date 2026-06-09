@@ -147,6 +147,52 @@ captcha modal. Mitigated by structural-evidence checks (the guard fires
 only when the page is short AND the status is 403/503).
 Benefit: real blocks no longer get probed through.
 
+### Activity-scheduler effective caps
+
+**Decision:** `can_continue()` gates on a *jittered effective cap* drawn
+at-or-below the configured `max_continuous_hours` / `max_daily_hours`,
+instead of the exact configured value.
+
+Before: the scheduler stopped at exactly `max_continuous_hours` (e.g. 6.0h)
+and `max_daily_hours` (e.g. 16.0h). Every session that hit the cap was
+therefore exactly the same length and every capped day exactly the same
+total — a point mass that shows up as a sharp spike in the session-length /
+daily-total histogram. Session length is a data-rich signal (many short
+sessions per account), so a one-sample KS / chi-square density test against
+human session-length data flags it readily.
+
+Now: `continuous = triangular(0.80x, 1.0x, mid)`, `daily =
+triangular(0.85x, 1.0x, mid)`. Triangular (not uniform) so the density
+tapers to zero at the band edges — a uniform draw would leave a rectangular
+support step a KDE edge check can still see. Key invariant: the effective
+cap is always **≤ the configured hard ceiling**, so we never work *longer*
+than the safety limit (over-activity is exactly what the cap protects
+against).
+
+Cadence matters:
+- The **continuous** cap re-jitters per session (each `start_session()`,
+  and on idle auto-reset / idle-restart) — the session counter resets to 0
+  at those boundaries, so there's no oscillation near the limit.
+- The **daily** cap re-jitters only across a **local-day** boundary
+  (tracked via a persisted `daily_cap_day`). Resampling it every short
+  session would make the capped daily total the max of several draws — an
+  order statistic that drifts back toward the ceiling. `can_continue()` and
+  state-load both refresh it on a day change so a long-running or resumed
+  process can't gate on a stale cap.
+
+Persistence: both caps live in `.scheduler_state.json` for same-day restart
+consistency. On load they're validated — non-finite (nan/inf) or out-of-band
+values are rejected and a fresh in-band value is used, because accepting a
+nan would make every `usage >= cap` comparison false and silently disable
+the safety gate.
+
+**Deferred (next step):** persona-bind the cap *centers* so each account has
+a stable per-account mean (via a persona-seeded RNG, like
+`throttler.seed_gap_shape`) with a truncated log-normal/beta around it.
+Triangular removes the per-account point mass but all accounts still share
+the same support and midpoint; a fleet-wide density comparison could still
+cluster them.
+
 ### Heavy-tailed timing
 
 **Decision:** kept `HumanDelay` (action-class triangular) but use

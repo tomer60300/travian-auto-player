@@ -339,6 +339,20 @@ Prevents 24/7 activity patterns that trigger Multihunter investigations:
 The scheduler is checked before each automation cycle in the build queue and
 farm list services. When limits are hit, the bot takes a break automatically.
 
+The daily-hours and continuous-session limits above are **hard safety
+ceilings** that are never exceeded. The scheduler does not stop at exactly
+that number, though: it gates on a jittered *effective* cap drawn at-or-below
+the ceiling (continuous: `0.80–1.0x`, daily: `0.85–1.0x`, triangular so the
+density tapers to zero at both band edges). Without this, every limit-hitting
+session is exactly the configured length and every capped day exactly the
+configured total — a sharp spike in the session-length / daily-total histogram
+that a KDE or chi-square density test flags. The continuous cap re-jitters per
+session (after each break and on idle auto-reset); the daily cap re-jitters
+once per local day (resampling it every short session would let it drift
+upward as an order statistic). Both are persisted (`.scheduler_state.json`)
+for same-day restart consistency, validated on load (non-finite or out-of-band
+values are rejected, never disabling the gate).
+
 ---
 
 ### Layer 9: Cookie Persistence (clients/http_client.py)

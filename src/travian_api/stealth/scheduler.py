@@ -14,6 +14,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import math
 import os
 import random
 import tempfile
@@ -71,6 +72,22 @@ class ActivityScheduler:
         self._last_save_time: float = 0.0
         self._save_throttle_s: float = 30.0
 
+        # Effective caps: jittered at-or-below the configured hard ceilings so
+        # the actual stop point varies instead of landing on the exact same
+        # round number every time. Without this, every session that hits the
+        # limit is exactly ``max_continuous_hours`` long and every capped day
+        # exactly ``max_daily_hours`` — a sharp spike in the session-length /
+        # daily-total histogram that a detector flags. Both stay <= the
+        # configured maximum, so we never work *longer* than the safety cap.
+        # The continuous cap re-jitters per session (after each break); the
+        # daily cap re-jitters once per local day (resampling it every short
+        # session would let it drift upward as an order statistic). Persisted
+        # so a same-day restart stays consistent. Sampled here so
+        # ``_load_state()`` can override from disk when state exists.
+        self._daily_cap_day = self._day_key()
+        self._effective_continuous_hours = self._sample_continuous_cap()
+        self._effective_daily_hours = self._sample_daily_cap()
+
         self._load_state()
         if self._state_file is not None:
             atexit.register(self._save_state_force)
@@ -101,6 +118,70 @@ class ActivityScheduler:
         self._prune_old_buckets()
         return sum(self._hourly_buckets.values())
 
+    @staticmethod
+    def _day_key(wall_time: float | None = None) -> str:
+        """Return day-granularity key like '2026-04-22' (local time)."""
+        t = datetime.fromtimestamp(wall_time) if wall_time else datetime.now()
+        return t.strftime("%Y-%m-%d")
+
+    # Lower edge of each cap's jitter band, as a fraction of the hard ceiling.
+    _CONT_CAP_LO_FRAC = 0.80
+    _DAILY_CAP_LO_FRAC = 0.85
+
+    def _continuous_cap_band(self) -> tuple[float, float]:
+        return (self.max_continuous_hours * self._CONT_CAP_LO_FRAC, self.max_continuous_hours)
+
+    def _daily_cap_band(self) -> tuple[float, float]:
+        return (self.max_daily_hours * self._DAILY_CAP_LO_FRAC, self.max_daily_hours)
+
+    def _sample_continuous_cap(self) -> float:
+        """Effective continuous-session cap, jittered below the hard ceiling.
+
+        Triangular (mode at the band midpoint) so density tapers to zero at
+        both edges — a uniform draw leaves sharp support edges at 0.80x and
+        1.0x that a fleet-wide KDE/density edge check can still see.
+        """
+        lo, hi = self._continuous_cap_band()
+        return random.triangular(lo, hi, (lo + hi) / 2.0)
+
+    def _sample_daily_cap(self) -> float:
+        """Effective rolling-24h cap, jittered below the hard ceiling."""
+        lo, hi = self._daily_cap_band()
+        return random.triangular(lo, hi, (lo + hi) / 2.0)
+
+    def _maybe_resample_daily_cap(self) -> None:
+        """Re-jitter the daily cap once per local day, not per session.
+
+        Resampling every short session would make the capped daily total the
+        max of several draws (an order statistic), drifting it toward the hard
+        ceiling and re-concentrating the upper edge.
+        """
+        today = self._day_key()
+        if today != self._daily_cap_day:
+            self._daily_cap_day = today
+            self._effective_daily_hours = self._sample_daily_cap()
+
+    def _coerce_cap(self, raw: object, band: tuple[float, float]) -> float | None:
+        """Validate a persisted cap against the current sampler band.
+
+        Returns None (caller keeps the freshly sampled default) when the value
+        is non-finite or falls outside ``band`` — which happens when a corrupt
+        state file holds nan/inf, or when the configured max changed between
+        runs so a stale cap now sits above the hard ceiling or below the jitter
+        band. Rejecting (vs clamping to the edge) avoids re-piling a stale value
+        onto the exact boundary, which would reintroduce the histogram spike.
+        Accepting nan/inf would be worse than cosmetic: ``value >= nan`` is
+        always false, silently disabling the safety gate.
+        """
+        low, high = band
+        try:
+            value = float(raw)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value) or not (low <= value <= high):
+            return None
+        return value
+
     def _auto_reset_session_if_idle(self) -> None:
         """Auto-reset session counter if enough idle time has passed."""
         idle_seconds = time.monotonic() - self._last_activity_time
@@ -114,6 +195,10 @@ class ActivityScheduler:
                 )
                 self._session_seconds = 0.0
                 self._session_start = time.monotonic()
+                # New logical session after an idle break: re-jitter the
+                # continuous cap so it doesn't reuse the prior stop point.
+                self._effective_continuous_hours = self._sample_continuous_cap()
+                self._maybe_resample_daily_cap()
 
     # ── State persistence ────────────────────────────────────────────
 
@@ -144,10 +229,32 @@ class ActivityScheduler:
             # Session: reset if idle since last save
             last_saved = data.get("last_saved", 0)
             idle_since_save = time.time() - last_saved if last_saved else 0
-            if idle_since_save >= self.min_break_minutes * 60:
+            session_was_reset = idle_since_save >= self.min_break_minutes * 60
+            if session_was_reset:
                 self._session_seconds = 0.0
             else:
                 self._session_seconds = float(data.get("session_seconds", 0.0))
+
+            # Restore the jittered caps for cross-restart consistency. Invalid
+            # or out-of-band values are rejected and the freshly sampled default
+            # is kept. When the idle gap reset the session this is a NEW logical
+            # session (same boundary as _auto_reset_session_if_idle), so keep
+            # the fresh continuous cap rather than restoring the prior one.
+            if not session_was_reset:
+                cont = self._coerce_cap(
+                    data.get("effective_continuous_hours"), self._continuous_cap_band()
+                )
+                if cont is not None:
+                    self._effective_continuous_hours = cont
+            daily = self._coerce_cap(data.get("effective_daily_hours"), self._daily_cap_band())
+            if daily is not None:
+                self._effective_daily_hours = daily
+            saved_day = data.get("daily_cap_day")
+            if isinstance(saved_day, str) and saved_day:
+                self._daily_cap_day = saved_day
+            # A process resumed across a day boundary must pick up a fresh daily
+            # cap before any can_continue() gate uses the stale one.
+            self._maybe_resample_daily_cap()
 
             rolling = self._rolling_24h_seconds()
             logger.info(
@@ -176,6 +283,9 @@ class ActivityScheduler:
         data = {
             "hourly_buckets": self._hourly_buckets,
             "session_seconds": self._session_seconds,
+            "effective_continuous_hours": self._effective_continuous_hours,
+            "effective_daily_hours": self._effective_daily_hours,
+            "daily_cap_day": self._daily_cap_day,
             "last_saved": time.time(),
         }
         try:
@@ -207,24 +317,28 @@ class ActivityScheduler:
         if not self.enabled:
             return True
 
+        # A session running across local midnight gets a fresh daily cap.
+        self._maybe_resample_daily_cap()
         self._auto_reset_session_if_idle()
 
-        # Check rolling 24h limit
+        # Check rolling 24h limit (against the jittered effective cap)
         rolling_hours = self._rolling_24h_seconds() / 3600.0
-        if rolling_hours >= self.max_daily_hours:
+        if rolling_hours >= self._effective_daily_hours:
             logger.info(
-                "Rolling 24h limit reached: %.1fh / %.1fh",
+                "Rolling 24h limit reached: %.1fh / %.1fh (cap %.1fh)",
                 rolling_hours,
+                self._effective_daily_hours,
                 self.max_daily_hours,
             )
             return False
 
-        # Check continuous session limit
+        # Check continuous session limit (against the jittered effective cap)
         session_hours = self._session_seconds / 3600.0
-        if session_hours >= self.max_continuous_hours:
+        if session_hours >= self._effective_continuous_hours:
             logger.info(
-                "Continuous limit reached: %.1fh / %.1fh",
+                "Continuous limit reached: %.1fh / %.1fh (cap %.1fh)",
                 session_hours,
+                self._effective_continuous_hours,
                 self.max_continuous_hours,
             )
             return False
@@ -264,8 +378,12 @@ class ActivityScheduler:
         return duration_s
 
     def remaining_daily_budget(self) -> float:
-        """Hours remaining in the rolling 24h window."""
-        remaining = self.max_daily_hours - (self._rolling_24h_seconds() / 3600.0)
+        """Hours remaining in the rolling 24h window.
+
+        Measured against the jittered effective cap that ``can_continue()``
+        actually gates on, so telemetry/UI agrees with when the bot stops.
+        """
+        remaining = self._effective_daily_hours - (self._rolling_24h_seconds() / 3600.0)
         return max(0.0, remaining)
 
     def log_activity(self, seconds: float) -> None:
@@ -300,7 +418,15 @@ class ActivityScheduler:
         """Start a new session (call after a break)."""
         self._session_start = time.monotonic()
         self._session_seconds = 0.0
-        logger.debug("New session started")
+        # Re-jitter the continuous cap so each post-break session ends at a
+        # different point; the daily cap only re-jitters across a day boundary.
+        self._effective_continuous_hours = self._sample_continuous_cap()
+        self._maybe_resample_daily_cap()
+        logger.debug(
+            "New session started (caps: continuous=%.1fh, daily=%.1fh)",
+            self._effective_continuous_hours,
+            self._effective_daily_hours,
+        )
         self._save_state()
 
     @property

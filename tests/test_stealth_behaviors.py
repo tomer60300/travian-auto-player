@@ -195,3 +195,112 @@ def test_throttler_gap_shape_is_persona_stable_and_account_distinct():
     frac, sigma = shape(account_a)
     assert 0.30 <= frac <= 0.48
     assert 0.45 <= sigma <= 0.85
+
+
+def test_scheduler_caps_are_jittered_below_hard_ceiling():
+    """Effective stop caps must vary below the configured max, never exceed it.
+
+    A fixed cap makes every limit-hitting session exactly ``max_continuous_hours``
+    long and every capped day exactly ``max_daily_hours`` — a sharp spike in the
+    session-length / daily-total histogram. Jittered effective caps smear that
+    spike while never letting the bot work *longer* than the safety ceiling.
+    """
+    import random
+
+    from travian_api.stealth.scheduler import ActivityScheduler
+
+    random.seed(7)
+    s = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
+
+    # Continuous cap re-jitters every session.
+    cont_caps = set()
+    for _ in range(200):
+        s.start_session()
+        cont_caps.add(s._effective_continuous_hours)
+
+    # Never exceed the hard ceiling (safety invariant); stay in band; vary.
+    assert max(cont_caps) <= 6.0
+    assert min(cont_caps) >= 6.0 * 0.80
+    assert len(cont_caps) > 50
+
+    # The daily sampler likewise stays in band and varies.
+    daily = [s._sample_daily_cap() for _ in range(200)]
+    assert max(daily) <= 16.0
+    assert min(daily) >= 16.0 * 0.85
+    assert len(set(daily)) > 50
+
+
+def test_scheduler_daily_cap_resamples_per_day_not_per_session():
+    """Daily cap is stable within a day (no upward order-statistic drift)."""
+    import random
+
+    from travian_api.stealth.scheduler import ActivityScheduler
+
+    random.seed(9)
+    s = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
+    first = s._effective_daily_hours
+
+    # Many same-day sessions keep the daily cap fixed.
+    for _ in range(20):
+        s.start_session()
+        assert s._effective_daily_hours == first
+
+    # A day boundary triggers a resample.
+    s._daily_cap_day = "1970-01-01"
+    s.start_session()
+    assert s._daily_cap_day != "1970-01-01"
+
+
+def test_scheduler_rejects_nonfinite_persisted_caps(tmp_path):
+    """A corrupt state file with nan/inf caps must not disable the safety gate."""
+    import json
+    import math
+
+    from travian_api.stealth.scheduler import ActivityScheduler
+
+    state_file = tmp_path / ".scheduler_state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "hourly_buckets": {},
+                "session_seconds": 0.0,
+                "effective_continuous_hours": float("nan"),
+                "effective_daily_hours": float("inf"),
+                "last_saved": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    s = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0, state_file=state_file)
+    # Fell back to the freshly sampled in-band defaults, not nan/inf.
+    assert math.isfinite(s._effective_continuous_hours)
+    assert 0.0 < s._effective_continuous_hours <= 6.0
+    assert math.isfinite(s._effective_daily_hours)
+    assert 0.0 < s._effective_daily_hours <= 16.0
+
+
+def test_scheduler_caps_survive_persistence(tmp_path):
+    """Jittered caps persist so a same-day restart stays consistent."""
+    import random
+
+    from travian_api.stealth.scheduler import ActivityScheduler
+
+    state_file = tmp_path / ".scheduler_state.json"
+
+    random.seed(11)
+    a = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0, state_file=state_file)
+    a.start_session()
+    a.log_activity(60.0)  # forces a state write
+    a._save_state_force()
+    saved_cont = a._effective_continuous_hours
+    saved_daily = a._effective_daily_hours
+
+    b = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0, state_file=state_file)
+    assert b._effective_continuous_hours == saved_cont
+    assert b._effective_daily_hours == saved_daily
+
+    # A lowered config clamps a stale persisted cap to the new hard ceiling.
+    c = ActivityScheduler(max_continuous_hours=3.0, max_daily_hours=8.0, state_file=state_file)
+    assert c._effective_continuous_hours <= 3.0
+    assert c._effective_daily_hours <= 8.0
