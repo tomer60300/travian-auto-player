@@ -103,8 +103,10 @@ class PageNavigator:
         ``warm_up``); only these motifs are persona-stable.
         """
         # Coherent per-account page personality (wide prior) + reload tendency,
-        # stop bias, and browse-length cap.
-        page_bias = {p: rng.uniform(0.2, 2.5) for p in _WARMUP_PAGES}
+        # stop bias, and browse-length cap. The page bias is kept as an
+        # attribute so mid-session idle browsing (idle_browse) draws from the
+        # same personality instead of a fleet-uniform random.choice.
+        self._route_page_bias = {p: rng.uniform(0.2, 2.5) for p in _WARMUP_PAGES}
         self_loop_bias = rng.uniform(0.02, 0.30)  # floored: a reload is always possible
         stop_bias = rng.uniform(0.4, 2.2)
         self._route_max_steps = rng.randint(4, _WARMUP_MAX_STEPS)
@@ -113,7 +115,9 @@ class PageNavigator:
         for frm in _WARMUP_PAGES:
             weights: dict[Optional[str], float] = {}
             for to in _WARMUP_PAGES:
-                weight = _WARMUP_PAGE_AFFINITY[to] * page_bias[to] * rng.uniform(0.6, 1.4)
+                weight = (
+                    _WARMUP_PAGE_AFFINITY[to] * self._route_page_bias[to] * rng.uniform(0.6, 1.4)
+                )
                 if to == frm:
                     weight *= self_loop_bias  # rare reload, not a structural zero
                 weights[to] = weight
@@ -311,26 +315,25 @@ class PageNavigator:
         await self._delay.wait(ActionType.CLICK, "clicking reports")
 
     async def idle_browse(self, village_id: Optional[int] = None) -> None:
-        """Simulate idle browsing — random page visits that a human might do.
+        """Simulate idle browsing — a persona-weighted page visit during waits.
 
-        Call this occasionally during long waits to maintain session
-        and create background traffic noise.
+        The page is drawn from this account's stable page personality (the same
+        per-account affinity ``warm_up`` uses), not a flat ``random.choice``: a
+        uniform pick shared across the fleet is clusterable by a visit-frequency
+        chi-square, whereas a persona-weighted draw gives each account a
+        distinct, internally consistent idle pattern. The realistic base
+        affinity (overviews > profile/stats) keeps the aggregate human-like.
         """
         if not self.enabled:
             return
 
         newdid = f"?newdid={village_id}" if village_id else ""
-
-        # Pick a random "idle" action
-        actions = [
-            (f"/dorf1.php{newdid}", "checking resources"),
-            (f"/dorf2.php{newdid}", "looking at village"),
-            ("/statistiken.php", "checking statistics"),
-            ("/spieler.php", "checking profile"),
-        ]
-
-        path, desc = random.choice(actions)
-        await self._visit(path, f"idle browsing: {desc}")
+        pages = list(_WARMUP_PAGES)
+        weights = [_WARMUP_PAGE_AFFINITY[p] * self._route_page_bias[p] for p in pages]
+        page = random.choices(pages, weights=weights, k=1)[0]
+        await self._visit(
+            self._warmup_page_path(page, newdid), f"idle browsing: {_WARMUP_PAGE_DESC[page]}"
+        )
 
     async def pre_upgrade_flow(self, slot_id: int, village_id: Optional[int] = None) -> None:
         """Full navigation flow before upgrading a building/field.

@@ -442,10 +442,39 @@ unscaled.
 Cost: ~0 mean-time (tempo centered at 1.0). Benefit: one coherent session pace
 across micro and macro timescales.
 
-**Deferred (next step):** extend the tempo into the activity scheduler's
-session/break *durations* so daily/continuous play windows drift coherently
-too (still under the hard configured max bounds). Detector: HMM / session-state
-clustering plus runs / Ljung-Box across active-vs-break transitions.
+### Persona-weighted idle browsing
+
+**Decision:** `navigator.idle_browse()` (the page `NoiseInjector` visits
+mid-session) draws a persona-weighted page instead of a flat `random.choice`.
+
+The mid-session noise pages were a flat-uniform distribution identical across
+the fleet — the same flat-skeleton problem `warm_up` had before cycle 4, and
+clusterable by a visit-frequency chi-square / G-test. `idle_browse` now reuses
+the cycle-4 per-account page bias (`_route_page_bias`, promoted to an
+attribute) × the realistic base affinity, so each account's idle distribution
+matches its own warm-up personality. Reusing the warm-up bias (rather than an
+independent idle bias) is deliberate: a real user has cross-context page
+preferences, so the warm-up↔idle correlation is human-like, not a re-link
+signal.
+
+Cost: 0. Benefit: removes a fleet-uniform mid-session navigation fingerprint.
+
+### On feeding SessionTempo into break/session durations (rejected)
+
+The queued idea of scaling the activity scheduler's break/session durations by
+the shared `SessionTempo` was **rejected as statistically weak**: `SessionTempo`
+is a 30s-update AR(1) that decorrelates over minutes, while breaks are hours
+apart, so per-break tempo samples are ~independent — it would NOT create the
+break-to-break autocorrelation a runs / Ljung-Box / lag-1 test looks for (it
+would just add another multiplicative jitter the durations already have).
+Coherent session-scale drift needs a **separate day-scale process** (circadian
+/ session persistence across hours), which is the real deferred item.
+
+**Deferred (next steps):** (1) make `maybe_inject_noise`'s trigger non-iid —
+the per-cycle Bernoulli leaves geometric inter-noise gaps (KS/chi-square vs
+geometric, runs, Ljung-Box on the indicator); replace with a persona-stable
+renewal/hazard process with a refractory period. (2) a day-scale circadian /
+session drift for break & session durations.
 
 ## Per-feature decisions
 

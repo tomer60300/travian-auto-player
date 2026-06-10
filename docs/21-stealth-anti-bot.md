@@ -390,9 +390,21 @@ injector adds random non-functional browsing between bot operations:
 
 - **Default rate:** 15% chance per action cycle
 - Between each farm send, build check, or scout operation, there is a chance
-  the bot will visit a random page (map, messages, statistics, profile)
+  the bot will visit a page. The page is **persona-weighted**, not a flat
+  `random.choice`: `idle_browse` draws from the same per-account page
+  personality (`_route_page_bias` × base affinity) that `warm_up` uses, so each
+  account's idle-page distribution is distinct and internally consistent. A
+  flat pick is identical across the fleet and clusterable by a visit-frequency
+  chi-square / G-test; the realistic base affinity (overviews > profile/stats)
+  keeps the aggregate human-like.
 - **Session breaks:** Simulates AFK periods (2-10 minutes of silence, then a
   mini warm-up when resuming)
+
+> Known limitation (deferred): the per-cycle noise *trigger* is still an
+> independent Bernoulli draw, so inter-noise gaps are geometric (testable by
+> KS/chi-square vs geometric, runs, Ljung-Box on the event indicator). A
+> persona-stable renewal/hazard process with a refractory period is the next
+> step.
 
 The noise injector is automatically called between iterations in:
 - Build queue polling (build_queue_service.py)

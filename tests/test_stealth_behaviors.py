@@ -641,3 +641,53 @@ def test_tempo_scale_respects_stealth_flag_and_bounds():
         assert off.tempo_scale(100.0) == 100.0  # no-op when stealth disabled
     finally:
         asyncio.run(off.close())
+
+
+def test_idle_browse_is_persona_weighted_not_uniform():
+    """Mid-session idle browsing must be persona-weighted, not fleet-uniform.
+
+    A flat random.choice over the page list is identical across accounts — a
+    visit-frequency chi-square clusters them. The persona page bias gives each
+    account a distinct, stable idle distribution.
+    """
+    import random
+    from collections import Counter
+
+    from travian_api.stealth.human_delay import HumanDelay
+    from travian_api.stealth.navigator import PageNavigator
+
+    allowed = {"/dorf1.php", "/dorf2.php", "/statistiken.php", "/spieler.php", "/karte.php"}
+
+    def freqs(identity: str) -> Counter:
+        http = _RecordingHttp()
+        nav = PageNavigator(http, HumanDelay(enabled=False), enabled=True)
+        nav.seed_routes(identity)
+        random.seed(0)  # same draw stream -> any difference is the persona weights
+        for _ in range(5000):
+            asyncio.run(nav.idle_browse(village_id=5))
+        for url in http.urls:
+            assert url.split("?")[0] in allowed  # no impossible page
+        return Counter(u.split("?")[0] for u in http.urls)
+
+    a = "Chrome/133|en-US|https://ts2.x1.europe.travian.com|saltAAAA"
+    b = "Chrome/131|de-DE|https://ts1.x1.travian.de|saltBBBB"
+
+    # Persona page bias is stable per account, distinct across accounts.
+    nav_a = PageNavigator(_RecordingHttp(), HumanDelay(enabled=False), enabled=True)
+    nav_a.seed_routes(a)
+    nav_a2 = PageNavigator(_RecordingHttp(), HumanDelay(enabled=False), enabled=True)
+    nav_a2.seed_routes(a)
+    nav_b = PageNavigator(_RecordingHttp(), HumanDelay(enabled=False), enabled=True)
+    nav_b.seed_routes(b)
+    assert nav_a._route_page_bias == nav_a2._route_page_bias
+    assert nav_a._route_page_bias != nav_b._route_page_bias
+
+    fa = freqs(a)
+    total = sum(fa.values())
+    # Not flat-uniform (uniform over 5 pages would be 0.20 each).
+    assert max(fa.values()) / total > 0.25
+    # Two accounts produce materially different idle distributions.
+    fb = freqs(b)
+    tb = sum(fb.values())
+    l1 = sum(abs(fa[p] / total - fb[p] / tb) for p in allowed)
+    assert l1 > 0.10
