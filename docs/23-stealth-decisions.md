@@ -412,12 +412,40 @@ without flattening their marginals (mean multiplier ~1.0).
 Cost: ~0 mean-time (centered at 1.0). Benefit: defeats lag-1 autocorrelation /
 runs / Ljung-Box / HMM iid-gap detectors.
 
-**Deferred (next step):** feed the same `SessionTempo` into the macro loop
-intervals (`HumanTiming` / build-queue / scout / farm-builder pacing) so the
-tempo drift is coherent across micro and macro timescales — closing the HMM
-inconsistency where short gaps drift but raid/build/scout cadence doesn't.
-Scope narrowly: human-controlled waits only, never server-deadline/countdown
-sleeps, retry backoffs, or ATG/video timing.
+**Update (next cycle):** done — see "Session tempo on macro loop intervals".
+
+### Session tempo on macro loop intervals
+
+**Decision:** the shared `SessionTempo` now also scales human-paced macro loop
+intervals, via `HttpClient.tempo_scale(seconds)`.
+
+After cycle 6 the micro layer (per-action delays, per-request gaps) drifted
+with the tempo, but the macro loop intervals (`HumanTiming.delay`-based loop
+pacing) were still independent. That leaves an HMM / cross-timescale
+inconsistency — short gaps drift but build/scout cadence doesn't — and a
+periodogram / Lomb-Scargle signal on fixed polling cadences.
+
+`tempo_scale` multiplies the *mean* passed to `HumanTiming.delay(...)` (not the
+output), so the heavy-tailed shape and the function's internal `[mean*0.1,
+mean*15]` clamp are preserved and only the distribution center drifts. The
+tempo signal survives the resample (the sampled delay is `tempo * mean *
+iid_noise`; the iid tail attenuates but doesn't erase lag-1). Applied at three
+human-paced sites: the build-queue slot-free reaction window, the build-queue
+"come back later" polling sleep, and the inter-scout delay.
+
+**Scope (strict):** `tempo_scale` is a no-op when stealth is off, and is used
+ONLY for human-controlled loop/reaction pacing — never for server-deadline
+countdowns, retry backoffs, or the ATG/video tick cadence. The
+collision-stagger and the legacy non-live `execute_plan()` jitter were left
+unscaled.
+
+Cost: ~0 mean-time (tempo centered at 1.0). Benefit: one coherent session pace
+across micro and macro timescales.
+
+**Deferred (next step):** extend the tempo into the activity scheduler's
+session/break *durations* so daily/continuous play windows drift coherently
+too (still under the hard configured max bounds). Detector: HMM / session-state
+clustering plus runs / Ljung-Box across active-vs-break transitions.
 
 ## Per-feature decisions
 

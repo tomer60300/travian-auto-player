@@ -205,7 +205,9 @@ class BuildQueueService:
             return
         try:
             # Heavy-tailed: 70% short (~30s), 25% medium (~90s), 5% long (~300s).
-            reaction = HumanTiming.delay(45.0, variance_factor=0.8)
+            # Mean scaled by the shared session tempo so the reaction window
+            # drifts with the rest of the session's pace.
+            reaction = HumanTiming.delay(self.http_client.tempo_scale(45.0), variance_factor=0.8)
             reaction = max(20.0, min(reaction, 300.0))
             self._report(f"  Noticing slot freed... ({reaction:.0f}s reaction window)")
             await asyncio.sleep(reaction)
@@ -1015,6 +1017,6 @@ class BuildQueueService:
                     reason = f"No items completed for priority {next_prio}"
                     wait_s = float(poll_interval_s)
                 self._report(f"{reason}. Waiting {wait_s:.0f}s...")
-                await asyncio.sleep(HumanTiming.delay(wait_s))
+                await asyncio.sleep(HumanTiming.delay(self.http_client.tempo_scale(wait_s)))
 
         return all_results

@@ -1018,10 +1018,12 @@ class AutoScoutService:
                 )
 
             if i < len(targets) - 1:
-                # Stealth: heavy-tailed delay between scout sends
+                # Stealth: heavy-tailed delay between scout sends, mean scaled
+                # by the shared session tempo so inter-scout cadence drifts
+                # coherently with the rest of the session.
                 from ..stealth.timing import HumanTiming
 
-                await asyncio.sleep(HumanTiming.delay(delay_between))
+                await asyncio.sleep(HumanTiming.delay(self.http_client.tempo_scale(delay_between)))
                 # Stealth: occasional noise between scouts
                 try:
                     await self.http_client.noise_injector.maybe_inject_noise()

@@ -264,6 +264,23 @@ class HttpClient:
     def stealth_enabled(self) -> bool:
         return self._stealth_enabled
 
+    def tempo_scale(self, seconds: float) -> float:
+        """Scale a human-paced wait by the shared session tempo.
+
+        Lets macro loop intervals drift with the same tempo that already
+        modulates per-action delays and request gaps, so a detector can't find
+        a session where short gaps drift but raid/build/scout cadence stays
+        independent (Ljung-Box / runs / lag-1 autocorrelation; periodogram /
+        Lomb-Scargle on fixed polling cadences).
+
+        No-op when stealth is off. Use ONLY for human-controlled loop/reaction
+        pacing — NEVER for server-deadline countdowns, retry backoffs, or the
+        ATG/video tick cadence.
+        """
+        if not self._stealth_enabled:
+            return seconds
+        return seconds * self._session_tempo.current()
+
     @property
     def throttler(self) -> RequestThrottler:
         return self._throttler

@@ -289,6 +289,18 @@ and volatility are persona-stable, giving each account a steady-or-erratic
 tempo personality. The throttler re-floors after scaling (the hard min-gap is
 never violated) and `VIDEO_TICK` is excluded (functional ~3s cadence).
 
+The same tempo also drives the **macro loop intervals** via
+`HttpClient.tempo_scale(seconds)`, which scales the *mean* fed to
+`HumanTiming.delay(...)` (preserving its heavy-tailed shape and clamps): the
+build-queue slot-free reaction window and "come back later" polling sleep, and
+the inter-scout delay. So short request gaps, per-action delays, and the
+minutes-scale loop cadence all drift with one coherent session pace — closing
+the cross-timescale gap an HMM (short gaps drift, loop cadence doesn't) or a
+periodogram / Lomb-Scargle (fixed polling cadence) would otherwise find.
+`tempo_scale` is a no-op when stealth is off and is applied ONLY to
+human-controlled waits — never to server-deadline countdowns, retry backoffs,
+or the ATG/video tick cadence.
+
 ---
 
 ### Layer 6: Page Navigation Simulation (stealth/navigator.py)

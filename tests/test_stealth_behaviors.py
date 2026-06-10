@@ -607,3 +607,37 @@ def test_throttler_tempo_scales_gap_but_keeps_floor(monkeypatch):
     # The enforced wait was floored at min_gap_s despite the tiny tempo.
     assert slept
     assert max(slept) >= 1.0 - 0.05
+
+
+def test_tempo_scale_respects_stealth_flag_and_bounds():
+    """tempo_scale modulates human-paced loop waits, and is a no-op when off."""
+    from travian_api.clients.http_client import HttpClient
+    from travian_api.config import Settings
+
+    on = HttpClient(
+        Settings(
+            base_url="https://ts2.x1.europe.travian.com",
+            username="t@e.com",
+            password="pw123456",
+            stealth=True,
+        )
+    )
+    try:
+        scaled = on.tempo_scale(100.0)
+        # Bounded by the SessionTempo multiplier range [0.7, 1.5].
+        assert 0.7 * 100.0 <= scaled <= 1.5 * 100.0
+    finally:
+        asyncio.run(on.close())
+
+    off = HttpClient(
+        Settings(
+            base_url="https://ts2.x1.europe.travian.com",
+            username="t@e.com",
+            password="pw123456",
+            stealth=False,
+        )
+    )
+    try:
+        assert off.tempo_scale(100.0) == 100.0  # no-op when stealth disabled
+    finally:
+        asyncio.run(off.close())
