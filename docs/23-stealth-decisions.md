@@ -330,14 +330,58 @@ the distribution just stops being flat.
 Benefit: removes a primary statistical timing tell at zero throughput cost.
 
 The reviewer flagged the triangular distributions as still detectable in
-principle. We have not switched HumanDelay to log-normal because:
+principle. This was deferred for several cycles (re-tuning the data-tuned
+profiles seemed risky), but is now **done** — see "HumanDelay action-class
+shape" below. The re-tuning risk was avoided by deriving the new shape
+*from* the existing profile rather than picking new parameters.
 
-- The action-class profiles are tuned (mode/min/max) to match observed
-  user data and re-tuning to log-normal parameters is risky.
-- Anti-bot systems that distinguish triangular from log-normal would
-  need much larger sample sizes than they have for individual users.
-- Adding log-normal everywhere is a much bigger refactor than the
-  proportional benefit. (Marked as deferred.)
+### HumanDelay action-class shape
+
+**Decision:** `HumanDelay` draws each action delay from a **shifted
+log-normal** auto-derived from the existing `(min, mode, max)` profile,
+replacing `random.triangular(min, max, mode)`.
+
+Triangular has a hard min, linear ramps, and a hard *max cutoff*. Because a
+delay is sampled on every single action, a detector accumulates a large
+per-action-class sample quickly and a KS / Anderson-Darling test rejects the
+triangular shape against human action-time data (which has a soft floor and a
+right tail, no hard ceiling). This was the highest-statistical-power timing
+tell left.
+
+The shape is derived, not re-tuned — directly addressing the original
+deferral's concern:
+
+- floored at `min` (soft reaction floor);
+- mode pinned exactly at `mode` (`mu = ln(mode-min) + sigma^2`, so the
+  lognormal mode equals `mode-min` regardless of sigma — the tuned central
+  tendency is preserved exactly);
+- `sigma` solved so the increment's ~95th percentile equals `max-min`, i.e.
+  ~95% of draws stay inside the old `[min, max]` envelope and the rest form a
+  soft right tail; tail soft-capped at `4x` the span so a single draw can't
+  stall a loop.
+
+A per-account `seed_delays()` multiplier on sigma (`[0.92, 1.12]`, from the
+salt-bearing identity) gives each account a distinct spread without moving the
+mode. The band is deliberately narrow: the multiplier shifts where the old
+`max` falls on the curve, so a wide band would make the over-`max` tail mass
+vary enough across accounts (~3% to ~9% within this band) to be a
+likelihood-ratio signal. `VIDEO_TICK` is excluded and kept triangular — its
+~3s cadence is a functional ATG-signature requirement, not a stealth knob, so
+it must not grow a tail.
+
+This does NOT collapse the deliberate `HumanDelay` vs `HumanTiming` split
+above: `HumanDelay` still answers "short pause between clicks" (now log-normal
+instead of triangular, but still tight, mode-preserving), while
+`HumanTiming.delay` still owns the bursty minutes-long loop-interval reactions.
+
+Cost: 0 mean-time change of note (mode preserved, ~95% of mass in the same
+band). Benefit: removes the last easily-KS-rejectable per-action timing shape.
+
+**Deferred (next step):** a shared persona-stable, slowly-drifting *session
+tempo* (AR(1) in log-space) injected into both `HumanDelay` and the throttler.
+Samples are still ~iid within an action class; a server can use Ljung-Box /
+runs / lag-1 autocorrelation to distinguish independent synthetic gaps from a
+human's drifting session tempo.
 
 ## Per-feature decisions
 

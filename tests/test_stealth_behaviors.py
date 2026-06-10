@@ -384,3 +384,115 @@ def test_warmup_route_is_varied_bounded_and_coherent():
     assert len(set(sequences)) > 10
     # dorf2 is visited often but NOT every time.
     assert 0 < dorf2_present < n
+
+
+def test_action_delay_is_lognormal_shaped_not_triangular():
+    """Action delays must be floored, right-skewed, envelope-preserving, capped.
+
+    Triangular has a hard min, linear ramps, and a hard max cutoff — a KS /
+    Anderson-Darling test rejects it against human action-time data. The shifted
+    log-normal keeps the tuned envelope (mode preserved, ~95th pct at the old
+    max) while removing the hard max cutoff.
+    """
+    import random
+
+    from travian_api.stealth.human_delay import HumanDelay
+
+    min_s, mode_s, max_s = 0.8, 1.5, 4.0  # PAGE_LOAD profile
+
+    random.seed(99)
+    hd = HumanDelay(enabled=True)
+    samples = [hd._action_delay(min_s, mode_s, max_s) for _ in range(40000)]
+    n = len(samples)
+    ordered = sorted(samples)
+    mean = sum(samples) / n
+    median = ordered[n // 2]
+
+    # Soft floor: never below min_s.
+    assert min(samples) >= min_s
+    # Tail soft-capped at 4x the span.
+    assert max(samples) <= min_s + (max_s - min_s) * 4.0
+    # Right-skewed (lognormal): mean above median.
+    assert mean > median
+    # Envelope preserved: the old max is ~the 95th percentile (no hard cutoff).
+    within = sum(1 for s in samples if s <= max_s) / n
+    assert 0.88 <= within <= 0.99
+    # Median sits between the mode and the old max.
+    assert mode_s <= median <= max_s
+
+
+def test_video_tick_delay_stays_tight(monkeypatch):
+    """VIDEO_TICK must keep its tight triangular range (ATG ~3s requirement).
+
+    Exercises the real wait() branch with sleep stubbed out.
+    """
+    import random
+
+    from travian_api.stealth.human_delay import _TIMING_PROFILES, ActionType, HumanDelay
+
+    async def _noop(_seconds):
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _noop)
+
+    min_s, _mode_s, max_s = _TIMING_PROFILES[ActionType.VIDEO_TICK]
+    random.seed(3)
+    hd = HumanDelay(enabled=True)
+    # First 14 calls can't trigger the periodic think-pause (fires at an action
+    # count that is a multiple of >=15) and VIDEO_TICK is excluded from
+    # micro-pauses, so every delay must stay inside the tight profile band.
+    for _ in range(14):
+        d = asyncio.run(hd.wait(ActionType.VIDEO_TICK))
+        assert min_s <= d <= max_s
+
+
+def test_seed_delays_is_persona_stable_and_distinct():
+    """The per-account delay-spread multiplier is stable, distinct, in-band."""
+    from travian_api.stealth.human_delay import HumanDelay
+
+    def mult(identity: str) -> float:
+        hd = HumanDelay(enabled=True)
+        hd.seed_delays(identity)
+        return hd._delay_sigma_mult
+
+    a = "Chrome/133|en-US|https://ts2.x1.europe.travian.com|saltAAAA"
+    b = "Chrome/131|de-DE|https://ts1.x1.travian.de|saltBBBB"
+
+    assert mult(a) == mult(a)
+    assert mult(a) != mult(b)
+    assert 0.92 <= mult(a) <= 1.12
+    # The mode is invariant to the multiplier (tuned central tendency preserved).
+    import random
+
+    random.seed(1)
+    hd_a = HumanDelay(enabled=True)
+    hd_a.seed_delays(a)
+    hd_b = HumanDelay(enabled=True)
+    hd_b.seed_delays(b)
+    # Both keep the floor and cap regardless of spread.
+    for hd in (hd_a, hd_b):
+        d = [hd._action_delay(0.8, 1.5, 4.0) for _ in range(2000)]
+        assert min(d) >= 0.8
+        assert max(d) <= 0.8 + (4.0 - 0.8) * 4.0
+
+
+def test_action_delay_tail_mass_stays_bounded_across_personas():
+    """Over-max tail mass must stay in a tight band across the persona range.
+
+    The sigma multiplier shifts where the old max falls on the curve, so a wide
+    band would let cross-account tail mass vary enough for a per-action-class
+    likelihood-ratio test. The narrow [0.92, 1.12] band must keep P(delay>max)
+    within a human-plausible window for every account.
+    """
+    import random
+
+    from travian_api.stealth.human_delay import HumanDelay
+
+    min_s, mode_s, max_s = 0.8, 1.5, 4.0
+    random.seed(5)
+    for mult in (0.92, 1.0, 1.12):
+        hd = HumanDelay(enabled=True)
+        hd._delay_sigma_mult = mult
+        d = [hd._action_delay(min_s, mode_s, max_s) for _ in range(40000)]
+        over_max = sum(1 for x in d if x > max_s) / len(d)
+        assert 0.02 <= over_max <= 0.12

@@ -240,7 +240,17 @@ HumanTiming.micro_jitter(3.0) ->  2.55-3.45s (+-15%)
 #### HumanDelay -- Action-specific timing
 
 Used for in-game action delays. Each action type has a tuned timing profile
-using triangular distributions (min, mode, max):
+`(min, mode, max)`. Delays are drawn from a **shifted log-normal** whose shape
+is auto-derived from that profile — `min` is a soft floor, the peak sits
+exactly at `mode`, and `max` is the ~95th percentile (not a hard cutoff; a
+soft right tail continues past it, capped at 4x the span). A bounded
+*triangular* was used before, but its hard min/max cutoffs and linear ramps
+are rejectable by a KS / Anderson-Darling test against human action-time data.
+The tuned central tendency (mode) is preserved exactly, so this is a shape
+fix, not a re-tune. A per-account `seed_delays()` multiplier (`[0.92, 1.12]`
+on sigma, from the salt-bearing identity) gives each account a distinct spread
+without moving the mode. `VIDEO_TICK` stays triangular — its ~3s cadence is a
+functional ATG-signature requirement, not a stealth knob.
 
 | Action | Typical Delay | Use Case |
 |---|---|---|

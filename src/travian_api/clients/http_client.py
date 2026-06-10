@@ -183,6 +183,8 @@ class HttpClient:
             speed_factor=settings.stealth_speed,
             enabled=settings.stealth,
         )
+        # Per-account spread on the action-delay distributions, same identity.
+        self._human_delay.seed_delays(behavioral_identity)
         self._navigator = PageNavigator(
             http_client=self,
             human_delay=self._human_delay,
