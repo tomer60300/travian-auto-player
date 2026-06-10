@@ -496,3 +496,114 @@ def test_action_delay_tail_mass_stays_bounded_across_personas():
         d = [hd._action_delay(min_s, mode_s, max_s) for _ in range(40000)]
         over_max = sum(1 for x in d if x > max_s) / len(d)
         assert 0.02 <= over_max <= 0.12
+
+
+class _FixedTempo:
+    """Test double: a SessionTempo that always returns a fixed multiplier."""
+
+    def __init__(self, mult: float):
+        self.mult = mult
+
+    def current(self, now=None):
+        return self.mult
+
+
+def test_session_tempo_is_bounded_persona_stable_and_autocorrelated():
+    """Tempo must stay bounded, be persona-stable, and drift (not be iid)."""
+    import random
+
+    from travian_api.stealth.session_tempo import SessionTempo
+
+    # Persona-stable params: same identity -> same phi/sigma; distinct otherwise.
+    a1 = SessionTempo("acct-A|salt1")
+    a2 = SessionTempo("acct-A|salt1")
+    b = SessionTempo("acct-B|salt2")
+    assert (a1._phi, a1._noise_sigma) == (a2._phi, a2._noise_sigma)
+    assert (a1._phi, a1._noise_sigma) != (b._phi, b._noise_sigma)
+
+    # Neutral center: before any drift (z == 0) the multiplier is exactly 1.0.
+    assert abs(SessionTempo("acct-A|salt1").current(now=0.0) - 1.0) < 1e-12
+
+    # Within one step interval, the tempo is constant (no double-step when a
+    # HumanDelay.wait and a throttler.wait fire close together).
+    t = SessionTempo("acct-A|salt1", step_interval_s=30.0)
+    v0 = t.current(now=1000.0)
+    assert t.current(now=1001.0) == v0
+    assert t.current(now=1029.0) == v0
+
+    # Advance the walk on a 30s grid; collect a long series.
+    random.seed(123)
+    t = SessionTempo("acct-A|salt1", low=0.7, high=1.5, step_interval_s=30.0)
+    series = [t.current(now=1000.0 + i * 30.0) for i in range(3000)]
+
+    # Bounded multiplier — strictly interior (tanh squash, no clamp mass).
+    assert min(series) > 0.7
+    assert max(series) < 1.5
+    # No boundary pile-up: few samples sit near either bound (a hard clamp
+    # would create a sticky boundary regime an HMM could detect).
+    near_bound = sum(1 for v in series if v <= 0.7 * 1.02 or v >= 1.5 * 0.98) / len(series)
+    assert near_bound < 0.10
+
+    # Positive lag-1 autocorrelation (the whole point — not iid).
+    mean = sum(series) / len(series)
+    num = sum((series[i] - mean) * (series[i + 1] - mean) for i in range(len(series) - 1))
+    den = sum((x - mean) ** 2 for x in series)
+    lag1 = num / den
+    assert lag1 > 0.2
+
+
+def test_human_delay_applies_tempo_except_video_tick(monkeypatch):
+    """The action delay scales with the shared tempo; VIDEO_TICK does not."""
+    import random
+
+    from travian_api.stealth.human_delay import ActionType, HumanDelay
+
+    async def _noop(_seconds):
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _noop)
+
+    # RAPID: first call, no micro/think pause -> delay == base * tempo. Same
+    # seed gives the same base draw, so the ratio isolates the tempo factor.
+    hd_plain = HumanDelay(enabled=True)
+    random.seed(42)
+    d_plain = asyncio.run(hd_plain.wait(ActionType.RAPID))
+
+    hd_tempo = HumanDelay(enabled=True)
+    hd_tempo.set_tempo(_FixedTempo(2.0))
+    random.seed(42)
+    d_tempo = asyncio.run(hd_tempo.wait(ActionType.RAPID))
+
+    assert abs(d_tempo - 2.0 * d_plain) < 1e-9
+
+    # VIDEO_TICK ignores tempo (functional ~3s cadence).
+    hd_v = HumanDelay(enabled=True)
+    random.seed(7)
+    v_plain = asyncio.run(hd_v.wait(ActionType.VIDEO_TICK))
+    hd_v2 = HumanDelay(enabled=True)
+    hd_v2.set_tempo(_FixedTempo(2.0))
+    random.seed(7)
+    v_tempo = asyncio.run(hd_v2.wait(ActionType.VIDEO_TICK))
+    assert v_tempo == v_plain
+
+
+def test_throttler_tempo_scales_gap_but_keeps_floor(monkeypatch):
+    """A low tempo must not push the inter-request gap below the hard floor."""
+    from travian_api.stealth.throttler import RequestThrottler
+
+    slept: list[float] = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    thr = RequestThrottler(min_gap_s=1.0, max_gap_s=2.5, enabled=True)
+    thr.set_tempo(_FixedTempo(0.05))  # would push the gap far below the floor
+
+    asyncio.run(thr.wait())  # first call: records time, no gap enforced
+    asyncio.run(thr.wait())  # second call: elapsed ~0 -> a gap is enforced
+
+    # The enforced wait was floored at min_gap_s despite the tiny tempo.
+    assert slept
+    assert max(slept) >= 1.0 - 0.05

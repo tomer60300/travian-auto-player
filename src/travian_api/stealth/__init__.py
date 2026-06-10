@@ -18,6 +18,7 @@ from .noise import NoiseInjector
 from .persona import Persona, build_persona, load_persona, save_persona
 from .scheduler import ActivityScheduler
 from .session_manager import SessionManager
+from .session_tempo import SessionTempo
 from .throttler import RequestThrottler
 from .timing import HumanTiming
 from .user_agents import UserAgentRotator, get_random_ua
@@ -38,4 +39,5 @@ __all__ = [
     "HumanTiming",
     "NoiseInjector",
     "ActivityScheduler",
+    "SessionTempo",
 ]

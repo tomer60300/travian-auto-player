@@ -267,6 +267,28 @@ functional ATG-signature requirement, not a stealth knob.
 - **Periodic think pause:** Every 15-25 actions, 10-30 second idle
 - **Speed factor:** Multiply all delays by `TRAVIAN_STEALTH_SPEED`
 
+#### SessionTempo -- shared drifting tempo (stealth/session_tempo.py)
+
+The action-delay and request-gap samplers were independent within their class
+— i.e. ~iid. A real player's pace drifts over a session (warming up, tiring,
+getting distracted), so consecutive delays and gaps are positively
+**autocorrelated**. A detector separates iid synthetic timing from a human
+session tempo with a Ljung-Box / runs / lag-1 autocorrelation test (or an HMM
+likelihood-ratio over a latent tempo).
+
+`SessionTempo` is one bounded AR(1) random walk in log-space, **shared** by
+both `HumanDelay` and `RequestThrottler` (one instance per account, seeded
+from the salt-bearing identity). Each multiplies its sampled delay by the same
+current tempo, so consecutive delays and gaps drift together — positive
+short-lag correlation, without flattening either marginal (the walk is
+centered at multiplier 1.0). The latent is mapped to `[0.7, 1.5]` via a smooth
+`tanh` squash (no hard-clamp boundary mass), and the walk advances at most once
+per 30s of wall-clock so a `HumanDelay.wait()` and a `throttler.wait()` within
+one action read the same tempo instead of double-stepping. `phi` (persistence)
+and volatility are persona-stable, giving each account a steady-or-erratic
+tempo personality. The throttler re-floors after scaling (the hard min-gap is
+never violated) and `VIDEO_TICK` is excluded (functional ~3s cadence).
+
 ---
 
 ### Layer 6: Page Navigation Simulation (stealth/navigator.py)

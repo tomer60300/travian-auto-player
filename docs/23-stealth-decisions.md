@@ -377,11 +377,47 @@ instead of triangular, but still tight, mode-preserving), while
 Cost: 0 mean-time change of note (mode preserved, ~95% of mass in the same
 band). Benefit: removes the last easily-KS-rejectable per-action timing shape.
 
-**Deferred (next step):** a shared persona-stable, slowly-drifting *session
-tempo* (AR(1) in log-space) injected into both `HumanDelay` and the throttler.
-Samples are still ~iid within an action class; a server can use Ljung-Box /
-runs / lag-1 autocorrelation to distinguish independent synthetic gaps from a
-human's drifting session tempo.
+**Update (next cycle):** this was done — see "Shared session tempo" below.
+
+### Shared session tempo
+
+**Decision:** one `SessionTempo` (bounded AR(1) in log-space) is shared by
+`HumanDelay` and `RequestThrottler`; both multiply their sampled delay by the
+same current tempo.
+
+Before: each engine's samples were ~iid within their class. A real session has
+a drifting pace, so consecutive delays/gaps are positively autocorrelated; a
+Ljung-Box / runs / lag-1 autocorrelation test (or an HMM over a latent tempo)
+separates iid synthetic timing from a human. This was the last big iid
+assumption left after the per-sample shapes were fixed (cycles 1, 5).
+
+Design:
+- AR(1) latent `z_t = phi*z_{t-1} + N(0, noise_sigma)`, `phi` and `noise_sigma`
+  persona-stable (steady vs erratic tempo personality), the walk realization
+  on the global RNG.
+- The unbounded latent is mapped to `[0.7, 1.5]` by a **smooth tanh squash**
+  (asymmetric reach so `z=0` is exactly multiplier 1.0). A hard clamp was
+  rejected in review: the AR(1)'s stationary spread exceeds the window, so a
+  clamp would pile probability mass at the bounds — a sticky-regime artifact an
+  HMM / KS test on normalized gaps detects. tanh has no boundary mass.
+- The walk advances at most once per 30s of wall-clock, so a `HumanDelay.wait`
+  and the following `throttler.wait` within one action read the same tempo
+  rather than double-stepping (they share the one instance).
+- The throttler re-floors after scaling (`max(min_gap, gap*tempo)`), so the
+  hard floor is never violated. `VIDEO_TICK` is excluded (functional cadence).
+
+This couples the micro (action) and request layers with a coherent tempo
+without flattening their marginals (mean multiplier ~1.0).
+
+Cost: ~0 mean-time (centered at 1.0). Benefit: defeats lag-1 autocorrelation /
+runs / Ljung-Box / HMM iid-gap detectors.
+
+**Deferred (next step):** feed the same `SessionTempo` into the macro loop
+intervals (`HumanTiming` / build-queue / scout / farm-builder pacing) so the
+tempo drift is coherent across micro and macro timescales — closing the HMM
+inconsistency where short gaps drift but raid/build/scout cadence doesn't.
+Scope narrowly: human-controlled waits only, never server-deadline/countdown
+sleeps, retry backoffs, or ATG/video timing.
 
 ## Per-feature decisions
 

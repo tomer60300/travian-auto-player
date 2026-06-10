@@ -84,6 +84,11 @@ class HumanDelay:
         # likelihood-ratio test could cluster. The mode is unaffected (see
         # _action_delay), so the tuned central tendency is preserved per account.
         self._delay_sigma_mult = 1.0
+        self._tempo = None  # optional shared SessionTempo, set via set_tempo()
+
+    def set_tempo(self, tempo) -> None:
+        """Attach a shared SessionTempo so action delays drift with the gap."""
+        self._tempo = tempo
 
     def seed_delays(self, identity: str) -> None:
         """Bind the per-account delay-spread multiplier to a stable identity.
@@ -148,9 +153,11 @@ class HumanDelay:
         min_s, mode_s, max_s = _TIMING_PROFILES[action]
         if action == ActionType.VIDEO_TICK:
             base = random.triangular(min_s, max_s, mode_s)
+            tempo_mult = 1.0  # functional ~3s cadence must not drift
         else:
             base = self._action_delay(min_s, mode_s, max_s)
-        delay = base * self.speed_factor
+            tempo_mult = self._tempo.current() if self._tempo is not None else 1.0
+        delay = base * self.speed_factor * tempo_mult
 
         # Occasional micro-pause (5% chance): someone looked away, phone rang, etc.
         if random.random() < 0.05 and action not in (ActionType.VIDEO_TICK, ActionType.RAPID):

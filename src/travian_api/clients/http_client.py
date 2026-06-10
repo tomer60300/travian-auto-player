@@ -137,6 +137,7 @@ class HttpClient:
         from ..stealth.noise import NoiseInjector
         from ..stealth.persona import build_persona, load_persona, save_persona
         from ..stealth.scheduler import ActivityScheduler
+        from ..stealth.session_tempo import SessionTempo
         from ..stealth.throttler import RequestThrottler
         from ..stealth.user_agents import UserAgentRotator
 
@@ -185,6 +186,12 @@ class HttpClient:
         )
         # Per-account spread on the action-delay distributions, same identity.
         self._human_delay.seed_delays(behavioral_identity)
+        # One shared, slowly-drifting session tempo feeds BOTH the action-delay
+        # engine and the request throttler, so consecutive delays and gaps are
+        # positively correlated (a human session tempo) rather than iid.
+        self._session_tempo = SessionTempo(behavioral_identity)
+        self._human_delay.set_tempo(self._session_tempo)
+        self._throttler.set_tempo(self._session_tempo)
         self._navigator = PageNavigator(
             http_client=self,
             human_delay=self._human_delay,

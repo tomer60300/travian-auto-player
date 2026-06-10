@@ -62,6 +62,7 @@ class RequestThrottler:
         self._lock = asyncio.Lock()
         self._penalty_until: float = 0  # extra penalty from errors
         self._captcha_guard = None  # set via set_captcha_guard()
+        self._tempo = None  # optional shared SessionTempo, set via set_tempo()
 
         # Per-session gap-shape parameters. Drawn once per instance instead of
         # using one global constant so two accounts on the same config don't
@@ -74,6 +75,10 @@ class RequestThrottler:
     def set_captcha_guard(self, guard) -> None:
         """Attach a CaptchaGuard so requests block when captcha is active."""
         self._captcha_guard = guard
+
+    def set_tempo(self, tempo) -> None:
+        """Attach a shared SessionTempo so gaps drift with action delays."""
+        self._tempo = tempo
 
     def seed_gap_shape(self, identity: str) -> None:
         """Bind the gap-shape params to a stable identity (e.g. the persona).
@@ -136,10 +141,14 @@ class RequestThrottler:
                 now = time.monotonic()
                 self._cleanup_burst_window(now)
 
-            # Enforce minimum gap with heavy-tailed jitter
+            # Enforce minimum gap with heavy-tailed jitter, scaled by the
+            # shared session tempo (so consecutive gaps are positively
+            # correlated, not iid) but never below the hard floor.
             if self._last_request_time > 0:
                 elapsed = now - self._last_request_time
                 target_gap = self._sample_gap()
+                if self._tempo is not None:
+                    target_gap = max(self.min_gap_s, target_gap * self._tempo.current())
                 if elapsed < target_gap:
                     gap_wait = target_gap - elapsed
                     await asyncio.sleep(gap_wait)
