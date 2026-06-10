@@ -18,6 +18,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── Warm-up navigation model ───────────────────────────────────────────
+# Top-level pages a real player browses right after login. All are coherent
+# navigation targets from one another, so any transition keeps the Referer
+# chain truthful (no impossible jumps).
+_WARMUP_PAGES = ("dorf1", "dorf2", "statistiken", "spieler", "karte")
+# Pages that take a ?newdid= village selector (the global pages don't).
+_WARMUP_PAGE_TAKES_NEWDID = frozenset({"dorf1", "dorf2", "karte"})
+_WARMUP_PAGE_DESC = {
+    "dorf1": "checking resource overview",
+    "dorf2": "looking at village buildings",
+    "statistiken": "checking statistics",
+    "spieler": "checking own profile",
+    "karte": "glancing at the map",
+}
+# Pre-persona destination affinity: how commonly a page is visited at all.
+# Overviews are common landing/return targets; stats/profile are rarer. This
+# is intentionally kept realistic — a *human population* also visits overviews
+# more than profile/stats, so it is not a bot discriminator. Per-account spread
+# (the wide page-bias below) is what defeats clustering, not flattening this.
+_WARMUP_PAGE_AFFINITY = {
+    "dorf1": 1.0,
+    "dorf2": 0.9,
+    "karte": 0.5,
+    "statistiken": 0.35,
+    "spieler": 0.25,
+}
+# Base stop weight, scaled per-account by a stop bias.
+_WARMUP_STOP_BASE = 0.9
+# Absolute hard cap on extra pages after the initial dorf1 landing (a
+# per-account length cap is drawn within this).
+_WARMUP_MAX_STEPS = 7
+
 
 class PageNavigator:
     """Simulates realistic page navigation patterns.
@@ -44,30 +76,70 @@ class PageNavigator:
         self._delay = human_delay
         self.enabled = enabled
         self._current_page: Optional[str] = None
-        # Warm-up route preferences. Default from the global RNG; bound to the
-        # persona via seed_routes() so each account has a stable browsing
-        # "personality" rather than the fixed dorf1->dorf2->...->dorf1 skeleton.
+        # Warm-up navigation is a per-persona first-order Markov chain. Default
+        # from the global RNG; bound to the persona via seed_routes() so each
+        # account has a stable browsing "personality" rather than one shared
+        # deterministic (or shared-distribution) route.
         self._init_route_prefs(random)
 
     def _init_route_prefs(self, rng: "random.Random") -> None:
-        """Set per-persona warm-up route probabilities from ``rng``.
+        """Build the per-persona warm-up transition matrix from ``rng``.
 
-        These are stable for one account (seeded from the persona) and differ
-        between accounts, so a detector clustering warm-up routes by n-gram /
-        Markov-transition frequency sees a distinct-but-internally-consistent
-        profile per account instead of one shared deterministic sequence. The
-        per-call *realization* still varies (sampled from the global RNG in
-        ``warm_up``); only the underlying distribution is persona-stable.
+        ``_route_transitions[from_page]`` is a probability distribution over
+        the next page (or ``None`` = stop). To defeat *cross-account* clustering
+        (transition-count chi-square / likelihood-ratio, route-length KS,
+        edit-distance), each account draws several persona-stable behavioral
+        motifs, giving the population a broad mixture rather than one shared
+        curve:
+
+        - a wide per-page *bias* (a coherent browsing "personality": this
+          account may favor the map, another may favor profiles);
+        - a small *self-loop* tendency, so reloading the current page is
+          possible — a hard-zero diagonal is itself a regularity humans lack;
+        - a *stop bias* and a per-account *max length*, so route lengths form a
+          broad family, not one shared length distribution.
+
+        The per-call realization still varies (sampled from the global RNG in
+        ``warm_up``); only these motifs are persona-stable.
         """
-        self._route_p_dorf2 = rng.uniform(0.65, 0.95)
-        self._route_p_stats = rng.uniform(0.05, 0.35)
-        self._route_p_profile = rng.uniform(0.03, 0.20)
-        self._route_p_map = rng.uniform(0.10, 0.40)
-        self._route_p_end_dorf2 = rng.uniform(0.20, 0.50)
+        # Coherent per-account page personality (wide prior) + reload tendency,
+        # stop bias, and browse-length cap.
+        page_bias = {p: rng.uniform(0.2, 2.5) for p in _WARMUP_PAGES}
+        self_loop_bias = rng.uniform(0.02, 0.30)  # floored: a reload is always possible
+        stop_bias = rng.uniform(0.4, 2.2)
+        self._route_max_steps = rng.randint(4, _WARMUP_MAX_STEPS)
+
+        self._route_transitions: dict[str, dict[Optional[str], float]] = {}
+        for frm in _WARMUP_PAGES:
+            weights: dict[Optional[str], float] = {}
+            for to in _WARMUP_PAGES:
+                weight = _WARMUP_PAGE_AFFINITY[to] * page_bias[to] * rng.uniform(0.6, 1.4)
+                if to == frm:
+                    weight *= self_loop_bias  # rare reload, not a structural zero
+                weights[to] = weight
+            weights[None] = _WARMUP_STOP_BASE * stop_bias  # persona browse length
+            total = sum(weights.values())
+            self._route_transitions[frm] = {k: v / total for k, v in weights.items()}
 
     def seed_routes(self, identity: str) -> None:
-        """Bind warm-up route preferences to a stable persona identity."""
+        """Bind the warm-up transition matrix to a stable persona identity."""
         self._init_route_prefs(random.Random(identity))
+
+    def _next_route_step(self, current: str) -> Optional[str]:
+        """Sample the next warm-up page (or None=stop) from the global RNG."""
+        r = random.random()
+        cumulative = 0.0
+        target: Optional[str] = None
+        for target, prob in self._route_transitions[current].items():
+            cumulative += prob
+            if r < cumulative:
+                return target
+        return target  # numerical-tail fallback: last item (often stop)
+
+    @staticmethod
+    def _warmup_page_path(page: str, newdid: str) -> str:
+        suffix = newdid if page in _WARMUP_PAGE_TAKES_NEWDID else ""
+        return f"/{page}.php{suffix}"
 
     @property
     def current_page(self) -> Optional[str]:
@@ -92,38 +164,23 @@ class PageNavigator:
         logger.debug("Running post-login warm-up sequence")
         newdid = f"?newdid={village_id}" if village_id else ""
 
-        # 1. Resource overview (dorf1) — the landing page after login. Always
-        #    visited so we never "login -> immediate API blast".
+        # Always land on dorf1 first (the post-login landing page) so we never
+        # "login -> immediate API blast". From there, walk a per-persona
+        # first-order Markov chain over top-level pages: each step's next page
+        # (or stop) is drawn from this account's stable transition matrix, so
+        # both the visited set AND the transition structure are persona-
+        # specific and vary per call — no single n-gram / Markov signature is
+        # shared across accounts. All pages are coherent navigation targets, so
+        # the Referer chain stays truthful, and the walk is bounded.
         await self._visit(f"/dorf1.php{newdid}", "checking resource overview after login")
 
-        # 2. Persona-weighted curiosity: include each candidate with this
-        #    account's stable probability, then visit the chosen subset in a
-        #    randomized order. This breaks the old fixed skeleton — dorf2 is no
-        #    longer always second, the optional pages are no longer globally
-        #    20%/10%, and the order varies — so the warm-up has no single
-        #    deterministic n-gram/Markov signature shared across accounts. All
-        #    candidates are top-level pages, so the Referer chain stays coherent
-        #    (no impossible direct jumps).
-        candidates = [
-            (f"/dorf2.php{newdid}", "looking at village buildings", self._route_p_dorf2),
-            ("/statistiken.php", "checking statistics", self._route_p_stats),
-            ("/spieler.php", "checking own profile", self._route_p_profile),
-            (f"/karte.php{newdid}", "glancing at the map", self._route_p_map),
-        ]
-        chosen = [(path, desc) for path, desc, prob in candidates if random.random() < prob]
-        random.shuffle(chosen)
-        for path, desc in chosen:
-            await self._visit(path, desc)
-
-        # 3. Settle on a home view (persona-weighted dorf1 vs dorf2), skipping a
-        #    redundant reload if we're already there.
-        end_page = (
-            f"/dorf2.php{newdid}"
-            if random.random() < self._route_p_end_dorf2
-            else f"/dorf1.php{newdid}"
-        )
-        if self._current_page != end_page:
-            await self._visit(end_page, "settling on home view")
+        current = "dorf1"
+        for _ in range(self._route_max_steps):
+            nxt = self._next_route_step(current)
+            if nxt is None:
+                break  # this account's browse ended here
+            await self._visit(self._warmup_page_path(nxt, newdid), _WARMUP_PAGE_DESC[nxt])
+            current = nxt
         logger.debug("Warm-up sequence complete")
 
     async def navigate_to_resource_field(

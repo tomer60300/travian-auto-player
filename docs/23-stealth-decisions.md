@@ -235,11 +235,43 @@ isn't reset).
 Cost: 0 — same number of warm-up page loads in expectation; the salt is a
 local-only field.
 
-**Deferred (next step):** replace the independent-Bernoulli subset sampling
-with a persona-stable first-order Markov transition matrix (bounded path
-length), so the *transition structure* varies per account too, not just the
-visited set. Validate against transition-count chi-square / likelihood-ratio,
-route-length KS, and edit-distance clustering.
+**Update (next cycle):** the independent-Bernoulli subset was replaced with
+a **persona-stable first-order Markov transition matrix** (see below).
+
+### Warm-up Markov chain
+
+**Decision:** `warm_up()` walks a per-persona first-order Markov chain over
+the top-level pages instead of choosing an independent subset.
+
+The Bernoulli-subset version varied *which* pages an account visited, but the
+transition structure and route-length distribution were shared across
+accounts — still clusterable by transition-count chi-square / likelihood-ratio
+and route-length KS. The chain makes the *structure* persona-specific too.
+
+Per account (seeded from the salt-bearing identity), drawn once:
+- a wide per-page **bias** `uniform(0.2, 2.5)` applied across all from-states
+  — a coherent browsing personality, so the population transition profile is
+  a broad mixture rather than one tight shared curve;
+- a **self-loop** weight `uniform(0.02, 0.30)` (floored positive) so reloads
+  are possible — a hard-zero diagonal is itself a regularity a transition
+  chi-square catches, since humans do reload;
+- a **stop bias** `uniform(0.4, 2.2)` and a per-account **length cap**
+  `randint(4, 7)`, so route lengths form a broad family.
+
+The base page affinity (overviews > profile/stats) is kept realistic: a human
+population also favors overviews, so the aggregate is not a bot discriminator
+— per-account *spread* is what defeats clustering. The walk always starts on
+dorf1 (anti-blast anchor), every page is a coherent navigation target (Referer
+stays truthful), and the path is bounded. The per-call realization varies; the
+matrix is persona-stable.
+
+Cost: 0 — same order of magnitude of warm-up page loads, just structured as a
+walk.
+
+**Deferred (next step):** apply the same Markov treatment to mid-session
+`idle_browse` / `NoiseInjector` navigation, and revisit the triangular
+`HumanDelay` action-class profiles (KS / Anderson-Darling rejectable; highest
+statistical power since they are sampled on every action).
 
 ### Heavy-tailed timing
 

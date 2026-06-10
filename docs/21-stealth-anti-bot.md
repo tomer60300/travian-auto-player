@@ -264,28 +264,38 @@ using triangular distributions (min, mode, max):
 Before performing an action, the navigator loads the pages a real player would
 visit. This creates realistic traffic patterns instead of direct API-only access.
 
-**Post-login warm-up (persona-weighted, variable):**
+**Post-login warm-up (persona-stable first-order Markov walk):**
 ```
 Login -> dorf1.php (always; prevents "login -> immediate API blast")
-  -> persona-weighted subset of {dorf2, statistiken, spieler, karte},
-     visited in randomized order
-  -> settle on a persona-weighted home view (dorf1 or dorf2)
+  -> Markov walk over {dorf1, dorf2, statistiken, spieler, karte}:
+     each step draws the next page (or STOP) from this account's stable
+     transition matrix; bounded to a per-account length cap
 ```
 The warm-up used to be a fixed skeleton (`dorf1 -> dorf2 -> [20%] -> [10%]
--> dorf1`) with the same transitions every session. That is trivially
-clustered across accounts by an n-gram / first-order Markov-transition
-chi-square or edit-distance test: every session began `dorf1 -> dorf2`
-(transition prob ~1.0) and ended `-> dorf1` (prob 1.0).
+-> dorf1`) with the same transitions every session — trivially clustered by
+an n-gram / Markov-transition chi-square or edit-distance test. An interim
+version randomized the visited *set* per account (independent Bernoulli),
+but the transition *structure* and route lengths were still shared across
+accounts.
 
-Now each account has a **stable browsing personality**: per-page inclusion
-probabilities (`dorf2` 0.65–0.95, `statistiken` 0.05–0.35, `spieler`
-0.03–0.20, `karte` 0.10–0.40) and an end-page bias are seeded once from the
-persona (`seed_routes`), so they are stable across that account's restarts
-but differ between accounts. The per-call realization (which pages, in what
-order) still varies. All candidates are top-level pages, so the Referer
-chain stays coherent. (Deferred: a persona-stable first-order Markov policy
-with bounded path length, which would also vary the transition structure,
-not just the visited set.)
+Now the walk is a **per-persona first-order Markov chain**. Each account
+draws stable behavioral motifs from its (salt-bearing) identity:
+- a wide per-page **bias** (`uniform(0.2, 2.5)`) — a coherent browsing
+  personality (one account favors the map, another profiles), so the
+  population is a broad mixture, not one shared transition profile;
+- a small **self-loop** tendency (reloading the current page is possible —
+  a hard-zero diagonal is itself a regularity humans lack);
+- a **stop bias** and a per-account **length cap** (`randint(4, 7)`), so
+  route lengths form a broad family rather than one shared distribution.
+
+The base page affinity (overviews > profile/stats) is kept realistic on
+purpose: a *human* population also favors overviews, so the aggregate is not
+a bot discriminator — per-account spread is what defeats transition-count
+chi-square / likelihood-ratio, route-length KS, and edit-distance clustering.
+The per-call realization still varies (sampled from the global RNG); only
+the matrix is persona-stable. All pages are coherent navigation targets, so
+the Referer chain stays truthful. (Deferred: same Markov treatment for
+mid-session `idle_browse` / noise navigation.)
 
 **Behavioral salt:** the persona carries a persisted per-account random
 `salt` (`secrets.token_hex(8)`, never sent to the server). It is folded into

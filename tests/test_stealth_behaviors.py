@@ -315,46 +315,46 @@ class _RecordingHttp:
         return "<html></html>"
 
 
-def test_warmup_route_prefs_are_persona_stable_and_distinct():
-    """Warm-up route preferences must be stable per account, distinct across.
+def test_warmup_transition_matrix_is_persona_stable_and_distinct():
+    """The warm-up Markov matrix must be stable per account, distinct across.
 
-    A fixed warm-up skeleton (or pure per-call randomness, which makes every
-    account's route distribution identical) is clusterable. Persona-seeded
-    preferences give each account a stable-but-distinct browsing profile.
+    A fixed skeleton (or pure per-call randomness, which makes every account's
+    transition distribution identical) is clusterable by transition-count
+    chi-square. A persona-seeded matrix gives each account a stable-but-distinct
+    chain. Each row is a valid probability distribution (sums to 1, includes a
+    stop outcome and a small self-loop — a hard-zero diagonal is itself a tell).
     """
     from travian_api.stealth.human_delay import HumanDelay
-    from travian_api.stealth.navigator import PageNavigator
+    from travian_api.stealth.navigator import _WARMUP_MAX_STEPS, _WARMUP_PAGES, PageNavigator
 
-    def prefs(identity: str) -> tuple[float, ...]:
+    def nav_for(identity: str) -> PageNavigator:
         nav = PageNavigator(_RecordingHttp(), HumanDelay(enabled=False), enabled=True)
         nav.seed_routes(identity)
-        return (
-            nav._route_p_dorf2,
-            nav._route_p_stats,
-            nav._route_p_profile,
-            nav._route_p_map,
-            nav._route_p_end_dorf2,
-        )
+        return nav
 
-    a = "Chrome/133|en-US|https://ts2.x1.europe.travian.com"
-    b = "Chrome/131|de-DE|https://ts1.x1.travian.de"
+    a = "Chrome/133|en-US|https://ts2.x1.europe.travian.com|saltAAAA"
+    b = "Chrome/131|de-DE|https://ts1.x1.travian.de|saltBBBB"
 
-    assert prefs(a) == prefs(a)  # stable across restarts
-    assert prefs(a) != prefs(b)  # distinct across accounts
-    p_dorf2, p_stats, p_profile, p_map, p_end = prefs(a)
-    assert 0.65 <= p_dorf2 <= 0.95
-    assert 0.05 <= p_stats <= 0.35
-    assert 0.03 <= p_profile <= 0.20
-    assert 0.10 <= p_map <= 0.40
-    assert 0.20 <= p_end <= 0.50
+    assert nav_for(a)._route_transitions == nav_for(a)._route_transitions  # stable
+    assert nav_for(a)._route_transitions != nav_for(b)._route_transitions  # distinct
+
+    nav = nav_for(a)
+    for frm in _WARMUP_PAGES:
+        row = nav._route_transitions[frm]
+        assert abs(sum(row.values()) - 1.0) < 1e-9  # valid distribution
+        assert None in row  # a stop outcome exists
+        # Self-loop is present (no structural zero) but a minority outcome.
+        assert frm in row and 0.0 <= row[frm] < 0.5
+    # Per-account browse-length cap is within the absolute bound.
+    assert 4 <= nav._route_max_steps <= _WARMUP_MAX_STEPS
 
 
-def test_warmup_route_is_varied_and_coherent():
-    """Warm-up must not emit one fixed sequence, and never an impossible jump."""
+def test_warmup_route_is_varied_bounded_and_coherent():
+    """Warm-up must vary, stay bounded, and never make an impossible jump."""
     import random
 
     from travian_api.stealth.human_delay import HumanDelay
-    from travian_api.stealth.navigator import PageNavigator
+    from travian_api.stealth.navigator import _WARMUP_MAX_STEPS, PageNavigator
 
     allowed = {"/dorf1.php", "/dorf2.php", "/statistiken.php", "/spieler.php", "/karte.php"}
 
@@ -365,13 +365,15 @@ def test_warmup_route_is_varied_and_coherent():
     for _ in range(n):
         http = _RecordingHttp()
         nav = PageNavigator(http, HumanDelay(enabled=False), enabled=True)
-        nav.seed_routes("Chrome/133|en-US|https://ts2.x1.europe.travian.com")
+        nav.seed_routes("Chrome/133|en-US|https://ts2.x1.europe.travian.com|saltAAAA")
         asyncio.run(nav.warm_up(village_id=7))
 
         seq = tuple(http.urls)
         sequences.append(seq)
         # Always lands on dorf1 first (no login -> immediate API blast).
         assert seq[0].startswith("/dorf1.php")
+        # Bounded: initial dorf1 + at most _WARMUP_MAX_STEPS more pages.
+        assert 1 <= len(seq) <= 1 + _WARMUP_MAX_STEPS
         # Every visited page is a coherent top-level page (no impossible jump).
         for url in seq:
             assert url.split("?")[0] in allowed
@@ -380,5 +382,5 @@ def test_warmup_route_is_varied_and_coherent():
 
     # The skeleton is no longer fixed — many distinct sequences appear.
     assert len(set(sequences)) > 10
-    # dorf2 is visited often (persona-weighted high) but NOT every time.
+    # dorf2 is visited often but NOT every time.
     assert 0 < dorf2_present < n
