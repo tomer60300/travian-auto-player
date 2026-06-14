@@ -98,6 +98,7 @@ async def _stagger_account_build(http_client: HttpClient) -> None:
         await asyncio.sleep(stagger)
     _last_account_build_action_ts[key] = time.monotonic()
 
+
 logger = get_logger(__name__)
 
 
@@ -996,12 +997,17 @@ class BuildQueueService:
                 # the second is a transient Travian-state issue, the first is
                 # an economic wait. A real player who can't afford a build
                 # plans and returns later; they don't poll every 30s.
+                # Each branch produces the FINAL wait (with its own heavy-tail
+                # where wanted); the sleep below only applies session-tempo
+                # drift. Do NOT wrap wait_s in HumanTiming.delay() at the sleep
+                # — the resource branch already sampled a heavy-tailed value, so
+                # a second delay() there compounded into 45+ min frozen pauses.
                 if any_no_checksum and not any_resource_short:
                     reason = (
                         f"Priority {next_prio}: build page returned no upgrade URL "
                         "(rally-point tab default, maxed building, or stale session)"
                     )
-                    wait_s = float(poll_interval_s)
+                    wait_s = HumanTiming.delay(float(poll_interval_s))
                 elif any_resource_short and not any_no_checksum:
                     reason = f"Insufficient resources for priority {next_prio} items"
                     # Planner pause: heavy-tailed wait centered on ~3 min,
@@ -1015,8 +1021,8 @@ class BuildQueueService:
                         wait_s = float(poll_interval_s)
                 else:
                     reason = f"No items completed for priority {next_prio}"
-                    wait_s = float(poll_interval_s)
+                    wait_s = HumanTiming.delay(float(poll_interval_s))
                 self._report(f"{reason}. Waiting {wait_s:.0f}s...")
-                await asyncio.sleep(HumanTiming.delay(self.http_client.tempo_scale(wait_s)))
+                await asyncio.sleep(self.http_client.tempo_scale(wait_s))
 
         return all_results
