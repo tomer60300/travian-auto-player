@@ -360,7 +360,7 @@ def _parse_oasis_bonus_html(html: str) -> str:
 # the recon, even if the calls fan out via `asyncio.gather` etc.
 # Concurrent operations on the same AutoScoutService instance see
 # independent values without racing on shared state.
-_recon_context: contextvars.ContextVar[Optional["HttpClient"]] = contextvars.ContextVar(
+_recon_context: contextvars.ContextVar[Optional[HttpClient]] = contextvars.ContextVar(
     "auto_scout_recon_client", default=None,
 )
 
