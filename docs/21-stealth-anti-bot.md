@@ -390,21 +390,25 @@ injector adds random non-functional browsing between bot operations:
 
 - **Default rate:** 15% chance per action cycle
 - Between each farm send, build check, or scout operation, there is a chance
-  the bot will visit a page. The page is **persona-weighted**, not a flat
-  `random.choice`: `idle_browse` draws from the same per-account page
-  personality (`_route_page_bias` × base affinity) that `warm_up` uses, so each
-  account's idle-page distribution is distinct and internally consistent. A
-  flat pick is identical across the fleet and clusterable by a visit-frequency
-  chi-square / G-test; the realistic base affinity (overviews > profile/stats)
-  keeps the aggregate human-like.
+  the bot will visit a page. The page is chosen by a **first-order Markov
+  step** over the same per-account transition matrix `warm_up` uses: when the
+  current page is a known top-level page, `idle_browse` transitions via
+  `_next_idle_page` (falling back to the persona-weighted marginal otherwise).
+  This makes idle browsing both account-distinct (defeating a visit-frequency
+  chi-square) AND structurally consistent with warm-up (so idle transitions
+  aren't memoryless while warm-up's aren't — no transition-count mismatch). The
+  realistic base affinity (overviews > profile/stats) keeps the aggregate
+  human-like.
 - **Session breaks:** Simulates AFK periods (2-10 minutes of silence, then a
   mini warm-up when resuming)
 
-> Known limitation (deferred): the per-cycle noise *trigger* is still an
-> independent Bernoulli draw, so inter-noise gaps are geometric (testable by
-> KS/chi-square vs geometric, runs, Ljung-Box on the event indicator). A
-> persona-stable renewal/hazard process with a refractory period is the next
-> step.
+> Note: the per-cycle noise *trigger* is an independent Bernoulli draw (so
+> inter-noise gaps are geometric in principle), but adversarial review found
+> this is **not wire-observable** — the noise visits draw from the same Markov
+> page chain as real navigation, so the server can't isolate a "noise stream"
+> to test, and the observable request timing is already AR(1)-correlated by
+> SessionTempo. Treated as contested/low-value (see docs/23). The real deferred
+> item is a day-scale circadian drift for break/session durations.
 
 The noise injector is automatically called between iterations in:
 - Build queue polling (build_queue_service.py)
@@ -427,6 +431,11 @@ Prevents 24/7 activity patterns that trigger Multihunter investigations:
 
 The scheduler is checked before each automation cycle in the build queue and
 farm list services. When limits are hit, the bot takes a break automatically.
+The break **durations** are drawn from `random.triangular` (night
+`(6,9,7)`h, long `(1,3,1.8)`h, short `min_break + (0,10,3)`min), not
+`random.uniform` — so the break-length histogram tapers at its edges instead
+of showing the flat support a KS test rejects (the same anti-uniform reasoning
+as the caps below).
 
 The daily-hours and continuous-session limits above are **hard safety
 ceilings** that are never exceeded. The scheduler does not stop at exactly

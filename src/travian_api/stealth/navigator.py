@@ -145,6 +145,28 @@ class PageNavigator:
         suffix = newdid if page in _WARMUP_PAGE_TAKES_NEWDID else ""
         return f"/{page}.php{suffix}"
 
+    @staticmethod
+    def _page_key(path: Optional[str]) -> Optional[str]:
+        """Map a visited path back to a warm-up page key, or None if it isn't one."""
+        if not path:
+            return None
+        base = path.split("?", 1)[0].lstrip("/")
+        name = base[:-4] if base.endswith(".php") else base
+        return name if name in _WARMUP_PAGES else None
+
+    def _next_idle_page(self, current: str) -> str:
+        """First-order Markov transition to the next idle page (excludes stop).
+
+        Reuses the persona transition matrix so idle browsing has the same
+        transition structure as warm_up — otherwise idle transitions look
+        memoryless while warm-up transitions don't, an inconsistency a
+        first-order-Markov likelihood-ratio test could exploit.
+        """
+        row = self._route_transitions[current]
+        pages = [p for p in row if p is not None]
+        weights = [row[p] for p in pages]
+        return random.choices(pages, weights=weights, k=1)[0]
+
     @property
     def current_page(self) -> Optional[str]:
         return self._current_page
@@ -328,9 +350,16 @@ class PageNavigator:
             return
 
         newdid = f"?newdid={village_id}" if village_id else ""
-        pages = list(_WARMUP_PAGES)
-        weights = [_WARMUP_PAGE_AFFINITY[p] * self._route_page_bias[p] for p in pages]
-        page = random.choices(pages, weights=weights, k=1)[0]
+        # If we're on a known top-level page, take a first-order Markov step
+        # (same chain as warm_up). Otherwise fall back to the persona-weighted
+        # marginal so the page is still account-distinct, not fleet-uniform.
+        current = self._page_key(self._current_page)
+        if current is not None:
+            page = self._next_idle_page(current)
+        else:
+            pages = list(_WARMUP_PAGES)
+            weights = [_WARMUP_PAGE_AFFINITY[p] * self._route_page_bias[p] for p in pages]
+            page = random.choices(pages, weights=weights, k=1)[0]
         await self._visit(
             self._warmup_page_path(page, newdid), f"idle browsing: {_WARMUP_PAGE_DESC[page]}"
         )

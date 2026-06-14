@@ -459,6 +459,43 @@ signal.
 
 Cost: 0. Benefit: removes a fleet-uniform mid-session navigation fingerprint.
 
+### Idle browsing as a first-order Markov chain
+
+**Decision:** `idle_browse()` conditions the next idle page on the current one
+via the warm-up transition matrix, instead of an unconditional marginal draw.
+
+The cycle-8 marginal made idle transitions *memoryless* while `warm_up`'s are
+first-order Markov — an inconsistency a transition-count likelihood-ratio test
+could exploit (idle and warm-up are the same browser/account but show
+different transition structure). Now, when `_current_page` maps to a known
+top-level page (`_page_key`), `idle_browse` takes a Markov step via
+`_next_idle_page` (the persona `_route_transitions` row, excluding the stop
+outcome, renormalized over pages); otherwise it falls back to the marginal so
+the page is still account-distinct. Since `_visit` records `_current_page`,
+consecutive idle visits form a chain with the same transition signature as
+warm-up.
+
+Cost: 0. Benefit: idle and warm-up navigation now share one transition
+structure — no idle-vs-warmup memorylessness tell.
+
+### Break durations: triangular, not uniform
+
+**Decision:** `ActivityScheduler.next_break_duration()` draws all three break
+branches (night, long, short) from `random.triangular` instead of
+`random.uniform`.
+
+This is the *live* break mechanism (the dead `NoiseInjector.session_break`
+uniform was a red herring — zero callers). Uniform break durations have flat,
+sharp-edged support a KS test flags; the same file already switched the
+continuous-session caps to triangular for exactly this reason (the code even
+comments on it), so the breaks using uniform was an internal inconsistency.
+Modes: night `triangular(6,9,7)`, long `triangular(1,3,1.8)`, short-extra
+`triangular(0,10,3)` (skewed low — most breaks short). Same support, density
+tapers at the edges.
+
+Cost: 0 (same bounds). Benefit: break-duration histogram no longer has the
+flat support a KS test rejects.
+
 ### On feeding SessionTempo into break/session durations (rejected)
 
 The queued idea of scaling the activity scheduler's break/session durations by
@@ -470,11 +507,20 @@ would just add another multiplicative jitter the durations already have).
 Coherent session-scale drift needs a **separate day-scale process** (circadian
 / session persistence across hours), which is the real deferred item.
 
-**Deferred (next steps):** (1) make `maybe_inject_noise`'s trigger non-iid —
-the per-cycle Bernoulli leaves geometric inter-noise gaps (KS/chi-square vs
-geometric, runs, Ljung-Box on the indicator); replace with a persona-stable
-renewal/hazard process with a refractory period. (2) a day-scale circadian /
-session drift for break & session durations.
+**On `maybe_inject_noise`'s iid Bernoulli trigger (contested).** A finder
+flagged the geometric inter-noise gaps as a tell, but Heavy-Cycle adversarial
+verification **rejected** it as not wire-observable: the injected noise visits
+draw from the *same* persona pages (now the same Markov chain) as genuine
+navigation, so the server can't label a "noise stream" to test its gap
+distribution; the internal `_actions_since_noise` counter never reaches the
+wire; and the observable request timing is already governed by the
+HumanDelay+throttler+AR(1) tempo (positive autocorrelation, not iid). Codex (as
+bounded reviewer, without the verify context) still suggests it — kept as
+contested, low-confidence, not a priority until someone shows the noise stream
+is actually separable.
+
+**Deferred (real next step):** a day-scale circadian / session drift for break
+& session durations (a separate slow process — the 30s tempo can't supply it).
 
 ## Per-feature decisions
 

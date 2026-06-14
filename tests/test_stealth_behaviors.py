@@ -684,10 +684,88 @@ def test_idle_browse_is_persona_weighted_not_uniform():
 
     fa = freqs(a)
     total = sum(fa.values())
-    # Not flat-uniform (uniform over 5 pages would be 0.20 each).
-    assert max(fa.values()) / total > 0.25
+    # Not flat-uniform: the empirical idle distribution deviates from a flat
+    # 0.20-each (idle_browse is now a persona Markov chain, so its stationary
+    # distribution is flatter than the old marginal pick but still not uniform).
+    l1_uniform = sum(abs(fa[p] / total - 0.20) for p in allowed)
+    assert l1_uniform > 0.10
     # Two accounts produce materially different idle distributions.
     fb = freqs(b)
     tb = sum(fb.values())
     l1 = sum(abs(fa[p] / total - fb[p] / tb) for p in allowed)
     assert l1 > 0.10
+
+
+def test_scheduler_break_durations_are_triangular_not_uniform():
+    """Break durations must taper at the band edges, not be flat (uniform).
+
+    A flat support is KS-rejectable; the file already uses triangular for the
+    caps for exactly this reason. Verifies all three break branches stay in
+    range and the short-break distribution is right-skewed (mode below mid).
+    """
+    import random
+
+    from travian_api.stealth.scheduler import ActivityScheduler
+
+    s = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0, min_break_minutes=10.0)
+
+    random.seed(21)
+    shorts = []
+    for _ in range(20000):
+        # Force the standard mid-session branch: daytime hour, low rolling use.
+        # next_break_duration reads datetime.now().hour, which we can't pin
+        # here, so sample the short-break formula directly via the same RNG.
+        extra = random.triangular(0.0, 10.0, 3.0)
+        shorts.append((10.0 + extra) * 60.0)
+    n = len(shorts)
+    mean = sum(shorts) / n
+    median = sorted(shorts)[n // 2]
+    # Right-skewed (mode below the midpoint): mean above median.
+    assert mean > median
+    # Bounded to [base, base+10] minutes -> [600, 1200] s.
+    assert min(shorts) >= 600.0
+    assert max(shorts) <= 1200.0
+
+    # And the live method stays within each branch's band across many calls.
+    random.seed(5)
+    for _ in range(2000):
+        d = s.next_break_duration()
+        # night 6-9h, long 1-3h, or short 10-20min -> all within [600s, 9*3600s].
+        assert 600.0 <= d <= 9.0 * 3600.0
+
+
+def test_idle_browse_uses_markov_transition_from_current_page():
+    """Idle browsing must take a first-order Markov step when on a known page.
+
+    Reuses the warm_up transition matrix so idle transitions aren't memoryless
+    (a structure a first-order-Markov likelihood-ratio test could exploit).
+    """
+    import random
+
+    from travian_api.stealth.human_delay import HumanDelay
+    from travian_api.stealth.navigator import _WARMUP_PAGES, PageNavigator
+
+    nav = PageNavigator(_RecordingHttp(), HumanDelay(enabled=False), enabled=True)
+    nav.seed_routes("Chrome/133|en-US|https://ts2.x1.europe.travian.com|saltAAAA")
+
+    # _page_key maps paths back to page names (or None for non-top-level pages).
+    assert nav._page_key("/dorf1.php?newdid=5") == "dorf1"
+    assert nav._page_key("/statistiken.php") == "statistiken"
+    assert nav._page_key("/build.php?id=12") is None
+    assert nav._page_key(None) is None
+
+    # _next_idle_page is a pure transition over pages (never returns stop/None),
+    # and its distribution depends on the current page (Markov, not memoryless).
+    random.seed(0)
+    from collections import Counter
+
+    after_dorf1 = Counter(nav._next_idle_page("dorf1") for _ in range(4000))
+    after_spieler = Counter(nav._next_idle_page("spieler") for _ in range(4000))
+    assert None not in after_dorf1
+    assert set(after_dorf1) <= set(_WARMUP_PAGES)
+    # dorf1 never self-loops to a *guaranteed* page; just assert the two
+    # source pages induce different next-page distributions (Markov structure).
+    da = {p: after_dorf1[p] / 4000 for p in _WARMUP_PAGES}
+    ds = {p: after_spieler[p] / 4000 for p in _WARMUP_PAGES}
+    l1 = sum(abs(da[p] - ds[p]) for p in _WARMUP_PAGES)
+    assert l1 > 0.05

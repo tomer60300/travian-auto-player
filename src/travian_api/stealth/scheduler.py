@@ -358,21 +358,26 @@ class ActivityScheduler:
         hour = datetime.now().hour
         rolling_hours = self._rolling_24h_seconds() / 3600.0
 
+        # Triangular (not uniform) so the duration histogram tapers to zero at
+        # the band edges instead of showing the flat support a KS test flags —
+        # the same anti-uniform reasoning the continuous-session caps use
+        # (see _sample_continuous_cap).
+
         # Night break: if it's late, take a long rest
         if hour >= 23 or hour < 6:
-            duration_h = random.uniform(6.0, 9.0)
+            duration_h = random.triangular(6.0, 9.0, 7.0)
             logger.info("Night break: sleeping %.1fh", duration_h)
             return duration_h * 3600.0
 
         # Rolling limit approaching (>85% used): longer break
         if rolling_hours >= self.max_daily_hours * 0.85:
-            duration_h = random.uniform(1.0, 3.0)
+            duration_h = random.triangular(1.0, 3.0, 1.8)
             logger.info("Long break (rolling limit near): %.1fh", duration_h)
             return duration_h * 3600.0
 
-        # Standard mid-session break
+        # Standard mid-session break (mode skewed low — most breaks are short)
         base_minutes = self.min_break_minutes
-        extra_minutes = random.uniform(0.0, 10.0)
+        extra_minutes = random.triangular(0.0, 10.0, 3.0)
         duration_s = (base_minutes + extra_minutes) * 60.0
         logger.info("Short break: %.0f minutes", duration_s / 60)
         return duration_s
