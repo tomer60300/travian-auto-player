@@ -72,6 +72,18 @@ class ActivityScheduler:
         self._last_save_time: float = 0.0
         self._save_throttle_s: float = 30.0
 
+        # Per-account circadian phase + night-break duration. Defaults match the
+        # legacy fixed behavior; seed_circadian() binds them to the persona.
+        # This was the ONLY stealth component not seeded with behavioral_identity
+        # — so a multi-account fleet on one host shared an identical night-rest
+        # window (hard 23:00-06:00) and wake-duration distribution, a
+        # cross-account circadian-phase + wake-CDF collision a detector clusters
+        # (per-account 24h periodicity alone is human-like; the synchronized
+        # phase across accounts is the tell).
+        self._night_start_hour = 23.0
+        self._night_end_hour = 6.0
+        self._night_break_band = (6.0, 9.0, 7.0)
+
         # Effective caps: jittered at-or-below the configured hard ceilings so
         # the actual stop point varies instead of landing on the exact same
         # round number every time. Without this, every session that hits the
@@ -133,6 +145,22 @@ class ActivityScheduler:
 
     def _daily_cap_band(self) -> tuple[float, float]:
         return (self.max_daily_hours * self._DAILY_CAP_LO_FRAC, self.max_daily_hours)
+
+    def seed_circadian(self, identity: str) -> None:
+        """Bind night-rest phase + wake duration to a stable persona identity.
+
+        Each account gets its own night window (start in [22,24), end in [5,8))
+        and its own wake-duration triangular band, so accounts on one host no
+        longer share a synchronized night phase or an identical wake-time CDF.
+        Stable across restarts (derived from the persona), distinct per account.
+        """
+        rng = random.Random(identity)
+        self._night_start_hour = rng.uniform(22.0, 24.0)
+        self._night_end_hour = rng.uniform(5.0, 8.0)
+        lo = rng.uniform(5.5, 6.5)
+        hi = rng.uniform(8.5, 9.5)
+        mode = rng.uniform(lo + 0.5, hi - 0.5)
+        self._night_break_band = (lo, hi, mode)
 
     def _sample_continuous_cap(self) -> float:
         """Effective continuous-session cap, jittered below the hard ceiling.
@@ -355,7 +383,8 @@ class ActivityScheduler:
         if not self.enabled:
             return 0.0
 
-        hour = datetime.now().hour
+        now = datetime.now()
+        hour = now.hour + now.minute / 60.0  # fractional, for per-account phase
         rolling_hours = self._rolling_24h_seconds() / 3600.0
 
         # Triangular (not uniform) so the duration histogram tapers to zero at
@@ -363,9 +392,12 @@ class ActivityScheduler:
         # the same anti-uniform reasoning the continuous-session caps use
         # (see _sample_continuous_cap).
 
-        # Night break: if it's late, take a long rest
-        if hour >= 23 or hour < 6:
-            duration_h = random.triangular(6.0, 9.0, 7.0)
+        # Night break: if it's late, take a long rest. The window boundaries and
+        # the wake-duration band are per-account (seed_circadian), so accounts
+        # on one host don't share a synchronized night phase / wake-time CDF.
+        if hour >= self._night_start_hour or hour < self._night_end_hour:
+            lo, hi, mode = self._night_break_band
+            duration_h = random.triangular(lo, hi, mode)
             logger.info("Night break: sleeping %.1fh", duration_h)
             return duration_h * 3600.0
 

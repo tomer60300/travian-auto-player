@@ -214,6 +214,10 @@ class HttpClient:
             enabled=settings.stealth,
             state_file=self._cookie_file.parent / ".scheduler_state.json",
         )
+        # Bind the night-rest phase + wake distribution to the same identity, so
+        # accounts on one host don't share a synchronized circadian phase /
+        # wake-time CDF (the last stealth component that was identity-blind).
+        self._activity_scheduler.seed_circadian(behavioral_identity)
 
     async def _fetch_x_version(self) -> str:
         """Return the best known X-Version value.

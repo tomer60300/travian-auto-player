@@ -407,8 +407,9 @@ injector adds random non-functional browsing between bot operations:
 > this is **not wire-observable** — the noise visits draw from the same Markov
 > page chain as real navigation, so the server can't isolate a "noise stream"
 > to test, and the observable request timing is already AR(1)-correlated by
-> SessionTempo. Treated as contested/low-value (see docs/23). The real deferred
-> item is a day-scale circadian drift for break/session durations.
+> SessionTempo. Treated as contested/low-value (see docs/23). Break/session
+> *phase* is now per-account (see "Per-account circadian phase" below); a
+> finer day-scale *intensity* drift remains a possible future refinement.
 
 The noise injector is automatically called between iterations in:
 - Build queue polling (build_queue_service.py)
@@ -426,16 +427,27 @@ Prevents 24/7 activity patterns that trigger Multihunter investigations:
 | **Daily hours** | 10h | Max active hours per calendar day |
 | **Continuous session** | 4h | Max hours before forced break |
 | **Minimum break** | 30 min | Shortest allowed break |
-| **Night break** | 6-9h | Automatic long break 23:00-06:00 |
+| **Night break** | ~6-9h | Automatic long rest in the account's night window |
 | **Long break** | 2-6h | When 80%+ of daily budget used |
 
 The scheduler is checked before each automation cycle in the build queue and
 farm list services. When limits are hit, the bot takes a break automatically.
-The break **durations** are drawn from `random.triangular` (night
-`(6,9,7)`h, long `(1,3,1.8)`h, short `min_break + (0,10,3)`min), not
-`random.uniform` — so the break-length histogram tapers at its edges instead
-of showing the flat support a KS test rejects (the same anti-uniform reasoning
-as the caps below).
+The break **durations** are drawn from `random.triangular` (long `(1,3,1.8)`h,
+short `min_break + (0,10,3)`min), not `random.uniform` — so the break-length
+histogram tapers at its edges instead of showing the flat support a KS test
+rejects (the same anti-uniform reasoning as the caps below).
+
+**Per-account circadian phase (`seed_circadian`).** The night break is no
+longer a hard 23:00-06:00 window with a fixed `(6,9,7)`h wake distribution
+shared by every account. Each account's night window (start in `[22,24)`, end
+in `[5,8)`) and wake-duration band are seeded from the **behavioral identity**,
+so a multi-account fleet on one host no longer shares a synchronized circadian
+phase or an identical wake-time CDF (a cross-account clustering tell — a
+single-account 24h periodicity is human-like; the *synchrony across accounts*
+is the signal). This was the **last stealth component that was identity-blind**;
+the throttler, HumanDelay, SessionTempo, and navigator were all already
+persona-seeded. Per-account, stable across restarts (deterministic from the
+persona, so not persisted).
 
 The daily-hours and continuous-session limits above are **hard safety
 ceilings** that are never exceeded. The scheduler does not stop at exactly

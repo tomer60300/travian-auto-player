@@ -769,3 +769,39 @@ def test_idle_browse_uses_markov_transition_from_current_page():
     ds = {p: after_spieler[p] / 4000 for p in _WARMUP_PAGES}
     l1 = sum(abs(da[p] - ds[p]) for p in _WARMUP_PAGES)
     assert l1 > 0.05
+
+
+def test_scheduler_circadian_is_persona_seeded_and_distinct():
+    """Night-rest phase + wake band must be per-account, not shared constants.
+
+    The scheduler was the only stealth component not seeded with the behavioral
+    identity, so every account on a host shared a synchronized night window and
+    an identical wake-duration CDF — a cross-account clustering tell. seed_circadian
+    binds them to the persona: stable per account, distinct across accounts,
+    within sane bounds. Unseeded defaults preserve the legacy 23:00-06:00 window.
+    """
+    from travian_api.stealth.scheduler import ActivityScheduler
+
+    def circadian(identity: str) -> tuple:
+        s = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
+        s.seed_circadian(identity)
+        return (s._night_start_hour, s._night_end_hour, s._night_break_band)
+
+    a = "Chrome/133|en-US|https://ts2.x1.europe.travian.com|saltAAAA"
+    b = "Chrome/131|de-DE|https://ts1.x1.travian.de|saltBBBB"
+
+    assert circadian(a) == circadian(a)  # stable per account
+    assert circadian(a) != circadian(b)  # distinct across accounts
+
+    start, end, (lo, hi, mode) = circadian(a)
+    assert 22.0 <= start < 24.0
+    assert 5.0 <= end < 8.0
+    assert 5.5 <= lo <= 6.5
+    assert 8.5 <= hi <= 9.5
+    assert lo < mode < hi
+
+    # Unseeded default preserves legacy behavior (23:00-06:00, (6,9,7) band).
+    fresh = ActivityScheduler(max_continuous_hours=6.0, max_daily_hours=16.0)
+    assert fresh._night_start_hour == 23.0
+    assert fresh._night_end_hour == 6.0
+    assert fresh._night_break_band == (6.0, 9.0, 7.0)

@@ -496,6 +496,43 @@ tapers at the edges.
 Cost: 0 (same bounds). Benefit: break-duration histogram no longer has the
 flat support a KS test rejects.
 
+### Per-account circadian phase (scheduler seeded with the persona)
+
+**Decision:** `ActivityScheduler` is now seeded with the behavioral identity
+(`seed_circadian`), giving each account its own night-rest window and
+wake-duration band.
+
+The scheduler was the **only** stealth component still keyed off shared
+constants rather than the persona: the night break fired in a hard 23:00-06:00
+window and drew the wake duration from a fixed `triangular(6,9,7)`h for *every*
+account. The throttler (`seed_gap_shape`), HumanDelay (`seed_delays`),
+SessionTempo, and navigator (`seed_routes`) were all already persona-seeded;
+the scheduler was the gap. A multi-account fleet on one host therefore shared a
+synchronized circadian phase and an identical wake-time CDF — a cross-account
+clustering tell. (Note the discriminating signal: a single account showing 24h
+periodicity is the *most* human thing possible — real players sleep at night;
+the tell is the *synchrony and identical distribution across accounts*, found
+by cross-account phase clustering / two-sample KS on wake durations.)
+
+`seed_circadian` draws a per-account night window (start `U(22,24)`, end
+`U(5,8)`) and a wake-duration triangular band, deterministic from the persona
+(stable across restarts, not persisted, distinct per account). The night-break
+**safety property is preserved** — the alternative of removing the night branch
+entirely was rejected (it would run the bot through the night = less human, and
+drop a rest safeguard). `next_break_duration` now uses a fractional hour so the
+phase offset has real resolution.
+
+Cost: 0. Benefit: removes the last fleet-synchronized stealth signal; completes
+persona-seeding across the entire stealth stack.
+
+**h2 rejects (adversarial verify, do not re-propose):** randomizing the troop-send
+ActionType sequence (ActionType is internal, never on the wire); randomizing
+GraphQL field order (the fixed order matches the canonical compiled-frontend
+order ALL real clients send — invariance is camouflage; randomizing would
+manufacture a unique, browser-impossible fingerprint and risk query rejection);
+"midnight session-start clustering" (no such mechanism — consumption is a true
+rolling 24h window, the docstring even says "no midnight reset exploit").
+
 ### On feeding SessionTempo into break/session durations (rejected)
 
 The queued idea of scaling the activity scheduler's break/session durations by
@@ -519,8 +556,10 @@ bounded reviewer, without the verify context) still suggests it — kept as
 contested, low-confidence, not a priority until someone shows the noise stream
 is actually separable.
 
-**Deferred (real next step):** a day-scale circadian / session drift for break
-& session durations (a separate slow process — the 30s tempo can't supply it).
+**Update:** the break/session *phase* is now per-account (see "Per-account
+circadian phase" above). A finer day-scale *intensity* drift (how much an
+account plays by time-of-day) remains a possible future refinement, but the
+high-value cross-account-synchrony tell is now closed.
 
 ## Per-feature decisions
 
