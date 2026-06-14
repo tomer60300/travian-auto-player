@@ -19,7 +19,7 @@ from rich.table import Table
 
 from .clients.http_client import HttpClient
 from .config import Settings
-from .constants import BUILDING_NAMES
+from .constants import BUILDING_GID_BY_NAME_LOWER
 from .services.auth_service import AuthService
 from .services.auto_scout_service import AutoScoutService
 from .services.build_queue_service import BuildPlan, BuildQueueService
@@ -431,7 +431,7 @@ def building_construct(
             bs = BuildingService(client)
 
             # Resolve building name to GID
-            name_to_gid = {v.lower(): k for k, v in BUILDING_NAMES.items()}
+            name_to_gid = BUILDING_GID_BY_NAME_LOWER
             search = building.lower()
             gid = name_to_gid.get(search, 0)
             if not gid:

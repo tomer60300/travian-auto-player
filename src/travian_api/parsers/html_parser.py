@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 from bs4 import BeautifulSoup
 
-from ..constants import BUILDING_NAMES
+from ..constants import BUILDING_GID_BY_NAME, BUILDING_GID_BY_NAME_LOWER, BUILDING_NAMES
 from ..models.buildings import BuildingDetail, QueueItem, Resources
 
 
@@ -159,8 +159,7 @@ def parse_dorf2(html: str) -> List[Dict[str, Any]]:
             if title_name:
                 building_name = title_name
                 # Reverse lookup gid from name
-                name_to_gid = {v: k for k, v in BUILDING_NAMES.items()}
-                gid = name_to_gid.get(title_name, 0)
+                gid = BUILDING_GID_BY_NAME.get(title_name, 0)
 
         if not building_name:
             building_name = f"Unknown (gid={gid})"
@@ -317,8 +316,7 @@ def parse_build_page(html: str, slot_id: int = 0) -> BuildingDetail:
 
     # If we got a name but no gid, reverse-lookup from BUILDING_NAMES
     if name and not gid:
-        name_to_gid = {v.lower(): k for k, v in BUILDING_NAMES.items()}
-        gid = name_to_gid.get(name.lower(), 0)
+        gid = BUILDING_GID_BY_NAME_LOWER.get(name.lower(), 0)
 
     # If we have gid but no name, look it up
     if gid and not name:

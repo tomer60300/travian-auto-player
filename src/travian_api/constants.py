@@ -98,6 +98,11 @@ BUILDING_NAMES = {
     BuildingType.HOSPITAL: "Hospital",
 }
 
+# Precomputed reverse lookups (name -> gid). Built once at import instead of
+# re-derived per call in parser/CLI/build-queue hot paths. Treat as read-only.
+BUILDING_GID_BY_NAME = {v: k for k, v in BUILDING_NAMES.items()}
+BUILDING_GID_BY_NAME_LOWER = {v.lower(): k for k, v in BUILDING_NAMES.items()}
+
 
 # Event types for military actions
 class EventType(IntEnum):

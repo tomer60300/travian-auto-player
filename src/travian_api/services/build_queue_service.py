@@ -42,7 +42,7 @@ from typing import Any, Callable, Dict, List, Optional
 import yaml
 
 from ..clients.http_client import HttpClient
-from ..constants import BUILDING_NAMES
+from ..constants import BUILDING_GID_BY_NAME_LOWER, BUILDING_NAMES
 from ..logging_config import get_logger
 from ..stealth.timing import HumanTiming
 from .building_service import BuildingService
@@ -232,7 +232,7 @@ class BuildQueueService:
                             item.building = b.name
                         # If slot is empty (gid=0) and a building name is provided, mark as construction
                         if b.gid == 0 and item.building:
-                            name_to_gid = {v.lower(): k for k, v in BUILDING_NAMES.items()}
+                            name_to_gid = BUILDING_GID_BY_NAME_LOWER
                             search_lower = item.building.lower()
                             gid = name_to_gid.get(search_lower, 0)
                             if not gid:
@@ -288,7 +288,7 @@ class BuildQueueService:
 
             if item.slot_id == 0:
                 # Building not found — try to resolve as new construction on empty slot
-                name_to_gid = {v.lower(): k for k, v in BUILDING_NAMES.items()}
+                name_to_gid = BUILDING_GID_BY_NAME_LOWER
                 search_lower = item.building.lower()
                 gid = name_to_gid.get(search_lower, 0)
                 if not gid:

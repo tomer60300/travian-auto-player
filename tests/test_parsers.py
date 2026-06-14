@@ -320,3 +320,18 @@ class TestParsingErrorHandling:
         mixed = "Normal text \u202d with markers \u202c and\u200e more\u200f text"
         cleaned = clean_unicode_text(mixed)
         assert cleaned == "Normal text with markers and more text"
+
+
+def test_building_gid_reverse_lookup_precompute():
+    """Precomputed reverse maps must equal the old per-call comprehensions."""
+    from travian_api.constants import (
+        BUILDING_GID_BY_NAME,
+        BUILDING_GID_BY_NAME_LOWER,
+        BUILDING_NAMES,
+    )
+
+    assert {v: k for k, v in BUILDING_NAMES.items()} == BUILDING_GID_BY_NAME
+    assert {v.lower(): k for k, v in BUILDING_NAMES.items()} == BUILDING_GID_BY_NAME_LOWER
+    # Spot-check a known mapping resolves both ways.
+    assert BUILDING_GID_BY_NAME["Cranny"] == BuildingType.CRANNY
+    assert BUILDING_GID_BY_NAME_LOWER["cranny"] == BuildingType.CRANNY
