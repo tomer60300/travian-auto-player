@@ -342,3 +342,29 @@ class TestParserExtractsOasisOwnerCoords:
         assert info.player_id is None
         assert info.oasis_owner_x is None
         assert info.oasis_owner_y is None
+
+
+def test_oasis_burst_size_is_right_skewed_and_bounded():
+    """Burst size must be right-skewed, not uniform over {3,4,5}.
+
+    A uniform 3-value histogram is chi-square rejectable; the sampler clusters
+    at 3-4 with a quick-2 minority and an occasional 5-7 tail.
+    """
+    import random
+    from collections import Counter
+
+    from travian_api.services.oasis_raider_service import _sample_burst_size
+
+    random.seed(0)
+    samples = [_sample_burst_size() for _ in range(20000)]
+    c = Counter(samples)
+    n = len(samples)
+
+    assert min(samples) == 2
+    assert max(samples) <= 7
+    # Mode in the 3-4 band; size-2 a sizable minority; 5-7 an occasional tail.
+    assert (c[3] + c[4]) / n > 0.45
+    assert 0.18 < c[2] / n < 0.32
+    assert 0.12 < (c[5] + c[6] + c[7]) / n < 0.28
+    # Mean sits below the midpoint of the [2,7] support (right-skewed).
+    assert 2.0 < sum(samples) / n < 4.2

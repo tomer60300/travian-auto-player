@@ -59,9 +59,7 @@ THINK_DELAY_MAX = 12.0  # Seconds: careful read, check troops, hesitate
 SKIP_PROBABILITY = 0.10  # 10% chance to skip a valid empty target
 SKIP_MIN_REMAINING = 4  # Don't skip if fewer than this many targets left
 
-# Mitigation 6 — Burst-and-break pacing
-BURST_SIZE_MIN = 3  # Raids before micro-break (randomized)
-BURST_SIZE_MAX = 5
+# Mitigation 6 — Burst-and-break pacing (burst size via _sample_burst_size)
 BREAK_DURATION_MIN = 30.0  # Micro-break length in seconds
 BREAK_DURATION_MAX = 90.0
 
@@ -77,6 +75,21 @@ _NOISE_PAGES = [
     "/statistiken.php",
     "/spieler.php",
 ]
+
+
+def _sample_burst_size() -> int:
+    """Raids before a micro-break — right-skewed, not uniform over {3,4,5}.
+
+    A uniform draw over a 3-value set is a flat discrete histogram a chi-square
+    can reject. Real focus-bursts cluster small with an occasional longer run:
+    a quick 2-raid burst sometimes, mostly 3-4, occasionally a 5-7 streak.
+    """
+    r = random.random()
+    if r < 0.25:
+        return 2
+    if r < 0.80:
+        return random.randint(3, 4)
+    return random.randint(5, 7)
 
 
 @dataclass
@@ -222,7 +235,7 @@ class OasisRaiderService:
 
         # ── STEP 5: Process each target sequentially ─────────────────
         raids_in_burst = 0
-        next_burst_size = random.randint(BURST_SIZE_MIN, BURST_SIZE_MAX)
+        next_burst_size = _sample_burst_size()
         browse_counter = 0
         next_browse_at = random.randint(BROWSE_FREQ_MIN, BROWSE_FREQ_MAX)
 
@@ -292,7 +305,7 @@ class OasisRaiderService:
                 stats["breaks_taken"] += 1
                 stats["break_time"] += brk
                 raids_in_burst = 0
-                next_burst_size = random.randint(BURST_SIZE_MIN, BURST_SIZE_MAX)
+                next_burst_size = _sample_burst_size()
 
             # 5a-iii — Random skip (Mitigation 5)
             remaining = len(oases) - i
@@ -497,13 +510,13 @@ class OasisRaiderService:
                 # Continuing through "ghost sends" with deducted-but-unsent
                 # troops is exactly the pattern Travian's anti-bot scopes for.
                 try:
-                    self._http.throttler.add_penalty(60.0)
+                    self._http.throttler.add_penalty(random.uniform(45.0, 75.0))
                 except Exception:
                     pass
                 await send_log(
                     "STOP",
                     "🛑",
-                    "Soft failure detected — pausing sweep (60s throttle penalty applied)",
+                    "Soft failure detected — pausing sweep (throttle penalty applied)",
                     "warning",
                 )
                 break

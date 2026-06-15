@@ -579,10 +579,22 @@ page.
 mode like "no confirmation form returned" produced phantom sends in the
 local accounting while the bot pressed on with depleted-on-paper troops.
 Now: deduct + increment ONLY on `result.success`; soft-failure pauses
-the sweep with a 60s throttle penalty.
+the sweep with a throttle penalty.
 
 **Cost:** sweeps may stop early if Travian soft-blocks. This is a
 feature, not a bug.
+
+**Burst size + soft-failure penalty shaping (h3).** Burst-and-break size
+was `randint(3,5)` — uniform over a 3-value set (a flat discrete histogram).
+Now `_sample_burst_size()` is right-skewed (25% quick 2-raid burst, 55% a
+typical 3-4, 20% an occasional 5-7 streak). The soft-failure penalty was a
+fixed `60s`; now `uniform(45,75)` (no fixed floor). Both are low-risk
+defense-in-depth consistent with the "replace uniform/fixed with human-shaped"
+principle. Honesty note: the cycle's adversarial verify rated both as only
+weakly wire-observable (burst boundaries are blurred by injected micro-breaks;
+the penalty is never observable as an exact constant), so this is residual
+hardening, not closing a confirmed hole — the oasis stealth surface is now
+largely saturated.
 
 **Recurring interval jitter.** Before: exact `repeat_interval_seconds`
 between sweeps. Now: `micro_jitter(0.10)` + `max(1, round())` floor.
