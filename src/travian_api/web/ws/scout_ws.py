@@ -15,7 +15,6 @@ Optimised stealth flow preserved from the original:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
@@ -230,8 +229,8 @@ def _build_auto_scout_coro(config: dict):
         # only fronts the READ portion of the sweep (target list
         # resolution); the scout dispatch downstream stays on the
         # active user's primary because recon has no troops.
-        from ...services.recon_account import recon_account_manager
         from ...services.auto_scout_service import _recon_context
+        from ...services.recon_account import recon_account_manager
         recon_client = None
         if use_recon:
             try:
@@ -821,8 +820,8 @@ def _build_scout_scan_coro(config: dict):
         # scans reuse the cached session. Returns None when creds
         # aren't configured, the user opted out, or auth has failed
         # (the recon manager logs a warning).
-        from ...services.recon_account import recon_account_manager
         from ...services.auto_scout_service import _recon_context
+        from ...services.recon_account import recon_account_manager
         recon_client = None
         if use_recon:
             try:

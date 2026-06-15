@@ -23,10 +23,9 @@ import json
 import logging
 import re
 import statistics
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +202,7 @@ def load_recent_snapshots(
     if not directory.exists() or not directory.is_dir():
         return []
 
-    cutoff_dt = (now or datetime.now(timezone.utc))
+    cutoff_dt = (now or datetime.now(UTC))
     # Mirror "max_age_days" as a timedelta cutoff.
     from datetime import timedelta
     cutoff_dt -= timedelta(days=max_age_days)
@@ -280,7 +279,6 @@ def compute_throughput(
         return {}
 
     snapshots = sorted(snapshots, key=lambda s: s.run_timestamp)
-    newest_ts = snapshots[-1].run_timestamp
 
     recent_cutoff = now - timedelta(days=recent_window_days)
     baseline_cutoff = now - timedelta(days=baseline_window_days)

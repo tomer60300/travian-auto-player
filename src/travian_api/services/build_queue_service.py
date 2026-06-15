@@ -418,7 +418,7 @@ class BuildQueueService:
         queue = await self.building_service.get_construction_queue(village_id=village_id)
         if not queue:
             return 0
-        return max(q.remaining_seconds for q in queue) if queue else 0
+        return max(q.remaining_seconds for q in queue)
 
     async def execute_plan(
         self,
