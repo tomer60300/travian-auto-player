@@ -338,7 +338,7 @@ def _last_message_was_fatal_error(exec_session: ExecutionSession) -> bool:
     return False
 
 
-async def _global_keepalive(ctx: "OperationContext") -> None:
+async def _global_keepalive(ctx: OperationContext) -> None:
     """Heartbeat loop owned by the operation manager (not the op coro).
 
     Pushes a ``{"type": "heartbeat", "ts": <unix>}`` frame every 10s to

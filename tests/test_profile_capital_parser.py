@@ -19,7 +19,6 @@ from travian_api.services.auto_scout_service import (
     _parse_capital_id_from_profile_html,
 )
 
-
 PRODUCTION_PROFILE_SLICE = (
     '"villages":['
     '{"id":44077,"name":"Slovenská Ves","tribeId":3,"mapId":43149,'

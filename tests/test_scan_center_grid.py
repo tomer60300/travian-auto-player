@@ -16,8 +16,8 @@ fetched window [60, 90] when the only scan center was (10, 75).
 from __future__ import annotations
 
 import math
-import re
 import pathlib
+import re
 
 
 def _build_scan_centers(cx: int, cy: int, radius: int) -> list[tuple[int, int]]:

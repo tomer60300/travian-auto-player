@@ -30,7 +30,6 @@ from travian_api.services.auto_scout_service import (
     _parse_oasis_bonus_html,
 )
 
-
 # ────────────────────────── Parser tests ───────────────────────────
 
 

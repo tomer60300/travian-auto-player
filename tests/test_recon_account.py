@@ -138,8 +138,8 @@ def test_write_paths_never_use_recon() -> None:
     send-scout code paths must pass the PRIMARY http_client. This is
     a structural assertion against the source — recon would silently
     break write ops because the recon account has no villages."""
-    import re
     import pathlib
+    import re
     src = pathlib.Path(
         "src/travian_api/services/auto_scout_service.py"
     ).read_text(encoding="utf-8")
@@ -262,7 +262,8 @@ def test_recon_proxy_routing_completeness_scout_ws() -> None:
     this assertion, a refactor that duplicates the map-scan loop
     inline (as happened pre-recon) would silently leak the bulk of
     the scan's traffic onto the user's primary account again."""
-    import pathlib, re
+    import pathlib
+    import re
     src = pathlib.Path(
         "src/travian_api/web/ws/scout_ws.py"
     ).read_text(encoding="utf-8")
@@ -300,7 +301,8 @@ def test_recon_proxy_routing_completeness_service() -> None:
     """Same regression guard for auto_scout_service.py. The service
     has tighter rules: read endpoints must call ``self._read_client()``
     or use a local ``read_client = self._read_client()`` alias."""
-    import pathlib, re
+    import pathlib
+    import re
     src = pathlib.Path(
         "src/travian_api/services/auto_scout_service.py"
     ).read_text(encoding="utf-8")
@@ -338,7 +340,8 @@ def test_scout_ws_lazy_imports_resolve() -> None:
     and exercise the resolution by compiling + executing the import
     statement out of context.
     """
-    import pathlib, re
+    import pathlib
+    import re
     src_path = pathlib.Path(
         "src/travian_api/web/ws/scout_ws.py"
     ).read_text(encoding="utf-8")
@@ -359,7 +362,7 @@ def test_scout_ws_lazy_imports_resolve() -> None:
         # Reconstruct the absolute module path. scout_ws.py lives at
         # `travian_api.web.ws.scout_ws`. One leading dot = parent of
         # scout_ws.py's package, etc.
-        parts = "travian_api.web.ws.scout_ws".split(".")
+        parts = ["travian_api", "web", "ws", "scout_ws"]
         # Each dot strips one level from the right.
         levels_up = len(dots)
         if levels_up > len(parts):
