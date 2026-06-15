@@ -292,6 +292,22 @@ Cost: 0 mean-time change for either; the distributions just match real
 data better.
 Benefit: defeats simple variance-based timing fingerprints.
 
+### Post-error throttle penalties jittered
+
+**Decision:** the fixed throttle penalties in `http_client` (the
+`add_penalty(120.0)` after 429 / session-expired / network errors, the
+`add_penalty(30.0)` after a connection reset, and the `_soft_fire`
+soft-block penalties) are jittered ±15% via `_jitter_penalty(base)`.
+
+The post-error pause IS the next inter-request gap on the wire, so a fixed
+penalty (e.g. exactly 120s after every 429) is a point mass a KS /
+Anderson-Darling test on *post-error* inter-request gaps can flag — and this
+is error-conditioned, so it's cleanly attributable. ±15% jitter smears the
+mass while preserving the central tendency. The connection-reset retry samples
+**one** value used for both the penalty and the explicit retry sleep, so the
+retry gap isn't a fixed 30s floor either. (This was the last clearly
+wire-observable timing residual; see the "stealth saturated" status.)
+
 ### Throttler gap distribution
 
 **Decision:** the global request throttler draws its inter-request gap from

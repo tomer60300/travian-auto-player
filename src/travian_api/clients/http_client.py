@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -43,6 +44,17 @@ try:
 except ImportError:
     HAS_CURL_CFFI = False
     CurlError = Exception  # placeholder for retry_if_exception_type
+
+
+def _jitter_penalty(base_seconds: float) -> float:
+    """±15% jitter on a throttle penalty.
+
+    The post-error pause IS the next inter-request gap on the wire, so a fixed
+    penalty (e.g. exactly 120s after every 429) forms a point mass a KS /
+    Anderson-Darling test on post-error gaps can flag. Jittering smears it
+    while keeping the central tendency.
+    """
+    return base_seconds * random.uniform(0.85, 1.15)
 
 
 class HttpClient:
@@ -601,7 +613,7 @@ class HttpClient:
                 },
             )
             if penalty_seconds > 0 and self._stealth_enabled:
-                self._throttler.add_penalty(penalty_seconds)
+                self._throttler.add_penalty(_jitter_penalty(penalty_seconds))
 
         # ── Phase 1: recaptcha — require structural HTML evidence ────
         #
@@ -857,7 +869,7 @@ class HttpClient:
             if response.status_code >= 400:
                 if response.status_code == 429:
                     if self._stealth_enabled:
-                        self._throttler.add_penalty(120.0)
+                        self._throttler.add_penalty(_jitter_penalty(120.0))
                         logger.warning("429 Too Many Requests — adding 120s penalty")
                 raise NetworkError(
                     f"HTTP {response.status_code}: {response.text}", response.status_code
@@ -875,7 +887,7 @@ class HttpClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 if self._stealth_enabled:
-                    self._throttler.add_penalty(120.0)
+                    self._throttler.add_penalty(_jitter_penalty(120.0))
                     logger.warning("429 Too Many Requests — adding 120s penalty")
             raise NetworkError(
                 f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
@@ -889,9 +901,14 @@ class HttpClient:
                 raise NetworkError(f"Connection reset (non-retryable): {e}")
             # Server forcibly closed connection (rate limit) — penalty + retry once
             if _retry < 1 and self._stealth_enabled:
-                self._throttler.add_penalty(30.0)
-                logger.warning("Connection reset in post_json — 30s penalty then retry: %s", e)
-                await asyncio.sleep(30.0)
+                # One sampled value for both the penalty and the retry wait so
+                # the post-connection-reset retry gap isn't a fixed 30s floor.
+                penalty = _jitter_penalty(30.0)
+                self._throttler.add_penalty(penalty)
+                logger.warning(
+                    "Connection reset in post_json — %.0fs penalty then retry: %s", penalty, e
+                )
+                await asyncio.sleep(penalty)
                 return await self.post_json(
                     url,
                     data,
@@ -968,7 +985,7 @@ class HttpClient:
             if response.status_code >= 400:
                 if response.status_code == 429:
                     if self._stealth_enabled:
-                        self._throttler.add_penalty(120.0)
+                        self._throttler.add_penalty(_jitter_penalty(120.0))
                         logger.warning("429 Too Many Requests — adding 120s penalty")
                 raise NetworkError(
                     f"HTTP {response.status_code}: {response.text}", response.status_code
@@ -986,7 +1003,7 @@ class HttpClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 if self._stealth_enabled:
-                    self._throttler.add_penalty(120.0)
+                    self._throttler.add_penalty(_jitter_penalty(120.0))
                     logger.warning("429 Too Many Requests — adding 120s penalty")
             raise NetworkError(
                 f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
@@ -1079,7 +1096,7 @@ class HttpClient:
             if response.status_code >= 400:
                 if response.status_code == 429:
                     if self._stealth_enabled:
-                        self._throttler.add_penalty(120.0)
+                        self._throttler.add_penalty(_jitter_penalty(120.0))
                 self._dump_http_error(
                     method="POST",
                     url=url,
@@ -1099,7 +1116,7 @@ class HttpClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 if self._stealth_enabled:
-                    self._throttler.add_penalty(120.0)
+                    self._throttler.add_penalty(_jitter_penalty(120.0))
             self._dump_http_error(
                 method="POST",
                 url=url,
@@ -1205,7 +1222,7 @@ class HttpClient:
 
             if follow_redirects and response.status_code >= 400:
                 if response.status_code == 429 and self._stealth_enabled:
-                    self._throttler.add_penalty(120.0)
+                    self._throttler.add_penalty(_jitter_penalty(120.0))
                     logger.warning("429 Too Many Requests on GET — adding 120s penalty")
                 self._dump_http_error(
                     method="GET",
@@ -1226,7 +1243,7 @@ class HttpClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 if self._stealth_enabled:
-                    self._throttler.add_penalty(120.0)
+                    self._throttler.add_penalty(_jitter_penalty(120.0))
             self._dump_http_error(
                 method="GET",
                 url=url,

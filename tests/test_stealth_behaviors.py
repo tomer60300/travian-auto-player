@@ -805,3 +805,24 @@ def test_scheduler_circadian_is_persona_seeded_and_distinct():
     assert fresh._night_start_hour == 23.0
     assert fresh._night_end_hour == 6.0
     assert fresh._night_break_band == (6.0, 9.0, 7.0)
+
+
+def test_http_client_penalty_jitter_band():
+    """Throttle penalties must be jittered ±15%, not fixed point masses.
+
+    A fixed post-error penalty (e.g. exactly 120s after every 429) is a point
+    mass a KS / Anderson-Darling test on post-error inter-request gaps can flag.
+    """
+    import random
+
+    from travian_api.clients.http_client import _jitter_penalty
+
+    random.seed(0)
+    for base in (120.0, 30.0, 90.0):
+        samples = [_jitter_penalty(base) for _ in range(5000)]
+        assert min(samples) >= base * 0.85
+        assert max(samples) <= base * 1.15
+        # Central tendency preserved (mean within ~1% of base).
+        assert abs(sum(samples) / len(samples) - base) < base * 0.02
+        # Actually varies (not a point mass).
+        assert len(set(samples)) > 100
