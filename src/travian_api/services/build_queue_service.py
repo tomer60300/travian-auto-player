@@ -99,6 +99,37 @@ async def _stagger_account_build(http_client: HttpClient) -> None:
     _last_account_build_action_ts[key] = time.monotonic()
 
 
+def _resolve_idle_wait(
+    *,
+    any_no_checksum: bool,
+    any_resource_short: bool,
+    next_prio: int,
+    poll_interval_s: float,
+    stealth_enabled: bool,
+) -> tuple[str, float]:
+    """Decide the post-cycle wait when nothing was built — returns (reason, wait_s).
+
+    Each branch produces the FINAL wait (a single heavy-tail where wanted); the
+    caller applies ONLY ``tempo_scale`` to it, never another
+    ``HumanTiming.delay()`` — that double-application once compounded the
+    resource-short pause into 45+ minute frozen waits. Resource-short is the
+    economic "come back later" branch (clamped 2–10 min); the no-checksum and
+    no-items branches are transient and just re-poll on a human-paced interval.
+    """
+    if any_no_checksum and not any_resource_short:
+        reason = (
+            f"Priority {next_prio}: build page returned no upgrade URL "
+            "(rally-point tab default, maxed building, or stale session)"
+        )
+        return reason, HumanTiming.delay(float(poll_interval_s))
+    if any_resource_short and not any_no_checksum:
+        reason = f"Insufficient resources for priority {next_prio} items"
+        if stealth_enabled:
+            return reason, max(120.0, min(HumanTiming.delay(180.0, variance_factor=0.7), 600.0))
+        return reason, float(poll_interval_s)
+    return f"No items completed for priority {next_prio}", HumanTiming.delay(float(poll_interval_s))
+
+
 logger = get_logger(__name__)
 
 
@@ -997,31 +1028,17 @@ class BuildQueueService:
                 # the second is a transient Travian-state issue, the first is
                 # an economic wait. A real player who can't afford a build
                 # plans and returns later; they don't poll every 30s.
-                # Each branch produces the FINAL wait (with its own heavy-tail
-                # where wanted); the sleep below only applies session-tempo
-                # drift. Do NOT wrap wait_s in HumanTiming.delay() at the sleep
-                # — the resource branch already sampled a heavy-tailed value, so
-                # a second delay() there compounded into 45+ min frozen pauses.
-                if any_no_checksum and not any_resource_short:
-                    reason = (
-                        f"Priority {next_prio}: build page returned no upgrade URL "
-                        "(rally-point tab default, maxed building, or stale session)"
-                    )
-                    wait_s = HumanTiming.delay(float(poll_interval_s))
-                elif any_resource_short and not any_no_checksum:
-                    reason = f"Insufficient resources for priority {next_prio} items"
-                    # Planner pause: heavy-tailed wait centered on ~3 min,
-                    # clamped to [2 min, 10 min]. Resource gates rarely
-                    # resolve in 30s; rechecking sooner just generates
-                    # bot-shaped polling traffic.
-                    if getattr(self.http_client, "stealth_enabled", False):
-                        wait_s = HumanTiming.delay(180.0, variance_factor=0.7)
-                        wait_s = max(120.0, min(wait_s, 600.0))
-                    else:
-                        wait_s = float(poll_interval_s)
-                else:
-                    reason = f"No items completed for priority {next_prio}"
-                    wait_s = HumanTiming.delay(float(poll_interval_s))
+                # Wait selection is extracted to _resolve_idle_wait (pure +
+                # tested). The sleep applies ONLY tempo_scale — never another
+                # HumanTiming.delay() (that double-application once compounded
+                # the resource-short pause into 45+ min frozen waits).
+                reason, wait_s = _resolve_idle_wait(
+                    any_no_checksum=any_no_checksum,
+                    any_resource_short=any_resource_short,
+                    next_prio=next_prio,
+                    poll_interval_s=poll_interval_s,
+                    stealth_enabled=getattr(self.http_client, "stealth_enabled", False),
+                )
                 self._report(f"{reason}. Waiting {wait_s:.0f}s...")
                 await asyncio.sleep(self.http_client.tempo_scale(wait_s))
 
