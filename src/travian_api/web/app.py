@@ -99,6 +99,7 @@ async def lifespan(app: FastAPI):
     # pools leak across hot-reloads without this).
     try:
         from travian_api.services.recon_account import recon_account_manager
+
         await recon_account_manager.shutdown()
     except Exception:
         logger.exception("recon_account_manager.shutdown failed")
@@ -229,7 +230,8 @@ if STATIC_DIR.is_dir():
             return FileResponse(file_path, headers=_SPA_NO_CACHE_HEADERS)
         # SPA fallback — always serve a fresh index.html (see note above).
         return FileResponse(
-            STATIC_DIR / "index.html", headers=_SPA_NO_CACHE_HEADERS,
+            STATIC_DIR / "index.html",
+            headers=_SPA_NO_CACHE_HEADERS,
         )
 
 

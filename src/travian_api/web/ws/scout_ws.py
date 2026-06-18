@@ -231,6 +231,7 @@ def _build_auto_scout_coro(config: dict):
         # active user's primary because recon has no troops.
         from ...services.auto_scout_service import _recon_context
         from ...services.recon_account import recon_account_manager
+
         recon_client = None
         if use_recon:
             try:
@@ -241,29 +242,32 @@ def _build_auto_scout_coro(config: dict):
                 logger.exception("recon_account_manager.get_or_create_client failed")
                 recon_client = None
         active_user_for_strict = (
-            session.auth_state.player_name
-            if session.auth_state else session.settings.username
+            session.auth_state.player_name if session.auth_state else session.settings.username
         )
         if (
-            use_recon and recon_strict
+            use_recon
+            and recon_strict
             and recon_client is None
             and recon_account_manager.is_configured()
         ):
             logger.error(
                 "AutoScout-sweep STRICT-recon: recon proxy unavailable "
                 "AND strict mode is on. Aborting sweep for "
-                "active_user=%s.", active_user_for_strict,
+                "active_user=%s.",
+                active_user_for_strict,
             )
-            ctx.push({
-                "type": "error",
-                "fatal": True,
-                "message": (
-                    "Strict background-account mode is on, but the "
-                    "background account couldn't authenticate. The "
-                    "sweep was aborted to prevent leaking scout traffic "
-                    "onto your active account."
-                ),
-            })
+            ctx.push(
+                {
+                    "type": "error",
+                    "fatal": True,
+                    "message": (
+                        "Strict background-account mode is on, but the "
+                        "background account couldn't authenticate. The "
+                        "sweep was aborted to prevent leaking scout traffic "
+                        "onto your active account."
+                    ),
+                }
+            )
             return
         # ContextVar — race-safe per-coroutine routing. See the
         # equivalent block in _build_scout_scan_coro for why this is
@@ -271,8 +275,7 @@ def _build_auto_scout_coro(config: dict):
         _recon_context.set(recon_client)
         svc.recon_http_client = recon_client  # belt-and-braces backward compat
         active_user = (
-            session.auth_state.player_name
-            if session.auth_state else session.settings.username
+            session.auth_state.player_name if session.auth_state else session.settings.username
         )
         if recon_client is not None:
             proxy_user = recon_account_manager.get_proxy_username() or "(recon)"
@@ -281,7 +284,8 @@ def _build_auto_scout_coro(config: dict):
                 "resolution) for active_user=%s dispatches through "
                 "recon proxy username=%s. Scout DISPATCH stays on the "
                 "active user's primary account (recon has no troops).",
-                active_user, proxy_user,
+                active_user,
+                proxy_user,
             )
 
         cli_parts = [f"travian scout auto --radius {radius} --village-id {village_id}"]
@@ -773,8 +777,10 @@ def _build_scout_scan_coro(config: dict):
         if isinstance(raw_mins, dict):
             for k, v in raw_mins.items():
                 if (
-                    isinstance(k, str) and k in _ALLOWED_RESOURCES
-                    and isinstance(v, (int, float)) and int(v) > 0
+                    isinstance(k, str)
+                    and k in _ALLOWED_RESOURCES
+                    and isinstance(v, (int, float))
+                    and int(v) > 0
                 ):
                     bonus_resource_mins[k] = int(v)
         raw_levels = config.get("bonus_total_levels") or []
@@ -822,6 +828,7 @@ def _build_scout_scan_coro(config: dict):
         # (the recon manager logs a warning).
         from ...services.auto_scout_service import _recon_context
         from ...services.recon_account import recon_account_manager
+
         recon_client = None
         if use_recon:
             try:
@@ -834,8 +841,7 @@ def _build_scout_scan_coro(config: dict):
         # Active user's name — the primary account whose scan this is
         # and whose bot-detection / rate-limit risk we're protecting.
         active_user = (
-            session.auth_state.player_name
-            if session.auth_state else session.settings.username
+            session.auth_state.player_name if session.auth_state else session.settings.username
         )
         # Strict-mode abort path: user explicitly asked for recon AND
         # opted into strict mode. If we couldn't authenticate the recon
@@ -843,7 +849,8 @@ def _build_scout_scan_coro(config: dict):
         # to primary would silently misrepresent the masking the user
         # asked for.
         if (
-            use_recon and recon_strict
+            use_recon
+            and recon_strict
             and recon_client is None
             and recon_account_manager.is_configured()
         ):
@@ -853,18 +860,20 @@ def _build_scout_scan_coro(config: dict):
                 "active_user=%s rather than leaking to primary.",
                 active_user,
             )
-            ctx.push({
-                "type": "error",
-                "fatal": True,
-                "message": (
-                    "Strict background-account mode is on, but the "
-                    "background account couldn't authenticate. The "
-                    "scan was aborted to prevent leaking scout traffic "
-                    "onto your active account. Rotate the recon "
-                    "credentials, then retry — or uncheck 'Require "
-                    "background account' to fall back to your primary."
-                ),
-            })
+            ctx.push(
+                {
+                    "type": "error",
+                    "fatal": True,
+                    "message": (
+                        "Strict background-account mode is on, but the "
+                        "background account couldn't authenticate. The "
+                        "scan was aborted to prevent leaking scout traffic "
+                        "onto your active account. Rotate the recon "
+                        "credentials, then retry — or uncheck 'Require "
+                        "background account' to fall back to your primary."
+                    ),
+                }
+            )
             return
         # Set the ContextVar scoped to this coroutine task. ContextVar
         # values are task-local in asyncio, so a concurrent scout-scan
@@ -889,19 +898,23 @@ def _build_scout_scan_coro(config: dict):
                 "AutoScout proxy ACTIVE: read ops for active_user=%s "
                 "will dispatch through recon proxy username=%s "
                 "(server=%s). Primary account makes zero scout reqs.",
-                active_user, proxy_user, session.settings.base_url,
+                active_user,
+                proxy_user,
+                session.settings.base_url,
             )
-            ctx.push({
-                "type": "phase",
-                "phase": "recon_active",
-                "message": (
-                    f"Using background account [{proxy_user}] as a proxy "
-                    f"to dispatch read ops (map scan, tile-details, "
-                    f"profiles). Your active account [{active_user}] "
-                    "will not appear in any of these requests — bot-"
-                    "detection pressure stays on the proxy."
-                ),
-            })
+            ctx.push(
+                {
+                    "type": "phase",
+                    "phase": "recon_active",
+                    "message": (
+                        f"Using background account [{proxy_user}] as a proxy "
+                        f"to dispatch read ops (map scan, tile-details, "
+                        f"profiles). Your active account [{active_user}] "
+                        "will not appear in any of these requests — bot-"
+                        "detection pressure stays on the proxy."
+                    ),
+                }
+            )
         elif use_recon and recon_account_manager.is_configured():
             logger.warning(
                 "AutoScout proxy UNAVAILABLE: recon credentials are set "
@@ -910,18 +923,20 @@ def _build_scout_scan_coro(config: dict):
                 "account, increasing bot-detection exposure.",
                 active_user,
             )
-            ctx.push({
-                "type": "phase",
-                "phase": "recon_unavailable",
-                "message": (
-                    "Recon proxy is configured but couldn't authenticate — "
-                    f"falling back to your active account [{active_user}] "
-                    "for this scan. Check server logs for the recon login "
-                    "error and rotate credentials if needed. Enable "
-                    "'Require background account' if you'd prefer the "
-                    "scan to abort instead of fall back."
-                ),
-            })
+            ctx.push(
+                {
+                    "type": "phase",
+                    "phase": "recon_unavailable",
+                    "message": (
+                        "Recon proxy is configured but couldn't authenticate — "
+                        f"falling back to your active account [{active_user}] "
+                        "for this scan. Check server logs for the recon login "
+                        "error and rotate credentials if needed. Enable "
+                        "'Require background account' if you'd prefer the "
+                        "scan to abort instead of fall back."
+                    ),
+                }
+            )
         elif use_recon:
             # Configured-off path — silent. User asked for recon but
             # operator didn't set creds. Don't spam with a banner.
@@ -1019,11 +1034,13 @@ def _build_scout_scan_coro(config: dict):
                 # sees WHY their scan ended without a misleading red toast.
                 # operation_manager will still mark the terminal status as
                 # STOPPED via ctx.should_stop() detection after we return.
-                ctx.push({
-                    "type": "phase",
-                    "phase": "stopped",
-                    "message": "Scan stopped by user",
-                })
+                ctx.push(
+                    {
+                        "type": "phase",
+                        "phase": "stopped",
+                        "message": "Scan stopped by user",
+                    }
+                )
                 return
             ctx.push(
                 {
@@ -1172,11 +1189,13 @@ def _build_scout_scan_coro(config: dict):
                 # sees WHY their scan ended without a misleading red toast.
                 # operation_manager will still mark the terminal status as
                 # STOPPED via ctx.should_stop() detection after we return.
-                ctx.push({
-                    "type": "phase",
-                    "phase": "stopped",
-                    "message": "Scan stopped by user",
-                })
+                ctx.push(
+                    {
+                        "type": "phase",
+                        "phase": "stopped",
+                        "message": "Scan stopped by user",
+                    }
+                )
                 return
 
             t_enrich_start = time.monotonic()
@@ -1351,7 +1370,8 @@ def _build_scout_scan_coro(config: dict):
                 logger.warning(
                     "Capital parser returned None for %d/%d profiles; "
                     "the ★ column will be incomplete.",
-                    capital_misses, len(profiles),
+                    capital_misses,
+                    len(profiles),
                 )
                 ctx.push(
                     {
@@ -1396,9 +1416,7 @@ def _build_scout_scan_coro(config: dict):
         # number and the village-pop filter applies uniformly. Owner
         # villages outside the scan radius can't be resolved → pop stays
         # 0, which the user-supplied min-pop filter will drop.
-        village_pop_by_xy = {
-            (t.x, t.y): t.population for t in tiles if not t.is_oasis
-        }
+        village_pop_by_xy = {(t.x, t.y): t.population for t in tiles if not t.is_oasis}
         for t in tiles:
             if (
                 t.is_oasis
@@ -1406,9 +1424,7 @@ def _build_scout_scan_coro(config: dict):
                 and t.oasis_owner_x is not None
                 and t.oasis_owner_y is not None
             ):
-                t.population = village_pop_by_xy.get(
-                    (t.oasis_owner_x, t.oasis_owner_y), 0
-                )
+                t.population = village_pop_by_xy.get((t.oasis_owner_x, t.oasis_owner_y), 0)
 
         # Mark each tile owned by a known player whose capital we resolved.
         # The match relies on t.village_id (the ``did`` parsed from map
@@ -1421,25 +1437,19 @@ def _build_scout_scan_coro(config: dict):
         # empty ★ column.
         if capital_map:
             matched = 0
-            scanned_player_ids = {
-                t.player_id for t in tiles if t.player_id is not None
-            }
+            scanned_player_ids = {t.player_id for t in tiles if t.player_id is not None}
             for t in tiles:
-                if (
-                    not t.is_oasis
-                    and t.player_id
-                    and capital_map.get(t.player_id) == t.village_id
-                ):
+                if not t.is_oasis and t.player_id and capital_map.get(t.player_id) == t.village_id:
                     t.is_capital = True
                     matched += 1
-            capitals_in_scan = sum(
-                1 for pid in capital_map if pid in scanned_player_ids
-            )
+            capitals_in_scan = sum(1 for pid in capital_map if pid in scanned_player_ids)
             logger.info(
                 "Capital match: resolved=%d, matched_in_scan=%d, "
                 "capitals_of_scanned_players=%d (capitals outside scan "
                 "radius account for the gap).",
-                len(capital_map), matched, capitals_in_scan,
+                len(capital_map),
+                matched,
+                capitals_in_scan,
             )
 
         if player_pops:
@@ -1563,8 +1573,7 @@ def _build_scout_scan_coro(config: dict):
                     continue
                 # Per-resource minimums — ALL must hold.
                 if any(
-                    breakdown.get(res, 0) < min_pct
-                    for res, min_pct in bonus_resource_mins.items()
+                    breakdown.get(res, 0) < min_pct for res, min_pct in bonus_resource_mins.items()
                 ):
                     continue
                 # Total bucket — if any selected, the total must equal one.
@@ -1577,23 +1586,20 @@ def _build_scout_scan_coro(config: dict):
                 parts = []
                 if bonus_resource_mins:
                     parts.append(
-                        "mins=" + ",".join(
-                            f"{r}>={p}%"
-                            for r, p in sorted(bonus_resource_mins.items())
-                        )
+                        "mins="
+                        + ",".join(f"{r}>={p}%" for r, p in sorted(bonus_resource_mins.items()))
                     )
                 if bonus_total_levels:
                     parts.append(
                         "totals=" + ",".join(f"{lv}%" for lv in sorted(bonus_total_levels))
                     )
-                post_filter_msgs.append(
-                    f"Bonus filter ({'; '.join(parts)}): -{removed}"
-                )
+                post_filter_msgs.append(f"Bonus filter ({'; '.join(parts)}): -{removed}")
             if misses_unparseable:
                 logger.warning(
                     "Bonus filter dropped %d oasis tile(s) with unparseable bonus "
                     "while a filter was active — Travian locale or HTML may have "
-                    "changed.", misses_unparseable,
+                    "changed.",
+                    misses_unparseable,
                 )
 
         if max_player_pop is not None:

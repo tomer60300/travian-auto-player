@@ -329,11 +329,7 @@ def _last_message_was_fatal_error(exec_session: ExecutionSession) -> bool:
     if not msgs:
         return False
     for msg in list(msgs)[-5:]:
-        if (
-            isinstance(msg, dict)
-            and msg.get("type") == "error"
-            and bool(msg.get("fatal"))
-        ):
+        if isinstance(msg, dict) and msg.get("type") == "error" and bool(msg.get("fatal")):
             return True
     return False
 

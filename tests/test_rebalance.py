@@ -71,11 +71,25 @@ def _slot(slot_id: int, coord: tuple[int, int], **overrides):
 class TestBuildTargetInventory:
     def test_groups_by_coord_and_sums_stats(self):
         slot_ms = [
-            _slot(1, (10, 20), owner_village_id=1, total_raids=10,
-                  total_booty=500, last_raid_time=1700000000, defense_proxy=10),
-            _slot(2, (10, 20), owner_village_id=2, list_name="V2-MID",
-                  total_raids=25, total_booty=800, last_raid_time=1700001000,
-                  defense_proxy=200),
+            _slot(
+                1,
+                (10, 20),
+                owner_village_id=1,
+                total_raids=10,
+                total_booty=500,
+                last_raid_time=1700000000,
+                defense_proxy=10,
+            ),
+            _slot(
+                2,
+                (10, 20),
+                owner_village_id=2,
+                list_name="V2-MID",
+                total_raids=25,
+                total_booty=800,
+                last_raid_time=1700001000,
+                defense_proxy=200,
+            ),
         ]
         inv = build_target_inventory(slot_ms, {1: "V1", 2: "V2"})
         agg = inv[(10, 20)]
@@ -173,9 +187,12 @@ class TestPickBestPlacement:
             VillagePosition("V6", 33, 83),
         ]
         self.supplies = {
-            ("V1", "t1"): 694, ("V1", "t6"): 92,
-            ("V2", "t1"): 258, ("V2", "t5"): 110,
-            ("V3", "t3"): 2250, ("V3", "t6"): 1600,
+            ("V1", "t1"): 694,
+            ("V1", "t6"): 92,
+            ("V2", "t1"): 258,
+            ("V2", "t5"): 110,
+            ("V3", "t3"): 2250,
+            ("V3", "t6"): 1600,
             ("V4", "t1"): 100,
             ("V6", "t1"): 100,
         }
@@ -264,38 +281,58 @@ class TestAssignRoleAndListName:
 
 class TestIsDeadFarm:
     def test_low_loot_with_sample(self):
-        t = FakeTarget(coord=(1, 1), avg_loot=12.0, total_raids_all_lists=15,
-                       last_raid_time_unix=int(NOW - 86400))
+        t = FakeTarget(
+            coord=(1, 1),
+            avg_loot=12.0,
+            total_raids_all_lists=15,
+            last_raid_time_unix=int(NOW - 86400),
+        )
         dead, reason = is_dead_farm(t, now_unix=NOW)
         assert dead is True
         assert "avg_loot" in reason
 
     def test_stale_and_mediocre(self):
-        t = FakeTarget(coord=(2, 2), avg_loot=40.0, total_raids_all_lists=2,
-                       last_raid_time_unix=int(NOW - 30 * 86400))
+        t = FakeTarget(
+            coord=(2, 2),
+            avg_loot=40.0,
+            total_raids_all_lists=2,
+            last_raid_time_unix=int(NOW - 30 * 86400),
+        )
         dead, reason = is_dead_farm(t, now_unix=NOW)
         assert dead is True
         assert "last raid" in reason
 
     def test_defended(self):
-        t = FakeTarget(coord=(3, 3), avg_loot=100.0, total_raids_all_lists=10,
-                       last_raid_time_unix=int(NOW - 86400),
-                       max_def_proxy=DEAD_DEF_PROXY_LIMIT + 100)
+        t = FakeTarget(
+            coord=(3, 3),
+            avg_loot=100.0,
+            total_raids_all_lists=10,
+            last_raid_time_unix=int(NOW - 86400),
+            max_def_proxy=DEAD_DEF_PROXY_LIMIT + 100,
+        )
         dead, reason = is_dead_farm(t, now_unix=NOW)
         assert dead is True
         assert "def_proxy" in reason
 
     def test_ct2_ct3_suspect(self):
-        t = FakeTarget(coord=(4, 4), avg_loot=100.0, total_raids_all_lists=10,
-                       last_raid_time_unix=int(NOW - 86400),
-                       any_ct2_ct3_flag=True)
+        t = FakeTarget(
+            coord=(4, 4),
+            avg_loot=100.0,
+            total_raids_all_lists=10,
+            last_raid_time_unix=int(NOW - 86400),
+            any_ct2_ct3_flag=True,
+        )
         dead, reason = is_dead_farm(t, now_unix=NOW)
         assert dead is True
         assert "CT2" in reason
 
     def test_alive_target_returns_false(self):
-        t = FakeTarget(coord=(5, 5), avg_loot=80.0, total_raids_all_lists=20,
-                       last_raid_time_unix=int(NOW - 3 * 86400))
+        t = FakeTarget(
+            coord=(5, 5),
+            avg_loot=80.0,
+            total_raids_all_lists=20,
+            last_raid_time_unix=int(NOW - 3 * 86400),
+        )
         dead, reason = is_dead_farm(t, now_unix=NOW)
         assert dead is False
         assert reason == ""
@@ -342,7 +379,9 @@ class TestPlanRebalance:
         empty_supplies: dict[tuple[str, str], int] = {}
         inv = {
             (31, 83): FakeTarget(
-                coord=(31, 83), avg_loot=200.0, total_raids_all_lists=1,
+                coord=(31, 83),
+                avg_loot=200.0,
+                total_raids_all_lists=1,
                 last_raid_time_unix=int(NOW - 86400),
                 primary_owner_village="V6",
             )
@@ -359,6 +398,7 @@ class TestWaveStacking:
 
     def test_adaptive_wave_count_tiers(self):
         from travian_api.services.rebalance_planner import adaptive_wave_count
+
         assert adaptive_wave_count(500) == 4
         assert adaptive_wave_count(200) == 4
         assert adaptive_wave_count(199) == 3
@@ -372,6 +412,7 @@ class TestWaveStacking:
 
     def test_size_wave_residual_carry_threads_correctly(self):
         from travian_api.services.rebalance_planner import size_wave_with_residual_carry
+
         # Wave 0: empirical 200, unit carry 60 (Clubs); count = ceil(200*1.1/60) = 4, haul = min(240, 200) = 200.
         c0, h0 = size_wave_with_residual_carry(200, 0, 0, 60)
         assert c0 == 4
@@ -388,6 +429,7 @@ class TestWaveStacking:
 
     def test_pick_wave_set_greedy_enforces_spacing(self):
         from travian_api.services.rebalance_planner import pick_wave_set_greedy
+
         # Candidates with arrivals [5, 8, 25, 30, 50]; spacing 15.
         # Greedy: pick 5, then next ≥20 → 25, then next ≥40 → 50.
         candidates = [
@@ -402,12 +444,13 @@ class TestWaveStacking:
         assert arrivals == [5.0, 25.0, 50.0]
         # Each consecutive pair is ≥15 apart.
         for i in range(1, len(arrivals)):
-            assert arrivals[i] - arrivals[i-1] >= 15
+            assert arrivals[i] - arrivals[i - 1] >= 15
 
     def test_plan_waves_for_target_311_83_flagship(self):
         # Operator's flagship target (31,83) with avg_loot ~480 → 4 waves wanted.
         # Provide all 4 LOCAL-ish villages with Clubs supply; V3 with TK supply.
         from travian_api.services.rebalance_planner import plan_waves_for_target
+
         vps = [
             VillagePosition("V1", 15, 91),
             VillagePosition("V2", 22, 88),
@@ -417,21 +460,29 @@ class TestWaveStacking:
             VillagePosition("V7", 30, 82),
         ]
         supplies = {
-            ("V1", "t1"): 689, ("V1", "t6"): 92,
-            ("V2", "t1"): 258, ("V2", "t5"): 111,
-            ("V3", "t3"): 2024, ("V3", "t6"): 2506,
-            ("V4", "t1"): 100, ("V6", "t1"): 100, ("V7", "t1"): 100,
+            ("V1", "t1"): 689,
+            ("V1", "t6"): 92,
+            ("V2", "t1"): 258,
+            ("V2", "t5"): 111,
+            ("V3", "t3"): 2024,
+            ("V3", "t6"): 2506,
+            ("V4", "t1"): 100,
+            ("V6", "t1"): 100,
+            ("V7", "t1"): 100,
         }
         target = FakeTarget(
-            coord=(31, 83), avg_loot=480.0, total_raids_all_lists=20,
-            last_raid_time_unix=int(NOW - 86400), primary_owner_village="V3",
+            coord=(31, 83),
+            avg_loot=480.0,
+            total_raids_all_lists=20,
+            last_raid_time_unix=int(NOW - 86400),
+            primary_owner_village="V3",
         )
         waves = plan_waves_for_target(target, vps, supplies)
         assert len(waves) >= 3, f"avg_loot=480 should produce 3+ waves, got {len(waves)}"
         # Spacing ≥15min between consecutive waves.
         for i in range(1, len(waves)):
-            gap = waves[i].arrival_min - waves[i-1].arrival_min
-            assert gap >= 15, f"Wave {i+1} arrives only {gap:.1f}min after wave {i}"
+            gap = waves[i].arrival_min - waves[i - 1].arrival_min
+            assert gap >= 15, f"Wave {i + 1} arrives only {gap:.1f}min after wave {i}"
         # No two waves share the same (village, unit) pair.
         vu_pairs = {(w.optimal_village, w.optimal_unit) for w in waves}
         assert len(vu_pairs) == len(waves), "duplicate (village, unit) pair"
@@ -443,10 +494,13 @@ class TestWaveStacking:
 
     def test_plan_waves_supply_decrement(self):
         from travian_api.services.rebalance_planner import plan_waves_for_target
+
         vps = [VillagePosition("V7", 30, 82)]
         supplies = {("V7", "t1"): 100}
         target = FakeTarget(
-            coord=(31, 83), avg_loot=300.0, total_raids_all_lists=10,
+            coord=(31, 83),
+            avg_loot=300.0,
+            total_raids_all_lists=10,
             last_raid_time_unix=int(NOW - 86400),
         )
         waves = plan_waves_for_target(target, vps, supplies)
@@ -457,12 +511,13 @@ class TestWaveStacking:
 
     def test_dead_floor_returns_empty_plan(self):
         from travian_api.services.rebalance_planner import plan_waves_for_target
+
         vps = [VillagePosition("V7", 30, 82)]
         supplies = {("V7", "t1"): 100}
         target = FakeTarget(
-            coord=(31, 83), avg_loot=20.0, total_raids_all_lists=10,
+            coord=(31, 83),
+            avg_loot=20.0,
+            total_raids_all_lists=10,
             last_raid_time_unix=int(NOW - 86400),
         )
         assert plan_waves_for_target(target, vps, supplies) == []
-
-

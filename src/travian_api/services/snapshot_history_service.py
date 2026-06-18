@@ -30,9 +30,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Filename pattern: ``current-lists-2026-05-15T19-09-53Z.json``
-_FILENAME_RE = re.compile(
-    r"current-lists-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z\.json$"
-)
+_FILENAME_RE = re.compile(r"current-lists-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z\.json$")
 
 
 # ─── Dataclasses ──────────────────────────────────────────────────────────
@@ -202,9 +200,10 @@ def load_recent_snapshots(
     if not directory.exists() or not directory.is_dir():
         return []
 
-    cutoff_dt = (now or datetime.now(UTC))
+    cutoff_dt = now or datetime.now(UTC)
     # Mirror "max_age_days" as a timedelta cutoff.
     from datetime import timedelta
+
     cutoff_dt -= timedelta(days=max_age_days)
 
     candidates: list[Path] = []
@@ -234,8 +233,10 @@ def load_recent_snapshots(
 
 
 def _pair_rate_per_24h(
-    earlier: SlotSnapshot, later: SlotSnapshot,
-    earlier_ts: datetime, later_ts: datetime,
+    earlier: SlotSnapshot,
+    later: SlotSnapshot,
+    earlier_ts: datetime,
+    later_ts: datetime,
 ) -> float | None:
     """Rate in raids/24h from a single snapshot pair, or ``None`` if the
     pair carries no usable signal (raids went down, time delta non-positive)."""
@@ -333,9 +334,7 @@ def compute_throughput(
         # avg_loot_per_raid from the freshest available record
         last_slot = history[-1][1]
         avg_loot = (
-            last_slot.total_booty / last_slot.total_raids
-            if last_slot.total_raids > 0
-            else 0.0
+            last_slot.total_booty / last_slot.total_raids if last_slot.total_raids > 0 else 0.0
         )
 
         out[slot_id] = SlotThroughput(

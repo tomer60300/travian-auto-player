@@ -232,9 +232,7 @@ class TestPopulationFilterAppliesToOases:
         svc = AutoScoutService(http_client=None)  # filter_targets is pure
         tiles = [
             MapTileInfo(x=1, y=1, village_id=0, is_oasis=True, population=0, distance=1.0),
-            MapTileInfo(
-                x=2, y=2, village_id=42, player_id=7, population=600, distance=2.0
-            ),
+            MapTileInfo(x=2, y=2, village_id=42, player_id=7, population=600, distance=2.0),
         ]
         result = svc.filter_targets(tiles, min_population=1, exclude_oases=False)
         coords = {(t.x, t.y) for t in result}
@@ -247,12 +245,15 @@ class TestPopulationFilterAppliesToOases:
         # owning village (post-enrichment in scout_ws sets this).
         tiles = [
             MapTileInfo(
-                x=28, y=96, village_id=0, player_id=99, is_oasis=True,
-                population=600, distance=9.4,
+                x=28,
+                y=96,
+                village_id=0,
+                player_id=99,
+                is_oasis=True,
+                population=600,
+                distance=9.4,
             ),
-            MapTileInfo(
-                x=29, y=93, village_id=0, is_oasis=True, population=0, distance=7.8
-            ),
+            MapTileInfo(x=29, y=93, village_id=0, is_oasis=True, population=0, distance=7.8),
         ]
         result = svc.filter_targets(
             tiles, min_population=1, max_population=800, exclude_oases=False
@@ -265,8 +266,13 @@ class TestPopulationFilterAppliesToOases:
         svc = AutoScoutService(http_client=None)
         tiles = [
             MapTileInfo(
-                x=5, y=5, village_id=0, player_id=99, is_oasis=True,
-                population=2000, distance=5.0,
+                x=5,
+                y=5,
+                village_id=0,
+                player_id=99,
+                is_oasis=True,
+                population=2000,
+                distance=5.0,
             ),
         ]
         result = svc.filter_targets(tiles, max_population=800, exclude_oases=False)
@@ -305,12 +311,12 @@ class TestParserExtractsOasisOwnerCoords:
     def test_owner_coords_extracted_when_link_present(self):
         svc = AutoScoutService(http_client=None)
         html = (
-            '<h1>Occupied oasis</h1>'
-            '<th>Occupied by</th>'
+            "<h1>Occupied oasis</h1>"
+            "<th>Occupied by</th>"
             '<td><a href="/profile/123">THE NOBODY</a></td>'
-            '<th>Owner village</th>'
+            "<th>Owner village</th>"
             '<td><a href="/karte.php?x=27&amp;y=96">101</a></td>'
-            '<th>Tribe</th><td>Roman</td>'
+            "<th>Tribe</th><td>Roman</td>"
             '<div class="oasis"></div>'
         )
         info = svc._parse_tile_details(28, 96, html)
@@ -324,7 +330,7 @@ class TestParserExtractsOasisOwnerCoords:
         # Some popups may link to the tile itself before the owner-village
         # link. The parser must skip the self-link and pick the next.
         html = (
-            '<h1>Occupied oasis</h1>'
+            "<h1>Occupied oasis</h1>"
             '<a href="/karte.php?x=28&y=96">this tile</a>'
             '<th>Occupied by</th><td><a href="/profile/7">P</a></td>'
             '<a href="/karte.php?x=27&y=96">owner village</a>'

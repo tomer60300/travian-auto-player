@@ -684,6 +684,7 @@ class FarmBuilderService:
                     logger.warning("scout send (%s,%s) attempt %d: %s", x, y, attempt + 1, exc)
                 if attempt < 2:
                     from ..stealth.timing import HumanTiming as _HT_local
+
                     await asyncio.sleep(_HT_local.micro_jitter(5.0, 0.35))
             if not success:
                 defense_failed[(x, y)] = "scout_send_failed"
@@ -756,6 +757,7 @@ class FarmBuilderService:
                         )
                     if attempt < 2:
                         from ..stealth.timing import HumanTiming as _HT_local
+
                         await asyncio.sleep(_HT_local.micro_jitter(10.0, 0.35))
                 if got:
                     defense_data[(x, y)] = got
@@ -791,6 +793,7 @@ class FarmBuilderService:
         # scan input, which produces an invariant cross-list insertion
         # signature that's easy to fingerprint.
         import random as _rand
+
         for _bname in real_buckets:
             real_buckets[_bname] = list(real_buckets[_bname])
             _rand.shuffle(real_buckets[_bname])

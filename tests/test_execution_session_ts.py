@@ -60,8 +60,7 @@ def test_push_monotonicizes_caller_supplied_ts_on_collision() -> None:
     msgs = list(sess.messages)
     assert msgs[0]["ts"] == 100.0
     assert msgs[1]["ts"] > msgs[0]["ts"], (
-        "Caller-supplied collision must be monotonicized just like the "
-        "no-ts path."
+        "Caller-supplied collision must be monotonicized just like the no-ts path."
     )
 
 

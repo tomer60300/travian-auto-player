@@ -112,6 +112,7 @@ def _build_oasis_coro(config: OasisRaiderConfig):
             # Stealth: micro-jitter the recurring interval so the request
             # bursts don't sit on perfect second boundaries indefinitely.
             from travian_api.stealth.timing import HumanTiming as _HT
+
             wait_secs = _HT.micro_jitter(float(config.repeat_interval_seconds), 0.10)
             await send_log(
                 "RECURRING",

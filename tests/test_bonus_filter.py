@@ -203,7 +203,9 @@ def test_format_breakdown_uses_fixed_order() -> None:
 
 def _oasis(x: int, y: int, breakdown: dict) -> MapTileInfo:
     return MapTileInfo(
-        x=x, y=y, is_oasis=True,
+        x=x,
+        y=y,
+        is_oasis=True,
         bonus=_format_bonus_breakdown(breakdown),
         bonus_breakdown=breakdown,
     )
@@ -211,7 +213,11 @@ def _oasis(x: int, y: int, breakdown: dict) -> MapTileInfo:
 
 def _village(x: int, y: int) -> MapTileInfo:
     return MapTileInfo(
-        x=x, y=y, is_oasis=False, village_id=1, player_id=1,
+        x=x,
+        y=y,
+        is_oasis=False,
+        village_id=1,
+        player_id=1,
         population=500,
     )
 
@@ -235,10 +241,7 @@ def _apply_filter(
         if not breakdown:
             misses += 1
             continue
-        if any(
-            breakdown.get(res, 0) < min_pct
-            for res, min_pct in bonus_resource_mins.items()
-        ):
+        if any(breakdown.get(res, 0) < min_pct for res, min_pct in bonus_resource_mins.items()):
             continue
         if bonus_total_levels and sum(breakdown.values()) not in bonus_total_levels:
             continue
@@ -275,9 +278,9 @@ def test_filter_per_resource_iron_25_drops_25pct_oasis_below_threshold() -> None
 
 def test_filter_total_level_50_keeps_25_25_oasis() -> None:
     tiles = [
-        _oasis(1, 1, {"iron": 25, "crop": 25}),   # total 50
-        _oasis(2, 2, {"crop": 50}),               # total 50
-        _oasis(3, 3, {"iron": 25}),               # total 25
+        _oasis(1, 1, {"iron": 25, "crop": 25}),  # total 50
+        _oasis(2, 2, {"crop": 50}),  # total 50
+        _oasis(3, 3, {"iron": 25}),  # total 25
         _oasis(4, 4, {"wood": 25, "clay": 25, "crop": 25}),  # total 75
     ]
     out, _ = _apply_filter(tiles, {}, {50})
@@ -286,9 +289,9 @@ def test_filter_total_level_50_keeps_25_25_oasis() -> None:
 
 def test_filter_total_levels_25_and_50_multi_bucket() -> None:
     tiles = [
-        _oasis(1, 1, {"iron": 25}),              # 25
-        _oasis(2, 2, {"crop": 50}),              # 50
-        _oasis(3, 3, {"crop": 75}),              # 75
+        _oasis(1, 1, {"iron": 25}),  # 25
+        _oasis(2, 2, {"crop": 50}),  # 50
+        _oasis(3, 3, {"crop": 75}),  # 75
         _oasis(4, 4, {"iron": 25, "crop": 75}),  # 100
     ]
     out, _ = _apply_filter(tiles, {}, {25, 50})
@@ -303,9 +306,9 @@ def test_filter_combined_per_resource_and_total() -> None:
     is exactly 50 pass.
     """
     tiles = [
-        _oasis(1, 1, {"iron": 25, "crop": 25}),   # iron 25 ✓, total 50 ✓ → keep
-        _oasis(2, 2, {"iron": 50}),               # iron 25 ✓, total 50 ✓ → keep
-        _oasis(3, 3, {"crop": 50}),               # iron 0 ✗
+        _oasis(1, 1, {"iron": 25, "crop": 25}),  # iron 25 ✓, total 50 ✓ → keep
+        _oasis(2, 2, {"iron": 50}),  # iron 25 ✓, total 50 ✓ → keep
+        _oasis(3, 3, {"crop": 50}),  # iron 0 ✗
         _oasis(4, 4, {"iron": 25, "wood": 25, "clay": 25}),  # iron ✓ but total 75 ✗
     ]
     out, _ = _apply_filter(tiles, {"iron": 25}, {50})
@@ -392,7 +395,8 @@ def test_config_validation_drops_unknown_resource_keys() -> None:
     allowed_resources = {"wood", "clay", "iron", "crop"}
     raw = {"wood": 25, "uranium": 50, "crop": 25}
     cleaned = {
-        k: int(v) for k, v in raw.items()
+        k: int(v)
+        for k, v in raw.items()
         if k in allowed_resources and isinstance(v, (int, float)) and int(v) > 0
     }
     assert cleaned == {"wood": 25, "crop": 25}
@@ -401,10 +405,7 @@ def test_config_validation_drops_unknown_resource_keys() -> None:
 def test_config_validation_drops_unknown_levels() -> None:
     allowed_levels = {25, 50, 75, 100}
     raw = [25, 33, 50, 200, "abc"]
-    cleaned = {
-        int(v) for v in raw
-        if isinstance(v, (int, float)) and int(v) in allowed_levels
-    }
+    cleaned = {int(v) for v in raw if isinstance(v, (int, float)) and int(v) in allowed_levels}
     assert cleaned == {25, 50}
 
 
@@ -414,7 +415,8 @@ def test_config_validation_zero_min_treated_as_no_constraint() -> None:
     allowed_resources = {"wood", "clay", "iron", "crop"}
     raw = {"iron": 0, "crop": 25}
     cleaned = {
-        k: int(v) for k, v in raw.items()
+        k: int(v)
+        for k, v in raw.items()
         if k in allowed_resources and isinstance(v, (int, float)) and int(v) > 0
     }
     assert cleaned == {"crop": 25}

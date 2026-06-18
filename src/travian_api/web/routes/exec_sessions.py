@@ -63,12 +63,14 @@ async def diag_sessions(user=Depends(get_current_user)):
             if isinstance(last, dict):
                 last_msg_ts = last.get("ts")
                 last_msg_type = last.get("type")
-        enriched.append({
-            **s,
-            "subscriber_count": sub_count,
-            "last_message_ts": last_msg_ts,
-            "last_message_type": last_msg_type,
-        })
+        enriched.append(
+            {
+                **s,
+                "subscriber_count": sub_count,
+                "last_message_ts": last_msg_ts,
+                "last_message_type": last_msg_type,
+            }
+        )
     return {"sessions": enriched, "user_id": user.id}
 
 
@@ -135,7 +137,7 @@ async def diag_profile_parse(
     result["population"] = int(pop_m.group(1)) if pop_m else None
 
     json_matches: list[dict] = []
-    for obj in re.finditer(r'\{[^{}]{0,800}\}', html):
+    for obj in re.finditer(r"\{[^{}]{0,800}\}", html):
         chunk = obj.group(0)
         has_main = '"isMainVillage"' in chunk
         has_cap = '"isCapital"' in chunk
@@ -143,56 +145,85 @@ async def diag_profile_parse(
             continue
         marker_true = bool(re.search(r'"(?:isMainVillage|isCapital)"\s*:\s*true', chunk))
         id_match = re.search(r'"id"\s*:\s*(\d+)', chunk)
-        json_matches.append({
-            "snippet": chunk[:400],
-            "has_isMainVillage_key": has_main,
-            "has_isCapital_key": has_cap,
-            "marker_true": marker_true,
-            "id_found": int(id_match.group(1)) if id_match else None,
-        })
+        json_matches.append(
+            {
+                "snippet": chunk[:400],
+                "has_isMainVillage_key": has_main,
+                "has_isCapital_key": has_cap,
+                "marker_true": marker_true,
+                "id_found": int(id_match.group(1)) if id_match else None,
+            }
+        )
     result["json_chunks_with_marker_key"] = json_matches[:10]
 
     html_fallback: list[dict] = []
     for pat_name, pat in (
-        ("link_before_marker", r'<a[^>]*newdid=(\d+)[^>]*>.{0,120}?(?:capital|hauptdorf|stolica|kapital)'),
-        ("marker_before_link", r'(?:capital|hauptdorf|stolica|kapital)[^<>]{0,120}?<a[^>]*newdid=(\d+)'),
+        (
+            "link_before_marker",
+            r"<a[^>]*newdid=(\d+)[^>]*>.{0,120}?(?:capital|hauptdorf|stolica|kapital)",
+        ),
+        (
+            "marker_before_link",
+            r"(?:capital|hauptdorf|stolica|kapital)[^<>]{0,120}?<a[^>]*newdid=(\d+)",
+        ),
     ):
         m = re.search(pat, html, re.IGNORECASE | re.DOTALL)
-        html_fallback.append({
-            "pattern": pat_name,
-            "matched_id": int(m.group(1)) if m else None,
-            "matched_excerpt": m.group(0)[:300] if m else None,
-        })
+        html_fallback.append(
+            {
+                "pattern": pat_name,
+                "matched_id": int(m.group(1)) if m else None,
+                "matched_excerpt": m.group(0)[:300] if m else None,
+            }
+        )
     result["html_fallback"] = html_fallback
 
     keyword_counts: dict[str, int] = {}
     for kw in (
-        "isMainVillage", "isCapital", "mainVillage", "isMainVil",
-        "capital", "Hauptdorf", "stolica", "Kapital", "newdid",
-        "is_main_village", '"main"', "MainVillage",
+        "isMainVillage",
+        "isCapital",
+        "mainVillage",
+        "isMainVil",
+        "capital",
+        "Hauptdorf",
+        "stolica",
+        "Kapital",
+        "newdid",
+        "is_main_village",
+        '"main"',
+        "MainVillage",
     ):
         keyword_counts[kw] = html.lower().count(kw.lower())
     result["keyword_counts"] = keyword_counts
 
     excerpts: dict[str, str] = {}
     for kw in (
-        "isMainVillage", "isCapital", "MainVillage",
-        "capital", "Capital", "crown", "wonder",
-        "&#x2605;", "&#9733;", "mainVillage", "main-village",
+        "isMainVillage",
+        "isCapital",
+        "MainVillage",
+        "capital",
+        "Capital",
+        "crown",
+        "wonder",
+        "&#x2605;",
+        "&#9733;",
+        "mainVillage",
+        "main-village",
     ):
         idx = html.find(kw)
         if idx >= 0:
-            excerpts[kw] = html[max(0, idx - 250):idx + 500]
+            excerpts[kw] = html[max(0, idx - 250) : idx + 500]
     result["excerpts"] = excerpts
 
     newdid_contexts: list[dict] = []
-    for m in re.finditer(r'newdid=(\d+)', html):
+    for m in re.finditer(r"newdid=(\d+)", html):
         start = max(0, m.start() - 400)
         end = min(len(html), m.end() + 400)
-        newdid_contexts.append({
-            "newdid": int(m.group(1)),
-            "context": html[start:end],
-        })
+        newdid_contexts.append(
+            {
+                "newdid": int(m.group(1)),
+                "context": html[start:end],
+            }
+        )
     result["newdid_contexts"] = newdid_contexts
 
     villages_pat = re.search(
@@ -215,6 +246,7 @@ async def diag_profile_parse(
     result["relevant_classes"] = class_matches[:20]
 
     from travian_api.services.auto_scout_service import AutoScoutService
+
     svc = AutoScoutService(tsess.http_client)
     parsed = await svc.get_player_profile_info(player_id)
     result["parser_output"] = parsed
@@ -248,7 +280,9 @@ async def stop_one_session(session_id: str, user=Depends(get_current_user)):
     ok = operation_manager.request_stop(session_id)
     logger.info(
         "Stop requested for session %s by user %s (op_found=%s)",
-        session_id, user.id, ok,
+        session_id,
+        user.id,
+        ok,
     )
     return {"stopped": True, "op_running": ok, "session_id": session_id}
 
@@ -295,7 +329,9 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
     if result is None:
         logger.warning(
             "session_stream subscriber: subscribe() returned None — session vanished. "
-            "user=%s session=%s", user_id, session_id,
+            "user=%s session=%s",
+            user_id,
+            session_id,
         )
         await websocket.send_json({"type": "error", "message": "Session not found"})
         await ws_manager.disconnect(user_id, channel, websocket)
@@ -305,7 +341,11 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
     logger.info(
         "session_stream subscriber attached: user=%s session=%s sub_id=%s "
         "session.status=%s history_len=%d",
-        user_id, session_id, sub_id, session.status, len(history),
+        user_id,
+        session_id,
+        sub_id,
+        session.status,
+        len(history),
     )
 
     stop_listener: asyncio.Task | None = None
@@ -336,7 +376,10 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
             logger.info(
                 "session_stream subscriber: session already disconnected, sent "
                 "session_ended and closing. user=%s session=%s sub_id=%s sent=%d",
-                user_id, session_id, sub_id, sent_count,
+                user_id,
+                session_id,
+                sub_id,
+                sent_count,
             )
             return
 
@@ -357,7 +400,9 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
                 logger.info(
                     "session_stream subscriber: None sentinel received, sent "
                     "session_ended. session=%s sub_id=%s sent=%d",
-                    session_id, sub_id, sent_count,
+                    session_id,
+                    sub_id,
+                    sent_count,
                 )
                 break
             await websocket.send_json({"type": "message", "data": data})
@@ -365,14 +410,18 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
 
     except WebSocketDisconnect:
         logger.info(
-            "session_stream subscriber: WebSocketDisconnect. "
-            "session=%s sub_id=%s sent=%d",
-            session_id, sub_id, sent_count,
+            "session_stream subscriber: WebSocketDisconnect. session=%s sub_id=%s sent=%d",
+            session_id,
+            sub_id,
+            sent_count,
         )
     except Exception:
         logger.exception(
             "Error in session stream WS: session=%s user=%s sub_id=%s sent=%d",
-            session_id, user_id, sub_id, sent_count,
+            session_id,
+            user_id,
+            sub_id,
+            sent_count,
         )
     finally:
         if stop_listener is not None:
@@ -385,7 +434,9 @@ async def session_stream_ws(websocket: WebSocket, session_id: str):
         await ws_manager.disconnect(user_id, channel, websocket)
         logger.info(
             "session_stream subscriber detached. session=%s sub_id=%s total_sent=%d",
-            session_id, sub_id, sent_count,
+            session_id,
+            sub_id,
+            sent_count,
         )
 
 

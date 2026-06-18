@@ -24,8 +24,13 @@ def _apply_non_capitals_filter(tiles: list[MapTileInfo], non_capitals: bool) -> 
 
 def _village(x: int, y: int, is_capital: bool = False) -> MapTileInfo:
     return MapTileInfo(
-        x=x, y=y, is_oasis=False, village_id=x * 100 + y,
-        player_id=1, population=500, is_capital=is_capital,
+        x=x,
+        y=y,
+        is_oasis=False,
+        village_id=x * 100 + y,
+        player_id=1,
+        population=500,
+        is_capital=is_capital,
     )
 
 
@@ -70,9 +75,8 @@ def test_want_capital_info_derivation_matches_non_capitals_flag() -> None:
     legacy ``show_capitals`` config read must be GONE so removing the
     frontend toggle doesn't leave a vestigial unused config key."""
     import pathlib
-    src = pathlib.Path(
-        "src/travian_api/web/ws/scout_ws.py"
-    ).read_text(encoding="utf-8")
+
+    src = pathlib.Path("src/travian_api/web/ws/scout_ws.py").read_text(encoding="utf-8")
     # No reads of the old config key.
     assert 'config.get("show_capitals"' not in src, (
         "show_capitals is removed from the UI; backend must not "
@@ -80,10 +84,8 @@ def test_want_capital_info_derivation_matches_non_capitals_flag() -> None:
     )
     # want_capital_info is assigned exactly once, from non_capitals.
     import re
-    assignments = re.findall(
-        r"^\s*want_capital_info\s*=\s*(.+)$", src, re.MULTILINE
-    )
+
+    assignments = re.findall(r"^\s*want_capital_info\s*=\s*(.+)$", src, re.MULTILINE)
     assert assignments == ["non_capitals"], (
-        f"want_capital_info should be assigned exactly once from "
-        f"non_capitals; got {assignments!r}"
+        f"want_capital_info should be assigned exactly once from non_capitals; got {assignments!r}"
     )

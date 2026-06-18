@@ -136,7 +136,9 @@ class ReconAccount:
             logger.info(
                 "Recon account: retry window elapsed (%.0fs since last "
                 "failure), attempting re-auth for server=%s username=%s",
-                elapsed, self.server_url, self.username,
+                elapsed,
+                self.server_url,
+                self.username,
             )
         try:
             await self.auth_service.login()
@@ -147,7 +149,9 @@ class ReconAccount:
                 "Recon proxy login failed (server=%s username=%s): %r. "
                 "Read ops will fall back to the primary account for up "
                 "to %ds, then re-attempt.",
-                self.server_url, self.username, exc,
+                self.server_url,
+                self.username,
+                exc,
                 _RECON_AUTH_RETRY_AFTER_S,
             )
             return False
@@ -157,7 +161,8 @@ class ReconAccount:
             "Recon proxy account authenticated: server=%s username=%s. "
             "Subsequent AutoScout read ops will dispatch through this "
             "account instead of any user's primary login.",
-            self.server_url, self.username,
+            self.server_url,
+            self.username,
         )
         return True
 

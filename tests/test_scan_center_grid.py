@@ -36,9 +36,7 @@ def _build_scan_centers(cx: int, cy: int, radius: int) -> list[tuple[int, int]]:
 def _coverage_includes(centers: list[tuple[int, int]], x: int, y: int) -> bool:
     """A tile (x, y) is covered iff at least one center's 31x31
     region (center ± 15) contains it."""
-    return any(
-        abs(cx - x) <= 15 and abs(cy - y) <= 15 for cx, cy in centers
-    )
+    return any(abs(cx - x) <= 15 and abs(cy - y) <= 15 for cx, cy in centers)
 
 
 def test_small_radius_centers_on_requested_point() -> None:
@@ -54,8 +52,7 @@ def test_small_radius_covers_north_corner_of_radius() -> None:
     covered y up to 90 only — (17, 96) was outside the window."""
     centers = _build_scan_centers(23, 88, 13)
     assert _coverage_includes(centers, 17, 96), (
-        f"(17, 96) should be in fetched region for r=13 around "
-        f"(42, 17); centers were {centers}"
+        f"(17, 96) should be in fetched region for r=13 around (42, 17); centers were {centers}"
     )
 
 
@@ -70,9 +67,7 @@ def test_small_radius_covers_every_tile_inside_circle() -> None:
             if math.hypot(x - cx, y - cy) <= r:
                 if not _coverage_includes(centers, x, y):
                     missing.append((x, y))
-    assert not missing, (
-        f"Tiles inside r=13 not covered by any scan center: {missing[:5]}..."
-    )
+    assert not missing, f"Tiles inside r=13 not covered by any scan center: {missing[:5]}..."
 
 
 def test_radius_15_still_one_call() -> None:
@@ -100,9 +95,7 @@ def test_radius_30_covers_full_area() -> None:
     for x in range(70, 131):
         for y in range(70, 131):
             if math.hypot(x - 100, y - 100) <= 30:
-                assert _coverage_includes(centers, x, y), (
-                    f"({x}, {y}) inside r=30 not covered"
-                )
+                assert _coverage_includes(centers, x, y), f"({x}, {y}) inside r=30 not covered"
 
 
 def test_radius_60_still_covered_no_gaps() -> None:
@@ -133,12 +126,9 @@ def test_source_uses_new_algorithm() -> None:
     for path in targets:
         src = path.read_text(encoding="utf-8")
         m = bad_pattern.search(src)
-        assert m is None, (
-            f"Old buggy scan-center range found in {path}: {m.group(0)!r}"
-        )
+        assert m is None, f"Old buggy scan-center range found in {path}: {m.group(0)!r}"
         # Positive assertion: the new pattern exists.
         assert "HALF = 15" in src, (
-            f"Expected new HALF/STRIDE pattern in {path}; old code may "
-            f"still be in place."
+            f"Expected new HALF/STRIDE pattern in {path}; old code may still be in place."
         )
         assert "STRIDE = 30" in src

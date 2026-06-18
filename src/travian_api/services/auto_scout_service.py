@@ -22,9 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Module-level — module-private. Used by _parse_tile_details below.
 # Outer wrapper to anchor parsing inside the right table block.
-_OASIS_BONUS_TABLE_RE = re.compile(
-    r'<table[^>]*\bid="distribution"[^>]*>(.*?)</table>', re.DOTALL
-)
+_OASIS_BONUS_TABLE_RE = re.compile(r'<table[^>]*\bid="distribution"[^>]*>(.*?)</table>', re.DOTALL)
 # Each <tr> in the bonus table emits three cells in fixed order on modern
 # Travian (post-2025): ico → val → desc. The ``ico`` cell carries an
 # ``<i class="rN">`` icon (r1=wood, r2=clay, r3=iron, r4=crop); the
@@ -34,15 +32,11 @@ _OASIS_BONUS_TABLE_RE = re.compile(
 #
 # Older skins emitted desc → val only; we keep that as a backstop by
 # searching for any (resource-class, percentage) pair within a row.
-_OASIS_BONUS_ROW_RE = re.compile(
-    r'<tr[^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE
-)
+_OASIS_BONUS_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.DOTALL | re.IGNORECASE)
 # Resource icon (modern shape). Catches `<i class="r4" ...>` and
 # `<img class="resource r4" ...>` variants. The group captures the
 # numeric ID alone.
-_OASIS_BONUS_ICON_RE = re.compile(
-    r'class="[^"]*\br(\d)\b[^"]*"', re.IGNORECASE
-)
+_OASIS_BONUS_ICON_RE = re.compile(r'class="[^"]*\br(\d)\b[^"]*"', re.IGNORECASE)
 # Locale-stable canonical mapping. Travian's resource icon numbering is
 # stable across servers and locales: r1=Wood, r2=Clay, r3=Iron, r4=Crop.
 _RESOURCE_ID_BY_ICON = {
@@ -56,16 +50,37 @@ _RESOURCE_ID_BY_ICON = {
 # locales will produce empty bonus and log a warning, surfacing the
 # need to extend this list.
 _RESOURCE_ID_BY_NAME = {
-    "wood": "wood", "lumber": "wood", "holz": "wood",
-    "drewno": "wood", "drevo": "wood", "ahşap": "wood",
-    "дерево": "wood", "ξύλο": "wood",
-    "clay": "clay", "lehm": "clay", "glina": "clay",
-    "hlina": "clay", "kil": "clay", "глина": "clay", "πηλός": "clay",
-    "iron": "iron", "eisen": "iron", "żelazo": "iron",
-    "železo": "iron", "demir": "iron", "железо": "iron", "σίδηρος": "iron",
-    "crop": "crop", "cereal": "crop", "cereals": "crop",
-    "getreide": "crop", "zboże": "crop", "obilie": "crop",
-    "tahıl": "crop", "зерно": "crop", "δημητριακά": "crop",
+    "wood": "wood",
+    "lumber": "wood",
+    "holz": "wood",
+    "drewno": "wood",
+    "drevo": "wood",
+    "ahşap": "wood",
+    "дерево": "wood",
+    "ξύλο": "wood",
+    "clay": "clay",
+    "lehm": "clay",
+    "glina": "clay",
+    "hlina": "clay",
+    "kil": "clay",
+    "глина": "clay",
+    "πηλός": "clay",
+    "iron": "iron",
+    "eisen": "iron",
+    "żelazo": "iron",
+    "železo": "iron",
+    "demir": "iron",
+    "железо": "iron",
+    "σίδηρος": "iron",
+    "crop": "crop",
+    "cereal": "crop",
+    "cereals": "crop",
+    "getreide": "crop",
+    "zboże": "crop",
+    "obilie": "crop",
+    "tahıl": "crop",
+    "зерно": "crop",
+    "δημητριακά": "crop",
 }
 # Display labels in English. Used when rendering a locale-stable
 # string for users on any locale. Order = Wood, Clay, Iron, Crop.
@@ -83,19 +98,19 @@ _RESOURCE_DISPLAY = {
 # stems (e.g. plain "hlavn"): those false-positive against unrelated
 # Czech/Slovak words. Stick to recognisable, locale-explicit forms.
 _CAPITAL_KEYWORDS_RE = re.compile(
-    r'capital'                # en/es/pt/it (also matches "capitale")
-    r'|hauptdorf'             # de
-    r'|stolica|stolnica'      # pl, sl
-    r'|kapital'               # also fragments of de "Hauptstadt"-style skins
-    r'|столица'               # ru/uk/sr
-    r'|başkent'               # tr
-    r'|hlavní|hlavné'         # cs, sk
-    r'|főváros'               # hu
-    r'|hoofdstad'             # nl
-    r'|huvudstad'             # sv
-    r'|pääkaupunki'           # fi
-    r'|首都'                  # cjk
-    r'|العاصمة',              # ar
+    r"capital"  # en/es/pt/it (also matches "capitale")
+    r"|hauptdorf"  # de
+    r"|stolica|stolnica"  # pl, sl
+    r"|kapital"  # also fragments of de "Hauptstadt"-style skins
+    r"|столица"  # ru/uk/sr
+    r"|başkent"  # tr
+    r"|hlavní|hlavné"  # cs, sk
+    r"|főváros"  # hu
+    r"|hoofdstad"  # nl
+    r"|huvudstad"  # sv
+    r"|pääkaupunki"  # fi
+    r"|首都"  # cjk
+    r"|العاصمة",  # ar
     re.IGNORECASE,
 )
 
@@ -187,8 +202,8 @@ def _parse_capital_id_from_profile_html(html: str) -> Optional[int]:
     # cell sitting in the same table row separated by ``</td><td>``.
     kw_src = _CAPITAL_KEYWORDS_RE.pattern
     for marker_pat in (
-        rf'<a[^>]*newdid=(\d+)[^>]*>.{{0,200}}?(?:{kw_src})',
-        rf'(?:{kw_src}).{{0,200}}?<a[^>]*newdid=(\d+)',
+        rf"<a[^>]*newdid=(\d+)[^>]*>.{{0,200}}?(?:{kw_src})",
+        rf"(?:{kw_src}).{{0,200}}?<a[^>]*newdid=(\d+)",
     ):
         m = re.search(marker_pat, html, re.IGNORECASE | re.DOTALL)
         if m:
@@ -230,12 +245,7 @@ def _extract_villages_array(html: str) -> Optional[list]:
         if fallback is None:
             fallback = parsed
         if any(
-            isinstance(v, dict)
-            and (
-                "typeText" in v
-                or "isMainVillage" in v
-                or "isCapital" in v
-            )
+            isinstance(v, dict) and ("typeText" in v or "isMainVillage" in v or "isCapital" in v)
             for v in parsed
         ):
             return parsed
@@ -300,7 +310,8 @@ def _parse_oasis_bonus_breakdown(html: str) -> Dict[str, int]:
         if resource_id is None:
             desc_m = re.search(
                 r'<td[^>]*\bclass="desc"[^>]*>\s*([^<]+?)\s*</td>',
-                row, re.DOTALL,
+                row,
+                re.DOTALL,
             )
             if desc_m:
                 name = clean_unicode(html_unescape(desc_m.group(1))).strip().lower()
@@ -311,7 +322,8 @@ def _parse_oasis_bonus_breakdown(html: str) -> Dict[str, int]:
         # Percentage — from the ``class="val"`` cell.
         val_m = re.search(
             r'<td[^>]*\bclass="val"[^>]*>(.*?)</td>',
-            row, re.DOTALL,
+            row,
+            re.DOTALL,
         )
         if not val_m:
             continue
@@ -361,7 +373,8 @@ def _parse_oasis_bonus_html(html: str) -> str:
 # Concurrent operations on the same AutoScoutService instance see
 # independent values without racing on shared state.
 _recon_context: contextvars.ContextVar[Optional[HttpClient]] = contextvars.ContextVar(
-    "auto_scout_recon_client", default=None,
+    "auto_scout_recon_client",
+    default=None,
 )
 
 
@@ -388,7 +401,8 @@ class AutoScoutService:
 
     @asynccontextmanager
     async def with_recon_client(
-        self, recon_client: Optional[HttpClient],
+        self,
+        recon_client: Optional[HttpClient],
     ) -> AsyncIterator[None]:
         """Scope a recon HttpClient to a single coroutine tree.
 
@@ -977,6 +991,7 @@ class AutoScoutService:
                 # retry interval isn't a fixed clockwork tell.
                 if not result.success and "No confirmation form" in result.raw_response:
                     from ..stealth.timing import HumanTiming as _HT
+
                     backoff = _HT.micro_jitter(3.0, 0.35)
                     self._report(f"  -> Retrying after {backoff:.1f}s (possible rate limit)...")
                     await asyncio.sleep(backoff)
@@ -1121,9 +1136,7 @@ class AutoScoutService:
         # phase can copy that village's population into the oasis row
         # (otherwise V.Pop would always be 0 for occupied oases).
         if info.is_oasis and info.player_id:
-            for m in re.finditer(
-                r"karte\.php\?x=(-?\d+)&(?:amp;)?y=(-?\d+)", html
-            ):
+            for m in re.finditer(r"karte\.php\?x=(-?\d+)&(?:amp;)?y=(-?\d+)", html):
                 ox, oy = int(m.group(1)), int(m.group(2))
                 if (ox, oy) != (x, y):
                     info.oasis_owner_x = ox

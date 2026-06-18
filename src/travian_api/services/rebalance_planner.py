@@ -324,9 +324,7 @@ def plan_waves_for_target(
     if wanted == 0:
         return []
 
-    candidates = enumerate_candidate_waves(
-        target_agg.coord, village_positions, troop_supplies
-    )
+    candidates = enumerate_candidate_waves(target_agg.coord, village_positions, troop_supplies)
     picks = pick_wave_set_greedy(candidates, wanted)
     if not picks:
         return []
@@ -356,22 +354,24 @@ def plan_waves_for_target(
             break
         round_trip = arrival_min * 2.0
         raids_per_day = compute_expected_raids_per_day(round_trip)
-        plan.append(Placement(
-            target_coord=target_agg.coord,
-            optimal_village=village,
-            optimal_unit=unit,
-            optimal_count=count,
-            round_trip_min=round_trip,
-            expected_raids_per_day=raids_per_day,
-            expected_daily_booty=raids_per_day * haul,
-            target_name=target_name,
-            primary_owner_village=primary_owner,
-            slot_instances=slot_instances,
-            wave_index=idx + 1,            # 1-based for operator-facing output
-            of_total_waves=of_total,
-            arrival_min=arrival_min,
-            expected_haul=haul,
-        ))
+        plan.append(
+            Placement(
+                target_coord=target_agg.coord,
+                optimal_village=village,
+                optimal_unit=unit,
+                optimal_count=count,
+                round_trip_min=round_trip,
+                expected_raids_per_day=raids_per_day,
+                expected_daily_booty=raids_per_day * haul,
+                target_name=target_name,
+                primary_owner_village=primary_owner,
+                slot_instances=slot_instances,
+                wave_index=idx + 1,  # 1-based for operator-facing output
+                of_total_waves=of_total,
+                arrival_min=arrival_min,
+                expected_haul=haul,
+            )
+        )
         troop_supplies[(village, unit)] = avail - count
         cumulative_taken += haul
     return plan
@@ -604,9 +604,7 @@ def plan_rebalance(
         )
         dead, reason = is_dead_farm(target_agg, now_unix=now_unix)
         if dead:
-            dead_decisions.append(
-                _build_dead_decision(target_agg, owner, reason, now_unix)
-            )
+            dead_decisions.append(_build_dead_decision(target_agg, owner, reason, now_unix))
             continue
 
         wave_plan = plan_waves_for_target(target_agg, village_positions, troop_supplies)
@@ -666,9 +664,7 @@ def plan_rebalance(
     )
 
 
-def _build_dead_decision(
-    target_agg: Any, owner: str, reason: str, now_unix: float
-) -> DeadDecision:
+def _build_dead_decision(target_agg: Any, owner: str, reason: str, now_unix: float) -> DeadDecision:
     last_raid = target_agg.last_raid_time_unix
     days_ago = ((now_unix - float(last_raid)) / 86400.0) if last_raid else None
     return DeadDecision(

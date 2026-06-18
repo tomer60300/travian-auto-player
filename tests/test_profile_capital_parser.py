@@ -29,7 +29,7 @@ PRODUCTION_PROFILE_SLICE = (
     '"population":337,"victoryPoints":null,"victoryPointsPerDay":null,'
     '"x":41,"y":90,"occupiedOases":[],"region":null,'
     '"typeText":"","typeTitle":""}'
-    ']'
+    "]"
 )
 
 
@@ -43,22 +43,18 @@ def test_modern_typetext_capital_german() -> None:
         '"villages":['
         '{"id":111,"name":"Berlin","typeText":"(Hauptdorf)","typeTitle":""},'
         '{"id":222,"name":"Bonn","typeText":"","typeTitle":""}'
-        ']'
+        "]"
     )
     assert _parse_capital_id_from_profile_html(html) == 111
 
 
 def test_modern_typetext_capital_polish() -> None:
-    html = (
-        '"villages":[{"id":7777,"typeText":"(Stolica)","typeTitle":""}]'
-    )
+    html = '"villages":[{"id":7777,"typeText":"(Stolica)","typeTitle":""}]'
     assert _parse_capital_id_from_profile_html(html) == 7777
 
 
 def test_modern_typetext_capital_russian() -> None:
-    html = (
-        '"villages":[{"id":4242,"typeText":"(Столица)","typeTitle":""}]'
-    )
+    html = '"villages":[{"id":4242,"typeText":"(Столица)","typeTitle":""}]'
     assert _parse_capital_id_from_profile_html(html) == 4242
 
 
@@ -68,7 +64,7 @@ def test_modern_typetext_ignores_non_capital_marker() -> None:
         '"villages":['
         '{"id":1,"typeText":"(WW)","typeTitle":""},'
         '{"id":2,"typeText":"","typeTitle":""}'
-        ']'
+        "]"
     )
     assert _parse_capital_id_from_profile_html(html) is None
 
@@ -79,7 +75,7 @@ def test_legacy_isMainVillage_still_works() -> None:
         '"villages":['
         '{"id":555,"name":"Alpha","isMainVillage":true},'
         '{"id":666,"name":"Beta","isMainVillage":false}'
-        ']'
+        "]"
     )
     assert _parse_capital_id_from_profile_html(html) == 555
 
@@ -92,10 +88,10 @@ def test_legacy_isCapital_still_works() -> None:
 def test_html_fallback_link_before_marker() -> None:
     """Last-resort path: newdid link followed by the word 'capital'."""
     html = (
-        '<table>'
+        "<table>"
         '<tr><td><a href="?newdid=123">Alpha</a></td>'
         '<td class="capital">Capital village</td></tr>'
-        '</table>'
+        "</table>"
     )
     assert _parse_capital_id_from_profile_html(html) == 123
 
@@ -112,7 +108,7 @@ def test_empty_html_returns_none() -> None:
 def test_missing_villages_array_returns_none() -> None:
     """A profile page without the JSON villages array should fall through
     to the HTML fallback; with no marker text either, returns None."""
-    html = '<html><body>Some unrelated content.</body></html>'
+    html = "<html><body>Some unrelated content.</body></html>"
     assert _parse_capital_id_from_profile_html(html) is None
 
 
@@ -145,7 +141,7 @@ def test_modern_typetext_with_populated_occupied_oases() -> None:
         '{"id":222,"name":"Outpost","tribeId":1,"mapId":2,'
         '"population":300,"victoryPoints":null,"x":3,"y":3,'
         '"occupiedOases":[],"region":null,"typeText":"","typeTitle":""}'
-        ']'
+        "]"
     )
     assert _parse_capital_id_from_profile_html(html) == 111
 
@@ -155,18 +151,16 @@ def test_modern_typetext_with_very_long_village_object() -> None:
     can be long, names can be long, future fields can be added). The
     previous flat regex bounded the chunk to 800 chars; the new
     structural extractor must handle arbitrary length."""
-    long_oasis_list = ",".join(
-        f'{{"id":{i},"x":{i},"y":{i}}}' for i in range(40)
-    )
+    long_oasis_list = ",".join(f'{{"id":{i},"x":{i},"y":{i}}}' for i in range(40))
     html = (
-        '"villages":[{"id":7777,"name":"' + 'X' * 200 + '","tribeId":1,'
+        '"villages":[{"id":7777,"name":"' + "X" * 200 + '","tribeId":1,'
         f'"mapId":99,"population":1200,"occupiedOases":[{long_oasis_list}],'
         '"region":null,"typeText":"(Capital)","typeTitle":""}]'
     )
     # Sanity: this fixture really is bigger than the prior 800-char
     # window. If it weren't, the test would silently pass against the
     # old parser too and miss the regression Codex flagged.
-    villages_obj_len = len(html) - len('"villages":[') - len(']')
+    villages_obj_len = len(html) - len('"villages":[') - len("]")
     assert villages_obj_len > 800
     assert _parse_capital_id_from_profile_html(html) == 7777
 
@@ -176,10 +170,10 @@ def test_html_fallback_marker_before_link() -> None:
     the newdid link as well as after. Covers locales/skins where the
     village table puts the marker in a sibling cell to the left."""
     html = (
-        '<table>'
+        "<table>"
         '<tr><td class="capital">Capital</td>'
         '<td><a href="?newdid=2025">Roma</a></td></tr>'
-        '</table>'
+        "</table>"
     )
     assert _parse_capital_id_from_profile_html(html) == 2025
 
@@ -190,9 +184,9 @@ def test_unknown_locale_falls_through_without_crashing() -> None:
     user, instead of raising and failing the whole scan."""
     html = (
         '"villages":['
-        '{"id":1,"typeText":"(पूँजी)","typeTitle":""},'   # Hindi placeholder
+        '{"id":1,"typeText":"(पूँजी)","typeTitle":""},'  # Hindi placeholder
         '{"id":2,"typeText":"","typeTitle":""}'
-        ']'
+        "]"
     )
     assert _parse_capital_id_from_profile_html(html) is None
 
@@ -202,9 +196,7 @@ def test_caller_dict_immutability_not_relevant_here() -> None:
     (we pass strings, which are immutable, but assert behavior is
     referentially transparent so repeated calls on the same input
     yield identical results)."""
-    html = (
-        '"villages":[{"id":111,"typeText":"(Capital)","typeTitle":""}]'
-    )
+    html = '"villages":[{"id":111,"typeText":"(Capital)","typeTitle":""}]'
     first = _parse_capital_id_from_profile_html(html)
     second = _parse_capital_id_from_profile_html(html)
     assert first == second == 111
@@ -220,28 +212,20 @@ def test_hlavn_short_prefix_no_longer_false_positive() -> None:
         '"villages":['
         '{"id":1,"typeText":"(hlavně)","typeTitle":""},'
         '{"id":2,"typeText":"","typeTitle":""}'
-        ']'
+        "]"
     )
     assert _parse_capital_id_from_profile_html(html) is None
 
 
 def test_czech_capital_marker_still_works() -> None:
     """Tightening the locale regex must not break real Czech."""
-    html = (
-        '"villages":['
-        '{"id":99,"typeText":"(Hlavní město)","typeTitle":""}'
-        ']'
-    )
+    html = '"villages":[{"id":99,"typeText":"(Hlavní město)","typeTitle":""}]'
     assert _parse_capital_id_from_profile_html(html) == 99
 
 
 def test_slovak_capital_marker_still_works() -> None:
     """Tightening the locale regex must not break real Slovak."""
-    html = (
-        '"villages":['
-        '{"id":99,"typeText":"(Hlavné mesto)","typeTitle":""}'
-        ']'
-    )
+    html = '"villages":[{"id":99,"typeText":"(Hlavné mesto)","typeTitle":""}]'
     assert _parse_capital_id_from_profile_html(html) == 99
 
 
@@ -266,10 +250,7 @@ def test_falls_back_to_first_villages_array_when_no_markers_anywhere() -> None:
     Travian schema we haven't catalogued yet), return None — but the
     parser still picks A villages array internally for the legacy
     boolean check, not crashing on the unfamiliar shape."""
-    html = (
-        '"villages":[{"id":1,"name":"sidebar"}],'
-        '"villages":[{"id":99,"name":"some-other-block"}]'
-    )
+    html = '"villages":[{"id":1,"name":"sidebar"}],"villages":[{"id":99,"name":"some-other-block"}]'
     # No marker → returns None; the goal of the test is "no crash, no
     # spurious match", not a specific id.
     assert _parse_capital_id_from_profile_html(html) is None
@@ -279,8 +260,5 @@ def test_villages_array_with_string_containing_braces() -> None:
     """Village names occasionally contain literal { or } — the
     structural extractor's string awareness must not confuse them
     with object boundaries."""
-    html = (
-        '"villages":[{"id":1,"name":"weird}brace{name",'
-        '"typeText":"(Capital)","typeTitle":""}]'
-    )
+    html = '"villages":[{"id":1,"name":"weird}brace{name","typeText":"(Capital)","typeTitle":""}]'
     assert _parse_capital_id_from_profile_html(html) == 1

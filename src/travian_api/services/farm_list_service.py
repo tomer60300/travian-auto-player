@@ -326,6 +326,7 @@ class FarmListService:
             # payload-shape signature isn't an invariant 5,5,5,... across runs.
             # Stays close to BATCH_SIZE so cursor math remains stable.
             import random as _rand
+
             batch_size = _rand.randint(max(1, self.BATCH_SIZE - 1), self.BATCH_SIZE + 2)
 
             # Stealth: small custom pause between successive batches so the

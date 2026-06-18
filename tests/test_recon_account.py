@@ -90,6 +90,7 @@ async def test_with_recon_client_context_manager_isolates_concurrent_tasks() -> 
     with no recon at all). The mutable-attribute pattern fails this
     test; the ContextVar pattern passes."""
     import asyncio
+
     primary = _stub_client("primary")
     recon_a = _stub_client("recon_a")
     recon_b = _stub_client("recon_b")
@@ -140,16 +141,13 @@ def test_write_paths_never_use_recon() -> None:
     break write ops because the recon account has no villages."""
     import pathlib
     import re
-    src = pathlib.Path(
-        "src/travian_api/services/auto_scout_service.py"
-    ).read_text(encoding="utf-8")
+
+    src = pathlib.Path("src/travian_api/services/auto_scout_service.py").read_text(encoding="utf-8")
     # MilitaryService and TargetResolver must always be constructed
     # against self.http_client (the primary), never against
     # self._read_client() or self.recon_http_client.
     for ctor in ("MilitaryService", "TargetResolver"):
-        for m in re.finditer(
-            rf"\b{ctor}\(\s*self\.([a-z_]+)", src
-        ):
+        for m in re.finditer(rf"\b{ctor}\(\s*self\.([a-z_]+)", src):
             assert m.group(1) == "http_client", (
                 f"{ctor} must always be constructed with self.http_client "
                 f"(the primary account) — found self.{m.group(1)} which "
@@ -199,9 +197,7 @@ async def test_get_player_profile_info_uses_recon_when_set() -> None:
 def test_is_configured_false_when_creds_blank() -> None:
     """Without env vars set the manager reports unconfigured."""
     mgr = ReconAccountManager()
-    with patch(
-        "travian_api.services.recon_account._get_settings"
-    ) as mock_get_settings:
+    with patch("travian_api.services.recon_account._get_settings") as mock_get_settings:
         instance = mock_get_settings.return_value
         instance.recon_username = ""
         instance.recon_password = ""
@@ -210,9 +206,7 @@ def test_is_configured_false_when_creds_blank() -> None:
 
 def test_is_configured_true_when_creds_present() -> None:
     mgr = ReconAccountManager()
-    with patch(
-        "travian_api.services.recon_account._get_settings"
-    ) as mock_get_settings:
+    with patch("travian_api.services.recon_account._get_settings") as mock_get_settings:
         instance = mock_get_settings.return_value
         instance.recon_username = "recon@example.com"
         instance.recon_password = "secret"
@@ -222,30 +216,20 @@ def test_is_configured_true_when_creds_present() -> None:
 @pytest.mark.asyncio
 async def test_get_or_create_returns_none_when_unconfigured() -> None:
     mgr = ReconAccountManager()
-    with patch(
-        "travian_api.services.recon_account._get_settings"
-    ) as mock_get_settings:
+    with patch("travian_api.services.recon_account._get_settings") as mock_get_settings:
         instance = mock_get_settings.return_value
         instance.recon_username = ""
         instance.recon_password = ""
-        result = await mgr.get_or_create_client(
-            "https://ts2.x1.europe.travian.com"
-        )
+        result = await mgr.get_or_create_client("https://ts2.x1.europe.travian.com")
         assert result is None
 
 
 def test_server_slug_handles_typical_url() -> None:
-    assert (
-        _server_slug("https://ts2.x1.europe.travian.com")
-        == "ts2_x1_europe_travian_com"
-    )
+    assert _server_slug("https://ts2.x1.europe.travian.com") == "ts2_x1_europe_travian_com"
 
 
 def test_server_slug_handles_trailing_slash() -> None:
-    assert (
-        _server_slug("https://ts2.x1.europe.travian.com/")
-        == "ts2_x1_europe_travian_com"
-    )
+    assert _server_slug("https://ts2.x1.europe.travian.com/") == "ts2_x1_europe_travian_com"
 
 
 def test_server_slug_handles_unknown_host() -> None:
@@ -264,9 +248,8 @@ def test_recon_proxy_routing_completeness_scout_ws() -> None:
     the scan's traffic onto the user's primary account again."""
     import pathlib
     import re
-    src = pathlib.Path(
-        "src/travian_api/web/ws/scout_ws.py"
-    ).read_text(encoding="utf-8")
+
+    src = pathlib.Path("src/travian_api/web/ws/scout_ws.py").read_text(encoding="utf-8")
     # Strip comments so commentary mentioning "/api/v1/map/position"
     # doesn't false-positive.
     src_no_comments = re.sub(r"#[^\n]*", "", src)
@@ -303,9 +286,8 @@ def test_recon_proxy_routing_completeness_service() -> None:
     or use a local ``read_client = self._read_client()`` alias."""
     import pathlib
     import re
-    src = pathlib.Path(
-        "src/travian_api/services/auto_scout_service.py"
-    ).read_text(encoding="utf-8")
+
+    src = pathlib.Path("src/travian_api/services/auto_scout_service.py").read_text(encoding="utf-8")
     src_no_comments = re.sub(r"#[^\n]*", "", src)
     pattern = re.compile(
         r"(?P<receiver>self\.\w+|\w+)\.(?:post_json|get_html)\s*\(\s*[^)]*?"
@@ -342,13 +324,13 @@ def test_scout_ws_lazy_imports_resolve() -> None:
     """
     import pathlib
     import re
-    src_path = pathlib.Path(
-        "src/travian_api/web/ws/scout_ws.py"
-    ).read_text(encoding="utf-8")
+
+    src_path = pathlib.Path("src/travian_api/web/ws/scout_ws.py").read_text(encoding="utf-8")
     # All recon_account imports in scout_ws.py must resolve to the
     # actual module. We extract each one as written and use importlib
     # to verify it's reachable from the scout_ws.py package context.
     import importlib
+
     pattern = re.compile(
         r"^\s*from\s+(\.+)([\w.]*)\s+import\s+(\w[\w, ]*)$",
         re.MULTILINE,
@@ -367,8 +349,7 @@ def test_scout_ws_lazy_imports_resolve() -> None:
         levels_up = len(dots)
         if levels_up > len(parts):
             raise AssertionError(
-                f"Too many dots in {m.group(0)!r}: scout_ws.py only "
-                f"sits {len(parts)} levels deep."
+                f"Too many dots in {m.group(0)!r}: scout_ws.py only sits {len(parts)} levels deep."
             )
         anchor = ".".join(parts[: len(parts) - levels_up])
         full = f"{anchor}.{mod}" if mod else anchor
@@ -384,9 +365,7 @@ def test_get_proxy_username_returns_configured_username() -> None:
     and the user can't reason about WHICH disposable account is
     fronting their reads."""
     mgr = ReconAccountManager()
-    with patch(
-        "travian_api.services.recon_account._get_settings"
-    ) as mock_get_settings:
+    with patch("travian_api.services.recon_account._get_settings") as mock_get_settings:
         instance = mock_get_settings.return_value
         instance.recon_username = "throwaway@example.com"
         instance.recon_password = "secret"
@@ -395,9 +374,7 @@ def test_get_proxy_username_returns_configured_username() -> None:
 
 def test_get_proxy_username_returns_none_when_unconfigured() -> None:
     mgr = ReconAccountManager()
-    with patch(
-        "travian_api.services.recon_account._get_settings"
-    ) as mock_get_settings:
+    with patch("travian_api.services.recon_account._get_settings") as mock_get_settings:
         instance = mock_get_settings.return_value
         instance.recon_username = ""
         instance.recon_password = ""
@@ -413,11 +390,10 @@ async def test_ensure_authed_retries_after_window_elapsed() -> None:
 
     # Construct a ReconAccount bypassing real HttpClient creation by
     # patching at import time.
-    with patch(
-        "travian_api.services.recon_account.HttpClient"
-    ), patch(
-        "travian_api.services.recon_account.AuthService"
-    ) as mock_auth_service_cls:
+    with (
+        patch("travian_api.services.recon_account.HttpClient"),
+        patch("travian_api.services.recon_account.AuthService") as mock_auth_service_cls,
+    ):
         mock_auth = mock_auth_service_cls.return_value
 
         account = ReconAccount(
@@ -444,9 +420,8 @@ async def test_ensure_authed_retries_after_window_elapsed() -> None:
         # Third call AFTER the window: retry the login. Simulate elapsed
         # by rewinding _last_failure_at past the retry threshold.
         from travian_api.services import recon_account as recon_module
-        account._last_failure_at -= (
-            recon_module._RECON_AUTH_RETRY_AFTER_S + 1
-        )
+
+        account._last_failure_at -= recon_module._RECON_AUTH_RETRY_AFTER_S + 1
         mock_auth.login = AsyncMock(return_value=None)
         ok = await account.ensure_authed()
         assert ok is True
