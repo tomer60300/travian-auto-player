@@ -128,6 +128,22 @@ async def test_aggregate_uses_cache_no_refetch(_isolate_cache) -> None:
 
 
 @pytest.mark.asyncio
+async def test_aggregate_routes_all_reads_through_recon(_isolate_cache) -> None:
+    """Every tile-details read in the aggregation must dispatch through the
+    recon (background) account; the user's primary client must make ZERO
+    requests. This is the load-bearing stealth guarantee for the combined
+    non-capital + oasis-bonus search."""
+    primary = _stub_client("https://world")
+    recon = _stub_client("https://world")
+    svc = AutoScoutService(primary)
+    svc.recon_http_client = recon  # _read_client() fallback #2
+    await svc.aggregate_village_oasis_bonuses([{"village_id": 1, "oases": [(6, 7), (8, 9)]}])
+    assert recon.post_json.await_count == 2  # both oases fetched via recon
+    primary.post_json.assert_not_called()  # primary dispatches nothing
+    primary.get_html.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_aggregate_failed_fetch_not_cached(_isolate_cache) -> None:
     svc = AutoScoutService(_stub_client())
     svc.get_tile_details = AsyncMock(side_effect=RuntimeError("network"))
@@ -166,3 +182,88 @@ async def test_profile_info_includes_villages_no_extra_request() -> None:
     assert client.get_html.await_count == 1  # single profile fetch
     vids = {v["village_id"] for v in info["villages"]}
     assert vids == {34756, 34754}
+
+
+@pytest.mark.asyncio
+async def test_profile_info_yields_both_capital_and_oases_from_one_fetch() -> None:
+    """The non-capital + oasis-bonus combination relies on ONE /profile/{id}
+    GET answering BOTH questions: which village is the capital AND each
+    village's occupied-oasis coords. 34756 is tagged "(Capital)" in the
+    fixture, so a single fetch must expose both the capital id and the
+    villages list — zero extra requests for the combined filter."""
+    client = _stub_client()
+    client.get_html = AsyncMock(return_value=DEMO_PROFILE_SLICE)
+    svc = AutoScoutService(client)
+    info = await svc.get_player_profile_info(player_id=8639)
+    assert client.get_html.await_count == 1  # ONE fetch serves both filters
+    assert info["capital_id"] == 34756
+    assert {v["village_id"] for v in info["villages"]} == {34756, 34754}
+
+
+# ───────── combined non-capital + village-oasis-bonus filter ─────────
+
+
+def _apply_combined_filters(
+    tiles: list[MapTileInfo],
+    *,
+    non_capitals: bool,
+    bonus_total_levels: set[int],
+) -> list[MapTileInfo]:
+    """Mirror of the two independent scout_ws post-filter blocks that run
+    when a scan combines "Exclude capital villages" with the village
+    oasis-bonus filter — kept here so the AND-composition is asserted
+    without spinning up the full WS coroutine. Total uses MINIMUM (>=)
+    semantics, matching the village-oasis filter."""
+    out = tiles
+    if non_capitals:
+        out = [t for t in out if not t.is_capital]
+    if bonus_total_levels:
+        min_total = min(bonus_total_levels)
+        kept = []
+        for t in out:
+            if t.is_oasis or t.village_oasis_count == 0:
+                continue
+            breakdown = t.village_oasis_breakdown or {}
+            if not breakdown or sum(breakdown.values()) < min_total:
+                continue
+            kept.append(t)
+        out = kept
+    return out
+
+
+def _village_tile(x: int, *, is_capital: bool, breakdown: dict[str, int]) -> MapTileInfo:
+    return MapTileInfo(
+        x=x,
+        y=0,
+        is_oasis=False,
+        village_id=x,
+        player_id=1,
+        is_capital=is_capital,
+        village_oasis_breakdown=breakdown,
+        village_oasis_count=len(breakdown),
+    )
+
+
+def test_combined_keeps_only_noncapital_above_min_total() -> None:
+    tiles = [
+        _village_tile(
+            1, is_capital=False, breakdown={"iron": 25, "crop": 25, "wood": 25}
+        ),  # 75, keep
+        _village_tile(
+            2, is_capital=True, breakdown={"iron": 50, "crop": 50}
+        ),  # 100 but capital → drop
+        _village_tile(3, is_capital=False, breakdown={"wood": 25}),  # 25 < 50 → drop
+    ]
+    out = _apply_combined_filters(tiles, non_capitals=True, bonus_total_levels={50})
+    assert [t.x for t in out] == [1]
+
+
+def test_combined_without_capital_exclusion_keeps_capital() -> None:
+    """Same bonus filter, but exclude-capitals OFF: the 100%-total capital
+    survives because only the min-total axis applies."""
+    tiles = [
+        _village_tile(1, is_capital=False, breakdown={"iron": 25, "crop": 25, "wood": 25}),  # 75
+        _village_tile(2, is_capital=True, breakdown={"iron": 50, "crop": 50}),  # 100
+    ]
+    out = _apply_combined_filters(tiles, non_capitals=False, bonus_total_levels={50})
+    assert sorted(t.x for t in out) == [1, 2]

@@ -15,6 +15,7 @@ const LS_KEY_BONUS_MINS = 'autoscout_bonus_resource_mins'
 const LS_KEY_BONUS_LEVELS = 'autoscout_bonus_total_levels'
 const LS_KEY_USE_RECON = 'autoscout_use_recon'
 const LS_KEY_RECON_STRICT = 'autoscout_recon_strict'
+const LS_KEY_EXCLUDE_CAPITALS = 'autoscout_exclude_capitals'
 
 function loadJson(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback }
@@ -135,6 +136,13 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const [reconStrict, setReconStrict] = useState(() => {
     return loadJson(LS_KEY_RECON_STRICT, false) === true
   })
+  // Modifier for the "villages by oasis bonus" mode: also drop each
+  // player's capital village. Costs NOTHING extra — the capital id is
+  // already parsed from the very same profile fetch the oasis aggregation
+  // uses, so this just enables the existing non-capitals post-filter.
+  const [excludeCapitals, setExcludeCapitals] = useState(() => {
+    return loadJson(LS_KEY_EXCLUDE_CAPITALS, false) === true
+  })
   const [newAlliance, setNewAlliance] = useState('')
   const [newPlayer, setNewPlayer] = useState('')
 
@@ -160,6 +168,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   useEffect(() => { localStorage.setItem(LS_KEY_BONUS_LEVELS, JSON.stringify(bonusTotalLevels)) }, [bonusTotalLevels])
   useEffect(() => { localStorage.setItem(LS_KEY_USE_RECON, JSON.stringify(useRecon)) }, [useRecon])
   useEffect(() => { localStorage.setItem(LS_KEY_RECON_STRICT, JSON.stringify(reconStrict)) }, [reconStrict])
+  useEffect(() => { localStorage.setItem(LS_KEY_EXCLUDE_CAPITALS, JSON.stringify(excludeCapitals)) }, [excludeCapitals])
 
   const toast = useToast()
 
@@ -385,9 +394,13 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       oasis_only: filterMode === 'oasis-only',
       // Triggers the server's capital-identification path (profile
       // fetches per unique player) AND the post-filter that drops
-      // is_capital tiles. Only the non-capitals target type needs
-      // this — every other mode skips the profile-fetch phase.
-      non_capitals: filterMode === 'non-capitals',
+      // is_capital tiles. Fires for the dedicated non-capitals target
+      // type, OR as a modifier on the oasis-bonus mode (Exclude capital
+      // villages) — the latter reuses the SAME per-player profile fetch
+      // the oasis aggregation already needs, so it adds zero requests.
+      non_capitals:
+        filterMode === 'non-capitals' ||
+        (filterMode === 'villages-by-oasis-bonus' && excludeCapitals),
       // "Villages by oasis bonus" mode — server fetches each in-radius
       // player's profile (reusing the population/capital fetch), reads each
       // village's occupied-oasis coords, fetches+caches the per-oasis bonus,
@@ -555,6 +568,22 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
               occupied oasis; cached)
             </span>
           </label>
+          {filterMode === 'villages-by-oasis-bonus' && (
+            <label className="check-label ml-6">
+              <input
+                type="checkbox"
+                checked={excludeCapitals}
+                onChange={(e) => setExcludeCapitals(e.target.checked)}
+                disabled={scanning}
+                className="checkbox-gold"
+              />
+              Exclude capital villages —{' '}
+              <span className="text-secondary text-xs">
+                also drop each player&apos;s capital (same profile fetch — no
+                extra requests)
+              </span>
+            </label>
+          )}
         </div>
       </div>
 
