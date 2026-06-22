@@ -231,3 +231,13 @@ class MapTileInfo(BaseModel):
     # uniform across villages and occupied oases.
     oasis_owner_x: Optional[int] = None
     oasis_owner_y: Optional[int] = None
+    # Aggregated oasis bonus for a VILLAGE — the sum of the bonuses of every
+    # oasis this village occupies (from its profile `occupiedOases`), keyed by
+    # canonical resource id. Populated only in the "villages by oasis bonus"
+    # scan mode, on non-oasis tiles. Empty {} for villages with no occupied
+    # oases or in any other mode. Can exceed 100% across multiple oases.
+    village_oasis_breakdown: Dict[str, int] = Field(default_factory=dict)
+    # Number of oases this village occupies (from the profile). 0 lets the
+    # village-oasis-bonus filter reject a village for free, without any
+    # tile-details fetch.
+    village_oasis_count: int = 0

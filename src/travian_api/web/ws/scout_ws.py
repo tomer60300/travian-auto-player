@@ -29,6 +29,7 @@ from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.models.farm_list import MapTileInfo
 from travian_api.operation_manager import OperationContext, operation_manager
 from travian_api.parsers.html_parser import parse_troop_confirm_page
+from travian_api.services.auto_scout_service import _format_bonus_breakdown
 from travian_api.stealth.human_delay import ActionType
 from travian_api.stealth.timing import HumanTiming
 from travian_api.web.operation_gate import active_ops
@@ -798,6 +799,17 @@ def _build_scout_scan_coro(config: dict):
         # other scan mode.
         non_capitals = bool(config.get("non_capitals", False))
 
+        # Target-type flag: "villages by oasis bonus" — find player villages
+        # whose AGGREGATED occupied-oasis bonus meets the bonus filter. This
+        # mode is village-only: oases are an aggregation input, never result
+        # rows, so we force the oasis-display flags off to spend zero
+        # enrichment requests on oasis tiles. The only oasis I/O is the
+        # deduped, cached per-oasis tile-details fetched during aggregation.
+        villages_by_oasis_bonus = bool(config.get("villages_by_oasis_bonus", False))
+        if villages_by_oasis_bonus:
+            show_oases = False
+            oasis_only = False
+
         # Recon (background) account toggle — when True AND the recon
         # account is configured + authenticates successfully, all read
         # ops in this scan (map_position, tile-details, profile pages)
@@ -1301,17 +1313,25 @@ def _build_scout_scan_coro(config: dict):
         # (which needs the accurate total) and the non-capitals target
         # type (which needs to identify which villages to drop).
         capital_map: dict[int, int] = {}
+        # Per-village occupied-oasis projections collected from the profile
+        # pages (only when villages_by_oasis_bonus). Each entry is the dict
+        # produced by AutoScoutService._extract_village_oases.
+        profile_villages: list[dict] = []
 
-        # Profile fetching is needed when EITHER:
+        # Profile fetching is needed when ANY of:
         # - the user wants accurate per-player population (max_player_pop), OR
         # - the user picked the non-capitals target type and we need to
-        #   identify capitals to filter them out.
+        #   identify capitals to filter them out, OR
+        # - the user picked "villages by oasis bonus" and we need each
+        #   village's occupiedOases coords (parsed from the same profile HTML).
         # Other modes (plain villages / with-oases / oasis-only) skip
         # the profile-fetch phase entirely, saving ~N HTTP requests
         # per scan where N is the unique-player count (~50–150 for a
         # radius-10 scan).
         want_capital_info = non_capitals
-        need_profiles = (max_player_pop is not None or want_capital_info) and bool(visible_pops)
+        need_profiles = (
+            max_player_pop is not None or want_capital_info or villages_by_oasis_bonus
+        ) and bool(visible_pops)
 
         if need_profiles:
             unique_pids = set(visible_pops.keys())
@@ -1360,6 +1380,10 @@ def _build_scout_scan_coro(config: dict):
                     capital_map[pid] = cap
                 elif want_capital_info:
                     capital_misses += 1
+                if villages_by_oasis_bonus:
+                    vils = info.get("villages")
+                    if isinstance(vils, list):
+                        profile_villages.extend(vils)
             # Capital parse failures need to be loud — a silent zero
             # means every ★ in the UI is wrong without any error path.
             # Tolerable when the user opted out of capital markers; a
@@ -1484,6 +1508,51 @@ def _build_scout_scan_coro(config: dict):
                 }
             )
 
+        # ── Village oasis-bonus aggregation ─────────────────────────
+        # For the "villages by oasis bonus" mode, sum each in-radius
+        # village's occupied-oasis bonuses and stamp the aggregate onto its
+        # tile. Restricted to villages whose tile is in the scan (radius-only
+        # scope) so profile villages outside the radius are never fetched.
+        if villages_by_oasis_bonus:
+            scanned_vids = {t.village_id for t in tiles if not t.is_oasis and t.village_id}
+            candidates = [v for v in profile_villages if v.get("village_id") in scanned_vids]
+            unique_oasis_coords: set[tuple[int, int]] = set()
+            for v in candidates:
+                unique_oasis_coords.update(v.get("oases", []))
+            ctx.push(
+                {
+                    "type": "phase",
+                    "phase": "oasis_aggregate",
+                    "message": (
+                        f"Resolving oasis bonus for {len(candidates)} village(s) "
+                        f"across {len(unique_oasis_coords)} unique oasis tile(s)…"
+                    ),
+                }
+            )
+
+            def _on_oasis(done: int, total: int) -> None:
+                ctx.push(
+                    {
+                        "type": "phase",
+                        "phase": "oasis_progress",
+                        "index": done,
+                        "total": total,
+                        "message": f"Oasis bonus fetch: {done}/{total}",
+                    }
+                )
+
+            agg = await svc.aggregate_village_oasis_bonuses(candidates, progress_cb=_on_oasis)
+            # village_id → (breakdown, occupied-oasis count)
+            by_vid: dict[int, tuple[dict[str, int], int]] = {}
+            for v in candidates:
+                vid = v["village_id"]
+                by_vid[vid] = (agg.get(vid, {}), len(set(v.get("oases", []))))
+            for t in tiles:
+                if not t.is_oasis and t.village_id in by_vid:
+                    breakdown, count = by_vid[t.village_id]
+                    t.village_oasis_breakdown = breakdown
+                    t.village_oasis_count = count
+
         # ── Phase 4: Post-enrichment filtering ──────────────────────
         post_filter_msgs = []
 
@@ -1602,6 +1671,56 @@ def _build_scout_scan_coro(config: dict):
                     misses_unparseable,
                 )
 
+        # ── Village oasis-bonus filter ──────────────────────────────
+        # Same two axes as the oasis bonus filter, but read against a
+        # VILLAGE's aggregated occupied-oasis breakdown and with MINIMUM
+        # (>=) semantics for the total — a village's summed bonus can exceed
+        # 100%, so exact-bucket matching is meaningless here. Only runs when
+        # a filter is set; with no filter the mode just surfaces every
+        # in-radius village with its aggregated bonus for display.
+        if villages_by_oasis_bonus and (bonus_resource_mins or bonus_total_levels):
+            min_total = min(bonus_total_levels) if bonus_total_levels else 0
+            before = len(tiles)
+            out: list = []
+            misses_unparseable = 0
+            for t in tiles:
+                if t.is_oasis:
+                    # Defensive: this mode forces show_oases off, so oases
+                    # shouldn't reach here, but never emit one if it does.
+                    continue
+                if t.village_oasis_count == 0:
+                    continue  # no oases → can't meet any minimum
+                breakdown = t.village_oasis_breakdown or {}
+                if not breakdown:
+                    # Has oases but none parsed (locale/HTML change) — drop.
+                    misses_unparseable += 1
+                    continue
+                if any(
+                    breakdown.get(res, 0) < min_pct for res, min_pct in bonus_resource_mins.items()
+                ):
+                    continue
+                if bonus_total_levels and sum(breakdown.values()) < min_total:
+                    continue
+                out.append(t)
+            tiles = out
+            removed = before - len(tiles)
+            if removed > 0:
+                parts = []
+                if bonus_resource_mins:
+                    parts.append(
+                        "mins="
+                        + ",".join(f"{r}>={p}%" for r, p in sorted(bonus_resource_mins.items()))
+                    )
+                if bonus_total_levels:
+                    parts.append(f"total>={min_total}%")
+                post_filter_msgs.append(f"Village oasis bonus ({'; '.join(parts)}): -{removed}")
+            if misses_unparseable:
+                logger.warning(
+                    "Village oasis-bonus filter dropped %d village(s) whose oasis "
+                    "bonus couldn't be parsed while a filter was active.",
+                    misses_unparseable,
+                )
+
         if max_player_pop is not None:
             before = len(tiles)
             removed_players = set()
@@ -1680,6 +1799,14 @@ def _build_scout_scan_coro(config: dict):
                 # classify. Frontend uses this to compute bonus_total
                 # for sorting and to render compact chips if desired.
                 "bonus_breakdown": t.bonus_breakdown,
+                # Village-mode aggregate: the summed bonus of all oases this
+                # VILLAGE occupies, the contributing-oasis count, and a
+                # human-readable string. Empty/0 outside villages-by-oasis
+                # mode. Frontend renders village_oasis_bonus in the Bonus
+                # column and sorts on village_oasis_breakdown in this mode.
+                "village_oasis_breakdown": t.village_oasis_breakdown,
+                "village_oasis_count": t.village_oasis_count,
+                "village_oasis_bonus": _format_bonus_breakdown(t.village_oasis_breakdown),
             }
             for t in tiles
         ]

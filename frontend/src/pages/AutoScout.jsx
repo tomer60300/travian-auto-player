@@ -388,6 +388,12 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
       // is_capital tiles. Only the non-capitals target type needs
       // this — every other mode skips the profile-fetch phase.
       non_capitals: filterMode === 'non-capitals',
+      // "Villages by oasis bonus" mode — server fetches each in-radius
+      // player's profile (reusing the population/capital fetch), reads each
+      // village's occupied-oasis coords, fetches+caches the per-oasis bonus,
+      // and filters villages on the aggregated breakdown via the shared
+      // bonus_resource_mins / bonus_total_levels fields below.
+      villages_by_oasis_bonus: filterMode === 'villages-by-oasis-bonus',
       // Default true even when the user hasn't explicitly toggled —
       // server side decides whether recon is actually used (it needs
       // creds configured + a successful login). Sending false here
@@ -533,6 +539,22 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             />
             Oases only (occupied + unoccupied; ignore villages)
           </label>
+          <label className="check-label">
+            <input
+              type="radio"
+              name="filterMode"
+              value="villages-by-oasis-bonus"
+              checked={filterMode === 'villages-by-oasis-bonus'}
+              onChange={() => setFilterMode('villages-by-oasis-bonus')}
+              className="accent-radio"
+              disabled={scanning}
+            />
+            Villages by oasis bonus
+            <span className="text-xs text-secondary ml-1">
+              (1 profile fetch per player + 1 tile-details per unique
+              occupied oasis; cached)
+            </span>
+          </label>
         </div>
       </div>
 
@@ -590,6 +612,10 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         const anyMinSet = Object.values(bonusResourceMins).some((v) => v > 0)
         const anyLevelSet = bonusTotalLevels.length > 0
         const filterActive = anyMinSet || anyLevelSet
+        const villageMode = filterMode === 'villages-by-oasis-bonus'
+        // The filter has no effect only when oases are entirely out of
+        // scope — i.e. the plain villages mode. The village-by-bonus mode
+        // applies the filter to each village's AGGREGATED oasis bonus.
         const noOasesInScope = filterMode === 'villages'
         const toggleLevel = (lv) => {
           setBonusTotalLevels((prev) =>
@@ -603,7 +629,9 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         return (
           <div className="mb-4 p-3 rounded border-default bg-surface">
             <div className="flex items-center justify-between mb-2">
-              <label className="field-label-lg">Oasis bonus filter</label>
+              <label className="field-label-lg">
+                {villageMode ? 'Village oasis bonus filter' : 'Oasis bonus filter'}
+              </label>
               {filterActive && (
                 <button
                   type="button"
@@ -641,7 +669,9 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
               </div>
             </div>
             <div>
-              <label className="field-label mb-1">Total bonus level</label>
+              <label className="field-label mb-1">
+                {villageMode ? 'Minimum total bonus' : 'Total bonus level'}
+              </label>
               <div className="flex flex-wrap gap-2">
                 {LEVELS.map((lv) => {
                   const selected = bonusTotalLevels.includes(lv)
@@ -662,8 +692,9 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
                 })}
               </div>
               <p className="text-xs text-secondary mt-1">
-                Multi-select. An oasis passes if its TOTAL bonus equals any selected bucket.
-                Empty = no total filter.
+                {villageMode
+                  ? 'A village passes if its TOTAL oasis bonus (summed across all its oases) is at least the lowest selected level. Empty = no total filter.'
+                  : 'Multi-select. An oasis passes if its TOTAL bonus equals any selected bucket. Empty = no total filter.'}
               </p>
             </div>
             {filterActive && noOasesInScope && (
@@ -768,9 +799,13 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
     // surface (ascending) but never interleave with oases.
     const computeSortValue = (r) => {
       if (sortField !== 'bonus_total') return r[sortField] ?? 0
-      if (!r.is_oasis) return -1
-      const bd = r.bonus_breakdown
-      if (!bd || typeof bd !== 'object') return 0
+      // Prefer the village-aggregated breakdown (villages-by-oasis-bonus
+      // mode); fall back to a per-oasis breakdown. Rows with neither sink
+      // to -1 so they never interleave with rows that have a bonus.
+      const bd = r.village_oasis_count > 0
+        ? r.village_oasis_breakdown
+        : (r.is_oasis ? r.bonus_breakdown : null)
+      if (!bd || typeof bd !== 'object') return -1
       let total = 0
       for (const v of Object.values(bd)) {
         if (typeof v === 'number') total += v
@@ -929,11 +964,15 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
                   </td>
                   <td className="text-center font-mono">{row.distance != null ? row.distance.toFixed(1) : '---'}</td>
                   <td className="text-center font-mono whitespace-nowrap">
-                    {row.is_oasis
-                      ? (row.bonus
-                          ? <span className="text-gold">{row.bonus}</span>
-                          : <span className="text-secondary opacity-30" title="Oasis bonus could not be parsed">—</span>)
-                      : <span className="text-secondary opacity-15">·</span>}
+                    {row.village_oasis_count > 0
+                      ? (row.village_oasis_bonus
+                          ? <span className="text-gold" title={`${row.village_oasis_count} occupied oasis/oases`}>{row.village_oasis_bonus}</span>
+                          : <span className="text-secondary opacity-30" title="Village oasis bonus could not be parsed">—</span>)
+                      : row.is_oasis
+                        ? (row.bonus
+                            ? <span className="text-gold">{row.bonus}</span>
+                            : <span className="text-secondary opacity-30" title="Oasis bonus could not be parsed">—</span>)
+                        : <span className="text-secondary opacity-15">·</span>}
                   </td>
                   <td className={row.player_name ? 'text-primary' : 'text-secondary italic'}>{row.player_name || 'Unoccupied'}</td>
                   <td className="text-secondary text-xs">{row.alliance_name || '---'}</td>

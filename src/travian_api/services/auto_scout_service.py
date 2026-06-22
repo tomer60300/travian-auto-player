@@ -16,6 +16,7 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set, Tupl
 from ..clients.http_client import HttpClient
 from ..models.farm_list import MapTileInfo
 from ..parsers.html_parser import clean_unicode
+from .oasis_bonus_cache import oasis_bonus_cache
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +251,69 @@ def _extract_villages_array(html: str) -> Optional[list]:
         ):
             return parsed
     return fallback
+
+
+def _coerce_int(value: Any) -> int:
+    """Best-effort int coercion for profile JSON fields that may arrive as
+    ints or numeric strings. Returns 0 on anything unparseable so callers
+    don't need a separate error path."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.lstrip("-").isdigit():
+        return int(value)
+    return 0
+
+
+def _extract_village_oases(html: str) -> List[dict]:
+    """Per-village occupied-oasis coordinates from a profile page.
+
+    Reuses :func:`_extract_villages_array` (so it shares the structural
+    balancer that handles nested ``occupiedOases`` objects) and projects
+    each village down to the fields the oasis-bonus aggregation needs::
+
+        [{"village_id": int, "x": int, "y": int, "name": str,
+          "population": int, "oases": [(ox, oy), ...]}, ...]
+
+    The profile's ``occupiedOases`` entries carry only ``{"id","x","y"}`` —
+    NO bonus data — so coordinates are all we can lift here; the bonus
+    itself comes from a per-oasis tile-details fetch downstream. Villages
+    without a usable integer id are skipped. Returns ``[]`` when no villages
+    array is present (locale/layout change).
+    """
+    villages = _extract_villages_array(html)
+    if not villages:
+        return []
+    out: List[dict] = []
+    for v in villages:
+        if not isinstance(v, dict):
+            continue
+        vid = v.get("id")
+        if isinstance(vid, str) and vid.isdigit():
+            vid = int(vid)
+        if not isinstance(vid, int) or vid <= 0:
+            continue
+        oases: List[Tuple[int, int]] = []
+        raw_oases = v.get("occupiedOases")
+        if isinstance(raw_oases, list):
+            for o in raw_oases:
+                if not isinstance(o, dict):
+                    continue
+                ox, oy = o.get("x"), o.get("y")
+                if isinstance(ox, int) and isinstance(oy, int):
+                    oases.append((ox, oy))
+        out.append(
+            {
+                "village_id": vid,
+                "x": _coerce_int(v.get("x")),
+                "y": _coerce_int(v.get("y")),
+                "name": v.get("name") if isinstance(v.get("name"), str) else "",
+                "population": _coerce_int(v.get("population")),
+                "oases": oases,
+            }
+        )
+    return out
 
 
 def _extract_pct_from_val_cell(cell_html: str) -> Optional[int]:
@@ -597,6 +661,70 @@ class AutoScoutService:
         html = resp.get("html", "")
         return self._parse_tile_details(x, y, html)
 
+    async def aggregate_village_oasis_bonuses(
+        self,
+        villages: List[dict],
+        *,
+        progress_cb: Optional[Callable[[int, int], None]] = None,
+    ) -> Dict[int, Dict[str, int]]:
+        """Sum each village's occupied-oasis bonuses into a per-village
+        breakdown, with the fewest possible HTTP requests.
+
+        ``villages`` is the projection produced by :func:`_extract_village_oases`
+        (``{"village_id", "oases": [(x, y), ...]}`` per entry). Strategy:
+
+        1. Collect the UNIQUE oasis coordinates across all villages (op-wide
+           dedup) so a coordinate shared by the input is fetched at most once.
+        2. For each coordinate, consult :data:`oasis_bonus_cache` first
+           (bonus is immutable → cached forever); on a miss, do exactly ONE
+           ``get_tile_details`` (which routes through ``_read_client`` — the
+           recon account when active) and cache the parsed breakdown. Parse
+           failures are NOT cached, so transient errors self-heal next scan.
+        3. Sum per village in CPU, de-duplicating each village's own coords.
+
+        Returns ``{village_id: {resource_id: summed_pct}}``. A village with
+        no occupied oases maps to ``{}`` and costs zero requests.
+        """
+        server = self.http_client.base_url
+
+        unique_coords: List[Tuple[int, int]] = []
+        seen: Set[Tuple[int, int]] = set()
+        for v in villages:
+            for coord in v.get("oases", []):
+                if coord not in seen:
+                    seen.add(coord)
+                    unique_coords.append(coord)
+
+        bonus_by_coord: Dict[Tuple[int, int], Dict[str, int]] = {}
+        total = len(unique_coords)
+        for done, (ox, oy) in enumerate(unique_coords, start=1):
+            cached = oasis_bonus_cache.get(server, ox, oy)
+            if cached is not None:
+                bonus_by_coord[(ox, oy)] = cached
+            else:
+                try:
+                    detail = await self.get_tile_details(ox, oy)
+                    breakdown = detail.bonus_breakdown or {}
+                    bonus_by_coord[(ox, oy)] = breakdown
+                    oasis_bonus_cache.put(server, ox, oy, breakdown)
+                except Exception as exc:
+                    logger.warning("Failed to fetch oasis bonus for (%s,%s): %s", ox, oy, exc)
+                    bonus_by_coord[(ox, oy)] = {}  # not cached — self-heals
+            if progress_cb is not None:
+                try:
+                    progress_cb(done, total)
+                except Exception:
+                    pass
+
+        result: Dict[int, Dict[str, int]] = {}
+        for v in villages:
+            agg: Dict[str, int] = {}
+            for coord in set(v.get("oases", [])):
+                for res, pct in bonus_by_coord.get(coord, {}).items():
+                    agg[res] = agg.get(res, 0) + pct
+            result[v["village_id"]] = agg
+        return result
+
     async def enrich_tiles(
         self, tiles: List[MapTileInfo], concurrency: int = 15
     ) -> List[MapTileInfo]:
@@ -820,10 +948,13 @@ class AutoScoutService:
         per-village list. The capital is marked with ``"isMainVillage":true``
         inside the village entry.
 
-        Returns ``{"pop": int, "capital_id": int | None}``. Both fields are
-        defaulted (0 / None) so callers don't need separate error paths;
-        the capital flag is best-effort and silently skipped when the
-        profile page changes shape.
+        Returns ``{"pop": int, "capital_id": int | None, "villages": list}``.
+        All fields are defaulted (0 / None / []) so callers don't need
+        separate error paths; the capital flag and villages list are
+        best-effort and silently empty when the profile page changes shape.
+        ``villages`` is parsed from the SAME page HTML (no extra request) and
+        carries per-village occupied-oasis coordinates for the village-oasis
+        bonus aggregation — see :func:`_extract_village_oases`.
         """
         try:
             # Profile pages are account-independent reads — route
@@ -831,7 +962,7 @@ class AutoScoutService:
             page_html = await self._read_client().get_html(f"/profile/{player_id}")
         except Exception as exc:
             logger.warning("Failed to fetch profile for player %d: %s", player_id, exc)
-            return {"pop": 0, "capital_id": None}
+            return {"pop": 0, "capital_id": None, "villages": []}
 
         pop = 0
         m = re.search(
@@ -845,7 +976,8 @@ class AutoScoutService:
             logger.warning("Could not extract population from profile for player %d", player_id)
 
         capital_id = _parse_capital_id_from_profile_html(page_html)
-        return {"pop": pop, "capital_id": capital_id}
+        villages = _extract_village_oases(page_html)
+        return {"pop": pop, "capital_id": capital_id, "villages": villages}
 
     async def fetch_player_populations(
         self,
