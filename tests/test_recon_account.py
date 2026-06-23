@@ -379,6 +379,30 @@ async def test_get_player_profile_info_propagates_strict_violation() -> None:
     primary.get_html.assert_not_called()
 
 
+def test_diag_profile_endpoint_routes_through_recon() -> None:
+    """The /api/__diag/profile-parse diagnostic reads an account-
+    independent /profile/<id> page, so it must route through the recon
+    proxy when one is available — not fire directly on the caller's
+    primary http_client. Guards against the previously-unmasked profile
+    read regressing."""
+    import pathlib
+    import re
+
+    src = pathlib.Path("src/travian_api/web/routes/exec_sessions.py").read_text(encoding="utf-8")
+    src_no_comments = re.sub(r"#[^\n]*", "", src)
+    assert "recon_account_manager.get_or_create_client" in src_no_comments, (
+        "Diag profile read no longer acquires a recon client — the profile "
+        "fetch would run on the caller's primary account."
+    )
+    assert not re.search(
+        r"tsess\.http_client\.get_html\s*\(\s*f?[\"']/profile/",
+        src_no_comments,
+    ), (
+        "Diag profile read fires /profile/ directly on tsess.http_client "
+        "(primary) — route it through the recon-resolved read_client."
+    )
+
+
 def test_write_paths_never_use_recon() -> None:
     """Construction of TargetResolver/MilitaryService inside AutoScout
     send-scout code paths must pass the PRIMARY http_client. This is
