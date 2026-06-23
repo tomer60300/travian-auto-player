@@ -134,6 +134,251 @@ async def test_with_recon_client_none_falls_through_to_attribute() -> None:
         assert svc._read_client() is legacy_recon
 
 
+# ─────────────── strict-mode enforcement (_read_client) ──────────
+
+
+def test_read_client_raises_in_strict_mode_when_recon_unavailable() -> None:
+    """Bulletproof guarantee: under strict background-account mode,
+    ``_read_client`` REFUSES to return the primary client — it raises
+    ``ReconStrictViolation`` instead, so no account-independent read can
+    ever physically execute on the user's primary account. This is the
+    load-bearing enforcement; the per-coroutine entry guard is just a
+    nicer up-front abort on top of it."""
+    from travian_api.exceptions import ReconStrictViolation
+    from travian_api.services.auto_scout_service import _recon_strict_context
+
+    primary = _stub_client("primary")
+    svc = AutoScoutService(primary)
+    token = _recon_strict_context.set(True)
+    try:
+        with pytest.raises(ReconStrictViolation):
+            svc._read_client()
+    finally:
+        _recon_strict_context.reset(token)
+
+
+def test_read_client_strict_does_not_trust_legacy_attr() -> None:
+    """Under strict mode the task-local ContextVar is the SOLE accepted
+    authority. The legacy shared ``recon_http_client`` attribute is
+    mutable state another concurrent operation could have populated, so
+    strict mode must NOT ride it — with only the attr set (no scoped
+    ContextVar) ``_read_client`` raises rather than returning it. This
+    closes the cross-operation stale-client hole."""
+    from travian_api.exceptions import ReconStrictViolation
+    from travian_api.services.auto_scout_service import _recon_strict_context
+
+    primary = _stub_client("primary")
+    recon = _stub_client("recon")
+    svc = AutoScoutService(primary)
+    svc.recon_http_client = recon  # legacy attr only — no scoped ContextVar
+    token = _recon_strict_context.set(True)
+    try:
+        with pytest.raises(ReconStrictViolation):
+            svc._read_client()
+    finally:
+        _recon_strict_context.reset(token)
+
+
+def test_read_client_returns_recon_in_strict_mode_via_context() -> None:
+    """The scoped (ContextVar) recon client is honored under strict mode
+    too — the strict gate sits AFTER both recon sources are consulted."""
+    from travian_api.services.auto_scout_service import (
+        _recon_context,
+        _recon_strict_context,
+    )
+
+    primary = _stub_client("primary")
+    recon = _stub_client("recon")
+    svc = AutoScoutService(primary)
+    strict_token = _recon_strict_context.set(True)
+    try:
+        recon_token = _recon_context.set(recon)
+        try:
+            assert svc._read_client() is recon
+        finally:
+            _recon_context.reset(recon_token)
+    finally:
+        _recon_strict_context.reset(strict_token)
+
+
+def test_read_client_returns_primary_when_not_strict() -> None:
+    """Regression: with strict OFF (the default), the no-recon fallback
+    to the primary client is preserved. Strict mode is strictly opt-in —
+    it must never change behavior for users who didn't ask for it."""
+    primary = _stub_client("primary")
+    svc = AutoScoutService(primary)
+    assert svc._read_client() is primary
+
+
+def test_read_client_strict_rejects_scoped_primary() -> None:
+    """Defense-in-depth: even when the scoped ContextVar is set, if it
+    resolved to the PRIMARY client (a recon-manager bug), strict mode
+    refuses rather than reading on the user's own account."""
+    from travian_api.exceptions import ReconStrictViolation
+    from travian_api.services.auto_scout_service import (
+        _recon_context,
+        _recon_strict_context,
+    )
+
+    primary = _stub_client("primary")
+    svc = AutoScoutService(primary)
+    strict_token = _recon_strict_context.set(True)
+    try:
+        # Scoped client IS the primary — the exact corruption we guard.
+        ctx_token = _recon_context.set(primary)
+        try:
+            with pytest.raises(ReconStrictViolation):
+                svc._read_client()
+        finally:
+            _recon_context.reset(ctx_token)
+    finally:
+        _recon_strict_context.reset(strict_token)
+
+
+@pytest.mark.asyncio
+async def test_strict_mode_isolates_concurrent_tasks() -> None:
+    """Regression guard locking the architectural invariant: strict mode
+    is task-local. A strict task routed through its own recon client must
+    not bleed strict enforcement into a concurrent non-strict task, and a
+    non-strict task with no recon must still get the primary (not raise).
+    Guards against a future refactor that introduces gather/create_task
+    in the read path."""
+    import asyncio
+
+    from travian_api.services.auto_scout_service import (
+        _recon_context,
+        _recon_strict_context,
+    )
+
+    primary = _stub_client("primary")
+    recon = _stub_client("recon")
+    svc = AutoScoutService(primary)
+    results: dict[str, object] = {}
+
+    async def strict_task() -> None:
+        st = _recon_strict_context.set(True)
+        ct = _recon_context.set(recon)
+        try:
+            await asyncio.sleep(0)  # yield so the loose task interleaves
+            results["strict"] = svc._read_client()
+        finally:
+            _recon_context.reset(ct)
+            _recon_strict_context.reset(st)
+
+    async def loose_task() -> None:
+        await asyncio.sleep(0)
+        results["loose"] = svc._read_client()
+
+    await asyncio.gather(strict_task(), loose_task())
+    assert results["strict"] is recon, "strict task lost its recon routing"
+    assert results["loose"] is primary, "loose task wrongly affected by concurrent strict task"
+
+
+def test_strict_abort_not_gated_on_is_configured() -> None:
+    """Regression guard for the exact reported bug: the strict-mode
+    abort in scout_ws.py must NOT additionally require
+    ``recon_account_manager.is_configured()``. When it did, enabling
+    'Require background account' with no recon credentials set silently
+    became a no-op and the scan ran on the user's primary account — the
+    precise leak strict mode exists to prevent.
+
+    We assert that no abort condition combining a strict flag with
+    ``recon_client is None`` also references ``is_configured`` — whether
+    written single-line (``if strict_recon and recon_client is None:``)
+    or multi-line (``if ( ... ):``)."""
+    import pathlib
+    import re
+
+    src = pathlib.Path("src/travian_api/web/ws/scout_ws.py").read_text(encoding="utf-8")
+    conds: list[str] = []
+    # Single-line guards.
+    conds += re.findall(r"if\s+([^\n]*recon_client is None[^\n]*):", src)
+    # Multi-line `if ( ... ):` guards.
+    for m in re.finditer(r"if\s*\((?P<cond>.*?)\):", src, re.DOTALL):
+        if "recon_client is None" in m.group("cond"):
+            conds.append(m.group("cond"))
+    assert conds, (
+        "Could not locate any strict-recon abort guard referencing "
+        "'recon_client is None' in scout_ws.py — the regression guard is "
+        "no longer anchored to real code."
+    )
+    for cond in conds:
+        assert "is_configured" not in cond, (
+            "Strict-recon abort condition is gated on is_configured() — "
+            "this re-introduces the silent-fallback bug: 'Require "
+            "background account' becomes a no-op when no recon creds "
+            "are configured. The abort must fire on (strict and "
+            "recon_client is None) alone."
+        )
+
+
+# ──────────── _resolve_recon_flags (strict implies recon) ────────
+
+
+def test_resolve_recon_flags_strict_implies_acquire() -> None:
+    """The BLOCKER fix: a request that REQUIRES the background account
+    but unchecks 'use background account' (use_recon=False,
+    recon_strict=True) must still acquire AND enforce recon. Otherwise it
+    would skip recon acquisition, sail past the entry guard, and route
+    every read onto the primary — the exact leak strict mode forbids.
+    Strict wins over the opt-out flag."""
+    from travian_api.web.ws.scout_ws import _resolve_recon_flags
+
+    assert _resolve_recon_flags(use_recon=False, recon_strict=True) == (True, True)
+
+
+def test_resolve_recon_flags_normal_cases() -> None:
+    from travian_api.web.ws.scout_ws import _resolve_recon_flags
+
+    assert _resolve_recon_flags(True, False) == (True, False)  # use, not strict
+    assert _resolve_recon_flags(True, True) == (True, True)  # use + strict
+    assert _resolve_recon_flags(False, False) == (False, False)  # fully opted out
+
+
+# ──────── strict violation propagates through swallow sites ──────
+
+
+@pytest.mark.asyncio
+async def test_enrich_tiles_propagates_strict_violation() -> None:
+    """The enrichment loop's broad ``except Exception`` must NOT swallow
+    a strict violation into a per-tile 'enrich failed' and continue — it
+    must propagate so the operation aborts. Also proves the primary
+    client is never touched."""
+    from travian_api.exceptions import ReconStrictViolation
+    from travian_api.models.farm_list import MapTileInfo
+    from travian_api.services.auto_scout_service import _recon_strict_context
+
+    primary = _stub_client("primary")
+    svc = AutoScoutService(primary)
+    tile = MapTileInfo(x=10, y=91, distance=1.0)
+    token = _recon_strict_context.set(True)
+    try:
+        with pytest.raises(ReconStrictViolation):
+            await svc.enrich_tiles([tile])
+    finally:
+        _recon_strict_context.reset(token)
+    primary.post_json.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_player_profile_info_propagates_strict_violation() -> None:
+    """``get_player_profile_info`` swallows network/parse errors into a
+    default dict; it must NOT swallow a strict violation that way (which
+    would corrupt population/capital data AND hide the breach)."""
+    from travian_api.exceptions import ReconStrictViolation
+    from travian_api.services.auto_scout_service import _recon_strict_context
+
+    primary = _stub_client("primary")
+    svc = AutoScoutService(primary)
+    token = _recon_strict_context.set(True)
+    try:
+        with pytest.raises(ReconStrictViolation):
+            await svc.get_player_profile_info(4893)
+    finally:
+        _recon_strict_context.reset(token)
+    primary.get_html.assert_not_called()
+
+
 def test_write_paths_never_use_recon() -> None:
     """Construction of TargetResolver/MilitaryService inside AutoScout
     send-scout code paths must pass the PRIMARY http_client. This is

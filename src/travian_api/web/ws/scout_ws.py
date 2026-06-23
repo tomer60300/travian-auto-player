@@ -25,7 +25,7 @@ from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from travian_api.exceptions import ActivityBudgetExhausted
+from travian_api.exceptions import ActivityBudgetExhausted, ReconStrictViolation
 from travian_api.models.farm_list import MapTileInfo
 from travian_api.operation_manager import OperationContext, operation_manager
 from travian_api.parsers.html_parser import parse_troop_confirm_page
@@ -44,6 +44,22 @@ router = APIRouter()
 
 CHANNEL = "scout_auto"
 SCAN_CHANNEL = "scout_scan"
+
+
+def _resolve_recon_flags(use_recon: bool, recon_strict: bool) -> tuple[bool, bool]:
+    """Normalize the two client-supplied recon flags into the backend's
+    effective decision: ``(acquire_recon, strict)``.
+
+    ``strict`` ("Require background account") IMPLIES recon usage. A
+    request that requires the background account but also unchecks "use
+    background account" is contradictory; strict wins. Without this,
+    ``use_recon=False`` + ``recon_strict=True`` would skip recon
+    acquisition, sail past the entry guard (which keys off recon being
+    required), and route every read onto the PRIMARY account — the exact
+    leak strict mode exists to forbid. So strict mode can never be
+    disabled by the opt-out flag.
+    """
+    return (use_recon or recon_strict, recon_strict)
 
 
 # ---------------------------------------------------------------------------
@@ -230,11 +246,13 @@ def _build_auto_scout_coro(config: dict):
         # only fronts the READ portion of the sweep (target list
         # resolution); the scout dispatch downstream stays on the
         # active user's primary because recon has no troops.
-        from ...services.auto_scout_service import _recon_context
+        from ...services.auto_scout_service import _recon_context, _recon_strict_context
         from ...services.recon_account import recon_account_manager
 
+        # Strict mode implies recon usage — see _resolve_recon_flags.
+        acquire_recon, strict_recon = _resolve_recon_flags(use_recon, recon_strict)
         recon_client = None
-        if use_recon:
+        if acquire_recon:
             try:
                 recon_client = await recon_account_manager.get_or_create_client(
                     session.settings.base_url
@@ -245,16 +263,22 @@ def _build_auto_scout_coro(config: dict):
         active_user_for_strict = (
             session.auth_state.player_name if session.auth_state else session.settings.username
         )
-        if (
-            use_recon
-            and recon_strict
-            and recon_client is None
-            and recon_account_manager.is_configured()
-        ):
+        # Abort whenever strict mode is on and no recon client is
+        # available — unconfigured OR unauthenticated. NOT gated on
+        # is_configured() (that gate was the silent-no-op bug). See the
+        # equivalent block in _build_scout_scan_coro.
+        if strict_recon and recon_client is None:
+            configured = recon_account_manager.is_configured()
+            reason = (
+                "the background account couldn't authenticate"
+                if configured
+                else "no background account is configured on the server"
+            )
             logger.error(
                 "AutoScout-sweep STRICT-recon: recon proxy unavailable "
-                "AND strict mode is on. Aborting sweep for "
-                "active_user=%s.",
+                "(configured=%s) AND strict mode is on. Aborting sweep "
+                "for active_user=%s.",
+                configured,
                 active_user_for_strict,
             )
             ctx.push(
@@ -262,10 +286,9 @@ def _build_auto_scout_coro(config: dict):
                     "type": "error",
                     "fatal": True,
                     "message": (
-                        "Strict background-account mode is on, but the "
-                        "background account couldn't authenticate. The "
-                        "sweep was aborted to prevent leaking scout traffic "
-                        "onto your active account."
+                        f"Strict background-account mode is on, but {reason}. "
+                        "The sweep was aborted to prevent leaking scout "
+                        "traffic onto your active account."
                     ),
                 }
             )
@@ -274,6 +297,8 @@ def _build_auto_scout_coro(config: dict):
         # equivalent block in _build_scout_scan_coro for why this is
         # preferred over the legacy `svc.recon_http_client` attribute.
         _recon_context.set(recon_client)
+        # Arm choke-point enforcement for the read portion of the sweep.
+        _recon_strict_context.set(strict_recon)
         svc.recon_http_client = recon_client  # belt-and-braces backward compat
         active_user = (
             session.auth_state.player_name if session.auth_state else session.settings.username
@@ -838,11 +863,13 @@ def _build_scout_scan_coro(config: dict):
         # scans reuse the cached session. Returns None when creds
         # aren't configured, the user opted out, or auth has failed
         # (the recon manager logs a warning).
-        from ...services.auto_scout_service import _recon_context
+        from ...services.auto_scout_service import _recon_context, _recon_strict_context
         from ...services.recon_account import recon_account_manager
 
+        # Strict mode implies recon usage — see _resolve_recon_flags.
+        acquire_recon, strict_recon = _resolve_recon_flags(use_recon, recon_strict)
         recon_client = None
-        if use_recon:
+        if acquire_recon:
             try:
                 recon_client = await recon_account_manager.get_or_create_client(
                     session.settings.base_url
@@ -855,21 +882,31 @@ def _build_scout_scan_coro(config: dict):
         active_user = (
             session.auth_state.player_name if session.auth_state else session.settings.username
         )
-        # Strict-mode abort path: user explicitly asked for recon AND
-        # opted into strict mode. If we couldn't authenticate the recon
-        # account, the right behavior is to fail loudly — falling back
-        # to primary would silently misrepresent the masking the user
-        # asked for.
-        if (
-            use_recon
-            and recon_strict
-            and recon_client is None
-            and recon_account_manager.is_configured()
-        ):
+        # Strict-mode abort path: strict mode is on but no recon client is
+        # available. Fail loudly — falling back to primary would silently
+        # misrepresent the masking the user asked for. The abort fires
+        # whether recon is unconfigured OR configured-but-unauthenticated:
+        # BOTH leak reads onto the primary, which strict mode forbids.
+        # (Gating this on is_configured() was the bug that made the toggle
+        # a silent no-op when no recon creds were set.)
+        if strict_recon and recon_client is None:
+            configured = recon_account_manager.is_configured()
+            reason = (
+                "the background account couldn't authenticate"
+                if configured
+                else "no background account is configured on the server"
+            )
+            remedy = (
+                "Rotate the recon credentials, then retry"
+                if configured
+                else "Configure a background account on the server, then retry"
+            )
             logger.error(
-                "AutoScout STRICT-recon: recon proxy unavailable AND "
-                "user opted into strict mode. Aborting scan for "
-                "active_user=%s rather than leaking to primary.",
+                "AutoScout STRICT-recon: recon proxy unavailable "
+                "(configured=%s) AND user opted into strict mode. "
+                "Aborting scan for active_user=%s rather than leaking "
+                "to primary.",
+                configured,
                 active_user,
             )
             ctx.push(
@@ -877,12 +914,11 @@ def _build_scout_scan_coro(config: dict):
                     "type": "error",
                     "fatal": True,
                     "message": (
-                        "Strict background-account mode is on, but the "
-                        "background account couldn't authenticate. The "
-                        "scan was aborted to prevent leaking scout traffic "
-                        "onto your active account. Rotate the recon "
-                        "credentials, then retry — or uncheck 'Require "
-                        "background account' to fall back to your primary."
+                        f"Strict background-account mode is on, but {reason}. "
+                        "The scan was aborted to prevent leaking scout traffic "
+                        f"onto your active account. {remedy} — or uncheck "
+                        "'Require background account' to fall back to your "
+                        "primary."
                     ),
                 }
             )
@@ -894,6 +930,11 @@ def _build_scout_scan_coro(config: dict):
         # No reset needed — the task ends when the coro returns and
         # its context is discarded.
         _recon_context.set(recon_client)
+        # Arm the choke-point enforcement: if strict mode is on, any read
+        # that reaches `_read_client()` with no recon available raises
+        # rather than touching the primary. Defense-in-depth behind the
+        # entry guard above.
+        _recon_strict_context.set(strict_recon)
         # Keep the legacy attribute populated for any test paths /
         # external callers that still rely on it. ContextVar wins in
         # `_read_client` when both are set; this assignment is a
@@ -1273,6 +1314,11 @@ def _build_scout_scan_coro(config: dict):
                     }
                 )
 
+            except ReconStrictViolation:
+                # Strict background-account breach — must be fatal, not a
+                # per-tile "enrich failed" that the loop walks past. Re-raise
+                # so the operation aborts instead of degrading silently.
+                raise
             except Exception as e:
                 logger.warning("Enrich failed for (%s,%s): %s", tile.x, tile.y, e)
                 enriched.append(tile)

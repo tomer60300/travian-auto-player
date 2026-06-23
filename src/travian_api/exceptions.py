@@ -139,5 +139,23 @@ class ActivityBudgetExhausted(TravianError):
         super().__init__(message, details)
 
 
+class ReconStrictViolation(TravianError):
+    """Strict background-account mode is active but no recon (background)
+    client is available, so an account-independent read would otherwise
+    fall back to the user's PRIMARY account. We refuse and raise instead
+    of leaking the read onto the primary — the read never executes."""
+
+    def __init__(
+        self,
+        message: str = (
+            "Strict background-account mode is active but no background "
+            "account is available; refusing to route a read through the "
+            "primary account."
+        ),
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message, details)
+
+
 # Alias for backward compatibility
 TravianAPIError = TravianError

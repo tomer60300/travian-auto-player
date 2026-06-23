@@ -14,6 +14,7 @@ from html import unescape as html_unescape
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set, Tuple
 
 from ..clients.http_client import HttpClient
+from ..exceptions import ReconStrictViolation
 from ..models.farm_list import MapTileInfo
 from ..parsers.html_parser import clean_unicode
 
@@ -479,6 +480,17 @@ _recon_context: contextvars.ContextVar[Optional[HttpClient]] = contextvars.Conte
     default=None,
 )
 
+# Per-coroutine strict-mode flag. When True, `_read_client()` refuses to
+# fall back to the primary account: if no recon client is available it
+# raises ReconStrictViolation rather than leaking an account-independent
+# read onto the user's primary login. This is the load-bearing
+# enforcement of the "Require background account" toggle — the per-coro
+# entry guard in scout_ws is a friendlier up-front abort layered on top.
+_recon_strict_context: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "auto_scout_recon_strict",
+    default=False,
+)
+
 
 class AutoScoutService:
     """Scan the map for villages and send scouts based on filters."""
@@ -544,10 +556,37 @@ class AutoScoutService:
         Falls through to (3) only when both (1) and (2) are absent,
         so callers can never accidentally lose recon routing
         mid-scan to a concurrent operation's cleanup.
+
+        Exception: when strict mode is active on the current
+        coroutine (``_recon_strict_context`` is True), the task-local
+        ContextVar (1) is the SOLE accepted authority. If it is unset,
+        this raises :class:`ReconStrictViolation` — it will NOT fall
+        back to the legacy shared attribute (2) or the primary (3),
+        because (2) is mutable shared state another concurrent
+        operation could have populated with an unrelated client.
+        That makes "Require background account" un-bypassable: under
+        strict mode no read can reach the primary, no read can silently
+        ride a stale cross-operation recon client, and even a scoped
+        client that turns out to BE the primary (recon-manager bug) is
+        rejected.
         """
+        strict = _recon_strict_context.get()
         scoped = _recon_context.get()
         if scoped is not None:
+            # Under strict mode the scoped client must be a GENUINE recon
+            # client — never the primary. If the recon manager ever handed
+            # back the primary (bug / cache corruption), refuse rather than
+            # "succeed" with a read on the user's own account.
+            if strict and scoped is self.http_client:
+                raise ReconStrictViolation()
             return scoped
+        # Strict mode: the per-task ContextVar above is the only client
+        # we trust. It was unset, so refuse — raising here guarantees the
+        # read NEVER physically dispatches on the primary (and never on a
+        # stale shared recon client), regardless of any caller that
+        # forgot the up-front entry guard.
+        if strict:
+            raise ReconStrictViolation()
         if self.recon_http_client is not None:
             return self.recon_http_client
         return self.http_client
@@ -732,6 +771,12 @@ class AutoScoutService:
                 if not detail.alliance_name and tile.alliance_name:
                     detail.alliance_name = tile.alliance_name
                 enriched.append(detail)
+            except ReconStrictViolation:
+                # Strict background-account mode with no recon available:
+                # this is an invariant breach, never a per-tile hiccup.
+                # Propagate so the operation fails loudly instead of
+                # degrading to a half-enriched result set.
+                raise
             except Exception as e:
                 logger.warning("Failed to get details for (%s,%s): %s", tile.x, tile.y, e)
                 enriched.append(tile)
@@ -934,6 +979,11 @@ class AutoScoutService:
             # Profile pages are account-independent reads — route
             # through recon when active.
             page_html = await self._read_client().get_html(f"/profile/{player_id}")
+        except ReconStrictViolation:
+            # Strict mode breach — never silently degrade to an empty
+            # profile (which would also corrupt population/capital data).
+            # Propagate so the operation fails loudly.
+            raise
         except Exception as exc:
             logger.warning("Failed to fetch profile for player %d: %s", player_id, exc)
             return {"pop": 0, "capital_id": None, "villages": []}
