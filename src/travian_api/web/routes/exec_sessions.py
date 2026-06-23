@@ -130,7 +130,10 @@ async def diag_profile_parse(
     # adds zero profile traffic to the caller's PRIMARY account. Falls back
     # to the primary when recon is unavailable: this is a dev diagnostic,
     # not a strict-mode scan, so degrading to a result beats failing.
-    recon = await recon_account_manager.get_or_create_client(tsess.settings.base_url)
+    try:
+        recon = await recon_account_manager.get_or_create_client(tsess.settings.base_url)
+    except Exception:
+        recon = None
     read_client = recon if recon is not None else tsess.http_client
     try:
         html = await read_client.get_html(f"/profile/{player_id}")
