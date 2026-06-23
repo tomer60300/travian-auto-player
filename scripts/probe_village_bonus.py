@@ -132,14 +132,13 @@ async def main() -> None:
 
     this_village = next((v for v in villages if v.get("village_id") == info.village_id), None)
     if this_village is None:
-        print("\n  >>> Village not in owner's profile array (layout/locale change?) — can't aggregate.")
+        print("\n  >>> Village not in owner's profile array (layout/locale change?) — can't resolve.")
         await client.close()
         return
 
-    n_oases = len(set(this_village.get("oases", [])))
-    print(f"\n[probe] aggregating oasis bonus across {n_oases} occupied oasis tile(s)…", file=sys.stderr)
-    agg = await svc.aggregate_village_oasis_bonuses([this_village])
-    breakdown = agg.get(info.village_id, {})
+    # Oasis bonus is embedded in the profile — no extra requests.
+    breakdown = this_village.get("breakdown", {})
+    n_oases = this_village.get("oasis_count", 0)
     total = sum(breakdown.values())
     print("\n=== AGGREGATED VILLAGE OASIS BONUS ===")
     print(f"  occupied oases:    {n_oases}")

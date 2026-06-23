@@ -1508,50 +1508,37 @@ def _build_scout_scan_coro(config: dict):
                 }
             )
 
-        # ── Village oasis-bonus aggregation ─────────────────────────
-        # For the "villages by oasis bonus" mode, sum each in-radius
-        # village's occupied-oasis bonuses and stamp the aggregate onto its
-        # tile. Restricted to villages whose tile is in the scan (radius-only
-        # scope) so profile villages outside the radius are never fetched.
+        # ── Village oasis-bonus stamping ────────────────────────────
+        # For the "villages by oasis bonus" mode, stamp each in-radius
+        # village's aggregated occupied-oasis bonus onto its tile. The bonus
+        # is embedded in the owner's profile (already fetched above for
+        # capital/population), so this costs ZERO extra requests — no
+        # tile-details fetches. Villages outside the scan simply don't match
+        # any tile.
         if villages_by_oasis_bonus:
-            scanned_vids = {t.village_id for t in tiles if not t.is_oasis and t.village_id}
-            candidates = [v for v in profile_villages if v.get("village_id") in scanned_vids]
-            unique_oasis_coords: set[tuple[int, int]] = set()
-            for v in candidates:
-                unique_oasis_coords.update(v.get("oases", []))
-            ctx.push(
-                {
-                    "type": "phase",
-                    "phase": "oasis_aggregate",
-                    "message": (
-                        f"Resolving oasis bonus for {len(candidates)} village(s) "
-                        f"across {len(unique_oasis_coords)} unique oasis tile(s)…"
-                    ),
-                }
-            )
-
-            def _on_oasis(done: int, total: int) -> None:
-                ctx.push(
-                    {
-                        "type": "phase",
-                        "phase": "oasis_progress",
-                        "index": done,
-                        "total": total,
-                        "message": f"Oasis bonus fetch: {done}/{total}",
-                    }
-                )
-
-            agg = await svc.aggregate_village_oasis_bonuses(candidates, progress_cb=_on_oasis)
-            # village_id → (breakdown, occupied-oasis count)
-            by_vid: dict[int, tuple[dict[str, int], int]] = {}
-            for v in candidates:
-                vid = v["village_id"]
-                by_vid[vid] = (agg.get(vid, {}), len(set(v.get("oases", []))))
+            # village_id → (aggregated breakdown, occupied-oasis count)
+            by_vid: dict[int, tuple[dict[str, int], int]] = {
+                v["village_id"]: (v.get("breakdown", {}), v.get("oasis_count", 0))
+                for v in profile_villages
+                if v.get("village_id")
+            }
+            stamped = 0
             for t in tiles:
                 if not t.is_oasis and t.village_id in by_vid:
                     breakdown, count = by_vid[t.village_id]
                     t.village_oasis_breakdown = breakdown
                     t.village_oasis_count = count
+                    stamped += 1
+            ctx.push(
+                {
+                    "type": "phase",
+                    "phase": "oasis_aggregate",
+                    "message": (
+                        f"Resolved oasis bonus for {stamped} village(s) "
+                        "from player profiles (no extra requests)."
+                    ),
+                }
+            )
 
         # ── Phase 4: Post-enrichment filtering ──────────────────────
         post_filter_msgs = []

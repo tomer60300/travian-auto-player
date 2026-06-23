@@ -564,8 +564,8 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             />
             Villages by oasis bonus
             <span className="text-xs text-secondary ml-1">
-              (1 profile fetch per player + 1 tile-details per unique
-              occupied oasis; cached)
+              (1 profile fetch per player — oasis bonus is read straight from
+              the profile, no extra requests)
             </span>
           </label>
           {filterMode === 'villages-by-oasis-bonus' && (
