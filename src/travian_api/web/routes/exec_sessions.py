@@ -21,7 +21,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
 from travian_api.operation_manager import operation_manager
-from travian_api.services.recon_account import recon_account_manager
+from travian_api.services.recon_account import acquire_recon_client
 from travian_api.web.auth import get_current_user
 from travian_api.web.execution_sessions import exec_session_manager
 from travian_api.web.operation_gate import active_ops, captcha_stop
@@ -130,11 +130,7 @@ async def diag_profile_parse(
     # adds zero profile traffic to the caller's PRIMARY account. Falls back
     # to the primary when recon is unavailable: this is a dev diagnostic,
     # not a strict-mode scan, so degrading to a result beats failing.
-    try:
-        recon = await recon_account_manager.get_or_create_client(tsess.settings.base_url)
-    except Exception:
-        recon = None
-    read_client = recon if recon is not None else tsess.http_client
+    read_client = await acquire_recon_client(tsess.settings.base_url) or tsess.http_client
     try:
         html = await read_client.get_html(f"/profile/{player_id}")
     except Exception as exc:

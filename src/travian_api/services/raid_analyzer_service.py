@@ -18,6 +18,7 @@ from ..models.raid_analyzer import (
     RaidRecommendation,
     TargetVillageState,
 )
+from ..services.recon_account import acquire_recon_client
 from ..services.reports_service import ReportsService
 
 logger = get_logger(__name__)
@@ -962,6 +963,10 @@ class RaidAnalyzerService:
         vid_meta: Dict[int, Dict[str, Any]] = {}
         unique_vids = list(set(coord_to_vid.values()))
         if unique_vids:
+            # Village metadata (player / population / alliance) is account-
+            # independent — mask the GraphQL batch through the recon account
+            # by default, fall back to the primary when recon is unavailable.
+            gql_client = await acquire_recon_client(self.client.base_url) or self.client
             BATCH = 250
             for i in range(0, len(unique_vids), BATCH):
                 batch = unique_vids[i : i + BATCH]
@@ -971,7 +976,7 @@ class RaidAnalyzerService:
                 ]
                 query = "{" + " ".join(aliases) + "}"
                 try:
-                    resp = await self.client.post_json(
+                    resp = await gql_client.post_json(
                         "/api/v1/graphql", {"query": query, "variables": {}}
                     )
                     data = resp.get("data", {})

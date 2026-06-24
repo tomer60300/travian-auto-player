@@ -390,7 +390,7 @@ def test_diag_profile_endpoint_routes_through_recon() -> None:
 
     src = pathlib.Path("src/travian_api/web/routes/exec_sessions.py").read_text(encoding="utf-8")
     src_no_comments = re.sub(r"#[^\n]*", "", src)
-    assert "recon_account_manager.get_or_create_client" in src_no_comments, (
+    assert "acquire_recon_client" in src_no_comments, (
         "Diag profile read no longer acquires a recon client — the profile "
         "fetch would run on the caller's primary account."
     )
@@ -401,6 +401,112 @@ def test_diag_profile_endpoint_routes_through_recon() -> None:
         "Diag profile read fires /profile/ directly on tsess.http_client "
         "(primary) — route it through the recon-resolved read_client."
     )
+
+
+# ──────── acquire_recon_client (gathering-read masking default) ──────
+
+
+@pytest.mark.asyncio
+async def test_acquire_recon_client_returns_recon_when_available() -> None:
+    from travian_api.services import recon_account as ra
+
+    recon = _stub_client("recon")
+    with patch.object(
+        ra.recon_account_manager,
+        "get_or_create_client",
+        new=AsyncMock(return_value=recon),
+    ):
+        assert await ra.acquire_recon_client("https://ts.example.com") is recon
+
+
+@pytest.mark.asyncio
+async def test_acquire_recon_client_returns_none_when_unconfigured() -> None:
+    from travian_api.services import recon_account as ra
+
+    with patch.object(
+        ra.recon_account_manager,
+        "get_or_create_client",
+        new=AsyncMock(return_value=None),
+    ):
+        assert await ra.acquire_recon_client("https://ts.example.com") is None
+
+
+@pytest.mark.asyncio
+async def test_acquire_recon_client_never_raises() -> None:
+    """Masking is best-effort by default — if the manager raises, the
+    helper swallows it and returns None so the caller uses its primary."""
+    from travian_api.services import recon_account as ra
+
+    with patch.object(
+        ra.recon_account_manager,
+        "get_or_create_client",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
+    ):
+        assert await ra.acquire_recon_client("https://ts.example.com") is None
+
+
+# ──────── gathering reads route through recon by default ─────────
+
+
+@pytest.mark.asyncio
+async def test_target_resolver_routes_coords_through_recon() -> None:
+    """resolve_by_coords is account-independent gathering — it must fire
+    the map/position read on the recon client, not the primary."""
+    from travian_api.services import recon_account as ra
+    from travian_api.services.target_resolver import TargetResolver
+
+    primary = _stub_client("primary")
+    recon = _stub_client("recon")
+    recon.post_json = AsyncMock(return_value={"tiles": []})
+    tr = TargetResolver(primary)
+    with patch.object(
+        ra.recon_account_manager,
+        "get_or_create_client",
+        new=AsyncMock(return_value=recon),
+    ):
+        await tr.resolve_by_coords(10, 20)
+    recon.post_json.assert_awaited()
+    primary.post_json.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_target_resolver_falls_back_to_primary_without_recon() -> None:
+    """When recon isn't available the read degrades to the primary —
+    masking is best-effort by default, never a hard failure."""
+    from travian_api.services import recon_account as ra
+    from travian_api.services.target_resolver import TargetResolver
+
+    primary = _stub_client("primary")
+    primary.post_json = AsyncMock(return_value={"tiles": []})
+    tr = TargetResolver(primary)
+    with patch.object(
+        ra.recon_account_manager,
+        "get_or_create_client",
+        new=AsyncMock(return_value=None),
+    ):
+        await tr.resolve_by_coords(10, 20)
+    primary.post_json.assert_awaited()
+
+
+def test_all_gathering_reads_wired_to_recon() -> None:
+    """Regression guard: every account-independent gathering read site
+    OUTSIDE AutoScout must acquire a recon client by default. Locks the
+    'all scouting gathering via the masking account' invariant against a
+    site silently reverting to a bare-primary read."""
+    import pathlib
+
+    for path in (
+        "src/travian_api/services/target_resolver.py",
+        "src/travian_api/services/oasis_raider_service.py",
+        "src/travian_api/services/raid_analyzer_service.py",
+        "src/travian_api/web/routes/exec_sessions.py",
+    ):
+        src = pathlib.Path(path).read_text(encoding="utf-8")
+        assert "acquire_recon_client" in src, (
+            f"{path} no longer routes its account-independent gathering "
+            f"read(s) through acquire_recon_client — they would hit the "
+            f"primary account and leak the scouting fingerprint."
+        )
 
 
 def test_write_paths_never_use_recon() -> None:

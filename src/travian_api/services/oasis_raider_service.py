@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List
 
 from ..constants import TROOP_MAPPINGS, TribeType
+from .recon_account import acquire_recon_client
 
 logger = logging.getLogger(__name__)
 
@@ -828,7 +829,12 @@ class OasisRaiderService:
         return ", ".join(parts) if parts else "none"
 
     async def _scan_for_oases(self, radius: int, cx: int, cy: int) -> list:
-        tiles = await self._scout_svc.scan_map(cx, cy, radius)
+        # Mask the map scan through the recon (background) account by
+        # default — scan_map's reads are account-independent. with_recon_client
+        # routes them via recon for this task; None falls through to primary.
+        recon = await acquire_recon_client(self._http.base_url)
+        async with self._scout_svc.with_recon_client(recon):
+            tiles = await self._scout_svc.scan_map(cx, cy, radius)
         return [t for t in tiles if t.is_oasis and not t.player_id]
 
     async def _fetch_oasis_detail(self, x: int, y: int) -> dict:
@@ -839,7 +845,10 @@ class OasisRaiderService:
         frontend would send when a player opens a tile popup from the
         map page.
         """
-        resp = await self._http.post_json(
+        # Oasis tile-details (garrison + bonus) is account-independent —
+        # mask through the recon account by default, fall back to primary.
+        client = await acquire_recon_client(self._http.base_url) or self._http
+        resp = await client.post_json(
             "/api/v1/map/tile-details",
             {"x": x, "y": y},
             request_type="xhr",

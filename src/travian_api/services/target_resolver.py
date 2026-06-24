@@ -7,6 +7,7 @@ from typing import Optional
 from ..clients.http_client import HttpClient
 from ..exceptions import InvalidTargetError, TravianAPIError
 from ..models.military import TargetInfo
+from .recon_account import acquire_recon_client
 
 
 class TargetResolver:
@@ -31,8 +32,12 @@ class TargetResolver:
             TravianAPIError: If request fails
         """
         try:
+            # Resolving a tile is account-independent gathering — mask it
+            # through the recon (background) account by default, falling
+            # back to the primary when recon isn't configured/available.
+            client = await acquire_recon_client(self.http_client.base_url) or self.http_client
             # Use map/position API to get tile data
-            response = await self.http_client.post_json(
+            response = await client.post_json(
                 "/api/v1/map/position",
                 {"data": {"x": x, "y": y, "zoomLevel": 1, "ignorePositions": []}},
             )
@@ -111,8 +116,11 @@ class TargetResolver:
             TravianAPIError: If request fails
         """
         try:
+            # Name lookups are account-independent gathering — mask through
+            # the recon (background) account by default, fall back to primary.
+            client = await acquire_recon_client(self.http_client.base_url) or self.http_client
             # Try village name autocomplete first
-            village_response = await self.http_client.post_json(
+            village_response = await client.post_json(
                 "/api/v1/autocomplete/villagename", {"query": name}
             )
 
@@ -131,7 +139,7 @@ class TargetResolver:
                 )
 
             # Try player name autocomplete
-            player_response = await self.http_client.post_json(
+            player_response = await client.post_json(
                 "/api/v1/autocomplete/playername", {"query": name}
             )
 

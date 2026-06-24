@@ -241,3 +241,34 @@ class ReconAccountManager:
 # Module-level singleton — imported by AutoScoutService and the WS
 # orchestrators. Idempotent across multiple imports.
 recon_account_manager = ReconAccountManager()
+
+
+async def acquire_recon_client(base_url: str) -> Optional[HttpClient]:
+    """Recon (masking) client for account-INDEPENDENT gathering reads —
+    map tiles, tile-details, profiles, name/coords lookups, village
+    metadata about OTHER players. Returns the recon client when it is
+    configured + authenticated, else ``None`` so the caller falls back to
+    its own primary.
+
+    This is the by-default masking entry point for gathering reads that
+    live OUTSIDE the AutoScout WS coroutines (oasis raider, target
+    resolver, raid analyzer, diagnostics). It NEVER raises — masking is
+    best-effort by default. The strict "Require background account"
+    escalation (abort instead of fall back) is AutoScout-scan-only and
+    lives in :meth:`AutoScoutService._read_client`; gathering reads here
+    always degrade gracefully to the primary rather than fail an
+    operation that the user didn't flag strict.
+
+    Account-SPECIFIC reads (your own villages/troops/reports) must NOT use
+    this — recon is a different account and would return the wrong data.
+    """
+    try:
+        return await recon_account_manager.get_or_create_client(base_url)
+    except Exception:
+        logger.warning(
+            "recon acquisition failed for server=%s; caller will fall back "
+            "to its primary account for this read.",
+            base_url,
+            exc_info=True,
+        )
+        return None
