@@ -116,11 +116,15 @@ class TargetResolver:
             TravianAPIError: If request fails
         """
         try:
-            # Name lookups are account-independent gathering — mask through
-            # the recon (background) account by default, fall back to primary.
-            client = await acquire_recon_client(self.http_client.base_url) or self.http_client
+            # NOTE: name autocomplete stays on the PRIMARY account. Unlike
+            # coordinate/id lookups, autocomplete ranking may be influenced
+            # by the requesting account (proximity to own villages,
+            # favorites, history). Since this resolves a SEND target and we
+            # take suggestions[0], a recon account's different ranking could
+            # silently pick the wrong target. Masking a low-volume name
+            # lookup isn't worth that correctness risk.
             # Try village name autocomplete first
-            village_response = await client.post_json(
+            village_response = await self.http_client.post_json(
                 "/api/v1/autocomplete/villagename", {"query": name}
             )
 
@@ -138,8 +142,8 @@ class TargetResolver:
                     alliance=village.get("alliance", ""),
                 )
 
-            # Try player name autocomplete
-            player_response = await client.post_json(
+            # Try player name autocomplete (also on primary — see above)
+            player_response = await self.http_client.post_json(
                 "/api/v1/autocomplete/playername", {"query": name}
             )
 

@@ -509,6 +509,111 @@ def test_all_gathering_reads_wired_to_recon() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_oasis_detail_routes_through_recon() -> None:
+    """oasis_raider._fetch_oasis_detail reads account-independent oasis
+    tile-details — it must fire on the recon client, never the primary."""
+    from unittest.mock import MagicMock
+
+    from travian_api.services import recon_account as ra
+    from travian_api.services.oasis_raider_service import OasisRaiderService
+
+    primary = _stub_client("primary")
+    recon = _stub_client("recon")
+    recon.post_json = AsyncMock(return_value={"html": "<html></html>"})
+    session = MagicMock()
+    session.http_client = primary
+    svc = OasisRaiderService(session)
+    with patch.object(
+        ra.recon_account_manager,
+        "get_or_create_client",
+        new=AsyncMock(return_value=recon),
+    ):
+        await svc._fetch_oasis_detail(10, 20)
+    recon.post_json.assert_awaited()
+    primary.post_json.assert_not_called()
+
+
+# The single load-bearing "fail otherwise" guard for the whole masking
+# invariant — keep it last so it's easy to find.
+_GATHER_ENDPOINTS = (
+    "/api/v1/map/position",
+    "/api/v1/map/tile-details",
+    "/profile/",
+    "/api/v1/autocomplete/",
+)
+# (filename, endpoint) -> reason. Reads that stay on the PRIMARY on purpose
+# because the data is account-SPECIFIC or account-INFLUENCED. Adding an
+# entry here is a deliberate, reviewed exemption — not a way to silence the
+# guard.
+_PRIMARY_ALLOWLIST = {
+    ("reports_service.py", "/api/v1/map/tile-details"): (
+        "tile popup is parsed for the USER'S personal/alliance reports"
+    ),
+    ("target_resolver.py", "/api/v1/autocomplete/"): (
+        "autocomplete ranking is account-influenced; resolving a SEND "
+        "target via recon could silently pick the wrong village"
+    ),
+}
+
+
+def _scan_bare_primary_gather_reads() -> list[str]:
+    """Return every account-independent gathering read that fires on a BARE
+    PRIMARY client (self.http_client / self._http / self.client /
+    tsess.http_client / session.http_client) under src/travian_api, minus
+    the documented account-specific allowlist. Empty list == invariant holds.
+    """
+    import pathlib
+    import re
+
+    bare_primary = (
+        r"self\.http_client",
+        r"self\._http",
+        r"self\.client",
+        r"tsess\.http_client",
+        r"session\.http_client",
+    )
+    receiver_alt = "(?:" + "|".join(bare_primary) + r")\b"
+    found: list[str] = []
+    for py in sorted(pathlib.Path("src/travian_api").rglob("*.py")):
+        no_comments = re.sub(r"#[^\n]*", "", py.read_text(encoding="utf-8"))
+        for ep in _GATHER_ENDPOINTS:
+            pat = receiver_alt + r"\.(?:post_json|get_html)\s*\(\s*[^)]*?" + re.escape(ep)
+            if re.search(pat, no_comments, re.DOTALL):
+                if (py.name, ep) in _PRIMARY_ALLOWLIST:
+                    continue
+                found.append(f"{py.name} reads {ep} on a bare primary client")
+    return found
+
+
+def test_no_account_independent_gather_read_on_bare_primary() -> None:
+    """COMPREHENSIVE 'fail otherwise' guard: NO account-independent
+    scouting/gathering read (map/position, tile-details, profile pages,
+    name autocomplete) may fire on a BARE PRIMARY client anywhere under
+    src/travian_api. They must route through a recon-routed client —
+    AutoScout's _read_client/scan_client, or a client bound from
+    acquire_recon_client. The only allowed bare-primary gathering reads are
+    the documented account-SPECIFIC exceptions in _PRIMARY_ALLOWLIST."""
+    violations = _scan_bare_primary_gather_reads()
+    assert not violations, (
+        "Account-independent gathering read(s) firing on the PRIMARY account "
+        "instead of the recon masking user — route via acquire_recon_client "
+        "or AutoScout's _read_client:\n  " + "\n  ".join(violations)
+    )
+
+
+def test_bare_primary_gather_guard_actually_fires() -> None:
+    """Meta-guard: prove the guard above isn't vacuously green. The same
+    detection regex must flag a synthetic bare-primary gathering read."""
+    import re
+
+    bad = 'resp = await self.http_client.post_json("/api/v1/map/position", {})'
+    pat = r"(?:self\.http_client)\b\.(?:post_json|get_html)\s*\(\s*[^)]*?" + re.escape(
+        "/api/v1/map/position"
+    )
+    assert re.search(pat, bad, re.DOTALL), "detection regex failed to flag a known leak"
+
+
 def test_write_paths_never_use_recon() -> None:
     """Construction of TargetResolver/MilitaryService inside AutoScout
     send-scout code paths must pass the PRIMARY http_client. This is
