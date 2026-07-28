@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class RaidedResources(BaseModel):
@@ -112,6 +112,12 @@ class FarmListSlot(BaseModel):
 
     model_config = {"populate_by_name": True}
 
+    @field_validator("distance", mode="before")
+    @classmethod
+    def _distance_default(cls, v: float | None) -> float:
+        """Travian sends ``distance: null`` for un-raided slots; coerce to 0.0."""
+        return 0.0 if v is None else v
+
 
 class OwnerVillageTroops(BaseModel):
     """Available troops in the owner village."""
@@ -157,6 +163,12 @@ class FarmList(BaseModel):
     slots_amount: int = Field(default=0, alias="slotsAmount")
 
     model_config = {"populate_by_name": True}
+
+    @field_validator("owner_village", mode="before")
+    @classmethod
+    def _owner_village_default(cls, v: object) -> object:
+        """Travian sends ``ownerVillage: null`` for some lists; coerce to default."""
+        return {} if v is None else v
 
     @property
     def active_slots(self) -> List[FarmListSlot]:
