@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -114,7 +114,7 @@ class FarmListSlot(BaseModel):
 
     @field_validator("distance", mode="before")
     @classmethod
-    def _distance_default(cls, v: float | None) -> float:
+    def _distance_default(cls, v: Any) -> Any:
         """Travian sends ``distance: null`` for un-raided slots; coerce to 0.0."""
         return 0.0 if v is None else v
 
@@ -166,7 +166,7 @@ class FarmList(BaseModel):
 
     @field_validator("owner_village", mode="before")
     @classmethod
-    def _owner_village_default(cls, v: object) -> object:
+    def _owner_village_default(cls, v: Any) -> Any:
         """Travian sends ``ownerVillage: null`` for some lists; coerce to default."""
         return {} if v is None else v
 
