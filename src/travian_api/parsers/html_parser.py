@@ -657,18 +657,28 @@ def parse_troop_confirm_page(html: str) -> Dict[str, Any]:
 # /village/statistics/* — account-wide tables (one row per village)
 # ---------------------------------------------------------------------------
 
-_STATS_NEWDID_RE = re.compile(r"newdid=(\d+)")
+# Anchored on a query-parameter boundary so lookalikes (``oldnewdid=``) miss.
+_STATS_NEWDID_RE = re.compile(r"[?&]newdid=(\d+)")
 
-# Travian wraps every number in bidi override marks and thousands separators.
+# Travian wraps every number in bidi override marks.
 _STATS_BIDI = dict.fromkeys(
     [0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069],
     None,
 )
 
+# Digit grouping varies by locale: 1,750 / 1.750 / 1 750 / 1'750. These tables
+# only ever carry integers, so every separator can go.
+_STATS_GROUPING = str.maketrans("", "", ",. \t\xa0 '’")
+
 
 def _stats_int(text: str) -> int:
-    """Parse a statistics-table cell (``‭1,750‬``) into an int, 0 if unparseable."""
-    cleaned = text.translate(_STATS_BIDI).replace(",", "").replace("\xa0", "").strip()
+    """Parse a statistics-table cell (``‭1,750‬``) into an int, 0 if unparseable.
+
+    Returning 0 rather than raising keeps one odd cell from failing a whole
+    export. Non-numeric content stays 0 on purpose: a ratio cell like ``19/20``
+    must not collapse into 1920, and ``—`` genuinely means absent.
+    """
+    cleaned = text.translate(_STATS_BIDI).replace("−", "-").translate(_STATS_GROUPING).strip()
     return int(cleaned) if cleaned.lstrip("-").isdigit() else 0
 
 
@@ -694,10 +704,17 @@ def _stats_village_rows(html: str, table_id: str) -> List[Any]:
         match = _STATS_NEWDID_RE.search(link.get("href", ""))
         if match is None:
             continue
+        # Slice after the cell that actually holds the village link rather than
+        # assuming index 0, so a future leading cell cannot shift every column.
         cells = tr.find_all("td")
-        if len(cells) < 2:
+        village_cell = link.find_parent("td")
+        start = next((i for i, cell in enumerate(cells) if cell is village_cell), None)
+        if start is None:
             continue
-        rows.append((int(match.group(1)), cells[1:]))
+        data_cells = cells[start + 1 :]
+        if not data_cells:
+            continue
+        rows.append((int(match.group(1)), data_cells))
     return rows
 
 
@@ -755,6 +772,11 @@ def parse_village_stats_troops(html: str, tribe_id: int = 0) -> Dict[int, Dict[s
     tribe — Romans u1-u10, Teutons u11-u20, Gauls u21-u30 — so ``uNN`` maps back
     to ``tN`` by subtracting the tribe offset. The hero column (``uhero``) has no
     ``tN`` slot and is skipped.
+
+    Only the player's own tribe ever appears here, so when ``tribe_id`` is
+    unknown the column ids still identify the slots on their own — fall back to
+    ``(uNN - 1) % 10 + 1`` rather than discarding every column and silently
+    reporting an army of zero.
     """
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table", id="troops")
@@ -770,7 +792,8 @@ def parse_village_stats_troops(html: str, tribe_id: int = 0) -> Dict[int, Dict[s
         if uid is None:
             column_keys.append(None)
             continue
-        index = int(uid[1:]) - tribe_offset
+        unit_number = int(uid[1:])
+        index = unit_number - tribe_offset if tribe_id else (unit_number - 1) % 10 + 1
         column_keys.append(f"t{index}" if 1 <= index <= 10 else None)
 
     out: Dict[int, Dict[str, int]] = {}

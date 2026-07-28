@@ -200,6 +200,78 @@ def test_missing_table_yields_empty_mapping():
     assert parse_village_stats_troops("<html><body>nope</body></html>", tribe_id=2) == {}
 
 
+def test_unknown_tribe_still_maps_unit_columns():
+    """tribe_id=0 must not silently return zeros — that is the bug this replaced.
+
+    Only the player's own tribe appears on the page, so the column ids identify
+    the slots on their own; an unknown tribe must not discard every column.
+    """
+    out = parse_village_stats_troops(TROOPS_HTML, tribe_id=0)
+
+    assert out[20001]["t1"] == 1064
+    assert out[20001]["t6"] == 83
+    assert out[20003]["t6"] == 14996
+
+
+LOCALISED_HTML = """
+<table id="ressources">
+    <tbody>
+        <tr class="hover">
+            <td class="vil fc"><a href="/dorf1.php?newdid=7">L</a></td>
+            <td class="lum">‭1.234‬</td>
+            <td class="clay">‭5 678‬</td>
+            <td class="iron">‭9 012‬</td>
+            <td class="crop">−345</td>
+        </tr>
+    </tbody>
+</table>
+"""
+
+
+def test_localised_number_formats_are_parsed():
+    """Other Travian locales group with dots or spaces and use a Unicode minus."""
+    out = parse_village_stats_resources(LOCALISED_HTML)
+
+    assert out[7] == {"lumber": 1234, "clay": 5678, "iron": 9012, "crop": -345}
+
+
+NON_NUMERIC_HTML = """
+<table id="capacity">
+    <tbody>
+        <tr class="hover">
+            <td class="vil fc"><a href="/dorf1.php?newdid=8">N</a></td>
+            <td class="max123">‭19‬/‭20‬</td>
+            <td class="max4">—</td>
+        </tr>
+    </tbody>
+</table>
+"""
+
+
+def test_composite_and_placeholder_cells_do_not_invent_numbers():
+    """A ratio cell must not collapse into 1920; a dash is genuinely absent."""
+    out = parse_village_stats_capacity(NON_NUMERIC_HTML)
+
+    assert out[8] == {"warehouse": 0, "granary": 0}
+
+
+SIMILAR_PARAM_HTML = """
+<table id="capacity">
+    <tbody>
+        <tr class="hover">
+            <td class="vil fc"><a href="/x.php?oldnewdid=999">not a village row</a></td>
+            <td class="max123">‭1‬</td>
+            <td class="max4">‭2‬</td>
+        </tr>
+    </tbody>
+</table>
+"""
+
+
+def test_lookalike_query_param_is_not_read_as_a_village_id():
+    assert parse_village_stats_capacity(SIMILAR_PARAM_HTML) == {}
+
+
 def test_legacy_troop_overview_parser_cannot_read_this_page():
     """Why parse_village_stats_troops exists: the old parser returns all zeros.
 
