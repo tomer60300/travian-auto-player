@@ -262,7 +262,6 @@ function formatMarkdown(data) {
       `| Clay | ${(r.clay || 0).toLocaleString()} | ${(r.max_clay || 0).toLocaleString()} |`,
       `| Iron | ${(r.iron || 0).toLocaleString()} | ${(r.max_iron || 0).toLocaleString()} |`,
       `| Crop | ${(r.crop || 0).toLocaleString()} | ${(r.max_crop || 0).toLocaleString()} |`,
-      `| Free Crop | ${(r.free_crop || 0).toLocaleString()} | — |`,
       '',
     )
   }
@@ -297,6 +296,7 @@ export default function Buildings() {
   const [pendingAction, setPendingAction] = useState(null)
   const [actionLoading, setActionLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [includeBuildings, setIncludeBuildings] = useState(false)
   const fetchingSlotRef = useRef(null)
 
   useEffect(() => {
@@ -387,7 +387,13 @@ export default function Buildings() {
   const handleExportStatus = async () => {
     setExporting(true)
     try {
-      const res = await api.get('/status/export')
+      // Building levels are the only per-village fetch (dorf1 + dorf2 each) and
+      // run through the stealth throttler, so a large account takes minutes --
+      // far past the client's default 120s. Opt out of the timeout only then.
+      const res = await api.get('/status/export', {
+        params: { include_buildings: includeBuildings },
+        timeout: includeBuildings ? 0 : 120000,
+      })
       const md = formatMarkdown(res.data)
       const name = (res.data.player_name || 'player').replace(/\s+/g, '_')
       downloadFile(`${name}_status.md`, md)
@@ -409,6 +415,18 @@ export default function Buildings() {
       <div className="flex justify-between items-center mb-5">
         <h2 className="heading-gold text-2xl">Buildings</h2>
         <div className="flex items-center gap-3">
+          <label
+            className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer"
+            title="Building levels need two extra requests per village and take minutes on a large account"
+          >
+            <input
+              type="checkbox"
+              checked={includeBuildings}
+              onChange={(e) => setIncludeBuildings(e.target.checked)}
+              disabled={exporting}
+            />
+            Include building levels (slow)
+          </label>
           <button
             className="btn-secondary btn-sm"
             onClick={handleExportStatus}

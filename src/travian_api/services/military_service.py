@@ -16,6 +16,7 @@ from ..parsers.html_parser import (
     parse_smithy_research_levels,
     parse_troop_confirm_page,
     parse_troop_overview,
+    parse_village_stats_troops,
 )
 from ..stealth.human_delay import ActionType
 from .target_resolver import TargetResolver
@@ -138,6 +139,18 @@ class MilitaryService:
             url = f"/village/statistics/troops?newdid={village_id}"
         html = await self.http_client.get_html(url)
         return parse_troop_overview(html, tribe_id=tribe_id)
+
+    async def get_all_villages_troops(self, tribe_id: int = 0) -> Dict[int, Dict[str, int]]:
+        """Troop totals for EVERY village in a single request.
+
+        ``/village/statistics/troops`` renders one row per village regardless of
+        the active village, so the whole account costs one fetch.
+
+        Returns:
+            Dict of village_id -> {t1..t10}
+        """
+        html = await self.http_client.get_html("/village/statistics/troops")
+        return parse_village_stats_troops(html, tribe_id=tribe_id)
 
     # ── internal ─────────────────────────────────────────────────────
 

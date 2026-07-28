@@ -1,8 +1,9 @@
-"""Regression: the status export must not fetch the same village page twice.
+"""Request-cost contract for the status export.
 
-``get_village_buildings`` and ``get_resources`` both GET ``dorf1.php``. The
-export needs both, so every village cost an extra round trip through the
-stealth throttler -- on a 20-village account that is 20-40 wasted requests.
+Resources and troops come from account-wide /village/statistics tables, so the
+default export is a flat four requests no matter how many villages the account
+has. Building levels are the only per-village data and are opt-in, costing one
+dorf1 + one dorf2 each -- and each village page must still be fetched only once.
 """
 
 import asyncio
@@ -11,6 +12,13 @@ from types import SimpleNamespace
 from travian_api.services.building_service import BuildingService
 from travian_api.services.military_service import MilitaryService
 from travian_api.web.routes.status_export import export_player_status
+
+STATS_URLS = [
+    "/village/statistics/resources",
+    "/village/statistics/resources/production",
+    "/village/statistics/resources/capacity",
+    "/village/statistics/troops",
+]
 
 
 class _RecordingHttp:
@@ -34,21 +42,46 @@ def _session(http: _RecordingHttp, village_ids: list[int]) -> SimpleNamespace:
     )
 
 
-def test_export_fetches_each_village_page_once():
+def test_default_export_costs_four_requests_for_one_village():
     http = _RecordingHttp()
 
-    asyncio.run(export_player_status(_session(http, [11])))
+    asyncio.run(export_player_status(include_buildings=False, session=_session(http, [11])))
 
-    assert http.urls.count("/dorf1.php?newdid=11") == 1
-    assert http.urls.count("/dorf2.php?newdid=11") == 1
-    assert http.urls.count("/village/statistics/troops?newdid=11") == 1
-    assert len(http.urls) == 3
+    assert http.urls == STATS_URLS
 
 
-def test_export_costs_three_requests_per_village():
+def test_default_export_cost_does_not_grow_with_village_count():
+    http = _RecordingHttp()
+    twenty = list(range(1, 21))
+
+    asyncio.run(export_player_status(include_buildings=False, session=_session(http, twenty)))
+
+    assert http.urls == STATS_URLS
+    assert not any("dorf" in url for url in http.urls)
+
+
+def test_including_buildings_adds_exactly_two_requests_per_village():
     http = _RecordingHttp()
 
-    asyncio.run(export_player_status(_session(http, [1, 2, 3, 4, 5])))
+    asyncio.run(export_player_status(include_buildings=True, session=_session(http, [11, 12])))
 
-    assert len(http.urls) == 15
+    assert http.urls[:4] == STATS_URLS
+    assert sorted(http.urls[4:]) == [
+        "/dorf1.php?newdid=11",
+        "/dorf1.php?newdid=12",
+        "/dorf2.php?newdid=11",
+        "/dorf2.php?newdid=12",
+    ]
+    assert len(http.urls) == 4 + 2 * 2
     assert len(set(http.urls)) == len(http.urls)
+
+
+def test_export_reports_whether_buildings_were_included():
+    http = _RecordingHttp()
+
+    result = asyncio.run(
+        export_player_status(include_buildings=False, session=_session(http, [11]))
+    )
+
+    assert result["include_buildings"] is False
+    assert "buildings" not in result["villages"][0]

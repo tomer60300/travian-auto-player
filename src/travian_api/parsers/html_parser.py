@@ -653,6 +653,136 @@ def parse_troop_confirm_page(html: str) -> Dict[str, Any]:
     return fields
 
 
+# ---------------------------------------------------------------------------
+# /village/statistics/* — account-wide tables (one row per village)
+# ---------------------------------------------------------------------------
+
+_STATS_NEWDID_RE = re.compile(r"newdid=(\d+)")
+
+# Travian wraps every number in bidi override marks and thousands separators.
+_STATS_BIDI = dict.fromkeys(
+    [0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069],
+    None,
+)
+
+
+def _stats_int(text: str) -> int:
+    """Parse a statistics-table cell (``‭1,750‬``) into an int, 0 if unparseable."""
+    cleaned = text.translate(_STATS_BIDI).replace(",", "").replace("\xa0", "").strip()
+    return int(cleaned) if cleaned.lstrip("-").isdigit() else 0
+
+
+def _stats_village_rows(html: str, table_id: str) -> List[Any]:
+    """Yield ``(village_id, data_cells)`` for each village row of a statistics table.
+
+    Every village row carries a ``newdid=`` link in its first cell; the trailing
+    ``Sum`` row and the blank spacer row do not, so requiring the link filters
+    them out without depending on row classes. ``data_cells`` excludes the
+    leading village cell.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", id=table_id)
+    if table is None:
+        return []
+
+    rows: List[Any] = []
+    body = table.find("tbody") or table
+    for tr in body.find_all("tr"):
+        link = tr.find("a", href=_STATS_NEWDID_RE)
+        if link is None:
+            continue
+        match = _STATS_NEWDID_RE.search(link.get("href", ""))
+        if match is None:
+            continue
+        cells = tr.find_all("td")
+        if len(cells) < 2:
+            continue
+        rows.append((int(match.group(1)), cells[1:]))
+    return rows
+
+
+def parse_village_stats_resources(html: str) -> Dict[int, Dict[str, int]]:
+    """Parse /village/statistics/resources -> ``{village_id: {lumber, clay, iron, crop}}``."""
+    out: Dict[int, Dict[str, int]] = {}
+    # Travian spells this table id "ressources" — not a typo on our side.
+    for vid, cells in _stats_village_rows(html, "ressources"):
+        if len(cells) < 4:
+            continue
+        out[vid] = {
+            "lumber": _stats_int(cells[0].get_text()),
+            "clay": _stats_int(cells[1].get_text()),
+            "iron": _stats_int(cells[2].get_text()),
+            "crop": _stats_int(cells[3].get_text()),
+        }
+    return out
+
+
+def parse_village_stats_production(html: str) -> Dict[int, Dict[str, int]]:
+    """Parse /village/statistics/resources/production -> per-hour rates per village."""
+    out: Dict[int, Dict[str, int]] = {}
+    for vid, cells in _stats_village_rows(html, "production"):
+        if len(cells) < 4:
+            continue
+        out[vid] = {
+            "lumber": _stats_int(cells[0].get_text()),
+            "clay": _stats_int(cells[1].get_text()),
+            "iron": _stats_int(cells[2].get_text()),
+            "crop": _stats_int(cells[3].get_text()),
+        }
+    return out
+
+
+def parse_village_stats_capacity(html: str) -> Dict[int, Dict[str, int]]:
+    """Parse /village/statistics/resources/capacity -> ``{village_id: {warehouse, granary}}``."""
+    out: Dict[int, Dict[str, int]] = {}
+    for vid, cells in _stats_village_rows(html, "capacity"):
+        if len(cells) < 2:
+            continue
+        out[vid] = {
+            "warehouse": _stats_int(cells[0].get_text()),
+            "granary": _stats_int(cells[1].get_text()),
+        }
+    return out
+
+
+def parse_village_stats_troops(html: str, tribe_id: int = 0) -> Dict[int, Dict[str, int]]:
+    """Parse /village/statistics/troops -> ``{village_id: {t1..t10}}`` for every village.
+
+    Unlike :func:`parse_troop_overview` (which expects the report-style
+    ``tbody.units`` layout and finds nothing here), this reads the account-wide
+    grid: a header row of ``<img class="unit uNN">`` icons defines the column
+    order, and each body row is one village. Unit CSS ids are global, offset by
+    tribe — Romans u1-u10, Teutons u11-u20, Gauls u21-u30 — so ``uNN`` maps back
+    to ``tN`` by subtracting the tribe offset. The hero column (``uhero``) has no
+    ``tN`` slot and is skipped.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", id="troops")
+    if table is None:
+        return {}
+
+    tribe_offset = max(0, (tribe_id - 1)) * 10 if tribe_id else 0
+
+    column_keys: List[Any] = []
+    head = table.find("thead")
+    for img in head.find_all("img", class_="unit") if head else []:
+        uid = next((c for c in img.get("class", []) if re.match(r"^u\d+$", c)), None)
+        if uid is None:
+            column_keys.append(None)
+            continue
+        index = int(uid[1:]) - tribe_offset
+        column_keys.append(f"t{index}" if 1 <= index <= 10 else None)
+
+    out: Dict[int, Dict[str, int]] = {}
+    for vid, cells in _stats_village_rows(html, "troops"):
+        counts = {f"t{i}": 0 for i in range(1, 11)}
+        for key, cell in zip(column_keys, cells):
+            if key is not None:
+                counts[key] = _stats_int(cell.get_text())
+        out[vid] = counts
+    return out
+
+
 def parse_troop_overview(html: str, tribe_id: int = 0) -> Dict[str, int]:
     """Parse /village/statistics/troops and return total troops (t1-t10) for the village.
 
