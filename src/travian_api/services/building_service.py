@@ -32,15 +32,24 @@ class BuildingService:
         # Prevents double-upgrade races when two clients hit the same slot.
         self._slot_lock = KeyedLock()
 
-    async def get_village_buildings(self, village_id: Optional[int] = None) -> List[Building]:
+    async def get_village_snapshot(
+        self, village_id: Optional[int] = None
+    ) -> tuple[List[Building], Resources]:
         """
-        Get all buildings in the village.
+        Get all buildings AND current resources from one dorf1/dorf2 pair.
+
+        Resources live in an inline ``var resources`` blob carried by every
+        page, so they parse out of the dorf1 HTML the building list already
+        needs. Callers wanting both must use this rather than pairing
+        get_village_buildings() with get_resources(), which fetches dorf1.php
+        a second time -- an entire extra round trip through the throttler per
+        village.
 
         Args:
-            village_id: Village ID (unused for now, uses current village)
+            village_id: Village ID (switches village if set)
 
         Returns:
-            List of Building objects
+            Tuple of (buildings, resources)
 
         Raises:
             TravianError: If request fails
@@ -77,10 +86,32 @@ class BuildingService:
                     )
                 )
 
-            return buildings
+            # Same dorf1-then-dorf2 fallback get_resources() uses, but both
+            # pages are already in hand -- no additional request.
+            resources = parse_resources(dorf1_html)
+            if not any([resources.lumber, resources.clay, resources.iron, resources.crop]):
+                resources = parse_resources(dorf2_html)
+
+            return buildings, resources
 
         except Exception as e:
             raise TravianError(f"Failed to get village buildings: {e}") from e
+
+    async def get_village_buildings(self, village_id: Optional[int] = None) -> List[Building]:
+        """
+        Get all buildings in the village.
+
+        Args:
+            village_id: Village ID (unused for now, uses current village)
+
+        Returns:
+            List of Building objects
+
+        Raises:
+            TravianError: If request fails
+        """
+        buildings, _ = await self.get_village_snapshot(village_id)
+        return buildings
 
     async def get_building_detail(
         self, slot_id: int, village_id: Optional[int] = None

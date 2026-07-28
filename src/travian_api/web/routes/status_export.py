@@ -36,18 +36,17 @@ async def export_player_status(
     for village in session.auth_state.villages:
         vid = village.id
 
-        # Fetch data for this village concurrently
-        buildings_task = session.building_service.get_village_buildings(village_id=vid)
-        resources_task = session.building_service.get_resources(village_id=vid)
+        # Fetch data for this village concurrently. Buildings and resources
+        # share one dorf1/dorf2 pair -- see get_village_snapshot.
+        snapshot_task = session.building_service.get_village_snapshot(village_id=vid)
         troops_task = session.military_service.get_village_troop_totals(
             village_id=vid,
             tribe_id=tribe_id,
         )
 
         try:
-            buildings, resources, troops_raw = await asyncio.gather(
-                buildings_task,
-                resources_task,
+            (buildings, resources), troops_raw = await asyncio.gather(
+                snapshot_task,
                 troops_task,
             )
         except Exception as exc:
