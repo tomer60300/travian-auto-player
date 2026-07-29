@@ -259,8 +259,19 @@ class HttpClient:
             if m:
                 self._resolved_x_version = m.group(1)
                 logger.info("Resolved X-Version from live page: %s", self._resolved_x_version)
+            else:
+                # Page fetched fine but carried no version marker. Silence here
+                # would pin every request to a stale constant with no trace.
+                logger.warning(
+                    "No X-Version marker on /dorf1.php; still using configured %s",
+                    self.settings.x_version,
+                )
         except Exception as e:
-            logger.debug("Could not resolve X-Version from live page: %s", e)
+            logger.warning(
+                "Could not resolve X-Version from live page, using configured %s: %s",
+                self.settings.x_version,
+                e,
+            )
 
     async def _ensure_curl_session(self) -> Any:
         """Lazy-create the curl_cffi session with persona-matched impersonation."""

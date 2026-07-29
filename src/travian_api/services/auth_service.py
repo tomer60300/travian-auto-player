@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from base64 import b64decode
@@ -13,6 +14,13 @@ from ..clients.http_client import HttpClient
 from ..config import Settings
 from ..exceptions import AuthError, TravianError
 from ..models.auth import AuthState, Village
+
+logger = logging.getLogger(__name__)
+
+# The cookie the game issues on code exchange (docs/19-authentication-full.md).
+# Cookie names are case-sensitive per RFC 6265, so restoring a cached session
+# under any other spelling leaves it unauthenticated.
+JWT_COOKIE_NAME = "JWT"
 
 
 class AuthService:
@@ -57,11 +65,15 @@ class AuthService:
                         # Resolve dynamic X-Version with cached session too
                         try:
                             await self.http_client.try_resolve_x_version()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.warning(
+                                "X-Version resolution failed, using configured %s: %s",
+                                self.settings.x_version,
+                                exc,
+                            )
                         return self._auth_state
-            except Exception:
-                pass  # Cache check failed — fall through to fresh login
+            except Exception as exc:
+                logger.warning("Cached-session check failed, logging in fresh: %s", exc)
             # Reset state so fresh login starts clean
             self._auth_state = None
 
@@ -156,8 +168,12 @@ class AuthService:
             # Resolve dynamic X-Version now that we're authenticated
             try:
                 await self.http_client.try_resolve_x_version()
-            except Exception:
-                pass  # Fallback to config value is fine
+            except Exception as exc:
+                logger.warning(
+                    "X-Version resolution failed, using configured %s: %s",
+                    self.settings.x_version,
+                    exc,
+                )
 
             return self._auth_state
 
@@ -175,8 +191,16 @@ class AuthService:
         """
         cookies = self.http_client.get_cookies()
 
-        # Look for JWT in various possible cookie names
-        jwt_cookie_names = ["jwt", "JWT", "token", "authToken", "session", "travian_session"]
+        # Canonical name first: a stale lowercase cookie must never shadow the
+        # session cookie the server actually issued.
+        jwt_cookie_names = [
+            JWT_COOKIE_NAME,
+            "jwt",
+            "token",
+            "authToken",
+            "session",
+            "travian_session",
+        ]
 
         for cookie_name in jwt_cookie_names:
             if cookie_name in cookies:
@@ -314,8 +338,10 @@ class AuthService:
                 )
 
                 # Set cookie in HTTP client
-                self.http_client.set_cookie("jwt", jwt)
+                self.http_client.set_cookie(JWT_COOKIE_NAME, jwt)
 
-        except Exception:
-            # Don't fail on cache errors, just ignore
-            pass
+        except Exception as exc:
+            # Non-fatal: a cold or unreadable cache just means a fresh login.
+            # Log it, though — a silent failure here is indistinguishable from
+            # a cache that works, which is how a broken one goes unnoticed.
+            logger.warning("Could not restore cached JWT, will log in fresh: %s", exc)

@@ -63,8 +63,46 @@ class TestHttpClientConstruction:
             x_version="999",
         )
         client = HttpClient(s)
-        version = asyncio.get_event_loop().run_until_complete(client._fetch_x_version())
+        version = asyncio.run(client._fetch_x_version())
         assert version == "999"
+
+    def test_stale_x_version_is_never_kept_silently(self):
+        """A page with no version marker must say so, not quietly keep the old value."""
+        import asyncio
+        import logging
+
+        from travian_api.clients.http_client import HttpClient
+        from travian_api.config import Settings
+
+        s = Settings(
+            base_url="https://ts2.x1.europe.travian.com",
+            username="test@example.com",
+            password="test123",
+            x_version="999",
+        )
+        client = HttpClient(s)
+
+        async def _no_marker(url, **kwargs):
+            return "<html><body>no gpack path here</body></html>"
+
+        client.get_html = _no_marker
+
+        logger = logging.getLogger("travian_api.clients.http_client")
+        records: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = _Capture(level=logging.WARNING)
+        logger.addHandler(handler)
+        try:
+            asyncio.run(client.try_resolve_x_version())
+        finally:
+            logger.removeHandler(handler)
+
+        assert any("X-Version" in message for message in records), records
+        assert client._resolved_x_version != "changed"
 
 
 class TestActiveOpRegistry:
