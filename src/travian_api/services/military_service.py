@@ -15,7 +15,6 @@ from ..parsers.html_parser import (
     parse_rally_point_troops,
     parse_smithy_research_levels,
     parse_troop_confirm_page,
-    parse_troop_overview,
     parse_village_stats_troops,
 )
 from ..stealth.human_delay import ActionType
@@ -124,21 +123,6 @@ class MilitaryService:
             url = f"/build.php?newdid={village_id}&id={smithy_slot}&gid=13"
         html = await self.http_client.get_html(url)
         return parse_smithy_research_levels(html, tribe_id=tribe_id)
-
-    async def get_village_troop_totals(
-        self,
-        village_id: Optional[int] = None,
-        tribe_id: int = 0,
-    ) -> Dict[str, int]:
-        """Get total troops for a village (in-village + outgoing + incoming).
-
-        Fetches ``/village/statistics/troops`` which lists all troop categories.
-        """
-        url = "/village/statistics/troops"
-        if village_id:
-            url = f"/village/statistics/troops?newdid={village_id}"
-        html = await self.http_client.get_html(url)
-        return parse_troop_overview(html, tribe_id=tribe_id)
 
     async def get_all_villages_troops(self, tribe_id: int = 0) -> Dict[int, Dict[str, int]]:
         """Troop totals for EVERY village in a single request.

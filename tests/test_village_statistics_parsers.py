@@ -5,7 +5,6 @@ override marks and thousands separators Travian wraps every number in.
 """
 
 from travian_api.parsers.html_parser import (
-    parse_troop_overview,
     parse_village_stats_capacity,
     parse_village_stats_production,
     parse_village_stats_resources,
@@ -272,14 +271,14 @@ def test_lookalike_query_param_is_not_read_as_a_village_id():
     assert parse_village_stats_capacity(SIMILAR_PARAM_HTML) == {}
 
 
-def test_legacy_troop_overview_parser_cannot_read_this_page():
-    """Why parse_village_stats_troops exists: the old parser returns all zeros.
+def test_troops_are_never_reported_as_a_uniform_zero_army():
+    """Guards the failure this parser replaced.
 
-    parse_troop_overview expects the report-style ``tbody.units`` layout, which
-    this page does not use -- so the export reported zero troops for every
-    village.
+    The predecessor matched on a ``tbody.units`` layout this page does not use,
+    so it silently returned zeros for every unit — an account with 60k troops
+    exported as empty. Any future rewrite must keep this impossible.
     """
-    legacy = parse_troop_overview(TROOPS_HTML, tribe_id=2)
+    out = parse_village_stats_troops(TROOPS_HTML, tribe_id=2)
 
-    assert sum(legacy.values()) == 0
-    assert parse_village_stats_troops(TROOPS_HTML, tribe_id=2)[20001]["t1"] == 1064
+    assert out, "no villages parsed at all"
+    assert any(count for village in out.values() for count in village.values())
