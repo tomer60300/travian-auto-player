@@ -24,6 +24,7 @@ from travian_api.web.routes.farm import router as farm_router
 from travian_api.web.routes.farm_builder import router as farm_builder_router
 from travian_api.web.routes.military import router as military_router
 from travian_api.web.routes.queue import router as queue_router
+from travian_api.web.routes.recon import router as recon_router
 from travian_api.web.routes.reports import router as reports_router
 from travian_api.web.routes.scout import router as scout_router
 from travian_api.web.routes.status_export import router as status_export_router
@@ -83,6 +84,18 @@ async def lifespan(app: FastAPI):
 
     await init_db()
     logger.info("Database initialized")
+
+    # Apply stored recon credentials so a rotation survives a restart. Absent a
+    # stored row the manager keeps using the .env values.
+    try:
+        from travian_api.web.models.db import async_session_factory
+        from travian_api.web.routes.recon import load_stored_credentials
+
+        async with async_session_factory() as db:
+            if await load_stored_credentials(db):
+                logger.info("Loaded stored background-account credentials")
+    except Exception:
+        logger.exception("Could not load stored recon credentials; using environment")
 
     from travian_api.debug_dump import debug_dumper
     from travian_api.web.execution_sessions import exec_session_manager
@@ -185,6 +198,7 @@ app.include_router(status_export_router)
 app.include_router(captcha_router)
 app.include_router(exec_sessions_router)
 app.include_router(farm_builder_router)
+app.include_router(recon_router)
 
 # Mount WebSocket routes
 app.include_router(farm_ws_router)

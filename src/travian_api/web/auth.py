@@ -36,7 +36,15 @@ KEYS_FILE = _KEYS_DIR / ".web_keys"
 
 
 def _warn_if_world_readable(path: Path) -> None:
-    """Log a warning if the keys file is readable by others (Unix only)."""
+    """Log a warning if the keys file is readable by others (Unix only).
+
+    Skipped on Windows: ``stat()`` there reports a synthetic 0o666 that has no
+    relationship to the actual NTFS ACL, so this fired unconditionally and told
+    operators to run a chmod that cannot change anything. Use ``icacls`` to
+    restrict the file instead.
+    """
+    if os.name == "nt":
+        return
     try:
         mode = path.stat().st_mode
         if mode & (stat.S_IRGRP | stat.S_IROTH):

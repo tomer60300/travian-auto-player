@@ -21,6 +21,146 @@ function loadJson(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback }
 }
 
+// ── Background (recon) account credentials ─────────────────────────────
+// Credentials used to live only in the server's .env, so "rotate the recon
+// credentials, then retry" was impossible without editing a file and
+// restarting. Saving here applies to the running server immediately.
+function BackgroundAccountPanel({ disabled }) {
+  const toast = useToast()
+  const [status, setStatus] = useState(null)
+  const [editing, setEditing] = useState(false)
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await api.get('/recon/status')
+      setStatus(res.data)
+    } catch {
+      setStatus(null)
+    }
+  }, [])
+
+  useEffect(() => { refresh() }, [refresh])
+
+  const save = async () => {
+    if (!username.trim() || !password) {
+      toast.error('Username and password are both required')
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await api.put('/recon/credentials', { username: username.trim(), password })
+      setStatus(res.data)
+      setPassword('')
+      setEditing(false)
+      toast.success('Background account saved')
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Could not save credentials')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const test = async () => {
+    setBusy(true)
+    try {
+      const res = await api.post('/recon/test', {}, { timeout: 0 })
+      if (res.data.ok) toast.success(`Authenticated as ${res.data.username}`)
+      else toast.error(res.data.detail || 'Authentication failed')
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Test failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const clear = async () => {
+    setBusy(true)
+    try {
+      const res = await api.delete('/recon/credentials')
+      setStatus(res.data)
+      toast.success(res.data.configured ? 'Reverted to .env credentials' : 'Credentials cleared')
+    } catch (err) {
+      toast.error(err.response?.data?.detail || 'Could not clear credentials')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const locked = disabled || busy
+
+  return (
+    <div className="ml-6 mt-2 p-3 rounded border border-gray-700 bg-black/20 max-w-xl">
+      <div className="flex items-center gap-2 flex-wrap text-xs">
+        <span className="text-secondary">Background account:</span>
+        {status?.configured ? (
+          <>
+            <span className="font-mono">{status.username}</span>
+            <span className="text-secondary">
+              ({status.source === 'stored' ? 'saved here' : 'from .env'})
+            </span>
+          </>
+        ) : (
+          <span className="text-amber-400">not configured</span>
+        )}
+        <span className="flex-1" />
+        <button className="btn-secondary btn-sm" onClick={() => setEditing(!editing)} disabled={locked}>
+          {status?.configured ? 'Change' : 'Set'}
+        </button>
+        <button className="btn-secondary btn-sm" onClick={test} disabled={locked || !status?.configured}>
+          Test
+        </button>
+        {status?.source === 'stored' && (
+          <button className="btn-secondary btn-sm" onClick={clear} disabled={locked}>
+            Clear
+          </button>
+        )}
+      </div>
+
+      {editing && (
+        <div className="mt-3 flex flex-col gap-2">
+          <input
+            className="input-field text-xs"
+            placeholder="Background account username / email"
+            value={username}
+            autoComplete="off"
+            onChange={(e) => setUsername(e.target.value)}
+            disabled={locked}
+          />
+          <input
+            className="input-field text-xs"
+            type="password"
+            placeholder="Password"
+            value={password}
+            autoComplete="new-password"
+            onChange={(e) => setPassword(e.target.value)}
+            disabled={locked}
+          />
+          <div className="flex gap-2">
+            <button className="btn-primary btn-sm" onClick={save} disabled={locked}>
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              className="btn-secondary btn-sm"
+              onClick={() => { setEditing(false); setPassword('') }}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          </div>
+          <span className="text-secondary text-xs">
+            Stored encrypted on the server. Saving replaces the credentials the
+            running server uses and drops any cached background session, so a
+            rotation takes effect without a restart.
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Scan Progress Panel (shown during WS scan) ─────────────────────────
 function ScanProgressPanel({ phase, messages, enrichProgress, stats }) {
   const scrollRef = useRef(null)
@@ -623,6 +763,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             </span>
           </label>
         )}
+        {useRecon && <BackgroundAccountPanel disabled={scanning} />}
       </div>
 
       {/* Oasis bonus filter — only meaningful when oases are in scope.

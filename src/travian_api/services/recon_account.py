@@ -194,18 +194,65 @@ class ReconAccountManager:
     def __init__(self) -> None:
         self._accounts: dict[str, ReconAccount] = {}
         self._auth_lock = asyncio.Lock()
+        # Operator-supplied credentials, loaded from the DB at startup and
+        # replaced when they are rotated through the UI. None means "no stored
+        # credentials" and the .env values remain in force.
+        self._override: Optional[tuple[str, str]] = None
+
+    def credentials(self) -> tuple[Optional[str], Optional[str]]:
+        """Active recon credentials: stored ones win, .env is the fallback.
+
+        Keeping the env path alive means existing deployments that never touch
+        the UI keep working exactly as before.
+        """
+        if self._override is not None:
+            return self._override
+        s = _get_settings()
+        if s.recon_username and s.recon_password:
+            return s.recon_username, s.recon_password
+        return None, None
+
+    def credentials_source(self) -> Optional[str]:
+        """Where the active credentials came from: 'stored', 'env', or None."""
+        if self._override is not None:
+            return "stored"
+        s = _get_settings()
+        return "env" if (s.recon_username and s.recon_password) else None
 
     def is_configured(self) -> bool:
-        """True iff recon credentials are present in settings/env."""
-        s = _get_settings()
-        return bool(s.recon_username and s.recon_password)
+        """True iff recon credentials are available (stored, or from env)."""
+        username, password = self.credentials()
+        return bool(username and password)
 
     def get_proxy_username(self) -> Optional[str]:
         """The recon account's username, for log/UI display so it's
         always visible WHICH disposable account is acting as proxy.
         Returns None when not configured."""
-        s = _get_settings()
-        return s.recon_username or None
+        username, _ = self.credentials()
+        return username or None
+
+    def set_credentials(self, username: str, password: str) -> None:
+        """Install rotated credentials. Caller must invalidate() to apply them
+        to any already-authenticated client."""
+        self._override = (username, password)
+
+    def clear_credentials(self) -> None:
+        """Forget stored credentials and fall back to .env."""
+        self._override = None
+
+    async def invalidate(self) -> None:
+        """Drop every cached recon account.
+
+        Necessary after a credential change: a ReconAccount captures its
+        username/password at construction and caches both the authenticated
+        session and a 30-minute sticky-failure window, so without this a
+        rotation could not take effect and a prior failure would keep
+        suppressing retries.
+        """
+        async with self._auth_lock:
+            for account in list(self._accounts.values()):
+                await account.close()
+            self._accounts.clear()
 
     async def get_or_create_client(self, server_url: str) -> Optional[HttpClient]:
         """Return an authenticated HttpClient for the recon account on
@@ -217,14 +264,14 @@ class ReconAccountManager:
         Callers MUST tolerate None and fall back to their primary
         HttpClient — this function never raises.
         """
-        s = _get_settings()
-        if not (s.recon_username and s.recon_password):
+        username, password = self.credentials()
+        if not (username and password):
             return None
         key = server_url.rstrip("/")
         async with self._auth_lock:
             account = self._accounts.get(key)
             if account is None:
-                account = ReconAccount(key, s.recon_username, s.recon_password)
+                account = ReconAccount(key, username, password)
                 self._accounts[key] = account
             ok = await account.ensure_authed()
             return account.http_client if ok else None

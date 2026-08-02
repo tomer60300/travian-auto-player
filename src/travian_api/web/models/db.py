@@ -84,6 +84,31 @@ class TravianCredential(Base):
         )
 
 
+class ReconCredential(Base):
+    """Credentials for the background ("recon") account.
+
+    Deliberately not tied to a user: ReconAccountManager is a process-global
+    singleton shared by every session, so a single row is the honest
+    representation of what the runtime actually holds. The password is Fernet
+    encrypted at rest, same as TravianCredential.
+    """
+
+    __tablename__ = "recon_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    travian_username: Mapped[str] = mapped_column(String(128), nullable=False)
+    encrypted_password: Mapped[str] = mapped_column(String(512), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"<ReconCredential id={self.id} user={self.travian_username!r}>"
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -1,0 +1,156 @@
+"""Background ("recon") account credential management.
+
+The recon account masks account-independent gathering reads. Its credentials
+previously came only from ``.env``, which made the "rotate the recon
+credentials, then retry" advice impossible to follow without editing a file and
+restarting the process. These routes store them encrypted at rest and apply a
+rotation to the live runtime.
+"""
+
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from travian_api.services.recon_account import recon_account_manager
+from travian_api.web.auth import decrypt_credential, encrypt_credential, get_current_user
+from travian_api.web.models.db import ReconCredential, User, get_db
+from travian_api.web.sessions import TravianSession, get_travian_session
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/recon", tags=["recon"])
+
+
+class ReconCredentialRequest(BaseModel):
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+
+class ReconStatusResponse(BaseModel):
+    configured: bool
+    username: str | None = None
+    # "stored" (set here), "env" (.env fallback), or None when unconfigured.
+    source: str | None = None
+
+
+class ReconTestResponse(BaseModel):
+    ok: bool
+    username: str | None = None
+    detail: str | None = None
+
+
+def _status() -> ReconStatusResponse:
+    return ReconStatusResponse(
+        configured=recon_account_manager.is_configured(),
+        username=recon_account_manager.get_proxy_username(),
+        source=recon_account_manager.credentials_source(),
+    )
+
+
+async def load_stored_credentials(db: AsyncSession) -> bool:
+    """Push stored credentials into the manager. Returns True if any existed.
+
+    Called at startup so a rotation survives a restart, and after every write.
+    """
+    result = await db.execute(select(ReconCredential).order_by(ReconCredential.id).limit(1))
+    row = result.scalar_one_or_none()
+    if row is None:
+        recon_account_manager.clear_credentials()
+        return False
+    recon_account_manager.set_credentials(
+        row.travian_username, decrypt_credential(row.encrypted_password)
+    )
+    return True
+
+
+@router.get("/status", response_model=ReconStatusResponse)
+async def get_recon_status(_user: User = Depends(get_current_user)):
+    """Whether a background account is available, and where it came from."""
+    return _status()
+
+
+@router.put("/credentials", response_model=ReconStatusResponse)
+async def set_recon_credentials(
+    body: ReconCredentialRequest,
+    _user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Store rotated credentials and apply them to the live runtime."""
+    result = await db.execute(select(ReconCredential).order_by(ReconCredential.id).limit(1))
+    row = result.scalar_one_or_none()
+
+    if row is None:
+        row = ReconCredential(
+            travian_username=body.username,
+            encrypted_password=encrypt_credential(body.password),
+        )
+        db.add(row)
+    else:
+        row.travian_username = body.username
+        row.encrypted_password = encrypt_credential(body.password)
+
+    await db.commit()
+
+    recon_account_manager.set_credentials(body.username, body.password)
+    # A cached ReconAccount holds the old password and a sticky failure window;
+    # without dropping it the rotation could not take effect.
+    await recon_account_manager.invalidate()
+    logger.info("Recon credentials rotated; cached recon sessions dropped")
+
+    return _status()
+
+
+@router.delete("/credentials", response_model=ReconStatusResponse)
+async def clear_recon_credentials(
+    _user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Forget stored credentials and fall back to the .env values, if any."""
+    result = await db.execute(select(ReconCredential))
+    for row in result.scalars().all():
+        await db.delete(row)
+    await db.commit()
+
+    recon_account_manager.clear_credentials()
+    await recon_account_manager.invalidate()
+    logger.info("Stored recon credentials cleared; falling back to environment")
+
+    return _status()
+
+
+@router.post("/test", response_model=ReconTestResponse)
+async def test_recon_credentials(
+    session: TravianSession = Depends(get_travian_session),
+):
+    """Attempt a real login with the active recon credentials.
+
+    Uses the connected server so the operator does not have to retype it. This
+    authenticates the background account only — it never touches the primary
+    session.
+    """
+    if not recon_account_manager.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No background account configured.",
+        )
+
+    username = recon_account_manager.get_proxy_username()
+    try:
+        client = await recon_account_manager.get_or_create_client(session.settings.base_url)
+    except Exception as exc:  # get_or_create_client is documented never to raise
+        logger.exception("Recon test failed unexpectedly")
+        return ReconTestResponse(ok=False, username=username, detail=str(exc))
+
+    if client is None:
+        return ReconTestResponse(
+            ok=False,
+            username=username,
+            detail=(
+                "Authentication failed. Check the username and password, and "
+                "that the account is not banned or sitting-locked."
+            ),
+        )
+    return ReconTestResponse(ok=True, username=username)
