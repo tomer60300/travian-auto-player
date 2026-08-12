@@ -63,7 +63,9 @@ class Resources(BaseModel):
     clay: int = Field(default=0, ge=0, description="Current clay amount")
     iron: int = Field(default=0, ge=0, description="Current iron amount")
     crop: int = Field(default=0, ge=0, description="Current crop amount")
-    free_crop: int = Field(default=0, ge=0, description="Free crop (crop - consumption)")
+    free_crop: int = Field(
+        default=0, description="Free crop (production - consumption; negative when starving)"
+    )
     max_lumber: int = Field(default=0, ge=0, description="Maximum lumber storage")
     max_clay: int = Field(default=0, ge=0, description="Maximum clay storage")
     max_iron: int = Field(default=0, ge=0, description="Maximum iron storage")

@@ -26,12 +26,13 @@ async def export_player_status(
 ):
     """Collect resources, production and troops for every village.
 
-    Resources and troops come from the account-wide /village/statistics tables,
-    which render every village per page — four requests for the whole account
-    regardless of village count. Building levels are the only genuinely
-    per-village data (dorf1 + dorf2 each), so they are opt-in: setting
-    ``include_buildings`` adds two throttled requests per village, which on a
-    large account takes minutes.
+    Troops come from the account-wide /village/statistics/troops table — one
+    request for the whole account. Resources are read per village from dorf1:
+    the account-wide production table only carries GROSS crop, while the
+    ``var resources`` blob holds the net rate (production minus troop feeding,
+    negative when starving) plus free crop. Setting ``include_buildings`` adds
+    a dorf2 fetch per village for building levels; resources then ride along
+    on the dorf1 fetch the snapshot already makes.
     """
     if session.auth_state is None:
         raise HTTPException(
@@ -42,7 +43,6 @@ async def export_player_status(
     tribe_id = session.tribe_id or 0
 
     try:
-        resources_by_village = await session.building_service.get_all_villages_resources()
         troops_by_village = await session.military_service.get_all_villages_troops(tribe_id)
     except TravianError as exc:
         raise HTTPException(
@@ -54,7 +54,6 @@ async def export_player_status(
 
     for village in session.auth_state.villages:
         vid = village.id
-        resources = resources_by_village.get(vid)
         troops_raw = troops_by_village.get(vid, {})
 
         # Map troop keys to readable names and drop zeroes
@@ -65,17 +64,22 @@ async def export_player_status(
             "name": village.name,
             "x": village.x,
             "y": village.y,
-            "resources": resources.model_dump() if resources is not None else None,
+            "resources": None,
             "troops": troops,
         }
 
-        if include_buildings:
-            try:
-                buildings, _ = await session.building_service.get_village_snapshot(village_id=vid)
+        try:
+            if include_buildings:
+                buildings, resources = await session.building_service.get_village_snapshot(
+                    village_id=vid
+                )
                 entry["buildings"] = [b.model_dump() for b in buildings]
-            except Exception as exc:
-                logger.warning("Failed to fetch buildings for village %s: %s", vid, exc)
-                entry["error"] = str(exc)
+            else:
+                resources = await session.building_service.get_resources(village_id=vid)
+            entry["resources"] = resources.model_dump()
+        except Exception as exc:
+            logger.warning("Failed to fetch village %s: %s", vid, exc)
+            entry["error"] = str(exc)
 
         villages_out.append(entry)
 

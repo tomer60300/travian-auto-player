@@ -125,6 +125,28 @@ class TestHTMLParsers:
         assert resources.max_lumber == 8000
         assert resources.max_crop == 10000
 
+    def test_parse_resources_starving_village_keeps_negative_crop_rates(self):
+        """A village whose troops outeat its fields has negative l4/l5 rates."""
+        html_content = """
+        <html>
+        <head>
+            <script>
+                var resources = {
+                    storage: {l1: 81, l2: 66, l3: 93, l4: 20831},
+                    production: {l1: 745, l2: 745, l3: 745, l4: -3292, l5: -6536},
+                    maxStorage: {l1: 80000, l2: 80000, l3: 80000, l4: 240000}
+                };
+            </script>
+        </head>
+        </html>
+        """
+
+        resources = parse_resources(html_content)
+
+        assert resources.crop == 20831
+        assert resources.crop_per_hour == -3292
+        assert resources.free_crop == -6536
+
     def test_parse_construction_queue_empty(self):
         """Test parsing empty construction queue."""
         html_content = """

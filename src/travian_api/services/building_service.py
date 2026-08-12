@@ -18,9 +18,6 @@ from ..parsers.html_parser import (
     parse_dorf2,
     parse_empty_slot_buildings,
     parse_resources,
-    parse_village_stats_capacity,
-    parse_village_stats_production,
-    parse_village_stats_resources,
 )
 
 logger = logging.getLogger(__name__)
@@ -115,57 +112,6 @@ class BuildingService:
         """
         buildings, _ = await self.get_village_snapshot(village_id)
         return buildings
-
-    async def get_all_villages_resources(self) -> Dict[int, Resources]:
-        """
-        Get stocks, production and capacity for EVERY village in three requests.
-
-        The /village/statistics tables are account-wide: each renders one row
-        per village regardless of which village is active. Three fetches cover
-        the whole account, versus one dorf1 fetch per village.
-
-        Note: ``free_crop`` is not exposed by these tables (it lives only in the
-        per-page ``var resources`` blob) and is left at 0.
-
-        Returns:
-            Dict of village_id -> Resources
-
-        Raises:
-            TravianError: If request fails
-        """
-        try:
-            stocks = parse_village_stats_resources(
-                await self.http_client.get_html("/village/statistics/resources")
-            )
-            production = parse_village_stats_production(
-                await self.http_client.get_html("/village/statistics/resources/production")
-            )
-            capacity = parse_village_stats_capacity(
-                await self.http_client.get_html("/village/statistics/resources/capacity")
-            )
-        except Exception as e:
-            raise TravianError(f"Failed to get village statistics: {e}") from e
-
-        resources: Dict[int, Resources] = {}
-        for village_id, stock in stocks.items():
-            rates = production.get(village_id, {})
-            caps = capacity.get(village_id, {})
-            warehouse = caps.get("warehouse", 0)
-            resources[village_id] = Resources(
-                lumber=stock["lumber"],
-                clay=stock["clay"],
-                iron=stock["iron"],
-                crop=stock["crop"],
-                max_lumber=warehouse,
-                max_clay=warehouse,
-                max_iron=warehouse,
-                max_crop=caps.get("granary", 0),
-                lumber_per_hour=rates.get("lumber", 0),
-                clay_per_hour=rates.get("clay", 0),
-                iron_per_hour=rates.get("iron", 0),
-                crop_per_hour=rates.get("crop", 0),
-            )
-        return resources
 
     async def get_building_detail(
         self, slot_id: int, village_id: Optional[int] = None
