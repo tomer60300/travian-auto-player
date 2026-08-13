@@ -289,36 +289,17 @@ The current 20-village plan is the optimizer's golden test case: net production,
 
 Findings are ordered by how much damage they do if left unaddressed.
 
-## R1 — BLOCKER: the merchant capacity constants look doubly wrong
+## R1 — RESOLVED: the constants were right, the review was wrong
 
-§3.1 uses `Base_Merchant_Size = 2200` with `1 + 0.2 × TO`. Published Travian values for **Teutons** are **base 1000** and **+10% per Trade Office level** — the +20% figure is the **Roman** rate.
+**Measured: a TO 13 village carries 7,920 per merchant.** `2200 × (1 + 0.2 × 13) = 7920` exactly. §3.1 stands.
 
-Both errors push the same way: they overstate capacity, which under-provisions merchants — the direction §5.2 itself labels **unsafe**.
+The review argued the profile's `base 2200` / `+20%` had to be mistaken, because published Teuton values are `base 1000` / `+10%` and `+20%` is the Roman rate — which would have made the profile overstate capacity 3.35× and under-provision every route. That reasoning was sound but the premise was not: **Europe 2 is not a stock server.** Stock Teuton predicts 2,300 at TO 13; the game reports 7,920.
 
-Compare V05 (TO 11) from §5.3:
+Two things survive the correction:
 
-| Formula | Capacity/merchant |
-|---|---|
-| doc: `2200 × (1 + 0.2 × 11)` | **7,040** |
-| stock Teuton: `1000 × (1 + 0.1 × 11)` | **2,100** |
+**The measured model is pinned by a single data point.** Any `base × (1 + 13k) = 7920` fits it — `2200/0.20` is the natural reading and matches the profile's own empirical history, but a second village at a *different* Trade Office level would nail it. `calibrate()` exists for that, and the constant is `EUROPE2_TEUTON` rather than a hardcoded literal so a Trade artifact or server change can be re-derived rather than hunted down.
 
-A 3.35× overstatement. Every route sized against it needs ~3× the budgeted merchants — precisely known-issue #6.
-
-The correction history in issue #4 (`1000 → 1600 → 2200`) is itself the tell. Under the Teuton +10% rule those are exactly `TO 0 → TO 6 → TO 12` on a base of 1000. That is the signature of **sampling different villages and mistaking a Trade Office bonus for the base** — after which the formula applies the same bonus a second time.
-
-Other multipliers that could legitimately produce a non-stock number, and which are **not** constants:
-
-- **Trade artifacts** multiply merchant capacity, can be lost or captured, and some are account-wide while others are single-village.
-- Server speed multiplies capacity, but Europe 2 is x1.
-
-**Decisive test — zero requests.** Open the Marketplace in two villages with *different* TO levels and read the capacity the game states. Two observations solve `cap = base × (1 + k × TO)` for both unknowns:
-
-```
-k    = (cap_b − cap_a) / (cap_a × b − cap_b × a)     # a, b = the two TO levels
-base = cap_a / (1 + k × a)
-```
-
-Pick a TO-0 village for one sample and `base = cap` directly. **Nothing downstream should be built until this is pinned**, and the resolved values belong in a test fixture, not a config default.
+**§5.3's Trade Office table is stale.** It lists V16 at TO 0 and V05 at TO 11; both are actually **TO 13**. Every merchant figure in that table is therefore wrong independently of the formula, and it is exactly the drift the §5.3 staleness nag is designed to catch — the hand-maintained field had already diverged before the tool existed.
 
 ## R2 — §3.3's "single request" for net production is optimistic
 
@@ -489,9 +470,9 @@ The diff, not the plan: **Create / Edit / Delete** against the currently configu
 
 ## Immediate next actions
 
-| # | Action | Cost | Unblocks |
-|---|---|---|---|
-| 1 | Read merchant capacity in two villages with different TO | 0 requests | **R1 — everything** |
-| 2 | Capture Resources + Capacity + one *filling* village `dorf1` together | 0 requests | R2 filling branch |
-| 3 | One-off `dorf2` sweep for TO + Marketplace | N requests | §1 OWNED state |
-| 4 | Create one trade route and observe its phase and any per-village cap | in-game | R6, open question #1 |
+| # | Action | Cost | Unblocks | Status |
+|---|---|---|---|---|
+| 1 | Read merchant capacity at two *different* TO levels | 0 requests | pins the measured model exactly | partial — 7,920 @ TO 13 |
+| 2 | Capture Resources + Capacity + one *filling* village `dorf1` together | 0 requests | R2 filling branch | open |
+| 3 | One-off `dorf2` sweep for TO + Marketplace | N requests | §1 OWNED state, and refreshes the stale §5.3 levels | open |
+| 4 | Create one trade route and observe its phase and any per-village cap | in-game | R6, open question #1 | open |

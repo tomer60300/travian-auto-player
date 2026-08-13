@@ -11,6 +11,7 @@ import pytest
 from travian_api.services.distribution.merchants import (
     ALL_CYCLES,
     DAILY_BEAT_CYCLES,
+    EUROPE2_TEUTON,
     STOCK_TEUTON,
     CalibrationError,
     CapacityObservation,
@@ -29,7 +30,7 @@ V10_CAPACITY = 5720
 
 class TestCapacity:
     def test_capacity_scales_with_trade_office_level(self):
-        model = MerchantModel(1000, 0.10, 12.0)
+        model = MerchantModel(1000, 0.10)
 
         assert model.capacity(0) == 1000
         assert model.capacity(10) == 2000
@@ -38,7 +39,7 @@ class TestCapacity:
     def test_capacity_rounds_down(self):
         """Understating capacity over-provisions (safe); overstating breaches
         the merchant budget invisibly (unsafe). Only round the safe way."""
-        model = MerchantModel(1000, 0.13, 12.0)
+        model = MerchantModel(1000, 0.13)
 
         assert model.capacity(1) == 1130
         assert model.capacity(3) == 1390  # 1390.0000000000002 must not become 1391
@@ -54,7 +55,6 @@ class TestCalibration:
     def test_two_observations_recover_base_and_bonus(self):
         model = calibrate(
             [CapacityObservation(0, 1000), CapacityObservation(10, 2000)],
-            speed_fields_per_hour=12.0,
         )
 
         assert model.base_capacity == 1000
@@ -64,25 +64,33 @@ class TestCalibration:
         """The two villages to hand may both have a Trade Office."""
         model = calibrate(
             [CapacityObservation(4, 1400), CapacityObservation(11, 2100)],
-            speed_fields_per_hour=12.0,
         )
 
         assert model.base_capacity == 1000
         assert model.bonus_per_trade_office_level == pytest.approx(0.10)
 
-    def test_calibration_distinguishes_the_two_disputed_models(self):
-        """The whole point of R1: which model the account actually follows.
+    def test_calibration_distinguishes_rival_models(self):
+        """Why one reading settles R1: the candidates are nowhere near.
 
-        A TO-11 village reading 2,100 is base 1000 / +10%. Reading 7,040 it is
-        base 2200 / +20%. One observation pair settles it.
+        A TO-11 village reading 2,100 is base 1000 / +10%; reading 7,040 it is
+        base 2200 / +20% -- a 3.35x difference in how many merchants every route
+        needs.
         """
-        teuton = calibrate([CapacityObservation(0, 1000), CapacityObservation(11, 2100)], 12.0)
-        doc_model = calibrate([CapacityObservation(0, 2200), CapacityObservation(11, 7040)], 12.0)
+        stock = calibrate([CapacityObservation(0, 1000), CapacityObservation(11, 2100)])
+        measured = calibrate([CapacityObservation(0, 2200), CapacityObservation(11, 7040)])
 
-        assert teuton.capacity(11) == 2100
-        assert doc_model.capacity(11) == 7040
-        # A 3.35x difference in how many merchants every route needs.
-        assert doc_model.capacity(11) / teuton.capacity(11) == pytest.approx(3.35, abs=0.01)
+        assert stock.capacity(11) == 2100
+        assert measured.capacity(11) == 7040
+        assert measured.capacity(11) / stock.capacity(11) == pytest.approx(3.35, abs=0.01)
+
+    def test_the_measured_europe2_model_matches_the_live_reading(self):
+        """R1 resolved: a TO 13 village on Europe 2 carries 7,920 per merchant.
+
+        2200 * (1 + 0.2 * 13) == 7920 exactly. Stock Teuton predicts 2,300, so
+        this server is not stock and the review's objection was wrong.
+        """
+        assert EUROPE2_TEUTON.capacity(13) == 7920
+        assert STOCK_TEUTON.capacity(13) == 2300
 
     def test_inconsistent_observations_raise_rather_than_average(self):
         """Per-village variation means a Trade artifact, not a fitting problem."""
@@ -93,7 +101,6 @@ class TestCalibration:
                     CapacityObservation(10, 2000),
                     CapacityObservation(5, 3000),  # doubled: artifact village
                 ],
-                speed_fields_per_hour=12.0,
             )
 
     def test_adjacent_trade_office_levels_are_refused(self):
@@ -105,22 +112,22 @@ class TestCalibration:
         that silently breaches a village's merchant budget.
         """
         with pytest.raises(CalibrationError, match="apart"):
-            calibrate([CapacityObservation(7, 1350), CapacityObservation(8, 1400)], 12.0)
+            calibrate([CapacityObservation(7, 1350), CapacityObservation(8, 1400)])
 
     def test_a_trade_office_free_village_needs_no_separation(self):
         """base is read directly, so TO 0 paired with TO 1 is still exact."""
-        model = calibrate([CapacityObservation(0, 1000), CapacityObservation(1, 1100)], 12.0)
+        model = calibrate([CapacityObservation(0, 1000), CapacityObservation(1, 1100)])
 
         assert model.base_capacity == 1000
         assert model.bonus_per_trade_office_level == pytest.approx(0.10)
 
     def test_single_trade_office_level_cannot_solve_two_unknowns(self):
         with pytest.raises(CalibrationError, match="two different"):
-            calibrate([CapacityObservation(5, 1500), CapacityObservation(5, 1500)], 12.0)
+            calibrate([CapacityObservation(5, 1500), CapacityObservation(5, 1500)])
 
     def test_one_observation_is_rejected(self):
         with pytest.raises(CalibrationError, match="at least two"):
-            calibrate([CapacityObservation(0, 1000)], 12.0)
+            calibrate([CapacityObservation(0, 1000)])
 
 
 class TestRouteCost:
@@ -198,6 +205,21 @@ class TestCycleSelection:
         assert {c.merchants_committed for c in costs} == {1}
 
         assert cheapest_cycle(1, 60.0, 10_000, cycles=(3, 2, 1)).cycle_hours == 1
+
+    def test_the_cheapest_cycle_is_also_the_most_affordable_one(self):
+        """Why cheapest_cycle takes no budget parameter.
+
+        Minimising merchants already yields the cycle most likely to fit, so a
+        budget filter could never change the answer: if the minimum does not
+        fit, nothing does. Feasibility stays the caller's check.
+        """
+        costs = cycle_sweep(V10_CARGO, V10_ROUND_TRIP, V10_CAPACITY)
+        best = cheapest_cycle(V10_CARGO, V10_ROUND_TRIP, V10_CAPACITY)
+
+        assert best.merchants_committed == min(c.merchants_committed for c in costs)
+        for budget in range(40):
+            fits = [c for c in costs if c.merchants_committed <= budget]
+            assert not fits or best in fits
 
     def test_empty_cycle_set_is_rejected(self):
         with pytest.raises(ValueError):

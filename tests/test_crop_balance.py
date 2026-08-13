@@ -163,6 +163,25 @@ class TestAccountWideFetch:
         ]
         assert balances[20011].net_per_hour > 0
 
+    def test_a_village_with_no_stock_reading_is_underived_not_zero(self):
+        """Defaulting the stock to 0 makes a draining village derive to exactly
+        0/h, which is indistinguishable from healthy."""
+        http = _StatsHttp()
+        original = http.get_html
+
+        async def missing_stock(url: str, skip_reauth: bool = True) -> str:
+            html = await original(url, skip_reauth)
+            if url.endswith("/resources"):
+                # Drop village 03 from the stocks table only.
+                return RESOURCES_HTML.replace("20003", "99999")
+            return html
+
+        http.get_html = missing_stock
+        balances = asyncio.run(BuildingService(http).get_all_villages_net_crop())
+
+        assert balances[20003].net_per_hour is None
+        assert balances[20003].draining is True
+
     def test_an_all_draining_account_never_fetches_capacity(self):
         """Capacity only matters for filling villages."""
         http = _StatsHttp()

@@ -3,13 +3,18 @@
 Two review findings from ``docs/25-resource-distribution-planner.md`` shape this
 module:
 
-**R1 — the capacity constants are disputed.** The profiling doc used
-``base 2200`` with ``+20%`` per Trade Office level; published Teuton values are
-``base 1000`` and ``+10%`` (``+20%`` is the Roman rate). Both errors overstate
-capacity, which under-provisions merchants -- the unsafe direction. Rather than
-pick a side, capacity lives in one injectable :class:`MerchantModel` that can be
-*derived from observation* via :func:`calibrate`. Nothing else in the planner is
-allowed to hardcode a capacity.
+**R1 — RESOLVED, and the review was wrong.** The review argued the profile's
+``base 2200`` / ``+20%`` per Trade Office level had to be mistaken, because
+published Teuton values are ``base 1000`` / ``+10%``. A live reading settled it:
+a TO 13 village carries **7,920** per merchant, which is exactly
+``2200 * (1 + 0.2 * 13)``. Stock Teuton would have given 2,300. The profile was
+right and this server is not stock.
+
+The seam stays regardless. Capacity lives in one injectable
+:class:`MerchantModel` and can be *derived from observation* via
+:func:`calibrate`, because the measured model is still only pinned by a single
+data point -- any ``base * (1 + 13k) = 7920`` fits it, and a Trade artifact can
+change it mid-server. Nothing else in the planner may hardcode a capacity.
 
 **R5 — cycles should divide 24 hours.** Otherwise the schedule has no repeating
 daily period and cannot be written down as a beat. :data:`DAILY_BEAT_CYCLES` is
@@ -40,20 +45,22 @@ MIN_CALIBRATION_SEPARATION = 3
 
 @dataclass(frozen=True)
 class MerchantModel:
-    """How much one merchant carries, and how fast it travels.
+    """How much one merchant carries.
 
     ``capacity = base_capacity * (1 + bonus_per_trade_office_level * level)``
 
+    Merchant *speed* deliberately lives on :class:`~.geometry.MapGeometry`
+    instead, which is the only thing that needs it. Holding it in both places
+    would let the two disagree.
+
     Warning:
-        The stock constants below are **published values, unverified for any
-        particular server**. Trade artifacts multiply merchant capacity and can
-        be captured or lost, and server speed scales it. Prefer
-        :func:`calibrate` on real observations over trusting a default.
+        Do not assume a published constant applies. Europe 2 does not follow
+        stock Teuton values, Trade artifacts multiply capacity and can be
+        captured or lost, and server speed scales it. Prefer :func:`calibrate`.
     """
 
     base_capacity: int
     bonus_per_trade_office_level: float
-    speed_fields_per_hour: float
 
     def __post_init__(self) -> None:
         if self.base_capacity <= 0:
@@ -74,16 +81,17 @@ class MerchantModel:
         return math.floor(scaled)
 
 
-# Published stock values at 1x. UNVERIFIED for this account -- see R1.
-STOCK_TEUTON = MerchantModel(
-    base_capacity=1000, bonus_per_trade_office_level=0.10, speed_fields_per_hour=12.0
-)
-STOCK_ROMAN = MerchantModel(
-    base_capacity=500, bonus_per_trade_office_level=0.20, speed_fields_per_hour=16.0
-)
-STOCK_GAUL = MerchantModel(
-    base_capacity=750, bonus_per_trade_office_level=0.10, speed_fields_per_hour=24.0
-)
+# Measured on Europe 2 (Teuton): a TO 13 village carries 7,920, and
+# 2200 * (1 + 0.2 * 13) == 7920 exactly. Still only one data point -- other
+# (base, bonus) pairs also satisfy it -- so re-derive with calibrate() when a
+# village at a different Trade Office level is to hand.
+EUROPE2_TEUTON = MerchantModel(base_capacity=2200, bonus_per_trade_office_level=0.20)
+
+# Published stock values at 1x, for reference. Europe 2 does NOT follow these:
+# stock Teuton predicts 2,300 at TO 13 where the game reports 7,920.
+STOCK_TEUTON = MerchantModel(base_capacity=1000, bonus_per_trade_office_level=0.10)
+STOCK_ROMAN = MerchantModel(base_capacity=500, bonus_per_trade_office_level=0.20)
+STOCK_GAUL = MerchantModel(base_capacity=750, bonus_per_trade_office_level=0.10)
 
 
 @dataclass(frozen=True)
@@ -100,7 +108,6 @@ class CalibrationError(ValueError):
 
 def calibrate(
     observations: Sequence[CapacityObservation],
-    speed_fields_per_hour: float,
     *,
     tolerance: float = 1.0,
 ) -> MerchantModel:
@@ -127,7 +134,6 @@ def calibrate(
 
     Args:
         observations: at least two readings spanning two Trade Office levels.
-        speed_fields_per_hour: merchant speed for the tribe.
         tolerance: allowed absolute deviation, in resources, before raising.
 
     Raises:
@@ -177,11 +183,7 @@ def calibrate(
             f"observations imply an impossible model (base={base:.1f}, bonus={bonus:.4f})"
         )
 
-    model = MerchantModel(
-        base_capacity=round(base),
-        bonus_per_trade_office_level=bonus,
-        speed_fields_per_hour=speed_fields_per_hour,
-    )
+    model = MerchantModel(base_capacity=round(base), bonus_per_trade_office_level=bonus)
 
     for observation in observations:
         predicted = model.capacity(observation.trade_office_level)
@@ -274,6 +276,16 @@ def cheapest_cycle(
 
     Tie-breaking on the shorter cycle is deliberate: for equal merchant cost it
     delivers sooner, which is objective 2 (latency) in the optimizer.
+
+    Note:
+        There is deliberately no budget parameter. Because this already returns
+        the minimum-merchant cycle, that cycle is also the most affordable one:
+        if it does not fit a village's spare merchants, no cycle does. Filtering
+        by a budget could therefore never change the answer. Feasibility is the
+        caller's decision -- compare :attr:`RouteCost.merchants_committed`
+        against the budget and escalate per the optimizer's ladder. Known issue
+        #6 is that comparison being skipped, and no signature here can make it
+        for you.
     """
     if not cycles:
         raise ValueError("cycles must not be empty")

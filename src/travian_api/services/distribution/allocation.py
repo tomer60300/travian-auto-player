@@ -23,8 +23,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 # Rates are floats; treat anything under this as zero rather than warning about
-# a rounding artifact of the percentage arithmetic.
+# a rounding artifact of the percentage arithmetic. Conservation scales this by
+# the account total, because summing twenty five-figure rates accumulates more
+# float error than a fixed absolute tolerance allows for.
 EPSILON = 1e-6
+CONSERVATION_RELATIVE_TOLERANCE = 1e-9
 
 
 class Resource(StrEnum):
@@ -110,7 +113,8 @@ class ResourcePlan:
     @property
     def is_conserved(self) -> bool:
         """True when shipping nets to zero -- nothing created or destroyed."""
-        return abs(sum(v.ship_per_hour for v in self.villages)) <= EPSILON
+        tolerance = max(EPSILON, abs(self.total_production) * CONSERVATION_RELATIVE_TOLERANCE)
+        return abs(sum(v.ship_per_hour for v in self.villages)) <= tolerance
 
     @property
     def receivers(self) -> tuple[VillageAllocation, ...]:
@@ -177,6 +181,16 @@ def resolve_resource(
 
     total = sum(productions.values())
     warnings: list[str] = []
+
+    # A percentage of a negative total is meaningless: 30% of an account that is
+    # net -4,000 crop/h is a target of -1,200, which reads as an instruction to
+    # ship crop away from a village that is already starving.
+    if total < 0 and any(a.mode is AllocationMode.PERCENTAGE for a in allocations.values()):
+        warnings.append(
+            f"{resource.value}: account production is negative ({total:.0f}/h), so "
+            f"percentage targets resolve to negative amounts. Use absolute or "
+            f"sustain targets until the account is net positive."
+        )
 
     targets: dict[int, float] = {}
     for vid, own in productions.items():

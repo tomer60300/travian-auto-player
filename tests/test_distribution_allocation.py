@@ -173,6 +173,17 @@ class TestDefaultsAndValidation:
         with pytest.raises(AllocationError):
             Allocation(AllocationMode.PERCENTAGE, value)
 
+    def test_percentage_against_a_crop_negative_account_warns(self):
+        """30% of a net -4,000/h account is a target of -1,200, which reads as
+        an instruction to ship crop out of a starving village."""
+        plan = resolve_resource(
+            Resource.CROP,
+            productions={1: -5000, 2: 1000},
+            allocations={2: pct(30)},
+        )
+
+        assert any("negative" in w for w in plan.warnings)
+
     def test_negative_total_production_still_resolves(self):
         """An account can be crop-negative overall; the planner must not break."""
         plan = resolve_resource(

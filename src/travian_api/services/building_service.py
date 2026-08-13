@@ -208,18 +208,39 @@ class BuildingService:
 
         balances: Dict[int, CropBalance] = {}
         for vid, timer in timers.items():
-            stock = stocks.get(vid, {}).get("crop", 0)
+            # Defaulting a missing stock to 0 would make a draining village
+            # derive to exactly 0/h, which reads as healthy. That silent zero is
+            # the failure this module exists to avoid -- leave the rate unknown.
+            stock = stocks.get(vid, {}).get("crop")
+            if stock is None:
+                logger.warning(
+                    "Village %s has a granary countdown but no stock in the "
+                    "resources table; net crop left underived",
+                    vid,
+                )
             balances[vid] = CropBalance(
                 village_id=vid,
-                stock=stock,
-                net_per_hour=derive_net_crop_per_hour(
-                    stock=stock,
-                    seconds_remaining=timer["crop_seconds"],
-                    draining=timer["crop_draining"],
-                    granary_capacity=capacities.get(vid),
+                stock=stock or 0,
+                net_per_hour=(
+                    None
+                    if stock is None
+                    else derive_net_crop_per_hour(
+                        stock=stock,
+                        seconds_remaining=timer["crop_seconds"],
+                        draining=timer["crop_draining"],
+                        granary_capacity=capacities.get(vid),
+                    )
                 ),
                 draining=timer["crop_draining"],
                 seconds_remaining=timer["crop_seconds"],
+            )
+
+        missing_timer = set(stocks) - set(timers)
+        if missing_timer:
+            logger.warning(
+                "Villages present in the resources table but absent from the "
+                "warehouse table, so they have no crop balance: %s",
+                sorted(missing_timer),
             )
         return balances
 
