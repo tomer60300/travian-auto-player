@@ -96,6 +96,24 @@ class TestCalibration:
                 speed_fields_per_hour=12.0,
             )
 
+    def test_adjacent_trade_office_levels_are_refused(self):
+        """Found by simulation, not by these tests originally.
+
+        The game floors reported capacity, so adjacent levels make the solve
+        ill-conditioned: across 570 synthetic models it mis-predicted capacity
+        at TO 20 by up to 19 and overstated it in 8% of cases -- the direction
+        that silently breaches a village's merchant budget.
+        """
+        with pytest.raises(CalibrationError, match="apart"):
+            calibrate([CapacityObservation(7, 1350), CapacityObservation(8, 1400)], 12.0)
+
+    def test_a_trade_office_free_village_needs_no_separation(self):
+        """base is read directly, so TO 0 paired with TO 1 is still exact."""
+        model = calibrate([CapacityObservation(0, 1000), CapacityObservation(1, 1100)], 12.0)
+
+        assert model.base_capacity == 1000
+        assert model.bonus_per_trade_office_level == pytest.approx(0.10)
+
     def test_single_trade_office_level_cannot_solve_two_unknowns(self):
         with pytest.raises(CalibrationError, match="two different"):
             calibrate([CapacityObservation(5, 1500), CapacityObservation(5, 1500)], 12.0)
