@@ -88,6 +88,29 @@ class Resources(BaseModel):
     )
 
 
+class CropBalance(BaseModel):
+    """Net crop for one village, derived from the granary countdown.
+
+    Obtained for the whole account in two requests rather than one page per
+    village -- see docs/20-resource-production.md.
+    """
+
+    village_id: int = Field(..., description="Village id")
+    stock: int = Field(default=0, description="Current crop in the granary")
+    net_per_hour: float | None = Field(
+        default=None,
+        description=(
+            "True net crop per hour, negative while draining. None when it "
+            "could not be derived (a filling village with no known granary "
+            "capacity) -- never silently zero."
+        ),
+    )
+    draining: bool = Field(default=False, description="Granary is emptying; troops will starve")
+    seconds_remaining: int = Field(
+        default=0, description="Countdown to an empty granary, or to a full one when filling"
+    )
+
+
 class QueueItem(BaseModel):
     """Construction queue item."""
 

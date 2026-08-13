@@ -762,6 +762,44 @@ def parse_village_stats_capacity(html: str) -> Dict[int, Dict[str, int]]:
     return out
 
 
+def parse_village_stats_warehouse(html: str) -> Dict[int, Dict[str, Any]]:
+    """Parse /village/statistics/resources/warehouse -> fill/empty countdowns.
+
+    This page is the cheapest source of **true net crop** for the whole account:
+    the countdown is the server's own calculation, so deriving a rate from it
+    needs no upkeep model and no per-village fetch. See
+    docs/20-resource-production.md.
+
+    Returns ``{village_id: {crop_percent, crop_seconds, crop_draining,
+    warehouse_seconds}}``. ``crop_draining`` is the direction of the granary
+    countdown -- True counts down to empty (starving), False to full.
+    """
+    out: Dict[int, Dict[str, Any]] = {}
+    for vid, cells in _stats_village_rows(html, "warehouse"):
+        # village | lumber% | clay% | iron% | warehouse timer | crop% | granary timer
+        if len(cells) < 6:
+            continue
+        granary_timer = cells[5].find("span", class_="timer")
+        if granary_timer is None:
+            continue
+        # Raw seconds live in the attributes; the rendered H:MM:SS is a JS
+        # countdown and would have to be re-parsed for nothing.
+        raw_seconds = granary_timer.get("data-value") or granary_timer.get("value") or ""
+        warehouse_timer = cells[3].find("span", class_="timer")
+        warehouse_raw = ""
+        if warehouse_timer is not None:
+            warehouse_raw = warehouse_timer.get("data-value") or warehouse_timer.get("value") or ""
+
+        out[vid] = {
+            "crop_percent": _stats_int(cells[4].get_text().replace("%", "")),
+            "crop_seconds": _stats_int(str(raw_seconds)),
+            # The game marks a draining granary `crit` and prefixes a minus.
+            "crop_draining": "crit" in (granary_timer.get("class") or []),
+            "warehouse_seconds": _stats_int(str(warehouse_raw)),
+        }
+    return out
+
+
 def parse_village_stats_troops(html: str, tribe_id: int = 0) -> Dict[int, Dict[str, int]]:
     """Parse /village/statistics/troops -> ``{village_id: {t1..t10}}`` for every village.
 

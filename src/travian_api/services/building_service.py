@@ -10,7 +10,14 @@ from ..concurrency import KeyedLock
 from ..constants import BUILDING_NAMES
 from ..debug_dump import debug_dumper
 from ..exceptions import TravianError
-from ..models.buildings import Building, BuildingDetail, QueueItem, Resources, UpgradeResult
+from ..models.buildings import (
+    Building,
+    BuildingDetail,
+    CropBalance,
+    QueueItem,
+    Resources,
+    UpgradeResult,
+)
 from ..parsers.html_parser import (
     parse_build_page,
     parse_construction_queue,
@@ -18,9 +25,46 @@ from ..parsers.html_parser import (
     parse_dorf2,
     parse_empty_slot_buildings,
     parse_resources,
+    parse_village_stats_capacity,
+    parse_village_stats_resources,
+    parse_village_stats_warehouse,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def derive_net_crop_per_hour(
+    stock: int,
+    seconds_remaining: int,
+    draining: bool,
+    granary_capacity: Optional[int] = None,
+) -> Optional[float]:
+    """Net crop per hour implied by a granary countdown.
+
+    The countdown is the server's own arithmetic, so inverting it sidesteps the
+    upkeep model entirely -- no troop table, no population figure, and no
+    confusion about which village feeds troops standing somewhere else::
+
+        draining:  net = -stock / hours
+        filling:   net = (capacity - stock) / hours
+
+    Returns None rather than 0 when the rate cannot be derived, because a
+    village reported as "0 net crop" is indistinguishable from a healthy one and
+    that is precisely the silent-zero failure this codebase keeps hitting.
+
+    Note:
+        The draining branch is verified against a live village to 0.5%. The
+        filling branch is **not yet validated** -- see R2 in
+        docs/25-resource-distribution-planner.md.
+    """
+    if seconds_remaining <= 0:
+        return None
+    hours = seconds_remaining / 3600.0
+    if draining:
+        return -stock / hours
+    if granary_capacity is None:
+        return None
+    return (granary_capacity - stock) / hours
 
 
 class BuildingService:
@@ -112,6 +156,72 @@ class BuildingService:
         """
         buildings, _ = await self.get_village_snapshot(village_id)
         return buildings
+
+    async def get_all_villages_net_crop(
+        self, granary_capacity: Optional[Dict[int, int]] = None
+    ) -> Dict[int, CropBalance]:
+        """True net crop for EVERY village in two requests.
+
+        Reads absolute stocks and the granary countdown from the account-wide
+        statistics tables and inverts the countdown, rather than fetching one
+        dorf1 per village. On a 22-village account that is 2 requests instead
+        of 22.
+
+        Capacity is only needed for villages whose granary is *filling*, and it
+        changes only when a granary is upgraded -- so pass a cached mapping to
+        stay at two requests. Without one, a third request is made, and only if
+        some village is actually filling.
+
+        Args:
+            granary_capacity: village id -> granary capacity. Fetched when
+                omitted and needed.
+
+        Returns:
+            Dict of village_id -> CropBalance. ``net_per_hour`` is None where it
+            could not be derived; it is never silently zero.
+
+        Raises:
+            TravianError: If a request fails
+        """
+        try:
+            stocks = parse_village_stats_resources(
+                await self.http_client.get_html("/village/statistics/resources")
+            )
+            timers = parse_village_stats_warehouse(
+                await self.http_client.get_html("/village/statistics/resources/warehouse")
+            )
+
+            capacities = dict(granary_capacity or {})
+            needs_capacity = [
+                vid
+                for vid, timer in timers.items()
+                if not timer["crop_draining"] and vid not in capacities
+            ]
+            if needs_capacity:
+                fetched = parse_village_stats_capacity(
+                    await self.http_client.get_html("/village/statistics/resources/capacity")
+                )
+                for vid, caps in fetched.items():
+                    capacities.setdefault(vid, caps["granary"])
+        except Exception as e:
+            raise TravianError(f"Failed to read crop balance: {e}") from e
+
+        balances: Dict[int, CropBalance] = {}
+        for vid, timer in timers.items():
+            stock = stocks.get(vid, {}).get("crop", 0)
+            balances[vid] = CropBalance(
+                village_id=vid,
+                stock=stock,
+                net_per_hour=derive_net_crop_per_hour(
+                    stock=stock,
+                    seconds_remaining=timer["crop_seconds"],
+                    draining=timer["crop_draining"],
+                    granary_capacity=capacities.get(vid),
+                ),
+                draining=timer["crop_draining"],
+                seconds_remaining=timer["crop_seconds"],
+            )
+        return balances
 
     async def get_building_detail(
         self, slot_id: int, village_id: Optional[int] = None
