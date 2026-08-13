@@ -18,12 +18,41 @@ var resources = {
 
 | Key | l1 | l2 | l3 | l4 | l5 |
 |-----|----|----|----|----|-----|
-| **Resource** | Lumber | Clay | Iron | Crop | **Free Crop** |
-| `production` | Per-hour rate | Per-hour rate | Per-hour rate | Per-hour rate | Net crop (production - consumption) |
+| **Resource** | Lumber | Clay | Iron | Crop | see below |
+| `production` | Per-hour rate | Per-hour rate | Per-hour rate | **NET crop per hour** | not net crop — do not use |
 | `storage` | Current amount | Current amount | Current amount | Current amount | — |
 | `maxStorage` | Warehouse cap | Warehouse cap | Warehouse cap | Granary cap | — |
 
-> **`l5` (Free Crop)** = Net crop production after all consumption (troops, population). This is the crop balance. If negative, your village is starving.
+> ### ⚠️ `l4` is the crop balance, NOT `l5`
+>
+> **`production.l4` is the true net crop rate** — production minus all consumption
+> (population, constructions, and every troop actually feeding from this
+> village). It is what the granary drains or fills at, and it goes negative when
+> the village is starving. **This is the only field to use for starvation.**
+>
+> **`production.l5` is NOT net crop.** An earlier version of this document said
+> it was; that was wrong, and the mistake propagated into `Resources.free_crop`
+> and the Dashboard resource bar.
+>
+> Measured on a live starving village (`newdid=20003`), captured 2026-08:
+>
+> ```json
+> production: {"l1": 2875, "l2": 3750, "l3": 2175, "l4": -5556, "l5": 1481}
+> storage:    {"l1": 88652, "l2": 85167, "l3": 93880, "l4": 67397}
+> maxStorage: {"l1": 160000, "l2": 160000, "l3": 160000, "l4": 240000}
+> ```
+>
+> `l5` is **positive (+1481)** while the village is draining at **−5,556/h**.
+> Anything treating `l5` as the starvation signal reports this village as
+> healthy. Verified independently against the warehouse overview, which marked
+> this village `crit` with a 43,899 s countdown to an empty granary:
+> `67,397 / 5,556 = 12.13 h = 43,670 s` — a 0.5% match, the residual being the
+> few minutes between the two captures.
+>
+> What `l5` actually means is **unresolved**. From one sample,
+> `l5 - l4 = 7037` looks like it could be gross production or total consumption,
+> but a single data point cannot distinguish those. Treat it as unknown until
+> reconciled against `/production.php?t=balance`, which decomposes every term.
 
 ### Python — Quick Resource Fetch
 
@@ -42,6 +71,93 @@ print(f"Free Crop: {res['production']['l5']}/h")
 ```
 
 ---
+
+## Account-Wide Net Crop — Warehouse Overview (2 requests, all villages)
+
+`var resources` costs one request **per village**. The Central Village Overview
+carries the same net-crop information for every village at once.
+
+```
+/village/statistics/resources            -> absolute stocks per village
+/village/statistics/resources/warehouse  -> fill/empty countdown per village
+/village/statistics/resources/capacity   -> warehouse + granary caps (changes rarely; cache it)
+```
+
+`#warehouse` gives percentages, not absolutes, so pair it with the stocks table.
+The countdown is the server's own computation, which is why this needs no upkeep
+model:
+
+```
+crit present (draining):  net_crop = -stock / seconds * 3600
+crit absent  (filling):   net_crop = (granary_cap - stock) / seconds * 3600
+```
+
+For a **starving** village only stocks + warehouse are needed — capacity does not
+enter the formula. That makes "which villages are starving, and how fast" a
+**two-request** question for the whole account.
+
+### `#warehouse` markup
+
+```html
+<table id="warehouse">
+  <thead><tr>
+    <td>Village</td><td><i class="r1"></i></td><td><i class="r2"></i></td><td><i class="r3"></i></td>
+    <td><img class="clock"></td>            <!-- warehouse: first of lumber/clay/iron -->
+    <td><i class="r4"></i></td>
+    <td><img class="clock"></td>            <!-- granary: crop-specific -->
+  </tr></thead>
+  <tbody>
+    <!-- filling -->
+    <tr class="hover"><td class="vil fc"><a href="/dorf1.php?newdid=20011">11</a></td>
+      <td class="lum">18%</td><td class="clay">35%</td><td class="iron">0%</td>
+      <td class="max123"><span class="timer" counting="down" value="88017" data-value="88017">24:26:57</span></td>
+      <td class="crop">56%</td>
+      <td class="max4 lc"><span class="timer" counting="down" value="211328" data-value="211328">58:42:08</span></td>
+    </tr>
+    <!-- draining (starving) -->
+    <tr class="hover"><td class="vil fc"><a href="/dorf1.php?newdid=20003">03</a></td>
+      ...
+      <td class="max4 lc"><span class="crit">−</span>&nbsp;<span class="timer crit" value="43899" data-value="43899">12:11:39</span></td>
+    </tr>
+  </tbody>
+</table>
+```
+
+| Detail | Value |
+|--------|-------|
+| Raw seconds | `value` **and** `data-value` on `span.timer` — never parse the rendered `H:MM:SS` |
+| Direction | `class="crit"` (plus a `−` U+2212 prefix) = draining; absent = filling |
+| Crop column | the **second** clock (`td.max4`); the first (`td.max123`) is whichever of lumber/clay/iron fills first |
+| Village id | `newdid=` in the row's first-cell link |
+
+**Three parsing traps, all present in real markup:**
+
+1. Rows are **not** in village-id order — the header has `onclick="sortByColumnOrder(...)"` and the server honours the saved sort. Key on `newdid`, never on row index.
+2. The rows are malformed: `<tr class="hover" "="">`. `html.parser` tolerates it; do not switch parsers without re-testing.
+3. Percentages are integers, so `pct x capacity` carries up to ±0.5% error. Prefer absolute stocks from `/village/statistics/resources`.
+
+### Central Village Overview — full tab map
+
+Reached from the village-list header, legacy alias `dorf3.php`. **Travian Plus
+feature** — code must tolerate its absence and fall back to per-village `dorf1`.
+
+| Tab | Sub-tab | Path | Per-village data |
+|-----|---------|------|------------------|
+| Overview | — | `/village/statistics/overview` | attacks, buildings queued, troops training, merchants |
+| Resources | Resources | `/village/statistics/resources` | absolute stocks + merchants |
+| Resources | Warehouse | `/village/statistics/resources/warehouse` | **fill/empty countdowns** (net crop) |
+| Resources | Production | `/village/statistics/resources/production` | **GROSS** production — no troop feeding |
+| Resources | Capacity | `/village/statistics/resources/capacity` | warehouse + granary caps |
+| Culture points | — | `/village/statistics/culturepoints` | CP/day, celebrations, settlement slots |
+| Troops | Own troops | `/village/statistics/troops` | troop counts **by owning village** |
+| Troops | Troops in village | *(unconfirmed)* | troops **by station** + their crop upkeep |
+| Troops | Smithy / Hospital / Training | *(unconfirmed)* | research levels, wounded, training queues |
+
+> **Own troops vs Troops in village.** Consumption is charged where troops
+> *stand*, not where they were built. "Own troops" therefore cannot be used to
+> compute crop upkeep: a village's own army may be reinforcing elsewhere (eating
+> the host's crop), while foreign reinforcements eat this village's. "Troops in
+> village" is the station-keyed view and reports upkeep directly.
 
 ## Top Bar — Stock Bar (HTML)
 
@@ -323,7 +439,9 @@ for vid in [20030, 20031]:
 |------|--------|--------|
 | Current resource amounts | `var resources` on any page | Parse `storage.l1`–`l4` |
 | Production rates | `var resources` on any page | Parse `production.l1`–`l4` |
-| Free crop (net) | `var resources` on any page | Parse `production.l5` |
+| **Net crop / starvation (one village)** | `var resources` on any page | Parse `production.l4` — **not `l5`** |
+| **Net crop for ALL villages** | `/village/statistics/resources` + `.../warehouse` | Stocks ÷ countdown, sign from `crit` — 2 requests |
+| Gross crop production (no feeding) | `/village/statistics/resources/production` | Per-village table |
 | Warehouse capacity | `var resources` on any page | Parse `maxStorage.l1`–`l3` |
 | Granary capacity | `var resources` on any page | Parse `maxStorage.l4` |
 | Per-building breakdown | `/production.php?t={type}` | Parse `ProductionOverview.render()` viewData |

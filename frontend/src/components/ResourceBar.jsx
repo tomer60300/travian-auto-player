@@ -56,10 +56,14 @@ export default function ResourceBar({ resources }) {
       {resourceConfig.map((cfg) => (
         <SingleBar key={cfg.key} config={cfg} resources={resources} />
       ))}
-      {resources.free_crop != null && (
-        <div className={`mt-2 pt-2 border-t-default text-xs flex items-center gap-1 ${resources.free_crop > 0 ? 'text-success' : 'text-danger'}`}>
+      {/* crop_per_hour (production.l4) is the true net rate. free_crop (l5) was
+          used here and is not net — it reads positive on a starving village, so
+          this bar showed green while the granary drained. */}
+      {resources.crop_per_hour != null && (
+        <div className={`mt-2 pt-2 border-t-default text-xs flex items-center gap-1 ${resources.crop_per_hour >= 0 ? 'text-success' : 'text-danger'}`}>
           <span>🌿</span>
-          <span>Free Crop: {formatNumber(resources.free_crop)}</span>
+          <span>Net Crop: {formatNumber(resources.crop_per_hour)}/h</span>
+          {resources.crop_per_hour < 0 && <span>— starving</span>}
         </div>
       )}
     </div>

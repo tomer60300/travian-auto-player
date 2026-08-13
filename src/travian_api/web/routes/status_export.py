@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from travian_api.constants import TROOP_MAPPINGS, TribeType
 from travian_api.exceptions import TravianError
+from travian_api.models.buildings import Resources
 from travian_api.web.sessions import TravianSession, get_travian_session
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,22 @@ def _troop_name(tribe_id: int, key: str) -> str:
     """Resolve t1-t10 key to a human-readable troop name."""
     mapping = TROOP_MAPPINGS.get(TribeType(tribe_id), {})
     return mapping.get(key, key)
+
+
+def _crop_status(resources: Resources) -> dict:
+    """Starvation view for one village, derived from the NET crop rate.
+
+    ``crop_per_hour`` (Travian's ``production.l4``) is the only field that means
+    net crop. ``free_crop`` (``l5``) is not net and can be positive while the
+    granary drains, so it must never drive this — see
+    docs/20-resource-production.md.
+    """
+    net = resources.crop_per_hour
+    return {
+        "net_per_hour": net,
+        "starving": net < 0,
+        "hours_until_empty": round(resources.crop / -net, 2) if net < 0 else None,
+    }
 
 
 @router.get("/export")
@@ -65,6 +82,7 @@ async def export_player_status(
             "x": village.x,
             "y": village.y,
             "resources": None,
+            "crop": None,
             "troops": troops,
         }
 
@@ -77,6 +95,7 @@ async def export_player_status(
             else:
                 resources = await session.building_service.get_resources(village_id=vid)
             entry["resources"] = resources.model_dump()
+            entry["crop"] = _crop_status(resources)
         except Exception as exc:
             logger.warning("Failed to fetch village %s: %s", vid, exc)
             entry["error"] = str(exc)

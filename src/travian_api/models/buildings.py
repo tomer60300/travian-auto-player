@@ -64,7 +64,12 @@ class Resources(BaseModel):
     iron: int = Field(default=0, ge=0, description="Current iron amount")
     crop: int = Field(default=0, ge=0, description="Current crop amount")
     free_crop: int = Field(
-        default=0, description="Free crop (production - consumption; negative when starving)"
+        default=0,
+        description=(
+            "Raw production.l5 from Travian. NOT net crop and NOT a starvation "
+            "signal -- it can be positive while the village drains. Use "
+            "crop_per_hour. See docs/20-resource-production.md."
+        ),
     )
     max_lumber: int = Field(default=0, ge=0, description="Maximum lumber storage")
     max_clay: int = Field(default=0, ge=0, description="Maximum clay storage")
@@ -73,7 +78,14 @@ class Resources(BaseModel):
     lumber_per_hour: int = Field(default=0, description="Lumber production per hour")
     clay_per_hour: int = Field(default=0, description="Clay production per hour")
     iron_per_hour: int = Field(default=0, description="Iron production per hour")
-    crop_per_hour: int = Field(default=0, description="Crop production per hour")
+    crop_per_hour: int = Field(
+        default=0,
+        description=(
+            "NET crop per hour (production.l4): production minus population, "
+            "constructions and every troop feeding from this village. Negative "
+            "means the granary is draining and troops will starve."
+        ),
+    )
 
 
 class QueueItem(BaseModel):

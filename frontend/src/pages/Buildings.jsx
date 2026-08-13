@@ -238,6 +238,19 @@ function formatMarkdown(data) {
       lines.push('### Troops', '', '*No troops at rally point*', '')
     }
 
+    // Crop balance first — a starving village is the most actionable fact here.
+    // `crop.net_per_hour` comes from production.l4, the only true net rate.
+    const crop = v.crop
+    if (crop?.starving) {
+      lines.push(
+        `> ⚠️ **STARVING** — net crop ${crop.net_per_hour.toLocaleString()}/h` +
+          (crop.hours_until_empty != null
+            ? `, granary empty in ${crop.hours_until_empty}h`
+            : ''),
+        '',
+      )
+    }
+
     // Production
     const r = v.resources || {}
     lines.push(
@@ -248,7 +261,7 @@ function formatMarkdown(data) {
       `| Lumber | ${(r.lumber_per_hour || 0).toLocaleString()} |`,
       `| Clay | ${(r.clay_per_hour || 0).toLocaleString()} |`,
       `| Iron | ${(r.iron_per_hour || 0).toLocaleString()} |`,
-      `| Crop | ${(r.crop_per_hour || 0).toLocaleString()} |`,
+      `| Crop (net of feeding) | ${(r.crop_per_hour || 0).toLocaleString()} |`,
       '',
     )
 

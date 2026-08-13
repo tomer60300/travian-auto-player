@@ -85,12 +85,13 @@ def test_including_buildings_adds_one_dorf2_per_village_without_refetching_dorf1
     assert len(set(http.urls)) == len(http.urls)
 
 
+# Real capture, village 20003, 2026-08. Note l4 is negative while l5 is POSITIVE.
 DORF1_STARVING = """
 <html><script>
 var resources = {
-    storage: {l1: 81, l2: 66, l3: 93, l4: 20831},
-    production: {l1: 745, l2: 745, l3: 745, l4: -3292, l5: -6536},
-    maxStorage: {l1: 80000, l2: 80000, l3: 80000, l4: 240000}
+    storage: {l1: 88652, l2: 85167, l3: 93880, l4: 67397},
+    production: {l1: 2875, l2: 3750, l3: 2175, l4: -5556, l5: 1481},
+    maxStorage: {l1: 160000, l2: 160000, l3: 160000, l4: 240000}
 };
 </script></html>
 """
@@ -99,7 +100,7 @@ var resources = {
 GROSS_PRODUCTION_HTML = """
 <table id="production"><tbody>
 <tr><td class="vil"><a href="/dorf1.php?newdid=20003">03</a></td>
-<td>745</td><td>745</td><td>745</td><td>3244</td></tr>
+<td>2875</td><td>3750</td><td>2175</td><td>1481</td></tr>
 </tbody></table>
 """
 
@@ -113,22 +114,50 @@ class _StarvingVillageHttp:
         return "<html></html>"
 
 
-def test_export_reports_net_crop_from_the_village_page():
-    """Crop must be NET of troop feeding, as the game shows it.
-
-    The /village/statistics production table only carries gross crop (+3,244
-    for this village); the real net rate lives in the per-village ``var
-    resources`` blob and is negative (-3,292) when troops outgrow production.
-    """
-    result = asyncio.run(
+def _starving_export() -> dict:
+    return asyncio.run(
         export_player_status(
             include_buildings=False, session=_session(_StarvingVillageHttp(), [20003])
         )
     )
 
-    res = result["villages"][0]["resources"]
-    assert res["crop_per_hour"] == -3292
-    assert res["free_crop"] == -6536
+
+def test_export_reports_net_crop_from_the_village_page():
+    """Crop must be NET of troop feeding, as the game shows it.
+
+    The account-wide production table cannot supply this: it carries gross crop
+    only. The net rate lives in the per-village ``var resources`` blob and is
+    negative when troops outgrow the fields.
+    """
+    res = _starving_export()["villages"][0]["resources"]
+
+    assert res["crop_per_hour"] == -5556
+
+
+def test_export_flags_a_starving_village_from_the_net_rate():
+    """The starvation flag must come from l4, never from l5.
+
+    This village's l5 is +1481 at the same moment its granary is draining at
+    -5,556/h, so a free_crop-based check would call it healthy.
+    """
+    village = _starving_export()["villages"][0]
+
+    assert village["crop"]["starving"] is True
+    assert village["crop"]["net_per_hour"] == -5556
+    # 67,397 crop / 5,556 per hour -- matches the warehouse countdown (43,899s).
+    assert village["crop"]["hours_until_empty"] == 12.13
+    assert village["resources"]["free_crop"] > 0
+
+
+def test_export_does_not_flag_a_healthy_village():
+    http = _RecordingHttp()
+
+    village = asyncio.run(
+        export_player_status(include_buildings=False, session=_session(http, [11]))
+    )["villages"][0]
+
+    assert village["crop"]["starving"] is False
+    assert village["crop"]["hours_until_empty"] is None
 
 
 def test_export_reports_whether_buildings_were_included():

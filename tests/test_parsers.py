@@ -125,16 +125,21 @@ class TestHTMLParsers:
         assert resources.max_lumber == 8000
         assert resources.max_crop == 10000
 
-    def test_parse_resources_starving_village_keeps_negative_crop_rates(self):
-        """A village whose troops outeat its fields has negative l4/l5 rates."""
+    def test_parse_resources_starving_village_keeps_negative_crop_rate(self):
+        """Real capture from a starving village (newdid=20003, 2026-08).
+
+        l4 is the net rate and is negative; l5 is POSITIVE at the same moment.
+        Verified against the warehouse overview, which flagged this village
+        `crit` with 43,899s to an empty granary: 67397 / 5556 = 43,670s.
+        """
         html_content = """
         <html>
         <head>
             <script>
                 var resources = {
-                    storage: {l1: 81, l2: 66, l3: 93, l4: 20831},
-                    production: {l1: 745, l2: 745, l3: 745, l4: -3292, l5: -6536},
-                    maxStorage: {l1: 80000, l2: 80000, l3: 80000, l4: 240000}
+                    storage: {l1: 88652, l2: 85167, l3: 93880, l4: 67397},
+                    production: {l1: 2875, l2: 3750, l3: 2175, l4: -5556, l5: 1481},
+                    maxStorage: {l1: 160000, l2: 160000, l3: 160000, l4: 240000}
                 };
             </script>
         </head>
@@ -143,9 +148,33 @@ class TestHTMLParsers:
 
         resources = parse_resources(html_content)
 
-        assert resources.crop == 20831
-        assert resources.crop_per_hour == -3292
-        assert resources.free_crop == -6536
+        assert resources.crop == 67397
+        assert resources.max_crop == 240000
+        # l4 -> the true net rate, negative while draining.
+        assert resources.crop_per_hour == -5556
+        # l5 is carried through verbatim and is NOT net crop: positive here.
+        assert resources.free_crop == 1481
+
+    def test_free_crop_must_not_be_used_as_the_starvation_signal(self):
+        """Guards the bug this replaced.
+
+        free_crop (l5) read positive on a village draining at -5,556/h, so any
+        `free_crop > 0` health check reported a starving village as fine.
+        """
+        html_content = """
+        <html><script>
+            var resources = {
+                storage: {l1: 0, l2: 0, l3: 0, l4: 67397},
+                production: {l1: 0, l2: 0, l3: 0, l4: -5556, l5: 1481},
+                maxStorage: {l1: 0, l2: 0, l3: 0, l4: 240000}
+            };
+        </script></html>
+        """
+
+        resources = parse_resources(html_content)
+
+        assert resources.free_crop > 0, "l5 is positive on this starving village"
+        assert resources.crop_per_hour < 0, "l4 is the field that reveals starvation"
 
     def test_parse_construction_queue_empty(self):
         """Test parsing empty construction queue."""
