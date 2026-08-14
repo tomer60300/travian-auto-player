@@ -211,6 +211,27 @@ app.include_router(analyzer_ws_router)
 app.include_router(oasis_raider_ws_router)
 app.include_router(farm_builder_ws_router)
 
+
+async def serve_ui_not_built(request: Request, full_path: str) -> JSONResponse:
+    """Registered instead of the SPA when no frontend build exists.
+
+    `pip install travian-api[web]` alone ships no static assets, so without
+    this the advertised `travian-web` command serves a blank 404 at `/` and
+    nothing explains why.
+    """
+    if full_path.startswith(("api/", "ws/")):
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    return JSONResponse(
+        {
+            "detail": (
+                "The web UI has not been built. Run `npm run build` in frontend/ "
+                "(or use start.bat / start.sh), then restart the server."
+            )
+        },
+        status_code=503,
+    )
+
+
 # Serve static frontend files if the build directory exists
 if STATIC_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
@@ -249,6 +270,8 @@ if STATIC_DIR.is_dir():
             STATIC_DIR / "index.html",
             headers=_SPA_NO_CACHE_HEADERS,
         )
+else:
+    app.get("/{full_path:path}")(serve_ui_not_built)
 
 
 def main():

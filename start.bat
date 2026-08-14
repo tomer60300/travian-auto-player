@@ -53,14 +53,15 @@ if errorlevel 1 (
     echo ERROR: frontend directory not found.
     goto :fail
 )
-if not exist node_modules (
-    echo        Installing npm packages...
-    call npm install
-    if errorlevel 1 (
-        popd
-        echo ERROR: npm install failed.
-        goto :fail
-    )
+:: Always sync npm packages: after a pull, an existing node_modules can be
+:: stale against the new package-lock.json, and npm install is fast when
+:: everything is already current.
+echo        Installing npm packages...
+call npm install
+if errorlevel 1 (
+    popd
+    echo ERROR: npm install failed.
+    goto :fail
 )
 call npm run build
 if errorlevel 1 (

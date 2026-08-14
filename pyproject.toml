@@ -66,6 +66,11 @@ travian-web = "travian_api.web:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Ship the built web UI in wheels when it exists (frontend/ builds into
+# src/travian_api/web/static; the files are gitignored, not package-ignored).
+[tool.setuptools.package-data]
+"travian_api.web" = ["static/**/*"]
+
 [tool.setuptools.package-dir]
 "" = "src"
 

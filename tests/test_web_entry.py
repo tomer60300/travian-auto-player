@@ -5,6 +5,7 @@ extra) crashed with ModuleNotFoundError, and a custom TRAVIAN_DB_PATH pointing
 into a directory that does not exist yet made the web app unable to boot.
 """
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -35,6 +36,25 @@ def test_travian_web_does_not_mask_app_bugs_as_missing_extras(monkeypatch):
 
     with pytest.raises(ImportError):
         web.main()
+
+
+def test_a_missing_frontend_build_explains_itself():
+    """`pip install .[web]` alone ships no static assets; the server must say
+    how to get a UI instead of serving a blank 404."""
+    from travian_api.web.app import serve_ui_not_built
+
+    res = asyncio.run(serve_ui_not_built(None, ""))
+
+    assert res.status_code == 503
+    assert b"npm run build" in res.body
+
+
+def test_the_unbuilt_ui_handler_still_404s_api_paths():
+    from travian_api.web.app import serve_ui_not_built
+
+    res = asyncio.run(serve_ui_not_built(None, "api/travian/status"))
+
+    assert res.status_code == 404
 
 
 def test_custom_db_path_parent_directory_is_created(tmp_path):
