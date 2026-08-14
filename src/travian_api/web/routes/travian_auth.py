@@ -135,6 +135,10 @@ async def connect(
             username=body.username,
             password=body.password,
         )
+    except HTTPException:
+        # Control-flow errors from the session manager (e.g. 409 while
+        # operations are running) must reach the client as themselves.
+        raise
     except Exception as exc:
         logger.exception("Travian connect failed for user %s", user.id)
         raise HTTPException(
@@ -188,6 +192,8 @@ async def reconnect(
             username=username,
             password=password,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Travian reconnect failed for user %s", user.id)
         raise HTTPException(
@@ -296,6 +302,8 @@ async def connect_saved_server(
             username=cred.travian_username,
             password=password,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception(
             "Travian connect via saved server %s failed for user %s", server_id, user.id
