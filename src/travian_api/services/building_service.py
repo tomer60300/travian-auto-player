@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..clients.http_client import HttpClient
 from ..concurrency import KeyedLock
@@ -161,7 +161,7 @@ class BuildingService:
         self,
         granary_capacity: Optional[Dict[int, int]] = None,
         stocks: Optional[Dict[int, Dict[str, int]]] = None,
-    ) -> Dict[int, CropBalance]:
+    ) -> Tuple[Dict[int, CropBalance], int]:
         """True net crop for EVERY village in two requests.
 
         Reads absolute stocks and the granary countdown from the account-wide
@@ -184,20 +184,25 @@ class BuildingService:
                 paid for once.
 
         Returns:
-            Dict of village_id -> CropBalance. ``net_per_hour`` is None where it
-            could not be derived; it is never silently zero.
+            Tuple of (village_id -> CropBalance, game requests spent). The count
+            is returned so callers can price the fetch honestly instead of
+            assuming the worst case. ``net_per_hour`` is None where it could not
+            be derived; it is never silently zero.
 
         Raises:
             TravianError: If a request fails
         """
+        requests_spent = 0
         try:
             if stocks is None:
                 stocks = parse_village_stats_resources(
                     await self.http_client.get_html("/village/statistics/resources")
                 )
+                requests_spent += 1
             timers = parse_village_stats_warehouse(
                 await self.http_client.get_html("/village/statistics/resources/warehouse")
             )
+            requests_spent += 1
 
             capacities = dict(granary_capacity or {})
             needs_capacity = [
@@ -209,6 +214,7 @@ class BuildingService:
                 fetched = parse_village_stats_capacity(
                     await self.http_client.get_html("/village/statistics/resources/capacity")
                 )
+                requests_spent += 1
                 for vid, caps in fetched.items():
                     capacities.setdefault(vid, caps["granary"])
         except Exception as e:
@@ -250,7 +256,7 @@ class BuildingService:
                 "warehouse table, so they have no crop balance: %s",
                 sorted(missing_timer),
             )
-        return balances
+        return balances, requests_spent
 
     async def get_building_detail(
         self, slot_id: int, village_id: Optional[int] = None

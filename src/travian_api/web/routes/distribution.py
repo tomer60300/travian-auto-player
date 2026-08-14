@@ -11,6 +11,7 @@ re-planning while the operator tunes allocation targets must cost nothing, and
 every fetch is a deliberate, priced action rather than a side effect of typing.
 """
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -35,6 +36,8 @@ from travian_api.services.distribution.merchants import (
 )
 from travian_api.services.distribution.optimizer import VillageState
 from travian_api.services.distribution.planner import PlannerConfig, craft_plan
+from travian_api.web.auth import get_current_user
+from travian_api.web.models.db import User
 from travian_api.web.sessions import TravianSession, get_travian_session
 
 logger = logging.getLogger(__name__)
@@ -182,7 +185,9 @@ async def get_snapshot(session: TravianSession = Depends(get_travian_session)):
         stocks = parse_village_stats_resources(
             await session.http_client.get_html("/village/statistics/resources")
         )
-        crop = await session.building_service.get_all_villages_net_crop(stocks=stocks)
+        crop, crop_requests = await session.building_service.get_all_villages_net_crop(
+            stocks=stocks
+        )
     except TravianError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except Exception as exc:
@@ -191,6 +196,20 @@ async def get_snapshot(session: TravianSession = Depends(get_travian_session)):
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Could not read account state: {exc}",
         ) from exc
+
+    if not production:
+        warnings.append(
+            "no production rates could be read from the statistics page (is Travian "
+            "Plus active?); lumber/clay/iron default to 0/h, so a plan built from "
+            "this snapshot would move nothing"
+        )
+    else:
+        unread = [v.id for v in session.auth_state.villages if v.id not in production]
+        if unread:
+            warnings.append(
+                f"no production rates read for village(s) {unread}; their "
+                f"lumber/clay/iron default to 0/h"
+            )
 
     villages: list[VillageSnapshot] = []
     for village in session.auth_state.villages:
@@ -226,7 +245,9 @@ async def get_snapshot(session: TravianSession = Depends(get_travian_session)):
 
     return SnapshotResponse(
         villages=villages,
-        requests_used=4,
+        # Production + stocks here, plus whatever the crop read actually spent
+        # (the capacity page is only fetched when some granary is filling).
+        requests_used=2 + crop_requests,
         warnings=warnings,
     )
 
@@ -234,12 +255,14 @@ async def get_snapshot(session: TravianSession = Depends(get_travian_session)):
 @router.post("/plan", response_model=PlanResponse)
 async def post_plan(
     body: PlanRequest,
-    _session: TravianSession = Depends(get_travian_session),
+    _user: User = Depends(get_current_user),
 ):
     """Compute a plan. Costs **zero** game requests.
 
     The caller supplies the snapshot it already fetched, so tuning allocation
-    targets is free and the planner stays pure.
+    targets is free and the planner stays pure. Deliberately auth-only: a
+    Travian-session dependency would auto-reconnect (real login traffic) or 403
+    for a computation that never touches the game.
     """
     trade_office = {c.village_id: c.trade_office_level for c in body.config}
     villages = {
@@ -277,13 +300,6 @@ async def post_plan(
         if rates:
             productions[resource] = rates
 
-    allocations = {
-        resource: {
-            vid: Allocation(mode=item.mode, value=item.value) for vid, item in per_village.items()
-        }
-        for resource, per_village in body.allocations.items()
-    }
-
     config = PlannerConfig(
         geometry=MapGeometry(span=body.map_span, speed_fields_per_hour=body.speed_fields_per_hour),
         merchant_model=MerchantModel(
@@ -296,10 +312,40 @@ async def post_plan(
         min_arrival_gap_minutes=body.min_arrival_gap_minutes,
     )
 
+    extra_warnings: list[str] = []
     try:
-        plan = craft_plan(villages, productions, allocations, config)
+        # Explicit `keep` entries mean exactly what an absent entry means, so
+        # they are dropped here rather than allowed to 400 the whole plan when
+        # they reference a village that has since vanished from the snapshot.
+        allocations = {
+            resource: {
+                vid: Allocation(mode=item.mode, value=item.value)
+                for vid, item in per_village.items()
+                if item.mode is not AllocationMode.KEEP
+            }
+            for resource, per_village in body.allocations.items()
+        }
+        for resource in sorted(set(allocations) - set(productions), key=lambda r: r.value):
+            if allocations.pop(resource):
+                extra_warnings.append(
+                    f"{resource.value}: no production rate is known for any village, "
+                    f"so its allocations were ignored"
+                )
+        # The beat search is pure CPU; off the event loop so it cannot stall
+        # WebSocket frames or stealth-timed game requests while the user replans.
+        plan = await asyncio.to_thread(craft_plan, villages, productions, allocations, config)
     except AllocationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    free_now = {v.village_id: v.merchants_free for v in body.snapshot}
+    for vid in sorted(plan.merchants_committed):
+        committed = plan.merchants_committed[vid]
+        if committed > free_now.get(vid, 0):
+            extra_warnings.append(
+                f"village {vid}: the plan commits {committed} merchants but only "
+                f"{free_now.get(vid, 0)} are free right now — existing routes or "
+                f"shipments must release the rest before the sheet is executable"
+            )
 
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
     over = {o.village_id for o in plan.over_budget}
@@ -349,5 +395,5 @@ async def post_plan(
         ],
         total_merchants=plan.total_merchants,
         feasible=plan.is_feasible,
-        warnings=list(plan.warnings),
+        warnings=[*plan.warnings, *extra_warnings],
     )

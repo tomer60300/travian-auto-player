@@ -136,13 +136,14 @@ class TestAccountWideFetch:
     def test_costs_three_requests_when_capacity_is_unknown(self):
         http = _StatsHttp()
 
-        balances = asyncio.run(BuildingService(http).get_all_villages_net_crop())
+        balances, requests_spent = asyncio.run(BuildingService(http).get_all_villages_net_crop())
 
         assert http.urls == [
             "/village/statistics/resources",
             "/village/statistics/resources/warehouse",
             "/village/statistics/resources/capacity",
         ]
+        assert requests_spent == 3
         assert balances[20003].net_per_hour == pytest.approx(-5527, rel=1e-3)
         assert balances[20003].draining is True
         assert balances[20011].net_per_hour > 0
@@ -151,7 +152,7 @@ class TestAccountWideFetch:
         """Granary capacity changes only on upgrade, so it caches."""
         http = _StatsHttp()
 
-        balances = asyncio.run(
+        balances, requests_spent = asyncio.run(
             BuildingService(http).get_all_villages_net_crop(
                 granary_capacity={20003: 240000, 20011: 160000}
             )
@@ -161,6 +162,7 @@ class TestAccountWideFetch:
             "/village/statistics/resources",
             "/village/statistics/resources/warehouse",
         ]
+        assert requests_spent == 2
         assert balances[20011].net_per_hour > 0
 
     def test_a_village_with_no_stock_reading_is_underived_not_zero(self):
@@ -177,7 +179,7 @@ class TestAccountWideFetch:
             return html
 
         http.get_html = missing_stock
-        balances = asyncio.run(BuildingService(http).get_all_villages_net_crop())
+        balances, _ = asyncio.run(BuildingService(http).get_all_villages_net_crop())
 
         assert balances[20003].net_per_hour is None
         assert balances[20003].draining is True

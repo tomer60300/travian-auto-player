@@ -33,6 +33,18 @@ function saveJson(key, value) {
   }
 }
 
+/** FastAPI puts validation failures in `detail` as an ARRAY of error objects;
+ *  rendering that raw crashes React. Reduce whatever came back to a string. */
+function errorDetail(err, fallback) {
+  const detail = err.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) {
+    const msgs = detail.map((d) => d?.msg).filter(Boolean)
+    if (msgs.length) return msgs.join(' · ')
+  }
+  return fallback
+}
+
 const fmt = (n) => (n == null ? '—' : Math.round(n).toLocaleString())
 const signed = (n) => (n == null ? '—' : `${n > 0 ? '+' : ''}${Math.round(n).toLocaleString()}`)
 
@@ -112,13 +124,26 @@ export default function ResourcePlanner() {
       setSnapshot(res.data)
       saveJson(LS_SNAPSHOT, res.data)
       setPlan(null)
+      // Villages get lost, chiefed or renamed between fetches; allocations kept
+      // for ids no longer in the snapshot would fail every future plan call.
+      const ids = new Set(res.data.villages.map((v) => v.village_id))
+      setAllocations((prev) => {
+        const pruned = {}
+        for (const [resource, per] of Object.entries(prev)) {
+          const kept = Object.fromEntries(
+            Object.entries(per).filter(([vid]) => ids.has(Number(vid)))
+          )
+          if (Object.keys(kept).length) pruned[resource] = kept
+        }
+        return pruned
+      })
       const fresh = res.data.villages.filter((v) => tradeOffice[v.village_id] == null)
       toast.success(
         `Read ${res.data.villages.length} villages in ${res.data.requests_used} requests` +
           (fresh.length ? ` · ${fresh.length} need a Trade Office level` : '')
       )
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Could not read account state')
+      toast.error(errorDetail(err, 'Could not read account state'))
     } finally {
       setFetching(false)
     }
@@ -131,18 +156,32 @@ export default function ResourcePlanner() {
     }
     setPlanning(true)
     try {
+      // Send only entries the planner can act on: `keep` equals the backend
+      // default, and a village whose rate is unknown for this resource is not
+      // plannable — a stale or inert entry must not fail the whole plan.
+      const sendAllocations = {}
+      for (const [resource, per] of Object.entries(allocations)) {
+        const usable = {}
+        for (const [vid, a] of Object.entries(per)) {
+          if (a.mode === 'keep') continue
+          const v = villages.find((x) => x.village_id === Number(vid))
+          if (!v || v[`${resource}_per_hour`] == null) continue
+          usable[vid] = a
+        }
+        if (Object.keys(usable).length) sendAllocations[resource] = usable
+      }
       const res = await api.post('/distribution/plan', {
         snapshot: villages,
         config: villages.map((v) => ({
           village_id: v.village_id,
           trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
         })),
-        allocations,
+        allocations: sendAllocations,
       })
       setPlan(res.data)
       setStage('plan')
     } catch (err) {
-      toast.error(err.response?.data?.detail || 'Could not build a plan')
+      toast.error(errorDetail(err, 'Could not build a plan'))
     } finally {
       setPlanning(false)
     }
@@ -199,14 +238,16 @@ export default function ResourcePlanner() {
     const { total } = totals[resource]
     let assigned = 0
     for (const v of villages) {
-      const a = per[v.village_id]
-      if (!a || a.mode === 'remainder') continue
+      // A village with no entry keeps its own production — the same default the
+      // backend resolves — so an untouched account shows 0 unassigned, not the
+      // whole account total.
+      const a = per[v.village_id] ?? { mode: 'keep', value: 0 }
+      if (a.mode === 'remainder') continue
+      const own = v[`${resource}_per_hour`] ?? 0
       if (a.mode === 'absolute') assigned += Number(a.value) || 0
       else if (a.mode === 'percentage') assigned += (total * (Number(a.value) || 0)) / 100
-      else if (a.mode === 'sustain') {
-        const own = v[`${resource}_per_hour`] ?? 0
-        assigned += own < 0 ? (-own * (Number(a.value) || 0)) / 100 : own
-      } else assigned += v[`${resource}_per_hour`] ?? 0
+      else if (a.mode === 'sustain') assigned += own < 0 ? (-own * (Number(a.value) || 0)) / 100 : own
+      else assigned += own
     }
     return total - assigned
   }
@@ -228,7 +269,7 @@ export default function ResourcePlanner() {
           {/* Every fetch is priced in the label — requests are the scarce
               resource, so the cost is stated before it is spent. */}
           <button className="btn-primary btn-sm" onClick={fetchSnapshot} disabled={fetching}>
-            {fetching ? 'Reading…' : 'Fetch state (4 requests)'}
+            {fetching ? 'Reading…' : 'Fetch state (3–4 requests)'}
           </button>
           <button className="btn-secondary btn-sm" onClick={buildPlan} disabled={planning}>
             {planning ? 'Planning…' : 'Build plan (0 requests)'}
@@ -257,8 +298,9 @@ export default function ResourcePlanner() {
         <div className="card p-6 text-center text-secondary">
           <p>No account state yet.</p>
           <p className="text-xs mt-1">
-            Fetching reads production, stocks and granary countdowns for every village in four
-            requests — net crop included, so army villages are not mistaken for healthy ones.
+            Fetching reads production, stocks and granary countdowns for every village in three
+            to four requests — net crop included, so army villages are not mistaken for healthy
+            ones.
           </p>
         </div>
       )}
