@@ -15,7 +15,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 # Configurable via TRAVIAN_DB_PATH env var; defaults to ~/.travian/travian_web.db
 _DEFAULT_DB_DIR = Path.home() / ".travian"
 _DB_PATH = os.environ.get("TRAVIAN_DB_PATH", str(_DEFAULT_DB_DIR / "travian_web.db"))
-_DEFAULT_DB_DIR.mkdir(parents=True, exist_ok=True)
+# Create the directory the database actually lives in, not just the default one,
+# so a custom TRAVIAN_DB_PATH boots on a fresh machine too.
+Path(_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 DATABASE_URL = f"sqlite+aiosqlite:///{_DB_PATH}"
 
 engine = create_async_engine(DATABASE_URL, echo=False)

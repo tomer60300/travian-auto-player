@@ -61,7 +61,7 @@ dev = [
 [project.scripts]
 travian = "travian_api.cli:app"
 travian-setup = "travian_api._post_install:main"
-travian-web = "travian_api.web.app:main"
+travian-web = "travian_api.web:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
