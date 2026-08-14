@@ -86,12 +86,13 @@ async def switch_village(
 ):
     """Switch the active village context.
 
-    NOTE: This is now a client-side-only operation. The backend validates that the
-    village belongs to the player but does NOT mutate session.active_village_id.
-    Each browser tab tracks its own active village via sessionStorage. This prevents
-    one tab/browser from affecting another's village context.
+    Per-tab isolation lives in the CLIENT: every action route accepts an
+    explicit ``village_id`` and each tab sends its own selection, so tabs
+    cannot interfere through this default. The session field is still updated
+    here because GET /api/villages and /api/travian/status derive
+    ``active_village_id``/``is_active`` from it — leaving it stale would show
+    the old village as active on any status refresh or fresh tab.
     """
-    # Validate that the village belongs to this player (don't mutate session state)
     village = None
     if session.auth_state:
         for v in session.auth_state.villages:
@@ -111,6 +112,8 @@ async def switch_village(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Village {body.village_id} not found for this player.",
         )
+
+    session.active_village_id = body.village_id
 
     return SwitchVillageResponse(
         active_village_id=body.village_id,

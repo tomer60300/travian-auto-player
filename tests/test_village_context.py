@@ -46,6 +46,30 @@ class TestVillageContext:
         assert exc.value.status_code == 400
 
 
+class TestVillageSwitch:
+    def test_switch_updates_the_session_default(self):
+        """GET /api/villages and /api/travian/status derive active_village_id
+        from the session; leaving it stale after /switch means a status refresh
+        or a fresh tab shows the old village as active. Explicit village_id
+        parameters on action routes keep per-tab isolation regardless."""
+        from travian_api.web.routes.villages import SwitchVillageRequest, switch_village
+
+        session = SimpleNamespace(
+            active_village_id=111,
+            auth_state=SimpleNamespace(
+                villages=[
+                    SimpleNamespace(id=111, name="Old", x=0, y=0, is_main_village=True),
+                    SimpleNamespace(id=222, name="New", x=5, y=5, is_main_village=False),
+                ]
+            ),
+        )
+
+        res = asyncio.run(switch_village(SwitchVillageRequest(village_id=222), session))
+
+        assert res.active_village_id == 222
+        assert session.active_village_id == 222
+
+
 class TestSessionCacheIsolation:
     def test_cache_files_are_keyed_by_travian_identity_not_just_web_user(self):
         """A web user reconnecting to the same world with DIFFERENT Travian
