@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from travian_api.web.auth import (
@@ -57,7 +58,17 @@ async def register(body: UserCreate, db: AsyncSession = Depends(get_db)):
         password_hash=hash_password(body.password),
     )
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Two concurrent registrations can both pass the SELECT above; the
+        # unique constraint decides the winner and the loser gets the same
+        # 409 a sequential duplicate would.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Username already taken",
+        )
     await db.refresh(user)
 
     token = create_access_token(user.id, user.username)

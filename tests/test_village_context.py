@@ -180,6 +180,35 @@ class TestDisconnectVsReconnectRace:
         assert session_after is None
         assert torn_down is True
 
+    def test_reconnect_is_rejected_while_operations_run_on_the_old_session(self, monkeypatch):
+        """Long-running jobs hold the old session's HttpClient; replacing and
+        closing it mid-run makes every following request in the job fail.
+        Reconnecting must be refused until the operations are stopped."""
+        from fastapi import HTTPException
+
+        import travian_api.operation_manager as op_module
+        import travian_api.web.sessions as sessions_module
+
+        manager = SessionManager()
+        old = SimpleNamespace(server_url="https://ts1.x1.europe.travian.com")
+        manager._sessions[1] = old
+
+        class _RunningTask:
+            def done(self):
+                return False
+
+        running_op = SimpleNamespace(label="oasis-raider", task=_RunningTask())
+        monkeypatch.setattr(
+            op_module.operation_manager, "list_for_user", lambda user_id: [running_op]
+        )
+        monkeypatch.setattr(sessions_module, "TravianSession", _StubSession)
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(manager.connect(1, "https://ts1.x1.europe.travian.com", "u", "p"))
+
+        assert exc.value.status_code == 409
+        assert manager.get(1) is old
+
     def test_manual_connect_serializes_with_the_reconnect_lock(self, monkeypatch):
         """/api/travian/connect and /reconnect call SessionManager.connect
         directly; without the reconnect lock a logout that returned while that

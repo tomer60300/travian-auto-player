@@ -235,7 +235,26 @@ class SessionManager:
         Any existing session is replaced only AFTER the new login succeeds, so
         a reconnect that hits a transient Travian failure (downtime, captcha)
         cannot destroy a still-working session.
+
+        Refused while background operations are running on the session being
+        replaced: those jobs hold the old session's HttpClient, and closing it
+        under them makes every following request in the job fail mid-run.
         """
+        if user_id in self._sessions:
+            from travian_api.operation_manager import operation_manager
+
+            running = sorted(
+                op.label for op in operation_manager.list_for_user(user_id) if not op.task.done()
+            )
+            if running:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Cannot reconnect while operations are running: "
+                        f"{', '.join(running)}. Stop them first."
+                    ),
+                )
+
         session = TravianSession(user_id, server_url, username, password)
         await session.connect()
 
