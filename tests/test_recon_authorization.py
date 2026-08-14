@@ -55,6 +55,21 @@ def test_every_mutating_recon_route_requires_the_operator():
         assert get_instance_operator in dependencies, route.__name__
 
 
+def test_the_operator_check_runs_before_the_session_dependency():
+    """FastAPI resolves dependencies in signature order: if the Travian session
+    comes first, a non-operator without a live session triggers a real
+    auto-reconnect login (or gets the wrong 403) before authorization runs."""
+    from travian_api.web.sessions import get_travian_session
+
+    dependencies = [
+        getattr(parameter.default, "dependency", None)
+        for parameter in inspect.signature(test_recon_credentials).parameters.values()
+    ]
+
+    assert get_instance_operator in dependencies
+    assert dependencies.index(get_instance_operator) < dependencies.index(get_travian_session)
+
+
 def test_status_hides_the_recon_username_from_non_operators():
     recon_account_manager.set_credentials("recon-user", "recon-pass")
     try:

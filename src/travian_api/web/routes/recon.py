@@ -159,8 +159,10 @@ async def clear_recon_credentials(
 
 @router.post("/test", response_model=ReconTestResponse)
 async def test_recon_credentials(
-    session: TravianSession = Depends(get_travian_session),
+    # Authorization first: dependencies resolve in signature order, and the
+    # session dependency may spend a real auto-reconnect login.
     _operator: User = Depends(get_instance_operator),
+    session: TravianSession = Depends(get_travian_session),
 ):
     """Attempt a real login with the active recon credentials.
 
