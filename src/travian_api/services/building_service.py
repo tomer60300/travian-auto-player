@@ -158,7 +158,9 @@ class BuildingService:
         return buildings
 
     async def get_all_villages_net_crop(
-        self, granary_capacity: Optional[Dict[int, int]] = None
+        self,
+        granary_capacity: Optional[Dict[int, int]] = None,
+        stocks: Optional[Dict[int, Dict[str, int]]] = None,
     ) -> Dict[int, CropBalance]:
         """True net crop for EVERY village in two requests.
 
@@ -175,6 +177,11 @@ class BuildingService:
         Args:
             granary_capacity: village id -> granary capacity. Fetched when
                 omitted and needed.
+            stocks: already-parsed output of ``parse_village_stats_resources``.
+                Pass it when the caller has fetched that page for something else
+                -- merchant counts live on it too -- so the page is not fetched
+                twice. That duplicate fetch is a waste this codebase has already
+                paid for once.
 
         Returns:
             Dict of village_id -> CropBalance. ``net_per_hour`` is None where it
@@ -184,9 +191,10 @@ class BuildingService:
             TravianError: If a request fails
         """
         try:
-            stocks = parse_village_stats_resources(
-                await self.http_client.get_html("/village/statistics/resources")
-            )
+            if stocks is None:
+                stocks = parse_village_stats_resources(
+                    await self.http_client.get_html("/village/statistics/resources")
+                )
             timers = parse_village_stats_warehouse(
                 await self.http_client.get_html("/village/statistics/resources/warehouse")
             )

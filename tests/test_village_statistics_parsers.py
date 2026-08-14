@@ -147,8 +147,25 @@ def test_resources_table_maps_village_id_to_stocks():
     out = parse_village_stats_resources(RESOURCES_HTML)
 
     assert set(out) == {20001, 20002}
-    assert out[20001] == {"lumber": 95506, "clay": 87834, "iron": 89677, "crop": 43254}
+    assert out[20001]["lumber"] == 95506
+    assert out[20001]["clay"] == 87834
+    assert out[20001]["iron"] == 89677
+    assert out[20001]["crop"] == 43254
     assert out[20002]["lumber"] == 620875
+
+
+def test_resources_table_reads_the_merchant_count_directly():
+    """Settles open question #2: read the count, do not derive it.
+
+    The cell is ``free/total``; the count is the second number. Taking the first
+    would understate a busy village -- 19/20 means 20 merchants, 19 idle.
+    """
+    out = parse_village_stats_resources(RESOURCES_HTML)
+
+    assert out[20001]["merchants_free"] == 19
+    assert out[20001]["merchants_total"] == 20
+    assert out[20002]["merchants_free"] == 15
+    assert out[20002]["merchants_total"] == 20
 
 
 def test_production_table_maps_village_id_to_hourly_rates():
@@ -231,7 +248,10 @@ def test_localised_number_formats_are_parsed():
     """Other Travian locales group with dots or spaces and use a Unicode minus."""
     out = parse_village_stats_resources(LOCALISED_HTML)
 
-    assert out[7] == {"lumber": 1234, "clay": 5678, "iron": 9012, "crop": -345}
+    assert out[7]["lumber"] == 1234
+    assert out[7]["clay"] == 5678
+    assert out[7]["iron"] == 9012
+    assert out[7]["crop"] == -345
 
 
 NON_NUMERIC_HTML = """

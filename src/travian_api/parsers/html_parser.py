@@ -718,18 +718,40 @@ def _stats_village_rows(html: str, table_id: str) -> List[Any]:
     return rows
 
 
+def _stats_ratio(text: str) -> tuple[int, int]:
+    """Parse a ``free/total`` cell such as ``‭‭19‬/‭20‬‬`` -> ``(19, 20)``.
+
+    Returns ``(0, 0)`` when the cell is not a ratio. Note the *second* number is
+    the village's merchant count; the first is how many are idle right now, so
+    reading the wrong one understates capacity on a busy village.
+    """
+    parts = text.split("/")
+    if len(parts) != 2:
+        return (0, 0)
+    return (_stats_int(parts[0]), _stats_int(parts[1]))
+
+
 def parse_village_stats_resources(html: str) -> Dict[int, Dict[str, int]]:
-    """Parse /village/statistics/resources -> ``{village_id: {lumber, clay, iron, crop}}``."""
+    """Parse /village/statistics/resources per village.
+
+    Returns ``{village_id: {lumber, clay, iron, crop, merchants_free,
+    merchants_total}}``. ``merchants_total`` settles profile open question #2 --
+    the count is read directly rather than derived from Marketplace level, and it
+    genuinely varies (2 and 19 both observed alongside the usual 20).
+    """
     out: Dict[int, Dict[str, int]] = {}
     # Travian spells this table id "ressources" — not a typo on our side.
     for vid, cells in _stats_village_rows(html, "ressources"):
         if len(cells) < 4:
             continue
+        free, total = _stats_ratio(cells[4].get_text()) if len(cells) >= 5 else (0, 0)
         out[vid] = {
             "lumber": _stats_int(cells[0].get_text()),
             "clay": _stats_int(cells[1].get_text()),
             "iron": _stats_int(cells[2].get_text()),
             "crop": _stats_int(cells[3].get_text()),
+            "merchants_free": free,
+            "merchants_total": total,
         }
     return out
 

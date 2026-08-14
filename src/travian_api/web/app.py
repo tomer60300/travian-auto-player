@@ -19,6 +19,7 @@ from travian_api.web.models import farm_builder as _fb_models  # noqa: F401
 from travian_api.web.models.db import init_db
 from travian_api.web.routes.buildings import router as buildings_router
 from travian_api.web.routes.captcha import router as captcha_router
+from travian_api.web.routes.distribution import router as distribution_router
 from travian_api.web.routes.exec_sessions import router as exec_sessions_router
 from travian_api.web.routes.farm import router as farm_router
 from travian_api.web.routes.farm_builder import router as farm_builder_router
@@ -199,6 +200,7 @@ app.include_router(captcha_router)
 app.include_router(exec_sessions_router)
 app.include_router(farm_builder_router)
 app.include_router(recon_router)
+app.include_router(distribution_router)
 
 # Mount WebSocket routes
 app.include_router(farm_ws_router)

@@ -19,6 +19,7 @@ const navItems = [
   { to: '/scout', label: 'Auto Scout', icon: '🔭' },
   { to: '/oasis-raider', label: 'Oasis Raider', icon: '🏕' },
   { to: '/raid-optimizer', label: 'Raid Optimizer', icon: '🧮' },
+  { to: '/resource-planner', label: 'Resource Planner', icon: '⚖️' },
   { to: '/queue', label: 'Build Queue', icon: '📋' },
   { to: '/logs', label: 'Activity Log', icon: '📊' },
   { to: '/sessions', label: 'Sessions', icon: '📡' },
