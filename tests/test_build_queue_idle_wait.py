@@ -78,14 +78,20 @@ def test_resource_short_clamp_boundaries(monkeypatch):
 
     monkeypatch.setattr(bq.HumanTiming, "delay", staticmethod(lambda *a, **k: 5.0))
     _, low = bq._resolve_idle_wait(
-        any_no_checksum=False, any_resource_short=True, next_prio=1,
-        poll_interval_s=30.0, stealth_enabled=True,
+        any_no_checksum=False,
+        any_resource_short=True,
+        next_prio=1,
+        poll_interval_s=30.0,
+        stealth_enabled=True,
     )
     assert low == 120.0  # tiny draw clamps up
 
     monkeypatch.setattr(bq.HumanTiming, "delay", staticmethod(lambda *a, **k: 5000.0))
     _, high = bq._resolve_idle_wait(
-        any_no_checksum=False, any_resource_short=True, next_prio=1,
-        poll_interval_s=30.0, stealth_enabled=True,
+        any_no_checksum=False,
+        any_resource_short=True,
+        next_prio=1,
+        poll_interval_s=30.0,
+        stealth_enabled=True,
     )
     assert high == 600.0  # huge draw clamps down

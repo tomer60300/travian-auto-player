@@ -17,7 +17,7 @@ from travian_api.services.distribution.allocation import (
 from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import EUROPE2_TEUTON
 from travian_api.services.distribution.optimizer import VillageState
-from travian_api.services.distribution.planner import PlannerConfig, craft_plan
+from travian_api.services.distribution.planner import PlannerConfig, SheetRow, craft_plan
 from travian_api.services.distribution.rounding import round_preserving_total
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY, build_beat
 
@@ -260,6 +260,22 @@ class TestEndToEnd:
         assert plan.spare_merchants[1] == 18
         assert plan.free_merchants(1) == 18 - plan.merchants_committed[1]
         assert plan.merchants_committed[2] == 0
+
+    def test_sheet_rows_render_clock_times_for_the_operator(self):
+        """The sheet is copied into the game by hand, so minutes need faces."""
+        row = SheetRow(
+            origin=1,
+            destination=2,
+            cargo={Resource.IRON: 100},
+            cycle_hours=3,
+            dispatch_minute=125,
+            arrival_minute=605,
+            merchants=4,
+        )
+
+        assert row.dispatch_clock() == "02:05"
+        assert row.arrival_clock() == "10:05"
+        assert row.total_cargo == 100
 
     def test_allocation_warnings_reach_the_plan(self):
         """A warning raised three layers down must not be swallowed."""

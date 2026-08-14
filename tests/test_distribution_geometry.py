@@ -36,9 +36,9 @@ class TestDistance:
         assert EUROPE.distance(a, b) == pytest.approx(EUROPE.distance(b, a))
 
     def test_no_pair_exceeds_half_the_map_on_an_axis(self):
-        """A wrapped axis separation can never exceed span/2."""
+        """A wrapped separation can never exceed half the map."""
         for x in range(-200, 201, 37):
-            assert EUROPE._axis_delta(0, x) <= EUROPE.span / 2
+            assert EUROPE.distance((0, 0), (x, 0)) <= EUROPE.span / 2
 
 
 class TestTravelTime:

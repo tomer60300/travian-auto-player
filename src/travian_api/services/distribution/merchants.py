@@ -87,11 +87,11 @@ class MerchantModel:
 # village at a different Trade Office level is to hand.
 EUROPE2_TEUTON = MerchantModel(base_capacity=2200, bonus_per_trade_office_level=0.20)
 
-# Published stock values at 1x, for reference. Europe 2 does NOT follow these:
-# stock Teuton predicts 2,300 at TO 13 where the game reports 7,920.
+# Published stock Teuton values at 1x, kept only as the counter-example: they
+# predict 2,300 at TO 13 where the game reports 7,920, which is how we know this
+# server is not stock. Roman and Gaul figures are deliberately absent -- the tool
+# is single-account, and an unused constant is one more thing to get wrong.
 STOCK_TEUTON = MerchantModel(base_capacity=1000, bonus_per_trade_office_level=0.10)
-STOCK_ROMAN = MerchantModel(base_capacity=500, bonus_per_trade_office_level=0.20)
-STOCK_GAUL = MerchantModel(base_capacity=750, bonus_per_trade_office_level=0.10)
 
 
 @dataclass(frozen=True)
