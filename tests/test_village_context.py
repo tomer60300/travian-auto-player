@@ -180,6 +180,69 @@ class TestDisconnectVsReconnectRace:
         assert session_after is None
         assert torn_down is True
 
+    def test_the_reconnect_lock_identity_survives_a_disconnect(self):
+        """Removing the lock entry on disconnect hands later reconnects a
+        brand-new lock while earlier waiters still hold the old one — two
+        locks means two concurrent reconnects, the exact race again."""
+
+        async def scenario():
+            manager = SessionManager()
+            lock = manager.get_reconnect_lock(1)
+            await manager.disconnect(1)
+            return lock is manager.get_reconnect_lock(1)
+
+        assert asyncio.run(scenario()) is True
+
+
+class TestRestoreSessionBookkeeping:
+    def test_restore_returns_the_live_session_even_if_the_stamp_commit_fails(self, monkeypatch):
+        """A failed last_connected commit is bookkeeping, not a login failure:
+        returning None here closes the WebSocket with 'No active Travian
+        session' while a live session sits installed in the manager."""
+        import travian_api.web.auth as auth_module
+        import travian_api.web.models.db as db_module
+        import travian_api.web.sessions as sessions_module
+
+        fresh = sessions_module.SessionManager()
+        monkeypatch.setattr(sessions_module, "session_manager", fresh)
+
+        live = SimpleNamespace(server_url="https://ts1.x1.europe.travian.com")
+
+        async def fake_connect(**kwargs):
+            fresh._sessions[7] = live
+            return live
+
+        monkeypatch.setattr(fresh, "connect", fake_connect)
+
+        cred = SimpleNamespace(
+            server_url="https://ts1.x1.europe.travian.com",
+            travian_username="alice",
+            encrypted_password="sealed",
+            last_connected=None,
+        )
+
+        class _FakeDb:
+            async def execute(self, _query):
+                return SimpleNamespace(scalar_one_or_none=lambda: cred)
+
+            async def commit(self):
+                raise RuntimeError("database is locked")
+
+        class _FakeFactory:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return _FakeDb()
+
+            async def __aexit__(self, *args):
+                return False
+
+        monkeypatch.setattr(db_module, "async_session_factory", _FakeFactory())
+        monkeypatch.setattr(auth_module, "decrypt_credential", lambda _s: "pw")
+
+        assert asyncio.run(sessions_module.try_restore_session(7)) is live
+
 
 class _FakeWebSocket:
     def __init__(self, token="t"):

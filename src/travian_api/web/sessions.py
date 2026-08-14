@@ -247,8 +247,10 @@ class SessionManager:
         reconnect_lock = self.get_reconnect_lock(user_id)
         async with reconnect_lock, self._lock:
             session = self._sessions.pop(user_id, None)
-        if not reconnect_lock.locked():
-            self._reconnect_locks.pop(user_id, None)
+        # The lock entry is deliberately never removed: waiters queued on it
+        # hold a reference, and handing later callers a fresh lock from
+        # get_reconnect_lock() would let two reconnects run concurrently. One
+        # small Lock per user who ever connected is a bounded cost.
         if session:
             await session.disconnect()
             logger.info("User %s disconnected from %s", user_id, session.server_url)
@@ -304,32 +306,52 @@ async def try_restore_session(user_id: int) -> Optional[TravianSession]:
         from travian_api.web.auth import decrypt_credential
         from travian_api.web.models.db import TravianCredential, async_session_factory
 
+        def _latest_credential_query():
+            return (
+                select(TravianCredential)
+                .where(TravianCredential.user_id == user_id)
+                .order_by(TravianCredential.last_connected.desc().nulls_last())
+                .limit(1)
+            )
+
         try:
             async with async_session_factory() as db:
-                result = await db.execute(
-                    select(TravianCredential)
-                    .where(TravianCredential.user_id == user_id)
-                    .order_by(TravianCredential.last_connected.desc().nulls_last())
-                    .limit(1)
-                )
+                result = await db.execute(_latest_credential_query())
                 cred = result.scalar_one_or_none()
                 if cred is None:
                     return None
-
+                server_url = cred.server_url
+                username = cred.travian_username
                 password = decrypt_credential(cred.encrypted_password)
-                session = await session_manager.connect(
-                    user_id=user_id,
-                    server_url=cred.server_url,
-                    username=cred.travian_username,
-                    password=password,
-                )
-                cred.last_connected = datetime.now(UTC)
-                await db.commit()
-                logger.info("Auto-reconnected user %s for a WebSocket", user_id)
-                return session
         except Exception as exc:
             logger.warning("WebSocket auto-reconnect failed for user %s: %s", user_id, exc)
             return None
+
+        try:
+            session = await session_manager.connect(
+                user_id=user_id,
+                server_url=server_url,
+                username=username,
+                password=password,
+            )
+        except Exception as exc:
+            logger.warning("WebSocket auto-reconnect failed for user %s: %s", user_id, exc)
+            return None
+
+        # Bookkeeping only: the session is live regardless, and a failed stamp
+        # must not make the caller report a login failure.
+        try:
+            async with async_session_factory() as db:
+                result = await db.execute(_latest_credential_query())
+                cred = result.scalar_one_or_none()
+                if cred is not None:
+                    cred.last_connected = datetime.now(UTC)
+                    await db.commit()
+        except Exception:
+            logger.warning("Auto-reconnected user %s but could not stamp last_connected", user_id)
+
+        logger.info("Auto-reconnected user %s for a WebSocket", user_id)
+        return session
 
 
 # ---------------------------------------------------------------------------
