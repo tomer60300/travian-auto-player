@@ -180,6 +180,29 @@ class TestDisconnectVsReconnectRace:
         assert session_after is None
         assert torn_down is True
 
+    def test_manual_connect_serializes_with_the_reconnect_lock(self, monkeypatch):
+        """/api/travian/connect and /reconnect call SessionManager.connect
+        directly; without the reconnect lock a logout that returned while that
+        login was in flight is undone when the new session installs."""
+        import travian_api.web.sessions as sessions_module
+
+        monkeypatch.setattr(sessions_module, "TravianSession", _StubSession)
+
+        async def scenario():
+            manager = SessionManager()
+            lock = manager.get_reconnect_lock(1)
+            await lock.acquire()
+            task = asyncio.create_task(
+                manager.connect(1, "https://ts1.x1.europe.travian.com", "u", "p")
+            )
+            await asyncio.sleep(0.05)
+            finished_while_lock_held = task.done()
+            lock.release()
+            await task
+            return finished_while_lock_held
+
+        assert asyncio.run(scenario()) is False
+
     def test_the_reconnect_lock_identity_survives_a_disconnect(self):
         """Removing the lock entry on disconnect hands later reconnects a
         brand-new lock while earlier waiters still hold the old one — two
@@ -213,6 +236,7 @@ class TestRestoreSessionBookkeeping:
             return live
 
         monkeypatch.setattr(fresh, "connect", fake_connect)
+        monkeypatch.setattr(fresh, "_connect_locked", fake_connect, raising=False)
 
         cred = SimpleNamespace(
             server_url="https://ts1.x1.europe.travian.com",
@@ -242,6 +266,46 @@ class TestRestoreSessionBookkeeping:
         monkeypatch.setattr(auth_module, "decrypt_credential", lambda _s: "pw")
 
         assert asyncio.run(sessions_module.try_restore_session(7)) is live
+
+    def test_http_restore_returns_the_session_even_if_the_stamp_commit_fails(self, monkeypatch):
+        """Same contract for the HTTP dependency: a failed last_connected
+        commit after a successful login must not 403 the request while the
+        live session sits installed."""
+        import travian_api.web.auth as auth_module
+        import travian_api.web.sessions as sessions_module
+
+        fresh = sessions_module.SessionManager()
+        monkeypatch.setattr(sessions_module, "session_manager", fresh)
+
+        live = SimpleNamespace(server_url="https://ts1.x1.europe.travian.com")
+
+        async def fake_connect(**kwargs):
+            fresh._sessions[7] = live
+            return live
+
+        monkeypatch.setattr(fresh, "connect", fake_connect)
+        monkeypatch.setattr(fresh, "_connect_locked", fake_connect, raising=False)
+        monkeypatch.setattr(auth_module, "decrypt_credential", lambda _s: "pw")
+
+        cred = SimpleNamespace(
+            server_url="https://ts1.x1.europe.travian.com",
+            travian_username="alice",
+            encrypted_password="sealed",
+            last_connected=None,
+        )
+
+        class _FakeDb:
+            async def execute(self, _query):
+                return SimpleNamespace(scalar_one_or_none=lambda: cred)
+
+            async def commit(self):
+                raise RuntimeError("database is locked")
+
+        user = SimpleNamespace(id=7)
+
+        result = asyncio.run(sessions_module.get_travian_session(user, _FakeDb()))
+
+        assert result is live
 
 
 class _FakeWebSocket:

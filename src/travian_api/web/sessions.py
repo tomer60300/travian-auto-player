@@ -215,6 +215,23 @@ class SessionManager:
     ) -> TravianSession:
         """Create a new session and authenticate to Travian.
 
+        Serialized on the per-user reconnect lock so a logout that returns
+        while this login is in flight cannot be undone when the new session
+        installs. Auto-reconnect paths that already hold that lock call
+        :meth:`_connect_locked` directly instead.
+        """
+        async with self.get_reconnect_lock(user_id):
+            return await self._connect_locked(user_id, server_url, username, password)
+
+    async def _connect_locked(
+        self,
+        user_id: int,
+        server_url: str,
+        username: str,
+        password: str,
+    ) -> TravianSession:
+        """Login + install; the caller holds the per-user reconnect lock.
+
         Any existing session is replaced only AFTER the new login succeeds, so
         a reconnect that hits a transient Travian failure (downtime, captcha)
         cannot destroy a still-working session.
@@ -328,7 +345,8 @@ async def try_restore_session(user_id: int) -> Optional[TravianSession]:
             return None
 
         try:
-            session = await session_manager.connect(
+            # The reconnect lock is already held; go through the locked core.
+            session = await session_manager._connect_locked(
                 user_id=user_id,
                 server_url=server_url,
                 username=username,
@@ -404,21 +422,29 @@ async def get_travian_session(
 
         try:
             password = decrypt_credential(cred.encrypted_password)
-            session = await session_manager.connect(
+            # The reconnect lock is already held; go through the locked core.
+            session = await session_manager._connect_locked(
                 user_id=user.id,
                 server_url=cred.server_url,
                 username=cred.travian_username,
                 password=password,
             )
-            from datetime import datetime
-
-            cred.last_connected = datetime.now(UTC)
-            await db.commit()
-            logger.info("Auto-reconnected user %s to %s", user.id, cred.server_url)
-            return session
         except Exception as exc:
             logger.warning("Auto-reconnect failed for user %s: %s", user.id, exc)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Auto-reconnect failed: {exc}. Please reconnect manually.",
             )
+
+        # Bookkeeping only: the session is live regardless, and a failed stamp
+        # must not turn a successful login into a 403.
+        try:
+            from datetime import datetime
+
+            cred.last_connected = datetime.now(UTC)
+            await db.commit()
+        except Exception:
+            logger.warning("Auto-reconnected user %s but could not stamp last_connected", user.id)
+
+        logger.info("Auto-reconnected user %s to %s", user.id, cred.server_url)
+        return session
