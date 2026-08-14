@@ -154,11 +154,12 @@ def build_beat(
                 else sum(1 for minute in arrivals if _in_window(minute, reserved_window))
             )
             # Prefer avoiding the reserved window, then the widest spacing.
+            # Every offset is evaluated: stopping at the first one that merely
+            # clears the minimum gap would crowd arrivals that had a whole day
+            # of room. The full sweep is pure CPU and runs off the event loop.
             score = (-clear, gap)
             if best_score is None or score > best_score:
                 best_score, best_offset = score, offset
-            if clear == 0 and gap >= min_arrival_gap_minutes:
-                break
 
         placement = ScheduledRoute(route=route, dispatch_minute=best_offset)
         scheduled.append(placement)

@@ -16,7 +16,7 @@ from travian_api.services.distribution.allocation import (
 )
 from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import EUROPE2_TEUTON
-from travian_api.services.distribution.optimizer import VillageState
+from travian_api.services.distribution.optimizer import Route, VillageState
 from travian_api.services.distribution.planner import PlannerConfig, SheetRow, craft_plan
 from travian_api.services.distribution.rounding import round_preserving_total
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY, build_beat
@@ -25,6 +25,33 @@ CONFIG = PlannerConfig(
     geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
     merchant_model=EUROPE2_TEUTON,
 )
+
+
+class TestBeatSpacing:
+    def _route(self, origin: int) -> Route:
+        return Route(
+            origin=origin,
+            destination=99,
+            cargo_per_hour={Resource.LUMBER: 1000.0},
+            cycle_hours=24,
+            merchants_per_send=1,
+            sets_in_flight=1,
+            one_way_minutes=30.0,
+        )
+
+    def test_the_sweep_keeps_the_widest_spacing_not_the_first_legal_one(self):
+        """Two daily routes into one village have 720 minutes of room; stopping
+        at the first offset that merely clears the minimum gap crowds arrivals
+        for no reason and contradicts the stated widest-spacing preference."""
+        beat = build_beat((self._route(1), self._route(2)), min_arrival_gap_minutes=3)
+
+        first, second = (s.arrival_minutes[0] for s in beat.routes)
+        raw = abs(first - second)
+        gap = min(raw, MINUTES_PER_DAY - raw)
+        assert gap >= 360
+        assert beat.warnings == ()
+
+
 ACCOUNT_SIZES = [1, 2, 3, 6, 12, 22, 23, 35]
 
 

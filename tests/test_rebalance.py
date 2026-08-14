@@ -518,6 +518,37 @@ class TestWaveStacking:
         # Supply was decremented.
         assert supplies[("V7", "t1")] == 100 - waves[0].optimal_count
 
+    def test_truncated_plans_advertise_the_waves_that_exist(self, monkeypatch):
+        """Supply can run out mid-plan; the surviving placements must not claim
+        wave 1/2 when only one wave was actually planned."""
+        import travian_api.services.rebalance_planner as rp
+
+        real_sizer = rp.size_wave_with_residual_carry
+
+        def demanding_second_wave(avg_loot, wave_index, cumulative_carry_taken, unit_carry, **kw):
+            if wave_index >= 1:
+                return 999_999, 100  # more troops than any village holds
+            return real_sizer(avg_loot, wave_index, cumulative_carry_taken, unit_carry, **kw)
+
+        monkeypatch.setattr(rp, "size_wave_with_residual_carry", demanding_second_wave)
+
+        # V6 sits far enough that its arrival clears the 15-min wave spacing
+        # and it survives into the greedy pick set as wave 2.
+        vps = [VillagePosition("V7", 30, 82), VillagePosition("V6", 35, 83)]
+        supplies = {("V7", "t1"): 1000, ("V6", "t1"): 100}
+        target = FakeTarget(
+            coord=(31, 83),
+            avg_loot=480.0,
+            total_raids_all_lists=20,
+            last_raid_time_unix=int(NOW - 86400),
+        )
+
+        waves = rp.plan_waves_for_target(target, vps, supplies)
+
+        assert waves, "the first wave must survive the truncation"
+        for wave in waves:
+            assert wave.of_total_waves == len(waves)
+
     def test_dead_floor_returns_empty_plan(self):
         from travian_api.services.rebalance_planner import plan_waves_for_target
 

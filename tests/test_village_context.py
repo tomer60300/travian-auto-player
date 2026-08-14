@@ -27,6 +27,24 @@ class TestVillageContext:
 
         assert body.village_id == 20003
 
+    def test_construct_request_accepts_gid_only(self):
+        """building_gid is documented as the preferred identifier; requiring
+        building_name anyway 422s the preferred calling convention."""
+        body = ConstructRequest(slot_id=20, building_gid=17)
+
+        assert body.building_gid == 17
+        assert body.building_name is None
+
+    def test_construct_with_neither_identifier_is_a_400(self):
+        from fastapi import HTTPException
+
+        from travian_api.web.routes.buildings import construct_building
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(construct_building(ConstructRequest(slot_id=20)))
+
+        assert exc.value.status_code == 400
+
 
 class _StubSession:
     """Stands in for TravianSession; login outcome is configurable."""

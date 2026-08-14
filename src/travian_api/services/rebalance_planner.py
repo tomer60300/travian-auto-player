@@ -351,6 +351,8 @@ def plan_waves_for_target(
             # Supply ran out mid-plan; truncate at the prior wave. The target
             # gets fewer waves than wanted, which is fine — the operator may
             # train more troops later and a future run will fill the gap.
+            # of_total is corrected below so the surviving placements do not
+            # advertise waves that were never planned.
             break
         round_trip = arrival_min * 2.0
         raids_per_day = compute_expected_raids_per_day(round_trip)
@@ -374,6 +376,12 @@ def plan_waves_for_target(
         )
         troop_supplies[(village, unit)] = avail - count
         cumulative_taken += haul
+
+    # Truncation (or a zero-carry skip) can leave fewer waves than picked;
+    # advertise the waves that exist, not the ones that were merely wanted.
+    if len(plan) != of_total:
+        for placement in plan:
+            placement.of_total_waves = len(plan)
     return plan
 
 

@@ -33,7 +33,10 @@ class UpgradeRequest(BaseModel):
 
 class ConstructRequest(BaseModel):
     slot_id: int = Field(..., ge=19, le=40, description="Empty building slot (19-40)")
-    building_name: str = Field(..., description="Building name (used to resolve GID)")
+    building_name: str | None = Field(
+        default=None,
+        description="Building name (used to resolve GID when building_gid is absent)",
+    )
     building_gid: int | None = Field(
         default=None, description="Building GID (takes precedence over building_name)"
     )
@@ -154,6 +157,11 @@ async def construct_building(
     slot and matches by name (case-insensitive).
     """
     gid = body.building_gid
+    if gid is None and body.building_name is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide building_gid or building_name.",
+        )
     vid = body.village_id or session.active_village_id
 
     # Resolve building_name -> gid if gid not provided
