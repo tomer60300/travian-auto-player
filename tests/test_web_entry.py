@@ -57,6 +57,19 @@ def test_the_unbuilt_ui_handler_still_404s_api_paths():
     assert res.status_code == 404
 
 
+def test_loose_static_files_do_not_count_as_a_frontend_build(tmp_path):
+    """favicon.svg alone must not trip the SPA mount: StaticFiles raises on a
+    missing assets/ dir, crashing the server before the 503 fallback exists."""
+    from travian_api.web.app import ui_build_exists
+
+    (tmp_path / "favicon.svg").write_text("<svg/>")
+    assert ui_build_exists(tmp_path) is False
+
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<html></html>")
+    assert ui_build_exists(tmp_path) is True
+
+
 def test_custom_db_path_parent_directory_is_created(tmp_path):
     target = tmp_path / "nested" / "state" / "app.db"
     assert not target.parent.exists()

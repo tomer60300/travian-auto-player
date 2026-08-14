@@ -52,6 +52,17 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+def ui_build_exists(static_dir: Path) -> bool:
+    """True only when a complete frontend build is present.
+
+    The directory alone is not proof: loose files (favicon.svg) can exist
+    without a build, and mounting StaticFiles on a missing ``assets/`` raises
+    at import — which would crash the server instead of letting the
+    unbuilt-UI fallback explain the situation.
+    """
+    return (static_dir / "assets").is_dir() and (static_dir / "index.html").is_file()
+
+
 def _quiet_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
     """Suppress noisy Windows ProactorEventLoop socket teardown errors.
 
@@ -232,8 +243,8 @@ async def serve_ui_not_built(request: Request, full_path: str) -> JSONResponse:
     )
 
 
-# Serve static frontend files if the build directory exists
-if STATIC_DIR.is_dir():
+# Serve static frontend files if a complete build exists
+if ui_build_exists(STATIC_DIR):
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
     # Catch-all route: serve index.html for any non-API path (SPA routing).
