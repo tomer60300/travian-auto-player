@@ -10,6 +10,7 @@ export default function Military() {
   const toast = useToast()
   const tribeId = useGameStore((s) => s.tribeId)
   const connected = useGameStore((s) => s.connected)
+  const activeVillageId = useGameStore((s) => s.activeVillageId)
 
   // Scout state
   const [scoutX, setScoutX] = useState('')
@@ -84,6 +85,9 @@ export default function Military() {
         y: parseInt(scoutY, 10),
         amount: parseInt(scoutAmount, 10) || 1,
         type: scoutType,
+        // The backend default is forever the login village (switching is
+        // client-side only), so the selected village must travel explicitly.
+        village_id: activeVillageId ?? undefined,
       })
       setScoutResult({ success: true, data: res.data })
       toast.success('Scouts sent successfully!')
@@ -129,6 +133,7 @@ export default function Military() {
         x: parseInt(raidX, 10),
         y: parseInt(raidY, 10),
         troops,
+        village_id: activeVillageId ?? undefined,
       })
       setRaidResult({ success: true, data: res.data })
       toast.success('Raid sent successfully!')

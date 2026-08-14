@@ -46,6 +46,24 @@ class TestVillageContext:
         assert exc.value.status_code == 400
 
 
+class TestSessionCacheIsolation:
+    def test_cache_files_are_keyed_by_travian_identity_not_just_web_user(self):
+        """A web user reconnecting to the same world with DIFFERENT Travian
+        credentials must not resume the previous account's cached JWT/cookies —
+        that silently authenticates the wrong player until the cache expires."""
+        from travian_api.web.sessions import TravianSession
+
+        server = "https://ts1.x1.europe.travian.com"
+        alice = TravianSession(1, server, "alice", "pw-a")
+        bob = TravianSession(1, server, "bob", "pw-b")
+        alice_again = TravianSession(1, server, "alice", "pw-a")
+
+        assert alice.settings.jwt_cache_path != bob.settings.jwt_cache_path
+        assert alice._cookie_file != bob._cookie_file
+        # Same identity still shares its cache, so stealth session resume works.
+        assert alice.settings.jwt_cache_path == alice_again.settings.jwt_cache_path
+
+
 class _StubSession:
     """Stands in for TravianSession; login outcome is configurable."""
 
