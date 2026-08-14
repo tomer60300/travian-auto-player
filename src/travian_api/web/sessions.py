@@ -237,12 +237,18 @@ class SessionManager:
         return session
 
     async def disconnect(self, user_id: int) -> None:
-        """Disconnect and remove a user's session (no-op if none exists)."""
-        async with self._lock:
+        """Disconnect and remove a user's session (no-op if none exists).
+
+        Serialized with the per-user reconnect lock: an auto-reconnect holds
+        that lock across its whole login, so a logout arriving mid-login waits
+        for the install and then tears it down — the explicit disconnect stays
+        authoritative instead of being silently undone by the racing login.
+        """
+        reconnect_lock = self.get_reconnect_lock(user_id)
+        async with reconnect_lock, self._lock:
             session = self._sessions.pop(user_id, None)
-            lock = self._reconnect_locks.get(user_id)
-            if lock is not None and not lock.locked():
-                self._reconnect_locks.pop(user_id, None)
+        if not reconnect_lock.locked():
+            self._reconnect_locks.pop(user_id, None)
         if session:
             await session.disconnect()
             logger.info("User %s disconnected from %s", user_id, session.server_url)

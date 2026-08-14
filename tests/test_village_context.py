@@ -133,6 +133,54 @@ class TestNonDestructiveConnect:
         assert old.disconnect_called is True
 
 
+class TestDisconnectVsReconnectRace:
+    def test_an_explicit_disconnect_is_not_undone_by_an_inflight_reconnect(self):
+        """A logout that lands while an auto-reconnect is mid-login must win:
+        the user pressed disconnect, so the session installed by the racing
+        login has to come down, not linger as a silent re-connect."""
+
+        async def scenario():
+            manager = SessionManager()
+            lock = manager.get_reconnect_lock(1)
+            login_started = asyncio.Event()
+            finish_login = asyncio.Event()
+
+            class _Restored:
+                disconnected = False
+                server_url = "https://ts1.x1.europe.travian.com"
+
+                async def disconnect(self):
+                    self.disconnected = True
+
+            restored = _Restored()
+
+            async def reconnect():
+                # Mirrors get_travian_session/try_restore_session: the lock is
+                # held across the whole login + install.
+                async with lock:
+                    login_started.set()
+                    await finish_login.wait()
+                    async with manager._lock:
+                        manager._sessions[1] = restored
+
+            async def logout():
+                await login_started.wait()
+                disconnect_task = asyncio.create_task(manager.disconnect(1))
+                # Give the disconnect every chance to (wrongly) complete while
+                # the login is still in flight.
+                await asyncio.sleep(0.05)
+                finish_login.set()
+                await disconnect_task
+
+            await asyncio.gather(reconnect(), logout())
+            return manager.get(1), restored.disconnected
+
+        session_after, torn_down = asyncio.run(scenario())
+
+        assert session_after is None
+        assert torn_down is True
+
+
 class _FakeWebSocket:
     def __init__(self, token="t"):
         self.query_params = {"token": token}
