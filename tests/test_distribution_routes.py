@@ -221,6 +221,45 @@ class TestPlanEndpoint:
 
         assert any("crop" in w and "ignor" in w for w in res.warnings)
 
+    def test_one_unreadable_crop_village_does_not_fail_the_whole_plan(self):
+        """A village whose granary countdown could not be read is excluded from
+        crop productions; an allocation pointing at it must be dropped with a
+        warning, not 400 the entire account's plan."""
+        body = _plan_request(
+            {
+                "crop": {
+                    "20003": {"mode": "absolute", "value": 500},
+                    "20011": {"mode": "remainder"},
+                }
+            }
+        )
+        # Village 03 keeps its crop rate; village 11's granary was unreadable.
+        body.snapshot[0].crop_per_hour = 1000.0
+        body.snapshot[1].crop_per_hour = None
+
+        res = asyncio.run(post_plan(body))
+
+        assert any("20011" in w and "ignor" in w for w in res.warnings)
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"merchant_base_capacity": 0},
+            {"merchant_base_capacity": -100},
+            {"trade_office_bonus_per_level": -0.2},
+        ],
+    )
+    def test_merchant_model_overrides_are_validated_as_request_errors(self, overrides):
+        """merchant_base_capacity <= 0 must be a validation error (422), not a
+        ValueError escaping MerchantModel deep inside the planner as a 500."""
+        from pydantic import ValidationError
+
+        payload = _plan_request({}).model_dump()
+        payload.update(overrides)
+
+        with pytest.raises(ValidationError):
+            PlanRequest.model_validate(payload)
+
     def test_committing_more_than_the_free_merchants_warns(self):
         """The plan budgets against merchants_total; when in-game routes hold
         most of them, the sheet is not executable until they are released."""

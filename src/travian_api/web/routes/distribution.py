@@ -107,8 +107,10 @@ class PlanRequest(BaseModel):
     config: list[VillageConfig] = []
     # resource -> village_id -> allocation
     allocations: dict[Resource, dict[int, AllocationInput]] = {}
-    merchant_base_capacity: int = EUROPE2_TEUTON.base_capacity
-    trade_office_bonus_per_level: float = EUROPE2_TEUTON.bonus_per_trade_office_level
+    merchant_base_capacity: int = Field(default=EUROPE2_TEUTON.base_capacity, gt=0)
+    trade_office_bonus_per_level: float = Field(
+        default=EUROPE2_TEUTON.bonus_per_trade_office_level, ge=0
+    )
     merchant_reserve: int = Field(default=2, ge=0)
     max_latency_hours: float | None = 2.0
     min_arrival_gap_minutes: int = Field(default=3, ge=0)
@@ -330,6 +332,19 @@ async def post_plan(
                 extra_warnings.append(
                     f"{resource.value}: no production rate is known for any village, "
                     f"so its allocations were ignored"
+                )
+        # A single village with an unreadable rate (crop_per_hour=None is the
+        # normal no-crop-balance snapshot path) must not fail the whole plan:
+        # drop just its allocations, say so, and plan the rest.
+        for resource, per_village in allocations.items():
+            known = productions[resource]
+            unreadable = sorted(vid for vid in per_village if vid not in known)
+            for vid in unreadable:
+                del per_village[vid]
+            if unreadable:
+                extra_warnings.append(
+                    f"{resource.value}: no rate could be read for village(s) "
+                    f"{unreadable}, so their {resource.value} allocations were ignored"
                 )
         # The beat search is pure CPU; off the event loop so it cannot stall
         # WebSocket frames or stealth-timed game requests while the user replans.

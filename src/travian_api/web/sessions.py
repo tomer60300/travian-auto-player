@@ -52,9 +52,7 @@ class TravianSession:
         # the same world with different credentials must not come up as the
         # previous player. Same identity keeps its cache — stealth resume of
         # a still-valid session stays cheap.
-        identity = hashlib.sha256(
-            f"{server_url.rstrip('/')}|{username}".encode()
-        ).hexdigest()[:16]
+        identity = hashlib.sha256(f"{server_url.rstrip('/')}|{username}".encode()).hexdigest()[:16]
         self._data_dir = _SESSION_DATA_DIR / str(user_id) / identity
         self._data_dir.mkdir(parents=True, exist_ok=True)
         try:
