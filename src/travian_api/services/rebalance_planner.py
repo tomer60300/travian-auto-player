@@ -479,8 +479,11 @@ def assign_role_and_list_name(
     """
     sorted_placements = sorted(placements_for_village, key=lambda p: -p.objective_score)
     n = len(sorted_placements)
-    high_cut = int(n * HIGH_FRACTION)
-    mid_cut = int(n * MID_FRACTION)
+    # Floored cuts would leave 1-3 placement villages with no HIGH list at all
+    # (a single placement landed straight in INACTIVE), so every non-empty set
+    # promotes at least its best target.
+    high_cut = max(1, int(n * HIGH_FRACTION)) if n else 0
+    mid_cut = max(high_cut, int(n * MID_FRACTION))
     for idx, p in enumerate(sorted_placements):
         if idx < high_cut:
             role = "HIGH"

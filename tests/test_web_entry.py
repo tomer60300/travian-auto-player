@@ -83,3 +83,39 @@ def test_custom_db_path_parent_directory_is_created(tmp_path):
     )
 
     assert target.parent.is_dir()
+
+
+def test_init_db_backfills_columns_added_after_first_release(tmp_path):
+    """create_all() never ALTERs an existing table, so upgrading a live
+    travian_web.db from before label/last_connected left reconnect queries
+    failing with 'no such column' until the DB was rebuilt by hand."""
+    db_file = tmp_path / "travian_web.db"
+
+    import sqlite3
+
+    with sqlite3.connect(db_file) as conn:
+        conn.execute(
+            "CREATE TABLE travian_credentials ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "server_url VARCHAR(256) NOT NULL, "
+            "travian_username VARCHAR(128) NOT NULL, "
+            "encrypted_password VARCHAR(512) NOT NULL, "
+            "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio; from travian_api.web.models.db import init_db; asyncio.run(init_db())",
+        ],
+        env={**os.environ, "TRAVIAN_DB_PATH": str(db_file)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    with sqlite3.connect(db_file) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(travian_credentials)")}
+    assert {"label", "last_connected"} <= columns

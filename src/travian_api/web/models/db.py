@@ -116,10 +116,27 @@ class ReconCredential(Base):
 # ---------------------------------------------------------------------------
 
 
+# Columns added after the first release. create_all() creates missing TABLES
+# but never ALTERs existing ones, so upgrading a live travian_web.db needs
+# these backfilled or every query naming them fails with 'no such column'.
+_COLUMN_BACKFILLS: dict[str, dict[str, str]] = {
+    "travian_credentials": {
+        "label": "VARCHAR(128)",
+        "last_connected": "DATETIME",
+    },
+}
+
+
 async def init_db() -> None:
-    """Create all tables if they don't already exist."""
+    """Create all tables if they don't already exist, and backfill columns."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        for table, columns in _COLUMN_BACKFILLS.items():
+            result = await conn.exec_driver_sql(f"PRAGMA table_info({table})")
+            existing = {row[1] for row in result.fetchall()}
+            for name, ddl in columns.items():
+                if existing and name not in existing:
+                    await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 async def get_db():

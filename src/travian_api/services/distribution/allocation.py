@@ -162,8 +162,9 @@ def resolve_resource(
         plan meaningless raise.
 
     Raises:
-        AllocationError: more than one remainder village, or an allocation for a
-            village with no production figure.
+        AllocationError: more than one remainder village, an allocation for a
+            village with no production figure, or a percentage allocation
+            against a negative account total.
     """
     unknown = set(allocations) - set(productions)
     if unknown:
@@ -184,9 +185,10 @@ def resolve_resource(
 
     # A percentage of a negative total is meaningless: 30% of an account that is
     # net -4,000 crop/h is a target of -1,200, which reads as an instruction to
-    # ship crop away from a village that is already starving.
+    # ship crop away from a village that is already starving. The resolved
+    # routes would be wrong, not merely noisy, so this raises rather than warns.
     if total < 0 and any(a.mode is AllocationMode.PERCENTAGE for a in allocations.values()):
-        warnings.append(
+        raise AllocationError(
             f"{resource.value}: account production is negative ({total:.0f}/h), so "
             f"percentage targets resolve to negative amounts. Use absolute or "
             f"sustain targets until the account is net positive."

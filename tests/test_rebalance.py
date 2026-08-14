@@ -262,8 +262,17 @@ class TestAssignRoleAndListName:
     def test_list_name_uses_display_unit_and_village(self):
         p = self._make_placement(1.0, village="V3")
         assign_role_and_list_name("V3", [p])
-        # 1 placement, high_cut=0, mid_cut=0 → idx 0 >= mid_cut → INACTIVE
-        assert p.target_list_name == "V3-INACTIVE-Clubs"
+        # A village's single best target must land in HIGH, not INACTIVE.
+        assert p.target_list_name == "V3-HIGH-Clubs"
+
+    def test_small_placement_sets_always_get_a_high_list(self):
+        """Floored fraction cuts left 1-3 placement villages with no HIGH list
+        at all — a lone placement went straight to INACTIVE, deactivating the
+        village's only raid target by construction."""
+        for n in (1, 2, 3):
+            placements = [self._make_placement(1.0 - i * 0.1) for i in range(n)]
+            ordered = assign_role_and_list_name("V1", placements)
+            assert ordered[0].target_list_role == "HIGH", f"n={n}"
 
     def test_v4_v5_v6_v7_use_standard_roles(self):
         # v5.0 removed the LOCAL role; V4-V7 use HIGH/MID/INACTIVE like V1-V3.
