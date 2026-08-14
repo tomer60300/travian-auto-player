@@ -11,10 +11,15 @@ Module map (built in dependency order):
 
     geometry.py    toroidal distance and travel time            [done]
     merchants.py   capacity model + route cost + cycle choice    [done]
-    allocation.py  allocation modes -> per-village ship gaps     [next]
-    optimizer.py   hub assignment and route selection
-    schedule.py    the 24-hour beat
-    planner.py     orchestration: snapshot -> Plan
+    allocation.py  allocation modes -> per-village ship gaps     [done]
+    optimizer.py   flows -> routes, budgets, infeasibilities     [first pass]
+    schedule.py    the 24-hour beat                              [next]
+    planner.py     orchestration: fetched snapshot -> Plan
+
+Nothing in this package hardcodes an account. Village count grows as the account
+expands -- 22 today, 23 landing -- and every production figure differs between
+runs, so state is always passed in and correctness is pinned by properties that
+hold for *any* number of villages rather than by a fixture of one snapshot.
 
 Two review findings are structural rather than incidental, so they are encoded
 here rather than left to callers:
