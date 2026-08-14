@@ -12,9 +12,22 @@ Module map (built in dependency order):
     geometry.py    toroidal distance and travel time            [done]
     merchants.py   capacity model + route cost + cycle choice    [done]
     allocation.py  allocation modes -> per-village ship gaps     [done]
+    rounding.py    sum-preserving integer cargo                  [done]
     optimizer.py   flows -> routes, budgets, infeasibilities     [first pass]
-    schedule.py    the 24-hour beat                              [next]
-    planner.py     orchestration: fetched snapshot -> Plan
+    schedule.py    the 24-hour beat                              [done]
+    planner.py     orchestration: snapshot -> setup sheet        [done]
+
+Not yet built, and deliberately not faked:
+
+* **Hub consolidation** (profile 8.5) and escalation steps 2-3 of 8.4 -- reroute
+  via a nearer hub, split cargo across paths. The optimizer sweeps cycles and
+  recommends a Trade Office upgrade, then declares infeasibility rather than
+  quietly trimming a route to fit.
+* **Crop relay through a sub-hub** (profile 3.5). Netting in ``allocation``
+  leaves each village either a sender or a receiver of a resource, never both,
+  so a relay cannot be expressed. It needs multi-leg flows, not a scheduling
+  change.
+* **NPC, storage safety, apply and monitoring** (profile sections 6-9).
 
 Nothing in this package hardcodes an account. Village count grows as the account
 expands -- 22 today, 23 landing -- and every production figure differs between

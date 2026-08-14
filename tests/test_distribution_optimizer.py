@@ -189,6 +189,59 @@ class TestBudgetIsReportedNotHidden:
         for over in plan.over_budget:
             assert over.excess > 0
 
+    def test_an_over_budget_village_gets_a_trade_office_recommendation(self):
+        """Escalation step 4: say what would fix it, not just that it is broken.
+
+        A TO 0 sender hauling a lot needs more capacity per merchant; the plan
+        must name how many levels rather than only declaring infeasibility.
+        """
+        villages = {
+            1: VillageState(1, 0, 0, merchant_count=10, trade_office_level=0),
+            2: VillageState(2, 30, 0, merchant_count=20, trade_office_level=0),
+        }
+        plans = {
+            Resource.IRON: resolve_resource(
+                Resource.IRON,
+                {1: 9000.0, 2: 0.0},
+                {
+                    1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                    2: Allocation(AllocationMode.REMAINDER),
+                },
+            )
+        }
+
+        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+
+        assert plan.over_budget
+        over = plan.over_budget[0]
+        assert over.village_id == 1
+        assert over.excess > 0
+        assert over.trade_office_levels_needed is not None
+        assert over.trade_office_levels_needed >= 1
+
+    def test_an_impossible_village_reports_no_upgrade_that_would_help(self):
+        """A village with no spare merchants cannot be fixed by any upgrade."""
+        villages = {
+            1: VillageState(1, 0, 0, merchant_count=2, trade_office_level=0),
+            2: VillageState(2, 60, 0, merchant_count=20, trade_office_level=0),
+        }
+        plans = {
+            Resource.IRON: resolve_resource(
+                Resource.IRON,
+                {1: 9000.0, 2: 0.0},
+                {
+                    1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                    2: Allocation(AllocationMode.REMAINDER),
+                },
+            )
+        }
+
+        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+
+        over = plan.over_budget[0]
+        assert over.available == 0
+        assert over.trade_office_levels_needed is None
+
     def test_reserve_is_withheld_from_the_budget(self):
         village = VillageState(village_id=1, x=0, y=0, merchant_count=20)
 

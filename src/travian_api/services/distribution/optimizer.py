@@ -102,17 +102,49 @@ class Shortfall:
     reason: str
 
 
+MAX_TRADE_OFFICE_LEVEL = 20
+
+
 @dataclass(frozen=True)
 class OverBudget:
-    """A village asked to staff more merchants than it has."""
+    """A village asked to staff more merchants than it has.
+
+    ``trade_office_levels_needed`` is escalation step 4 of profile section 8.4:
+    the smallest Trade Office upgrade that would make this village's own routes
+    fit, or None when even the maximum level cannot. It is a recommendation
+    about the *current* route set -- upgrading changes merchant capacity, so the
+    plan should be re-run afterwards rather than assumed.
+    """
 
     village_id: int
     committed: int
     available: int
+    trade_office_levels_needed: int | None = None
 
     @property
     def excess(self) -> int:
         return self.committed - self.available
+
+
+def _trade_office_levels_needed(
+    village: VillageState,
+    routes_from: Sequence[Route],
+    merchant_model: MerchantModel,
+    budget: int,
+    cycles: Sequence[int],
+) -> int | None:
+    """Smallest Trade Office increase that brings *village* within *budget*."""
+    for delta in range(1, MAX_TRADE_OFFICE_LEVEL - village.trade_office_level + 1):
+        capacity = merchant_model.capacity(village.trade_office_level + delta)
+        needed = sum(
+            cheapest_cycle(
+                route.hourly_total, 2.0 * route.one_way_minutes, capacity, cycles
+            ).merchants_committed
+            for route in routes_from
+        )
+        if needed <= budget:
+            return delta
+    return None
 
 
 @dataclass(frozen=True)
@@ -270,11 +302,22 @@ def build_plan(
                 f"forbid better"
             )
 
+    routes_by_origin: dict[int, list[Route]] = {}
+    for route in routes:
+        routes_by_origin.setdefault(route.origin, []).append(route)
+
     over_budget = tuple(
         OverBudget(
             village_id=vid,
             committed=used,
             available=villages[vid].spare_merchants(merchant_reserve),
+            trade_office_levels_needed=_trade_office_levels_needed(
+                villages[vid],
+                routes_by_origin.get(vid, []),
+                merchant_model,
+                villages[vid].spare_merchants(merchant_reserve),
+                cycles,
+            ),
         )
         for vid, used in sorted(committed.items())
         if used > villages[vid].spare_merchants(merchant_reserve)
