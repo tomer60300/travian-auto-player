@@ -90,6 +90,9 @@ function BackgroundAccountPanel({ disabled }) {
   }
 
   const locked = disabled || busy
+  // The recon account is shared, process-global state; only the instance
+  // operator may see its username or manage it, so hide controls that would 403.
+  const manageable = status?.manageable !== false
 
   return (
     <div className="ml-6 mt-2 p-3 rounded border border-gray-700 bg-black/20 max-w-xl">
@@ -97,7 +100,7 @@ function BackgroundAccountPanel({ disabled }) {
         <span className="text-secondary">Background account:</span>
         {status?.configured ? (
           <>
-            <span className="font-mono">{status.username}</span>
+            <span className="font-mono">{status.username ?? 'configured'}</span>
             <span className="text-secondary">
               ({status.source === 'stored' ? 'saved here' : 'from .env'})
             </span>
@@ -106,20 +109,26 @@ function BackgroundAccountPanel({ disabled }) {
           <span className="text-amber-400">not configured</span>
         )}
         <span className="flex-1" />
-        <button className="btn-secondary btn-sm" onClick={() => setEditing(!editing)} disabled={locked}>
-          {status?.configured ? 'Change' : 'Set'}
-        </button>
-        <button className="btn-secondary btn-sm" onClick={test} disabled={locked || !status?.configured}>
-          Test
-        </button>
-        {status?.source === 'stored' && (
-          <button className="btn-secondary btn-sm" onClick={clear} disabled={locked}>
-            Clear
-          </button>
+        {manageable ? (
+          <>
+            <button className="btn-secondary btn-sm" onClick={() => setEditing(!editing)} disabled={locked}>
+              {status?.configured ? 'Change' : 'Set'}
+            </button>
+            <button className="btn-secondary btn-sm" onClick={test} disabled={locked || !status?.configured}>
+              Test
+            </button>
+            {status?.source === 'stored' && (
+              <button className="btn-secondary btn-sm" onClick={clear} disabled={locked}>
+                Clear
+              </button>
+            )}
+          </>
+        ) : (
+          <span className="text-secondary">managed by the instance operator</span>
         )}
       </div>
 
-      {editing && (
+      {editing && manageable && (
         <div className="mt-3 flex flex-col gap-2">
           <input
             className="input-field text-xs"

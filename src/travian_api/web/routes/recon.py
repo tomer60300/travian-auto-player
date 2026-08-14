@@ -11,7 +11,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from travian_api.services.recon_account import recon_account_manager
@@ -34,6 +34,9 @@ class ReconStatusResponse(BaseModel):
     username: str | None = None
     # "stored" (set here), "env" (.env fallback), or None when unconfigured.
     source: str | None = None
+    # False for everyone but the instance operator, so the UI can hide the
+    # management controls instead of offering buttons that will 403.
+    manageable: bool = True
 
 
 class ReconTestResponse(BaseModel):
@@ -42,12 +45,41 @@ class ReconTestResponse(BaseModel):
     detail: str | None = None
 
 
-def _status() -> ReconStatusResponse:
+def _status(manageable: bool) -> ReconStatusResponse:
     return ReconStatusResponse(
         configured=recon_account_manager.is_configured(),
-        username=recon_account_manager.get_proxy_username(),
+        # The recon username is the operator's business only.
+        username=recon_account_manager.get_proxy_username() if manageable else None,
         source=recon_account_manager.credentials_source(),
+        manageable=manageable,
     )
+
+
+async def _first_user_id(db: AsyncSession) -> int | None:
+    result = await db.execute(select(func.min(User.id)))
+    return result.scalar()
+
+
+async def get_instance_operator(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """The earliest-registered user, the only one who manages shared state.
+
+    ReconAccountManager is a process-global singleton backed by a single
+    credential row: letting any authenticated user rotate or clear it would let
+    one web user silently break every other user's recon setup.
+    """
+    first_id = await _first_user_id(db)
+    if first_id is not None and user.id != first_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Only the instance operator (the first registered user) can "
+                "manage the shared background account."
+            ),
+        )
+    return user
 
 
 async def load_stored_credentials(db: AsyncSession) -> bool:
@@ -67,15 +99,19 @@ async def load_stored_credentials(db: AsyncSession) -> bool:
 
 
 @router.get("/status", response_model=ReconStatusResponse)
-async def get_recon_status(_user: User = Depends(get_current_user)):
+async def get_recon_status(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Whether a background account is available, and where it came from."""
-    return _status()
+    first_id = await _first_user_id(db)
+    return _status(manageable=first_id is None or user.id == first_id)
 
 
 @router.put("/credentials", response_model=ReconStatusResponse)
 async def set_recon_credentials(
     body: ReconCredentialRequest,
-    _user: User = Depends(get_current_user),
+    _operator: User = Depends(get_instance_operator),
     db: AsyncSession = Depends(get_db),
 ):
     """Store rotated credentials and apply them to the live runtime."""
@@ -100,12 +136,12 @@ async def set_recon_credentials(
     await recon_account_manager.invalidate()
     logger.info("Recon credentials rotated; cached recon sessions dropped")
 
-    return _status()
+    return _status(manageable=True)
 
 
 @router.delete("/credentials", response_model=ReconStatusResponse)
 async def clear_recon_credentials(
-    _user: User = Depends(get_current_user),
+    _operator: User = Depends(get_instance_operator),
     db: AsyncSession = Depends(get_db),
 ):
     """Forget stored credentials and fall back to the .env values, if any."""
@@ -118,12 +154,13 @@ async def clear_recon_credentials(
     await recon_account_manager.invalidate()
     logger.info("Stored recon credentials cleared; falling back to environment")
 
-    return _status()
+    return _status(manageable=True)
 
 
 @router.post("/test", response_model=ReconTestResponse)
 async def test_recon_credentials(
     session: TravianSession = Depends(get_travian_session),
+    _operator: User = Depends(get_instance_operator),
 ):
     """Attempt a real login with the active recon credentials.
 
