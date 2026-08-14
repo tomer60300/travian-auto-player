@@ -21,6 +21,14 @@ router = APIRouter(prefix="/api/buildings", tags=["buildings"])
 class UpgradeRequest(BaseModel):
     slot_id: int = Field(..., ge=1, le=40, description="Building slot to upgrade")
     allow_gold: bool = Field(default=False, description="Allow spending gold on master builder")
+    village_id: int | None = Field(
+        default=None,
+        description=(
+            "Village to act on. Village switching is client-side only, so the "
+            "session default is forever the login village — pass this whenever "
+            "the UI shows a different village."
+        ),
+    )
 
 
 class ConstructRequest(BaseModel):
@@ -30,6 +38,9 @@ class ConstructRequest(BaseModel):
         default=None, description="Building GID (takes precedence over building_name)"
     )
     allow_gold: bool = Field(default=False, description="Allow spending gold on master builder")
+    village_id: int | None = Field(
+        default=None, description="Village to act on (default: the session's login village)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +125,7 @@ async def upgrade_building(
         result = await session.building_service.upgrade_building(
             slot_id=body.slot_id,
             allow_gold=body.allow_gold,
-            village_id=session.active_village_id,
+            village_id=body.village_id or session.active_village_id,
         )
     except Exception as exc:
         logger.exception("Failed to upgrade building slot %s", body.slot_id)
@@ -143,13 +154,14 @@ async def construct_building(
     slot and matches by name (case-insensitive).
     """
     gid = body.building_gid
+    vid = body.village_id or session.active_village_id
 
     # Resolve building_name -> gid if gid not provided
     if gid is None:
         try:
             available = await session.building_service.get_available_buildings(
                 slot_id=body.slot_id,
-                village_id=session.active_village_id,
+                village_id=vid,
             )
         except Exception as exc:
             logger.exception("Failed to list available buildings for slot %s", body.slot_id)
@@ -179,7 +191,7 @@ async def construct_building(
             slot_id=body.slot_id,
             building_gid=gid,
             allow_gold=body.allow_gold,
-            village_id=session.active_village_id,
+            village_id=vid,
         )
     except Exception as exc:
         logger.exception("Failed to construct building on slot %s", body.slot_id)
@@ -196,6 +208,7 @@ async def construct_building(
 @router.get("/{slot_id}")
 async def get_building_detail(
     slot_id: int,
+    village_id: Optional[int] = Query(None, description="Village ID (default: active village)"),
     session: TravianSession = Depends(get_travian_session),
 ):
     """Get detailed information for a specific building slot."""
@@ -205,10 +218,11 @@ async def get_building_detail(
             detail="slot_id must be between 1 and 40",
         )
 
+    vid = village_id or session.active_village_id
     try:
         detail = await session.building_service.get_building_detail(
             slot_id=slot_id,
-            village_id=session.active_village_id,
+            village_id=vid,
         )
     except Exception as exc:
         logger.exception("Failed to get building detail for slot %s", slot_id)
@@ -218,6 +232,6 @@ async def get_building_detail(
         )
 
     return {
-        "village_id": session.active_village_id,
+        "village_id": vid,
         **detail.model_dump(),
     }

@@ -8,7 +8,7 @@ import jwt
 from fastapi import WebSocket, status
 
 from travian_api.web.auth import decode_access_token
-from travian_api.web.sessions import session_manager
+from travian_api.web.sessions import session_manager, try_restore_session
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +60,17 @@ class ConnectionManager:
 
         user_id = payload["user_id"]
 
-        # Verify user has active Travian session (when required)
+        # Verify user has active Travian session (when required). HTTP routes
+        # auto-reconnect from saved credentials, so give sockets the same
+        # chance before rejecting — otherwise a backend restart leaves every
+        # live page broken until the user reconnects by hand.
         if require_travian_session and session_manager.get(user_id) is None:
-            await websocket.accept()
-            await websocket.close(
-                code=status.WS_1008_POLICY_VIOLATION, reason="No active Travian session"
-            )
-            return None
+            if await try_restore_session(user_id) is None:
+                await websocket.accept()
+                await websocket.close(
+                    code=status.WS_1008_POLICY_VIOLATION, reason="No active Travian session"
+                )
+                return None
 
         return user_id
 

@@ -208,15 +208,18 @@ class SessionManager:
     ) -> TravianSession:
         """Create a new session and authenticate to Travian.
 
-        If the user already has an active session it is disconnected first.
+        Any existing session is replaced only AFTER the new login succeeds, so
+        a reconnect that hits a transient Travian failure (downtime, captcha)
+        cannot destroy a still-working session.
         """
-        await self.disconnect(user_id)
-
         session = TravianSession(user_id, server_url, username, password)
         await session.connect()
 
         async with self._lock:
+            old = self._sessions.pop(user_id, None)
             self._sessions[user_id] = session
+        if old is not None:
+            await old.disconnect()
 
         logger.info(
             "User %s connected to %s as %s",
@@ -261,6 +264,59 @@ class SessionManager:
 # ---------------------------------------------------------------------------
 
 session_manager = SessionManager()
+
+
+async def try_restore_session(user_id: int) -> Optional[TravianSession]:
+    """Best-effort auto-reconnect from saved credentials, for WebSocket auth.
+
+    HTTP requests restore through :func:`get_travian_session`; sockets have no
+    request-scoped db dependency, so this opens its own session. Returns the
+    live or restored session, or None when nothing is saved or the login fails
+    — WebSocket auth turns None into a policy-violation close, not a 403.
+    """
+    session = session_manager.get(user_id)
+    if session is not None:
+        return session
+
+    reconnect_lock = session_manager.get_reconnect_lock(user_id)
+    async with reconnect_lock:
+        session = session_manager.get(user_id)
+        if session is not None:
+            return session
+
+        from datetime import datetime
+
+        from sqlalchemy import select
+
+        from travian_api.web.auth import decrypt_credential
+        from travian_api.web.models.db import TravianCredential, async_session_factory
+
+        try:
+            async with async_session_factory() as db:
+                result = await db.execute(
+                    select(TravianCredential)
+                    .where(TravianCredential.user_id == user_id)
+                    .order_by(TravianCredential.last_connected.desc().nulls_last())
+                    .limit(1)
+                )
+                cred = result.scalar_one_or_none()
+                if cred is None:
+                    return None
+
+                password = decrypt_credential(cred.encrypted_password)
+                session = await session_manager.connect(
+                    user_id=user_id,
+                    server_url=cred.server_url,
+                    username=cred.travian_username,
+                    password=password,
+                )
+                cred.last_connected = datetime.now(UTC)
+                await db.commit()
+                logger.info("Auto-reconnected user %s for a WebSocket", user_id)
+                return session
+        except Exception as exc:
+            logger.warning("WebSocket auto-reconnect failed for user %s: %s", user_id, exc)
+            return None
 
 
 # ---------------------------------------------------------------------------

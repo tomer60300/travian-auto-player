@@ -323,7 +323,11 @@ export default function Buildings() {
     fetchingSlotRef.current = slotId
     setDetailLoading(true)
     try {
-      const res = await api.get(`/buildings/${slotId}`)
+      // The backend's session default is forever the login village (switching
+      // is client-side only), so the selected village must travel explicitly.
+      const res = await api.get(`/buildings/${slotId}`, {
+        params: activeVillageId != null ? { village_id: activeVillageId } : {},
+      })
       if (fetchingSlotRef.current === slotId) {
         setDetail(res.data)
       }
@@ -337,7 +341,7 @@ export default function Buildings() {
         setDetailLoading(false)
       }
     }
-  }, [toast])
+  }, [toast, activeVillageId])
 
   const handleSlotClick = (slotId) => {
     if (selectedSlot === slotId) {
@@ -369,12 +373,14 @@ export default function Buildings() {
         await api.post('/buildings/upgrade', {
           slot_id: pendingAction.slotId,
           allow_gold: false,
+          village_id: activeVillageId ?? undefined,
         })
         toast.success('Upgrade started!')
       } else if (pendingAction.type === 'construct') {
         await api.post('/buildings/construct', {
           slot_id: pendingAction.slotId,
           building_name: pendingAction.buildingName,
+          village_id: activeVillageId ?? undefined,
         })
         toast.success('Construction started!')
       }

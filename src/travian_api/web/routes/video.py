@@ -35,6 +35,12 @@ class VideoClaimRequest(BaseModel):
     building_id: int | None = None
 
 
+class VideoClaimAllRequest(BaseModel):
+    # Village switching is client-side only, so the session default is forever
+    # the login village — the UI passes its own selection.
+    village_id: int | None = None
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -76,10 +82,11 @@ async def claim_reward(
 
 @router.post("/claim-all")
 async def claim_all_production_boosts(
+    body: VideoClaimAllRequest | None = None,
     session: TravianSession = Depends(get_travian_session),
 ):
     """Claim all production boost video rewards."""
-    village_id = session.active_village_id
+    village_id = (body.village_id if body else None) or session.active_village_id
     results = []
 
     for reward_type in _PRODUCTION_BOOST_TYPES:

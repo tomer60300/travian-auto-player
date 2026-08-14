@@ -51,6 +51,9 @@ function RewardCard({ reward, onClaim, claiming, result }) {
 export default function VideoRewards() {
   const toast = useToast()
   const connected = useGameStore((s) => s.connected)
+  // Claims must carry the UI's village: the backend session default is
+  // forever the login village since switching became client-side only.
+  const activeVillageId = useGameStore((s) => s.activeVillageId)
 
   // Per-reward state
   const [claimingType, setClaimingType] = useState(null)
@@ -70,7 +73,10 @@ export default function VideoRewards() {
     })
 
     try {
-      const res = await api.post('/video/claim', { type })
+      const res = await api.post('/video/claim', {
+        type,
+        village_id: activeVillageId ?? undefined,
+      })
       const message = res.data?.message || res.data?.detail || 'Reward claimed!'
       setResults((prev) => ({ ...prev, [type]: { success: true, message } }))
       toast.success(`${REWARD_TYPES.find((r) => r.key === type)?.label || type}: ${message}`)
@@ -90,7 +96,9 @@ export default function VideoRewards() {
     setClaimAllProgress('Starting claim all...')
 
     try {
-      const res = await api.post('/video/claim-all')
+      const res = await api.post('/video/claim-all', {
+        village_id: activeVillageId ?? undefined,
+      })
       const data = res.data
 
       // Handle different response shapes
