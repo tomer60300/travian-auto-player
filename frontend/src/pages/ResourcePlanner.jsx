@@ -156,11 +156,16 @@ export default function ResourcePlanner() {
   const villages = useMemo(() => snapshot?.villages ?? [], [snapshot])
 
   const fetchSnapshot = async () => {
+    // The account can change mid-request (switch/disconnect); a response that
+    // lands afterwards must not overwrite the new account's state with the old
+    // account's villages.
+    const requestedFor = accountKey
     setFetching(true)
     try {
       const res = await api.get('/distribution/snapshot', { timeout: 0 })
+      if (requestedFor !== accountKey) return
       setSnapshot(res.data)
-      saveJson(storageKey(LS_SNAPSHOT), res.data)
+      saveJson(`${LS_SNAPSHOT}::${requestedFor}`, res.data)
       setPlan(null)
       // Villages get lost, chiefed or renamed between fetches; allocations kept
       // for ids no longer in the snapshot would fail every future plan call.
@@ -192,6 +197,9 @@ export default function ResourcePlanner() {
       toast.error('Fetch account state first')
       return
     }
+    // Guard against the account changing mid-request: a plan built from
+    // account A's snapshot must not be presented under account B.
+    const requestedFor = accountKey
     setPlanning(true)
     try {
       // Send only entries the planner can act on: `keep` equals the backend
@@ -216,6 +224,7 @@ export default function ResourcePlanner() {
         })),
         allocations: sendAllocations,
       })
+      if (requestedFor !== accountKey) return
       setPlan(res.data)
       setStage('plan')
     } catch (err) {
@@ -223,7 +232,7 @@ export default function ResourcePlanner() {
     } finally {
       setPlanning(false)
     }
-  }, [villages, tradeOffice, allocations, toast])
+  }, [villages, tradeOffice, allocations, toast, accountKey])
 
   // Live unallocated counter, so slack is visible while typing rather than
   // discovered later (profile known issue #9).
