@@ -47,27 +47,45 @@ class TestVillageContext:
 
 
 class TestVillageSwitch:
-    def test_switch_updates_the_session_default(self):
-        """GET /api/villages and /api/travian/status derive active_village_id
-        from the session; leaving it stale after /switch means a status refresh
-        or a fresh tab shows the old village as active. Explicit village_id
-        parameters on action routes keep per-tab isolation regardless."""
+    def test_switch_is_tab_local_and_does_not_mutate_shared_state(self):
+        """The active village is per-tab. Mutating session.active_village_id
+        would let one tab retarget every other tab's fallback village, and a
+        fallback firing on the wrong village costs a corrective Travian
+        re-fetch — extra requests and an irregular fingerprint. The response
+        still echoes the caller's own choice."""
         from travian_api.web.routes.villages import SwitchVillageRequest, switch_village
 
         session = SimpleNamespace(
             active_village_id=111,
             auth_state=SimpleNamespace(
                 villages=[
-                    SimpleNamespace(id=111, name="Old", x=0, y=0, is_main_village=True),
-                    SimpleNamespace(id=222, name="New", x=5, y=5, is_main_village=False),
+                    SimpleNamespace(id=111, name="Login", x=0, y=0, is_main_village=True),
+                    SimpleNamespace(id=222, name="Other", x=5, y=5, is_main_village=False),
                 ]
             ),
         )
 
         res = asyncio.run(switch_village(SwitchVillageRequest(village_id=222), session))
 
-        assert res.active_village_id == 222
-        assert session.active_village_id == 222
+        assert res.active_village_id == 222  # the caller's tab-local truth
+        assert session.active_village_id == 111  # shared default untouched
+
+    def test_switch_rejects_a_village_the_player_does_not_own(self):
+        from fastapi import HTTPException
+
+        from travian_api.web.routes.villages import SwitchVillageRequest, switch_village
+
+        session = SimpleNamespace(
+            active_village_id=111,
+            auth_state=SimpleNamespace(
+                villages=[SimpleNamespace(id=111, name="Login", x=0, y=0, is_main_village=True)]
+            ),
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(switch_village(SwitchVillageRequest(village_id=999), session))
+
+        assert exc.value.status_code == 404
 
 
 class TestSessionCacheIsolation:

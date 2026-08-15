@@ -84,14 +84,18 @@ async def switch_village(
     body: SwitchVillageRequest,
     session: TravianSession = Depends(get_travian_session),
 ):
-    """Switch the active village context.
+    """Validate a village selection. Tab-local: does NOT mutate shared state.
 
-    Per-tab isolation lives in the CLIENT: every action route accepts an
-    explicit ``village_id`` and each tab sends its own selection, so tabs
-    cannot interfere through this default. The session field is still updated
-    here because GET /api/villages and /api/travian/status derive
-    ``active_village_id``/``is_active`` from it — leaving it stale would show
-    the old village as active on any status refresh or fresh tab.
+    The active village is a per-tab concept, so this deliberately does not touch
+    ``session.active_village_id``. Persisting it would let one tab (or another
+    logged-in device) silently retarget every other tab's fallback village, and
+    a fallback that hits the wrong village costs a corrective re-fetch — extra
+    Travian traffic and an irregular request fingerprint, which is exactly what
+    the stealth layer exists to avoid.
+
+    This stays safe because every Travian-hitting route and operation carries an
+    explicit ``village_id`` (each tab sends its own selection); the session
+    default is only the stable login village, used as a last-resort fallback.
     """
     village = None
     if session.auth_state:
@@ -113,8 +117,8 @@ async def switch_village(
             detail=f"Village {body.village_id} not found for this player.",
         )
 
-    session.active_village_id = body.village_id
-
+    # The response echoes the caller's choice (its own tab-local truth); the
+    # shared session default is intentionally left untouched.
     return SwitchVillageResponse(
         active_village_id=body.village_id,
         village=village,
