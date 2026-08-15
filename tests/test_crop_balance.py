@@ -62,6 +62,44 @@ CAPACITY_HTML = """
 """
 
 
+# Markup captured from the live account (Europe 2). The draining granary marks
+# the countdown with a leading `crit` minus span, and the timer span carries a
+# DUPLICATE class attribute (`class="timer crit" class="timer"`) — BeautifulSoup
+# keeps the second, dropping `crit`, so the draining flag can NOT be read off the
+# timer span. The non-draining row has a plain timer span and no crit anywhere.
+REAL_WAREHOUSE_HTML = """
+<table id="warehouse"><tbody>
+    <tr class="hover">
+        <td class="vil fc"><a href="/dorf1.php?newdid=20003">03</a></td>
+        <td class="lum">28%</td><td class="clay">28%</td><td class="iron">28%</td>
+        <td class="max123"><span class="timer" counting="down" value="72065">20:01:05</span></td>
+        <td class="crop">28%</td>
+        <td class="max4 lc"><span class="crit">&minus;</span>&nbsp;<span class="timer crit" class="timer" counting="down" value="32701">9:05:01</span></td>
+    </tr>
+    <tr class="hover">
+        <td class="vil fc"><a href="/dorf1.php?newdid=20002">02</a></td>
+        <td class="lum">86%</td><td class="clay">86%</td><td class="iron">86%</td>
+        <td class="max123"><span class="timer" counting="down" value="60000">16:40:00</span></td>
+        <td class="crop">86%</td>
+        <td class="max4 lc"><span  class="timer" counting="down" value="4996">1:23:16</span></td>
+    </tr>
+</tbody></table>
+"""
+
+
+class TestRealDrainingMarkup:
+    def test_draining_is_detected_despite_the_duplicate_timer_class(self):
+        """Regression: every village came back draining=False because the flag
+        was read off the timer span, whose duplicate class attribute drops
+        `crit`. The leading crit minus span is the reliable signal."""
+        out = parse_village_stats_warehouse(REAL_WAREHOUSE_HTML)
+
+        assert out[20003]["crop_draining"] is True
+        assert out[20003]["crop_seconds"] == 32701
+        assert out[20002]["crop_draining"] is False
+        assert out[20002]["crop_seconds"] == 4996
+
+
 class TestWarehouseParser:
     def test_reads_raw_seconds_and_direction(self):
         out = parse_village_stats_warehouse(WAREHOUSE_HTML)

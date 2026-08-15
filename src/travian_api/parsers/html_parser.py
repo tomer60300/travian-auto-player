@@ -801,7 +801,8 @@ def parse_village_stats_warehouse(html: str) -> Dict[int, Dict[str, Any]]:
         # village | lumber% | clay% | iron% | warehouse timer | crop% | granary timer
         if len(cells) < 6:
             continue
-        granary_timer = cells[5].find("span", class_="timer")
+        granary_cell = cells[5]
+        granary_timer = granary_cell.find("span", class_="timer")
         if granary_timer is None:
             continue
         # Raw seconds live in the attributes; the rendered H:MM:SS is a JS
@@ -815,8 +816,12 @@ def parse_village_stats_warehouse(html: str) -> Dict[int, Dict[str, Any]]:
         out[vid] = {
             "crop_percent": _stats_int(cells[4].get_text().replace("%", "")),
             "crop_seconds": _stats_int(str(raw_seconds)),
-            # The game marks a draining granary `crit` and prefixes a minus.
-            "crop_draining": "crit" in (granary_timer.get("class") or []),
+            # A draining granary prefixes a `crit`-classed minus span, so detect
+            # it anywhere in the cell. The timer span itself is unreliable: the
+            # live page emits it with a DUPLICATE class attribute
+            # (`class="timer crit" class="timer"`) and BeautifulSoup keeps the
+            # second, dropping `crit` — which read every village as filling.
+            "crop_draining": granary_cell.find(class_="crit") is not None,
             "warehouse_seconds": _stats_int(str(warehouse_raw)),
         }
     return out
