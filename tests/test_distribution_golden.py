@@ -14,6 +14,7 @@ improvement does better is expected — raising them is a regression.
 """
 
 import json
+import statistics
 from pathlib import Path
 
 from travian_api.services.distribution.allocation import (
@@ -38,12 +39,19 @@ FIXTURE = Path(__file__).parent / "fixtures" / "distribution_real_account.json"
 SEED_TOTAL_MERCHANTS = 163
 SEED_OVER_BUDGET_EXCESS = 22
 
-# What the current merchant-aware optimizer achieves. Pinned so an accidental
+# The merchant-minimal plan (latency pass off). Pinned so an accidental
 # regression is caught; expected to only ever drop.
 EXPECTED_TOTAL_MERCHANTS = 152
 EXPECTED_OVER_BUDGET_EXCESS = 17
+# With the latency pass on (the default), idle merchants are spent on speed, so
+# the count rises within budget while travel time falls.
+EXPECTED_LATENCY_MERCHANTS = 163
 # Both remote and crop-heavy; no Trade Office upgrade shrinks village 15's haul.
 STRANDED_VILLAGES = {20015, 81449}
+
+
+def _median_latency(plan):
+    return statistics.median(route.latency_hours for route in plan.routes)
 
 
 def _load_case():
@@ -116,7 +124,8 @@ def test_the_improved_plan_never_costs_more_than_the_greedy_seed():
     villages, plans, geometry, model = _load_case()
 
     seed = _seed_total_merchants(villages, plans, geometry, model)
-    plan = build_plan(villages, plans, geometry, model)
+    # Latency pass off: this property is about the merchant-minimal stage.
+    plan = build_plan(villages, plans, geometry, model, max_latency_hours=None)
 
     assert seed == SEED_TOTAL_MERCHANTS
     assert plan.total_merchants <= seed
@@ -125,12 +134,28 @@ def test_the_improved_plan_never_costs_more_than_the_greedy_seed():
 def test_golden_totals_are_pinned():
     villages, plans, geometry, model = _load_case()
 
-    plan = build_plan(villages, plans, geometry, model)
+    plan = build_plan(villages, plans, geometry, model, max_latency_hours=None)
 
     assert plan.total_merchants == EXPECTED_TOTAL_MERCHANTS
     assert sum(o.excess for o in plan.over_budget) == EXPECTED_OVER_BUDGET_EXCESS
     assert sum(o.excess for o in plan.over_budget) <= SEED_OVER_BUDGET_EXCESS
     assert not plan.shortfalls
+
+
+def test_the_latency_pass_trades_idle_merchants_for_speed():
+    """With a latency target, otherwise-idle merchants shorten cycles: the count
+    rises within budget while median travel time falls, and no village that was
+    within budget is pushed over it."""
+    villages, plans, geometry, model = _load_case()
+
+    minimal = build_plan(villages, plans, geometry, model, max_latency_hours=None)
+    fast = build_plan(villages, plans, geometry, model, max_latency_hours=2.0)
+
+    assert fast.total_merchants == EXPECTED_LATENCY_MERCHANTS
+    assert fast.total_merchants > minimal.total_merchants
+    assert _median_latency(fast) < _median_latency(minimal)
+    # Feasibility is unchanged: the same villages are over budget, no more.
+    assert {o.village_id for o in fast.over_budget} == {o.village_id for o in minimal.over_budget}
 
 
 def test_the_stranded_villages_are_reported_not_hidden():

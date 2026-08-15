@@ -283,14 +283,34 @@ def _greedy_seed_merchants(villages, plans):
 class TestImprovementNeverRegresses:
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
     def test_improved_plan_is_never_worse_than_the_greedy_seed(self, village_count):
-        """The local search only accepts strictly-improving swaps, so the plan it
-        returns must commit no more merchants than the seed it started from."""
+        """The local search only accepts strictly-improving swaps, so the
+        merchant-minimal plan commits no more merchants than the seed it started
+        from. Measured with the latency pass off (``max_latency_hours=None``),
+        which is the stage this property is about — the latency pass then spends
+        idle merchants on speed, deliberately raising the count within budget."""
         villages = make_account(village_count, seed=village_count + 91)
         plans, _ = make_plans(villages, seed=village_count + 91)
 
-        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+        plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
 
         assert plan.total_merchants <= _greedy_seed_merchants(villages, plans)
+
+    @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
+    def test_latency_pass_never_pushes_a_village_over_budget(self, village_count):
+        """Idle-merchant spending is gated by the per-village budget, so a plan
+        that was feasible without it stays feasible with it, and villages already
+        over budget (no spare) are left untouched."""
+        villages = make_account(village_count, seed=village_count + 91)
+        plans, _ = make_plans(villages, seed=village_count + 91)
+
+        minimal = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+        with_latency = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=2.0)
+
+        minimal_over = {o.village_id for o in minimal.over_budget}
+        assert {o.village_id for o in with_latency.over_budget} == minimal_over
+        for vid, used in with_latency.merchants_committed.items():
+            if vid not in minimal_over:
+                assert used <= villages[vid].spare_merchants()
 
 
 class TestDeterminism:

@@ -28,6 +28,14 @@ Two stages, per profile section 14 (``cluster -> assign -> improve``):
    objective ``(over_budget_excess, total_merchants, route_count)``. It never
    returns a plan worse than the seed, and cross-resource bundling falls out of
    costing the *merged* pair cargo.
+3. **Latency pass** -- :func:`_spend_idle_merchants_on_latency` then hands each
+   village's *idle* merchants (those the budget allows but the merchant-minimal
+   plan left unused) to the routes furthest over the latency target, shortening
+   their cycles while keeping merchants full (:data:`MIN_SEND_FILL`). It spends
+   strictly within budget, so feasibility never regresses, and runs only when a
+   target is set. Its reach is bounded by geometry: on a spread-out account the
+   one-way trip dwarfs the cycle wait, so cycle choice can only do so much --
+   assignment and a crop sub-hub are what shorten the trip itself.
 
 What it still does *not* do is claim global optimality (the problem is NP-hard,
 section 14) or relay crop through a sub-hub (single-leg flows only). A village
@@ -41,9 +49,16 @@ from dataclasses import dataclass, field
 
 from .allocation import EPSILON, Resource, ResourcePlan
 from .geometry import MapGeometry
-from .merchants import DAILY_BEAT_CYCLES, MerchantModel, cheapest_cycle
+from .merchants import DAILY_BEAT_CYCLES, MerchantModel, cheapest_cycle, cycle_sweep
 
 DEFAULT_MERCHANT_RESERVE = 2
+
+# Floor on how full a merchant must stay when idle merchants are spent to cut
+# latency. Shortening a cycle shrinks each batch, so without a floor the latency
+# pass runs half-empty merchants just to go faster — trading merchant fill (its
+# own optimisation axis) for speed. 0.6 keeps sends reasonably full while still
+# letting routes speed up where the trip, not the load, is the cost.
+MIN_SEND_FILL = 0.6
 
 
 @dataclass(frozen=True)
@@ -301,6 +316,87 @@ def _route_for_pair(
     )
 
 
+def _spend_idle_merchants_on_latency(
+    routes: Sequence[Route],
+    villages: Mapping[int, VillageState],
+    merchant_model: MerchantModel,
+    cycles: Sequence[int],
+    budgets: Mapping[int, int],
+    latency_target: float,
+) -> list[Route]:
+    """Shorten over-target routes by spending each village's idle merchants.
+
+    Merchant minimisation drives routes to long cycles (a 24h cycle can save one
+    merchant over a 3h one), so the cheapest plan is also the slowest — measured
+    at a median 5.6h against a 2h target. Yet villages carry idle merchants the
+    budget already allows. This pass hands those idle merchants to the routes
+    that most need speed: for each village it repeatedly picks the affordable
+    shorter cycle giving the best latency cut per merchant, spending strictly
+    within ``budget - already_committed`` so a village can never be pushed over
+    its cap. Compliant routes (<= target) are left alone rather than
+    over-shortened, and a route whose one-way trip alone exceeds the target is
+    still sped up as far as the spare budget reaches.
+
+    Runs only when a latency target is set; with ``None`` the plan stays purely
+    merchant-minimal.
+    """
+    result = list(routes)
+    by_origin: dict[int, list[int]] = {}
+    for index, route in enumerate(result):
+        by_origin.setdefault(route.origin, []).append(index)
+
+    for origin in sorted(by_origin):
+        capacity = merchant_model.capacity(villages[origin].trade_office_level)
+        indices = by_origin[origin]
+        spare = budgets.get(origin, 0) - sum(result[i].merchants_committed for i in indices)
+        while spare > 0:
+            best: tuple[tuple[int, float, int, int], int, int, int, int] | None = None
+            for i in indices:
+                route = result[i]
+                if route.latency_hours <= latency_target:
+                    continue  # already fast enough; do not waste merchants on it
+                one_way = route.one_way_minutes
+                for cost in cycle_sweep(route.hourly_total, 2.0 * one_way, capacity, cycles):
+                    if cost.cycle_hours >= route.cycle_hours:
+                        continue  # only a shorter cycle lowers latency
+                    delta = cost.merchants_committed - route.merchants_committed
+                    if delta <= 0 or delta > spare:
+                        continue
+                    new_latency = cost.cycle_hours + one_way / 60.0
+                    if new_latency >= route.latency_hours:
+                        continue
+                    # Don't buy speed with half-empty merchants (axis 2).
+                    if cost.batch < MIN_SEND_FILL * cost.merchants_per_send * capacity:
+                        continue
+                    compliant = int(new_latency <= latency_target)
+                    per_merchant = (route.latency_hours - new_latency) / delta
+                    key = (compliant, per_merchant, -delta, -cost.cycle_hours)
+                    if best is None or key > best[0]:
+                        best = (
+                            key,
+                            i,
+                            cost.cycle_hours,
+                            cost.merchants_per_send,
+                            cost.sets_in_flight,
+                        )
+                        best_delta = delta
+            if best is None:
+                break
+            _, i, cycle_hours, merchants_per_send, sets_in_flight = best
+            route = result[i]
+            result[i] = Route(
+                origin=route.origin,
+                destination=route.destination,
+                cargo_per_hour=route.cargo_per_hour,
+                cycle_hours=cycle_hours,
+                merchants_per_send=merchants_per_send,
+                sets_in_flight=sets_in_flight,
+                one_way_minutes=route.one_way_minutes,
+            )
+            spare -= best_delta
+    return result
+
+
 def _improve_flows(
     assignment: Assignment,
     villages: Mapping[int, VillageState],
@@ -484,25 +580,36 @@ def build_plan(
     assignment = _improve_flows(assignment, villages, geometry, merchant_model, cycles, budgets)
     pair_cargo = _merge_pair_cargo(assignment)
 
-    routes: list[Route] = []
-    committed: dict[int, int] = {vid: 0 for vid in villages}
-
-    for origin, destination in sorted(pair_cargo):
-        cargo = pair_cargo[(origin, destination)]
-        if sum(cargo.values()) <= EPSILON:
-            continue
-
-        route = _route_for_pair(
-            origin, destination, cargo, villages, geometry, merchant_model, cycles
+    routes: list[Route] = [
+        _route_for_pair(
+            origin,
+            destination,
+            pair_cargo[(origin, destination)],
+            villages,
+            geometry,
+            merchant_model,
+            cycles,
         )
-        routes.append(route)
-        committed[origin] += route.merchants_committed
+        for origin, destination in sorted(pair_cargo)
+        if sum(pair_cargo[(origin, destination)].values()) > EPSILON
+    ]
 
+    # Spend each village's idle merchants (within budget) to shorten the routes
+    # furthest over the latency target; skipped entirely when no target is set,
+    # leaving the plan purely merchant-minimal.
+    if max_latency_hours is not None:
+        routes = _spend_idle_merchants_on_latency(
+            routes, villages, merchant_model, cycles, budgets, max_latency_hours
+        )
+
+    committed: dict[int, int] = {vid: 0 for vid in villages}
+    for route in routes:
+        committed[route.origin] += route.merchants_committed
         if max_latency_hours is not None and route.latency_hours > max_latency_hours:
             warnings.append(
-                f"route {origin} -> {destination} has {route.latency_hours:.1f}h "
-                f"latency against a {max_latency_hours:.0f}h target; geometry may "
-                f"forbid better"
+                f"route {route.origin} -> {route.destination} has "
+                f"{route.latency_hours:.1f}h latency against a {max_latency_hours:.0f}h "
+                f"target; geometry or the merchant budget may forbid better"
             )
 
     routes_by_origin: dict[int, list[Route]] = {}
