@@ -152,7 +152,10 @@ def test_saving_the_same_server_twice_updates_instead_of_duplicating(monkeypatch
 
     class _Db:
         async def execute(self, _query):
-            return SimpleNamespace(scalar_one_or_none=lambda: existing)
+            return SimpleNamespace(
+                scalar_one_or_none=lambda: existing,
+                scalars=lambda: SimpleNamespace(first=lambda: existing),
+            )
 
         def add(self, obj):
             added.append(obj)
@@ -176,6 +179,56 @@ def test_saving_the_same_server_twice_updates_instead_of_duplicating(monkeypatch
     assert existing.encrypted_password == "enc:rotated"
     assert existing.label == "main"
     assert res.id == 5
+
+
+def test_resaving_tolerates_duplicate_rows_from_older_databases(monkeypatch):
+    """Legacy databases can hold duplicate rows for one account; resaving the
+    account must update the newest row, not 500 with MultipleResultsFound —
+    these are exactly the users the upsert exists to repair."""
+    from sqlalchemy.exc import MultipleResultsFound
+
+    monkeypatch.setattr(auth_routes, "encrypt_credential", lambda p: f"enc:{p}")
+    newest = SimpleNamespace(
+        id=9,
+        user_id=1,
+        server_url="https://ts1.x1.europe.travian.com",
+        travian_username="alice",
+        encrypted_password="enc:old",
+        label=None,
+        last_connected=None,
+    )
+
+    class _Result:
+        def scalar_one_or_none(self):
+            raise MultipleResultsFound()
+
+        def scalars(self):
+            return SimpleNamespace(first=lambda: newest)
+
+    class _Db:
+        async def execute(self, _query):
+            return _Result()
+
+        def add(self, _obj):
+            raise AssertionError("must update the newest duplicate, not insert another")
+
+        async def commit(self):
+            pass
+
+        async def refresh(self, _obj):
+            pass
+
+    body = auth_routes.SavedServerRequest(
+        server_url="https://ts1.x1.europe.travian.com",
+        username="alice",
+        password="rotated",
+        label=None,
+    )
+
+    res = asyncio.run(auth_routes.save_server(body, SimpleNamespace(id=1), _Db()))
+
+    assert newest.encrypted_password == "enc:rotated"
+    assert res.id == 9
 
 
 def test_stamping_tolerates_duplicate_rows_from_older_databases():

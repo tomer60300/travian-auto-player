@@ -110,14 +110,17 @@ async def _update_last_connected(
     """
     try:
         result = await db.execute(
-            select(TravianCredential).where(
+            select(TravianCredential)
+            .where(
                 TravianCredential.user_id == user_id,
                 TravianCredential.server_url == server_url,
                 TravianCredential.travian_username == travian_username,
             )
+            .order_by(TravianCredential.id.desc())
         )
-        # first(), not scalar_one_or_none(): databases from before the upsert
-        # in save_server may hold duplicate rows for the same account.
+        # first() on the newest row, not scalar_one_or_none(): databases from
+        # before the upsert in save_server may hold duplicates, and the row
+        # stamped here must be the one save_server keeps current.
         cred = result.scalars().first()
         if cred is not None:
             cred.last_connected = datetime.now(UTC)
@@ -257,13 +260,17 @@ async def save_server(
     outdated password, so saving the same account again rotates it in place.
     """
     result = await db.execute(
-        select(TravianCredential).where(
+        select(TravianCredential)
+        .where(
             TravianCredential.user_id == user.id,
             TravianCredential.server_url == body.server_url,
             TravianCredential.travian_username == body.username,
         )
+        .order_by(TravianCredential.id.desc())
     )
-    cred = result.scalar_one_or_none()
+    # first(), not scalar_one_or_none(): legacy databases may hold duplicate
+    # rows for the same account, and resaving must repair, not 500.
+    cred = result.scalars().first()
     if cred is not None:
         cred.encrypted_password = encrypt_credential(body.password)
         cred.label = body.label
