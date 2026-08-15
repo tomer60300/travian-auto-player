@@ -15,7 +15,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from travian_api.web.models.db import User, get_db
+from travian_api.web.models.db import DB_DIR, User, get_db
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -25,10 +25,12 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 _logger = logging.getLogger(__name__)
 
-# Store keys in ~/.travian/ (same directory as the DB) instead of CWD
-_KEYS_DIR = Path.home() / ".travian"
-_KEYS_DIR.mkdir(parents=True, exist_ok=True)
-KEYS_FILE = _KEYS_DIR / ".web_keys"
+# Keys live NEXT TO the database they encrypt for: with a custom
+# TRAVIAN_DB_PATH, keys pinned to ~/.travian mean moving or reusing that DB
+# elsewhere cannot decrypt its own credential rows. The default DB dir is
+# ~/.travian, so default deployments keep their existing key file.
+KEYS_FILE = DB_DIR / ".web_keys"
+_LEGACY_KEYS_FILE = Path.home() / ".travian" / ".web_keys"
 
 # ---------------------------------------------------------------------------
 # Key management
@@ -67,6 +69,19 @@ def get_or_create_keys() -> tuple[str, str]:
     if KEYS_FILE.exists():
         _warn_if_world_readable(KEYS_FILE)
         data = json.loads(KEYS_FILE.read_text(encoding="utf-8"))
+        return data["jwt_secret"], data["fernet_key"]
+
+    # One-time migration: deployments that ran a custom TRAVIAN_DB_PATH before
+    # keys followed the DB have their keys in ~/.travian. Regenerating instead
+    # of migrating would orphan every credential row that DB already holds.
+    if KEYS_FILE != _LEGACY_KEYS_FILE and _LEGACY_KEYS_FILE.exists():
+        data = json.loads(_LEGACY_KEYS_FILE.read_text(encoding="utf-8"))
+        KEYS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            KEYS_FILE.chmod(0o600)
+        except OSError:
+            pass
+        _logger.info("Migrated web keys from %s to %s", _LEGACY_KEYS_FILE, KEYS_FILE)
         return data["jwt_secret"], data["fernet_key"]
 
     jwt_secret = os.urandom(32).hex()

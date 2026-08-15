@@ -13,9 +13,11 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:8000',
+      // Default 8001 matches what travian-web and start.bat actually launch;
+      // override with TRAVIAN_BACKEND_PORT (e.g. 8000 for the stable server).
+      '/api': `http://localhost:${process.env.TRAVIAN_BACKEND_PORT || '8001'}`,
       '/ws': {
-        target: 'ws://localhost:8000',
+        target: `ws://localhost:${process.env.TRAVIAN_BACKEND_PORT || '8001'}`,
         ws: true,
       },
     },

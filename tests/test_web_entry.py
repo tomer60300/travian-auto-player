@@ -85,6 +85,65 @@ def test_custom_db_path_parent_directory_is_created(tmp_path):
     assert target.parent.is_dir()
 
 
+def test_web_keys_follow_a_custom_db_path(tmp_path):
+    """The Fernet/JWT keys must live next to the database they encrypt for:
+    with keys pinned to ~/.travian, moving or reusing a custom-path DB on
+    another setup cannot decrypt its own credential rows."""
+    db_file = tmp_path / "data" / "app.db"
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    subprocess.run(
+        [sys.executable, "-c", "import travian_api.web.auth"],
+        env={
+            **os.environ,
+            "TRAVIAN_DB_PATH": str(db_file),
+            "USERPROFILE": str(fake_home),
+            "HOME": str(fake_home),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert (db_file.parent / ".web_keys").is_file()
+
+
+def test_legacy_keys_are_migrated_next_to_a_custom_db(tmp_path):
+    """Deployments that already ran with a custom TRAVIAN_DB_PATH have their
+    keys in ~/.travian; those must move with the DB, not be regenerated —
+    regeneration would orphan every encrypted credential row."""
+    db_file = tmp_path / "data" / "app.db"
+    fake_home = tmp_path / "home"
+    legacy_dir = fake_home / ".travian"
+    legacy_dir.mkdir(parents=True)
+    import json
+
+    from cryptography.fernet import Fernet
+
+    legacy_keys = legacy_dir / ".web_keys"
+    legacy_keys.write_text(
+        json.dumps({"jwt_secret": "legacy-jwt", "fernet_key": Fernet.generate_key().decode()})
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", "import travian_api.web.auth"],
+        env={
+            **os.environ,
+            "TRAVIAN_DB_PATH": str(db_file),
+            "USERPROFILE": str(fake_home),
+            "HOME": str(fake_home),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    migrated = db_file.parent / ".web_keys"
+    assert migrated.is_file()
+    assert "legacy-jwt" in migrated.read_text()
+
+
 def test_init_db_backfills_columns_added_after_first_release(tmp_path):
     """create_all() never ALTERs an existing table, so upgrading a live
     travian_web.db from before label/last_connected left reconnect queries
