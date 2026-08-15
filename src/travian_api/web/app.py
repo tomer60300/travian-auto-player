@@ -235,8 +235,11 @@ async def serve_ui_not_built(request: Request, full_path: str) -> JSONResponse:
     return JSONResponse(
         {
             "detail": (
-                "The web UI has not been built. Run `npm run build` in frontend/ "
-                "(or use start.bat / start.sh), then restart the server."
+                "The web UI has not been built. From a source checkout, run "
+                "`npm run build` in frontend/ (or use start.bat / start.sh). "
+                "From a pip install, reinstall a wheel that bundles the UI — "
+                "one built with Node available, e.g. `pip install --force-reinstall "
+                "'travian-api[web]'`. Then restart the server."
             )
         },
         status_code=503,
