@@ -38,7 +38,7 @@ from travian_api.services.distribution.optimizer import VillageState
 from travian_api.services.distribution.planner import PlannerConfig, craft_plan
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User
-from travian_api.web.sessions import TravianSession, get_travian_session
+from travian_api.web.sessions import TravianSession, get_live_travian_session
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +163,11 @@ class PlanResponse(BaseModel):
 
 
 @router.get("/snapshot", response_model=SnapshotResponse)
-async def get_snapshot(session: TravianSession = Depends(get_travian_session)):
+async def get_snapshot(session: TravianSession = Depends(get_live_travian_session)):
     """Read current account state. Costs 3-4 game requests.
+
+    Uses the live session only: this endpoint prices every game request, and
+    an auto-reconnect would spend unreported login traffic first.
 
     Production for lumber/clay/iron comes from the account-wide statistics table,
     where gross equals net -- only crop is consumed. Crop is read separately

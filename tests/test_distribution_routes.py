@@ -123,6 +123,16 @@ def _session(http: _SnapshotHttp) -> SimpleNamespace:
 
 
 class TestSnapshotPricing:
+    def test_snapshot_never_spends_an_implicit_login(self):
+        """The endpoint prices itself at 3-4 requests; auto-reconnect would
+        spend unreported login traffic before the handler even starts. It must
+        depend on the live session only and 403 otherwise."""
+        from travian_api.web.sessions import get_travian_session as reconnecting
+
+        for parameter in inspect.signature(get_snapshot).parameters.values():
+            dependency = getattr(parameter.default, "dependency", None)
+            assert dependency is not reconnecting
+
     def test_reports_three_requests_when_nothing_is_filling(self):
         """The capacity page is only fetched for filling villages, and the
         reported price must match what was actually spent."""

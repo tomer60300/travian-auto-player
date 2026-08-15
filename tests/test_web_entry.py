@@ -70,6 +70,22 @@ def test_loose_static_files_do_not_count_as_a_frontend_build(tmp_path):
     assert ui_build_exists(tmp_path) is True
 
 
+def test_spa_file_serving_rejects_path_traversal():
+    """`/../../.env` must not escape the build directory: only api/ and ws/
+    prefixes were filtered, so any readable file on disk could be downloaded."""
+    import asyncio
+
+    from travian_api.web.app import STATIC_DIR, serve_spa
+
+    escape = "../routes/distribution.py"
+    assert (STATIC_DIR / escape).resolve().is_file(), "traversal target must exist for the test"
+
+    response = asyncio.run(serve_spa(None, escape))
+
+    served = getattr(response, "path", "")
+    assert not str(served).endswith("distribution.py"), "traversal escaped the build directory"
+
+
 def test_custom_db_path_parent_directory_is_created(tmp_path):
     target = tmp_path / "nested" / "state" / "app.db"
     assert not target.parent.exists()

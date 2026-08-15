@@ -269,7 +269,12 @@ if ui_build_exists(STATIC_DIR):
         if full_path.startswith(("api/", "ws/")):
             return JSONResponse({"detail": "Not found"}, status_code=404)
 
-        file_path = STATIC_DIR / full_path
+        # Resolve and verify containment BEFORE serving: a raw request like
+        # /../../.env would otherwise escape the build directory and download
+        # any readable file on disk, .env and key files included.
+        file_path = (STATIC_DIR / full_path).resolve()
+        if not file_path.is_relative_to(STATIC_DIR.resolve()):
+            return JSONResponse({"detail": "Not found"}, status_code=404)
         if file_path.is_file():
             # Loose static files at the SPA root (favicon.svg, robots.txt,
             # etc.). The content-hashed assets live under /assets via the

@@ -463,6 +463,27 @@ async def try_restore_session(user_id: int) -> Optional[TravianSession]:
         return session
 
 
+async def get_live_travian_session(
+    user: User = Depends(get_current_user),
+) -> TravianSession:
+    """The live session only — NO auto-reconnect.
+
+    For endpoints that price their game traffic explicitly (the distribution
+    snapshot): an implicit login would spend unreported requests before the
+    handler even starts. 403 tells the operator to reconnect deliberately.
+    """
+    session = session_manager.get(user.id)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Not connected. Reconnect first — this endpoint never spends "
+                "login traffic implicitly."
+            ),
+        )
+    return session
+
+
 # ---------------------------------------------------------------------------
 # FastAPI dependency
 # ---------------------------------------------------------------------------
