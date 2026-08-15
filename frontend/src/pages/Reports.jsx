@@ -143,6 +143,9 @@ function ReportDetail({ detail, loading }) {
 
 function RaidTargetAnalyzer() {
   const toast = useToast()
+  // The backend session default is forever the login village (switching is
+  // client-side only), so this tab's selection must travel explicitly.
+  const activeVillageId = useGameStore((s) => s.activeVillageId)
   const [collapsed, setCollapsed] = useState(true)
   const [minResources, setMinResources] = useState(200)
   const [analyzerMaxAge, setAnalyzerMaxAge] = useState(24)
@@ -184,6 +187,7 @@ function RaidTargetAnalyzer() {
 
     ws.onopen = () => {
       ws.send(JSON.stringify({
+        village_id: activeVillageId ?? undefined,
         min_resources: minResources,
         max_report_age_hours: analyzerMaxAge,
         max_pages: analyzerMaxPages,

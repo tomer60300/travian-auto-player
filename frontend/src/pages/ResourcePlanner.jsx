@@ -127,7 +127,16 @@ export default function ResourcePlanner() {
   )
 
   useEffect(() => {
-    if (!accountKey) return
+    if (!accountKey) {
+      // Disconnected: the page stays routable, so showing (or planning from)
+      // the previous account's villages would act on stale data.
+      setSnapshot(null)
+      setTradeOffice({})
+      setAllocations({})
+      setPlan(null)
+      setHydratedKey(null)
+      return
+    }
     setSnapshot(loadJson(`${LS_SNAPSHOT}::${accountKey}`, null))
     setTradeOffice(loadJson(`${LS_TRADE_OFFICE}::${accountKey}`, {}))
     setAllocations(loadJson(`${LS_ALLOCATIONS}::${accountKey}`, {}))
