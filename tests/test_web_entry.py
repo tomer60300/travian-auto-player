@@ -65,15 +65,23 @@ def test_loose_static_files_do_not_count_as_a_frontend_build(tmp_path):
     (tmp_path / "favicon.svg").write_text("<svg/>")
     assert ui_build_exists(tmp_path) is False
 
-    # index.html referencing a chunk that was never written = interrupted build.
+    # index.html referencing assets that were never written = interrupted build.
     (tmp_path / "assets").mkdir()
     (tmp_path / "index.html").write_text(
-        '<html><body><script type="module" src="/assets/index-abc123.js"></script></body></html>'
+        "<html><head>"
+        '<link rel="stylesheet" href="/assets/index-abc123.css">'
+        "</head><body>"
+        '<script type="module" src="/assets/index-abc123.js"></script>'
+        "</body></html>"
     )
     assert ui_build_exists(tmp_path) is False
 
-    # The referenced chunk now exists on disk → a complete build.
+    # The script exists but the linked stylesheet is still missing → not ready.
     (tmp_path / "assets" / "index-abc123.js").write_text("// built")
+    assert ui_build_exists(tmp_path) is False
+
+    # Every referenced asset exists → a complete build.
+    (tmp_path / "assets" / "index-abc123.css").write_text("/* built */")
     assert ui_build_exists(tmp_path) is True
 
 

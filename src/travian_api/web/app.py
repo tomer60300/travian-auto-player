@@ -59,8 +59,9 @@ def ui_build_exists(static_dir: Path) -> bool:
     without a build, and mounting StaticFiles on a missing ``assets/`` raises
     at import — which would crash the server instead of letting the
     unbuilt-UI fallback explain the situation. Beyond that, an interrupted Vite
-    build can leave an index.html that references a hashed chunk which was never
-    written — so validate that every local ``<script src>`` index.html points at
+    build can leave an index.html that references a hashed asset which was never
+    written — script, stylesheet, or modulepreload chunk. So validate that every
+    local ``assets/`` reference (``src`` or ``href``) index.html points at
     actually exists on disk. A partial build then falls back to the 503 page
     instead of serving a broken SPA.
     """
@@ -73,10 +74,14 @@ def ui_build_exists(static_dir: Path) -> bool:
         html = index.read_text(encoding="utf-8")
     except OSError:
         return False
-    refs = [r for r in re.findall(r'<script[^>]+src="([^"]+)"', html) if "://" not in r]
+    # Every hashed build output Vite emits (entry script, CSS, preloaded chunks)
+    # lives under assets/ and is referenced by a src= or href=.
+    refs = [
+        r for r in re.findall(r'(?:src|href)="([^"]+)"', html) if "://" not in r and "assets/" in r
+    ]
     if not refs:
         return False
-    return all((static_dir / ref.lstrip("/")).is_file() for ref in refs)
+    return all((static_dir / r.lstrip("/")).is_file() for r in refs)
 
 
 def _quiet_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
