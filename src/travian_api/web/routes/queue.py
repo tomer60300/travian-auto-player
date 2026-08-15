@@ -114,7 +114,8 @@ _TEMPLATES = {
         "label": "Resource Focus",
         "description": "Level up all resource fields evenly to 5, then 8",
         "yaml": (
-            "village_id: auto\n"
+            "# Set village_id to your target village id before running.\n"
+            "village_id: 0\n"
             "plan:\n"
             "  - building: Woodcutter\n"
             "    target: 8\n"
@@ -134,7 +135,8 @@ _TEMPLATES = {
         "label": "Roman Military",
         "description": "Barracks, Academy, Smithy, and Horse Drinking Trough",
         "yaml": (
-            "village_id: auto\n"
+            "# Set village_id to your target village id before running.\n"
+            "village_id: 0\n"
             "plan:\n"
             "  - building: Barracks\n"
             "    target: 15\n"
@@ -154,7 +156,8 @@ _TEMPLATES = {
         "label": "Teuton Raider",
         "description": "Barracks and Stable for early raiding",
         "yaml": (
-            "village_id: auto\n"
+            "# Set village_id to your target village id before running.\n"
+            "village_id: 0\n"
             "plan:\n"
             "  - building: Barracks\n"
             "    target: 15\n"
@@ -171,7 +174,8 @@ _TEMPLATES = {
         "label": "Gaul Defense",
         "description": "Palisade, Trapper, and Stable for defensive play",
         "yaml": (
-            "village_id: auto\n"
+            "# Set village_id to your target village id before running.\n"
+            "village_id: 0\n"
             "plan:\n"
             "  - building: Palisade\n"
             "    target: 15\n"
@@ -188,7 +192,8 @@ _TEMPLATES = {
         "label": "Economy Starter",
         "description": "Main Building, Warehouse, Granary, Marketplace",
         "yaml": (
-            "village_id: auto\n"
+            "# Set village_id to your target village id before running.\n"
+            "village_id: 0\n"
             "plan:\n"
             "  - building: Main Building\n"
             "    target: 15\n"
@@ -208,7 +213,8 @@ _TEMPLATES = {
         "label": "Second Village",
         "description": "Residence, Warehouse, and Granary for settling",
         "yaml": (
-            "village_id: auto\n"
+            "# Set village_id to your target village id before running.\n"
+            "village_id: 0\n"
             "plan:\n"
             "  - building: Residence\n"
             "    target: 10\n"
@@ -244,6 +250,14 @@ async def validate_build_plan(
     Nothing is executed -- this is a read-only operation.
     """
     plan = _parse_yaml_to_plan(body.yaml_content)
+
+    # Reject a village-less plan the same way the runner does, so validate and
+    # run agree — a template placeholder must be filled in before either.
+    if not plan.village_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Build plan is missing village_id. Set it to your target village.",
+        )
 
     # Collect status messages emitted during resolve_slots
     messages: list[str] = []
