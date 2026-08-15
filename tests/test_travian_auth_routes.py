@@ -69,6 +69,44 @@ def test_connect_succeeds_even_if_the_last_connected_stamp_fails(monkeypatch):
     assert res.connected is True
 
 
+def test_saved_server_connect_succeeds_even_if_the_stamp_fails(monkeypatch):
+    """Same contract as /connect: the timestamp is bookkeeping and must not
+    turn a successful saved-server login into a 500."""
+    live = SimpleNamespace(
+        server_url="https://ts1.x1.europe.travian.com",
+        player_name="Chieftain",
+        tribe_id=1,
+        active_village_id=20003,
+        auth_state=SimpleNamespace(
+            villages=[SimpleNamespace(id=20003, name="03", x=23, y=88, is_main_village=True)]
+        ),
+    )
+
+    async def ok_connect(**kwargs):
+        return live
+
+    monkeypatch.setattr(auth_routes.session_manager, "connect", ok_connect)
+
+    cred = SimpleNamespace(
+        server_url="https://ts1.x1.europe.travian.com",
+        travian_username="alice",
+        encrypted_password="sealed",
+        last_connected=None,
+    )
+    monkeypatch.setattr(auth_routes, "decrypt_credential", lambda _s: "pw")
+
+    class _StampFailsDb:
+        async def execute(self, _query):
+            return SimpleNamespace(scalar_one_or_none=lambda: cred)
+
+        async def commit(self):
+            raise RuntimeError("database is locked")
+
+    res = asyncio.run(auth_routes.connect_saved_server(1, SimpleNamespace(id=1), _StampFailsDb()))
+
+    assert res.connected is True
+
+
 def test_status_attempts_a_saved_credential_restore(monkeypatch):
     """After a backend restart the frontend's first call is /status; answering
     connected=false without trying the saved-credential restore sends users

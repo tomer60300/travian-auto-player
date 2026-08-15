@@ -329,8 +329,12 @@ async def connect_saved_server(
             detail=f"Failed to connect to Travian server: {exc}",
         )
 
-    # 4. Update last_connected timestamp
-    cred.last_connected = datetime.now(UTC)
-    await db.commit()
+    # 4. Update last_connected timestamp — best-effort bookkeeping: a DB
+    # hiccup here must not report the successful login as a failure.
+    try:
+        cred.last_connected = datetime.now(UTC)
+        await db.commit()
+    except Exception:
+        logger.warning("Connected user %s but could not stamp last_connected", user.id)
 
     return _session_to_status(session)

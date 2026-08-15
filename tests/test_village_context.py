@@ -419,6 +419,61 @@ class TestRestoreSessionBookkeeping:
         assert result is live
 
 
+class TestRestoreBackoff:
+    def test_a_failed_restore_is_not_retried_on_every_poll(self, monkeypatch):
+        """/status polls call try_restore_session whenever no session exists;
+        with stale credentials or a downed world, every poll performing another
+        real login is unbounded traffic and bot-detection pressure."""
+        import travian_api.web.auth as auth_module
+        import travian_api.web.models.db as db_module
+        import travian_api.web.sessions as sessions_module
+
+        fresh = SessionManager()
+        monkeypatch.setattr(sessions_module, "session_manager", fresh)
+        monkeypatch.setattr(sessions_module, "_restore_backoff", {}, raising=False)
+
+        attempts = []
+
+        async def failing_connect(**kwargs):
+            attempts.append(1)
+            raise RuntimeError("login blocked")
+
+        monkeypatch.setattr(fresh, "connect", failing_connect)
+        monkeypatch.setattr(fresh, "_connect_locked", failing_connect, raising=False)
+        monkeypatch.setattr(auth_module, "decrypt_credential", lambda _s: "pw")
+
+        cred = SimpleNamespace(
+            server_url="https://ts1.x1.europe.travian.com",
+            travian_username="alice",
+            encrypted_password="sealed",
+            last_connected=None,
+        )
+
+        class _FakeDb:
+            async def execute(self, _query):
+                return SimpleNamespace(scalar_one_or_none=lambda: cred)
+
+            async def commit(self):
+                pass
+
+        class _FakeFactory:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return _FakeDb()
+
+            async def __aexit__(self, *args):
+                return False
+
+        monkeypatch.setattr(db_module, "async_session_factory", _FakeFactory())
+
+        assert asyncio.run(sessions_module.try_restore_session(7)) is None
+        assert asyncio.run(sessions_module.try_restore_session(7)) is None
+
+        assert len(attempts) == 1, "second poll re-attempted a real login during backoff"
+
+
 class _FakeWebSocket:
     def __init__(self, token="t"):
         self.query_params = {"token": token}

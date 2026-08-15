@@ -10,6 +10,7 @@ import hashlib
 import logging
 import os
 import tempfile
+import time
 from datetime import UTC
 from pathlib import Path
 from typing import Optional
@@ -327,6 +328,13 @@ class SessionManager:
 
 session_manager = SessionManager()
 
+# After a FAILED background restore, do not retry for this long. The /status
+# health poll calls try_restore_session on every tick; with stale credentials
+# or a downed world, retrying each poll is unbounded login traffic and
+# bot-detection pressure. Keyed by user id, monotonic deadline.
+_RESTORE_RETRY_SECONDS = 60.0
+_restore_backoff: dict[int, float] = {}
+
 
 async def try_restore_session(user_id: int) -> Optional[TravianSession]:
     """Best-effort auto-reconnect from saved credentials, for WebSocket auth.
@@ -342,6 +350,8 @@ async def try_restore_session(user_id: int) -> Optional[TravianSession]:
     if not session_manager.auto_reconnect_allowed(user_id):
         # The user explicitly disconnected; restoring would override them.
         return None
+    if time.monotonic() < _restore_backoff.get(user_id, 0.0):
+        return None
 
     reconnect_lock = session_manager.get_reconnect_lock(user_id)
     async with reconnect_lock:
@@ -349,6 +359,8 @@ async def try_restore_session(user_id: int) -> Optional[TravianSession]:
         if session is not None:
             return session
         if not session_manager.auto_reconnect_allowed(user_id):
+            return None
+        if time.monotonic() < _restore_backoff.get(user_id, 0.0):
             return None
 
         from datetime import datetime
@@ -389,7 +401,10 @@ async def try_restore_session(user_id: int) -> Optional[TravianSession]:
             )
         except Exception as exc:
             logger.warning("WebSocket auto-reconnect failed for user %s: %s", user_id, exc)
+            _restore_backoff[user_id] = time.monotonic() + _RESTORE_RETRY_SECONDS
             return None
+
+        _restore_backoff.pop(user_id, None)
 
         # Bookkeeping only: the session is live regardless, and a failed stamp
         # must not make the caller report a login failure.
