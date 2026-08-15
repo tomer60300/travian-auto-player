@@ -244,10 +244,12 @@ export default function ResourcePlanner() {
           trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
         })),
         allocations: sendAllocations,
-        // Geometry comes from the snapshot (map span + tribe-derived merchant
-        // speed); the merchant capacity model is the operator's calibration.
-        map_span: snapshot?.map_span,
-        speed_fields_per_hour: snapshot?.speed_fields_per_hour,
+        // Geometry defaults to the snapshot (map span + tribe-derived x1
+        // merchant speed) but the operator can override both for non-Europe 2
+        // worlds (x2/x3 speed, larger maps) — no extra Travian requests.
+        map_span: Number(merchantModel.map_span) || snapshot?.map_span,
+        speed_fields_per_hour:
+          Number(merchantModel.speed_fields_per_hour) || snapshot?.speed_fields_per_hour,
         merchant_base_capacity: Number(merchantModel.base_capacity) || undefined,
         trade_office_bonus_per_level: Number(merchantModel.bonus_per_to_level) || undefined,
       })
@@ -442,17 +444,11 @@ export default function ResourcePlanner() {
             </ul>
           )}
 
-          {/* Merchant model: speed is tribe-derived server-side (shown, not
-              editable); capacity is server-calibrated, so the operator sets it. */}
+          {/* World + merchant model. Capacity is server-calibrated and speed
+              defaults to the tribe's x1 value; both — plus map span — are
+              overridable for non-Europe 2 worlds without spending a request. */}
           <div className="mt-4 flex items-center gap-4 flex-wrap text-xs border-t border-gray-800 pt-3">
-            <span className="text-secondary uppercase">Merchant model</span>
-            <span className="text-secondary">
-              Speed:{' '}
-              <span className="font-mono text-white">
-                {snapshot?.speed_fields_per_hour ?? '—'}
-              </span>{' '}
-              fields/h (from tribe)
-            </span>
+            <span className="text-secondary uppercase">World &amp; merchants</span>
             <label className="flex items-center gap-1">
               <span className="text-secondary">Base capacity</span>
               <input
@@ -477,6 +473,40 @@ export default function ResourcePlanner() {
                 value={merchantModel.bonus_per_to_level}
                 onChange={(e) =>
                   setMerchantModel((m) => ({ ...m, bonus_per_to_level: Number(e.target.value) }))
+                }
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-secondary">Speed f/h</span>
+              <input
+                type="number"
+                min="1"
+                aria-label="Merchant speed fields per hour override"
+                placeholder={String(snapshot?.speed_fields_per_hour ?? '')}
+                className="input-field w-20 text-right py-1"
+                value={merchantModel.speed_fields_per_hour ?? ''}
+                onChange={(e) =>
+                  setMerchantModel((m) => ({
+                    ...m,
+                    speed_fields_per_hour: e.target.value === '' ? undefined : Number(e.target.value),
+                  }))
+                }
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-secondary">Map span</span>
+              <input
+                type="number"
+                min="1"
+                aria-label="Map span override"
+                placeholder={String(snapshot?.map_span ?? '')}
+                className="input-field w-20 text-right py-1"
+                value={merchantModel.map_span ?? ''}
+                onChange={(e) =>
+                  setMerchantModel((m) => ({
+                    ...m,
+                    map_span: e.target.value === '' ? undefined : Number(e.target.value),
+                  }))
                 }
               />
             </label>

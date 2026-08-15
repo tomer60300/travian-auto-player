@@ -451,7 +451,10 @@ export default function BuildQueue() {
     }
   }, [])
 
-  useEffect(() => { fetchLocalData(villageId) }, [villageId, fetchLocalData])
+  // Re-fetch on account change too: a different world can share the numeric
+  // village id, so villageId alone would leave the old account's buildings
+  // and queue on screen.
+  useEffect(() => { fetchLocalData(villageId) }, [villageId, accountKey, fetchLocalData])
 
   const handleVillageSwitch = (id) => {
     setLocalVillageId(id)

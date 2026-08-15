@@ -112,7 +112,8 @@ export default function VideoRewards() {
           if (typeof entries[0] === 'object' && !Array.isArray(entries[0])) {
             // Array of result objects
             entries.forEach((item) => {
-              const type = item.type || item.key
+              // /video/claim-all returns each result under reward_type.
+              const type = item.type || item.key || item.reward_type
               const success = item.success !== false && !item.error
               if (success) successCount++
               else failCount++
