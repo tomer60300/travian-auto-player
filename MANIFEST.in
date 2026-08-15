@@ -1,0 +1,13 @@
+# The built web UI is a BUILD ARTIFACT, not source. It is produced fresh by
+# setup.py's build_py during wheel packaging (and shipped via package-data),
+# so it must never travel in an sdist — otherwise an sdist made from a
+# previously-built checkout could publish a stale UI that drifts from this
+# backend. Excluding it means an sdist install rebuilds the UI (npm present)
+# or serves the honest 503 fallback (npm absent), never stale assets.
+prune src/travian_api/web/static
+
+# Ship the frontend SOURCE so a wheel built from the sdist can rebuild the UI,
+# but not its build outputs or dependencies.
+graft frontend
+prune frontend/node_modules
+prune frontend/dist
