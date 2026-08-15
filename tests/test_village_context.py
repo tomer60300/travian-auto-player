@@ -584,6 +584,51 @@ class TestHttpReconnectBackoff:
         assert len(attempts) == 1, "second request re-attempted a real login during backoff"
 
 
+class TestRestoreBackoffOnPreLoginFailure:
+    def test_a_corrupt_credential_backs_off_like_a_failed_login(self, monkeypatch):
+        """A decrypt/DB error before the login step must set the backoff too, or
+        reconnecting sockets repeat the restore work on every retry."""
+        import travian_api.web.auth as auth_module
+        import travian_api.web.models.db as db_module
+        import travian_api.web.sessions as sessions_module
+
+        fresh = sessions_module.SessionManager()
+        monkeypatch.setattr(sessions_module, "session_manager", fresh)
+        backoff = {}
+        monkeypatch.setattr(sessions_module, "_restore_backoff", backoff, raising=False)
+
+        def boom(_ciphertext):
+            raise ValueError("invalid token")
+
+        monkeypatch.setattr(auth_module, "decrypt_credential", boom)
+
+        cred = SimpleNamespace(
+            server_url="https://ts1.x1.europe.travian.com",
+            travian_username="alice",
+            encrypted_password="corrupt",
+            last_connected=None,
+        )
+
+        class _FakeDb:
+            async def execute(self, _query):
+                return SimpleNamespace(scalar_one_or_none=lambda: cred)
+
+        class _FakeFactory:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return _FakeDb()
+
+            async def __aexit__(self, *args):
+                return False
+
+        monkeypatch.setattr(db_module, "async_session_factory", _FakeFactory())
+
+        assert asyncio.run(sessions_module.try_restore_session(7)) is None
+        assert 7 in backoff  # backoff armed, so the next socket retry is throttled
+
+
 class TestRestoreBackoff:
     def test_a_failed_restore_is_not_retried_on_every_poll(self, monkeypatch):
         """/status polls call try_restore_session whenever no session exists;

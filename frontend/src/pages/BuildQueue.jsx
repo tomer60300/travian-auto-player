@@ -389,14 +389,21 @@ export default function BuildQueue() {
   const [localVillageId, setLocalVillageId] = useState(null)
   const villageId = localVillageId || globalActiveVillageId
 
-  // Drop a local selection that does not belong to the connected account:
-  // after reconnecting to a different world the old id could collide with a
-  // different village or not exist, targeting the wrong village in-game.
+  // Reset the tab-local selection whenever the connected ACCOUNT changes, not
+  // just when the id is absent: a different world can hold the same numeric
+  // village id, so keeping it would silently target a colliding village.
+  const serverUrl = useGameStore((s) => s.serverUrl)
+  const playerName = useGameStore((s) => s.playerName)
+  const accountKey = serverUrl && playerName ? `${serverUrl}|${playerName}` : null
+  const accountKeyRef = useRef(accountKey)
   useEffect(() => {
-    if (localVillageId && !villages.some((v) => v.id === localVillageId)) {
+    if (accountKeyRef.current !== accountKey) {
+      accountKeyRef.current = accountKey
+      setLocalVillageId(null)
+    } else if (localVillageId && !villages.some((v) => v.id === localVillageId)) {
       setLocalVillageId(null)
     }
-  }, [villages, localVillageId])
+  }, [accountKey, villages, localVillageId])
 
   // Local building/queue state (fetched per-village, not from global store)
   const [buildings, setBuildings] = useState([])

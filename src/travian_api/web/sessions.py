@@ -455,7 +455,11 @@ async def try_restore_session(user_id: int) -> Optional[TravianSession]:
                 username = cred.travian_username
                 password = decrypt_credential(cred.encrypted_password)
         except Exception as exc:
+            # A corrupt/undecryptable credential or a DB read error fails the
+            # same way a bad login does — back off so reconnecting sockets do
+            # not repeat this restore work on every retry.
             logger.warning("WebSocket auto-reconnect failed for user %s: %s", user_id, exc)
+            _restore_backoff[user_id] = time.monotonic() + _RESTORE_RETRY_SECONDS
             return None
 
         try:
