@@ -126,6 +126,14 @@ export default function ResourcePlanner() {
     [accountKey]
   )
 
+  // The live account key, read from the store at call time — NOT the render
+  // closure. An async response must compare against the account that is
+  // current when it lands, or the guard sees its own stale captured value.
+  const currentAccountKey = useCallback(() => {
+    const s = useGameStore.getState()
+    return s.serverUrl && s.playerName ? `${s.serverUrl}|${s.playerName}` : null
+  }, [])
+
   useEffect(() => {
     if (!accountKey) {
       // Disconnected: the page stays routable, so showing (or planning from)
@@ -163,7 +171,7 @@ export default function ResourcePlanner() {
     setFetching(true)
     try {
       const res = await api.get('/distribution/snapshot', { timeout: 0 })
-      if (requestedFor !== accountKey) return
+      if (requestedFor !== currentAccountKey()) return
       setSnapshot(res.data)
       saveJson(`${LS_SNAPSHOT}::${requestedFor}`, res.data)
       setPlan(null)
@@ -224,7 +232,7 @@ export default function ResourcePlanner() {
         })),
         allocations: sendAllocations,
       })
-      if (requestedFor !== accountKey) return
+      if (requestedFor !== currentAccountKey()) return
       setPlan(res.data)
       setStage('plan')
     } catch (err) {
@@ -232,7 +240,7 @@ export default function ResourcePlanner() {
     } finally {
       setPlanning(false)
     }
-  }, [villages, tradeOffice, allocations, toast, accountKey])
+  }, [villages, tradeOffice, allocations, toast, accountKey, currentAccountKey])
 
   // Live unallocated counter, so slack is visible while typing rather than
   // discovered later (profile known issue #9).
