@@ -27,6 +27,9 @@ function loadJson(key, fallback) {
 // restarting. Saving here applies to the running server immediately.
 function BackgroundAccountPanel({ disabled }) {
   const toast = useToast()
+  // The recon account exists on one world; saving records which, so it is
+  // never used to mask reads on a different server.
+  const serverUrl = useGameStore((s) => s.serverUrl)
   const [status, setStatus] = useState(null)
   const [editing, setEditing] = useState(false)
   const [username, setUsername] = useState('')
@@ -51,7 +54,11 @@ function BackgroundAccountPanel({ disabled }) {
     }
     setBusy(true)
     try {
-      const res = await api.put('/recon/credentials', { username: username.trim(), password })
+      const res = await api.put('/recon/credentials', {
+        username: username.trim(),
+        password,
+        server_url: serverUrl ?? undefined,
+      })
       setStatus(res.data)
       setPassword('')
       setEditing(false)

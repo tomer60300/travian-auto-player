@@ -111,17 +111,21 @@ async def _update_last_connected(
     try:
         result = await db.execute(
             select(TravianCredential)
-            .where(
-                TravianCredential.user_id == user_id,
-                TravianCredential.server_url == server_url,
-                TravianCredential.travian_username == travian_username,
-            )
+            .where(TravianCredential.user_id == user_id)
             .order_by(TravianCredential.id.desc())
         )
-        # first() on the newest row, not scalar_one_or_none(): databases from
-        # before the upsert in save_server may hold duplicates, and the row
-        # stamped here must be the one save_server keeps current.
-        cred = result.scalars().first()
+        # Matching happens in Python on NORMALIZED urls: the runtime identity
+        # rstrips trailing slashes, and legacy rows may carry either spelling.
+        # Newest matching row first — the one save_server keeps current.
+        server = server_url.rstrip("/")
+        cred = next(
+            (
+                row
+                for row in result.scalars().all()
+                if row.server_url.rstrip("/") == server and row.travian_username == travian_username
+            ),
+            None,
+        )
         if cred is not None:
             cred.last_connected = datetime.now(UTC)
             await db.commit()
@@ -261,18 +265,21 @@ async def save_server(
     """
     result = await db.execute(
         select(TravianCredential)
-        .where(
-            TravianCredential.user_id == user.id,
-            TravianCredential.server_url == body.server_url,
-            TravianCredential.travian_username == body.username,
-        )
+        .where(TravianCredential.user_id == user.id)
         .order_by(TravianCredential.id.desc())
     )
-    # all(), not scalar_one_or_none(): legacy databases may hold duplicate
-    # rows for the same account, and resaving must repair them, not 500.
-    rows = list(result.scalars().all())
+    # Matching happens in Python on NORMALIZED urls (the runtime identity
+    # rstrips trailing slashes), and over all rows — legacy databases may hold
+    # duplicates or either slash spelling, and resaving must repair them.
+    server = body.server_url.rstrip("/")
+    rows = [
+        row
+        for row in result.scalars().all()
+        if row.server_url.rstrip("/") == server and row.travian_username == body.username
+    ]
     cred = rows[0] if rows else None
     if cred is not None:
+        cred.server_url = server  # repair a legacy trailing slash in place
         cred.encrypted_password = encrypt_credential(body.password)
         cred.label = body.label
         # Remove stale duplicates outright: auto-restore sorts by
@@ -283,7 +290,7 @@ async def save_server(
     else:
         cred = TravianCredential(
             user_id=user.id,
-            server_url=body.server_url,
+            server_url=server,
             travian_username=body.username,
             encrypted_password=encrypt_credential(body.password),
             label=body.label,

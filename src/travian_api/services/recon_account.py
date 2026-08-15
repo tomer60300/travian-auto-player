@@ -196,17 +196,24 @@ class ReconAccountManager:
         self._auth_lock = asyncio.Lock()
         # Operator-supplied credentials, loaded from the DB at startup and
         # replaced when they are rotated through the UI. None means "no stored
-        # credentials" and the .env values remain in force.
-        self._override: Optional[tuple[str, str]] = None
+        # credentials" and the .env values remain in force. The third element
+        # scopes them to one Travian world (None = any).
+        self._override: Optional[tuple[str, str, Optional[str]]] = None
 
-    def credentials(self) -> tuple[Optional[str], Optional[str]]:
+    def credentials(self, server_url: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
         """Active recon credentials: stored ones win, .env is the fallback.
 
-        Keeping the env path alive means existing deployments that never touch
-        the UI keep working exactly as before.
+        Stored credentials scoped to a world are only handed out for THAT
+        world: the recon account exists on one server, and using it to mask
+        logins elsewhere fails and silently unmasks the reads. Keeping the env
+        path alive means existing deployments that never touch the UI keep
+        working exactly as before.
         """
         if self._override is not None:
-            return self._override
+            username, password, scope = self._override
+            if scope is not None and server_url is not None and scope != server_url.rstrip("/"):
+                return None, None
+            return username, password
         s = _get_settings()
         if s.recon_username and s.recon_password:
             return s.recon_username, s.recon_password
@@ -231,10 +238,14 @@ class ReconAccountManager:
         username, _ = self.credentials()
         return username or None
 
-    def set_credentials(self, username: str, password: str) -> None:
-        """Install rotated credentials. Caller must invalidate() to apply them
-        to any already-authenticated client."""
-        self._override = (username, password)
+    def set_credentials(
+        self, username: str, password: str, server_url: Optional[str] = None
+    ) -> None:
+        """Install rotated credentials, optionally scoped to one Travian world.
+
+        Caller must invalidate() to apply them to any already-authenticated
+        client."""
+        self._override = (username, password, server_url.rstrip("/") if server_url else None)
 
     def clear_credentials(self) -> None:
         """Forget stored credentials and fall back to .env."""
@@ -264,7 +275,7 @@ class ReconAccountManager:
         Callers MUST tolerate None and fall back to their primary
         HttpClient — this function never raises.
         """
-        username, password = self.credentials()
+        username, password = self.credentials(server_url)
         if not (username and password):
             return None
         key = server_url.rstrip("/")

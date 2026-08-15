@@ -229,24 +229,60 @@ def test_resaving_repairs_legacy_duplicate_rows(monkeypatch):
     assert res.id == 9
 
 
-def test_stamping_tolerates_duplicate_rows_from_older_databases():
-    """Existing databases may already hold duplicates; scalar_one_or_none
-    raised MultipleResultsFound, which the best-effort guard swallowed — so
-    last_connected silently never advanced."""
-    from sqlalchemy.exc import MultipleResultsFound
-
-    cred = SimpleNamespace(last_connected=None)
-
-    class _Result:
-        def scalar_one_or_none(self):
-            raise MultipleResultsFound()
-
-        def scalars(self):
-            return SimpleNamespace(first=lambda: cred)
+def test_resaving_with_a_trailing_slash_updates_the_same_row(monkeypatch):
+    """The runtime identity normalizes server URLs with rstrip('/'); the saved
+    rows must dedupe the same way or a trailing slash forks a second row and
+    auto-restore can pick the stale password."""
+    monkeypatch.setattr(auth_routes, "encrypt_credential", lambda p: f"enc:{p}")
+    existing = SimpleNamespace(
+        id=5,
+        user_id=1,
+        server_url="https://ts1.x1.europe.travian.com/",
+        travian_username="alice",
+        encrypted_password="enc:old",
+        label=None,
+        last_connected=None,
+    )
+    added = []
 
     class _Db:
         async def execute(self, _query):
-            return _Result()
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [existing]))
+
+        def add(self, obj):
+            added.append(obj)
+
+        async def commit(self):
+            pass
+
+        async def refresh(self, _obj):
+            pass
+
+    body = auth_routes.SavedServerRequest(
+        server_url="https://ts1.x1.europe.travian.com",  # no trailing slash
+        username="alice",
+        password="rotated",
+        label=None,
+    )
+
+    res = asyncio.run(auth_routes.save_server(body, SimpleNamespace(id=1), _Db()))
+
+    assert added == []
+    assert existing.encrypted_password == "enc:rotated"
+    assert existing.server_url == "https://ts1.x1.europe.travian.com"  # repaired in place
+    assert res.id == 5
+
+
+def test_stamping_matches_across_trailing_slashes():
+    cred = SimpleNamespace(
+        server_url="https://ts1.x1.europe.travian.com/",
+        travian_username="alice",
+        last_connected=None,
+    )
+
+    class _Db:
+        async def execute(self, _query):
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [cred]))
 
         async def commit(self):
             pass
@@ -256,6 +292,37 @@ def test_stamping_tolerates_duplicate_rows_from_older_databases():
     )
 
     assert cred.last_connected is not None
+
+
+def test_stamping_tolerates_duplicate_rows_from_older_databases():
+    """Existing databases may already hold duplicates; stamping must update
+    the newest matching row instead of erroring out (the old
+    scalar_one_or_none raised MultipleResultsFound, silently swallowed by the
+    best-effort guard, so last_connected never advanced)."""
+
+    def row(row_id):
+        return SimpleNamespace(
+            id=row_id,
+            server_url="https://ts1.x1.europe.travian.com",
+            travian_username="alice",
+            last_connected=None,
+        )
+
+    newest, stale = row(9), row(3)
+
+    class _Db:
+        async def execute(self, _query):
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [newest, stale]))
+
+        async def commit(self):
+            pass
+
+    asyncio.run(
+        auth_routes._update_last_connected(_Db(), 1, "https://ts1.x1.europe.travian.com", "alice")
+    )
+
+    assert newest.last_connected is not None
+    assert stale.last_connected is None
 
 
 def test_reconnect_preserves_the_409_from_the_session_manager(monkeypatch):

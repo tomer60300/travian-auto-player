@@ -162,6 +162,13 @@ def test_init_db_backfills_columns_added_after_first_release(tmp_path):
             "encrypted_password VARCHAR(512) NOT NULL, "
             "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
         )
+        conn.execute(
+            "CREATE TABLE recon_credentials ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "travian_username VARCHAR(128) NOT NULL, "
+            "encrypted_password VARCHAR(512) NOT NULL, "
+            "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
 
     subprocess.run(
         [
@@ -177,4 +184,6 @@ def test_init_db_backfills_columns_added_after_first_release(tmp_path):
 
     with sqlite3.connect(db_file) as conn:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(travian_credentials)")}
+        recon_columns = {row[1] for row in conn.execute("PRAGMA table_info(recon_credentials)")}
     assert {"label", "last_connected"} <= columns
+    assert "server_url" in recon_columns

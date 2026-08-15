@@ -70,6 +70,32 @@ def test_the_operator_check_runs_before_the_session_dependency():
     assert dependencies.index(get_instance_operator) < dependencies.index(get_travian_session)
 
 
+def test_stored_recon_credentials_scope_to_their_server():
+    """The recon account exists on ONE world; using it to mask logins on a
+    different server fails and silently falls back to the primary account,
+    defeating the stealth feature on every non-matching world."""
+    from travian_api.services.recon_account import ReconAccountManager
+
+    manager = ReconAccountManager()
+    manager.set_credentials("recon-user", "pw", server_url="https://ts1.x1.europe.travian.com/")
+
+    assert manager.credentials("https://ts1.x1.europe.travian.com") == ("recon-user", "pw")
+    assert manager.credentials("https://ts2.x1.europe.travian.com") == (None, None)
+    # The UI-level view stays global: the operator sees what is stored.
+    assert manager.is_configured() is True
+    assert manager.get_proxy_username() == "recon-user"
+
+
+def test_unscoped_recon_credentials_apply_to_any_server():
+    """Single-world deployments (and .env credentials) keep working unchanged."""
+    from travian_api.services.recon_account import ReconAccountManager
+
+    manager = ReconAccountManager()
+    manager.set_credentials("recon-user", "pw")
+
+    assert manager.credentials("https://anywhere.travian.com") == ("recon-user", "pw")
+
+
 def test_status_hides_the_recon_username_from_non_operators():
     recon_account_manager.set_credentials("recon-user", "recon-pass")
     try:

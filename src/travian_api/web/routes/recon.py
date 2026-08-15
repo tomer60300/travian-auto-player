@@ -27,6 +27,9 @@ router = APIRouter(prefix="/api/recon", tags=["recon"])
 class ReconCredentialRequest(BaseModel):
     username: str = Field(min_length=1)
     password: str = Field(min_length=1)
+    # The world this recon account exists on. None = any (single-world
+    # deployments); when set, the account only masks reads on that server.
+    server_url: str | None = None
 
 
 class ReconStatusResponse(BaseModel):
@@ -93,7 +96,9 @@ async def load_stored_credentials(db: AsyncSession) -> bool:
         recon_account_manager.clear_credentials()
         return False
     recon_account_manager.set_credentials(
-        row.travian_username, decrypt_credential(row.encrypted_password)
+        row.travian_username,
+        decrypt_credential(row.encrypted_password),
+        server_url=getattr(row, "server_url", None),
     )
     return True
 
@@ -118,19 +123,22 @@ async def set_recon_credentials(
     result = await db.execute(select(ReconCredential).order_by(ReconCredential.id).limit(1))
     row = result.scalar_one_or_none()
 
+    server_url = body.server_url.rstrip("/") if body.server_url else None
     if row is None:
         row = ReconCredential(
             travian_username=body.username,
             encrypted_password=encrypt_credential(body.password),
+            server_url=server_url,
         )
         db.add(row)
     else:
         row.travian_username = body.username
         row.encrypted_password = encrypt_credential(body.password)
+        row.server_url = server_url
 
     await db.commit()
 
-    recon_account_manager.set_credentials(body.username, body.password)
+    recon_account_manager.set_credentials(body.username, body.password, server_url=server_url)
     # A cached ReconAccount holds the old password and a sticky failure window;
     # without dropping it the rotation could not take effect.
     await recon_account_manager.invalidate()

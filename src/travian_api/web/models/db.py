@@ -102,6 +102,9 @@ class ReconCredential(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     travian_username: Mapped[str] = mapped_column(String(128), nullable=False)
     encrypted_password: Mapped[str] = mapped_column(String(512), nullable=False)
+    # The world this recon account exists on; NULL means "any" (legacy rows
+    # and single-world deployments). The account can only mask reads there.
+    server_url: Mapped[str | None] = mapped_column(String(256), nullable=True, default=None)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -125,6 +128,9 @@ _COLUMN_BACKFILLS: dict[str, dict[str, str]] = {
     "travian_credentials": {
         "label": "VARCHAR(128)",
         "last_connected": "DATETIME",
+    },
+    "recon_credentials": {
+        "server_url": "VARCHAR(256)",
     },
 }
 
