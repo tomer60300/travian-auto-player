@@ -329,8 +329,20 @@ async def queue_run_ws(websocket: WebSocket) -> None:
         await websocket.close(code=4002)
         return
 
-    if not plan.village_id and session.active_village_id:
-        plan.village_id = session.active_village_id
+    # The plan must name its village explicitly. Falling back to the session
+    # default (pinned to the login village since selection became tab-local)
+    # would run the build queue against the wrong village — a wasted, wrong
+    # sequence of Travian requests. Fail fast instead.
+    if not plan.village_id:
+        await websocket.send_json(
+            {
+                "type": "error",
+                "message": "Build plan is missing village_id.",
+                "fatal": True,
+            }
+        )
+        await websocket.close(code=4002)
+        return
 
     op_label = f"queue:{plan.village_id}"
     if op_label in active_ops.get_active(user_id):

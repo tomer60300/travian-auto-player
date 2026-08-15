@@ -142,12 +142,13 @@ async def send_scouts(
 
 @router.get("/troops")
 async def get_available_troops(
-    village_id: int = None,
+    village_id: int | None = None,
     session: TravianSession = Depends(get_travian_session),
 ):
     """Get available (idle) troops at the rally point for a village."""
+    vid = require_village_id(village_id)
     try:
-        troops = await session.military_service.get_available_troops(village_id)
+        troops = await session.military_service.get_available_troops(vid)
         return troops
     except Exception as exc:
         logger.warning("Failed to get troops: %s", exc)
@@ -165,9 +166,10 @@ async def get_smithy_levels(
     ``found=False`` means the village has no smithy built yet — research dict
     stays all zeros.
     """
+    vid = require_village_id(village_id)
     try:
         smithy = await session.building_service.find_building(
-            int(BuildingType.BLACKSMITH), village_id=village_id
+            int(BuildingType.BLACKSMITH), village_id=vid
         )
         if not smithy:
             return {
@@ -177,7 +179,7 @@ async def get_smithy_levels(
             }
         research = await session.military_service.get_smithy_research_levels(
             smithy_slot=smithy.slot_id,
-            village_id=village_id,
+            village_id=vid,
             tribe_id=session.tribe_id or 0,
         )
         return {

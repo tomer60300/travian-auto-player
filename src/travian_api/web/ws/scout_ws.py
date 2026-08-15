@@ -224,7 +224,10 @@ def _build_auto_scout_coro(config: dict):
         delay_min = config.get("delay_min", config.get("delay", 2.0))
         delay_max = config.get("delay_max", delay_min + 2.0)
         start_index = config.get("start_index", 0)
-        village_id = config.get("village_id") or session.active_village_id
+        village_id = config.get("village_id")
+        if not village_id:
+            ctx.push({"type": "error", "message": "village_id is required", "fatal": True})
+            return
         targets_from_ui = config.get("targets")
         # Recon (background) account toggle — applies only to the
         # read portion of this sweep (the prep scan / target list
@@ -773,7 +776,10 @@ def _build_scout_scan_coro(config: dict):
     async def coro(ctx: OperationContext) -> None:
         session: TravianSession = ctx.session
         radius = config.get("radius", 10)
-        village_id = config.get("village_id") or session.active_village_id
+        village_id = config.get("village_id")
+        if not village_id:
+            ctx.push({"type": "error", "message": "village_id is required", "fatal": True})
+            return
         min_pop = config.get("min_pop")
         max_pop = config.get("max_pop")
         max_player_pop = config.get("max_player_pop")
