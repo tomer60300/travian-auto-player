@@ -54,7 +54,12 @@ const useAuthStore = create((set, get) => ({
         localStorage.removeItem('token');
         set({ token: null, user: null, isAuthenticated: false, initialCheckDone: true });
       } else {
-        set({ isAuthenticated: true, initialCheckDone: true });
+        // Transient failure: the token was NOT revalidated, so do not enter
+        // the authenticated UI on faith — but keep the token and retry until
+        // the backend gives a definitive answer, so an outage never costs the
+        // user their session.
+        set({ isAuthenticated: false, initialCheckDone: true });
+        setTimeout(() => { get().checkAuth() }, 5000);
       }
     }
   },
