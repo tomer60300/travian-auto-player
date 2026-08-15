@@ -212,6 +212,13 @@ async def reconnect(
     """
     session = session_manager.get(user.id)
     if session is None:
+        # "Current or last": after a restart or eviction there is no in-memory
+        # session — exactly when a reconnect is needed most. An explicit
+        # reconnect request also overrides an earlier explicit disconnect.
+        session_manager.clear_explicit_disconnect(user.id)
+        restored = await try_restore_session(user.id)
+        if restored is not None:
+            return _session_to_status(restored)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No active session to reconnect. Use POST /api/travian/connect instead.",

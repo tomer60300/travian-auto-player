@@ -324,6 +324,10 @@ class SessionManager:
         """False after an explicit disconnect, until an explicit connect."""
         return user_id not in self._explicit_disconnects
 
+    def clear_explicit_disconnect(self, user_id: int) -> None:
+        """An explicit reconnect request overrides an earlier explicit disconnect."""
+        self._explicit_disconnects.discard(user_id)
+
     def _running_operation_labels(self, user_id: int) -> list[str]:
         """Labels of the user's background operations that are still running."""
         from travian_api.operation_manager import operation_manager

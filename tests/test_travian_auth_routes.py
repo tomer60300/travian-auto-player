@@ -365,6 +365,32 @@ def test_stamping_tolerates_duplicate_rows_from_older_databases():
     assert stale.last_connected is None
 
 
+def test_reconnect_restores_from_saved_credentials_when_no_live_session(monkeypatch):
+    """The endpoint advertises reconnecting from the current OR LAST session;
+    after a backend restart there is no in-memory session, which is exactly
+    when a reconnect is needed most."""
+    restored = SimpleNamespace(
+        server_url="https://ts1.x1.europe.travian.com",
+        player_name="Chieftain",
+        tribe_id=1,
+        active_village_id=20003,
+        auth_state=SimpleNamespace(
+            villages=[SimpleNamespace(id=20003, name="03", x=23, y=88, is_main_village=True)]
+        ),
+    )
+    monkeypatch.setattr(auth_routes.session_manager, "get", lambda user_id: None)
+
+    async def fake_restore(user_id):
+        return restored
+
+    monkeypatch.setattr(auth_routes, "try_restore_session", fake_restore)
+
+    res = asyncio.run(auth_routes.reconnect(SimpleNamespace(id=1), None))
+
+    assert res.connected is True
+    assert res.player_name == "Chieftain"
+
+
 def test_reconnect_preserves_the_409_from_the_session_manager(monkeypatch):
     live = SimpleNamespace(
         server_url="https://ts1.x1.europe.travian.com",

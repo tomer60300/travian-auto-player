@@ -3,6 +3,12 @@ import api from '../api';
 import useGameStore from './gameStore';
 import useLogStore from './logStore';
 
+// Transient /users/me failures are retried a few times before giving up; a
+// backend restart must neither log the user out nor pin the whole UI behind
+// the loading gate forever.
+const AUTH_RETRY_LIMIT = 3
+let authRetryCount = 0
+
 const useAuthStore = create((set, get) => ({
   token: localStorage.getItem('token'),
   user: null,
@@ -46,21 +52,31 @@ const useAuthStore = create((set, get) => ({
     }
     try {
       const res = await api.get('/users/me');
+      authRetryCount = 0;
       set({ user: res.data, isAuthenticated: true, initialCheckDone: true });
     } catch (e) {
       // Only discard the token when the server says it is bad; a restart,
       // timeout, or 5xx during the initial check must not log the user out.
       if (e.response?.status === 401 || e.response?.status === 403) {
+        authRetryCount = 0;
         localStorage.removeItem('token');
         set({ token: null, user: null, isAuthenticated: false, initialCheckDone: true });
-      } else {
-        // Transient failure: the auth state is UNKNOWN, which is neither
-        // logged-in nor logged-out. Leave the current state untouched —
-        // initialCheckDone stays false on first load, so the router shows
-        // the loading gate instead of bouncing to /login, and an already
-        // verified session keeps its pages — and retry until the backend
-        // answers definitively. The token survives either way.
+      } else if (authRetryCount < AUTH_RETRY_LIMIT) {
+        // Transient failure: auth state is UNKNOWN. Leave it untouched — the
+        // loading gate stays up on first load instead of bouncing to /login,
+        // an already verified session keeps its pages — and retry shortly.
+        authRetryCount += 1;
         setTimeout(() => { get().checkAuth() }, 5000);
+      } else {
+        // Retries exhausted: stop blocking the UI. The token is kept, so a
+        // later login-page load or manual retry can still restore the
+        // session once the backend recovers; a verified session stays put.
+        authRetryCount = 0;
+        if (get().isAuthenticated) {
+          set({ initialCheckDone: true });
+        } else {
+          set({ isAuthenticated: false, initialCheckDone: true });
+        }
       }
     }
   },
