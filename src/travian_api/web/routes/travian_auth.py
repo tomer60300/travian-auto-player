@@ -179,6 +179,11 @@ async def connect(
             detail=f"Failed to connect to Travian server: {exc}",
         )
 
+    # A proven-good explicit login clears any failed-restore backoff, so a
+    # session that vanishes again (restart/worker reload) can auto-restore
+    # immediately instead of waiting out the throttle.
+    reset_restore_backoff(user.id)
+
     # Update last_connected on any matching saved credential
     await _update_last_connected(db, user.id, body.server_url, body.username, body.password)
 
@@ -403,6 +408,9 @@ async def connect_saved_server(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to connect to Travian server: {exc}",
         )
+
+    # A proven-good login clears any failed-restore backoff (see /connect).
+    reset_restore_backoff(user.id)
 
     # 4. Update last_connected timestamp — best-effort bookkeeping: a DB
     # hiccup here must not report the successful login as a failure.

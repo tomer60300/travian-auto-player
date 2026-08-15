@@ -391,6 +391,38 @@ def test_reconnect_restores_from_saved_credentials_when_no_live_session(monkeypa
     assert res.player_name == "Chieftain"
 
 
+def test_successful_connect_clears_the_restore_backoff(monkeypatch):
+    """A proven-good explicit login must clear any failed-restore backoff so a
+    session that vanishes again can auto-restore immediately."""
+    cleared = []
+    monkeypatch.setattr(auth_routes, "reset_restore_backoff", lambda uid: cleared.append(uid))
+
+    live = SimpleNamespace(
+        server_url="https://ts1.x1.europe.travian.com",
+        player_name="Chieftain",
+        tribe_id=1,
+        active_village_id=20003,
+        auth_state=SimpleNamespace(villages=[]),
+    )
+
+    async def ok_connect(**kwargs):
+        return live
+
+    monkeypatch.setattr(auth_routes.session_manager, "connect", ok_connect)
+
+    class _NoRowDb:
+        async def execute(self, _query):
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=list))
+
+    body = TravianConnectRequest(
+        server_url="https://ts1.x1.europe.travian.com", username="u", password="p"
+    )
+
+    asyncio.run(auth_routes.connect(body, SimpleNamespace(id=9), _NoRowDb()))
+
+    assert cleared == [9]
+
+
 def test_reconnect_bypasses_the_restore_backoff(monkeypatch):
     """An explicit reconnect must clear the failed-restore backoff — that
     throttle exists for per-request auto-reconnects, not an intentional retry
