@@ -149,6 +149,7 @@ const useGameStore = create((set, get) => ({
       set({
         connected: false, statusChecked: true, serverUrl: null,
         playerName: null, tribeId: null, villages: [], activeVillageId: null,
+        resources: null, buildings: [], constructionQueue: [],
       });
     }
   },
@@ -173,10 +174,13 @@ const useGameStore = create((set, get) => ({
   },
 
   fetchResources: async () => {
+    // Never send a village-less read: the backend would resolve it to the
+    // account's default village, which may not be the one the user is on.
+    // Fewer/again-correct Travian requests beats a guess that needs redoing.
+    const vid = get().activeVillageId
+    if (!vid) return
     try {
-      const vid = get().activeVillageId
-      const params = vid ? { village_id: vid } : {}
-      const res = await api.get('/buildings/resources', { params });
+      const res = await api.get('/buildings/resources', { params: { village_id: vid } });
       if (res.data && typeof res.data === 'object' && !Array.isArray(res.data)) {
         set({ resources: res.data });
       }
@@ -187,11 +191,11 @@ const useGameStore = create((set, get) => ({
   },
 
   fetchBuildings: async () => {
+    const vid = get().activeVillageId
+    if (!vid) return
     set({ buildingsLoading: true, buildingsError: null });
     try {
-      const vid = get().activeVillageId
-      const params = vid ? { village_id: vid } : {}
-      const res = await api.get('/buildings', { params });
+      const res = await api.get('/buildings', { params: { village_id: vid } });
       // API returns { village_id, buildings: [...] } or possibly a plain array
       const arr = Array.isArray(res.data) ? res.data
         : Array.isArray(res.data?.buildings) ? res.data.buildings
@@ -206,10 +210,10 @@ const useGameStore = create((set, get) => ({
   },
 
   fetchQueue: async () => {
+    const vid = get().activeVillageId
+    if (!vid) return
     try {
-      const vid = get().activeVillageId
-      const params = vid ? { village_id: vid } : {}
-      const res = await api.get('/buildings/queue', { params });
+      const res = await api.get('/buildings/queue', { params: { village_id: vid } });
       // API returns { village_id, queue: [...] } or possibly a plain array
       const arr = Array.isArray(res.data) ? res.data
         : Array.isArray(res.data?.queue) ? res.data.queue

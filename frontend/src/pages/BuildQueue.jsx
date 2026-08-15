@@ -389,6 +389,15 @@ export default function BuildQueue() {
   const [localVillageId, setLocalVillageId] = useState(null)
   const villageId = localVillageId || globalActiveVillageId
 
+  // Drop a local selection that does not belong to the connected account:
+  // after reconnecting to a different world the old id could collide with a
+  // different village or not exist, targeting the wrong village in-game.
+  useEffect(() => {
+    if (localVillageId && !villages.some((v) => v.id === localVillageId)) {
+      setLocalVillageId(null)
+    }
+  }, [villages, localVillageId])
+
   // Local building/queue state (fetched per-village, not from global store)
   const [buildings, setBuildings] = useState([])
   const [buildingsLoading, setBuildingsLoading] = useState(false)
@@ -480,6 +489,7 @@ export default function BuildQueue() {
   // Validate
   const handleValidate = async () => {
     if (queueItems.length === 0) { toast.warning('Queue is empty'); return }
+    if (!villageId) { toast.error('Select a village first'); return }
     try {
       const res = await api.post('/queue/validate', { yaml_content: generatedYaml })
       setValidationResult(res.data)
@@ -541,6 +551,7 @@ export default function BuildQueue() {
 
   // Execute
   const startExecution = useCallback(() => {
+    if (!villageId) { toast.error('Select a village first'); return }
     setShowConfirm(false)
     timersRef.current.forEach(({ type, id }) => type === 'interval' ? clearInterval(id) : clearTimeout(id))
     timersRef.current = []
@@ -558,7 +569,7 @@ export default function BuildQueue() {
       use_video: useVideo,
       verbose,
     })
-  }, [generatedYaml, pollInterval, useVideo, verbose, queueItems.length, queueOp, addMessage])
+  }, [villageId, generatedYaml, pollInterval, useVideo, verbose, queueItems.length, queueOp, addMessage, toast])
 
   const handleStop = () => {
     queueOp.stop()
