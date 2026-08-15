@@ -18,8 +18,17 @@ from travian_api.services.distribution.allocation import (
     resolve_resource,
 )
 from travian_api.services.distribution.geometry import MapGeometry
-from travian_api.services.distribution.merchants import EUROPE2_TEUTON, route_cost
-from travian_api.services.distribution.optimizer import VillageState, build_plan
+from travian_api.services.distribution.merchants import (
+    DAILY_BEAT_CYCLES,
+    EUROPE2_TEUTON,
+    route_cost,
+)
+from travian_api.services.distribution.optimizer import (
+    VillageState,
+    _flows_for_resource,
+    _route_for_pair,
+    build_plan,
+)
 
 GEOMETRY = MapGeometry(span=401, speed_fields_per_hour=12.0)
 MODEL = EUROPE2_TEUTON
@@ -253,6 +262,35 @@ class TestBudgetIsReportedNotHidden:
         village = VillageState(village_id=1, x=0, y=0, merchant_count=2)
 
         assert village.spare_merchants(reserve=2) == 0
+
+
+def _greedy_seed_merchants(villages, plans):
+    """Total merchants the greedy seed alone commits, before local search."""
+    pair: dict[tuple[int, int], dict[Resource, float]] = {}
+    for resource, resource_plan in plans.items():
+        flows, _ = _flows_for_resource(resource_plan, villages, GEOMETRY)
+        for key, amount in flows.items():
+            pair.setdefault(key, {})[resource] = amount
+    total = 0
+    for (origin, destination), cargo in pair.items():
+        route = _route_for_pair(
+            origin, destination, cargo, villages, GEOMETRY, MODEL, DAILY_BEAT_CYCLES
+        )
+        total += route.merchants_committed
+    return total
+
+
+class TestImprovementNeverRegresses:
+    @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
+    def test_improved_plan_is_never_worse_than_the_greedy_seed(self, village_count):
+        """The local search only accepts strictly-improving swaps, so the plan it
+        returns must commit no more merchants than the seed it started from."""
+        villages = make_account(village_count, seed=village_count + 91)
+        plans, _ = make_plans(villages, seed=village_count + 91)
+
+        plan = build_plan(villages, plans, GEOMETRY, MODEL)
+
+        assert plan.total_merchants <= _greedy_seed_merchants(villages, plans)
 
 
 class TestDeterminism:

@@ -18,10 +18,20 @@ resource:
 Both are asserted as invariants in the tests rather than defended with runtime
 checks, because the property comes from the data model, not from vigilance here.
 
-First pass, per profile section 14: greedy nearest-sender matching, no hub
-consolidation and no local improvement. It is deterministic, explainable, and a
-baseline the later hub pass has to beat. What it does *not* do is claim
-optimality -- a village over its merchant budget is reported, never hidden.
+Two stages, per profile section 14 (``cluster -> assign -> improve``):
+
+1. **Greedy seed** -- :func:`_flows_for_resource` matches each receiver to its
+   nearest senders, largest demand first. Deterministic and explainable, but
+   order-dependent and blind to merchant cost.
+2. **Merchant-aware local search** -- :func:`_improve_flows` reassigns that seed
+   with 2x2 swaps, keeping only moves that strictly lower the lexicographic
+   objective ``(over_budget_excess, total_merchants, route_count)``. It never
+   returns a plan worse than the seed, and cross-resource bundling falls out of
+   costing the *merged* pair cargo.
+
+What it still does *not* do is claim global optimality (the problem is NP-hard,
+section 14) or relay crop through a sub-hub (single-leg flows only). A village
+over its merchant budget is reported, never hidden.
 """
 
 from __future__ import annotations
@@ -220,6 +230,206 @@ def _flows_for_resource(
     return flows, shortfalls
 
 
+# ---------------------------------------------------------------------------
+# Merchant-aware improvement: seed with the greedy flows, then local search
+# ---------------------------------------------------------------------------
+
+# A directed flow: (origin, destination) -> rate, one map per resource.
+FlowKey = tuple[int, int]
+Assignment = dict[Resource, dict[FlowKey, float]]
+
+# Backstop against a pathological non-converging sweep. Each accepted swap
+# strictly lowers the integer objective, so convergence is guaranteed well
+# inside this on any real account; the cap only bounds the worst case.
+MAX_IMPROVE_PASSES = 200
+
+
+def _merge_pair_cargo(assignment: Assignment) -> dict[FlowKey, dict[Resource, float]]:
+    """Collapse the per-resource flows into one mixed cargo per village pair.
+
+    A Travian route carries all four resources together, so merchant cost is a
+    function of the *combined* tonnage on a pair — never the per-resource legs.
+    """
+    pair: dict[FlowKey, dict[Resource, float]] = {}
+    for resource, flows in assignment.items():
+        for key, amount in flows.items():
+            if amount > EPSILON:
+                pair.setdefault(key, {})[resource] = pair.get(key, {}).get(resource, 0.0) + amount
+    return pair
+
+
+def _pair_merchants(
+    origin: int,
+    destination: int,
+    cargo: Mapping[Resource, float],
+    villages: Mapping[int, VillageState],
+    geometry: MapGeometry,
+    merchant_model: MerchantModel,
+    cycles: Sequence[int],
+) -> int:
+    """Merchants one pair commits at its cheapest cycle. Zero for empty cargo."""
+    hourly_total = sum(cargo.values())
+    if hourly_total <= EPSILON:
+        return 0
+    one_way = geometry.one_way_minutes(villages[origin].coords, villages[destination].coords)
+    capacity = merchant_model.capacity(villages[origin].trade_office_level)
+    return cheapest_cycle(hourly_total, 2.0 * one_way, capacity, cycles).merchants_committed
+
+
+def _route_for_pair(
+    origin: int,
+    destination: int,
+    cargo: Mapping[Resource, float],
+    villages: Mapping[int, VillageState],
+    geometry: MapGeometry,
+    merchant_model: MerchantModel,
+    cycles: Sequence[int],
+) -> Route:
+    """Build the concrete :class:`Route` for one merged pair."""
+    hourly_total = sum(cargo.values())
+    one_way = geometry.one_way_minutes(villages[origin].coords, villages[destination].coords)
+    capacity = merchant_model.capacity(villages[origin].trade_office_level)
+    cost = cheapest_cycle(hourly_total, 2.0 * one_way, capacity, cycles)
+    return Route(
+        origin=origin,
+        destination=destination,
+        cargo_per_hour=dict(sorted(cargo.items(), key=lambda kv: kv[0].value)),
+        cycle_hours=cost.cycle_hours,
+        merchants_per_send=cost.merchants_per_send,
+        sets_in_flight=cost.sets_in_flight,
+        one_way_minutes=one_way,
+    )
+
+
+def _improve_flows(
+    assignment: Assignment,
+    villages: Mapping[int, VillageState],
+    geometry: MapGeometry,
+    merchant_model: MerchantModel,
+    cycles: Sequence[int],
+    budgets: Mapping[int, int],
+) -> Assignment:
+    """Lower merchant commitment by reassigning flow, seeded by the greedy plan.
+
+    The greedy seed matches each receiver to its nearest senders, which is
+    order-dependent and blind to merchant cost: a remote village's surplus can
+    land on far-flung leftover receivers and blow its merchant budget. This is
+    the "local improvement" pass the profile (§14) always intended.
+
+    The one move is a **2x2 swap** within a single resource: two flows
+    ``o1->d1`` and ``o2->d2`` become ``o1->d2`` and ``o2->d1``, shifting the
+    same rate ``t = min(both)``. It preserves every origin's total outflow and
+    every destination's total inflow, so conservation, the surplus ceiling, the
+    no-two-way-pair rule and the no-waterfall rule all survive untouched — a
+    sender stays a sender, a receiver stays a receiver. Cross-resource bundling
+    falls out for free: cost is measured on the *merged* pair cargo, so a swap
+    that lands a resource on a pair another resource already uses is rewarded.
+
+    The objective is lexicographic ``(over_budget_excess, total_merchants,
+    route_count)`` — feasibility first, then merchants (§8.3 objective 1), then
+    route count (objective 4). A swap is applied only when it strictly lowers
+    that tuple, so the result is deterministic and never worse than the seed.
+    """
+    # Working state, kept in sync: per-resource flows, merged pair cargo, the
+    # merchant cost of each pair, and the running per-origin commitment.
+    flows: Assignment = {resource: dict(legs) for resource, legs in assignment.items()}
+    pair = _merge_pair_cargo(flows)
+    pair_merch: dict[FlowKey, int] = {
+        key: _pair_merchants(key[0], key[1], cargo, villages, geometry, merchant_model, cycles)
+        for key, cargo in pair.items()
+    }
+    committed: dict[int, int] = {}
+    for (origin, _destination), merchants in pair_merch.items():
+        committed[origin] = committed.get(origin, 0) + merchants
+
+    def excess(origin: int, count: int) -> int:
+        return max(0, count - budgets.get(origin, 0))
+
+    for _pass in range(MAX_IMPROVE_PASSES):
+        applied = False
+        for resource in sorted(flows, key=lambda r: r.value):
+            legs = flows[resource]
+            edges = sorted(key for key, amount in legs.items() if amount > EPSILON)
+            for i, (o1, d1) in enumerate(edges):
+                for o2, d2 in edges[i + 1 :]:
+                    if o1 == o2 or d1 == d2:
+                        continue
+                    t = min(legs[(o1, d1)], legs[(o2, d2)])
+                    if t <= EPSILON:
+                        continue
+
+                    # Cargo of the four pairs the swap touches, after the move.
+                    moved = [((o1, d1), -t), ((o2, d2), -t), ((o1, d2), t), ((o2, d1), t)]
+                    new_cargo: dict[FlowKey, dict[Resource, float]] = {}
+                    for key, delta in moved:
+                        cargo = dict(pair.get(key, {}))
+                        updated = cargo.get(resource, 0.0) + delta
+                        if updated > EPSILON:
+                            cargo[resource] = updated
+                        else:
+                            cargo.pop(resource, None)
+                        new_cargo[key] = cargo
+                    new_merch = {
+                        key: _pair_merchants(
+                            key[0], key[1], cargo, villages, geometry, merchant_model, cycles
+                        )
+                        for key, cargo in new_cargo.items()
+                    }
+
+                    d_o1 = (new_merch[(o1, d1)] - pair_merch.get((o1, d1), 0)) + (
+                        new_merch[(o1, d2)] - pair_merch.get((o1, d2), 0)
+                    )
+                    d_o2 = (new_merch[(o2, d2)] - pair_merch.get((o2, d2), 0)) + (
+                        new_merch[(o2, d1)] - pair_merch.get((o2, d1), 0)
+                    )
+                    new_o1, new_o2 = committed.get(o1, 0) + d_o1, committed.get(o2, 0) + d_o2
+
+                    over_delta = (
+                        excess(o1, new_o1)
+                        - excess(o1, committed.get(o1, 0))
+                        + excess(o2, new_o2)
+                        - excess(o2, committed.get(o2, 0))
+                    )
+                    total_delta = sum(new_merch.values()) - sum(
+                        pair_merch.get(key, 0) for key, _ in moved
+                    )
+                    rc_delta = sum(1 for key, _ in moved if new_merch[key] > 0) - sum(
+                        1 for key, _ in moved if pair_merch.get(key, 0) > 0
+                    )
+
+                    # The whole objective only shifts by these deltas, so the
+                    # full tuple improves exactly when the delta tuple is < 0.
+                    if (over_delta, total_delta, rc_delta) >= (0, 0, 0):
+                        continue
+
+                    for key, cargo in new_cargo.items():
+                        if cargo:
+                            pair[key] = cargo
+                        else:
+                            pair.pop(key, None)
+                        if new_merch[key] > 0:
+                            pair_merch[key] = new_merch[key]
+                        else:
+                            pair_merch.pop(key, None)
+                    committed[o1], committed[o2] = new_o1, new_o2
+                    legs[(o1, d1)] -= t
+                    legs[(o2, d2)] -= t
+                    legs[(o1, d2)] = legs.get((o1, d2), 0.0) + t
+                    legs[(o2, d1)] = legs.get((o2, d1), 0.0) + t
+                    for key in ((o1, d1), (o2, d2)):
+                        if legs[key] <= EPSILON:
+                            del legs[key]
+                    applied = True
+                    break
+                if applied:
+                    break
+            if applied:
+                break
+        if not applied:
+            break
+    return flows
+
+
 def build_plan(
     villages: Mapping[int, VillageState],
     resource_plans: Mapping[Resource, ResourcePlan],
@@ -253,7 +463,7 @@ def build_plan(
         in the plan, never silently dropped or quietly trimmed to fit.
     """
     warnings: list[str] = []
-    pair_cargo: dict[tuple[int, int], dict[Resource, float]] = {}
+    assignment: Assignment = {}
     shortfalls: list[Shortfall] = []
 
     for resource in sorted(resource_plans, key=lambda r: r.value):
@@ -266,31 +476,24 @@ def build_plan(
             )
         flows, resource_shortfalls = _flows_for_resource(plan, villages, geometry)
         shortfalls.extend(resource_shortfalls)
-        for pair, amount in flows.items():
-            pair_cargo.setdefault(pair, {})[resource] = amount
+        assignment[resource] = {key: amount for key, amount in flows.items() if amount > EPSILON}
+
+    # Reassign the greedy seed to cut merchants and relieve over-budget villages
+    # wherever a cheaper routing exists; never worse than the seed (§8.3, §14).
+    budgets = {vid: villages[vid].spare_merchants(merchant_reserve) for vid in villages}
+    assignment = _improve_flows(assignment, villages, geometry, merchant_model, cycles, budgets)
+    pair_cargo = _merge_pair_cargo(assignment)
 
     routes: list[Route] = []
     committed: dict[int, int] = {vid: 0 for vid in villages}
 
     for origin, destination in sorted(pair_cargo):
         cargo = pair_cargo[(origin, destination)]
-        hourly_total = sum(cargo.values())
-        if hourly_total <= EPSILON:
+        if sum(cargo.values()) <= EPSILON:
             continue
 
-        sender = villages[origin]
-        one_way = geometry.one_way_minutes(sender.coords, villages[destination].coords)
-        capacity = merchant_model.capacity(sender.trade_office_level)
-        cost = cheapest_cycle(hourly_total, 2.0 * one_way, capacity, cycles)
-
-        route = Route(
-            origin=origin,
-            destination=destination,
-            cargo_per_hour=dict(sorted(cargo.items(), key=lambda kv: kv[0].value)),
-            cycle_hours=cost.cycle_hours,
-            merchants_per_send=cost.merchants_per_send,
-            sets_in_flight=cost.sets_in_flight,
-            one_way_minutes=one_way,
+        route = _route_for_pair(
+            origin, destination, cargo, villages, geometry, merchant_model, cycles
         )
         routes.append(route)
         committed[origin] += route.merchants_committed
