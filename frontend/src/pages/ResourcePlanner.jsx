@@ -142,15 +142,16 @@ function BudgetBar({ budget }) {
   )
 }
 
-/** Batch-set one resource's mode/value across every village at once, so a
- *  common allocation (e.g. everyone Keep own, or everyone Absolute 5000) does
- *  not have to be typed row by row. The remainder village keeps its role. */
-function BatchSet({ onApply }) {
+/** Batch-set the mode/value of the CHECKED villages for one resource, so a
+ *  common allocation does not have to be typed row by row. Select rows with
+ *  the checkboxes (or the header select-all); the remainder village keeps its
+ *  role. Disabled until at least one village is checked. */
+function BatchSet({ count, onApply }) {
   const [mode, setMode] = useState('keep')
   const [value, setValue] = useState(0)
   return (
     <div className="flex items-center gap-1 text-xs">
-      <span className="text-secondary">Set all</span>
+      <span className="text-secondary">Set checked</span>
       <select
         aria-label="Batch mode"
         className="input-field text-xs py-0.5"
@@ -171,8 +172,12 @@ function BatchSet({ onApply }) {
         value={value}
         onChange={(e) => setValue(Number(e.target.value))}
       />
-      <button className="btn-secondary btn-xs" onClick={() => onApply(mode, value)}>
-        Apply
+      <button
+        className="btn-secondary btn-xs"
+        disabled={!count}
+        onClick={() => onApply(mode, value)}
+      >
+        Apply to {count} selected
       </button>
     </div>
   )
@@ -392,13 +397,42 @@ export default function ResourcePlanner() {
     })
   }
 
-  // Apply one mode/value to every village for a resource in a single edit.
-  // The remainder village keeps its role (it is set via the Rest radio, not a
-  // mode), so a batch set never silently clears the slack destination.
-  const setAllForResource = (resource, mode, value) => {
+  // Per-resource checkbox selection for batch edits: { [resource]: number[] }.
+  const [selected, setSelected] = useState({})
+  const isSelected = (resource, vid) => (selected[resource] ?? []).includes(vid)
+  const someSelected = (resource) => (selected[resource] ?? []).length > 0
+  const allSelected = (resource) =>
+    villages.length > 0 && (selected[resource] ?? []).length === villages.length
+
+  const toggleSelected = (resource, vid) => {
+    setSelected((prev) => {
+      const cur = new Set(prev[resource] ?? [])
+      if (cur.has(vid)) cur.delete(vid)
+      else cur.add(vid)
+      return { ...prev, [resource]: [...cur] }
+    })
+  }
+
+  const toggleSelectAll = (resource) => {
+    setSelected((prev) => ({
+      ...prev,
+      [resource]: allSelected(resource) ? [] : villages.map((v) => v.village_id),
+    }))
+  }
+
+  // Apply one mode/value to the CHECKED villages for a resource. The remainder
+  // village keeps its role (set via the Rest radio, not a mode), so a batch
+  // edit never silently clears the slack destination.
+  const applyToSelected = (resource, mode, value) => {
+    const ids = new Set(selected[resource] ?? [])
+    if (!ids.size) {
+      toast.error('Check the villages to set first')
+      return
+    }
     setAllocations((prev) => {
       const per = { ...(prev[resource] ?? {}) }
       for (const v of villages) {
+        if (!ids.has(v.village_id)) continue
         if (per[v.village_id]?.mode === 'remainder') continue
         per[v.village_id] = { mode, value: Number(value) || 0 }
       }
@@ -615,7 +649,7 @@ export default function ResourcePlanner() {
               {villages.map((v) => (
                 <tr
                   key={v.village_id}
-                  className="border-t border-gray-800 hover:bg-white/5 transition-colors"
+                  className="border-t border-gray-800 hover:bg-white/5 focus-within:bg-amber-400/10 transition-colors"
                 >
                   <td className="py-1.5 px-2">
                     {v.name}{' '}
@@ -744,7 +778,10 @@ export default function ResourcePlanner() {
                 <div className="flex justify-between items-baseline mb-2 flex-wrap gap-2">
                   <h3 className="font-semibold">{RESOURCE_LABEL[resource]}</h3>
                   <div className="flex items-center gap-3 flex-wrap">
-                    <BatchSet onApply={(mode, value) => setAllForResource(resource, mode, value)} />
+                    <BatchSet
+                      count={(selected[resource] ?? []).length}
+                      onApply={(mode, value) => applyToSelected(resource, mode, value)}
+                    />
                     <div className="text-xs">
                       <span className="text-secondary">
                         total {fmt(totals[resource].total)}/h
@@ -763,6 +800,17 @@ export default function ResourcePlanner() {
                   <table className="w-full text-xs">
                     <thead className="text-secondary uppercase">
                       <tr>
+                        <th className="text-center px-2">
+                          <input
+                            type="checkbox"
+                            aria-label="Select all villages"
+                            checked={allSelected(resource)}
+                            ref={(el) => {
+                              if (el) el.indeterminate = someSelected(resource) && !allSelected(resource)
+                            }}
+                            onChange={() => toggleSelectAll(resource)}
+                          />
+                        </th>
                         <th className="text-left py-1 px-2">Village</th>
                         <th className="text-right px-2">Own/h</th>
                         <th className="text-left px-2">Mode</th>
@@ -785,8 +833,18 @@ export default function ResourcePlanner() {
                         return (
                           <tr
                             key={v.village_id}
-                            className="border-t border-gray-800 hover:bg-white/5 transition-colors"
+                            className={`border-t border-gray-800 hover:bg-white/5 focus-within:bg-amber-400/10 transition-colors ${
+                              isSelected(resource, v.village_id) ? 'bg-amber-400/5' : ''
+                            }`}
                           >
+                            <td className="text-center px-2">
+                              <input
+                                type="checkbox"
+                                aria-label={`Select ${v.name} for batch edit`}
+                                checked={isSelected(resource, v.village_id)}
+                                onChange={() => toggleSelected(resource, v.village_id)}
+                              />
+                            </td>
                             <td className="py-1 px-2">{v.name}</td>
                             <td className="text-right px-2 font-mono text-secondary">
                               {own == null ? '—' : signed(own)}

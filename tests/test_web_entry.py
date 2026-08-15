@@ -65,8 +65,13 @@ def test_loose_static_files_do_not_count_as_a_frontend_build(tmp_path):
     (tmp_path / "favicon.svg").write_text("<svg/>")
     assert ui_build_exists(tmp_path) is False
 
+    # index.html + an empty assets dir is a half-written build → still not ready.
     (tmp_path / "assets").mkdir()
     (tmp_path / "index.html").write_text("<html></html>")
+    assert ui_build_exists(tmp_path) is False
+
+    # A real build has hashed JS chunks under assets/.
+    (tmp_path / "assets" / "index-abc123.js").write_text("// built")
     assert ui_build_exists(tmp_path) is True
 
 

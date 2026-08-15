@@ -58,9 +58,13 @@ def ui_build_exists(static_dir: Path) -> bool:
     The directory alone is not proof: loose files (favicon.svg) can exist
     without a build, and mounting StaticFiles on a missing ``assets/`` raises
     at import — which would crash the server instead of letting the
-    unbuilt-UI fallback explain the situation.
+    unbuilt-UI fallback explain the situation. Also require at least one hashed
+    JS chunk under ``assets/`` so a half-written or interrupted build (empty
+    assets dir, index.html pointing at chunks that are not there) falls back to
+    the 503 page instead of serving a broken SPA.
     """
-    return (static_dir / "assets").is_dir() and (static_dir / "index.html").is_file()
+    assets = static_dir / "assets"
+    return (static_dir / "index.html").is_file() and assets.is_dir() and any(assets.glob("*.js"))
 
 
 def _quiet_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
