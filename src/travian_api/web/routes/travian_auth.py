@@ -268,12 +268,18 @@ async def save_server(
         )
         .order_by(TravianCredential.id.desc())
     )
-    # first(), not scalar_one_or_none(): legacy databases may hold duplicate
-    # rows for the same account, and resaving must repair, not 500.
-    cred = result.scalars().first()
+    # all(), not scalar_one_or_none(): legacy databases may hold duplicate
+    # rows for the same account, and resaving must repair them, not 500.
+    rows = list(result.scalars().all())
+    cred = rows[0] if rows else None
     if cred is not None:
         cred.encrypted_password = encrypt_credential(body.password)
         cred.label = body.label
+        # Remove stale duplicates outright: auto-restore sorts by
+        # last_connected, so a more recently stamped OLD row would otherwise
+        # keep shadowing the row just rotated.
+        for stale in rows[1:]:
+            await db.delete(stale)
     else:
         cred = TravianCredential(
             user_id=user.id,

@@ -152,10 +152,7 @@ def test_saving_the_same_server_twice_updates_instead_of_duplicating(monkeypatch
 
     class _Db:
         async def execute(self, _query):
-            return SimpleNamespace(
-                scalar_one_or_none=lambda: existing,
-                scalars=lambda: SimpleNamespace(first=lambda: existing),
-            )
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [existing]))
 
         def add(self, obj):
             added.append(obj)
@@ -181,36 +178,36 @@ def test_saving_the_same_server_twice_updates_instead_of_duplicating(monkeypatch
     assert res.id == 5
 
 
-def test_resaving_tolerates_duplicate_rows_from_older_databases(monkeypatch):
-    """Legacy databases can hold duplicate rows for one account; resaving the
-    account must update the newest row, not 500 with MultipleResultsFound —
-    these are exactly the users the upsert exists to repair."""
-    from sqlalchemy.exc import MultipleResultsFound
-
+def test_resaving_repairs_legacy_duplicate_rows(monkeypatch):
+    """Legacy databases can hold duplicate rows for one account. Resaving must
+    update the newest row AND delete the stale ones: auto-restore sorts by
+    last_connected, so a more recently stamped older row would otherwise keep
+    shadowing the rotated password forever."""
     monkeypatch.setattr(auth_routes, "encrypt_credential", lambda p: f"enc:{p}")
-    newest = SimpleNamespace(
-        id=9,
-        user_id=1,
-        server_url="https://ts1.x1.europe.travian.com",
-        travian_username="alice",
-        encrypted_password="enc:old",
-        label=None,
-        last_connected=None,
-    )
 
-    class _Result:
-        def scalar_one_or_none(self):
-            raise MultipleResultsFound()
+    def row(row_id, stamped):
+        return SimpleNamespace(
+            id=row_id,
+            user_id=1,
+            server_url="https://ts1.x1.europe.travian.com",
+            travian_username="alice",
+            encrypted_password="enc:old",
+            label=None,
+            last_connected=stamped,
+        )
 
-        def scalars(self):
-            return SimpleNamespace(first=lambda: newest)
+    newest, stale = row(9, None), row(3, "2026-01-01")
+    deleted = []
 
     class _Db:
         async def execute(self, _query):
-            return _Result()
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [newest, stale]))
 
         def add(self, _obj):
             raise AssertionError("must update the newest duplicate, not insert another")
+
+        async def delete(self, obj):
+            deleted.append(obj)
 
         async def commit(self):
             pass
@@ -228,6 +225,7 @@ def test_resaving_tolerates_duplicate_rows_from_older_databases(monkeypatch):
     res = asyncio.run(auth_routes.save_server(body, SimpleNamespace(id=1), _Db()))
 
     assert newest.encrypted_password == "enc:rotated"
+    assert deleted == [stale], "stale duplicates must be removed so restore cannot pick them"
     assert res.id == 9
 
 

@@ -1,9 +1,13 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useToast } from '../components/Toast'
+import useGameStore from '../stores/gameStore'
 import api from '../api'
 
 // Owned state the game will not tell us, kept per village. Trade Office level
 // changes only when the operator builds one, so it is stored rather than fetched.
+// Keys are namespaced per (server, player): the plan endpoint trusts the
+// snapshot the client sends, so rehydrating another account's villages would
+// generate a route sheet from the wrong account's data.
 const LS_TRADE_OFFICE = 'planner_trade_office'
 const LS_ALLOCATIONS = 'planner_allocations'
 const LS_SNAPSHOT = 'planner_snapshot'
@@ -26,6 +30,7 @@ function loadJson(key, fallback) {
 }
 
 function saveJson(key, value) {
+  if (!key) return // not connected yet — nothing to namespace the state under
   try {
     localStorage.setItem(key, JSON.stringify(value))
   } catch {
@@ -102,16 +107,40 @@ function BudgetBar({ budget }) {
 
 export default function ResourcePlanner() {
   const toast = useToast()
+  const serverUrl = useGameStore((s) => s.serverUrl)
+  const playerName = useGameStore((s) => s.playerName)
+  const accountKey = serverUrl && playerName ? `${serverUrl}|${playerName}` : null
   const [stage, setStage] = useState('snapshot')
-  const [snapshot, setSnapshot] = useState(() => loadJson(LS_SNAPSHOT, null))
-  const [tradeOffice, setTradeOffice] = useState(() => loadJson(LS_TRADE_OFFICE, {}))
-  const [allocations, setAllocations] = useState(() => loadJson(LS_ALLOCATIONS, {}))
+  const [snapshot, setSnapshot] = useState(null)
+  const [tradeOffice, setTradeOffice] = useState({})
+  const [allocations, setAllocations] = useState({})
+  // Persisting is enabled only after this account's stored state has been
+  // loaded, so the initial defaults can never overwrite it.
+  const [hydratedKey, setHydratedKey] = useState(null)
   const [plan, setPlan] = useState(null)
   const [fetching, setFetching] = useState(false)
   const [planning, setPlanning] = useState(false)
 
-  useEffect(() => saveJson(LS_TRADE_OFFICE, tradeOffice), [tradeOffice])
-  useEffect(() => saveJson(LS_ALLOCATIONS, allocations), [allocations])
+  const storageKey = useCallback(
+    (base) => (accountKey ? `${base}::${accountKey}` : null),
+    [accountKey]
+  )
+
+  useEffect(() => {
+    if (!accountKey) return
+    setSnapshot(loadJson(`${LS_SNAPSHOT}::${accountKey}`, null))
+    setTradeOffice(loadJson(`${LS_TRADE_OFFICE}::${accountKey}`, {}))
+    setAllocations(loadJson(`${LS_ALLOCATIONS}::${accountKey}`, {}))
+    setPlan(null)
+    setHydratedKey(accountKey)
+  }, [accountKey])
+
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_TRADE_OFFICE), tradeOffice)
+  }, [tradeOffice, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_ALLOCATIONS), allocations)
+  }, [allocations, hydratedKey, accountKey, storageKey])
 
   // Memoised so it does not become a fresh array on every render, which would
   // re-run the plan callback and the totals memo for no reason.
@@ -122,7 +151,7 @@ export default function ResourcePlanner() {
     try {
       const res = await api.get('/distribution/snapshot', { timeout: 0 })
       setSnapshot(res.data)
-      saveJson(LS_SNAPSHOT, res.data)
+      saveJson(storageKey(LS_SNAPSHOT), res.data)
       setPlan(null)
       // Villages get lost, chiefed or renamed between fetches; allocations kept
       // for ids no longer in the snapshot would fail every future plan call.
