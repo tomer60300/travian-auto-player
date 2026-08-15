@@ -70,6 +70,34 @@ class TestVillageSwitch:
         assert res.active_village_id == 222  # the caller's tab-local truth
         assert session.active_village_id == 111  # shared default untouched
 
+    def test_list_reflects_the_callers_tab_local_selection(self):
+        """The switch/list pair must round-trip: passing the tab's selection
+        to /api/villages marks it active, not the stale login default."""
+        from travian_api.web.routes.villages import list_villages
+
+        session = SimpleNamespace(
+            active_village_id=111,
+            auth_state=SimpleNamespace(
+                villages=[
+                    SimpleNamespace(id=111, name="Login", x=0, y=0, is_main_village=True),
+                    SimpleNamespace(id=222, name="Other", x=5, y=5, is_main_village=False),
+                ]
+            ),
+        )
+
+        res = asyncio.run(list_villages(active_village_id=222, session=session))
+
+        assert res.active_village_id == 222
+        assert [v.id for v in res.villages if v.is_active] == [222]
+
+        # Without an override, the server default is reported.
+        res_default = asyncio.run(list_villages(active_village_id=None, session=session))
+        assert res_default.active_village_id == 111
+
+        # An unowned override is ignored, falling back to the default.
+        res_bad = asyncio.run(list_villages(active_village_id=999, session=session))
+        assert res_bad.active_village_id == 111
+
     def test_switch_rejects_a_village_the_player_does_not_own(self):
         from fastapi import HTTPException
 

@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from travian_api.web.sessions import TravianSession, get_travian_session
@@ -52,14 +52,31 @@ class SwitchVillageResponse(BaseModel):
 
 @router.get("", response_model=VillageListResponse)
 async def list_villages(
+    active_village_id: int | None = Query(
+        None,
+        description=(
+            "The caller's tab-local active village. Village selection is "
+            "client-side (see /switch), so pass it here to get a consistent "
+            "is_active view; without it the server's login-village default is "
+            "reported."
+        ),
+    ),
     session: TravianSession = Depends(get_travian_session),
 ):
-    """Return all villages for the connected player."""
+    """Return all villages for the connected player.
+
+    ``active_village_id`` reflects the caller's tab-local selection when
+    supplied (and owned by the player), otherwise the session's login-village
+    default — the switch/list pair round-trips for tab-local selection.
+    """
     if session.auth_state is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Session has no auth state. Try reconnecting.",
         )
+
+    owned_ids = {v.id for v in session.auth_state.villages}
+    active = active_village_id if active_village_id in owned_ids else session.active_village_id
 
     villages = [
         VillageInfo(
@@ -68,13 +85,13 @@ async def list_villages(
             x=v.x,
             y=v.y,
             is_main_village=v.is_main_village,
-            is_active=(v.id == session.active_village_id),
+            is_active=(v.id == active),
         )
         for v in session.auth_state.villages
     ]
 
     return VillageListResponse(
-        active_village_id=session.active_village_id,
+        active_village_id=active,
         villages=villages,
     )
 
