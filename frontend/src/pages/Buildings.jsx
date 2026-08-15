@@ -320,7 +320,11 @@ export default function Buildings() {
   }, [fetchBuildings, fetchQueue, activeVillageId])
 
   const fetchDetail = useCallback(async (slotId) => {
-    fetchingSlotRef.current = slotId
+    // Key the in-flight request by slot AND village: the same slot id exists in
+    // every village, so a slower response from the previous village must not
+    // repopulate the sidebar after a switch.
+    const token = `${slotId}::${activeVillageId ?? ''}`
+    fetchingSlotRef.current = token
     setDetailLoading(true)
     try {
       // The backend's session default is forever the login village (switching
@@ -328,16 +332,16 @@ export default function Buildings() {
       const res = await api.get(`/buildings/${slotId}`, {
         params: activeVillageId != null ? { village_id: activeVillageId } : {},
       })
-      if (fetchingSlotRef.current === slotId) {
+      if (fetchingSlotRef.current === token) {
         setDetail(res.data)
       }
     } catch {
-      if (fetchingSlotRef.current === slotId) {
+      if (fetchingSlotRef.current === token) {
         toast.error('Failed to load building details')
         setDetail(null)
       }
     } finally {
-      if (fetchingSlotRef.current === slotId) {
+      if (fetchingSlotRef.current === token) {
         setDetailLoading(false)
       }
     }

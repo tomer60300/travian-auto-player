@@ -429,15 +429,22 @@ export default function BuildQueue() {
   const [validationResult, setValidationResult] = useState(null)
   const [showConfirm, setShowConfirm] = useState(false)
 
+  // Only the latest fetch may commit: a slower response from the previous
+  // village/account must not overwrite the current one after a switch.
+  const fetchTokenRef = useRef('')
+
   // Fetch buildings + queue for the selected village (no global switch)
   const fetchLocalData = useCallback(async (vid) => {
     if (!vid) return
+    const token = `${vid}::${accountKeyRef.current}`
+    fetchTokenRef.current = token
     setBuildingsLoading(true)
     try {
       const [bRes, qRes] = await Promise.all([
         api.get(`/buildings?village_id=${vid}`),
         api.get(`/buildings/queue?village_id=${vid}`),
       ])
+      if (fetchTokenRef.current !== token) return
       const arr = Array.isArray(bRes.data) ? bRes.data
         : Array.isArray(bRes.data?.buildings) ? bRes.data.buildings : []
       setBuildings(arr)
