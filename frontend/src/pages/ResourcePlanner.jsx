@@ -11,6 +11,13 @@ import api from '../api'
 const LS_TRADE_OFFICE = 'planner_trade_office'
 const LS_ALLOCATIONS = 'planner_allocations'
 const LS_SNAPSHOT = 'planner_snapshot'
+const LS_MERCHANT = 'planner_merchant_model'
+
+// Merchant capacity is server-calibrated (Europe 2 is not a stock server — see
+// docs/25), so it cannot be derived from tribe and defaults to the operator's
+// calibrated Europe 2 Teuton values. Travel SPEED, by contrast, is tribe-derived
+// server-side and travels in the snapshot.
+const DEFAULT_MERCHANT_MODEL = { base_capacity: 2200, bonus_per_to_level: 0.2 }
 
 const RESOURCES = ['lumber', 'clay', 'iron', 'crop']
 const RESOURCE_LABEL = { lumber: 'Lumber', clay: 'Clay', iron: 'Iron', crop: 'Crop' }
@@ -114,6 +121,7 @@ export default function ResourcePlanner() {
   const [snapshot, setSnapshot] = useState(null)
   const [tradeOffice, setTradeOffice] = useState({})
   const [allocations, setAllocations] = useState({})
+  const [merchantModel, setMerchantModel] = useState(DEFAULT_MERCHANT_MODEL)
   // Persisting is enabled only after this account's stored state has been
   // loaded, so the initial defaults can never overwrite it.
   const [hydratedKey, setHydratedKey] = useState(null)
@@ -141,6 +149,7 @@ export default function ResourcePlanner() {
       setSnapshot(null)
       setTradeOffice({})
       setAllocations({})
+      setMerchantModel(DEFAULT_MERCHANT_MODEL)
       setPlan(null)
       setHydratedKey(null)
       return
@@ -148,6 +157,7 @@ export default function ResourcePlanner() {
     setSnapshot(loadJson(`${LS_SNAPSHOT}::${accountKey}`, null))
     setTradeOffice(loadJson(`${LS_TRADE_OFFICE}::${accountKey}`, {}))
     setAllocations(loadJson(`${LS_ALLOCATIONS}::${accountKey}`, {}))
+    setMerchantModel(loadJson(`${LS_MERCHANT}::${accountKey}`, DEFAULT_MERCHANT_MODEL))
     setPlan(null)
     setHydratedKey(accountKey)
   }, [accountKey])
@@ -158,6 +168,9 @@ export default function ResourcePlanner() {
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_ALLOCATIONS), allocations)
   }, [allocations, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_MERCHANT), merchantModel)
+  }, [merchantModel, hydratedKey, accountKey, storageKey])
 
   // Memoised so it does not become a fresh array on every render, which would
   // re-run the plan callback and the totals memo for no reason.
@@ -231,6 +244,12 @@ export default function ResourcePlanner() {
           trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
         })),
         allocations: sendAllocations,
+        // Geometry comes from the snapshot (map span + tribe-derived merchant
+        // speed); the merchant capacity model is the operator's calibration.
+        map_span: snapshot?.map_span,
+        speed_fields_per_hour: snapshot?.speed_fields_per_hour,
+        merchant_base_capacity: Number(merchantModel.base_capacity) || undefined,
+        trade_office_bonus_per_level: Number(merchantModel.bonus_per_to_level) || undefined,
       })
       if (requestedFor !== currentAccountKey()) return
       setPlan(res.data)
@@ -240,7 +259,7 @@ export default function ResourcePlanner() {
     } finally {
       setPlanning(false)
     }
-  }, [villages, tradeOffice, allocations, toast, accountKey, currentAccountKey])
+  }, [villages, tradeOffice, allocations, toast, accountKey, currentAccountKey, snapshot, merchantModel])
 
   // Live unallocated counter, so slack is visible while typing rather than
   // discovered later (profile known issue #9).
@@ -422,6 +441,46 @@ export default function ResourcePlanner() {
               ))}
             </ul>
           )}
+
+          {/* Merchant model: speed is tribe-derived server-side (shown, not
+              editable); capacity is server-calibrated, so the operator sets it. */}
+          <div className="mt-4 flex items-center gap-4 flex-wrap text-xs border-t border-gray-800 pt-3">
+            <span className="text-secondary uppercase">Merchant model</span>
+            <span className="text-secondary">
+              Speed:{' '}
+              <span className="font-mono text-white">
+                {snapshot?.speed_fields_per_hour ?? '—'}
+              </span>{' '}
+              fields/h (from tribe)
+            </span>
+            <label className="flex items-center gap-1">
+              <span className="text-secondary">Base capacity</span>
+              <input
+                type="number"
+                min="1"
+                aria-label="Merchant base capacity"
+                className="input-field w-24 text-right py-1"
+                value={merchantModel.base_capacity}
+                onChange={(e) =>
+                  setMerchantModel((m) => ({ ...m, base_capacity: Number(e.target.value) }))
+                }
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              <span className="text-secondary">Bonus / TO level</span>
+              <input
+                type="number"
+                min="0"
+                step="0.05"
+                aria-label="Trade Office bonus per level"
+                className="input-field w-20 text-right py-1"
+                value={merchantModel.bonus_per_to_level}
+                onChange={(e) =>
+                  setMerchantModel((m) => ({ ...m, bonus_per_to_level: Number(e.target.value) }))
+                }
+              />
+            </label>
+          </div>
         </div>
       )}
 

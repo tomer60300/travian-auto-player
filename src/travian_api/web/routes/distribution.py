@@ -49,6 +49,18 @@ router = APIRouter(prefix="/api/distribution", tags=["distribution"])
 DEFAULT_MAP_SPAN = 401
 DEFAULT_SPEED_FIELDS_PER_HOUR = 12.0
 
+# Merchant travel speed is tribe-specific (fields/hour). Wrong speed inflates
+# travel time -> sets_in_flight -> merchant counts, and can flip over_budget.
+# Keyed by Travian tribe id; unknown tribes fall back to the Teuton default.
+_TRIBE_MERCHANT_SPEED: dict[int, float] = {
+    1: 16.0,  # Roman
+    2: 12.0,  # Teuton
+    3: 24.0,  # Gaul
+    6: 16.0,  # Egyptian
+    7: 12.0,  # Hun
+    8: 16.0,  # Spartan
+}
+
 
 class VillageSnapshot(BaseModel):
     """Per-village state, all of it read from the game."""
@@ -250,6 +262,9 @@ async def get_snapshot(session: TravianSession = Depends(get_live_travian_sessio
 
     return SnapshotResponse(
         villages=villages,
+        speed_fields_per_hour=_TRIBE_MERCHANT_SPEED.get(
+            session.tribe_id or 0, DEFAULT_SPEED_FIELDS_PER_HOUR
+        ),
         # Production + stocks here, plus whatever the crop read actually spent
         # (the capacity page is only fetched when some granary is filling).
         requests_used=2 + crop_requests,

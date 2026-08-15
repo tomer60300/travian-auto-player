@@ -109,7 +109,7 @@ class _SnapshotHttp:
         return RESOURCES_HTML
 
 
-def _session(http: _SnapshotHttp) -> SimpleNamespace:
+def _session(http: _SnapshotHttp, tribe_id: int = 2) -> SimpleNamespace:
     return SimpleNamespace(
         auth_state=SimpleNamespace(
             villages=[
@@ -117,6 +117,7 @@ def _session(http: _SnapshotHttp) -> SimpleNamespace:
                 SimpleNamespace(id=20011, name="11", x=30, y=90),
             ]
         ),
+        tribe_id=tribe_id,
         http_client=http,
         building_service=BuildingService(http),
     )
@@ -150,6 +151,22 @@ class TestSnapshotPricing:
 
         assert len(http.urls) == 4
         assert res.requests_used == 4
+
+    def test_merchant_speed_comes_from_the_connected_tribe(self):
+        """Merchant travel speed is tribe-specific; hardcoding Teuton's 12
+        f/h inflates travel times and merchant counts for Romans/Gauls."""
+        assert (
+            asyncio.run(get_snapshot(_session(_SnapshotHttp(), tribe_id=2))).speed_fields_per_hour
+            == 12
+        )  # Teuton
+        assert (
+            asyncio.run(get_snapshot(_session(_SnapshotHttp(), tribe_id=1))).speed_fields_per_hour
+            == 16
+        )  # Roman
+        assert (
+            asyncio.run(get_snapshot(_session(_SnapshotHttp(), tribe_id=3))).speed_fields_per_hour
+            == 24
+        )  # Gaul
 
     def test_warns_when_the_production_table_is_missing(self):
         """Without Travian Plus the production table is absent; rates silently
