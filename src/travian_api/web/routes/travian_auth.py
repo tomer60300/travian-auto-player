@@ -14,7 +14,7 @@ from travian_api.web.auth import (
     get_current_user,
 )
 from travian_api.web.models.db import TravianCredential, User, get_db
-from travian_api.web.sessions import TravianSession, session_manager
+from travian_api.web.sessions import TravianSession, session_manager, try_restore_session
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +160,16 @@ async def disconnect(user: User = Depends(get_current_user)):
 
 @router.get("/status", response_model=TravianStatusResponse)
 async def get_status(user: User = Depends(get_current_user)):
-    """Return the current Travian connection state and player info."""
+    """Return the current Travian connection state and player info.
+
+    Attempts a saved-credential restore when no live session exists: the
+    frontend's initial mount and health poll key off this route, so without
+    the attempt a backend restart sends users to /connect despite saved
+    credentials. The restore is best-effort and returns None on failure.
+    """
     session = session_manager.get(user.id)
+    if session is None:
+        session = await try_restore_session(user.id)
     return _session_to_status(session)
 
 

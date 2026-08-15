@@ -17,6 +17,17 @@ function storeVillageId(id) {
   } catch { /* empty */ }
 }
 
+// When a stored selection wins over the server's default, tell the backend:
+// endpoints that fall back to session.active_village_id (e.g. the reports
+// analyzer WS) would otherwise act on the login village until the user
+// manually re-selects. Best-effort — action routes send explicit ids anyway.
+async function syncBackendVillage(villageId, serverActiveId) {
+  if (villageId == null || villageId === serverActiveId) return
+  try {
+    await api.post('/villages/switch', { village_id: villageId })
+  } catch { /* keep the server default; explicit ids still travel per call */ }
+}
+
 let _checkingStatus = false
 
 const useGameStore = create((set, get) => ({
@@ -55,6 +66,7 @@ const useGameStore = create((set, get) => ({
       villages: villages,
     });
     storeVillageId(villageToUse)
+    await syncBackendVillage(villageToUse, data.active_village_id)
     return data;
   },
 
@@ -76,6 +88,7 @@ const useGameStore = create((set, get) => ({
       villages: villages,
     });
     storeVillageId(villageToUse)
+    await syncBackendVillage(villageToUse, data.active_village_id)
     return data;
   },
 
@@ -115,6 +128,7 @@ const useGameStore = create((set, get) => ({
           villages: villages,
         });
         storeVillageId(villageToUse)
+        await syncBackendVillage(villageToUse, data.active_village_id)
       } else {
         set({ connected: false, statusChecked: true });
       }
