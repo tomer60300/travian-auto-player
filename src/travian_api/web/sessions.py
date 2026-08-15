@@ -367,6 +367,15 @@ _RESTORE_RETRY_SECONDS = 60.0
 _restore_backoff: dict[int, float] = {}
 
 
+def reset_restore_backoff(user_id: int) -> None:
+    """Drop the failed-restore backoff for a user.
+
+    Called when the user EXPLICITLY reconnects: the backoff exists to stop
+    per-request auto-reconnect storms, not to block an intentional retry.
+    """
+    _restore_backoff.pop(user_id, None)
+
+
 def latest_credential_query(user_id: int):
     """The saved credential auto-restore should use: most recently connected,
     with newest-id as the tie-break — timestamps are commonly NULL on freshly

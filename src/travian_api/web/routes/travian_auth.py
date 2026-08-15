@@ -14,7 +14,12 @@ from travian_api.web.auth import (
     get_current_user,
 )
 from travian_api.web.models.db import TravianCredential, User, get_db
-from travian_api.web.sessions import TravianSession, session_manager, try_restore_session
+from travian_api.web.sessions import (
+    TravianSession,
+    reset_restore_backoff,
+    session_manager,
+    try_restore_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,8 +219,11 @@ async def reconnect(
     if session is None:
         # "Current or last": after a restart or eviction there is no in-memory
         # session — exactly when a reconnect is needed most. An explicit
-        # reconnect request also overrides an earlier explicit disconnect.
+        # reconnect overrides an earlier explicit disconnect AND the
+        # failed-restore backoff (which only exists to throttle per-request
+        # auto-reconnects, never an intentional retry).
         session_manager.clear_explicit_disconnect(user.id)
+        reset_restore_backoff(user.id)
         restored = await try_restore_session(user.id)
         if restored is not None:
             return _session_to_status(restored)
@@ -364,8 +372,18 @@ async def connect_saved_server(
             detail="Saved server not found",
         )
 
-    # 2. Decrypt the password
-    password = decrypt_credential(cred.encrypted_password)
+    # 2. Decrypt the password. A row that cannot be decrypted (secret rotated,
+    # corrupt legacy row) is a controlled error, not a 500.
+    try:
+        password = decrypt_credential(cred.encrypted_password)
+    except Exception as exc:
+        logger.warning(
+            "Saved credential %s for user %s is undecryptable: %r", server_id, user.id, exc
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Saved credentials could not be decrypted. Re-save this server.",
+        )
 
     # 3. Connect via session_manager
     try:

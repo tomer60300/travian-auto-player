@@ -391,6 +391,65 @@ def test_reconnect_restores_from_saved_credentials_when_no_live_session(monkeypa
     assert res.player_name == "Chieftain"
 
 
+def test_reconnect_bypasses_the_restore_backoff(monkeypatch):
+    """An explicit reconnect must clear the failed-restore backoff — that
+    throttle exists for per-request auto-reconnects, not an intentional retry
+    the user just clicked."""
+    import travian_api.web.sessions as sessions_module
+
+    monkeypatch.setattr(auth_routes.session_manager, "get", lambda user_id: None)
+    cleared = []
+    monkeypatch.setattr(auth_routes, "reset_restore_backoff", lambda uid: cleared.append(uid))
+
+    restored = SimpleNamespace(
+        server_url="https://ts1.x1.europe.travian.com",
+        player_name="Chieftain",
+        tribe_id=1,
+        active_village_id=20003,
+        auth_state=SimpleNamespace(villages=[]),
+    )
+
+    async def fake_restore(user_id):
+        return restored
+
+    monkeypatch.setattr(auth_routes, "try_restore_session", fake_restore)
+    monkeypatch.setattr(
+        sessions_module.session_manager, "clear_explicit_disconnect", lambda uid: None
+    )
+
+    res = asyncio.run(auth_routes.reconnect(SimpleNamespace(id=7), None))
+
+    assert res.connected is True
+    assert cleared == [7]
+
+
+def test_saved_server_connect_422s_on_undecryptable_credentials(monkeypatch):
+    """A row that cannot be decrypted (rotated secret, corrupt legacy row)
+    is a controlled error, not a 500 from an unguarded decrypt."""
+    cred = SimpleNamespace(
+        id=3,
+        user_id=1,
+        server_url="https://ts1.x1.europe.travian.com",
+        travian_username="alice",
+        encrypted_password="corrupt",
+        last_connected=None,
+    )
+
+    def boom(_ciphertext):
+        raise ValueError("invalid token")
+
+    monkeypatch.setattr(auth_routes, "decrypt_credential", boom)
+
+    class _Db:
+        async def execute(self, _query):
+            return SimpleNamespace(scalar_one_or_none=lambda: cred)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(auth_routes.connect_saved_server(3, SimpleNamespace(id=1), _Db()))
+
+    assert exc.value.status_code == 422
+
+
 def test_reconnect_preserves_the_409_from_the_session_manager(monkeypatch):
     live = SimpleNamespace(
         server_url="https://ts1.x1.europe.travian.com",
