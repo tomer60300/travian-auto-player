@@ -259,6 +259,15 @@ class TestAssignRoleAndListName:
         assert all(r == "MID" for r in roles[3:8])
         assert all(r == "INACTIVE" for r in roles[8:])
 
+    def test_two_placements_keep_the_runner_up_active(self):
+        """Flooring the cut index (int(2*0.80)=1) dropped the 2nd of exactly two
+        placements straight to INACTIVE. The bottom 20% of two targets rounds to
+        zero deactivations, so the runner-up belongs in MID, not INACTIVE."""
+        placements = [self._make_placement(1.0), self._make_placement(0.5)]
+        ordered = assign_role_and_list_name("V1", placements)
+        roles = [p.target_list_role for p in ordered]
+        assert roles == ["HIGH", "MID"]
+
     def test_list_name_uses_display_unit_and_village(self):
         p = self._make_placement(1.0, village="V3")
         assign_role_and_list_name("V3", [p])

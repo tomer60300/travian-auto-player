@@ -503,7 +503,11 @@ def assign_role_and_list_name(
     # (a single placement landed straight in INACTIVE), so every non-empty set
     # promotes at least its best target.
     high_cut = max(1, int(n * HIGH_FRACTION)) if n else 0
-    mid_cut = max(high_cut, int(n * MID_FRACTION))
+    # Round the MID boundary rather than floor it: flooring int(n * MID_FRACTION)
+    # pulls the cut a whole slot short whenever the fractional part is >= 0.5, so
+    # two placements (2 * 0.80 = 1.6 -> 1) sent the runner-up to INACTIVE instead
+    # of MID, deactivating a live raid target.
+    mid_cut = max(high_cut, round(n * MID_FRACTION))
     for idx, p in enumerate(sorted_placements):
         if idx < high_cut:
             role = "HIGH"

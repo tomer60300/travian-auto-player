@@ -412,12 +412,10 @@ async def connect_saved_server(
     # A proven-good login clears any failed-restore backoff (see /connect).
     reset_restore_backoff(user.id)
 
-    # 4. Update last_connected timestamp — best-effort bookkeeping: a DB
-    # hiccup here must not report the successful login as a failure.
-    try:
-        cred.last_connected = datetime.now(UTC)
-        await db.commit()
-    except Exception:
-        logger.warning("Connected user %s but could not stamp last_connected", user.id)
+    # 4. Update last_connected through the shared, duplicate-aware helper the
+    # /connect and /reconnect paths use, so legacy duplicate rows get the row
+    # holding the password that just authenticated stamped — not merely the one
+    # looked up by id. Best-effort: a DB hiccup must not fail the live login.
+    await _update_last_connected(db, user.id, cred.server_url, cred.travian_username, password)
 
     return _session_to_status(session)

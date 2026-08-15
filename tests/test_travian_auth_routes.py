@@ -107,6 +107,54 @@ def test_saved_server_connect_succeeds_even_if_the_stamp_fails(monkeypatch):
     assert res.connected is True
 
 
+def test_saved_server_connect_stamps_the_password_matching_row(monkeypatch):
+    """connect_saved_server routes its last_connected stamp through the shared
+    duplicate-aware helper: among legacy duplicates the row whose password just
+    authenticated is stamped, not merely whichever row the id lookup returned."""
+    live = SimpleNamespace(
+        server_url="https://ts1.x1.europe.travian.com",
+        player_name="Chieftain",
+        tribe_id=1,
+        active_village_id=20003,
+        auth_state=SimpleNamespace(villages=[]),
+    )
+
+    async def ok_connect(**kwargs):
+        return live
+
+    monkeypatch.setattr(auth_routes.session_manager, "connect", ok_connect)
+    monkeypatch.setattr(auth_routes, "decrypt_credential", lambda s: s.removeprefix("enc:"))
+
+    def row(row_id, password):
+        return SimpleNamespace(
+            id=row_id,
+            server_url="https://ts1.x1.europe.travian.com",
+            travian_username="alice",
+            encrypted_password=f"enc:{password}",
+            last_connected=None,
+        )
+
+    clicked = row(3, "current-pw")  # the row addressed by server_id
+    newest_stale = row(9, "old-pw")  # a legacy duplicate holding the wrong password
+    older_correct = row(3, "current-pw")  # same account/password, distinct object
+
+    class _Db:
+        async def execute(self, _query):
+            return SimpleNamespace(
+                scalar_one_or_none=lambda: clicked,
+                scalars=lambda: SimpleNamespace(all=lambda: [newest_stale, older_correct]),
+            )
+
+        async def commit(self):
+            pass
+
+    res = asyncio.run(auth_routes.connect_saved_server(3, SimpleNamespace(id=1), _Db()))
+
+    assert res.connected is True
+    assert older_correct.last_connected is not None
+    assert newest_stale.last_connected is None
+
+
 def test_status_attempts_a_saved_credential_restore(monkeypatch):
     """After a backend restart the frontend's first call is /status; answering
     connected=false without trying the saved-credential restore sends users

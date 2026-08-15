@@ -655,9 +655,9 @@ export default function ResourcePlanner() {
               {villages.map((v) => (
                 <tr
                   key={v.village_id}
-                  className="border-t border-gray-800 hover:bg-white/5 focus-within:bg-amber-400/10 transition-colors"
+                  className="group border-t border-gray-800 hover:bg-white/5 focus-within:bg-amber-400/15 transition-colors"
                 >
-                  <td className="py-1.5 px-2">
+                  <td className="py-1.5 px-2 border-l-2 border-l-transparent group-focus-within:border-l-amber-400">
                     {v.name}{' '}
                     <span className="text-secondary text-xs">
                       ({v.x}|{v.y})
@@ -839,11 +839,11 @@ export default function ResourcePlanner() {
                         return (
                           <tr
                             key={v.village_id}
-                            className={`border-t border-gray-800 hover:bg-white/5 focus-within:bg-amber-400/10 transition-colors ${
+                            className={`group border-t border-gray-800 hover:bg-white/5 focus-within:bg-amber-400/15 transition-colors ${
                               isSelected(resource, v.village_id) ? 'bg-amber-400/5' : ''
                             }`}
                           >
-                            <td className="text-center px-2">
+                            <td className="text-center px-2 border-l-2 border-l-transparent group-focus-within:border-l-amber-400">
                               <input
                                 type="checkbox"
                                 aria-label={`Select ${v.name} for batch edit`}
