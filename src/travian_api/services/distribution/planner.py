@@ -13,6 +13,7 @@ run plans from the snapshot it is given.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -151,8 +152,14 @@ def craft_plan(
         SheetRow(
             origin=scheduled.route.origin,
             destination=scheduled.route.destination,
-            # Integer cargo, rounded so the send total is preserved.
-            cargo=round_preserving_total(scheduled.route.batch_per_resource),
+            # Integer cargo, summing to the same ceil(batch) the merchant
+            # budget in route_cost was sized for — round(sum) would ship one
+            # resource less than budgeted on every cycle when the fraction
+            # falls below .5.
+            cargo=round_preserving_total(
+                scheduled.route.batch_per_resource,
+                target_total=math.ceil(sum(scheduled.route.batch_per_resource.values())),
+            ),
             cycle_hours=scheduled.route.cycle_hours,
             dispatch_minute=scheduled.dispatch_minute,
             arrival_minute=scheduled.first_arrival_minute,

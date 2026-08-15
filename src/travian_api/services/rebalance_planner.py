@@ -324,27 +324,37 @@ def plan_waves_for_target(
     if wanted == 0:
         return []
 
-    candidates = enumerate_candidate_waves(target_agg.coord, village_positions, troop_supplies)
-    picks = pick_wave_set_greedy(candidates, wanted)
-    if not picks:
+    candidates = sorted(
+        enumerate_candidate_waves(target_agg.coord, village_positions, troop_supplies),
+        key=lambda c: c[2],
+    )
+    if not candidates:
         return []
 
     plan: list[Placement] = []
     cumulative_taken = 0
-    of_total = len(picks)
+    of_total = min(wanted, len(candidates))
     target_name = getattr(target_agg, "target_name", "")
     primary_owner = getattr(target_agg, "primary_owner_village", "")
     slot_instances = list(getattr(target_agg, "slot_instances", []) or [])
 
-    for village, unit, arrival_min in picks:
+    # Selection and supply-checking run together over ALL candidates rather
+    # than a greedy pre-slice: a candidate can enumerate with supply >= 1 yet
+    # lack the units its wave needs, and pre-slicing would have discarded the
+    # slower candidates (including ones inside the skipped pick's spacing
+    # window) that could still fill the wave.
+    seen_vu: set[tuple[str, str]] = set()
+    last_arrival: float | None = None
+    for village, unit, arrival_min in candidates:
+        if len(plan) >= wanted:
+            break
+        if (village, unit) in seen_vu:
+            continue
+        if last_arrival is not None and arrival_min - last_arrival < WAVE_SPACING_MIN:
+            continue
         carry = UNIT_CARRY.get(unit, 0)
         if carry <= 0:
             continue
-        # Wave numbering follows COMMITTED waves, not pick position: a pick
-        # can enumerate with supply >= 1 yet lack the units the wave needs,
-        # and truncating there would drop feasible placements from slower
-        # villages with plenty of troops. Skip it and let the next candidate
-        # take this wave slot instead.
         count, haul = size_wave_with_residual_carry(
             avg_loot,
             wave_index=len(plan),
@@ -354,6 +364,8 @@ def plan_waves_for_target(
         avail = int(troop_supplies.get((village, unit), 0))
         if count > avail:
             continue
+        seen_vu.add((village, unit))
+        last_arrival = arrival_min
         round_trip = arrival_min * 2.0
         raids_per_day = compute_expected_raids_per_day(round_trip)
         plan.append(

@@ -19,8 +19,15 @@ from typing import TypeVar
 K = TypeVar("K", bound=Hashable)
 
 
-def round_preserving_total(values: Mapping[K, float]) -> dict[K, int]:
-    """Round *values* to integers whose sum is ``round(sum(values))``.
+def round_preserving_total(
+    values: Mapping[K, float], *, target_total: int | None = None
+) -> dict[K, int]:
+    """Round *values* to integers whose sum is *target_total*.
+
+    The default target is ``round(sum(values))``. The planner passes
+    ``ceil(batch)`` instead: merchants are budgeted for the ceiling in
+    ``route_cost``, so rounding the sheet down would under-deliver on every
+    cycle while the reserved merchants ride part-empty.
 
     Ties in the fractional part are broken by the key's sorted order, so the
     result is deterministic -- a re-plan on unchanged input must produce an
@@ -35,8 +42,9 @@ def round_preserving_total(values: Mapping[K, float]) -> dict[K, int]:
     if not values:
         return {}
 
+    total = round(sum(values.values())) if target_total is None else target_total
     floors = {key: math.floor(value) for key, value in values.items()}
-    shortfall = round(sum(values.values())) - sum(floors.values())
+    shortfall = total - sum(floors.values())
 
     if shortfall <= 0:
         return floors

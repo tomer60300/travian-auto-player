@@ -121,6 +121,30 @@ class TestSumPreservingRounding:
         with pytest.raises(ValueError):
             round_preserving_total({"a": -1.0})
 
+    def test_sheet_cargo_matches_the_merchant_budget_ceiling(self):
+        """route_cost budgets merchants for ceil(batch); rounding the sheet to
+        round(sum) under-delivers every cycle when the fraction is below .5,
+        even though merchants were reserved for the higher batch."""
+        values = {"lumber": 1.1}
+
+        rounded = round_preserving_total(values, target_total=2)
+
+        assert sum(rounded.values()) == 2
+
+    @pytest.mark.parametrize("seed", range(25))
+    def test_ceiling_target_keeps_each_entry_within_one(self, seed):
+        import math
+
+        rng = random.Random(seed + 900)
+        values = {f"r{i}": rng.uniform(0, 5000) for i in range(rng.randint(1, 8))}
+        target = math.ceil(sum(values.values()))
+
+        rounded = round_preserving_total(values, target_total=target)
+
+        assert sum(rounded.values()) == target
+        for key, value in values.items():
+            assert abs(rounded[key] - value) < 1.0
+
     def test_rounding_is_deterministic(self):
         values = {"a": 1.5, "b": 1.5, "c": 1.5}
 

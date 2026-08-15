@@ -572,6 +572,32 @@ class TestWaveStacking:
         assert waves[0].wave_index == 1
         assert all(w.of_total_waves == len(waves) for w in waves)
 
+    def test_backfill_reaches_candidates_beyond_the_greedy_slice(self):
+        """Greedy pre-selection excluded candidates inside the spacing window
+        of an undersupplied pick; skipping that pick must reopen its window so
+        slower candidates can fill the wave."""
+        from travian_api.services.rebalance_planner import plan_waves_for_target
+
+        # VA fastest (12min) but one club; VB (19min) sits inside VA's spacing
+        # window so the old greedy slice never contained it; VC at 34min.
+        vps = [
+            VillagePosition("VA", 30, 82),
+            VillagePosition("VB", 33, 84),
+            VillagePosition("VC", 35, 83),
+        ]
+        supplies = {("VA", "t1"): 1, ("VB", "t1"): 1000, ("VC", "t1"): 1000}
+        target = FakeTarget(
+            coord=(31, 83),
+            avg_loot=480.0,
+            total_raids_all_lists=20,
+            last_raid_time_unix=int(NOW - 86400),
+        )
+
+        waves = plan_waves_for_target(target, vps, supplies)
+
+        assert [w.optimal_village for w in waves] == ["VB", "VC"]
+        assert [w.wave_index for w in waves] == [1, 2]
+
     def test_dead_floor_returns_empty_plan(self):
         from travian_api.services.rebalance_planner import plan_waves_for_target
 
