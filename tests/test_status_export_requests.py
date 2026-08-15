@@ -50,6 +50,15 @@ def _session(http: _RecordingHttp, village_ids: list[int]) -> SimpleNamespace:
     )
 
 
+def test_troop_names_tolerate_an_unknown_tribe():
+    """session.tribe_id falls back to 0 when GraphQL enrichment failed during
+    login; TribeType(0) raised ValueError and 500ed the whole export."""
+    from travian_api.web.routes.status_export import _troop_name
+
+    assert _troop_name(0, "t1") == "t1"
+    assert _troop_name(1, "t1") != "t1"  # a known tribe still resolves names
+
+
 def test_default_export_costs_one_troops_plus_one_dorf1_per_village():
     http = _RecordingHttp()
 

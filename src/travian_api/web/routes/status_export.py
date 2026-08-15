@@ -15,9 +15,16 @@ router = APIRouter(prefix="/api/status", tags=["status"])
 
 
 def _troop_name(tribe_id: int, key: str) -> str:
-    """Resolve t1-t10 key to a human-readable troop name."""
-    mapping = TROOP_MAPPINGS.get(TribeType(tribe_id), {})
-    return mapping.get(key, key)
+    """Resolve t1-t10 key to a human-readable troop name.
+
+    An unknown tribe — 0 when GraphQL enrichment failed during login — keeps
+    the raw t1-t10 key rather than 500ing the whole export.
+    """
+    try:
+        tribe = TribeType(tribe_id)
+    except ValueError:
+        return key
+    return TROOP_MAPPINGS.get(tribe, {}).get(key, key)
 
 
 def _crop_status(resources: Resources) -> dict:

@@ -3,17 +3,26 @@ import api from '../api';
 
 const VILLAGE_KEY = 'activeVillageId'
 
-function getStoredVillageId() {
+// Scoped per (server, player): village ids can overlap across worlds, so one
+// global key could silently inherit another account's selection and route
+// actions to the wrong village after switching accounts in the same tab.
+function villageStorageKey(serverUrl, playerName) {
+  return serverUrl && playerName ? `${VILLAGE_KEY}::${serverUrl}|${playerName}` : null
+}
+
+function getStoredVillageId(key) {
+  if (!key) return null
   try {
-    const v = sessionStorage.getItem(VILLAGE_KEY)
+    const v = sessionStorage.getItem(key)
     return v ? Number(v) : null
   } catch { return null }
 }
 
-function storeVillageId(id) {
+function storeVillageId(key, id) {
+  if (!key) return
   try {
-    if (id != null) sessionStorage.setItem(VILLAGE_KEY, String(id))
-    else sessionStorage.removeItem(VILLAGE_KEY)
+    if (id != null) sessionStorage.setItem(key, String(id))
+    else sessionStorage.removeItem(key)
   } catch { /* empty */ }
 }
 
@@ -32,7 +41,9 @@ const useGameStore = create((set, get) => ({
   playerName: null,
   tribeId: null,
   villages: [],
-  activeVillageId: getStoredVillageId(),
+  // Populated by connect/checkStatus once the account (and so the per-account
+  // storage key) is known.
+  activeVillageId: null,
   resources: null,
   buildings: [],
   buildingsLoading: false,
@@ -46,7 +57,8 @@ const useGameStore = create((set, get) => ({
       password,
     });
     const data = res.data;
-    const storedVid = getStoredVillageId()
+    const vkey = villageStorageKey(data.server_url, data.player_name)
+    const storedVid = getStoredVillageId(vkey)
     const villages = Array.isArray(data.villages) ? data.villages : []
     const villageToUse = (storedVid && villages.some(v => v.id === storedVid))
       ? storedVid
@@ -60,14 +72,15 @@ const useGameStore = create((set, get) => ({
       activeVillageId: villageToUse,
       villages: villages,
     });
-    storeVillageId(villageToUse)
+    storeVillageId(vkey, villageToUse)
     return data;
   },
 
   connectFromSaved: async (serverId) => {
     const res = await api.post(`/travian/servers/${serverId}/connect`);
     const data = res.data;
-    const storedVid = getStoredVillageId()
+    const vkey = villageStorageKey(data.server_url, data.player_name)
+    const storedVid = getStoredVillageId(vkey)
     const villages = Array.isArray(data.villages) ? data.villages : []
     const villageToUse = (storedVid && villages.some(v => v.id === storedVid))
       ? storedVid
@@ -81,13 +94,13 @@ const useGameStore = create((set, get) => ({
       activeVillageId: villageToUse,
       villages: villages,
     });
-    storeVillageId(villageToUse)
+    storeVillageId(vkey, villageToUse)
     return data;
   },
 
   disconnect: async () => {
     try { await api.delete('/travian/disconnect'); } catch (e) { console.warn('Disconnect failed:', e) }
-    storeVillageId(null)
+    storeVillageId(villageStorageKey(get().serverUrl, get().playerName), null)
     set({
       connected: false,
       serverUrl: null,
@@ -106,7 +119,8 @@ const useGameStore = create((set, get) => ({
       const res = await api.get('/travian/status');
       const data = res.data;
       if (data && data.connected) {
-        const storedVid = getStoredVillageId()
+        const vkey = villageStorageKey(data.server_url, data.player_name)
+        const storedVid = getStoredVillageId(vkey)
         const villages = Array.isArray(data.villages) ? data.villages : []
         const villageToUse = (storedVid && villages.some(v => v.id === storedVid))
           ? storedVid
@@ -120,7 +134,7 @@ const useGameStore = create((set, get) => ({
           activeVillageId: villageToUse,
           villages: villages,
         });
-        storeVillageId(villageToUse)
+        storeVillageId(vkey, villageToUse)
       } else {
         set({ connected: false, statusChecked: true });
       }
@@ -132,7 +146,7 @@ const useGameStore = create((set, get) => ({
   switchVillage: async (villageId) => {
     await api.post('/villages/switch', { village_id: villageId });
     set({ activeVillageId: villageId });
-    storeVillageId(villageId)
+    storeVillageId(villageStorageKey(get().serverUrl, get().playerName), villageId)
     await Promise.all([get().fetchResources(), get().fetchBuildings(), get().fetchQueue()]);
   },
 
