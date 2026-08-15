@@ -142,11 +142,51 @@ function BudgetBar({ budget }) {
   )
 }
 
+/** Batch-set one resource's mode/value across every village at once, so a
+ *  common allocation (e.g. everyone Keep own, or everyone Absolute 5000) does
+ *  not have to be typed row by row. The remainder village keeps its role. */
+function BatchSet({ onApply }) {
+  const [mode, setMode] = useState('keep')
+  const [value, setValue] = useState(0)
+  return (
+    <div className="flex items-center gap-1 text-xs">
+      <span className="text-secondary">Set all</span>
+      <select
+        aria-label="Batch mode"
+        className="input-field text-xs py-0.5"
+        value={mode}
+        onChange={(e) => setMode(e.target.value)}
+      >
+        {MODES.map((m) => (
+          <option key={m.value} value={m.value}>
+            {m.label}
+          </option>
+        ))}
+      </select>
+      <input
+        type="number"
+        aria-label="Batch value"
+        className="input-field w-20 text-right text-xs py-0.5"
+        disabled={mode === 'keep'}
+        value={value}
+        onChange={(e) => setValue(Number(e.target.value))}
+      />
+      <button className="btn-secondary btn-xs" onClick={() => onApply(mode, value)}>
+        Apply
+      </button>
+    </div>
+  )
+}
+
 export default function ResourcePlanner() {
   const toast = useToast()
   const serverUrl = useGameStore((s) => s.serverUrl)
   const playerName = useGameStore((s) => s.playerName)
-  const accountKey = serverUrl && playerName ? `${serverUrl}|${playerName}` : null
+  // Normalize the server URL (strip trailing slashes) so the per-account cache
+  // key is STABLE across reconnects — otherwise a slash difference would look
+  // like a new account and silently drop cached Trade Office levels, profiles,
+  // and the merchant model.
+  const accountKey = serverUrl && playerName ? `${serverUrl.replace(/\/+$/, '')}|${playerName}` : null
   const [stage, setStage] = useState('snapshot')
   const [snapshot, setSnapshot] = useState(null)
   const [tradeOffice, setTradeOffice] = useState({})
@@ -184,7 +224,9 @@ export default function ResourcePlanner() {
   // current when it lands, or the guard sees its own stale captured value.
   const currentAccountKey = useCallback(() => {
     const s = useGameStore.getState()
-    return s.serverUrl && s.playerName ? `${s.serverUrl}|${s.playerName}` : null
+    return s.serverUrl && s.playerName
+      ? `${s.serverUrl.replace(/\/+$/, '')}|${s.playerName}`
+      : null
   }, [])
 
   useEffect(() => {
@@ -342,6 +384,20 @@ export default function ResourcePlanner() {
     setAllocations((prev) => {
       const per = { ...(prev[resource] ?? {}) }
       per[villageId] = { mode: 'keep', value: 0, ...(per[villageId] ?? {}), ...patch }
+      return { ...prev, [resource]: per }
+    })
+  }
+
+  // Apply one mode/value to every village for a resource in a single edit.
+  // The remainder village keeps its role (it is set via the Rest radio, not a
+  // mode), so a batch set never silently clears the slack destination.
+  const setAllForResource = (resource, mode, value) => {
+    setAllocations((prev) => {
+      const per = { ...(prev[resource] ?? {}) }
+      for (const v of villages) {
+        if (per[v.village_id]?.mode === 'remainder') continue
+        per[v.village_id] = { mode, value: Number(value) || 0 }
+      }
       return { ...prev, [resource]: per }
     })
   }
@@ -553,7 +609,10 @@ export default function ResourcePlanner() {
             </thead>
             <tbody>
               {villages.map((v) => (
-                <tr key={v.village_id} className="border-t border-gray-800">
+                <tr
+                  key={v.village_id}
+                  className="border-t border-gray-800 hover:bg-white/5 transition-colors"
+                >
                   <td className="py-1.5 px-2">
                     {v.name}{' '}
                     <span className="text-secondary text-xs">
@@ -680,17 +739,20 @@ export default function ResourcePlanner() {
               <div key={resource} className="card p-4">
                 <div className="flex justify-between items-baseline mb-2 flex-wrap gap-2">
                   <h3 className="font-semibold">{RESOURCE_LABEL[resource]}</h3>
-                  <div className="text-xs">
-                    <span className="text-secondary">
-                      total {fmt(totals[resource].total)}/h
-                      {!totals[resource].known && ' (some villages unknown)'} ·{' '}
-                    </span>
-                    <span className={settled ? 'text-success' : 'text-danger'}>
-                      {fmt(slack)}/h unassigned
-                      {remainder != null
-                        ? ` → village ${remainder}`
-                        : ' · no remainder village set'}
-                    </span>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <BatchSet onApply={(mode, value) => setAllForResource(resource, mode, value)} />
+                    <div className="text-xs">
+                      <span className="text-secondary">
+                        total {fmt(totals[resource].total)}/h
+                        {!totals[resource].known && ' (some villages unknown)'} ·{' '}
+                      </span>
+                      <span className={settled ? 'text-success' : 'text-danger'}>
+                        {fmt(slack)}/h unassigned
+                        {remainder != null
+                          ? ` → village ${remainder}`
+                          : ' · no remainder village set'}
+                      </span>
+                    </div>
                   </div>
                 </div>
                 <div className="overflow-x-auto">
@@ -717,7 +779,10 @@ export default function ResourcePlanner() {
                           target = own < 0 ? (-own * (Number(a.value) || 0)) / 100 : own
                         const ship = a.mode === 'remainder' ? null : target - (own ?? 0)
                         return (
-                          <tr key={v.village_id} className="border-t border-gray-800">
+                          <tr
+                            key={v.village_id}
+                            className="border-t border-gray-800 hover:bg-white/5 transition-colors"
+                          >
                             <td className="py-1 px-2">{v.name}</td>
                             <td className="text-right px-2 font-mono text-secondary">
                               {own == null ? '—' : signed(own)}
