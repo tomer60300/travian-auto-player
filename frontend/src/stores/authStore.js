@@ -47,9 +47,15 @@ const useAuthStore = create((set, get) => ({
     try {
       const res = await api.get('/users/me');
       set({ user: res.data, isAuthenticated: true, initialCheckDone: true });
-    } catch {
-      localStorage.removeItem('token');
-      set({ token: null, user: null, isAuthenticated: false, initialCheckDone: true });
+    } catch (e) {
+      // Only discard the token when the server says it is bad; a restart,
+      // timeout, or 5xx during the initial check must not log the user out.
+      if (e.response?.status === 401 || e.response?.status === 403) {
+        localStorage.removeItem('token');
+        set({ token: null, user: null, isAuthenticated: false, initialCheckDone: true });
+      } else {
+        set({ isAuthenticated: true, initialCheckDone: true });
+      }
     }
   },
 

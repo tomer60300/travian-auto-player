@@ -102,18 +102,26 @@ async def _update_last_connected(
     server_url: str,
     travian_username: str,
 ) -> None:
-    """If a saved credential matches the server/username, update its timestamp."""
-    result = await db.execute(
-        select(TravianCredential).where(
-            TravianCredential.user_id == user_id,
-            TravianCredential.server_url == server_url,
-            TravianCredential.travian_username == travian_username,
+    """If a saved credential matches the server/username, update its timestamp.
+
+    Best-effort: this runs AFTER a successful Travian login, so a database
+    hiccup here must not make the whole connect report failure while a live
+    session sits installed in the manager.
+    """
+    try:
+        result = await db.execute(
+            select(TravianCredential).where(
+                TravianCredential.user_id == user_id,
+                TravianCredential.server_url == server_url,
+                TravianCredential.travian_username == travian_username,
+            )
         )
-    )
-    cred = result.scalar_one_or_none()
-    if cred is not None:
-        cred.last_connected = datetime.now(UTC)
-        await db.commit()
+        cred = result.scalar_one_or_none()
+        if cred is not None:
+            cred.last_connected = datetime.now(UTC)
+            await db.commit()
+    except Exception:
+        logger.warning("Connected user %s but could not stamp last_connected", user_id)
 
 
 # ---------------------------------------------------------------------------

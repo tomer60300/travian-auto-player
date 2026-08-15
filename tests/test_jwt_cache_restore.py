@@ -63,7 +63,17 @@ class _FakeHttp:
         if path == "/api/v1/graphql":
             if SERVER_COOKIE not in self.cookies:
                 return {}  # server sees no session
-            return {"data": {"ownPlayer": {"name": "FreshLogin", "tribeId": 2, "villages": []}}}
+            return {
+                "data": {
+                    "ownPlayer": {
+                        "name": "FreshLogin",
+                        "tribeId": 2,
+                        "villages": [
+                            {"id": 999, "name": "Settled", "x": 5, "y": 7, "isMainVillage": True}
+                        ],
+                    }
+                }
+            }
         if path == "/api/v1/auth/login":
             return {
                 "redirectTo": "/api/v1/auth?code=abc&response_type=redirect",
@@ -125,8 +135,22 @@ def test_a_valid_cache_avoids_a_credential_login(tmp_path):
     assert not any("auth/login" in request for request in http.requests), (
         f"credential login still performed: {http.requests}"
     )
-    # Identity came from the cache file, not from a fresh GraphQL enrichment.
-    assert state.player_name == "CachedPlayer"
+    # The liveness probe already carries the current identity, so a resumed
+    # session must not keep serving the cache file's snapshot.
+    assert state.player_name == "FreshLogin"
+
+
+def test_a_cached_resume_refreshes_the_village_list(tmp_path):
+    """Villages settle, get chiefed, or get renamed while a JWT stays valid;
+    resuming from cache must not serve the stale list — or a village_id that
+    is no longer on the account."""
+    http = _FakeHttp()
+    service = _service(http, tmp_path, _make_jwt())
+
+    state = asyncio.run(service.login())
+
+    assert [v.id for v in state.villages] == [999]
+    assert state.village_id == 999  # cached 20001 no longer exists
 
 
 def test_get_jwt_prefers_the_server_cookie_over_a_stale_lowercase_one(tmp_path):

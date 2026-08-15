@@ -57,11 +57,20 @@ class AuthService:
             try:
                 await self._load_cached_jwt()
                 if self._auth_state and self._is_jwt_valid(self._auth_state.jwt):
-                    # Lightweight server-side check: fetch player data
+                    # Server-side liveness check. The same single request also
+                    # carries the current player/village state, so a resumed
+                    # session never serves the cache file's stale village list.
                     player_data = await self.http_client.post_json(
-                        "/api/v1/graphql", {"query": "{ ownPlayer { name } }"}, skip_reauth=True
+                        "/api/v1/graphql",
+                        {
+                            "query": "{ ownPlayer { name tribeId villages { id name x y isMainVillage } } }"
+                        },
+                        skip_reauth=True,
                     )
-                    if player_data.get("data", {}).get("ownPlayer"):
+                    own_player = player_data.get("data", {}).get("ownPlayer")
+                    if own_player:
+                        self._apply_own_player(own_player)
+                        await self._cache_jwt(self._auth_state)
                         # Resolve dynamic X-Version with cached session too
                         try:
                             await self.http_client.try_resolve_x_version()
@@ -126,30 +135,7 @@ class AuthService:
                 )
                 own_player = player_data.get("data", {}).get("ownPlayer", {})
                 if own_player:
-                    self._auth_state.player_name = own_player.get("name", "Unknown")
-                    self._auth_state.tribe_id = own_player.get("tribeId", 0)
-                    villages_data = own_player.get("villages", [])
-                    if villages_data:
-                        self._auth_state.villages = [
-                            Village(
-                                id=v["id"],
-                                name=v.get("name", ""),
-                                x=v.get("x", 0),
-                                y=v.get("y", 0),
-                                is_main_village=v.get("isMainVillage", False),
-                            )
-                            for v in villages_data
-                            if v.get("id")
-                        ]
-                        # Set village_id to main village if not already set from JWT
-                        if not self._auth_state.village_id:
-                            main = next(
-                                (v for v in self._auth_state.villages if v.is_main_village), None
-                            )
-                            if main:
-                                self._auth_state.village_id = main.id
-                            elif self._auth_state.villages:
-                                self._auth_state.village_id = self._auth_state.villages[0].id
+                    self._apply_own_player(own_player)
             except Exception:
                 pass  # GraphQL enrichment is best-effort
 
@@ -242,6 +228,31 @@ class AuthService:
     async def _handle_reauth(self) -> None:
         """Handle re-authentication callback from HTTP client."""
         await self.login()
+
+    def _apply_own_player(self, own_player: dict) -> None:
+        """Refresh player identity and villages on the current auth state.
+
+        Also repairs ``village_id`` when it no longer exists on the account —
+        a cached or JWT-derived id can point at a chiefed/lost village.
+        """
+        self._auth_state.player_name = own_player.get("name", "Unknown")
+        self._auth_state.tribe_id = own_player.get("tribeId", 0)
+        villages_data = own_player.get("villages", [])
+        if villages_data:
+            self._auth_state.villages = [
+                Village(
+                    id=v["id"],
+                    name=v.get("name", ""),
+                    x=v.get("x", 0),
+                    y=v.get("y", 0),
+                    is_main_village=v.get("isMainVillage", False),
+                )
+                for v in villages_data
+                if v.get("id")
+            ]
+            if self._auth_state.village_id not in {v.id for v in self._auth_state.villages}:
+                main = next((v for v in self._auth_state.villages if v.is_main_village), None)
+                self._auth_state.village_id = main.id if main else self._auth_state.villages[0].id
 
     def _decode_jwt_payload(self, jwt: str) -> dict:
         """
