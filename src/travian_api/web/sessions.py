@@ -201,6 +201,11 @@ class SessionManager:
         self._sessions: dict[int, TravianSession] = {}
         self._lock = asyncio.Lock()
         self._reconnect_locks: dict[int, asyncio.Lock] = {}
+        # Users who explicitly disconnected. Auto-restore exists for crashes
+        # and restarts, not to override the user: the flag suppresses it until
+        # an explicit connect. In-memory on purpose — a process restart clears
+        # it, which is exactly when seamless recovery is wanted.
+        self._explicit_disconnects: set[int] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -261,6 +266,7 @@ class SessionManager:
         async with self._lock:
             old = self._sessions.pop(user_id, None)
             self._sessions[user_id] = session
+            self._explicit_disconnects.discard(user_id)
         if old is not None:
             await old.disconnect()
 
@@ -283,6 +289,7 @@ class SessionManager:
         reconnect_lock = self.get_reconnect_lock(user_id)
         async with reconnect_lock, self._lock:
             session = self._sessions.pop(user_id, None)
+            self._explicit_disconnects.add(user_id)
         # The lock entry is deliberately never removed: waiters queued on it
         # hold a reference, and handing later callers a fresh lock from
         # get_reconnect_lock() would let two reconnects run concurrently. One
@@ -294,6 +301,10 @@ class SessionManager:
     def get(self, user_id: int) -> Optional[TravianSession]:
         """Return an active session for *user_id*, or ``None``."""
         return self._sessions.get(user_id)
+
+    def auto_reconnect_allowed(self, user_id: int) -> bool:
+        """False after an explicit disconnect, until an explicit connect."""
+        return user_id not in self._explicit_disconnects
 
     def get_reconnect_lock(self, user_id: int) -> asyncio.Lock:
         """Return a per-user lock for serializing auto-reconnect attempts."""
@@ -328,12 +339,17 @@ async def try_restore_session(user_id: int) -> Optional[TravianSession]:
     session = session_manager.get(user_id)
     if session is not None:
         return session
+    if not session_manager.auto_reconnect_allowed(user_id):
+        # The user explicitly disconnected; restoring would override them.
+        return None
 
     reconnect_lock = session_manager.get_reconnect_lock(user_id)
     async with reconnect_lock:
         session = session_manager.get(user_id)
         if session is not None:
             return session
+        if not session_manager.auto_reconnect_allowed(user_id):
+            return None
 
         from datetime import datetime
 
@@ -403,12 +419,18 @@ async def get_travian_session(
     """FastAPI dependency returning the caller's active Travian session.
 
     If no session exists but the user has saved credentials, attempts to
-    auto-reconnect using the most recently connected saved credential.
-    Raises HTTP 403 only if reconnection fails or no credentials are saved.
+    auto-reconnect using the most recently connected saved credential — unless
+    the user explicitly disconnected, which stands until an explicit connect.
+    Raises HTTP 403 if reconnection fails, is suppressed, or nothing is saved.
     """
     session = session_manager.get(user.id)
     if session is not None:
         return session
+    if not session_manager.auto_reconnect_allowed(user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Disconnected. Use POST /api/travian/connect to reconnect.",
+        )
 
     # Serialize reconnect attempts per user — prevents two concurrent requests
     # from both triggering session_manager.connect() simultaneously.
@@ -418,6 +440,11 @@ async def get_travian_session(
         session = session_manager.get(user.id)
         if session is not None:
             return session
+        if not session_manager.auto_reconnect_allowed(user.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Disconnected. Use POST /api/travian/connect to reconnect.",
+            )
 
         # Try auto-reconnect from saved credentials
         from sqlalchemy import select

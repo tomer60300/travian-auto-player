@@ -270,6 +270,64 @@ class TestDisconnectVsReconnectRace:
         assert asyncio.run(scenario()) is True
 
 
+class TestExplicitDisconnectIsPersistent:
+    """Auto-restore exists for crashes and restarts, not to override the user:
+    after DELETE /api/travian/disconnect, the very next protected request or
+    status poll must NOT silently log back in from saved credentials."""
+
+    def test_disconnect_disables_auto_restore(self):
+        async def scenario():
+            manager = SessionManager()
+            live = SimpleNamespace(server_url="https://ts1.x1.europe.travian.com")
+
+            async def teardown():
+                pass
+
+            live.disconnect = teardown
+            manager._sessions[1] = live
+            await manager.disconnect(1)
+            return manager.auto_reconnect_allowed(1)
+
+        assert asyncio.run(scenario()) is False
+
+    def test_try_restore_respects_an_explicit_disconnect(self, monkeypatch):
+        import travian_api.web.sessions as sessions_module
+
+        fresh = SessionManager()
+        fresh._explicit_disconnects.add(7)
+        monkeypatch.setattr(sessions_module, "session_manager", fresh)
+
+        # No db patching: the flag must short-circuit before any query or login.
+        assert asyncio.run(try_restore_session(7)) is None
+
+    def test_a_manual_connect_reenables_auto_restore(self, monkeypatch):
+        import travian_api.web.sessions as sessions_module
+
+        monkeypatch.setattr(sessions_module, "TravianSession", _StubSession)
+
+        async def scenario():
+            manager = SessionManager()
+            manager._explicit_disconnects.add(1)
+            await manager.connect(1, "https://ts1.x1.europe.travian.com", "u", "p")
+            return manager.auto_reconnect_allowed(1)
+
+        assert asyncio.run(scenario()) is True
+
+    def test_http_dependency_refuses_auto_restore_after_disconnect(self, monkeypatch):
+        from fastapi import HTTPException
+
+        import travian_api.web.sessions as sessions_module
+
+        fresh = SessionManager()
+        fresh._explicit_disconnects.add(7)
+        monkeypatch.setattr(sessions_module, "session_manager", fresh)
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(sessions_module.get_travian_session(SimpleNamespace(id=7), None))
+
+        assert exc.value.status_code == 403
+
+
 class TestRestoreSessionBookkeeping:
     def test_restore_returns_the_live_session_even_if_the_stamp_commit_fails(self, monkeypatch):
         """A failed last_connected commit is bookkeeping, not a login failure:
