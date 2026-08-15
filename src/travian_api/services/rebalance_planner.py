@@ -336,24 +336,24 @@ def plan_waves_for_target(
     primary_owner = getattr(target_agg, "primary_owner_village", "")
     slot_instances = list(getattr(target_agg, "slot_instances", []) or [])
 
-    for idx, (village, unit, arrival_min) in enumerate(picks):
+    for village, unit, arrival_min in picks:
         carry = UNIT_CARRY.get(unit, 0)
         if carry <= 0:
             continue
+        # Wave numbering follows COMMITTED waves, not pick position: a pick
+        # can enumerate with supply >= 1 yet lack the units the wave needs,
+        # and truncating there would drop feasible placements from slower
+        # villages with plenty of troops. Skip it and let the next candidate
+        # take this wave slot instead.
         count, haul = size_wave_with_residual_carry(
             avg_loot,
-            wave_index=idx,
+            wave_index=len(plan),
             cumulative_carry_taken=cumulative_taken,
             unit_carry=carry,
         )
         avail = int(troop_supplies.get((village, unit), 0))
         if count > avail:
-            # Supply ran out mid-plan; truncate at the prior wave. The target
-            # gets fewer waves than wanted, which is fine — the operator may
-            # train more troops later and a future run will fill the gap.
-            # of_total is corrected below so the surviving placements do not
-            # advertise waves that were never planned.
-            break
+            continue
         round_trip = arrival_min * 2.0
         raids_per_day = compute_expected_raids_per_day(round_trip)
         plan.append(
@@ -368,7 +368,7 @@ def plan_waves_for_target(
                 target_name=target_name,
                 primary_owner_village=primary_owner,
                 slot_instances=slot_instances,
-                wave_index=idx + 1,  # 1-based for operator-facing output
+                wave_index=len(plan) + 1,  # 1-based over committed waves
                 of_total_waves=of_total,
                 arrival_min=arrival_min,
                 expected_haul=haul,

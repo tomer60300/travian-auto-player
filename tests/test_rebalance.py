@@ -549,6 +549,29 @@ class TestWaveStacking:
         for wave in waves:
             assert wave.of_total_waves == len(waves)
 
+    def test_an_undersupplied_pick_falls_back_to_later_candidates(self):
+        """The fastest candidate can have supply >= 1 (so it enumerates) but
+        fewer units than the wave needs; truncating there dropped feasible
+        placements from slower villages with plenty of troops."""
+        from travian_api.services.rebalance_planner import plan_waves_for_target
+
+        # V7 is fastest but has one clubswinger; V6 is farther with plenty.
+        vps = [VillagePosition("V7", 30, 82), VillagePosition("V6", 35, 83)]
+        supplies = {("V7", "t1"): 1, ("V6", "t1"): 1000}
+        target = FakeTarget(
+            coord=(31, 83),
+            avg_loot=480.0,
+            total_raids_all_lists=20,
+            last_raid_time_unix=int(NOW - 86400),
+        )
+
+        waves = plan_waves_for_target(target, vps, supplies)
+
+        assert waves, "the slower-but-supplied village must still get the wave"
+        assert waves[0].optimal_village == "V6"
+        assert waves[0].wave_index == 1
+        assert all(w.of_total_waves == len(waves) for w in waves)
+
     def test_dead_floor_returns_empty_plan(self):
         from travian_api.services.rebalance_planner import plan_waves_for_target
 

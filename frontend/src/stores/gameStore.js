@@ -136,10 +136,19 @@ const useGameStore = create((set, get) => ({
         });
         storeVillageId(vkey, villageToUse)
       } else {
-        set({ connected: false, statusChecked: true });
+        // Clear account-scoped state too: pages that key off serverUrl or
+        // playerName (Resource Planner) must not keep showing — or persisting
+        // under — the previous account after the session expired.
+        set({
+          connected: false, statusChecked: true, serverUrl: null,
+          playerName: null, tribeId: null, villages: [], activeVillageId: null,
+        });
       }
     } catch (e) { console.warn('Store fetch failed:', e)
-      set({ connected: false, statusChecked: true });
+      set({
+        connected: false, statusChecked: true, serverUrl: null,
+        playerName: null, tribeId: null, villages: [], activeVillageId: null,
+      });
     }
   },
 
