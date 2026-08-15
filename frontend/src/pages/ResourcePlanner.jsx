@@ -9,9 +9,39 @@ import api from '../api'
 // snapshot the client sends, so rehydrating another account's villages would
 // generate a route sheet from the wrong account's data.
 const LS_TRADE_OFFICE = 'planner_trade_office'
-const LS_ALLOCATIONS = 'planner_allocations'
+const LS_ALLOCATIONS = 'planner_allocations' // legacy single-plan key (migrated)
 const LS_SNAPSHOT = 'planner_snapshot'
 const LS_MERCHANT = 'planner_merchant_model'
+// Named allocation profiles (e.g. Day / Night). Trade Office and the merchant
+// model stay account-wide — only the allocations differ per profile, so
+// switching a profile is free: it re-plans from the same snapshot with no
+// extra Travian request.
+const LS_PROFILES = 'planner_profiles'
+const LS_ACTIVE_PROFILE = 'planner_active_profile'
+const DEFAULT_PROFILE = 'Day'
+const EMPTY_ALLOC = Object.freeze({}) // stable reference for a profile with no entries
+
+// Drop allocation entries for villages no longer in the snapshot; a stale id
+// would 400 every plan call. Applied to every profile on fetch.
+function pruneAllocations(alloc, ids) {
+  const pruned = {}
+  for (const [resource, per] of Object.entries(alloc ?? {})) {
+    const kept = Object.fromEntries(
+      Object.entries(per).filter(([vid]) => ids.has(Number(vid)))
+    )
+    if (Object.keys(kept).length) pruned[resource] = kept
+  }
+  return pruned
+}
+
+// Load persisted profiles, migrating a legacy single-plan account into a
+// "Day" profile so no existing work is lost.
+function loadProfiles(accountKey) {
+  const stored = loadJson(`${LS_PROFILES}::${accountKey}`, null)
+  if (stored && typeof stored === 'object' && Object.keys(stored).length) return stored
+  const legacy = loadJson(`${LS_ALLOCATIONS}::${accountKey}`, null)
+  return { [DEFAULT_PROFILE]: legacy && typeof legacy === 'object' ? legacy : {} }
+}
 
 // Merchant capacity is server-calibrated (Europe 2 is not a stock server — see
 // docs/25), so it cannot be derived from tribe and defaults to the operator's
@@ -120,8 +150,23 @@ export default function ResourcePlanner() {
   const [stage, setStage] = useState('snapshot')
   const [snapshot, setSnapshot] = useState(null)
   const [tradeOffice, setTradeOffice] = useState({})
-  const [allocations, setAllocations] = useState({})
+  const [profiles, setProfiles] = useState({ [DEFAULT_PROFILE]: {} })
+  const [activeProfile, setActiveProfile] = useState(DEFAULT_PROFILE)
   const [merchantModel, setMerchantModel] = useState(DEFAULT_MERCHANT_MODEL)
+
+  // The active profile's allocations, exposed with the same shape the rest of
+  // the component already uses, so the Allocate grid and plan build unchanged.
+  const allocations = profiles[activeProfile] ?? EMPTY_ALLOC
+  const setAllocations = useCallback(
+    (updater) => {
+      setProfiles((prev) => {
+        const current = prev[activeProfile] ?? {}
+        const next = typeof updater === 'function' ? updater(current) : updater
+        return { ...prev, [activeProfile]: next }
+      })
+    },
+    [activeProfile]
+  )
   // Persisting is enabled only after this account's stored state has been
   // loaded, so the initial defaults can never overwrite it.
   const [hydratedKey, setHydratedKey] = useState(null)
@@ -148,15 +193,19 @@ export default function ResourcePlanner() {
       // the previous account's villages would act on stale data.
       setSnapshot(null)
       setTradeOffice({})
-      setAllocations({})
+      setProfiles({ [DEFAULT_PROFILE]: {} })
+      setActiveProfile(DEFAULT_PROFILE)
       setMerchantModel(DEFAULT_MERCHANT_MODEL)
       setPlan(null)
       setHydratedKey(null)
       return
     }
+    const loaded = loadProfiles(accountKey)
+    const storedActive = loadJson(`${LS_ACTIVE_PROFILE}::${accountKey}`, DEFAULT_PROFILE)
     setSnapshot(loadJson(`${LS_SNAPSHOT}::${accountKey}`, null))
     setTradeOffice(loadJson(`${LS_TRADE_OFFICE}::${accountKey}`, {}))
-    setAllocations(loadJson(`${LS_ALLOCATIONS}::${accountKey}`, {}))
+    setProfiles(loaded)
+    setActiveProfile(loaded[storedActive] ? storedActive : Object.keys(loaded)[0])
     setMerchantModel(loadJson(`${LS_MERCHANT}::${accountKey}`, DEFAULT_MERCHANT_MODEL))
     setPlan(null)
     setHydratedKey(accountKey)
@@ -166,8 +215,12 @@ export default function ResourcePlanner() {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_TRADE_OFFICE), tradeOffice)
   }, [tradeOffice, hydratedKey, accountKey, storageKey])
   useEffect(() => {
-    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_ALLOCATIONS), allocations)
-  }, [allocations, hydratedKey, accountKey, storageKey])
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_PROFILES), profiles)
+  }, [profiles, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_ACTIVE_PROFILE), activeProfile)
+  }, [activeProfile, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_MERCHANT), merchantModel)
   }, [merchantModel, hydratedKey, accountKey, storageKey])
@@ -190,17 +243,13 @@ export default function ResourcePlanner() {
       setPlan(null)
       // Villages get lost, chiefed or renamed between fetches; allocations kept
       // for ids no longer in the snapshot would fail every future plan call.
+      // Prune every profile, not just the active one.
       const ids = new Set(res.data.villages.map((v) => v.village_id))
-      setAllocations((prev) => {
-        const pruned = {}
-        for (const [resource, per] of Object.entries(prev)) {
-          const kept = Object.fromEntries(
-            Object.entries(per).filter(([vid]) => ids.has(Number(vid)))
-          )
-          if (Object.keys(kept).length) pruned[resource] = kept
-        }
-        return pruned
-      })
+      setProfiles((prev) =>
+        Object.fromEntries(
+          Object.entries(prev).map(([name, alloc]) => [name, pruneAllocations(alloc, ids)])
+        )
+      )
       const fresh = res.data.villages.filter((v) => tradeOffice[v.village_id] == null)
       toast.success(
         `Read ${res.data.villages.length} villages in ${res.data.requests_used} requests` +
@@ -328,6 +377,75 @@ export default function ResourcePlanner() {
     return total - assigned
   }
 
+  // ── Profile management ─────────────────────────────────────────────
+  // A built plan belongs to the profile it was built from, so switching or
+  // editing the set clears it.
+  const profileNames = Object.keys(profiles)
+
+  const switchProfile = (name) => {
+    if (!profiles[name] || name === activeProfile) return
+    setActiveProfile(name)
+    setPlan(null)
+  }
+
+  const addProfile = () => {
+    const name = (window.prompt('New profile name', 'Night') || '').trim()
+    if (!name) return
+    if (profiles[name]) {
+      toast.error(`Profile "${name}" already exists`)
+      return
+    }
+    setProfiles((prev) => ({ ...prev, [name]: {} }))
+    setActiveProfile(name)
+    setPlan(null)
+  }
+
+  const duplicateProfile = () => {
+    const name = (window.prompt(`Duplicate "${activeProfile}" as`, `${activeProfile} copy`) || '').trim()
+    if (!name) return
+    if (profiles[name]) {
+      toast.error(`Profile "${name}" already exists`)
+      return
+    }
+    setProfiles((prev) => ({
+      ...prev,
+      [name]: JSON.parse(JSON.stringify(prev[activeProfile] ?? {})),
+    }))
+    setActiveProfile(name)
+    setPlan(null)
+  }
+
+  const renameProfile = () => {
+    const name = (window.prompt('Rename profile', activeProfile) || '').trim()
+    if (!name || name === activeProfile) return
+    if (profiles[name]) {
+      toast.error(`Profile "${name}" already exists`)
+      return
+    }
+    setProfiles((prev) => {
+      const next = {}
+      for (const [k, v] of Object.entries(prev)) next[k === activeProfile ? name : k] = v
+      return next
+    })
+    setActiveProfile(name)
+  }
+
+  const deleteProfile = () => {
+    if (profileNames.length <= 1) {
+      toast.error('Keep at least one profile')
+      return
+    }
+    if (!window.confirm(`Delete profile "${activeProfile}"?`)) return
+    const fallback = profileNames.find((n) => n !== activeProfile)
+    setProfiles((prev) => {
+      const next = { ...prev }
+      delete next[activeProfile]
+      return next
+    })
+    setActiveProfile(fallback)
+    setPlan(null)
+  }
+
   const stages = [
     { id: 'snapshot', label: 'Snapshot' },
     { id: 'allocate', label: 'Allocate' },
@@ -351,6 +469,44 @@ export default function ResourcePlanner() {
             {planning ? 'Planning…' : 'Build plan (0 requests)'}
           </button>
         </div>
+      </div>
+
+      {/* Named allocation profiles (e.g. Day / Night). Only the allocations
+          differ per profile; the snapshot and merchant model are shared, so
+          switching re-plans from the same data with no extra request. */}
+      <div className="flex items-center gap-2 mb-3 text-xs flex-wrap">
+        <span className="text-secondary uppercase">Plan profile</span>
+        <select
+          aria-label="Allocation profile"
+          className="input-field text-xs py-1"
+          value={activeProfile}
+          onChange={(e) => switchProfile(e.target.value)}
+        >
+          {profileNames.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <button className="btn-secondary btn-xs" onClick={addProfile}>
+          + New
+        </button>
+        <button className="btn-secondary btn-xs" onClick={duplicateProfile}>
+          Duplicate
+        </button>
+        <button className="btn-secondary btn-xs" onClick={renameProfile}>
+          Rename
+        </button>
+        <button
+          className="btn-secondary btn-xs"
+          onClick={deleteProfile}
+          disabled={profileNames.length <= 1}
+        >
+          Delete
+        </button>
+        <span className="text-secondary">
+          each profile builds its own routes — switching is free (no request)
+        </span>
       </div>
 
       <nav className="flex gap-1 mb-4 border-b border-gray-700" aria-label="Planner stages">
@@ -678,7 +834,9 @@ export default function ResourcePlanner() {
               </div>
 
               <div className="card p-4 overflow-x-auto">
-                <h3 className="font-semibold mb-2">Setup sheet</h3>
+                <h3 className="font-semibold mb-2">
+                  Setup sheet <span className="text-secondary">· {activeProfile}</span>
+                </h3>
                 <table className="w-full text-xs">
                   <thead className="text-secondary uppercase">
                     <tr>
