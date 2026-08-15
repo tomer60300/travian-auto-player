@@ -163,7 +163,9 @@ def craft_plan(
             cycle_hours=scheduled.route.cycle_hours,
             dispatch_minute=scheduled.dispatch_minute,
             arrival_minute=scheduled.first_arrival_minute,
-            merchants=scheduled.route.merchants_committed,
+            # Per SEND: the row describes one Gold Club route definition. The
+            # total commitment (x sets in flight) lives in the budget section.
+            merchants=scheduled.route.merchants_per_send,
         )
         for scheduled in beat.routes
     )

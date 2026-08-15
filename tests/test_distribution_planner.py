@@ -39,6 +39,50 @@ class TestBeatSpacing:
             one_way_minutes=30.0,
         )
 
+    def test_sheet_reports_per_send_merchants_not_total_commitment(self):
+        """A multi-set route commits merchants_per_send x sets, but the sheet
+        row describes ONE Gold Club route definition; reporting the total
+        overstates the route and conflicts with the budget section."""
+        villages = {
+            1: VillageState(village_id=1, x=0, y=0, merchant_count=20, trade_office_level=0),
+            2: VillageState(village_id=2, x=60, y=0, merchant_count=20, trade_office_level=0),
+        }
+        productions = {Resource.LUMBER: {1: 1000.0, 2: 0.0}}
+        allocations = {
+            Resource.LUMBER: {
+                1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                2: Allocation(AllocationMode.REMAINDER),
+            }
+        }
+
+        plan = craft_plan(villages, productions, allocations, CONFIG)
+
+        assert len(plan.rows) == 1
+        route = plan.routing.routes[0]
+        assert route.sets_in_flight > 1, "60 fields must need several sets in flight"
+        assert plan.rows[0].merchants == route.merchants_per_send
+
+    def test_a_route_outpacing_the_gap_warns_about_its_own_arrivals(self):
+        """A 1h cycle lands hourly; no dispatch offset can space its own
+        arrivals to a 90 min target, and staying silent hides the violation
+        exactly when one busy inbound route causes it alone."""
+        beat = build_beat(
+            (
+                Route(
+                    origin=1,
+                    destination=99,
+                    cargo_per_hour={Resource.LUMBER: 100.0},
+                    cycle_hours=1,
+                    merchants_per_send=1,
+                    sets_in_flight=1,
+                    one_way_minutes=30.0,
+                ),
+            ),
+            min_arrival_gap_minutes=90,
+        )
+
+        assert any("its own" in w for w in beat.warnings)
+
     def test_the_sweep_keeps_the_widest_spacing_not_the_first_legal_one(self):
         """Two daily routes into one village have 720 minutes of room; stopping
         at the first offset that merely clears the minimum gap crowds arrivals

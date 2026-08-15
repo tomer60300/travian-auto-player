@@ -165,6 +165,17 @@ def build_beat(
         scheduled.append(placement)
         taken.extend(placement.arrival_minutes)
 
+        # A cycle shorter than the gap target violates the constraint all by
+        # itself — no dispatch offset can space a route's own repeats.
+        cycle_minutes = route.cycle_hours * 60
+        if cycle_minutes < min_arrival_gap_minutes:
+            warnings.append(
+                f"route {route.origin} -> {route.destination} fires every "
+                f"{cycle_minutes} min, closer than the {min_arrival_gap_minutes} "
+                f"min arrival-gap target; its own arrivals cannot be spaced by "
+                f"choosing a dispatch offset"
+            )
+
         achieved = best_score[1] if best_score else MINUTES_PER_DAY
         if achieved < min_arrival_gap_minutes:
             warnings.append(
