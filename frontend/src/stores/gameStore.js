@@ -142,6 +142,7 @@ const useGameStore = create((set, get) => ({
         set({
           connected: false, statusChecked: true, serverUrl: null,
           playerName: null, tribeId: null, villages: [], activeVillageId: null,
+          resources: null, buildings: [], constructionQueue: [],
         });
       }
     } catch (e) { console.warn('Store fetch failed:', e)

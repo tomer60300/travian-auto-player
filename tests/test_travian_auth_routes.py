@@ -294,6 +294,46 @@ def test_stamping_matches_across_trailing_slashes():
     assert cred.last_connected is not None
 
 
+def test_stamping_prefers_the_row_whose_password_actually_logged_in(monkeypatch):
+    """Legacy duplicates can hold different passwords; bumping last_connected
+    on the newest row regardless keeps auto-restore pinned to the stale
+    password even though the user just proved which one works."""
+    monkeypatch.setattr(auth_routes, "decrypt_credential", lambda s: s.removeprefix("enc:"))
+
+    def row(row_id, password):
+        return SimpleNamespace(
+            id=row_id,
+            server_url="https://ts1.x1.europe.travian.com",
+            travian_username="alice",
+            encrypted_password=f"enc:{password}",
+            last_connected=None,
+        )
+
+    newest_stale, older_correct = row(9, "old-pw"), row(3, "current-pw")
+
+    class _Db:
+        async def execute(self, _query):
+            return SimpleNamespace(
+                scalars=lambda: SimpleNamespace(all=lambda: [newest_stale, older_correct])
+            )
+
+        async def commit(self):
+            pass
+
+    asyncio.run(
+        auth_routes._update_last_connected(
+            _Db(),
+            1,
+            "https://ts1.x1.europe.travian.com",
+            "alice",
+            password="current-pw",
+        )
+    )
+
+    assert older_correct.last_connected is not None
+    assert newest_stale.last_connected is None
+
+
 def test_stamping_tolerates_duplicate_rows_from_older_databases():
     """Existing databases may already hold duplicates; stamping must update
     the newest matching row instead of erroring out (the old

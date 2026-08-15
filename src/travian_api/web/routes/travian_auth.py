@@ -101,6 +101,7 @@ async def _update_last_connected(
     user_id: int,
     server_url: str,
     travian_username: str,
+    password: str | None = None,
 ) -> None:
     """If a saved credential matches the server/username, update its timestamp.
 
@@ -116,16 +117,26 @@ async def _update_last_connected(
         )
         # Matching happens in Python on NORMALIZED urls: the runtime identity
         # rstrips trailing slashes, and legacy rows may carry either spelling.
-        # Newest matching row first — the one save_server keeps current.
         server = server_url.rstrip("/")
-        cred = next(
-            (
-                row
-                for row in result.scalars().all()
-                if row.server_url.rstrip("/") == server and row.travian_username == travian_username
-            ),
-            None,
-        )
+        rows = [
+            row
+            for row in result.scalars().all()
+            if row.server_url.rstrip("/") == server and row.travian_username == travian_username
+        ]
+        # Among legacy duplicates, stamp the row holding the password that
+        # JUST authenticated — bumping the newest regardless would keep
+        # auto-restore (which sorts by last_connected) pinned to a stale one.
+        cred = None
+        if password is not None:
+            for row in rows:
+                try:
+                    if decrypt_credential(row.encrypted_password) == password:
+                        cred = row
+                        break
+                except Exception:
+                    continue
+        if cred is None:
+            cred = rows[0] if rows else None
         if cred is not None:
             cred.last_connected = datetime.now(UTC)
             await db.commit()
@@ -164,7 +175,7 @@ async def connect(
         )
 
     # Update last_connected on any matching saved credential
-    await _update_last_connected(db, user.id, body.server_url, body.username)
+    await _update_last_connected(db, user.id, body.server_url, body.username, body.password)
 
     return _session_to_status(session)
 
@@ -226,7 +237,7 @@ async def reconnect(
             detail=f"Failed to reconnect to Travian server: {exc}",
         )
 
-    await _update_last_connected(db, user.id, server_url, username)
+    await _update_last_connected(db, user.id, server_url, username, password)
 
     return _session_to_status(new_session)
 
