@@ -54,11 +54,12 @@ const useAuthStore = create((set, get) => ({
         localStorage.removeItem('token');
         set({ token: null, user: null, isAuthenticated: false, initialCheckDone: true });
       } else {
-        // Transient failure: the token was NOT revalidated, so do not enter
-        // the authenticated UI on faith — but keep the token and retry until
-        // the backend gives a definitive answer, so an outage never costs the
-        // user their session.
-        set({ isAuthenticated: false, initialCheckDone: true });
+        // Transient failure: the auth state is UNKNOWN, which is neither
+        // logged-in nor logged-out. Leave the current state untouched —
+        // initialCheckDone stays false on first load, so the router shows
+        // the loading gate instead of bouncing to /login, and an already
+        // verified session keeps its pages — and retry until the backend
+        // answers definitively. The token survives either way.
         setTimeout(() => { get().checkAuth() }, 5000);
       }
     }
