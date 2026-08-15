@@ -230,7 +230,7 @@ async def serve_ui_not_built(request: Request, full_path: str) -> JSONResponse:
     this the advertised `travian-web` command serves a blank 404 at `/` and
     nothing explains why.
     """
-    if full_path.startswith(("api/", "ws/")):
+    if full_path.startswith(("api/", "ws/")) or full_path in ("api", "ws"):
         return JSONResponse({"detail": "Not found"}, status_code=404)
     return JSONResponse(
         {
@@ -268,8 +268,8 @@ if ui_build_exists(STATIC_DIR):
 
     @app.get("/{full_path:path}")
     async def serve_spa(request: Request, full_path: str):
-        # Don't intercept API or WebSocket paths
-        if full_path.startswith(("api/", "ws/")):
+        # Don't intercept API or WebSocket paths (including the bare roots).
+        if full_path.startswith(("api/", "ws/")) or full_path in ("api", "ws"):
             return JSONResponse({"detail": "Not found"}, status_code=404)
 
         # Resolve and verify containment BEFORE serving: a raw request like

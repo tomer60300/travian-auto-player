@@ -342,7 +342,11 @@ export default function ResourcePlanner() {
         speed_fields_per_hour:
           Number(merchantModel.speed_fields_per_hour) || snapshot?.speed_fields_per_hour,
         merchant_base_capacity: Number(merchantModel.base_capacity) || undefined,
-        trade_office_bonus_per_level: Number(merchantModel.bonus_per_to_level) || undefined,
+        // A per-level bonus of 0 is valid (a world with no Trade Office scaling),
+        // so preserve it — `|| undefined` would drop it and use the 0.2 default.
+        trade_office_bonus_per_level: Number.isFinite(Number(merchantModel.bonus_per_to_level))
+          ? Number(merchantModel.bonus_per_to_level)
+          : undefined,
       })
       if (requestedFor !== currentAccountKey()) return
       setPlan(res.data)
