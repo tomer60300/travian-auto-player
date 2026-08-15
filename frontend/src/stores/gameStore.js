@@ -146,11 +146,12 @@ const useGameStore = create((set, get) => ({
         });
       }
     } catch (e) { console.warn('Store fetch failed:', e)
-      set({
-        connected: false, statusChecked: true, serverUrl: null,
-        playerName: null, tribeId: null, villages: [], activeVillageId: null,
-        resources: null, buildings: [], constructionQueue: [],
-      });
+      // A transport failure is NOT a confirmed logout — a real logout returns
+      // 200 with connected:false (cleared in the else branch above). Leave
+      // account state intact so a brief 5xx/network blip does not reset
+      // account-scoped pages; the next poll (or a 403 from another call)
+      // reconciles. Only mark the first check done so the app can render.
+      set({ statusChecked: true });
     }
   },
 

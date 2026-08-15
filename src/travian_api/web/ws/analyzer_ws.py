@@ -62,6 +62,10 @@ async def ws_analyze_reports(websocket: WebSocket):
         await websocket.close(code=4009, reason="Raid analysis already running")
         return
 
+    # Bound before the try so the finally can reference it even if setup
+    # (ws_manager.connect / a client disconnect) fails before it is created —
+    # otherwise cleanup raises UnboundLocalError and masks the real error.
+    exec_session = None
     try:
         active_ops.register(user_id, op_type)
         await ws_manager.connect(websocket, user_id, CHANNEL)
@@ -225,5 +229,6 @@ async def ws_analyze_reports(websocket: WebSocket):
             pass
     finally:
         active_ops.unregister(user_id, op_type)
-        exec_session_manager.mark_disconnected(exec_session.id)
+        if exec_session is not None:
+            exec_session_manager.mark_disconnected(exec_session.id)
         await ws_manager.disconnect(user_id, CHANNEL, websocket)
