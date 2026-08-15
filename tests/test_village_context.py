@@ -419,6 +419,96 @@ class TestRestoreSessionBookkeeping:
         assert result is live
 
 
+class TestConnectVsOperationStartRace:
+    def test_an_operation_starting_during_the_login_still_blocks_the_swap(self, monkeypatch):
+        """The pre-login guard only snapshots; a job started while the login
+        was in flight would still have its HttpClient closed by the swap. The
+        re-check inside the install lock must catch it and tear down the fresh
+        session instead."""
+        from fastapi import HTTPException
+
+        import travian_api.operation_manager as op_module
+        import travian_api.web.sessions as sessions_module
+
+        manager = SessionManager()
+        old = SimpleNamespace(server_url="https://ts1.x1.europe.travian.com")
+        manager._sessions[1] = old
+
+        class _RunningTask:
+            def done(self):
+                return False
+
+        calls = []
+
+        def ops_appear_after_the_precheck(user_id):
+            calls.append(1)
+            if len(calls) == 1:
+                return []  # pre-login snapshot: nothing running yet
+            return [SimpleNamespace(label="farm-loop", task=_RunningTask())]
+
+        monkeypatch.setattr(
+            op_module.operation_manager, "list_for_user", ops_appear_after_the_precheck
+        )
+        monkeypatch.setattr(sessions_module, "TravianSession", _StubSession)
+        _StubSession.instances.clear()
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(manager.connect(1, "https://ts1.x1.europe.travian.com", "u", "p"))
+
+        assert exc.value.status_code == 409
+        assert manager.get(1) is old
+        # The freshly logged-in session must not leak its HttpClient.
+        assert _StubSession.instances[-1].disconnected is True
+
+
+class TestHttpReconnectBackoff:
+    def test_failed_http_reconnects_are_not_retried_per_request(self, monkeypatch):
+        """A page load fans out several protected API calls; each one running a
+        real login against stale credentials or a downed world is the same
+        login storm the /status path already avoids."""
+        from fastapi import HTTPException
+
+        import travian_api.web.auth as auth_module
+        import travian_api.web.sessions as sessions_module
+
+        fresh = SessionManager()
+        monkeypatch.setattr(sessions_module, "session_manager", fresh)
+        monkeypatch.setattr(sessions_module, "_restore_backoff", {}, raising=False)
+
+        attempts = []
+
+        async def failing_connect(**kwargs):
+            attempts.append(1)
+            raise RuntimeError("login blocked")
+
+        monkeypatch.setattr(fresh, "connect", failing_connect)
+        monkeypatch.setattr(fresh, "_connect_locked", failing_connect, raising=False)
+        monkeypatch.setattr(auth_module, "decrypt_credential", lambda _s: "pw")
+
+        cred = SimpleNamespace(
+            server_url="https://ts1.x1.europe.travian.com",
+            travian_username="alice",
+            encrypted_password="sealed",
+            last_connected=None,
+        )
+
+        class _FakeDb:
+            async def execute(self, _query):
+                return SimpleNamespace(scalar_one_or_none=lambda: cred)
+
+            async def commit(self):
+                pass
+
+        user = SimpleNamespace(id=7)
+
+        for _ in range(2):
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(sessions_module.get_travian_session(user, _FakeDb()))
+            assert exc.value.status_code == 403
+
+        assert len(attempts) == 1, "second request re-attempted a real login during backoff"
+
+
 class TestRestoreBackoff:
     def test_a_failed_restore_is_not_retried_on_every_poll(self, monkeypatch):
         """/status polls call try_restore_session whenever no session exists;

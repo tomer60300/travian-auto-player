@@ -134,6 +134,79 @@ def test_status_attempts_a_saved_credential_restore(monkeypatch):
     assert res.active_village_id == 20003
 
 
+def test_saving_the_same_server_twice_updates_instead_of_duplicating(monkeypatch):
+    """Duplicate (user, server, username) rows break last_connected stamping
+    (MultipleResultsFound) and let auto-restore pick an older row with an
+    outdated password. Saving again must update the existing row."""
+    monkeypatch.setattr(auth_routes, "encrypt_credential", lambda p: f"enc:{p}")
+    existing = SimpleNamespace(
+        id=5,
+        user_id=1,
+        server_url="https://ts1.x1.europe.travian.com",
+        travian_username="alice",
+        encrypted_password="enc:old",
+        label=None,
+        last_connected=None,
+    )
+    added = []
+
+    class _Db:
+        async def execute(self, _query):
+            return SimpleNamespace(scalar_one_or_none=lambda: existing)
+
+        def add(self, obj):
+            added.append(obj)
+
+        async def commit(self):
+            pass
+
+        async def refresh(self, _obj):
+            pass
+
+    body = auth_routes.SavedServerRequest(
+        server_url="https://ts1.x1.europe.travian.com",
+        username="alice",
+        password="rotated",
+        label="main",
+    )
+
+    res = asyncio.run(auth_routes.save_server(body, SimpleNamespace(id=1), _Db()))
+
+    assert added == []
+    assert existing.encrypted_password == "enc:rotated"
+    assert existing.label == "main"
+    assert res.id == 5
+
+
+def test_stamping_tolerates_duplicate_rows_from_older_databases():
+    """Existing databases may already hold duplicates; scalar_one_or_none
+    raised MultipleResultsFound, which the best-effort guard swallowed — so
+    last_connected silently never advanced."""
+    from sqlalchemy.exc import MultipleResultsFound
+
+    cred = SimpleNamespace(last_connected=None)
+
+    class _Result:
+        def scalar_one_or_none(self):
+            raise MultipleResultsFound()
+
+        def scalars(self):
+            return SimpleNamespace(first=lambda: cred)
+
+    class _Db:
+        async def execute(self, _query):
+            return _Result()
+
+        async def commit(self):
+            pass
+
+    asyncio.run(
+        auth_routes._update_last_connected(_Db(), 1, "https://ts1.x1.europe.travian.com", "alice")
+    )
+
+    assert cred.last_connected is not None
+
+
 def test_reconnect_preserves_the_409_from_the_session_manager(monkeypatch):
     live = SimpleNamespace(
         server_url="https://ts1.x1.europe.travian.com",

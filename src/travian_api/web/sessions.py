@@ -244,14 +244,13 @@ class SessionManager:
 
         Refused while background operations are running on the session being
         replaced: those jobs hold the old session's HttpClient, and closing it
-        under them makes every following request in the job fail mid-run.
+        under them makes every following request in the job fail mid-run. The
+        pre-login check avoids wasting a real login in the common case; the
+        re-check under the install lock closes the race with jobs that start
+        while the login is in flight.
         """
         if user_id in self._sessions:
-            from travian_api.operation_manager import operation_manager
-
-            running = sorted(
-                op.label for op in operation_manager.list_for_user(user_id) if not op.task.done()
-            )
+            running = self._running_operation_labels(user_id)
             if running:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -264,10 +263,28 @@ class SessionManager:
         session = TravianSession(user_id, server_url, username, password)
         await session.connect()
 
+        # Re-check under the install lock: an operation may have started while
+        # the login was in flight, and swapping now would close the HttpClient
+        # it just captured. No awaits sit between this check and the swap, so
+        # nothing can slip in between.
+        old: Optional[TravianSession] = None
+        conflict: list[str] = []
         async with self._lock:
-            old = self._sessions.pop(user_id, None)
-            self._sessions[user_id] = session
-            self._explicit_disconnects.discard(user_id)
+            if user_id in self._sessions:
+                conflict = self._running_operation_labels(user_id)
+            if not conflict:
+                old = self._sessions.pop(user_id, None)
+                self._sessions[user_id] = session
+                self._explicit_disconnects.discard(user_id)
+        if conflict:
+            await session.disconnect()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Cannot reconnect while operations are running: "
+                    f"{', '.join(conflict)}. Stop them first."
+                ),
+            )
         if old is not None:
             await old.disconnect()
 
@@ -306,6 +323,14 @@ class SessionManager:
     def auto_reconnect_allowed(self, user_id: int) -> bool:
         """False after an explicit disconnect, until an explicit connect."""
         return user_id not in self._explicit_disconnects
+
+    def _running_operation_labels(self, user_id: int) -> list[str]:
+        """Labels of the user's background operations that are still running."""
+        from travian_api.operation_manager import operation_manager
+
+        return sorted(
+            op.label for op in operation_manager.list_for_user(user_id) if not op.task.done()
+        )
 
     def get_reconnect_lock(self, user_id: int) -> asyncio.Lock:
         """Return a per-user lock for serializing auto-reconnect attempts."""
@@ -446,6 +471,16 @@ async def get_travian_session(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Disconnected. Use POST /api/travian/connect to reconnect.",
         )
+    # A page load fans out several protected calls; after a FAILED restore,
+    # each retrying with a real login is the same storm /status avoids.
+    if time.monotonic() < _restore_backoff.get(user.id, 0.0):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Auto-reconnect recently failed and is backing off. "
+                "Use POST /api/travian/connect to reconnect now."
+            ),
+        )
 
     # Serialize reconnect attempts per user — prevents two concurrent requests
     # from both triggering session_manager.connect() simultaneously.
@@ -459,6 +494,14 @@ async def get_travian_session(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Disconnected. Use POST /api/travian/connect to reconnect.",
+            )
+        if time.monotonic() < _restore_backoff.get(user.id, 0.0):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Auto-reconnect recently failed and is backing off. "
+                    "Use POST /api/travian/connect to reconnect now."
+                ),
             )
 
         # Try auto-reconnect from saved credentials
@@ -492,10 +535,13 @@ async def get_travian_session(
             )
         except Exception as exc:
             logger.warning("Auto-reconnect failed for user %s: %s", user.id, exc)
+            _restore_backoff[user.id] = time.monotonic() + _RESTORE_RETRY_SECONDS
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Auto-reconnect failed: {exc}. Please reconnect manually.",
             )
+
+        _restore_backoff.pop(user.id, None)
 
         # Bookkeeping only: the session is live regardless, and a failed stamp
         # must not turn a successful login into a 403.

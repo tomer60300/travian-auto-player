@@ -116,7 +116,9 @@ async def _update_last_connected(
                 TravianCredential.travian_username == travian_username,
             )
         )
-        cred = result.scalar_one_or_none()
+        # first(), not scalar_one_or_none(): databases from before the upsert
+        # in save_server may hold duplicate rows for the same account.
+        cred = result.scalars().first()
         if cred is not None:
             cred.last_connected = datetime.now(UTC)
             await db.commit()
@@ -248,15 +250,32 @@ async def save_server(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Save new Travian server credentials (password is encrypted at rest)."""
-    cred = TravianCredential(
-        user_id=user.id,
-        server_url=body.server_url,
-        travian_username=body.username,
-        encrypted_password=encrypt_credential(body.password),
-        label=body.label,
+    """Save Travian server credentials (password is encrypted at rest).
+
+    Upserts on (user, server, username): duplicates would break the
+    last_connected stamping and let auto-restore pick an older row with an
+    outdated password, so saving the same account again rotates it in place.
+    """
+    result = await db.execute(
+        select(TravianCredential).where(
+            TravianCredential.user_id == user.id,
+            TravianCredential.server_url == body.server_url,
+            TravianCredential.travian_username == body.username,
+        )
     )
-    db.add(cred)
+    cred = result.scalar_one_or_none()
+    if cred is not None:
+        cred.encrypted_password = encrypt_credential(body.password)
+        cred.label = body.label
+    else:
+        cred = TravianCredential(
+            user_id=user.id,
+            server_url=body.server_url,
+            travian_username=body.username,
+            encrypted_password=encrypt_credential(body.password),
+            label=body.label,
+        )
+        db.add(cred)
     await db.commit()
     await db.refresh(cred)
     return _credential_to_response(cred)
