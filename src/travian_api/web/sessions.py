@@ -376,6 +376,23 @@ def reset_restore_backoff(user_id: int) -> None:
     _restore_backoff.pop(user_id, None)
 
 
+def require_village_id(village_id: Optional[int]) -> int:
+    """A village-specific route must be told which village, explicitly.
+
+    Village selection is client-side (tab-local /switch), so falling back to a
+    shared session default risks acting on the WRONG village — a wasted or
+    wrong Travian request, which the fewer-requests/stealth goals reject. Every
+    first-party caller already sends its own ``village_id``; a missing one is a
+    caller bug and fails loud with 400 rather than silently guessing.
+    """
+    if village_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="village_id is required.",
+        )
+    return village_id
+
+
 def latest_credential_query(user_id: int):
     """The saved credential auto-restore should use: most recently connected,
     with newest-id as the tie-break — timestamps are commonly NULL on freshly

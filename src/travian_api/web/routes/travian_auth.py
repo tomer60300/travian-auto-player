@@ -381,7 +381,7 @@ async def connect_saved_server(
             "Saved credential %s for user %s is undecryptable: %r", server_id, user.id, exc
         )
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail="Saved credentials could not be decrypted. Re-save this server.",
         )
 

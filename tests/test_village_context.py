@@ -16,6 +16,22 @@ from travian_api.web.routes.buildings import ConstructRequest, UpgradeRequest
 from travian_api.web.sessions import SessionManager, try_restore_session
 
 
+class TestRequireVillageId:
+    def test_missing_village_id_is_a_400(self):
+        from fastapi import HTTPException
+
+        from travian_api.web.sessions import require_village_id
+
+        with pytest.raises(HTTPException) as exc:
+            require_village_id(None)
+        assert exc.value.status_code == 400
+
+    def test_explicit_village_id_passes_through(self):
+        from travian_api.web.sessions import require_village_id
+
+        assert require_village_id(20003) == 20003
+
+
 class TestVillageContext:
     def test_upgrade_request_carries_the_target_village(self):
         body = UpgradeRequest(slot_id=1, village_id=20003)

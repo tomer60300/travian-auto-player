@@ -101,8 +101,18 @@ async def ws_analyze_reports(websocket: WebSocket):
 
         from travian_api.models.raid_analyzer import AnalyzerSettings
 
+        # The analysis is the heaviest read operation; running it against a
+        # guessed village would waste a large batch of Travian requests, so the
+        # source village must be explicit (the client always sends it).
+        analysis_village_id = msg.get("village_id")
+        if not analysis_village_id:
+            await tracked_send(
+                {"type": "error", "message": "village_id is required", "fatal": True}
+            )
+            return
+
         settings = AnalyzerSettings(
-            village_id=msg.get("village_id") or session.active_village_id,
+            village_id=analysis_village_id,
             min_resources=msg.get("min_resources", 200),
             max_report_age_hours=msg.get("max_report_age_hours", 24),
             max_pages=msg.get("max_pages", 3),

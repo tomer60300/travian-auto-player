@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from travian_api.web.sessions import TravianSession, get_travian_session
+from travian_api.web.sessions import TravianSession, get_travian_session, require_village_id
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ async def scan_map(
         )
 
     # Resolve center village
-    vid = body.village_id or session.active_village_id
+    vid = require_village_id(body.village_id)
     center_village = next((v for v in session.auth_state.villages if v.id == vid), None)
     if not center_village:
         raise HTTPException(

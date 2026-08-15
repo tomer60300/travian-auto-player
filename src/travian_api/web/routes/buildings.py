@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from travian_api.web.rate_limit import action_limiter
-from travian_api.web.sessions import TravianSession, get_travian_session
+from travian_api.web.sessions import TravianSession, get_travian_session, require_village_id
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +24,8 @@ class UpgradeRequest(BaseModel):
     village_id: int | None = Field(
         default=None,
         description=(
-            "Village to act on. Village switching is client-side only, so the "
-            "session default is forever the login village — pass this whenever "
-            "the UI shows a different village."
+            "Village to act on. Required: village selection is client-side, so "
+            "the server never guesses which village a build targets."
         ),
     )
 
@@ -41,9 +40,7 @@ class ConstructRequest(BaseModel):
         default=None, description="Building GID (takes precedence over building_name)"
     )
     allow_gold: bool = Field(default=False, description="Allow spending gold on master builder")
-    village_id: int | None = Field(
-        default=None, description="Village to act on (default: the session's login village)"
-    )
+    village_id: int | None = Field(default=None, description="Village to act on (required)")
 
 
 # ---------------------------------------------------------------------------
@@ -53,11 +50,11 @@ class ConstructRequest(BaseModel):
 
 @router.get("")
 async def list_buildings(
-    village_id: Optional[int] = Query(None, description="Village ID (default: active village)"),
+    village_id: Optional[int] = Query(None, description="Village ID (required)"),
     session: TravianSession = Depends(get_travian_session),
 ):
     """List all buildings for a village."""
-    vid = village_id or session.active_village_id
+    vid = require_village_id(village_id)
     try:
         buildings = await session.building_service.get_village_buildings(village_id=vid)
     except Exception as exc:
@@ -75,11 +72,11 @@ async def list_buildings(
 
 @router.get("/resources")
 async def get_resources(
-    village_id: Optional[int] = Query(None, description="Village ID (default: active village)"),
+    village_id: Optional[int] = Query(None, description="Village ID (required)"),
     session: TravianSession = Depends(get_travian_session),
 ):
     """Get current resources, production rates, and storage capacity."""
-    vid = village_id or session.active_village_id
+    vid = require_village_id(village_id)
     try:
         resources = await session.building_service.get_resources(village_id=vid)
     except Exception as exc:
@@ -97,11 +94,11 @@ async def get_resources(
 
 @router.get("/queue")
 async def get_construction_queue(
-    village_id: Optional[int] = Query(None, description="Village ID (default: active village)"),
+    village_id: Optional[int] = Query(None, description="Village ID (required)"),
     session: TravianSession = Depends(get_travian_session),
 ):
     """Get the active construction queue."""
-    vid = village_id or session.active_village_id
+    vid = require_village_id(village_id)
     try:
         queue = await session.building_service.get_construction_queue(village_id=vid)
     except Exception as exc:
@@ -128,7 +125,7 @@ async def upgrade_building(
         result = await session.building_service.upgrade_building(
             slot_id=body.slot_id,
             allow_gold=body.allow_gold,
-            village_id=body.village_id or session.active_village_id,
+            village_id=require_village_id(body.village_id),
         )
     except Exception as exc:
         logger.exception("Failed to upgrade building slot %s", body.slot_id)
@@ -162,7 +159,7 @@ async def construct_building(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Provide building_gid or building_name.",
         )
-    vid = body.village_id or session.active_village_id
+    vid = require_village_id(body.village_id)
 
     # Resolve building_name -> gid if gid not provided
     if gid is None:
@@ -216,7 +213,7 @@ async def construct_building(
 @router.get("/{slot_id}")
 async def get_building_detail(
     slot_id: int,
-    village_id: Optional[int] = Query(None, description="Village ID (default: active village)"),
+    village_id: Optional[int] = Query(None, description="Village ID (required)"),
     session: TravianSession = Depends(get_travian_session),
 ):
     """Get detailed information for a specific building slot."""
@@ -226,7 +223,7 @@ async def get_building_detail(
             detail="slot_id must be between 1 and 40",
         )
 
-    vid = village_id or session.active_village_id
+    vid = require_village_id(village_id)
     try:
         detail = await session.building_service.get_building_detail(
             slot_id=slot_id,

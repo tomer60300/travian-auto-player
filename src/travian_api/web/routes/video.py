@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from travian_api.exceptions import TravianError
-from travian_api.web.sessions import TravianSession, get_travian_session
+from travian_api.web.sessions import TravianSession, get_travian_session, require_village_id
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ async def claim_reward(
     session: TravianSession = Depends(get_travian_session),
 ):
     """Claim a single video reward."""
-    village_id = body.village_id or session.active_village_id
+    village_id = require_village_id(body.village_id)
 
     extra_params: dict = {}
     if village_id is not None:
@@ -86,7 +86,7 @@ async def claim_all_production_boosts(
     session: TravianSession = Depends(get_travian_session),
 ):
     """Claim all production boost video rewards."""
-    village_id = (body.village_id if body else None) or session.active_village_id
+    village_id = require_village_id(body.village_id if body else None)
     results = []
 
     for reward_type in _PRODUCTION_BOOST_TYPES:

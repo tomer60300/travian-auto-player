@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from travian_api.exceptions import TravianError
 from travian_api.web.auth import get_current_user
-from travian_api.web.sessions import TravianSession, get_travian_session
+from travian_api.web.sessions import TravianSession, get_travian_session, require_village_id
 
 logger = logging.getLogger(__name__)
 
@@ -237,12 +237,7 @@ async def create_farm_list(
     session: TravianSession = Depends(get_travian_session),
 ):
     """Create a new farm list. Returns the new list ID."""
-    village_id = body.village_id or session.active_village_id
-    if village_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No village_id provided and no active village set.",
-        )
+    village_id = require_village_id(body.village_id)
     try:
         list_id = await session.farm_service.create_farm_list(village_id, body.name)
     except TravianError as exc:

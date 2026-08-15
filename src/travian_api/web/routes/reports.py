@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from travian_api.exceptions import ReportError, ReportNotFoundError, TravianError
-from travian_api.web.sessions import TravianSession, get_travian_session
+from travian_api.web.sessions import TravianSession, get_travian_session, require_village_id
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,7 @@ async def analyze_reports(
     """Analyze raid reports and return prioritized target recommendations."""
     from travian_api.models.raid_analyzer import AnalyzerSettings
 
-    village_id = body.village_id or session.active_village_id
+    village_id = require_village_id(body.village_id)
 
     settings = AnalyzerSettings(
         village_id=village_id,
