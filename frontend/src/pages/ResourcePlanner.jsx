@@ -198,6 +198,10 @@ export default function ResourcePlanner() {
   const [profiles, setProfiles] = useState({ [DEFAULT_PROFILE]: {} })
   const [activeProfile, setActiveProfile] = useState(DEFAULT_PROFILE)
   const [merchantModel, setMerchantModel] = useState(DEFAULT_MERCHANT_MODEL)
+  // Per-resource checkbox selection for batch edits: { [resource]: number[] }.
+  // Transient (not persisted); reset on account change and on a fresh snapshot
+  // so it never targets villages from a previous account/snapshot.
+  const [selected, setSelected] = useState({})
 
   // The active profile's allocations, exposed with the same shape the rest of
   // the component already uses, so the Allocate grid and plan build unchanged.
@@ -243,6 +247,7 @@ export default function ResourcePlanner() {
       setProfiles({ [DEFAULT_PROFILE]: {} })
       setActiveProfile(DEFAULT_PROFILE)
       setMerchantModel(DEFAULT_MERCHANT_MODEL)
+      setSelected({})
       setPlan(null)
       setHydratedKey(null)
       return
@@ -254,6 +259,7 @@ export default function ResourcePlanner() {
     setProfiles(loaded)
     setActiveProfile(loaded[storedActive] ? storedActive : Object.keys(loaded)[0])
     setMerchantModel(loadJson(`${LS_MERCHANT}::${accountKey}`, DEFAULT_MERCHANT_MODEL))
+    setSelected({})
     setPlan(null)
     setHydratedKey(accountKey)
   }, [accountKey])
@@ -288,6 +294,8 @@ export default function ResourcePlanner() {
       setSnapshot(res.data)
       saveJson(`${LS_SNAPSHOT}::${requestedFor}`, res.data)
       setPlan(null)
+      // A new snapshot can have different village ids — drop stale selections.
+      setSelected({})
       // Villages get lost, chiefed or renamed between fetches; allocations kept
       // for ids no longer in the snapshot would fail every future plan call.
       // Prune every profile, not just the active one.
@@ -397,8 +405,6 @@ export default function ResourcePlanner() {
     })
   }
 
-  // Per-resource checkbox selection for batch edits: { [resource]: number[] }.
-  const [selected, setSelected] = useState({})
   const isSelected = (resource, vid) => (selected[resource] ?? []).includes(vid)
   const someSelected = (resource) => (selected[resource] ?? []).length > 0
   const allSelected = (resource) =>

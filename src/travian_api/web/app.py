@@ -58,13 +58,25 @@ def ui_build_exists(static_dir: Path) -> bool:
     The directory alone is not proof: loose files (favicon.svg) can exist
     without a build, and mounting StaticFiles on a missing ``assets/`` raises
     at import — which would crash the server instead of letting the
-    unbuilt-UI fallback explain the situation. Also require at least one hashed
-    JS chunk under ``assets/`` so a half-written or interrupted build (empty
-    assets dir, index.html pointing at chunks that are not there) falls back to
-    the 503 page instead of serving a broken SPA.
+    unbuilt-UI fallback explain the situation. Beyond that, an interrupted Vite
+    build can leave an index.html that references a hashed chunk which was never
+    written — so validate that every local ``<script src>`` index.html points at
+    actually exists on disk. A partial build then falls back to the 503 page
+    instead of serving a broken SPA.
     """
-    assets = static_dir / "assets"
-    return (static_dir / "index.html").is_file() and assets.is_dir() and any(assets.glob("*.js"))
+    import re
+
+    index = static_dir / "index.html"
+    if not index.is_file() or not (static_dir / "assets").is_dir():
+        return False
+    try:
+        html = index.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    refs = [r for r in re.findall(r'<script[^>]+src="([^"]+)"', html) if "://" not in r]
+    if not refs:
+        return False
+    return all((static_dir / ref.lstrip("/")).is_file() for ref in refs)
 
 
 def _quiet_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
