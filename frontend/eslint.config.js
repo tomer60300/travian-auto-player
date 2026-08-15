@@ -7,7 +7,13 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 export default defineConfig([
   globalIgnores(['dist']),
   {
+    // Config/tooling files run in Node, not the browser.
+    files: ['*.config.{js,mjs}'],
+    languageOptions: { globals: globals.node },
+  },
+  {
     files: ['**/*.{js,jsx}'],
+    ignores: ['*.config.{js,mjs}'],
     extends: [
       js.configs.recommended,
       reactHooks.configs.flat.recommended,
