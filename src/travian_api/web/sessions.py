@@ -333,10 +333,12 @@ class SessionManager:
         )
 
     def get_reconnect_lock(self, user_id: int) -> asyncio.Lock:
-        """Return a per-user lock for serializing auto-reconnect attempts."""
-        if user_id not in self._reconnect_locks:
-            self._reconnect_locks[user_id] = asyncio.Lock()
-        return self._reconnect_locks[user_id]
+        """Return a per-user lock for serializing auto-reconnect attempts.
+
+        setdefault keeps creation atomic at the dict level, so concurrent
+        first-use callers can never end up holding two different locks.
+        """
+        return self._reconnect_locks.setdefault(user_id, asyncio.Lock())
 
     async def disconnect_all(self) -> None:
         """Disconnect every session (call during application shutdown)."""
@@ -359,6 +361,26 @@ session_manager = SessionManager()
 # bot-detection pressure. Keyed by user id, monotonic deadline.
 _RESTORE_RETRY_SECONDS = 60.0
 _restore_backoff: dict[int, float] = {}
+
+
+def latest_credential_query(user_id: int):
+    """The saved credential auto-restore should use: most recently connected,
+    with newest-id as the tie-break — timestamps are commonly NULL on freshly
+    saved rows and legacy duplicates, and without the tie-break SQLite may
+    pick an older row with an outdated password."""
+    from sqlalchemy import select
+
+    from travian_api.web.models.db import TravianCredential
+
+    return (
+        select(TravianCredential)
+        .where(TravianCredential.user_id == user_id)
+        .order_by(
+            TravianCredential.last_connected.desc().nulls_last(),
+            TravianCredential.id.desc(),
+        )
+        .limit(1)
+    )
 
 
 async def try_restore_session(user_id: int) -> Optional[TravianSession]:
@@ -390,22 +412,12 @@ async def try_restore_session(user_id: int) -> Optional[TravianSession]:
 
         from datetime import datetime
 
-        from sqlalchemy import select
-
         from travian_api.web.auth import decrypt_credential
-        from travian_api.web.models.db import TravianCredential, async_session_factory
-
-        def _latest_credential_query():
-            return (
-                select(TravianCredential)
-                .where(TravianCredential.user_id == user_id)
-                .order_by(TravianCredential.last_connected.desc().nulls_last())
-                .limit(1)
-            )
+        from travian_api.web.models.db import async_session_factory
 
         try:
             async with async_session_factory() as db:
-                result = await db.execute(_latest_credential_query())
+                result = await db.execute(latest_credential_query(user_id))
                 cred = result.scalar_one_or_none()
                 if cred is None:
                     return None
@@ -435,7 +447,7 @@ async def try_restore_session(user_id: int) -> Optional[TravianSession]:
         # must not make the caller report a login failure.
         try:
             async with async_session_factory() as db:
-                result = await db.execute(_latest_credential_query())
+                result = await db.execute(latest_credential_query(user_id))
                 cred = result.scalar_one_or_none()
                 if cred is not None:
                     cred.last_connected = datetime.now(UTC)
@@ -505,17 +517,9 @@ async def get_travian_session(
             )
 
         # Try auto-reconnect from saved credentials
-        from sqlalchemy import select
-
         from travian_api.web.auth import decrypt_credential
-        from travian_api.web.models.db import TravianCredential
 
-        result = await db.execute(
-            select(TravianCredential)
-            .where(TravianCredential.user_id == user.id)
-            .order_by(TravianCredential.last_connected.desc().nulls_last())
-            .limit(1)
-        )
+        result = await db.execute(latest_credential_query(user.id))
         cred = result.scalar_one_or_none()
 
         if cred is None:

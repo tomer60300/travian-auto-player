@@ -328,6 +328,19 @@ class TestExplicitDisconnectIsPersistent:
         assert exc.value.status_code == 403
 
 
+class TestCredentialSelection:
+    def test_restore_prefers_the_newest_row_on_timestamp_ties(self):
+        """last_connected is commonly NULL on fresh rows and legacy duplicates;
+        without a tie-break SQLite may pick an older row with an outdated
+        password, making auto-restore fail nondeterministically."""
+        from travian_api.web.sessions import latest_credential_query
+
+        sql = str(latest_credential_query(1))
+
+        assert "last_connected DESC NULLS LAST" in sql
+        assert "id DESC" in sql
+
+
 class TestRestoreSessionBookkeeping:
     def test_restore_returns_the_live_session_even_if_the_stamp_commit_fails(self, monkeypatch):
         """A failed last_connected commit is bookkeeping, not a login failure:
