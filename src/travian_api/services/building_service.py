@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..clients.http_client import HttpClient
@@ -31,6 +34,12 @@ from ..parsers.html_parser import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _crop_diag_dir() -> Path:
+    """Where TRAVIAN_DIST_DIAG writes the raw statistics HTML for debugging the
+    net-crop derivation. Off unless that env var is set."""
+    return Path(tempfile.gettempdir()) / "travian_crop_diag"
 
 
 def derive_net_crop_per_hour(
@@ -193,16 +202,25 @@ class BuildingService:
             TravianError: If a request fails
         """
         requests_spent = 0
+        _diag = bool(os.environ.get("TRAVIAN_DIST_DIAG"))
         try:
             if stocks is None:
                 stocks = parse_village_stats_resources(
                     await self.http_client.get_html("/village/statistics/resources")
                 )
                 requests_spent += 1
-            timers = parse_village_stats_warehouse(
-                await self.http_client.get_html("/village/statistics/resources/warehouse")
+            warehouse_html = await self.http_client.get_html(
+                "/village/statistics/resources/warehouse"
             )
+            timers = parse_village_stats_warehouse(warehouse_html)
             requests_spent += 1
+            if _diag:
+                try:
+                    out = _crop_diag_dir()
+                    out.mkdir(parents=True, exist_ok=True)
+                    (out / "warehouse.html").write_text(warehouse_html, encoding="utf-8")
+                except Exception as exc:  # diagnostics must never break the read
+                    logger.warning("CROPDIAG dump failed: %s", exc)
 
             capacities = dict(granary_capacity or {})
             needs_capacity = [
@@ -232,19 +250,32 @@ class BuildingService:
                     "resources table; net crop left underived",
                     vid,
                 )
+            net = (
+                None
+                if stock is None
+                else derive_net_crop_per_hour(
+                    stock=stock,
+                    seconds_remaining=timer["crop_seconds"],
+                    draining=timer["crop_draining"],
+                    granary_capacity=capacities.get(vid),
+                )
+            )
+            if _diag:
+                logger.warning(
+                    "CROPDIAG vid=%s stock=%s draining=%s crop_seconds=%s "
+                    "crop_percent=%s capacity=%s -> net=%s",
+                    vid,
+                    stock,
+                    timer["crop_draining"],
+                    timer["crop_seconds"],
+                    timer.get("crop_percent"),
+                    capacities.get(vid),
+                    net,
+                )
             balances[vid] = CropBalance(
                 village_id=vid,
                 stock=stock or 0,
-                net_per_hour=(
-                    None
-                    if stock is None
-                    else derive_net_crop_per_hour(
-                        stock=stock,
-                        seconds_remaining=timer["crop_seconds"],
-                        draining=timer["crop_draining"],
-                        granary_capacity=capacities.get(vid),
-                    )
-                ),
+                net_per_hour=net,
                 draining=timer["crop_draining"],
                 seconds_remaining=timer["crop_seconds"],
             )
