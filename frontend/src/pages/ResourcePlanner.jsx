@@ -146,7 +146,7 @@ const signed = (n) => (n == null ? '—' : `${n > 0 ? '+' : ''}${Math.round(n).t
 function CropCell({ village }) {
   if (village.crop_per_hour == null) {
     return (
-      <span className="text-amber-300" title="Rate could not be derived — not treated as zero">
+      <span className="text-orange-200" title="Rate could not be derived — not treated as zero">
         unknown
       </span>
     )
@@ -209,7 +209,7 @@ function BudgetBar({ budget }) {
       {open && (
         <div className="mt-1 mb-2 ml-2 pl-3 border-l border-gray-700">
           {budget.explanation && (
-            <p className="text-xs text-amber-200 mb-1">{budget.explanation}</p>
+            <p className="text-xs text-orange-200 mb-1">{budget.explanation}</p>
           )}
           <table className="text-xs w-full max-w-2xl">
             <thead className="text-secondary uppercase">
@@ -872,7 +872,7 @@ export default function ResourcePlanner() {
             aria-current={stage === s.id ? 'page' : undefined}
             className={`px-4 py-2 text-sm rounded-t ${
               stage === s.id
-                ? 'bg-black/40 text-white border-b-2 border-amber-400'
+                ? 'bg-black/40 text-white border-b-2 border-violet-400'
                 : 'text-secondary hover:text-white'
             }`}
           >
@@ -916,9 +916,9 @@ export default function ResourcePlanner() {
               {villages.map((v) => (
                 <tr
                   key={v.village_id}
-                  className="group border-t border-gray-800 hover:bg-white/5 focus-within:bg-amber-400/15 transition-colors"
+                  className="group border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors"
                 >
-                  <td className="py-1.5 px-2 border-l-2 border-l-transparent group-focus-within:border-l-amber-400">
+                  <td className="py-1.5 px-2 border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
                     {v.name}{' '}
                     <span className="text-secondary text-xs">
                       ({v.x}|{v.y})
@@ -974,7 +974,7 @@ export default function ResourcePlanner() {
             </tbody>
           </table>
           {snapshot?.warnings?.length > 0 && (
-            <ul className="mt-3 text-xs text-amber-300 list-disc list-inside">
+            <ul className="mt-3 text-xs text-orange-200 list-disc list-inside">
               {snapshot.warnings.map((w, i) => (
                 <li key={i}>{w}</li>
               ))}
@@ -1110,9 +1110,9 @@ export default function ResourcePlanner() {
                     return (
                       <tr
                         key={i}
-                        className="group border-t border-gray-800 hover:bg-white/5 focus-within:bg-amber-400/15 transition-colors"
+                        className="group border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors"
                       >
-                        <td className="py-1 px-2 border-l-2 border-l-transparent group-focus-within:border-l-amber-400">
+                        <td className="py-1 px-2 border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
                           <input
                             type="text"
                             aria-label={`Foreign target ${i + 1} name`}
@@ -1168,7 +1168,7 @@ export default function ResourcePlanner() {
                         <td className="px-2 text-right whitespace-nowrap">
                           {incomplete && (
                             <span
-                              className="text-amber-300 mr-2"
+                              className="text-orange-200 mr-2"
                               title="Needs a name and a crop rate before the planner uses it"
                             >
                               draft
@@ -1209,7 +1209,7 @@ export default function ResourcePlanner() {
                 aria-pressed={allocView === key}
                 className={`text-xs px-3 py-1.5 rounded border transition-colors ${
                   allocView === key
-                    ? 'border-amber-400/60 bg-amber-400/15 text-amber-200'
+                    ? 'border-violet-400/60 bg-violet-400/15 text-violet-200'
                     : 'border-gray-700 text-secondary hover:text-white hover:border-gray-500'
                 }`}
                 onClick={() => setAllocView(key)}
@@ -1293,7 +1293,7 @@ export default function ResourcePlanner() {
                                 `${fmt(after)}/h`
                               )}
                               {isRest && (
-                                <span className="ml-1 text-[10px] uppercase text-amber-300/80 font-sans">
+                                <span className="ml-1 text-[10px] uppercase text-violet-300/80 font-sans">
                                   rest
                                 </span>
                               )}
@@ -1306,7 +1306,7 @@ export default function ResourcePlanner() {
                                   ? 'text-secondary/60'
                                   : ship > 0
                                     ? 'text-success'
-                                    : 'text-amber-300'
+                                    : 'text-orange-200'
                               }`}
                             >
                               {ship == null ? '—' : Math.abs(ship) < 1 ? '·' : signed(ship)}
@@ -1361,14 +1361,14 @@ export default function ResourcePlanner() {
               </div>
 
               {dayCheck?.skipped?.length > 0 && (
-                <p className="text-amber-300 text-xs mb-2">
+                <p className="text-orange-200 text-xs mb-2">
                   Skipped {dayCheck.skipped.join(', ')} — no hours set. Give each profile its
                   window in the bar above.
                 </p>
               )}
 
               {dayCheck?.warnings?.length > 0 && (
-                <ul className="text-xs text-amber-300 list-disc list-inside mb-3 space-y-0.5">
+                <ul className="text-xs text-orange-200 list-disc list-inside mb-3 space-y-0.5">
                   {dayCheck.warnings.map((w, i) => (
                     <li key={i}>{w}</li>
                   ))}
@@ -1419,7 +1419,7 @@ export default function ResourcePlanner() {
                               {fmt(t.low)} → {fmt(t.high)}
                               {!t.settled && (
                                 <span
-                                  className="text-amber-300 ml-1"
+                                  className="text-orange-200 ml-1"
                                   title="Still drifting at the simulation horizon — the drift column is the story"
                                 >
                                   ↗
@@ -1431,7 +1431,7 @@ export default function ResourcePlanner() {
                                 Math.abs(t.daily_net) < 1
                                   ? 'text-secondary/60'
                                   : t.daily_net > 0
-                                    ? 'text-amber-300'
+                                    ? 'text-orange-200'
                                     : 'text-success'
                               }`}
                             >
@@ -1525,11 +1525,11 @@ export default function ResourcePlanner() {
                         return (
                           <tr
                             key={v.village_id}
-                            className={`group border-t border-gray-800 hover:bg-white/5 focus-within:bg-amber-400/15 transition-colors ${
-                              isSelected(resource, v.village_id) ? 'bg-amber-400/5' : ''
+                            className={`group border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors ${
+                              isSelected(resource, v.village_id) ? 'bg-violet-400/10' : ''
                             }`}
                           >
-                            <td className="text-center px-2 border-l-2 border-l-transparent group-focus-within:border-l-amber-400">
+                            <td className="text-center px-2 border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
                               <input
                                 type="checkbox"
                                 aria-label={`Select ${v.name} for batch edit`}
@@ -1580,7 +1580,7 @@ export default function ResourcePlanner() {
                                   : ship > 0
                                     ? 'text-success'
                                     : ship < 0
-                                      ? 'text-amber-300'
+                                      ? 'text-orange-200'
                                       : 'text-secondary'
                               }`}
                             >
@@ -1732,7 +1732,7 @@ export default function ResourcePlanner() {
 
               {plan.warnings.length > 0 && (
                 <div className="card p-4">
-                  <h3 className="font-semibold mb-2 text-amber-300">
+                  <h3 className="font-semibold mb-2 text-orange-200">
                     Warnings ({plan.warnings.length})
                   </h3>
                   <ul className="text-xs list-disc list-inside space-y-0.5 max-h-64 overflow-y-auto">
