@@ -549,10 +549,18 @@ def _improve_flows(
     def _crop_edges() -> set[FlowKey]:
         return {key for key, amount in flows.get(Resource.CROP, {}).items() if amount > EPSILON}
 
-    def _apply_changes(changes: Sequence[tuple[FlowKey, Resource, float]]) -> bool:
-        """Evaluate a set of pair-cargo deltas and apply them if they improve.
+    def _score_changes(changes: Sequence[tuple[FlowKey, Resource, float]]):
+        """Cost a set of pair-cargo deltas WITHOUT applying them.
 
-        Shared by the relay move. Returns True when the objective strictly fell.
+        Split out from applying so a mover can compare candidates before
+        committing to one. Relay used to take the first hub that merely
+        improved, and since hubs are iterated in village-id order that made the
+        choice arbitrary: on a real account it routed a 96-field haul through
+        the lowest-numbered village while four nearer ones sat unused.
+
+        Returns ``(delta, state)`` where delta is the lexicographic objective
+        change -- lower is better, negative means an improvement -- and state is
+        what :func:`_commit_changes` needs to apply it.
         """
         touched_keys = {key for key, _r, _d in changes}
         new_cargo: dict[FlowKey, dict[Resource, float]] = {
@@ -580,9 +588,15 @@ def _improve_flows(
         rc_delta = sum(route_weight(key) for key in touched_keys if new_merch[key] > 0) - sum(
             route_weight(key) for key in touched_keys if pair_merch.get(key, 0) > 0
         )
-        if (over_delta, total_delta, rc_delta) >= (0, 0, 0):
-            return False
+        return (over_delta, total_delta, rc_delta), (
+            touched_keys,
+            new_cargo,
+            new_merch,
+            per_origin,
+        )
 
+    def _commit_changes(changes, state) -> None:
+        touched_keys, new_cargo, new_merch, per_origin = state
         for key in touched_keys:
             if new_cargo[key]:
                 pair[key] = new_cargo[key]
@@ -607,7 +621,6 @@ def _improve_flows(
                 if touched_villages & {entry[1][0], entry[1][1], entry[2][0], entry[2][1]}
             ]
         )
-        return True
 
     def _relay_scan() -> bool:
         """Reroute a crop flow through an intermediate village that forwards it.
@@ -647,6 +660,11 @@ def _improve_flows(
             amount = legs.get((origin, destination), 0.0)
             if amount <= EPSILON:
                 continue
+            # Score every candidate hub and take the best one. Accepting the
+            # first that merely improves picks by village id, which is arbitrary
+            # and measurably bad: it sent a 96-field haul through the
+            # lowest-numbered village when four nearer ones would have done.
+            best = None
             for hub in hubs:
                 if hub in (origin, destination):
                     continue
@@ -662,15 +680,25 @@ def _improve_flows(
                 }
                 if not _crop_shape_ok(prospective):
                     continue
-                if _apply_changes(
-                    [
-                        ((origin, destination), Resource.CROP, -amount),
-                        ((origin, hub), Resource.CROP, amount),
-                        ((hub, destination), Resource.CROP, amount),
-                    ]
-                ):
-                    relay_hubs.add(hub)
-                    return True
+                changes = [
+                    ((origin, destination), Resource.CROP, -amount),
+                    ((origin, hub), Resource.CROP, amount),
+                    ((hub, destination), Resource.CROP, amount),
+                ]
+                delta, state = _score_changes(changes)
+                if delta >= (0, 0, 0):
+                    continue
+                # Tie-break on the collection leg: when two hubs cost the same,
+                # the nearer one is the better place to send cargo, and it keeps
+                # the choice stable rather than falling back on village id.
+                key = (delta, one_way_cache.get((origin, hub), 0.0), hub)
+                if best is None or key < best[0]:
+                    best = (key, hub, changes, state)
+            if best is not None:
+                _, hub, changes, state = best
+                _commit_changes(changes, state)
+                relay_hubs.add(hub)
+                return True
         return False
 
     converged = False

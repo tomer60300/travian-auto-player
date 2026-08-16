@@ -566,6 +566,44 @@ class TestCropRelay:
             f"{own.ship_per_hour:+.0f}/h -- it kept or funded some of the relay"
         )
 
+    def test_relay_picks_the_best_hub_not_the_lowest_numbered_one(self):
+        """Hubs are iterated in village-id order. Taking the first that merely
+        improved therefore chose by id, which is arbitrary: on a real account it
+        routed a 96-field haul through the lowest-numbered village while four
+        nearer ones sat unused, and left the sender over its merchant budget.
+
+        Here village 2 is the low-numbered far hub and village 9 the near one.
+        The near hub must win on merit despite sorting last.
+        """
+        villages = {
+            1: VillageState(1, 0, 0, merchant_count=20, trade_office_level=12),  # capital
+            2: VillageState(2, 100, 60, merchant_count=20, trade_office_level=12),  # far, low id
+            9: VillageState(9, 40, 20, merchant_count=20, trade_office_level=12),  # near, high id
+            5: VillageState(5, 150, 90, merchant_count=8, trade_office_level=10),  # stranded
+        }
+        plans = {
+            Resource.CROP: resolve_resource(
+                Resource.CROP,
+                {1: 0.0, 2: 900.0, 9: 900.0, 5: 9000.0},
+                {
+                    1: Allocation(AllocationMode.REMAINDER),
+                    2: Allocation(AllocationMode.ABSOLUTE, 900.0),
+                    9: Allocation(AllocationMode.ABSOLUTE, 900.0),
+                    5: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                },
+            )
+        }
+
+        plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+        hops = [r.destination for r in plan.routes if r.origin == 5]
+        assert hops, "the stranded village shipped nothing"
+        # Whatever it chose, it must not be dearer than the cheapest option, and
+        # the near hub is strictly cheaper than the far one from village 5.
+        assert 2 not in hops or 9 in hops, (
+            f"routed through the far low-id hub (2) while the nearer hub (9) was available: {hops}"
+        )
+
     @pytest.mark.parametrize("village_count", [5, 12, 22, 40])
     def test_relay_never_makes_a_plan_worse(self, village_count):
         """Relay is adopted only when it strictly lowers the objective.
