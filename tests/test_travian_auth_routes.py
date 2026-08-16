@@ -188,6 +188,32 @@ def test_status_attempts_a_saved_credential_restore(monkeypatch):
     assert res.active_village_id == 20003
 
 
+def test_last_connected_serializes_with_a_utc_offset():
+    """SQLite hands DateTime(timezone=True) columns back WITHOUT tzinfo, even
+    though the value was written with datetime.now(UTC). A bare isoformat()
+    then carries no offset, so a browser outside UTC parses the UTC wall time
+    as local and shows a wrong last-connected age."""
+    from datetime import datetime
+
+    from travian_api.web.routes.travian_auth import _credential_to_response
+
+    cred = SimpleNamespace(
+        id=1,
+        server_url="https://ts1.x1.europe.travian.com",
+        travian_username="alice",
+        label=None,
+        # Exactly what SQLite returns: the UTC wall time, tzinfo stripped.
+        last_connected=datetime(2026, 8, 16, 12, 0, 0),
+    )
+
+    rendered = _credential_to_response(cred).last_connected
+
+    assert rendered is not None
+    assert rendered.endswith(("+00:00", "Z")), (
+        f"timestamp has no UTC marker; a non-UTC browser will misread it: {rendered}"
+    )
+
+
 def test_saving_the_same_server_twice_updates_instead_of_duplicating(monkeypatch):
     """Duplicate (user, server, username) rows break last_connected stamping
     (MultipleResultsFound) and let auto-restore pick an older row with an

@@ -199,6 +199,31 @@ class TestNonDestructiveConnect:
         assert manager.get(1) is old
         assert old.disconnect_called is False
 
+    def test_a_failed_login_closes_the_session_it_created(self, monkeypatch):
+        """The session whose connect() failed was never installed anywhere,
+        but its httpx/curl clients already exist. Abandoning it leaks a
+        connection pool per failed attempt -- and auto-reconnect retries turn
+        that into a steady drip."""
+        import travian_api.web.sessions as sessions_module
+
+        manager = SessionManager()
+
+        class _FailingSession(_StubSession):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.fail_login = True
+
+        _StubSession.instances.clear()
+        monkeypatch.setattr(sessions_module, "TravianSession", _FailingSession)
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(manager.connect(1, "https://ts1.x1.europe.travian.com", "u", "p"))
+
+        assert len(_StubSession.instances) == 1
+        assert _StubSession.instances[0].disconnected is True, (
+            "the failed session's clients were never closed"
+        )
+
     def test_a_successful_login_replaces_and_disconnects_the_old_session(self, monkeypatch):
         import travian_api.web.sessions as sessions_module
 

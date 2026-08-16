@@ -97,7 +97,15 @@ def _credential_to_response(cred: TravianCredential) -> SavedServerResponse:
         server_url=cred.server_url,
         username=cred.travian_username,
         label=cred.label,
-        last_connected=cred.last_connected.isoformat() if cred.last_connected else None,
+        # SQLite returns DateTime(timezone=True) values with tzinfo stripped,
+        # even though they were written with datetime.now(UTC). Serialized bare,
+        # the ISO string has no offset and a non-UTC browser reads the UTC wall
+        # time as local. Restore the marker before it leaves the server.
+        last_connected=(
+            cred.last_connected.replace(tzinfo=UTC).isoformat()
+            if cred.last_connected and cred.last_connected.tzinfo is None
+            else (cred.last_connected.isoformat() if cred.last_connected else None)
+        ),
     )
 
 

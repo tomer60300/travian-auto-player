@@ -1,7 +1,7 @@
 """User registration, login, and profile routes."""
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +24,17 @@ router = APIRouter(prefix="/api/users", tags=["users"])
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=32)
     password: str = Field(..., min_length=6)
+
+    @field_validator("password")
+    @classmethod
+    def _within_bcrypt_byte_limit(cls, value: str) -> str:
+        # bcrypt only reads the first 72 BYTES and, from bcrypt 5, raises for
+        # anything longer. Bytes, not characters: an emoji is four. Without
+        # this check a long password passes validation and detonates inside
+        # hash_password(), turning a user mistake into a 500.
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("password must be at most 72 bytes (UTF-8 encoded)")
+        return value
 
 
 class UserResponse(BaseModel):

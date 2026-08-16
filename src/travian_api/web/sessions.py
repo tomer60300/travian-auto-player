@@ -261,7 +261,19 @@ class SessionManager:
                 )
 
         session = TravianSession(user_id, server_url, username, password)
-        await session.connect()
+        try:
+            await session.connect()
+        except BaseException:
+            # Bad credentials, a network error or a captcha leaves a session
+            # that was never installed anywhere -- but its httpx/curl clients
+            # and file-backed state already exist. Abandoning it leaks a
+            # connection pool per failed attempt, and reconnect retries make
+            # that a steady drip. Close it before letting the error out.
+            try:
+                await session.disconnect()
+            except Exception:
+                logger.exception("Cleanup after a failed connect also failed")
+            raise
 
         # Re-check under the install lock: an operation may have started while
         # the login was in flight, and swapping now would close the HttpClient

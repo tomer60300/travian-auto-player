@@ -31,6 +31,34 @@ class _RacingDb:
         pass
 
 
+def test_a_long_password_is_rejected_with_422_not_a_500():
+    """bcrypt 5 raises ValueError for passwords over 72 BYTES. Without a
+    byte-aware limit on the model, a long (or emoji-heavy: 4 bytes each)
+    password sails through validation and detonates inside hash_password(),
+    turning a user mistake into a server error."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        UserCreate(username="longpass", password="x" * 73)
+
+    # Byte-aware, not character-aware: 19 four-byte emoji = 76 bytes.
+    with pytest.raises(pydantic.ValidationError):
+        UserCreate(username="emoji", password="\U0001f600" * 19)
+
+    # 72 bytes exactly is bcrypt's limit and must still be accepted.
+    UserCreate(username="edge", password="x" * 72)
+
+
+def test_login_with_an_overlong_password_is_401_not_500():
+    """An existing user typing garbage past 72 bytes must get the normal
+    invalid-credentials answer, not a traceback from bcrypt.checkpw."""
+    from travian_api.web.auth import hash_password, verify_password
+
+    hashed = hash_password("correct-password")
+
+    assert verify_password("x" * 100, hashed) is False
+
+
 def test_losing_a_registration_race_returns_409_not_500():
     with pytest.raises(HTTPException) as exc:
         asyncio.run(register(UserCreate(username="dup", password="hunter2"), _RacingDb()))

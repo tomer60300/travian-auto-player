@@ -69,7 +69,7 @@ _TRIBE_MERCHANT_SPEED: dict[int, float] = {
     2: 12.0,  # Teuton
     3: 24.0,  # Gaul
     6: 16.0,  # Egyptian
-    7: 12.0,  # Hun
+    7: 20.0,  # Hun
     8: 16.0,  # Spartan
 }
 

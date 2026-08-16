@@ -169,6 +169,13 @@ class TestSnapshotPricing:
             asyncio.run(get_snapshot(_session(_SnapshotHttp(), tribe_id=3))).speed_fields_per_hour
             == 24
         )  # Gaul
+        # Hun merchants travel at 20 f/h on x1 — the table shipped with 12
+        # (Teuton's), overstating every Hun plan's travel time and merchant
+        # counts, and potentially flipping feasible routes to over-budget.
+        assert (
+            asyncio.run(get_snapshot(_session(_SnapshotHttp(), tribe_id=7))).speed_fields_per_hour
+            == 20
+        )  # Hun
 
     def test_warns_when_the_production_table_is_missing(self):
         """Without Travian Plus the production table is absent; rates silently

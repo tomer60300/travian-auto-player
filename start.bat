@@ -19,7 +19,16 @@ if errorlevel 1 (
 )
 where npm >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: 'npm' is not on PATH. Install Node.js 18+ from https://nodejs.org/
+    echo ERROR: 'npm' is not on PATH. Install Node.js 20.19+ or 22.12+ from https://nodejs.org/
+    goto :fail
+)
+:: Vite 8 (the locked frontend toolchain) requires Node ^20.19.0 or >=22.12.0.
+:: Checking only that npm exists let Node 18 pass preflight and then fail
+:: halfway through the frontend build.
+for /f "tokens=1 delims=." %%v in ('node -v') do set NODE_MAJOR=%%v
+set NODE_MAJOR=%NODE_MAJOR:v=%
+if %NODE_MAJOR% LSS 20 (
+    echo ERROR: Node %NODE_MAJOR% is too old. The frontend build needs Node 20.19+ or 22.12+.
     goto :fail
 )
 

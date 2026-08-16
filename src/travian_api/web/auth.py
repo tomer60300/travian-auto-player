@@ -117,8 +117,17 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, hashed: str) -> bool:
-    """Check *password* against a bcrypt *hashed* value."""
-    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    """Check *password* against a bcrypt *hashed* value.
+
+    A password over bcrypt's 72-byte limit cannot be the right one -- nothing
+    that long was ever hashed -- but bcrypt 5 raises for it rather than
+    returning False. Login must answer "invalid credentials", not a 500, so
+    the impossible length is the answer, not an error.
+    """
+    encoded = password.encode("utf-8")
+    if len(encoded) > 72:
+        return False
+    return bcrypt.checkpw(encoded, hashed.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
