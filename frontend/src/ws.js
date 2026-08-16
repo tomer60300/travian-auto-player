@@ -54,12 +54,17 @@ export function createWebSocket(path, onMessage, onError, onClose, options = {})
   function connect() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const host = window.location.host
-    const url = `${protocol}//${host}${path}${path.includes('?') ? '&' : '?'}token=${token}`
+    // The bearer JWT rides in a WebSocket subprotocol, NOT the query string:
+    // uvicorn logs request paths (query included) at INFO, so a `?token=<jwt>`
+    // writes a reusable 24h token into server logs (and proxy logs, browser
+    // history, Referer). Subprotocol values are part of the handshake headers,
+    // which uvicorn does not log. The server reads the token from here.
+    const url = `${protocol}//${host}${path}`
 
     const isReconnect = !isFirstConnect
     if (isReconnect) onReconnecting?.()
     log('info', source, `WS >> connect: ${path}${attempts > 0 ? ` (retry ${attempts})` : ''}`)
-    const ws = new WebSocket(url)
+    const ws = new WebSocket(url, ['travian-jwt', token])
     currentWs = ws
 
     ws.onopen = () => {

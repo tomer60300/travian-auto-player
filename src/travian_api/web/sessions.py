@@ -366,12 +366,21 @@ class SessionManager:
         self._explicit_disconnects.discard(user_id)
 
     def _running_operation_labels(self, user_id: int) -> list[str]:
-        """Labels of the user's background operations that are still running."""
-        from travian_api.operation_manager import operation_manager
+        """Labels of the user's background operations that are still running.
 
-        return sorted(
-            op.label for op in operation_manager.list_for_user(user_id) if not op.task.done()
-        )
+        Two independent registries hold work that pins this session's
+        HttpClient: OperationManager (detached farm/scout/queue/raid tasks)
+        and ActiveOpRegistry (WebSocket-driven work like the raid analyzer,
+        which never becomes an OperationManager task). Both must be consulted
+        — an operation missing from the guard lets disconnect/reconnect close
+        the client underneath it mid-run.
+        """
+        from travian_api.operation_manager import operation_manager
+        from travian_api.web.operation_gate import active_ops
+
+        labels = {op.label for op in operation_manager.list_for_user(user_id) if not op.task.done()}
+        labels.update(active_ops.get_active(user_id))
+        return sorted(labels)
 
     def get_reconnect_lock(self, user_id: int) -> asyncio.Lock:
         """Return a per-user lock for serializing auto-reconnect attempts.

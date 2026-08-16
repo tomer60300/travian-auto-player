@@ -12,6 +12,27 @@ from travian_api.web.sessions import session_manager, try_restore_session
 
 logger = logging.getLogger(__name__)
 
+# The subprotocol marker the frontend sends before the token:
+# `Sec-WebSocket-Protocol: travian-jwt, <JWT>`.
+_JWT_SUBPROTOCOL = "travian-jwt"
+
+
+def _token_from_subprotocol(websocket: WebSocket) -> Optional[str]:
+    """Extract the JWT carried as `travian-jwt, <token>` subprotocols.
+
+    The header is a comma-separated offer list; the value right after the
+    marker is the token. Returns None when the marker is absent so the caller
+    can fall back to the legacy query param.
+    """
+    header = websocket.headers.get("sec-websocket-protocol")
+    if not header:
+        return None
+    protocols = [p.strip() for p in header.split(",") if p.strip()]
+    for index, proto in enumerate(protocols):
+        if proto == _JWT_SUBPROTOCOL and index + 1 < len(protocols):
+            return protocols[index + 1]
+    return None
+
 
 class ConnectionManager:
     """Manages WebSocket connections keyed by user_id.
@@ -33,9 +54,15 @@ class ConnectionManager:
         *,
         require_travian_session: bool = True,
     ) -> Optional[int]:
-        """Authenticate a WebSocket connection via query parameter token.
+        """Authenticate a WebSocket connection.
 
-        Expected URL: ws://host/ws/path?token=<JWT>
+        The token is read from the ``travian-jwt`` WebSocket subprotocol
+        (``Sec-WebSocket-Protocol: travian-jwt, <JWT>``). It is deliberately
+        NOT read from the query string by default: uvicorn logs request paths
+        (with query) at INFO, which would write a reusable bearer token into
+        server logs. A legacy ``?token=`` query param is still accepted as a
+        fallback so older clients keep working.
+
         Returns user_id on success, None on failure.
         Must accept() before close() per ASGI spec.
 
@@ -45,7 +72,7 @@ class ConnectionManager:
                 when the user has no active Travian session.  Set to False for
                 endpoints like /ws/logs and /ws/sessions that only need JWT auth.
         """
-        token = websocket.query_params.get("token")
+        token = _token_from_subprotocol(websocket) or websocket.query_params.get("token")
         if not token:
             await websocket.accept()
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Missing token")

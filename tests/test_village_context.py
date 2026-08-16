@@ -352,6 +352,28 @@ class TestDisconnectVsReconnectRace:
             "a refused logout is no logout: it must not flip the explicit-disconnect latch"
         )
 
+    def test_a_websocket_only_operation_also_blocks_disconnect(self, monkeypatch):
+        """The raid analyzer registers only in active_ops, never as an
+        OperationManager task. It still holds this session's HttpClient, so
+        the guard must see it too -- otherwise a logout closes the client
+        mid-analysis."""
+        from fastapi import HTTPException
+
+        import travian_api.web.operation_gate as gate
+
+        manager = SessionManager()
+        manager._sessions[1] = SimpleNamespace(server_url="https://ts1.x1.europe.travian.com")
+        gate.active_ops.register(1, "raid-analyzer")
+        try:
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(manager.disconnect(1))
+        finally:
+            gate.active_ops.unregister(1, "raid-analyzer")
+
+        assert exc.value.status_code == 409
+        assert "raid-analyzer" in exc.value.detail
+        assert manager.get(1) is not None
+
     def test_manual_connect_serializes_with_the_reconnect_lock(self, monkeypatch):
         """/api/travian/connect and /reconnect call SessionManager.connect
         directly; without the reconnect lock a logout that returned while that
@@ -744,6 +766,9 @@ class TestRestoreBackoff:
 class _FakeWebSocket:
     def __init__(self, token="t"):
         self.query_params = {"token": token}
+        # No subprotocol header: these tests exercise the legacy query-param
+        # fallback, so authenticate() reads the token from query_params.
+        self.headers = {}
         self.closed_with = None
 
     async def accept(self):

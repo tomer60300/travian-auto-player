@@ -26,6 +26,29 @@ JWT_COOKIE_NAME = "JWT"
 class AuthService:
     """Service for handling authentication with Travian server."""
 
+    def _safe_login_redirect(self, redirect_url: str) -> str:
+        """Confine the post-login redirect to the server the user connected to.
+
+        The login host controls ``redirectTo``, and get_html follows absolute
+        URLs; a malicious or compromised server could point it at a loopback
+        or private-network service and turn login into an SSRF. The connect
+        guard vetted base_url already, so requiring the redirect to stay on
+        that same https host (relative URLs resolve against it) closes the
+        hole without a second DNS round-trip. Real Travian auth always
+        redirects within its own host.
+        """
+        from urllib.parse import urlsplit
+
+        base_host = urlsplit(self.settings.base_url).hostname
+        parsed = urlsplit(redirect_url)
+        if not parsed.netloc:
+            return redirect_url  # relative: resolved against base_url by get_html
+        if parsed.scheme != "https" or parsed.hostname != base_host:
+            raise AuthError(
+                f"Login redirect points off-server ({redirect_url!r}); refusing to follow it"
+            )
+        return redirect_url
+
     def __init__(self, http_client: HttpClient, settings: Settings):
         self.http_client = http_client
         self.settings = settings
@@ -105,7 +128,7 @@ class AuthService:
             if "redirectTo" not in response or "code" not in response:
                 raise AuthError("Invalid login response - missing redirectTo or code")
 
-            redirect_url = response["redirectTo"]
+            redirect_url = self._safe_login_redirect(response["redirectTo"])
 
             # Step 2: GET redirect URL to exchange code for JWT cookie (don't follow redirects)
             await self.http_client.get_html(redirect_url, follow_redirects=False, skip_reauth=True)
