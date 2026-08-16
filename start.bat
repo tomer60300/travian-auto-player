@@ -22,13 +22,29 @@ if errorlevel 1 (
     echo ERROR: 'npm' is not on PATH. Install Node.js 20.19+ or 22.12+ from https://nodejs.org/
     goto :fail
 )
+where node >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: 'node' is not on PATH. Install Node.js 20.19+ or 22.12+ from https://nodejs.org/
+    goto :fail
+)
 :: Vite 8 (the locked frontend toolchain) requires Node ^20.19.0 or >=22.12.0.
-:: Checking only that npm exists let Node 18 pass preflight and then fail
-:: halfway through the frontend build.
-for /f "tokens=1 delims=." %%v in ('node -v') do set NODE_MAJOR=%%v
-set NODE_MAJOR=%NODE_MAJOR:v=%
-if %NODE_MAJOR% LSS 20 (
-    echo ERROR: Node %NODE_MAJOR% is too old. The frontend build needs Node 20.19+ or 22.12+.
+:: The check must match that range exactly: a major-only check let Node
+:: 20.0-20.18 and Node 21 pass preflight and then fail halfway through the
+:: frontend build.
+set NODE_MAJOR=
+set NODE_MINOR=
+for /f "tokens=1,2 delims=v." %%a in ('node -v') do (set NODE_MAJOR=%%a& set NODE_MINOR=%%b)
+if "%NODE_MAJOR%"=="" (
+    echo ERROR: could not read the Node version from 'node -v'.
+    goto :fail
+)
+set NODE_OK=1
+if %NODE_MAJOR% LSS 20 set NODE_OK=0
+if %NODE_MAJOR% EQU 20 if %NODE_MINOR% LSS 19 set NODE_OK=0
+if %NODE_MAJOR% EQU 21 set NODE_OK=0
+if %NODE_MAJOR% EQU 22 if %NODE_MINOR% LSS 12 set NODE_OK=0
+if %NODE_OK% EQU 0 (
+    echo ERROR: Node %NODE_MAJOR%.%NODE_MINOR% cannot build the frontend. It needs Node 20.19+ or 22.12+.
     goto :fail
 )
 
