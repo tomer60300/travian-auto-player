@@ -280,6 +280,25 @@ class TestForeignTribute:
 
         assert not [row for row in res.rows if row.origin < 0]
 
+    def test_sheet_rows_carry_the_targets_name_not_a_negative_id(self):
+        """Reported from the UI: foreign villages rendered as '-1' in the plan.
+
+        The frontend resolved names from its own snapshot, which cannot know
+        foreign tributes -- their negative ids fell through the lookup and the
+        raw id was shown. Names are now resolved server-side on every row, so
+        no client needs to know how sink ids are generated.
+        """
+        res = asyncio.run(post_plan(self._body()))
+
+        tribute_rows = [row for row in res.rows if row.destination < 0]
+        assert tribute_rows, "the tribute was never shipped; fixture drifted"
+        for row in tribute_rows:
+            assert row.destination_name == "Ally-Keep"
+            assert row.origin_name, "real villages must carry their name too"
+
+        for shortfall in res.shortfalls:
+            assert shortfall.village_name, "shortfalls must be named, never numbered"
+
     def test_the_cold_start_is_reported(self):
         """The first delivery only lands after a full one-way trip; a tribute
         that silently starts late looks like a broken promise."""

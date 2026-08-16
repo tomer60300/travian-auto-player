@@ -229,6 +229,11 @@ class PlanRequest(BaseModel):
 class SheetRowResponse(BaseModel):
     origin: int
     destination: int
+    # Display names, resolved server-side. The frontend used to look ids up in
+    # its own snapshot, which cannot know foreign tributes -- their negative
+    # ids leaked into the sheet as "-1" instead of the name the operator typed.
+    origin_name: str = ""
+    destination_name: str = ""
     cargo: dict[Resource, int]
     total_cargo: int
     cycle_hours: int
@@ -280,6 +285,7 @@ class BudgetResponse(BaseModel):
 
 class ShortfallResponse(BaseModel):
     village_id: int
+    village_name: str = ""
     resource: Resource
     per_hour: float
     reason: str
@@ -743,6 +749,8 @@ async def post_plan(
         rows=[
             SheetRowResponse(
                 origin=row.origin,
+                origin_name=village_label(row.origin, names),
+                destination_name=village_label(row.destination, names),
                 destination=row.destination,
                 cargo={r: amount for r, amount in row.cargo.items() if amount},
                 total_cargo=row.total_cargo,
@@ -782,6 +790,7 @@ async def post_plan(
         shortfalls=[
             ShortfallResponse(
                 village_id=s.village_id,
+                village_name=village_label(s.village_id, names),
                 resource=s.resource,
                 per_hour=s.per_hour,
                 reason=s.reason,

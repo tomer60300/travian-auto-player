@@ -1216,11 +1216,16 @@ export default function ResourcePlanner() {
                     {plan.rows.map((row, i) => (
                       <tr key={i} className="border-t border-gray-800">
                         <td className="py-1 px-2">
-                          {villages.find((v) => v.village_id === row.origin)?.name ?? row.origin}
+                          {/* Server-resolved names: the snapshot cannot know
+                              foreign tributes, whose negative ids rendered as
+                              "-1" here before the plan carried names itself. */}
+                          {row.origin_name ||
+                            (villages.find((v) => v.village_id === row.origin)?.name ?? row.origin)}
                         </td>
                         <td className="px-2">
-                          {villages.find((v) => v.village_id === row.destination)?.name ??
-                            row.destination}
+                          {row.destination_name ||
+                            (villages.find((v) => v.village_id === row.destination)?.name ??
+                              row.destination)}
                         </td>
                         <td className="px-2 font-mono">
                           {Object.entries(row.cargo)
@@ -1248,8 +1253,9 @@ export default function ResourcePlanner() {
                     {plan.shortfalls.map((s, i) => (
                       <li key={i}>
                         {RESOURCE_LABEL[s.resource]} ·{' '}
-                        {villages.find((v) => v.village_id === s.village_id)?.name ??
-                          `village ${s.village_id}`}{' '}
+                        {s.village_name ||
+                          (villages.find((v) => v.village_id === s.village_id)?.name ??
+                            `village ${s.village_id}`)}{' '}
                         short{' '}
                         {fmt(s.per_hour)}/h — {s.reason}
                       </li>
