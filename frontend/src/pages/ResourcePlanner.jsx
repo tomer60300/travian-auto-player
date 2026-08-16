@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
 import api from '../api'
@@ -422,6 +422,17 @@ export default function ResourcePlanner() {
   useEffect(() => {
     setDayCheck(null)
   }, [profiles, profileWindows, cropCeilings, snapshot, foreignTargets])
+  // Same rule for the route sheet, with higher stakes: its rows are copied
+  // field by field into the game's trade-route dialog. A sheet computed from
+  // yesterday's allocations, Trade Office levels, merchant model, tributes or
+  // snapshot prescribes routes for a world that no longer exists. The
+  // revision counter also kills in-flight builds: a response that started
+  // before the latest edit must not resurrect a stale sheet.
+  const planInputRev = useRef(0)
+  useEffect(() => {
+    planInputRev.current += 1
+    setPlan(null)
+  }, [allocations, tradeOffice, merchantModel, foreignTargets, villages])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_CROP_CEILING), cropCeilings)
@@ -482,8 +493,10 @@ export default function ResourcePlanner() {
       return
     }
     // Guard against the account changing mid-request: a plan built from
-    // account A's snapshot must not be presented under account B.
+    // account A's snapshot must not be presented under account B. The input
+    // revision closes the same race for edits within one account.
     const requestedFor = accountKey
+    const requestedRev = planInputRev.current
     setPlanning(true)
     try {
       // Send only entries the planner can act on: `keep` equals the backend
@@ -522,6 +535,7 @@ export default function ResourcePlanner() {
           : undefined,
       })
       if (requestedFor !== currentAccountKey()) return
+      if (requestedRev !== planInputRev.current) return
       setPlan(res.data)
       setStage('plan')
     } catch (err) {

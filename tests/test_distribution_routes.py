@@ -301,10 +301,16 @@ class TestForeignTribute:
 
     def test_the_cold_start_is_reported(self):
         """The first delivery only lands after a full one-way trip; a tribute
-        that silently starts late looks like a broken promise."""
+        that silently starts late looks like a broken promise. With several
+        suppliers the FIRST crop lands at the minimum startup, not the
+        maximum -- calling the last route's startup "first delivery" would
+        overstate the gap the operator has to cover by hand."""
         res = asyncio.run(post_plan(self._body()))
 
-        assert any("first delivery lands" in w and "Ally-Keep" in w for w in res.warnings)
+        cold = [w for w in res.warnings if "first crop lands" in w and "Ally-Keep" in w]
+        assert cold, f"warnings: {res.warnings}"
+        tribute_firsts = [row.first_delivery_hours for row in res.rows if row.destination < 0]
+        assert f"{min(tribute_firsts):.1f}h" in cold[0]
 
     def test_an_unsuppliable_tribute_says_so(self):
         """Promising more crop than the account grows must be reported, not

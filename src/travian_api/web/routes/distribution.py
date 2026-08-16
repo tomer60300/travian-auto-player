@@ -995,16 +995,20 @@ async def post_plan(
             )
         # Section 7.3: a tribute must not lapse, and the first delivery only
         # lands after a full one-way trip. Saying so is the difference between
-        # a planned gap and an apparent broken promise.
-        first = max(
-            (row.first_delivery_hours for row in plan.rows if row.destination == target_id),
-            default=0.0,
+        # a planned gap and an apparent broken promise. With several suppliers
+        # the first crop lands at the EARLIEST route's startup; the slowest
+        # route only marks when the full rate is flowing.
+        firsts = [row.first_delivery_hours for row in plan.rows if row.destination == target_id]
+        first = min(firsts, default=0.0)
+        full = max(firsts, default=0.0)
+        note = (
+            f"{target.name} ({target.x}|{target.y}): the first crop lands "
+            f"{first:.1f}h after the routes are created"
         )
-        extra_warnings.append(
-            f"{target.name} ({target.x}|{target.y}): first delivery lands "
-            f"{first:.1f}h after the route is created, so the tribute starts "
-            f"late unless it is covered by hand until then"
-        )
+        if full > first + 0.05:
+            note += f" and the full tribute only flows from {full:.1f}h"
+        note += ", so it starts late unless covered by hand until then"
+        extra_warnings.append(note)
 
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
     over = {o.village_id for o in plan.over_budget}

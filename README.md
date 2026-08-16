@@ -7,7 +7,7 @@ A Python library, CLI, and self-hosted web UI for automating Travian Legends gam
 ### Prerequisites
 
 - **Python 3.11+** — [python.org/downloads](https://www.python.org/downloads/)
-- **Node.js 18+** — [nodejs.org](https://nodejs.org/)
+- **Node.js 20.19+ or 22.12+** — [nodejs.org](https://nodejs.org/) (the frontend build uses Vite 8, which needs exactly this range; the startup scripts enforce it)
 
 ### Setup & Run
 
