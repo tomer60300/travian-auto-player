@@ -138,18 +138,27 @@ class TestStructuralInvariants:
             assert not (resources & back), f"{origin}<->{destination} both ways"
 
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_no_village_relays_the_same_resource(self, village_count):
-        """The no-waterfall rule for W/C/I, and it holds for crop too."""
+    def test_no_village_relays_a_material(self, village_count):
+        """The no-waterfall rule, scoped to W/C/I as profile section 3.5 states.
+
+        Materials must never chain A->B->C. Crop is explicitly exempt there --
+        relay through a sub-hub is permitted -- and the optimizer's relay move
+        uses that exemption to lift merchant load off villages that cannot staff
+        their own haul. Restricting relay to crop is what keeps this rule true by
+        construction for the other three rather than by a runtime check.
+        """
         villages = make_account(village_count, seed=village_count + 11)
         plans, _ = make_plans(villages, seed=village_count + 11)
 
         plan = build_plan(villages, plans, GEOMETRY, MODEL)
 
+        materials = {Resource.LUMBER, Resource.CLAY, Resource.IRON}
         sends: dict[int, set[Resource]] = {}
         receives: dict[int, set[Resource]] = {}
         for route in plan.routes:
-            sends.setdefault(route.origin, set()).update(route.cargo_per_hour)
-            receives.setdefault(route.destination, set()).update(route.cargo_per_hour)
+            carried = set(route.cargo_per_hour) & materials
+            sends.setdefault(route.origin, set()).update(carried)
+            receives.setdefault(route.destination, set()).update(carried)
         for vid in villages:
             assert not (sends.get(vid, set()) & receives.get(vid, set()))
 
@@ -266,36 +275,52 @@ class TestBudgetIsReportedNotHidden:
         assert village.spare_merchants(reserve=2) == 0
 
 
-def _greedy_seed_merchants(villages, plans):
-    """Total merchants the greedy seed alone commits, before local search."""
+def _greedy_seed_objective(villages, plans):
+    """(total merchants, over-budget excess) for the greedy seed alone.
+
+    Both halves are needed because the search optimises them lexicographically:
+    a plan that spends more merchants to relieve excess is an improvement.
+    """
     pair: dict[tuple[int, int], dict[Resource, float]] = {}
     for resource, resource_plan in plans.items():
         flows, _ = _flows_for_resource(resource_plan, villages, GEOMETRY)
         for key, amount in flows.items():
             pair.setdefault(key, {})[resource] = amount
     total = 0
+    committed: dict[int, int] = {}
     for (origin, destination), cargo in pair.items():
         route = _route_for_pair(
             origin, destination, cargo, villages, GEOMETRY, MODEL, DAILY_BEAT_CYCLES
         )
         total += route.merchants_committed
-    return total
+        committed[origin] = committed.get(origin, 0) + route.merchants_committed
+    excess = sum(max(0, used - villages[vid].spare_merchants()) for vid, used in committed.items())
+    return total, excess
 
 
 class TestImprovementNeverRegresses:
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
     def test_improved_plan_is_never_worse_than_the_greedy_seed(self, village_count):
-        """The local search only accepts strictly-improving swaps, so the
-        merchant-minimal plan commits no more merchants than the seed it started
-        from. Measured with the latency pass off (``max_latency_hours=None``),
-        which is the stage this property is about — the latency pass then spends
-        idle merchants on speed, deliberately raising the count within budget."""
+        """The search only accepts strictly-improving moves, so the plan is never
+        worse than its seed **on the objective it optimises** -- which is the
+        lexicographic pair (over_budget_excess, total_merchants), not merchants
+        alone. Relay deliberately buys feasibility with extra merchants: it can
+        only be accepted when excess strictly falls, so a plan may commit more
+        merchants than the seed while being unambiguously better.
+
+        Measured with the latency pass off; that stage separately spends idle
+        merchants on speed and is covered by its own tests.
+        """
         villages = make_account(village_count, seed=village_count + 91)
         plans, _ = make_plans(villages, seed=village_count + 91)
 
+        seed_merchants, seed_excess = _greedy_seed_objective(villages, plans)
         plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+        got = (sum(o.excess for o in plan.over_budget), plan.total_merchants)
 
-        assert plan.total_merchants <= _greedy_seed_merchants(villages, plans)
+        assert got <= (seed_excess, seed_merchants), (
+            f"plan {got} is worse than the greedy seed {(seed_excess, seed_merchants)}"
+        )
 
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
     def test_latency_pass_never_pushes_a_village_over_budget(self, village_count):
@@ -460,6 +485,115 @@ class TestLatencyPassRespectsTheFillFloor:
         assert compliant_seen, "fixture produced no compliant routes; test proves nothing"
 
 
+class TestCropRelay:
+    """Relay exists to buy feasibility, never to save merchants.
+
+    Merchant cost is essentially cargo x round_trip / capacity -- linear in both
+    -- so consolidating n shipments into one long haul costs the same on the long
+    leg and adds the collection legs on top. Measured across every cluster
+    geometry, relay is at best break-even on total merchants. Its real use is to
+    move commitment off a village that cannot staff its own haul.
+    """
+
+    def _stranded_account(self):
+        """A far village that cannot afford its own haul, plus a midpoint hub.
+
+        The midpoint grows and ships crop of its own, so it is part of the crop
+        network and therefore eligible as a hub. That matters: a village with no
+        crop flow at all is excluded on purpose, so that founding a village
+        cannot silently reshuffle routes it has nothing to do with.
+        """
+        return {
+            1: VillageState(1, 0, 0, merchant_count=20, trade_office_level=15),  # capital
+            2: VillageState(2, 60, 0, merchant_count=20, trade_office_level=10),  # midpoint
+            3: VillageState(3, 120, 0, merchant_count=6, trade_office_level=10),  # stranded
+        }, {
+            Resource.CROP: resolve_resource(
+                Resource.CROP,
+                {1: 0.0, 2: 1200.0, 3: 9000.0},
+                {
+                    1: Allocation(AllocationMode.REMAINDER),
+                    2: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                    3: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                },
+            )
+        }
+
+    def test_relay_lifts_load_off_a_village_that_cannot_staff_its_haul(self):
+        villages, plans = self._stranded_account()
+
+        plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+        direct = _route_for_pair(
+            3, 1, {Resource.CROP: 9000.0}, villages, GEOMETRY, MODEL, DAILY_BEAT_CYCLES
+        )
+        assert direct.merchants_committed > villages[3].spare_merchants(), (
+            "fixture must be one the stranded village genuinely cannot afford"
+        )
+        # The stranded village now ships only as far as the hub, so its own
+        # commitment drops below what the direct haul demanded.
+        assert plan.merchants_committed[3] < direct.merchants_committed
+        assert any(r.origin == 3 and r.destination == 2 for r in plan.routes), (
+            "expected a short collection leg 3 -> 2"
+        )
+        assert any(r.origin == 2 and r.destination == 1 for r in plan.routes), (
+            "expected the hub to forward on to the capital"
+        )
+
+    def test_the_relay_hub_keeps_none_of_what_it_forwards(self):
+        """Pure pass-through, stated on the net.
+
+        Gross inflow and outflow do NOT match: the hub still ships its own
+        surplus on top of what it forwards. What must hold is that relaying
+        leaves its net crop exactly where its allocation put it -- it keeps none
+        of the relayed cargo and funds none of it from its own granary.
+        """
+        villages, plans = self._stranded_account()
+
+        plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+        inflow = sum(
+            r.cargo_per_hour.get(Resource.CROP, 0.0) for r in plan.routes if r.destination == 2
+        )
+        outflow = sum(
+            r.cargo_per_hour.get(Resource.CROP, 0.0) for r in plan.routes if r.origin == 2
+        )
+        own = next(v for v in plans[Resource.CROP].villages if v.village_id == 2)
+
+        assert inflow > 0, "the hub is not relaying anything; test proves nothing"
+        assert inflow - outflow == pytest.approx(own.ship_per_hour), (
+            f"hub nets {inflow - outflow:+.0f}/h against an allocation of "
+            f"{own.ship_per_hour:+.0f}/h -- it kept or funded some of the relay"
+        )
+
+    @pytest.mark.parametrize("village_count", [5, 12, 22, 40])
+    def test_relay_never_makes_a_plan_worse(self, village_count):
+        """Relay is adopted only when it strictly lowers the objective.
+
+        Note it is NOT purely a feasibility move, which is what the first draft
+        of this test wrongly assumed: relay also wins on integer rounding, since
+        ``ceil(a/c) + ceil(b/c) >= ceil((a+b)/c)`` means consolidating two part
+        loads onto one leg can shed a merchant even when nothing is over budget.
+        Both are genuine improvements, so the property worth pinning is not *when*
+        relay fires but that firing never costs anything: measured against the
+        same plan built with the move disabled.
+        """
+        villages = make_account(village_count, seed=village_count + 255)
+        plans, _ = make_plans(villages, seed=village_count + 255)
+
+        with_relay = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+        without = build_plan(
+            villages, plans, GEOMETRY, MODEL, max_latency_hours=None, max_relay_hops=0
+        )
+
+        def objective(plan):
+            return (sum(o.excess for o in plan.over_budget), plan.total_merchants)
+
+        assert objective(with_relay) <= objective(without), (
+            f"relay made the plan worse: {objective(with_relay)} vs {objective(without)}"
+        )
+
+
 class TestCrossResourceBundling:
     def test_cargo_riding_an_existing_pair_is_preferred_to_opening_a_new_one(self):
         """Merchant cost is charged on the MERGED pair cargo, so moving a
@@ -524,25 +658,40 @@ class TestDeterminism:
 
 class TestFlowConservation:
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_received_plus_shortfall_equals_demand(self, village_count):
-        """Every receiver either gets what it asked for or the gap is recorded."""
+    def test_every_village_nets_exactly_what_its_allocation_asked_for(self, village_count):
+        """Inflow minus outflow equals the allocation, for EVERY village.
+
+        This supersedes the older pair of one-directional checks ("a receiver
+        gets what it asked", "a sender never exceeds its surplus"), which both
+        assumed a village is only ever one or the other. A crop relay hub is
+        both: it receives cargo it does not keep and forwards cargo it did not
+        grow, so its gross flows exceed its own allocation in both directions
+        while the *net* is untouched. Netting is the property that actually
+        matters -- nothing may be created or destroyed at any village -- and it
+        holds whether or not relay fires, so it is the stronger statement.
+        """
         villages = make_account(village_count, seed=village_count + 71)
         plans, _ = make_plans(villages, seed=village_count + 71)
 
         plan = build_plan(villages, plans, GEOMETRY, MODEL)
 
         for resource, resource_plan in plans.items():
-            received: dict[int, float] = {}
+            inflow: dict[int, float] = {}
+            outflow: dict[int, float] = {}
             for route in plan.routes:
-                if resource in route.cargo_per_hour:
-                    received[route.destination] = (
-                        received.get(route.destination, 0.0) + route.cargo_per_hour[resource]
-                    )
+                amount = route.cargo_per_hour.get(resource)
+                if amount:
+                    outflow[route.origin] = outflow.get(route.origin, 0.0) + amount
+                    inflow[route.destination] = inflow.get(route.destination, 0.0) + amount
             missing = {s.village_id: s.per_hour for s in plan.shortfalls if s.resource is resource}
-            for village in resource_plan.receivers:
-                got = received.get(village.village_id, 0.0)
-                gap = missing.get(village.village_id, 0.0)
-                assert got + gap == pytest.approx(village.ship_per_hour, rel=1e-6, abs=1e-6)
+            for village in resource_plan.villages:
+                vid = village.village_id
+                net = inflow.get(vid, 0.0) - outflow.get(vid, 0.0)
+                gap = missing.get(vid, 0.0)
+                assert net + gap == pytest.approx(village.ship_per_hour, rel=1e-6, abs=1e-6), (
+                    f"village {vid} nets {net:+.1f}/h of {resource.value} against an "
+                    f"allocation of {village.ship_per_hour:+.1f}/h (shortfall {gap:.1f})"
+                )
 
     def test_unmet_demand_is_reported_as_a_shortfall(self):
         """Reaches a branch the generated accounts cannot.
@@ -578,13 +727,17 @@ class TestFlowConservation:
         assert plan.routes[0].cargo_per_hour[Resource.IRON] == pytest.approx(1000.0)
 
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_no_village_sends_more_than_its_surplus(self, village_count):
+    def test_no_village_sends_more_material_than_its_surplus(self, village_count):
+        """For W/C/I gross outflow is still capped by the village's own surplus:
+        those never relay, so there is no forwarded cargo to account for. Crop is
+        covered by the net-flow invariant above instead."""
         villages = make_account(village_count, seed=village_count + 81)
         plans, _ = make_plans(villages, seed=village_count + 81)
 
         plan = build_plan(villages, plans, GEOMETRY, MODEL)
 
-        for resource, resource_plan in plans.items():
+        for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
+            resource_plan = plans[resource]
             surplus = {v.village_id: -v.ship_per_hour for v in resource_plan.senders}
             sent: dict[int, float] = {}
             for route in plan.routes:

@@ -58,8 +58,12 @@ SEED_TOTAL_MERCHANTS = 233
 # Ratchet on the merchant-minimal plan (latency pass off): the optimizer must do
 # at least this well. Tighten these when an improvement lands; never loosen them
 # without saying why.
-MAX_TOTAL_MERCHANTS = 210
-MAX_OVER_BUDGET_EXCESS = 62
+# The ratchet is on the objective the search actually optimises, in its own
+# order: excess first, merchants second. Relay buys the 62 -> 44 excess drop with
+# one extra merchant, which is an improvement even though the merchant count
+# rose -- bounding merchants alone would have rejected it.
+MAX_OVER_BUDGET_EXCESS = 44
+MAX_TOTAL_MERCHANTS = 211
 
 # Villages whose surplus cannot be shipped within their merchant budget on this
 # snapshot. They are NOT interchangeable, and the distinction is the point:
@@ -158,8 +162,10 @@ def test_the_optimizer_holds_its_ratchet():
 
     plan = build_plan(villages, plans, geometry, model, max_latency_hours=None)
 
-    assert plan.total_merchants <= MAX_TOTAL_MERCHANTS
-    assert sum(o.excess for o in plan.over_budget) <= MAX_OVER_BUDGET_EXCESS
+    assert (sum(o.excess for o in plan.over_budget), plan.total_merchants) <= (
+        MAX_OVER_BUDGET_EXCESS,
+        MAX_TOTAL_MERCHANTS,
+    )
     assert not plan.shortfalls
     # A finished search, so the over-budget figures below are trustworthy.
     assert not [w for w in plan.warnings if "improvement passes" in w]
@@ -222,27 +228,37 @@ def test_golden_plan_respects_the_structural_invariants():
 
     plan = build_plan(villages, plans, geometry, model)
 
-    # No two-way pair and no relay of the same resource (issues #2 and the
-    # no-waterfall rule), checked on the real account rather than only on
-    # generated ones.
+    # No two-way pair (issue #2), and no relay of a MATERIAL: the no-waterfall
+    # rule is W/C/I only. Crop relay is permitted (profile 3.5) and is how the
+    # optimizer lifts load off villages that cannot staff their own haul.
+    materials = {Resource.LUMBER, Resource.CLAY, Resource.IRON}
     sends: dict[int, set] = {}
     receives: dict[int, set] = {}
     carried: dict[tuple[int, int], set] = {}
     for route in plan.routes:
         carried[(route.origin, route.destination)] = set(route.cargo_per_hour)
-        sends.setdefault(route.origin, set()).update(route.cargo_per_hour)
-        receives.setdefault(route.destination, set()).update(route.cargo_per_hour)
+        material_cargo = set(route.cargo_per_hour) & materials
+        sends.setdefault(route.origin, set()).update(material_cargo)
+        receives.setdefault(route.destination, set()).update(material_cargo)
     for (origin, destination), resources in carried.items():
         assert not (resources & carried.get((destination, origin), set()))
     for vid in villages:
         assert not (sends.get(vid, set()) & receives.get(vid, set()))
 
-    # Conservation: no village ships more of a resource than its surplus.
+    # Conservation: inflow minus outflow equals what each village's allocation
+    # asked for. Stated on the net so a relay hub -- which forwards cargo it did
+    # not grow -- is covered by the same rule as everyone else.
     for resource, resource_plan in plans.items():
-        surplus = {v.village_id: -v.ship_per_hour for v in resource_plan.senders}
-        sent: dict[int, float] = {}
+        inflow: dict[int, float] = {}
+        outflow: dict[int, float] = {}
         for route in plan.routes:
-            if resource in route.cargo_per_hour:
-                sent[route.origin] = sent.get(route.origin, 0.0) + route.cargo_per_hour[resource]
-        for vid, amount in sent.items():
-            assert amount <= surplus.get(vid, 0.0) + 1e-6
+            amount = route.cargo_per_hour.get(resource)
+            if amount:
+                outflow[route.origin] = outflow.get(route.origin, 0.0) + amount
+                inflow[route.destination] = inflow.get(route.destination, 0.0) + amount
+        for village in resource_plan.villages:
+            net = inflow.get(village.village_id, 0.0) - outflow.get(village.village_id, 0.0)
+            assert abs(net - village.ship_per_hour) < 1e-6, (
+                f"village {village.village_id} nets {net:+.1f}/h of {resource.value} "
+                f"against an allocation of {village.ship_per_hour:+.1f}/h"
+            )

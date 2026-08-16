@@ -23,6 +23,7 @@ from .merchants import DAILY_BEAT_CYCLES, MerchantModel
 from .optimizer import (
     DEFAULT_MERCHANT_RESERVE,
     MAX_IMPROVE_PASSES,
+    MAX_RELAY_HOPS,
     MIN_SEND_FILL,
     OverBudget,
     Plan,
@@ -53,6 +54,8 @@ class PlannerConfig:
     plan, so it belongs here rather than buried as a module constant.
     """
     max_improve_passes: int = MAX_IMPROVE_PASSES
+    max_relay_hops: int = MAX_RELAY_HOPS
+    """Levels of crop relay allowed; 0 ships everything direct."""
 
 
 @dataclass(frozen=True)
@@ -150,6 +153,7 @@ def craft_plan(
         max_latency_hours=config.max_latency_hours,
         min_send_fill=config.min_send_fill,
         max_improve_passes=config.max_improve_passes,
+        max_relay_hops=config.max_relay_hops,
     )
     warnings.extend(routing.warnings)
 

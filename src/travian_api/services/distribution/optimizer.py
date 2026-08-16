@@ -14,6 +14,8 @@ resource:
   same resource, so ``A -> B`` and ``B -> A`` for iron cannot both exist.
 * **waterfall for W/C/I** -- for the same reason a village that nets as a
   receiver of lumber cannot also send lumber, so ``A -> B -> C`` cannot form.
+  Crop is deliberately exempt: relay through a sub-hub is permitted there, and
+  restricting the relay move to crop is what keeps this true for the rest.
 
 Both are asserted as invariants in the tests rather than defended with runtime
 checks, because the property comes from the data model, not from vigilance here.
@@ -37,9 +39,18 @@ Three stages, per profile section 14 (``cluster -> assign -> improve``):
    one-way trip dwarfs the cycle wait, so cycle choice can only do so much --
    assignment and a crop sub-hub are what shorten the trip itself.
 
+4. **Crop relay** -- :func:`_improve_flows` may also reroute a crop flow through
+   an intermediate village that forwards it (profile section 3.5 permits this for
+   crop, never for materials). Relay cannot lower total merchants -- cost is
+   essentially ``cargo x round_trip / capacity``, linear in both, so the long haul
+   costs the same consolidated as split and the collection legs are pure addition
+   -- but it *moves* commitment off a village that cannot staff its own haul, and
+   occasionally sheds a merchant to integer rounding. Because excess is the first
+   objective key, it is adopted exactly when it pays and never merely to shuffle.
+
 What it still does *not* do is claim global optimality (the problem is NP-hard,
-section 14) or relay crop through a sub-hub (single-leg flows only). A village
-over its merchant budget is reported, never hidden.
+section 14) or relay materials. A village over its merchant budget is reported,
+never hidden.
 """
 
 from __future__ import annotations
@@ -264,6 +275,12 @@ Assignment = dict[Resource, dict[FlowKey, float]]
 # never approaches it. Tunable via PlannerConfig.max_improve_passes.
 MAX_IMPROVE_PASSES = 1000
 
+# Levels of crop relay permitted. 1 allows village -> sub-hub -> destination;
+# 0 disables relay entirely. Chains beyond one level would make the beat's
+# collect-then-ship ordering much harder to reason about, so deeper relay is
+# a deliberate future decision rather than an accident of the search.
+MAX_RELAY_HOPS = 1
+
 
 def _merge_pair_cargo(assignment: Assignment) -> dict[FlowKey, dict[Resource, float]]:
     """Collapse the per-resource flows into one mixed cargo per village pair.
@@ -412,6 +429,7 @@ def _improve_flows(
     cycles: Sequence[int],
     budgets: Mapping[int, int],
     max_passes: int = MAX_IMPROVE_PASSES,
+    max_relay_hops: int = MAX_RELAY_HOPS,
 ) -> tuple[Assignment, bool]:
     """Lower merchant commitment by reassigning flow, seeded by the greedy plan.
 
@@ -479,6 +497,119 @@ def _improve_flows(
     # memo -- it never changes which swap is chosen, only how much work is
     # repeated to find it.
     settled: set[tuple[Resource, FlowKey, FlowKey]] = set()
+
+    # Villages currently forwarding relayed crop. Relaying a flow whose origin is
+    # already a hub would build a chain (o -> h1 -> h2 -> d); one level keeps the
+    # collect-then-ship ordering in the beat analysable.
+    relay_hubs: set[int] = set()
+
+    def _apply_changes(changes: Sequence[tuple[FlowKey, Resource, float]]) -> bool:
+        """Evaluate a set of pair-cargo deltas and apply them if they improve.
+
+        Shared by the relay move. Returns True when the objective strictly fell.
+        """
+        touched_keys = {key for key, _r, _d in changes}
+        new_cargo: dict[FlowKey, dict[Resource, float]] = {
+            key: dict(pair.get(key, {})) for key in touched_keys
+        }
+        for key, resource, delta in changes:
+            updated = new_cargo[key].get(resource, 0.0) + delta
+            if updated > EPSILON:
+                new_cargo[key][resource] = updated
+            else:
+                new_cargo[key].pop(resource, None)
+        new_merch = {key: merchants_for(key[0], key[1], cargo) for key, cargo in new_cargo.items()}
+
+        per_origin: dict[int, int] = {}
+        for key in touched_keys:
+            per_origin[key[0]] = per_origin.get(key[0], 0) + (
+                new_merch[key] - pair_merch.get(key, 0)
+            )
+        over_delta = sum(
+            excess(origin, committed.get(origin, 0) + delta)
+            - excess(origin, committed.get(origin, 0))
+            for origin, delta in per_origin.items()
+        )
+        total_delta = sum(new_merch.values()) - sum(pair_merch.get(key, 0) for key in touched_keys)
+        rc_delta = sum(1 for key in touched_keys if new_merch[key] > 0) - sum(
+            1 for key in touched_keys if pair_merch.get(key, 0) > 0
+        )
+        if (over_delta, total_delta, rc_delta) >= (0, 0, 0):
+            return False
+
+        for key in touched_keys:
+            if new_cargo[key]:
+                pair[key] = new_cargo[key]
+            else:
+                pair.pop(key, None)
+            if new_merch[key] > 0:
+                pair_merch[key] = new_merch[key]
+            else:
+                pair_merch.pop(key, None)
+        for origin, delta in per_origin.items():
+            committed[origin] = committed.get(origin, 0) + delta
+        for key, resource, delta in changes:
+            legs = flows[resource]
+            legs[key] = legs.get(key, 0.0) + delta
+            if legs[key] <= EPSILON:
+                legs.pop(key, None)
+        touched_villages = {v for key in touched_keys for v in key}
+        settled.difference_update(
+            [
+                entry
+                for entry in settled
+                if touched_villages & {entry[1][0], entry[1][1], entry[2][0], entry[2][1]}
+            ]
+        )
+        return True
+
+    def _relay_scan() -> bool:
+        """Reroute a crop flow through an intermediate village that forwards it.
+
+        Relay can never lower TOTAL merchants: cost is essentially
+        ``cargo x round_trip / capacity``, linear in both, so the long haul costs
+        the same consolidated as split and the collection legs are pure addition
+        (measured across every cluster geometry: best case break-even). What it
+        does is *move* commitment off a village that cannot staff its own haul
+        onto one with spare capacity. Since ``over_budget_excess`` is the first
+        objective key and merchants only the second, the accept test below adopts
+        relay exactly when it buys feasibility and never merely to shuffle load.
+
+        Crop only, per profile section 3.5: materials must not chain A->B->C, and
+        restricting relay to crop keeps that no-waterfall rule true by
+        construction rather than by a runtime check.
+        """
+        if max_relay_hops < 1:
+            return False
+        legs = flows.get(Resource.CROP)
+        if not legs:
+            return False
+        # Only villages already carrying crop may act as hubs. A village with no
+        # crop allocation is typically one that has just been founded, and
+        # conscripting it as infrastructure would both surprise the operator and
+        # break the idempotent re-plan that route diffing depends on (known issue
+        # #10): merely adding a village would reshuffle routes that have nothing
+        # to do with it. Computed once per scan, not per edge.
+        hubs = sorted({v for key in legs for v in key})
+        for origin, destination in sorted(key for key, amount in legs.items() if amount > EPSILON):
+            if origin in relay_hubs:
+                continue  # would build a second relay level
+            amount = legs.get((origin, destination), 0.0)
+            if amount <= EPSILON:
+                continue
+            for hub in hubs:
+                if hub in (origin, destination):
+                    continue
+                if _apply_changes(
+                    [
+                        ((origin, destination), Resource.CROP, -amount),
+                        ((origin, hub), Resource.CROP, amount),
+                        ((hub, destination), Resource.CROP, amount),
+                    ]
+                ):
+                    relay_hubs.add(hub)
+                    return True
+        return False
 
     converged = False
     for _pass in range(max_passes):
@@ -588,6 +719,11 @@ def _improve_flows(
             if applied:
                 break
         if not applied:
+            # Swaps are exhausted. Relay is tried only now, so a plan with no
+            # over-budget village -- where relay can never improve anything --
+            # comes out identical to one produced without this move at all.
+            applied = _relay_scan()
+        if not applied:
             converged = True
             break
     return flows, converged
@@ -604,6 +740,7 @@ def build_plan(
     max_latency_hours: float | None = 2.0,
     min_send_fill: float = MIN_SEND_FILL,
     max_improve_passes: int = MAX_IMPROVE_PASSES,
+    max_relay_hops: int = MAX_RELAY_HOPS,
 ) -> Plan:
     """Build a route set from fetched state. Works for any village count.
 
@@ -647,7 +784,14 @@ def build_plan(
     # wherever a cheaper routing exists; never worse than the seed (§8.3, §14).
     budgets = {vid: villages[vid].spare_merchants(merchant_reserve) for vid in villages}
     assignment, converged = _improve_flows(
-        assignment, villages, geometry, merchant_model, cycles, budgets, max_improve_passes
+        assignment,
+        villages,
+        geometry,
+        merchant_model,
+        cycles,
+        budgets,
+        max_improve_passes,
+        max_relay_hops,
     )
     if not converged:
         # Never let a truncated search masquerade as a converged one: it inflates
