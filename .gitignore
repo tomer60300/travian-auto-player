@@ -2,8 +2,6 @@
 .env
 *.env.local
 run.ps1
-start.bat
-start.sh
 STRATEGY.md
 agent-logs/
 
