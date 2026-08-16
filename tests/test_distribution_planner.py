@@ -68,6 +68,64 @@ class TestCollectThenShip:
             f"a whole {cycle_minutes} min cycle -- it is shipping stale stock"
         )
 
+    def test_a_relay_chain_is_ordered_along_the_flow(self):
+        """Every leg of 10 -> 20 -> 30 -> 5 is hub-outbound, so sorting hubs last
+        decides nothing. Ordered by destination id instead of by flow direction,
+        30 -> 5 was placed first and shipped 20.7h-old stock."""
+        beat = build_beat(
+            (self._leg(10, 20, 100.0), self._leg(20, 30, 100.0), self._leg(30, 5, 100.0)),
+            min_arrival_gap_minutes=3,
+        )
+
+        placed = {s.route.origin: s for s in beat.routes}
+        for hub, feeder in ((20, 10), (30, 20)):
+            arrivals = placed[feeder].arrival_minutes
+            worst = max(
+                min((d - a) % MINUTES_PER_DAY for a in arrivals)
+                for d in placed[hub].dispatch_minutes
+            )
+            assert worst < placed[hub].route.cycle_hours * 60, (
+                f"village {hub} waits {worst} min after collecting before forwarding"
+            )
+
+    def test_collect_then_ship_never_costs_the_arrival_gap(self):
+        """Staleness must not outrank the spacing target.
+
+        Ranking raw staleness above the gap made the target unenforceable at
+        relay hubs: staleness differs at nearly every candidate minute, so it
+        decided every comparison and arrivals were allowed to collide outright.
+        A few minutes of extra staleness is always the cheaper trade.
+        """
+        beat = build_beat(
+            (
+                self._leg(1, 2, 60.0),  # feeds the hub
+                self._leg(2, 3, 60.0),  # hub forwards
+                Route(  # an unrelated inbound at the same destination
+                    origin=4,
+                    destination=3,
+                    cargo_per_hour={Resource.LUMBER: 1000.0},
+                    cycle_hours=24,
+                    merchants_per_send=1,
+                    sets_in_flight=1,
+                    one_way_minutes=120.0,
+                ),
+            ),
+            min_arrival_gap_minutes=3,
+        )
+
+        at_three = sorted(
+            minute for s in beat.routes if s.route.destination == 3 for minute in s.arrival_minutes
+        )
+        gaps = [
+            min(abs(a - b), MINUTES_PER_DAY - abs(a - b))
+            for i, a in enumerate(at_three)
+            for b in at_three[i + 1 :]
+        ]
+        assert min(gaps, default=MINUTES_PER_DAY) >= 3, (
+            f"arrivals at village 3 collided ({at_three}); staleness outranked the gap"
+        )
+        assert not [w for w in beat.warnings if "lands within" in w]
+
     def test_ordinary_routes_are_scheduled_exactly_as_before(self):
         """Nothing relays here, so the collect-then-ship term must be inert: two
         legs that merely share a destination are not a relay."""

@@ -594,6 +594,47 @@ class TestCropRelay:
         )
 
 
+class TestRelayGraphStaysShallow:
+    """Relay must produce single hops, not a waterfall or a loop.
+
+    The beat's collect-then-ship ordering assumes it can place a hub's inbound
+    before its outbound. A longer chain makes that a topological problem, and a
+    two-way pair makes it unsatisfiable outright -- each end would have to ship
+    after the other. Guarding only the relayed flow's ORIGIN was not enough:
+    relaying a leg that ended at an existing hub extended the chain.
+    """
+
+    @pytest.mark.parametrize("village_count", [5, 12, 22, 40])
+    def test_crop_never_forms_a_chain_or_a_two_way_pair(self, village_count):
+        villages = make_account(village_count, seed=village_count + 301)
+        plans, _ = make_plans(villages, seed=village_count + 301)
+
+        plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+        edges = {
+            (r.origin, r.destination) for r in plan.routes if Resource.CROP in r.cargo_per_hour
+        }
+        for origin, destination in edges:
+            assert (destination, origin) not in edges, (
+                f"crop ships both ways between {origin} and {destination}; "
+                f"collect-then-ship cannot be satisfied at either end"
+            )
+        senders = {o for o, _ in edges}
+        receivers = {d for _, d in edges}
+        hubs = senders & receivers
+        for hub in hubs:
+            upstream = {o for o, d in edges if d == hub}
+            downstream = {d for o, d in edges if o == hub}
+            assert not (upstream & hubs), (
+                f"village {hub} forwards crop it received from another hub {upstream & hubs}; "
+                f"that is a relay chain, not a single hop"
+            )
+            assert not (downstream & hubs), (
+                f"village {hub} forwards crop on to another hub {downstream & hubs}; "
+                f"that is a relay chain, not a single hop"
+            )
+
+
 class TestCrossResourceBundling:
     def test_cargo_riding_an_existing_pair_is_preferred_to_opening_a_new_one(self):
         """Merchant cost is charged on the MERGED pair cargo, so moving a

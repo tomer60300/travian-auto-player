@@ -59,10 +59,20 @@ SEED_TOTAL_MERCHANTS = 233
 # at least this well. Tighten these when an improvement lands; never loosen them
 # without saying why.
 # The ratchet is on the objective the search actually optimises, in its own
-# order: excess first, merchants second. Relay buys the 62 -> 44 excess drop with
-# one extra merchant, which is an improvement even though the merchant count
-# rose -- bounding merchants alone would have rejected it.
-MAX_OVER_BUDGET_EXCESS = 44
+# order: excess first, merchants second. Relay buys the excess down from the
+# greedy seed's 62 at the cost of a merchant or two, which is an improvement even
+# though the merchant count rose -- bounding merchants alone would have rejected
+# it.
+#
+# Loosened once, deliberately, from 44 to 52. Relay was originally allowed to
+# build chains (A -> B -> C -> D) and two-way pairs, and those bought some of the
+# 44. They are not schedulable: the beat has to place a hub's outbound after its
+# inbound, which a 2-cycle makes unsatisfiable at both ends at once, so those
+# plans only looked better on paper. Constraining relay to genuine single hops
+# gives 52, and 52 that can actually be executed beats 44 that cannot. This is
+# the only loosening in this file and it should not be repeated without the same
+# kind of reason.
+MAX_OVER_BUDGET_EXCESS = 52
 MAX_TOTAL_MERCHANTS = 211
 
 # Villages whose surplus cannot be shipped within their merchant budget on this

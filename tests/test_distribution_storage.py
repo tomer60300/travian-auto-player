@@ -101,35 +101,79 @@ class TestDiscreteArrivals:
             one_way_minutes=60.0,
         )
 
-    def test_a_lumpy_batch_overflows_while_the_average_rate_says_steady(self):
-        """The exact shape of known issue #12.
+    def test_a_batch_bigger_than_the_store_overflows_every_single_day(self):
+        """The exact shape of known issue #12, in its RECURRING form.
 
-        Village 2 burns 1,000/h and receives 1,000/h on average, so on a
+        Village 2 burns 5,000/h and receives 5,000/h on average, so on a
         continuous view it is perfectly level -- the rate check reports STEADY
-        and raises nothing, forever. But the delivery is a 24h cycle: a whole
-        day's worth lands in one lump on a store that is already nearly full,
-        and everything past the cap is gone. Averages cannot see this; only
-        replaying the actual beat can.
+        and raises nothing, forever. But the delivery is a 24h cycle, so a whole
+        day's worth (120,000) lands in one lump on a store that only holds
+        80,000. At least 40,000 is lost, and it is lost again tomorrow, and the
+        day after: the batch does not fit no matter what the village started
+        with. Averages cannot see this; only replaying the beat can.
         """
         # The continuous check, on the same numbers, is content.
-        averaged = store_status(2, Resource.LUMBER, stock=70_000, capacity=80_000, net_per_hour=0.0)
+        averaged = store_status(2, Resource.LUMBER, stock=40_000, capacity=80_000, net_per_hour=0.0)
         assert averaged.trend is Trend.STEADY
         assert storage_warnings([averaged], []) == ()
 
-        beat = build_beat((self._daily_route(1, 2, 1_000),))
+        beat = build_beat((self._daily_route(1, 2, 5_000),))
         overflows = simulate_day(
             beat,
-            stocks={1: {Resource.LUMBER: 0}, 2: {Resource.LUMBER: 70_000}},
+            stocks={1: {Resource.LUMBER: 120_000}, 2: {Resource.LUMBER: 40_000}},
+            capacities={1: {Resource.LUMBER: 1_000_000}, 2: {Resource.LUMBER: 80_000}},
+            net_per_hour={1: {Resource.LUMBER: 5_000}, 2: {Resource.LUMBER: -5_000}},
+        )
+
+        event = next((e for e in overflows if e.village_id == 2), None)
+        assert event is not None, "a 120,000 batch cannot fit an 80,000 store, ever"
+        assert event.resource is Resource.LUMBER
+        assert event.wasted_per_day >= 40_000
+        assert any("hits the cap" in w for w in storage_warnings([averaged], overflows))
+
+    def test_a_store_that_is_merely_full_today_is_not_called_a_daily_loss(self):
+        """A one-off transient must not be reported as a recurring rate.
+
+        A village sitting near its cap loses one batch, settles, and never loses
+        anything again -- the beat is fine, the village just needs draining
+        today. Reporting that as 'loses N per day' overstates it indefinitely,
+        and it is already covered by the continuous fill-time check. Only waste
+        that survives to a settled day belongs here.
+        """
+        beat = build_beat((self._daily_route(1, 2, 1_000),))
+
+        overflows = simulate_day(
+            beat,
+            # 24,000 lands daily and 24,000 is consumed daily: the batch fits the
+            # 80,000 store comfortably. Only the 70,000 opening stock makes day
+            # one overflow.
+            stocks={1: {Resource.LUMBER: 24_000}, 2: {Resource.LUMBER: 70_000}},
             capacities={1: {Resource.LUMBER: 800_000}, 2: {Resource.LUMBER: 80_000}},
             net_per_hour={1: {Resource.LUMBER: 1_000}, 2: {Resource.LUMBER: -1_000}},
         )
 
-        event = next((e for e in overflows if e.village_id == 2), None)
-        assert event is not None, "the batch overflows, but the average-rate check passed"
-        assert event.resource is Resource.LUMBER
-        assert event.wasted_per_day > 0
-        # And it is reported in terms the operator can act on.
-        assert any("hits the cap" in w for w in storage_warnings([averaged], overflows))
+        assert not [e for e in overflows if e.village_id == 2], (
+            "day-one transient reported as a recurring daily loss"
+        )
+
+    def test_a_delivery_the_origin_cannot_fund_is_not_invented(self):
+        """Cargo must be conserved. If the origin has nothing to ship, taking
+        the shortfall out at zero while still crediting the destination a full
+        batch creates resources -- and the invented cargo then reappears as an
+        overflow at the far end."""
+        beat = build_beat((self._daily_route(1, 2, 1_000),))
+
+        overflows = simulate_day(
+            beat,
+            # Village 1 has no stock and no production: it can ship nothing.
+            stocks={1: {Resource.LUMBER: 0}, 2: {Resource.LUMBER: 60_000}},
+            capacities={1: {Resource.LUMBER: 800_000}, 2: {Resource.LUMBER: 80_000}},
+            net_per_hour={1: {Resource.LUMBER: 0}, 2: {Resource.LUMBER: 0}},
+        )
+
+        assert overflows == (), (
+            "nothing was ever shipped, so nothing can overflow at the destination"
+        )
 
     def test_a_sender_is_not_reported_as_overflowing_its_own_outbound(self):
         """Cargo leaves the origin when the merchants do. Counting only arrivals

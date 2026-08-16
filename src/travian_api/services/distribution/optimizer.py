@@ -503,6 +503,31 @@ def _improve_flows(
     # collect-then-ship ordering in the beat analysable.
     relay_hubs: set[int] = set()
 
+    def _crop_shape_ok(edges: set[FlowKey]) -> bool:
+        """Would this crop graph still be a set of single hops?
+
+        Asked of a PROSPECTIVE edge set, before anything is committed. It cannot
+        be asked afterwards and undone: :func:`_apply_changes` only applies moves
+        that improve the objective, so a revert -- which by definition worsens it
+        -- is silently refused and the bad shape stays.
+
+        Guarding the relay move alone is also not enough. Once a hub exists an
+        ordinary 2x2 swap can rewire its legs into a longer chain, and swaps know
+        nothing about relay, so both movers consult this.
+        """
+        senders = {origin for origin, _ in edges}
+        receivers = {destination for _, destination in edges}
+        hubs = senders & receivers
+        for origin, destination in edges:
+            if (destination, origin) in edges:
+                return False  # a two-way pair: ship-after-collect is unsatisfiable
+            if origin in hubs and destination in hubs:
+                return False  # hub feeding a hub: a chain, not a single hop
+        return True
+
+    def _crop_edges() -> set[FlowKey]:
+        return {key for key, amount in flows.get(Resource.CROP, {}).items() if amount > EPSILON}
+
     def _apply_changes(changes: Sequence[tuple[FlowKey, Resource, float]]) -> bool:
         """Evaluate a set of pair-cargo deltas and apply them if they improve.
 
@@ -592,13 +617,29 @@ def _improve_flows(
         # to do with it. Computed once per scan, not per edge.
         hubs = sorted({v for key in legs for v in key})
         for origin, destination in sorted(key for key, amount in legs.items() if amount > EPSILON):
-            if origin in relay_hubs:
-                continue  # would build a second relay level
+            # Both ends must be outside the relay graph, not just the origin.
+            # Guarding only the origin let a leg that *ends* at an existing hub
+            # extend the chain, producing depth-3 waterfalls like 2 -> 6 -> 1 -> 3
+            # that the beat's collect-then-ship ordering was never designed for.
+            if origin in relay_hubs or destination in relay_hubs:
+                continue
             amount = legs.get((origin, destination), 0.0)
             if amount <= EPSILON:
                 continue
             for hub in hubs:
                 if hub in (origin, destination):
+                    continue
+                # Never create a two-way crop pair. A 2-cycle is not a relay: it
+                # makes "ship after you collect" unsatisfiable at both ends
+                # simultaneously, so no schedule can honour it.
+                if (hub, origin) in legs or (destination, hub) in legs:
+                    continue
+                # Relay moves the whole flow, so (origin, destination) goes away.
+                prospective = (_crop_edges() - {(origin, destination)}) | {
+                    (origin, hub),
+                    (hub, destination),
+                }
+                if not _crop_shape_ok(prospective):
                     continue
                 if _apply_changes(
                     [
@@ -681,6 +722,19 @@ def _improve_flows(
                     if (over_delta, total_delta, rc_delta) >= (0, 0, 0):
                         settled.add(candidate)
                         continue
+
+                    if resource is Resource.CROP and relay_hubs:
+                        # Swaps are blind to relay: rewiring a hub's legs can
+                        # lengthen the chain or close a loop, either of which the
+                        # beat cannot then schedule. Checked on the prospective
+                        # edge set, never applied-then-undone.
+                        prospective = _crop_edges() | {(o1, d2), (o2, d1)}
+                        for key in ((o1, d1), (o2, d2)):
+                            if legs.get(key, 0.0) - t <= EPSILON:
+                                prospective.discard(key)
+                        if not _crop_shape_ok(prospective):
+                            settled.add(candidate)
+                            continue
 
                     for key, cargo in new_cargo.items():
                         if cargo:

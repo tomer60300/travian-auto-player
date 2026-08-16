@@ -281,21 +281,35 @@ class TestStorageSafety:
         every delivery twice -- a receiver ends the day holding double what
         arrived -- and invents overflows that do not exist.
         """
+        # Everything nets to zero: village 1 grows 8,000/h of lumber and ships
+        # all of it; village 2 burns exactly what arrives. Nothing accumulates,
+        # so a correctly-wired simulation settles and reports nothing. Counting
+        # the deliveries twice cancels village 2's consumption, so it banks
+        # 192,000 a day out of nowhere and any finite store fills.
+        #
+        # Village 1 is given a deep reserve on purpose. Under the doubled wiring
+        # its own production also cancels, and with a shallow store it would
+        # simply run dry, stop shipping, and hide the very bug this pins.
+        quiet = dict(clay_per_hour=0, iron_per_hour=0, crop_per_hour=0)
         body = PlanRequest(
             snapshot=[
-                # A sender with a large surplus and a receiver sized so that one
-                # day of genuine delivery fits, but a doubled one does not.
                 self._village(
-                    1, x=0, y=0, lumber_per_hour=8000, lumber_stock=0, warehouse_capacity=2_000_000
+                    1,
+                    x=0,
+                    y=0,
+                    lumber_per_hour=8000,
+                    lumber_stock=3_000_000,
+                    warehouse_capacity=5_000_000,
+                    **quiet,
                 ),
                 self._village(
                     2,
                     x=3,
                     y=0,
-                    lumber_per_hour=0,
-                    lumber_stock=0,
-                    warehouse_capacity=250_000,
-                    crop_per_hour=1000,
+                    lumber_per_hour=-8000,
+                    lumber_stock=100_000,
+                    warehouse_capacity=400_000,
+                    **quiet,
                 ),
             ],
             allocations={
@@ -305,8 +319,7 @@ class TestStorageSafety:
 
         result = asyncio.run(post_plan(body, SimpleNamespace(id=1)))
 
-        # 8,000/h = 192,000 a day, inside the 250,000 cap. Doubled it would not be.
-        bogus = [w for w in result.warnings if "hits the cap" in w and "village 2" in w]
+        bogus = [w for w in result.warnings if "hits the cap" in w]
         assert not bogus, f"phantom overflow from double-counted deliveries: {bogus}"
 
     def test_storage_checks_cost_no_game_requests(self):

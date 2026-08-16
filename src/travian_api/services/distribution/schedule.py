@@ -159,21 +159,55 @@ def build_beat(
     relay_hubs = crop_senders & crop_receivers
 
     # Deterministic order: the busiest destinations are placed first, while they
-    # still have the whole day to spread across. A hub's outbound goes last, so
-    # the inbound it must follow is already on the clock when it is placed.
+    # still have the whole day to spread across.
     inbound_count: dict[int, int] = {}
     for route in routes:
         inbound_count[route.destination] = inbound_count.get(route.destination, 0) + 1
-    ordered = sorted(
-        routes,
-        key=lambda r: (
-            r.origin in relay_hubs and Resource.CROP in r.cargo_per_hour,
-            -inbound_count[r.destination],
-            r.destination,
-            r.origin,
-            r.cycle_hours,
-        ),
+
+    def placement_key(route: Route) -> tuple[int, int, int, int]:
+        return (
+            -inbound_count[route.destination],
+            route.destination,
+            route.origin,
+            route.cycle_hours,
+        )
+
+    # A crop route out of a hub must be placed after the routes feeding that hub,
+    # or its inbound arrivals are not on the clock yet and collect-then-ship
+    # quietly does nothing. Merely sorting hub-outbound last is not enough: in a
+    # chain A -> B -> C -> D every leg is hub-outbound, and the tie-break decides
+    # their relative order by destination id, which has nothing to do with the
+    # direction cargo flows. So this is a real topological pass over the crop
+    # graph, with the ordinary key breaking ties inside each layer.
+    crop_routes = [r for r in routes if Resource.CROP in r.cargo_per_hour]
+    pending = {id(r): r for r in crop_routes}
+    feeders: dict[int, list[Route]] = {}
+    for route in crop_routes:
+        feeders.setdefault(route.destination, []).append(route)
+
+    layered: list[Route] = []
+    placed_ids: set[int] = set()
+    while pending:
+        ready = [
+            route
+            for route in pending.values()
+            if all(id(feed) in placed_ids for feed in feeders.get(route.origin, ()))
+        ]
+        if not ready:
+            # A cycle in the crop graph (a two-way pair, or a longer loop). No
+            # ordering can satisfy every leg, so fall back to the ordinary key
+            # for the remainder and let the staleness warning report the cost
+            # rather than looping here forever.
+            ready = sorted(pending.values(), key=placement_key)[:1]
+        for route in sorted(ready, key=placement_key):
+            layered.append(route)
+            placed_ids.add(id(route))
+            pending.pop(id(route), None)
+
+    non_crop = sorted(
+        (r for r in routes if Resource.CROP not in r.cargo_per_hour), key=placement_key
     )
+    ordered = non_crop + layered
 
     for route in ordered:
         window = route.cycle_hours * 60
@@ -182,7 +216,7 @@ def build_beat(
         inbound = crop_arrivals.get(route.origin, []) if forwards_crop else []
 
         best_offset = 0
-        best_score: tuple[int, int, int] | None = None
+        best_score: tuple[int, int, int, int] | None = None
         for offset in range(0, window, step_minutes):
             candidate = ScheduledRoute(route=route, dispatch_minute=offset)
             arrivals = candidate.arrival_minutes
@@ -196,11 +230,19 @@ def build_beat(
             # freshest crop landed here. Zero for everything that is not a relay
             # hub, which leaves non-relay scheduling byte-identical.
             stale = _staleness(candidate.dispatch_minutes, inbound)
-            # Prefer avoiding the reserved window, then shipping soon after
-            # collecting, then the widest spacing. Every offset is evaluated:
-            # stopping at the first that merely clears the minimum gap would
-            # crowd arrivals that had a whole day of room.
-            score = (-clear, -stale, gap)
+            # Order of preference: clear the reserved window, then MEET the
+            # arrival-gap target, then ship soon after collecting, then widen
+            # the spacing further.
+            #
+            # The gap term saturates at the target deliberately. Ranking raw
+            # staleness above raw gap made the target unenforceable for relay
+            # hubs: staleness takes a different value at nearly every candidate
+            # minute, so it decided every comparison and the gap was never
+            # consulted -- measured as arrivals colliding at 0 minutes apart
+            # where the previous scheduler kept them 15 apart. Saturating means
+            # a few minutes of extra staleness can never buy a collision, while
+            # beyond the target staleness is still free to choose.
+            score = (-clear, min(gap, min_arrival_gap_minutes), -stale, gap)
             if best_score is None or score > best_score:
                 best_score, best_offset = score, offset
 
@@ -221,8 +263,8 @@ def build_beat(
                 f"choosing a dispatch offset"
             )
 
-        # score is (-clear, -stale, gap); the achieved spacing is the last term.
-        achieved = best_score[2] if best_score else MINUTES_PER_DAY
+        # score is (-clear, saturated_gap, -stale, gap); spacing is the last term.
+        achieved = best_score[3] if best_score else MINUTES_PER_DAY
         if achieved < min_arrival_gap_minutes:
             warnings.append(
                 f"route {route.origin} -> {route.destination} lands within "

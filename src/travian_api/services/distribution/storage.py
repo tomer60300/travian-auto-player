@@ -107,14 +107,31 @@ def store_status(
 
 @dataclass(frozen=True)
 class OverflowEvent:
-    """A store that hits its cap during the simulated day."""
+    """A store that hits its cap on a *repeating* day of the beat."""
 
     village_id: int
     resource: Resource
     minute: int
     """Minute of the day the cap was first reached."""
     wasted_per_day: float
-    """Resources lost to the cap over one day at this rate and beat."""
+    """Resources lost to the cap on a settled day -- a genuinely recurring rate.
+
+    Deliberately measured after the simulation has reached a steady state. Read
+    off day one it would be an artifact of whatever the store happened to hold
+    at snapshot time: a village sitting near its cap loses one batch, settles,
+    and never loses anything again, which is a different problem with a
+    different fix and is already covered by the continuous fill-time check.
+    """
+
+
+# Waste below this is float residue from the settling loop, not a loss. A
+# store that converges to exactly its cap leaves a few nano-resources of
+# rounding behind, and reporting that as a daily loss is noise.
+MIN_REPORTED_WASTE = 1.0
+
+# Days to run before believing the numbers. Convergence is normally immediate
+# once the transient has drained; this only bounds a pathological input.
+MAX_SETTLING_DAYS = 14
 
 
 def simulate_day(
@@ -124,63 +141,110 @@ def simulate_day(
     net_per_hour: Mapping[int, Mapping[Resource, float]],
     step_minutes: int = 5,
 ) -> tuple[OverflowEvent, ...]:
-    """Replay one day of the beat against real capacities. Known issue #12.
+    """Replay the beat against real capacities until it settles. Issue #12.
 
     The continuous check asks whether the *average* inflow overruns the cap. This
     asks whether the store is ever actually full, which is a different question:
     a village can sit comfortably under its cap on average and still lose a whole
-    batch because a 24h route dumps it all at once.
+    batch every cycle because a long-cycle route dumps it all at once.
 
-    Production accrues continuously between steps; each scheduled arrival lands
-    as a lump at its minute. Anything above the cap is lost, exactly as the game
-    does it, and the loss is accumulated so the report can say what it costs per
-    day rather than merely that it happened.
+    Two things this is careful about, both of which produce confident nonsense if
+    skipped:
+
+    **It runs to a steady state, not for one day.** Seeded from the observed
+    stock, day one measures the transient -- a store that happens to be nearly
+    full right now loses a batch, settles, and never loses anything again. That
+    is real, but it is a "drain this village today" problem, already reported by
+    the continuous fill-time check, and calling it a *per-day* loss overstates it
+    indefinitely. Only waste that survives to a settled day is a property of the
+    beat, and only that is reported.
+
+    **Cargo is conserved.** A dispatch takes what the origin actually has; the
+    matching arrival delivers exactly that. Crediting the destination a full
+    batch the origin could not fund invents resources, and the invented cargo
+    then shows up as overflow at the far end.
+
+    ``net_per_hour`` is each village's OWN production. The routes are applied
+    here as discrete events, so folding them into the rate as well would count
+    every delivery twice.
     """
-    # Cargo leaves the origin when the merchants depart and lands at the
-    # destination when they arrive. Both halves are needed: modelling only the
-    # arrivals would let every sender's store grow without bound and report an
-    # overflow that the outbound route is in fact preventing.
-    moves: dict[int, list[tuple[int, Resource, float]]] = {}
+    # (route index, firing index, resource) -> what actually left the origin.
+    firings: list[tuple[int, int, int, int, Resource, float]] = []
     for scheduled in beat.routes:
-        batch = scheduled.route.batch_per_resource
-        for resource, amount in batch.items():
-            for minute in scheduled.dispatch_minutes:
-                moves.setdefault(minute, []).append((scheduled.route.origin, resource, -amount))
-            for minute in scheduled.arrival_minutes:
-                moves.setdefault(minute, []).append((scheduled.route.destination, resource, amount))
+        dispatches = scheduled.dispatch_minutes
+        arrivals = scheduled.arrival_minutes
+        for out_minute, in_minute in zip(dispatches, arrivals, strict=True):
+            for resource, amount in scheduled.route.batch_per_resource.items():
+                firings.append(
+                    (
+                        out_minute,
+                        in_minute,
+                        scheduled.route.origin,
+                        scheduled.route.destination,
+                        resource,
+                        amount,
+                    )
+                )
+
+    departures: dict[int, list[tuple[int, int, int, Resource, float]]] = {}
+    arrivals_at: dict[int, list[int]] = {}
+    for index, (out_minute, in_minute, origin, destination, resource, amount) in enumerate(firings):
+        departures.setdefault(out_minute, []).append((index, origin, destination, resource, amount))
+        arrivals_at.setdefault(in_minute, []).append(index)
 
     level: dict[tuple[int, Resource], float] = {}
     for vid, per_resource in stocks.items():
         for resource, amount in per_resource.items():
             level[(vid, resource)] = float(amount)
 
-    wasted: dict[tuple[int, Resource], float] = {}
-    first_full: dict[tuple[int, Resource], int] = {}
-
     def cap_for(vid: int, resource: Resource) -> float | None:
         value = capacities.get(vid, {}).get(resource)
         return None if value is None else float(value)
 
-    def apply(vid: int, resource: Resource, amount: float, minute: int) -> None:
-        key = (vid, resource)
-        cap = cap_for(vid, resource)
-        current = level.get(key, 0.0)
-        updated = current + amount
-        if cap is not None and updated > cap:
-            wasted[key] = wasted.get(key, 0.0) + (updated - cap)
-            first_full.setdefault(key, minute)
-            updated = cap
-        level[key] = max(0.0, updated)
+    wasted: dict[tuple[int, Resource], float] = {}
+    first_full: dict[tuple[int, Resource], int] = {}
+    in_flight: dict[int, float] = {}
+    previous_close: dict[tuple[int, Resource], float] | None = None
 
-    for minute in range(0, MINUTES_PER_DAY, step_minutes):
-        # Production for this slice, then whatever landed inside it.
-        for vid, per_resource in net_per_hour.items():
-            for resource, rate in per_resource.items():
-                if rate:
-                    apply(vid, resource, rate * step_minutes / 60.0, minute)
-        for event_minute in range(minute, minute + step_minutes):
-            for vid, resource, amount in moves.get(event_minute, ()):
-                apply(vid, resource, amount, event_minute)
+    for _day in range(MAX_SETTLING_DAYS):
+        wasted = {}
+        first_full = {}
+
+        def add(vid: int, resource: Resource, amount: float, minute: int) -> None:
+            key = (vid, resource)
+            cap = cap_for(vid, resource)
+            updated = level.get(key, 0.0) + amount
+            if cap is not None and updated > cap:
+                wasted[key] = wasted.get(key, 0.0) + (updated - cap)  # noqa: B023
+                first_full.setdefault(key, minute)  # noqa: B023
+                updated = cap
+            level[key] = max(0.0, updated)
+
+        for minute in range(0, MINUTES_PER_DAY, step_minutes):
+            for vid, per_resource in net_per_hour.items():
+                for resource, rate in per_resource.items():
+                    if rate:
+                        add(vid, resource, rate * step_minutes / 60.0, minute)
+            for event_minute in range(minute, min(minute + step_minutes, MINUTES_PER_DAY)):
+                # Arrivals before departures within the same minute: cargo that
+                # lands now is available to a route leaving now, which is what
+                # the beat's collect-then-ship ordering is arranging for.
+                for index in arrivals_at.get(event_minute, ()):
+                    _o, _i, _origin, destination, resource, batch = firings[index]
+                    add(destination, resource, in_flight.get(index, batch), event_minute)
+                for index, origin, _dest, resource, batch in departures.get(event_minute, ()):
+                    available = level.get((origin, resource), 0.0)
+                    shipped = min(batch, available)
+                    in_flight[index] = shipped
+                    level[(origin, resource)] = available - shipped
+
+        closing = dict(level)
+        if previous_close is not None and all(
+            abs(closing.get(key, 0.0) - previous_close.get(key, 0.0)) < 1e-6
+            for key in set(closing) | set(previous_close)
+        ):
+            break
+        previous_close = closing
 
     return tuple(
         sorted(
@@ -192,7 +256,7 @@ def simulate_day(
                     wasted_per_day=amount,
                 )
                 for (vid, resource), amount in wasted.items()
-                if amount > 0
+                if amount >= MIN_REPORTED_WASTE
             ),
             key=lambda event: (-event.wasted_per_day, event.village_id, event.resource.value),
         )
