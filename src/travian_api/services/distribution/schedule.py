@@ -23,10 +23,10 @@ Two things this deliberately does not do:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from .allocation import Resource
+from .allocation import Resource, village_label
 from .optimizer import Route
 
 MINUTES_PER_DAY = 24 * 60
@@ -117,6 +117,7 @@ def build_beat(
     min_arrival_gap_minutes: int = DEFAULT_MIN_ARRIVAL_GAP_MINUTES,
     reserved_window: tuple[int, int] | None = None,
     step_minutes: int = 1,
+    names: Mapping[int, str] | None = None,
 ) -> Beat:
     """Place every route on the daily beat, spacing arrivals at each destination.
 
@@ -257,7 +258,8 @@ def build_beat(
         cycle_minutes = route.cycle_hours * 60
         if cycle_minutes < min_arrival_gap_minutes:
             warnings.append(
-                f"route {route.origin} -> {route.destination} fires every "
+                f"route {village_label(route.origin, names)} -> "
+                f"{village_label(route.destination, names)} fires every "
                 f"{cycle_minutes} min, closer than the {min_arrival_gap_minutes} "
                 f"min arrival-gap target; its own arrivals cannot be spaced by "
                 f"choosing a dispatch offset"
@@ -267,15 +269,17 @@ def build_beat(
         achieved = best_score[3] if best_score else MINUTES_PER_DAY
         if achieved < min_arrival_gap_minutes:
             warnings.append(
-                f"route {route.origin} -> {route.destination} lands within "
+                f"route {village_label(route.origin, names)} -> "
+                f"{village_label(route.destination, names)} lands within "
                 f"{achieved} min of another arrival there, against a "
-                f"{min_arrival_gap_minutes} min target; village {route.destination} "
+                f"{min_arrival_gap_minutes} min target; {village_label(route.destination, names)} "
                 f"has {inbound_count[route.destination]} inbound routes and may be "
                 f"too busy to space them"
             )
         if reserved_window is not None and best_score and best_score[0] < 0:
             warnings.append(
-                f"route {route.origin} -> {route.destination} unavoidably lands in "
+                f"route {village_label(route.origin, names)} -> "
+                f"{village_label(route.destination, names)} unavoidably lands in "
                 f"the reserved window {reserved_window}"
             )
 

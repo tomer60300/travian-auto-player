@@ -151,9 +151,15 @@ def craft_plan(
     """
     resource_plans: dict[Resource, ResourcePlan] = {}
     warnings: list[str] = []
+    # Warnings are read by a person, so they name villages the way that person
+    # does. Derived here rather than passed in: the caller already gave us the
+    # villages, and a second source of names could disagree with the first.
+    names = {vid: village.name for vid, village in villages.items() if village.name}
 
     for resource in sorted(productions, key=lambda r: r.value):
-        plan = resolve_resource(resource, productions[resource], allocations.get(resource, {}))
+        plan = resolve_resource(
+            resource, productions[resource], allocations.get(resource, {}), names
+        )
         resource_plans[resource] = plan
         warnings.extend(plan.warnings)
 
@@ -175,6 +181,7 @@ def craft_plan(
         routing.routes,
         min_arrival_gap_minutes=config.min_arrival_gap_minutes,
         reserved_window=config.reserved_window,
+        names=names,
     )
     warnings.extend(beat.warnings)
 

@@ -29,7 +29,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from .allocation import Resource
+from .allocation import Resource, village_label
 from .schedule import MINUTES_PER_DAY, Beat
 
 # Rates below this are treated as level rather than drifting. Dividing by a rate
@@ -267,6 +267,7 @@ def storage_warnings(
     statuses: Sequence[StoreStatus],
     overflows: Sequence[OverflowEvent],
     warn_hours: float = DEFAULT_WARN_HOURS,
+    names: Mapping[int, str] | None = None,
 ) -> tuple[str, ...]:
     """Operator-facing lines. Starvation first: it destroys troops, not surplus."""
     warnings: list[str] = []
@@ -276,7 +277,7 @@ def storage_warnings(
     ):
         if (status.hours_remaining or 0.0) < warn_hours:
             warnings.append(
-                f"village {status.village_id}: {status.resource.value} runs out in "
+                f"{village_label(status.village_id, names)}: {status.resource.value} runs out in "
                 f"{status.hours_remaining:.1f}h at {status.net_per_hour:+.0f}/h "
                 f"({status.stock:,} in store)"
             )
@@ -286,13 +287,14 @@ def storage_warnings(
     ):
         if (status.hours_remaining or 0.0) < warn_hours:
             warnings.append(
-                f"village {status.village_id}: {status.resource.value} fills its store in "
+                f"{village_label(status.village_id, names)}: {status.resource.value} "
+                f"fills its store in "
                 f"{status.hours_remaining:.1f}h at {status.net_per_hour:+.0f}/h; "
                 f"anything past the cap is lost"
             )
     for event in overflows:
         warnings.append(
-            f"village {event.village_id}: {event.resource.value} hits the cap at "
+            f"{village_label(event.village_id, names)}: {event.resource.value} hits the cap at "
             f"{event.minute // 60:02d}:{event.minute % 60:02d} and loses about "
             f"{event.wasted_per_day:,.0f}/day — an arriving batch overflows even "
             f"though the average rate fits"

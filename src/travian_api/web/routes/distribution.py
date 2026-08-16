@@ -27,6 +27,7 @@ from travian_api.services.distribution.allocation import (
     AllocationError,
     AllocationMode,
     Resource,
+    village_label,
 )
 from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import (
@@ -309,7 +310,8 @@ async def get_snapshot(session: TravianSession = Depends(get_live_travian_sessio
         balance = crop.get(vid)
         merchants = stocks.get(vid, {})
         if balance is None:
-            warnings.append(f"village {vid} has no crop balance; it will not be routed for crop")
+            label = village.name or f"village {vid}"
+            warnings.append(f"{label} has no crop balance; it will not be routed for crop")
         villages.append(
             VillageSnapshot(
                 village_id=vid,
@@ -332,11 +334,12 @@ async def get_snapshot(session: TravianSession = Depends(get_live_travian_sessio
             )
         )
 
-    missing_merchants = [v.village_id for v in villages if v.merchants_total == 0]
+    missing_merchants = [v for v in villages if v.merchants_total == 0]
     if missing_merchants:
         warnings.append(
-            f"no merchant count read for village(s) {missing_merchants}; they cannot "
-            f"send until it is known"
+            "no merchant count read for "
+            + ", ".join(v.name or f"village {v.village_id}" for v in missing_merchants)
+            + "; they cannot send until it is known"
         )
 
     return SnapshotResponse(
@@ -416,7 +419,8 @@ def _storage_warnings(body: PlanRequest, plan) -> list[str]:
             statuses.append(store_status(vid, resource, stock, cap, net))
 
     overflows = simulate_day(plan.beat, stocks, capacities, own_rates)
-    return list(storage_warnings(statuses, overflows))
+    names = {v.village_id: v.name for v in body.snapshot if v.name}
+    return list(storage_warnings(statuses, overflows, names=names))
 
 
 @router.post("/plan", response_model=PlanResponse)
@@ -431,6 +435,8 @@ async def post_plan(
     Travian-session dependency would auto-reconnect (real login traffic) or 403
     for a computation that never touches the game.
     """
+    # Warnings are read by a person: name villages the way they do, never by id.
+    names = {v.village_id: v.name for v in body.snapshot if v.name}
     trade_office = {c.village_id: c.trade_office_level for c in body.config}
     villages = {
         v.village_id: VillageState(
@@ -512,8 +518,9 @@ async def post_plan(
                 del per_village[vid]
             if unreadable:
                 extra_warnings.append(
-                    f"{resource.value}: no rate could be read for village(s) "
-                    f"{unreadable}, so their {resource.value} allocations were ignored"
+                    f"{resource.value}: no rate could be read for "
+                    + ", ".join(village_label(vid, names) for vid in unreadable)
+                    + f", so their {resource.value} allocations were ignored"
                 )
         # The beat search is pure CPU; off the event loop so it cannot stall
         # WebSocket frames or stealth-timed game requests while the user replans.
@@ -526,7 +533,7 @@ async def post_plan(
         committed = plan.merchants_committed[vid]
         if committed > free_now.get(vid, 0):
             extra_warnings.append(
-                f"village {vid}: the plan commits {committed} merchants but only "
+                f"{village_label(vid, names)}: the plan commits {committed} merchants but only "
                 f"{free_now.get(vid, 0)} are free right now — existing routes or "
                 f"shipments must release the rest before the sheet is executable"
             )

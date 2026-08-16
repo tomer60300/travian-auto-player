@@ -58,7 +58,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .allocation import EPSILON, Resource, ResourcePlan
+from .allocation import EPSILON, Resource, ResourcePlan, village_label
 from .geometry import MapGeometry
 from .merchants import DAILY_BEAT_CYCLES, MerchantModel, cheapest_cycle, cycle_sweep
 
@@ -819,6 +819,8 @@ def build_plan(
         in the plan, never silently dropped or quietly trimmed to fit.
     """
     warnings: list[str] = []
+    # Every message below names villages the way the operator does.
+    names = {vid: village.name for vid, village in villages.items() if village.name}
     assignment: Assignment = {}
     shortfalls: list[Shortfall] = []
 
@@ -827,8 +829,9 @@ def build_plan(
         missing = {v.village_id for v in plan.villages} - set(villages)
         if missing:
             warnings.append(
-                f"{resource.value}: no fetched state for village(s) "
-                f"{sorted(missing)}; excluded from routing"
+                f"{resource.value}: no fetched state for "
+                + ", ".join(village_label(vid, names) for vid in sorted(missing))
+                + "; excluded from routing"
             )
         flows, resource_shortfalls = _flows_for_resource(plan, villages, geometry)
         shortfalls.extend(resource_shortfalls)
@@ -885,7 +888,8 @@ def build_plan(
         committed[route.origin] += route.merchants_committed
         if max_latency_hours is not None and route.latency_hours > max_latency_hours:
             warnings.append(
-                f"route {route.origin} -> {route.destination} has "
+                f"route {village_label(route.origin, names)} -> "
+                f"{village_label(route.destination, names)} has "
                 f"{route.latency_hours:.1f}h latency against a {max_latency_hours:.0f}h "
                 f"target; geometry or the merchant budget may forbid better"
             )

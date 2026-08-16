@@ -796,7 +796,7 @@ export default function ResourcePlanner() {
                       <span className={settled ? 'text-success' : 'text-danger'}>
                         {fmt(slack)}/h unassigned
                         {remainder != null
-                          ? ` → village ${remainder}`
+                          ? ` → ${villages.find((v) => v.village_id === remainder)?.name ?? `village ${remainder}`}`
                           : ' · no remainder village set'}
                       </span>
                     </div>
@@ -1017,7 +1017,10 @@ export default function ResourcePlanner() {
                   <ul className="text-xs list-disc list-inside space-y-0.5">
                     {plan.shortfalls.map((s, i) => (
                       <li key={i}>
-                        {RESOURCE_LABEL[s.resource]} · village {s.village_id} short{' '}
+                        {RESOURCE_LABEL[s.resource]} ·{' '}
+                        {villages.find((v) => v.village_id === s.village_id)?.name ??
+                          `village ${s.village_id}`}{' '}
+                        short{' '}
                         {fmt(s.per_hour)}/h — {s.reason}
                       </li>
                     ))}

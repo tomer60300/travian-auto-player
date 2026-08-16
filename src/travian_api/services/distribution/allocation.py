@@ -58,6 +58,18 @@ class AllocationError(ValueError):
     """The allocation set cannot be resolved as written."""
 
 
+def village_label(village_id: int, names: Mapping[int, str] | None = None) -> str:
+    """How a village is named to the operator.
+
+    Every message a human reads goes through here. A village id is an internal
+    handle -- nobody running the account knows which village 53629 is, and a
+    warning they cannot act on is barely better than no warning. Falls back to
+    the id only when there is genuinely no name to use, and says so.
+    """
+    name = (names or {}).get(village_id)
+    return name if name else f"village {village_id}"
+
+
 @dataclass(frozen=True)
 class Allocation:
     """One village's instruction for one resource."""
@@ -145,6 +157,7 @@ def resolve_resource(
     resource: Resource,
     productions: Mapping[int, float],
     allocations: Mapping[int, Allocation],
+    names: Mapping[int, str] | None = None,
 ) -> ResourcePlan:
     """Resolve one resource's allocations into per-village shipping rates.
 
@@ -169,14 +182,16 @@ def resolve_resource(
     unknown = set(allocations) - set(productions)
     if unknown:
         raise AllocationError(
-            f"allocations reference villages with no production: {sorted(unknown)}"
+            "allocations reference villages with no production: "
+            + ", ".join(village_label(vid, names) for vid in sorted(unknown))
         )
 
     remainder_ids = [vid for vid, a in allocations.items() if a.mode is AllocationMode.REMAINDER]
     if len(remainder_ids) > 1:
         raise AllocationError(
             f"{resource.value}: exactly one remainder village is allowed, got "
-            f"{sorted(remainder_ids)}. Slack has to land somewhere specific."
+            + ", ".join(village_label(vid, names) for vid in sorted(remainder_ids))
+            + ". Slack has to land somewhere specific."
         )
     remainder_id = remainder_ids[0] if remainder_ids else None
 
@@ -201,7 +216,7 @@ def resolve_resource(
             continue  # settled below, once everything else is known
         if allocation.mode is AllocationMode.SUSTAIN and own >= 0:
             warnings.append(
-                f"village {vid} is set to sustain but its {resource.value} "
+                f"{village_label(vid, names)} is set to sustain but its {resource.value} "
                 f"production is not negative ({own:.0f}/h); nothing to sustain"
             )
         targets[vid] = _explicit_target(allocation, own, total)
@@ -213,7 +228,8 @@ def resolve_resource(
         if unallocated < -EPSILON:
             warnings.append(
                 f"{resource.value}: allocations exceed production by "
-                f"{-unallocated:.0f}/h, so the remainder village {remainder_id} "
+                f"{-unallocated:.0f}/h, so the remainder village "
+                f"{village_label(remainder_id, names)} "
                 f"would have to send more than it has"
             )
     elif abs(unallocated) > EPSILON:

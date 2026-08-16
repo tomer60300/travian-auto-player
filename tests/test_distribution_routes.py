@@ -212,6 +212,62 @@ def _plan_request(allocations, merchants_free=20, crop=None):
     )
 
 
+class TestWarningsNameVillages:
+    """No message a human reads may identify a village by its internal id.
+
+    An id is a database handle. Told that "village 53629 would have to send more
+    than it has", the operator has to go and look up which village that even is
+    before they can act -- and a warning nobody can act on is barely better than
+    no warning at all.
+    """
+
+    def test_no_warning_leaks_a_village_id(self):
+        # Deliberately provoke several warnings at once: an over-allocated
+        # remainder, a sustain on a village that is not in deficit, and a
+        # merchant budget that cannot cover what the plan commits.
+        body = _plan_request(
+            {
+                "iron": {
+                    "20003": {"mode": "absolute", "value": 50_000},
+                    "20011": {"mode": "remainder"},
+                },
+                "crop": {
+                    "20003": {"mode": "sustain", "value": 10},
+                    "20011": {"mode": "remainder"},
+                },
+            },
+            merchants_free=2,
+            crop=1000.0,
+        )
+
+        res = asyncio.run(post_plan(body))
+
+        assert res.warnings, "fixture produced no warnings; the test proves nothing"
+        for warning in res.warnings:
+            for village in body.snapshot:
+                assert str(village.village_id) not in warning, (
+                    f"warning identifies a village by id instead of name: {warning}"
+                )
+
+    def test_a_village_with_no_name_still_gets_an_intelligible_warning(self):
+        """Falling back to the id is fine when there is genuinely no name --
+        silently dropping the identity would be worse."""
+        body = _plan_request(
+            {
+                "iron": {
+                    "20003": {"mode": "absolute", "value": 50_000},
+                    "20011": {"mode": "remainder"},
+                }
+            }
+        )
+        for village in body.snapshot:
+            village.name = ""
+
+        res = asyncio.run(post_plan(body))
+
+        assert any("village " in w for w in res.warnings)
+
+
 class TestStorageSafety:
     """The plan must say when a village will starve or overflow.
 
@@ -254,7 +310,8 @@ class TestStorageSafety:
 
         result = asyncio.run(post_plan(body, SimpleNamespace(id=1)))
 
-        starving = [w for w in result.warnings if "runs out" in w and "village 2" in w]
+        # The fixture names village 2 "2", so the warning leads with the name.
+        starving = [w for w in result.warnings if "runs out" in w and w.startswith("2:")]
         assert starving, f"no starvation warning in {result.warnings}"
         assert "crop" in starving[0]
 
@@ -383,7 +440,13 @@ class TestPlanEndpoint:
 
         res = asyncio.run(post_plan(body))
 
-        assert any("20011" in w and "ignor" in w for w in res.warnings)
+        dropped = [w for w in res.warnings if "ignor" in w]
+        assert dropped, f"the dropped allocation must be reported: {res.warnings}"
+        # Named, not numbered. An operator knows village "11"; nobody knows 20011.
+        assert any("11" in w for w in dropped)
+        assert not any("20011" in w for w in dropped), (
+            f"warning leaks the internal village id: {dropped}"
+        )
 
     @pytest.mark.parametrize(
         "overrides",
