@@ -278,6 +278,33 @@ class TestDayCheckEndpoint:
             "unpaid means unpaid: the hub keeps its own production"
         )
 
+    def test_a_nonconserved_profile_cannot_report_a_green_all_clear(self):
+        """An absolute receiver target with no remainder to source it is not
+        conserved: resolve_resource hands back inflow no route supplies. The
+        day check must surface that warning rather than credit crop from
+        nothing and fall through to 'all clear'."""
+        body = DayCheckRequest.model_validate(
+            {
+                "snapshot": [
+                    self._village(1, "02", crop=1_000, crop_stock=50_000, granary=800_000),
+                    self._village(2, "03", crop=1_000, crop_stock=50_000, granary=800_000),
+                ],
+                "segments": [
+                    {
+                        # 02 is told to hold 50,000/h with nobody assigned to send it.
+                        "name": "Day",
+                        "window": [0, 1439],
+                        "allocations": {"crop": {"1": {"mode": "absolute", "value": 50_000}}},
+                    }
+                ],
+            }
+        )
+
+        res = asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
+
+        assert res.warnings, "a non-conserved profile must not be silently accepted"
+        assert any("unallocated" in w and w.startswith("Day:") for w in res.warnings)
+
     def test_an_unreadable_crop_rate_is_reported_not_silently_dropped(self):
         """A crop_per_hour=None village sits the check out -- allocations
         dropped, no crop row, its alert level ignored. The response must say

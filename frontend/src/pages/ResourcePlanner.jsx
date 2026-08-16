@@ -432,7 +432,12 @@ export default function ResourcePlanner() {
   useEffect(() => {
     planInputRev.current += 1
     setPlan(null)
-  }, [allocations, tradeOffice, merchantModel, foreignTargets, villages])
+    // Depends on `snapshot`, not the derived `villages`: `villages` is declared
+    // further down, and naming it here would evaluate this dependency array in
+    // its temporal dead zone — a ReferenceError that drops the whole planner
+    // into the error boundary. `villages` is `snapshot?.villages ?? []`, so
+    // snapshot changing is exactly the signal we want.
+  }, [allocations, tradeOffice, merchantModel, foreignTargets, snapshot])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_CROP_CEILING), cropCeilings)

@@ -774,6 +774,14 @@ async def post_day_check(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"{segment.name}: {exc}",
                 ) from exc
+            # A profile that does not conserve mass (an absolute receiver with
+            # no remainder to source it) makes resolve_resource emit a warning
+            # and hand back a receiver inflow no route actually supplies.
+            # Discarding it would let the day picture credit crop from nothing
+            # and still report a green all-clear where /plan would show a
+            # shortfall. Surface the warning so the safety check cannot lie.
+            for warning in resolved.warnings:
+                warnings.append(f"{segment.name}: {warning}")
             for village in resolved.villages:
                 if village.village_id < 0:
                     continue  # the sink itself is not simulated; see above

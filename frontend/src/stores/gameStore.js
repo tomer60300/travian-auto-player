@@ -186,6 +186,9 @@ const useGameStore = create((set, get) => ({
     if (!vid) return
     try {
       const res = await api.get('/buildings/resources', { params: { village_id: vid } });
+      // Drop a response for a village the user has since switched away from:
+      // otherwise A's resources land under B's selector.
+      if (get().activeVillageId !== vid) return;
       if (res.data && typeof res.data === 'object' && !Array.isArray(res.data)) {
         set({ resources: res.data });
       }
@@ -201,6 +204,8 @@ const useGameStore = create((set, get) => ({
     set({ buildingsLoading: true, buildingsError: null });
     try {
       const res = await api.get('/buildings', { params: { village_id: vid } });
+      // A newer switch owns the store now; its own fetch will settle loading.
+      if (get().activeVillageId !== vid) return;
       // API returns { village_id, buildings: [...] } or possibly a plain array
       const arr = Array.isArray(res.data) ? res.data
         : Array.isArray(res.data?.buildings) ? res.data.buildings
@@ -219,6 +224,7 @@ const useGameStore = create((set, get) => ({
     if (!vid) return
     try {
       const res = await api.get('/buildings/queue', { params: { village_id: vid } });
+      if (get().activeVillageId !== vid) return;
       // API returns { village_id, queue: [...] } or possibly a plain array
       const arr = Array.isArray(res.data) ? res.data
         : Array.isArray(res.data?.queue) ? res.data.queue

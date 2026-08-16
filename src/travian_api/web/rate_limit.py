@@ -59,3 +59,8 @@ class RateLimiter:
 
 # Pre-configured limiters for different route groups
 action_limiter = RateLimiter(max_calls=5, window_seconds=10)
+
+# Unauthenticated auth endpoints (register/login). These run bcrypt, which is
+# CPU-heavy by design, so an unlimited flood both stalls the event loop and
+# enables password brute force. Keyed by IP (no user_id yet at this point).
+auth_limiter = RateLimiter(max_calls=10, window_seconds=60)

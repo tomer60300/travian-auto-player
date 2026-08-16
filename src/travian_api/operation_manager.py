@@ -150,6 +150,25 @@ class OperationManager:
         """
         # Sync block: check-and-register is atomic in asyncio because no
         # await happens between the policy check and the register call.
+        #
+        # WS handlers fetch `session` and then await the client's config before
+        # reaching here; a /disconnect in that window can pop and close the
+        # session, and spawning an op against that dead HttpClient makes every
+        # request in it fail. Refuse if the cached session is no longer the
+        # one installed for this user. This runs synchronously, so it cannot
+        # interleave with disconnect: either it registers the op first (and
+        # disconnect's guard then sees it and returns 409), or disconnect has
+        # already popped the session and this check fails cleanly.
+        from travian_api.web.sessions import session_manager
+
+        if session is not None and session_manager.get(user_id) is not session:
+            logger.info(
+                "Refusing to start %s for user %s: session was torn down mid-startup",
+                label,
+                user_id,
+            )
+            return None
+
         if require_unique_label or require_unique_extras:
             existing_labels = set(active_ops.get_active(user_id))
             if require_unique_label and label in existing_labels:

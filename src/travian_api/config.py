@@ -15,6 +15,16 @@ class Settings(BaseSettings):
     base_url: str = Field(default="", description="Game server URL (required)")
     x_version: str = Field(default="389", description="Game client version (from gpack)")
 
+    # SSRF allowlist for user-supplied server URLs. A public IP passing the
+    # loopback/private checks is not enough on a shared deployment: a plausible
+    # phishing host (https://travian-login.example) would still receive the
+    # user's Travian credentials. Only hosts under one of these suffixes are
+    # accepted. CSV so it stays a plain env var; add fan/regional TLDs here.
+    allowed_server_hosts: str = Field(
+        default="travian.com",
+        description="Comma-separated host suffixes accepted as Travian servers (SSRF allowlist)",
+    )
+
     # Authentication — username + password + server = full auth identity
     username: str = Field(default="", description="Account email/username")
     password: str = Field(default="", description="Account password")

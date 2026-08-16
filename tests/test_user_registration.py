@@ -60,7 +60,29 @@ def test_login_with_an_overlong_password_is_401_not_500():
 
 
 def test_losing_a_registration_race_returns_409_not_500():
+    # Called directly (not through FastAPI), so the Depends-injected limiter
+    # never runs; a stub Request satisfies the added positional parameter.
+    request = SimpleNamespace(state=SimpleNamespace(), client=SimpleNamespace(host="127.0.0.1"))
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(register(UserCreate(username="dup", password="hunter2"), _RacingDb()))
+        asyncio.run(register(UserCreate(username="dup", password="hunter2"), request, _RacingDb()))
 
     assert exc.value.status_code == 409
+
+
+def test_auth_endpoints_are_rate_limited_by_ip():
+    """A flood of unauthenticated register/login calls from one IP must be
+    throttled: each runs bcrypt, so an unlimited burst is both a DoS on the
+    event loop and a brute-force channel."""
+    from travian_api.web.rate_limit import RateLimiter
+
+    limiter = RateLimiter(max_calls=3, window_seconds=60)
+    request = SimpleNamespace(state=SimpleNamespace(), client=SimpleNamespace(host="10.1.1.1"))
+
+    async def hammer():
+        for _ in range(3):
+            await limiter(request)  # within budget
+        await limiter(request)  # the fourth trips it
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(hammer())
+    assert exc.value.status_code == 429

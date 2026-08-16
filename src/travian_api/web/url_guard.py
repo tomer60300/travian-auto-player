@@ -20,6 +20,8 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException, status
 
+from travian_api.config import settings
+
 
 async def _resolve_host(host: str) -> list[str]:
     """All addresses *host* resolves to. Split out so tests can stub DNS."""
@@ -59,6 +61,13 @@ async def ensure_safe_server_url(server_url: str) -> None:
         pass  # a hostname, as expected
     else:
         _reject("must be a hostname, not an IP address")
+
+    # Allowlist BEFORE DNS: a publicly resolvable phishing host must never
+    # receive a login attempt just because its address is routable.
+    host_l = host.lower()
+    allowed = [s.strip().lower() for s in settings.allowed_server_hosts.split(",") if s.strip()]
+    if not any(host_l == suffix or host_l.endswith("." + suffix) for suffix in allowed):
+        _reject(f"is not an allowed Travian host (allowed: {', '.join(allowed)})")
 
     try:
         addresses = await _resolve_host(host)

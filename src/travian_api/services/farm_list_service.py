@@ -134,6 +134,9 @@ class FarmListService:
                 "useShip": False,
                 "onlyLosses": False,
             },
+            # Non-idempotent: if the server commits the create but the response
+            # connection drops, a transport retry would make a second list.
+            safe_to_retry=False,
         )
         list_id = resp.get("id", 0)
         logger.info(f"Created farm list '{name}' (id={list_id}) for village {village_id}")
@@ -143,6 +146,7 @@ class FarmListService:
         """Delete a farm list."""
         await self.http_client.delete_json(
             f"/api/v1/farm-list/{list_id}",
+            safe_to_retry=False,
         )
         logger.info(f"Deleted farm list {list_id}")
 
@@ -175,6 +179,8 @@ class FarmListService:
                 ]
             },
             request_type="xhr",
+            # Non-idempotent: a retry after a committed add would duplicate the slot.
+            safe_to_retry=False,
         )
         logger.info(f"Added slot ({x},{y}) to list {list_id}")
 
@@ -184,6 +190,7 @@ class FarmListService:
             "/api/v1/farm-list/slot",
             data={"slots": slot_ids, "abandoned": False},
             request_type="xhr",
+            safe_to_retry=False,
         )
         logger.info(f"Deleted slots: {slot_ids}")
 

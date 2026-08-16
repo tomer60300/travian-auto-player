@@ -1,6 +1,8 @@
 """User registration, login, and profile routes."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -13,6 +15,7 @@ from travian_api.web.auth import (
     verify_password,
 )
 from travian_api.web.models.db import User, get_db
+from travian_api.web.rate_limit import auth_limiter
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -54,7 +57,12 @@ class TokenResponse(BaseModel):
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(body: UserCreate, db: AsyncSession = Depends(get_db)):
+async def register(
+    body: UserCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _rate: None = Depends(auth_limiter),
+):
     """Create a new user account and return a JWT."""
     # Check for duplicate username
     result = await db.execute(select(User).where(User.username == body.username))
@@ -64,9 +72,12 @@ async def register(body: UserCreate, db: AsyncSession = Depends(get_db)):
             detail="Username already taken",
         )
 
+    # bcrypt is intentionally slow; run it off the event loop so a burst of
+    # registrations cannot stall unrelated API/WebSocket traffic.
+    password_hash = await asyncio.to_thread(hash_password, body.password)
     user = User(
         username=body.username,
-        password_hash=hash_password(body.password),
+        password_hash=password_hash,
     )
     db.add(user)
     try:
@@ -87,12 +98,22 @@ async def register(body: UserCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: UserCreate, db: AsyncSession = Depends(get_db)):
+async def login(
+    body: UserCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _rate: None = Depends(auth_limiter),
+):
     """Authenticate an existing user and return a JWT."""
     result = await db.execute(select(User).where(User.username == body.username))
     user = result.scalar_one_or_none()
 
-    if user is None or not verify_password(body.password, user.password_hash):
+    # Offload the bcrypt compare (same DoS/event-loop concern as register). A
+    # missing user still returns 401 without hashing; the per-IP limiter above
+    # is what bounds brute force against a known username.
+    if user is None or not await asyncio.to_thread(
+        verify_password, body.password, user.password_hash
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",

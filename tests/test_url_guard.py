@@ -47,6 +47,29 @@ class TestFormatRules:
         _expect_reject("ts1.x1.europe.travian.com", "https")
 
 
+class TestHostAllowlist:
+    def test_a_public_but_non_travian_host_is_refused(self):
+        """The phishing shape: a plausible, publicly-resolvable host that is
+        not Travian. The address checks would pass it; the allowlist must not,
+        or the user's Travian credentials get POSTed to the attacker."""
+        _expect_reject("https://travian-login.example.com", "not an allowed Travian host")
+
+    def test_a_lookalike_suffix_is_refused(self):
+        # endswith must be on a dot boundary: nottravian.com is not travian.com
+        _expect_reject("https://nottravian.com", "not an allowed Travian host")
+
+    def test_the_allowlist_is_configurable(self, monkeypatch):
+        monkeypatch.setattr(
+            url_guard.settings, "allowed_server_hosts", "travian.com,myfanserver.net"
+        )
+
+        async def resolves_public(host):
+            return ["8.8.8.8"]
+
+        monkeypatch.setattr(url_guard, "_resolve_host", resolves_public)
+        _check("https://play.myfanserver.net")
+
+
 class TestResolvedAddresses:
     def test_a_public_name_resolving_private_is_refused(self, monkeypatch):
         """The DNS-rebinding shape: innocent-looking public hostname, A record
@@ -56,7 +79,7 @@ class TestResolvedAddresses:
             return ["192.168.1.10"]
 
         monkeypatch.setattr(url_guard, "_resolve_host", resolves_private)
-        _expect_reject("https://innocent.example.com", "private or local")
+        _expect_reject("https://ts5.x1.internal.travian.com", "private or local")
 
     def test_loopback_and_linklocal_resolutions_are_refused(self, monkeypatch):
         for address in ["127.0.0.1", "169.254.1.1", "::1", "fe80::1%eth0"]:
@@ -65,14 +88,14 @@ class TestResolvedAddresses:
                 return [_address]
 
             monkeypatch.setattr(url_guard, "_resolve_host", resolves)
-            _expect_reject("https://innocent.example.com", "private or local")
+            _expect_reject("https://ts5.x1.internal.travian.com", "private or local")
 
     def test_one_private_address_amongst_public_ones_is_refused(self, monkeypatch):
         async def resolves_mixed(host):
             return ["8.8.8.8", "10.0.0.1"]
 
         monkeypatch.setattr(url_guard, "_resolve_host", resolves_mixed)
-        _expect_reject("https://innocent.example.com", "private or local")
+        _expect_reject("https://ts5.x1.internal.travian.com", "private or local")
 
     def test_an_unresolvable_name_is_refused(self, monkeypatch):
         import socket

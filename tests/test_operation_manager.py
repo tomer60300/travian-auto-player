@@ -28,14 +28,68 @@ from travian_api.web.operation_gate import active_ops, captcha_stop
 
 
 @pytest.fixture
-def fresh_manager():
-    """Each test gets its own manager with a clean active_ops state."""
+def fresh_manager(monkeypatch):
+    """Each test gets its own manager with a clean active_ops state.
+
+    start() now refuses to spawn against a session that is not the one
+    installed in session_manager (the disconnect-during-startup guard). These
+    unit tests pass throwaway sessions, so the fixture models production —
+    where the session handed to start() IS the installed one — by recording
+    each start()'s session as installed and pointing session_manager.get at
+    that record. Tests that want to exercise the guard's refusal patch get()
+    themselves.
+    """
+    from travian_api.web import sessions as sessions_mod
+
+    installed: dict[int, object] = {}
+    monkeypatch.setattr(sessions_mod.session_manager, "get", installed.get)
+
     mgr = OperationManager()
+    _orig_start = mgr.start
+
+    def _start(*args, **kwargs):
+        if "user_id" in kwargs and "session" in kwargs:
+            installed[kwargs["user_id"]] = kwargs["session"]
+        return _orig_start(*args, **kwargs)
+
+    mgr.start = _start
     yield mgr
     # Cleanup: best-effort cancel any leftover tasks so a flaky test doesn't
     # leak running tasks into the next one.
     for op in list(mgr._ops.values()):
         op.task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_start_refuses_a_session_torn_down_mid_startup(monkeypatch):
+    """The WS-handler race: a session was fetched, the client config awaited,
+    and /disconnect popped and closed the session in that gap. start() must
+    refuse rather than spawn a detached op against the dead HttpClient."""
+    from travian_api.web import sessions as sessions_mod
+
+    # session_manager reports a DIFFERENT (or no) session than the one passed.
+    monkeypatch.setattr(sessions_mod.session_manager, "get", lambda uid: None)
+    mgr = OperationManager()
+
+    ran = False
+
+    async def coro(ctx: OperationContext) -> None:
+        nonlocal ran
+        ran = True
+
+    op = mgr.start(
+        user_id=99,
+        label="doomed",
+        session_type="test",
+        session_label="Test",
+        session=SimpleNamespace(),
+        coro=coro,
+    )
+
+    assert op is None, "start must refuse when the session is no longer installed"
+    assert "doomed" not in active_ops.get_active(99)
+    await asyncio.sleep(0)
+    assert ran is False, "the coroutine must never have been scheduled"
 
 
 @pytest.mark.asyncio
