@@ -19,7 +19,14 @@ from travian_api.web.routes.recon import (
     clear_recon_credentials,
     get_instance_operator,
     set_recon_credentials,
-    test_recon_credentials,
+)
+from travian_api.web.routes.recon import (
+    # Aliased: this is a FastAPI route handler, not a test. Imported under its
+    # own name pytest collects it as one and calls the route body for real,
+    # which "passed" only on machines whose .env happens to configure a
+    # background account and failed in CI with "400: No background account
+    # configured" -- a green local run over a red pipeline.
+    test_recon_credentials as verify_recon_credentials_route,
 )
 
 
@@ -47,7 +54,7 @@ def test_other_users_are_rejected_with_403():
 
 
 def test_every_mutating_recon_route_requires_the_operator():
-    for route in (set_recon_credentials, clear_recon_credentials, test_recon_credentials):
+    for route in (set_recon_credentials, clear_recon_credentials, verify_recon_credentials_route):
         dependencies = [
             getattr(parameter.default, "dependency", None)
             for parameter in inspect.signature(route).parameters.values()
@@ -63,7 +70,7 @@ def test_the_operator_check_runs_before_the_session_dependency():
 
     dependencies = [
         getattr(parameter.default, "dependency", None)
-        for parameter in inspect.signature(test_recon_credentials).parameters.values()
+        for parameter in inspect.signature(verify_recon_credentials_route).parameters.values()
     ]
 
     assert get_instance_operator in dependencies
