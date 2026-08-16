@@ -28,6 +28,10 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+# Slack subtracted before any ceil of a cargo batch, so float dust just above
+# an integer does not round a boundary-exact batch up to a phantom unit.
+CEIL_DUST_TOLERANCE = 1e-6
+
 # Cycle lengths that divide a day, so the schedule repeats every 24h (R5).
 DAILY_BEAT_CYCLES: tuple[int, ...] = (1, 2, 3, 4, 6, 8, 12, 24)
 
@@ -240,7 +244,14 @@ def route_cost(
     if hourly_cargo < 0:
         raise ValueError(f"hourly_cargo cannot be negative, got {hourly_cargo}")
 
-    batch = math.ceil(hourly_cargo * cycle_hours)
+    # ceil with a dust tolerance. Breakpoint transfers deliberately land flow
+    # rates exactly on capacity boundaries, and the arithmetic that produces
+    # them (k * capacity / cycle - rate) leaves ~1e-12 of float dust ABOVE the
+    # integer. A bare ceil amplifies that dust into a whole extra unit of
+    # cargo -- and worse, a whole extra merchant per send. Genuine fractional
+    # batches are never this close to an integer (the smallest real fraction is
+    # capacity/cycle granularity, orders of magnitude above the tolerance).
+    batch = math.ceil(hourly_cargo * cycle_hours - CEIL_DUST_TOLERANCE)
     return RouteCost(
         cycle_hours=cycle_hours,
         batch=batch,

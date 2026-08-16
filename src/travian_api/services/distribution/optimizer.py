@@ -440,6 +440,65 @@ def _spend_idle_merchants_on_latency(
     return result
 
 
+# How many transfer sizes the refinement sweep tries per swap. Boundaries are
+# deduped and taken largest-first; the cap bounds refinement cost without
+# silently dropping the full transfer, which is always included.
+MAX_BREAKPOINT_CANDIDATES = 12
+
+
+def breakpoint_candidates(
+    grows: Sequence[tuple[float, int]],
+    shrinks: Sequence[tuple[float, int]],
+    t_full: float,
+    cycles: Sequence[int],
+) -> list[float]:
+    """Transfer sizes worth trying besides all-of-min.
+
+    Vehicle cost is a staircase, so the best transfer is often a breakpoint
+    BELOW ``min(both)``: the size that lands some pair's batch exactly on a
+    multiple of its origin's capacity, wasting nothing. All-of-min restricts the
+    search to transportation-polytope vertices; these interior points are where
+    the ceiling-waste savings live.
+
+    Boundaries come from all FOUR touched pairs, not only the growing two. The
+    first version generated candidates only where a growing pair's batch hit a
+    boundary, and Codex review produced the counterexample: with the saving on a
+    SHRINKING leg (200/h over a 1,800-minute round trip dropping to the
+    166.67/h boundary at a 6h cycle), the only improving transfer is one this
+    function never emitted, and the search declared convergence with an
+    improvement still on the table. Both directions now contribute, across every
+    cycle, one boundary each (the nearest below the pair's post-transfer load).
+
+    Args:
+        grows: ``(current_rate, origin_capacity)`` for the two pairs gaining t.
+        shrinks: same, for the two pairs losing t.
+        t_full: the all-of-min transfer; always included.
+        cycles: candidate cycle lengths.
+
+    Returns:
+        Distinct sizes in (0, t_full], largest first, capped at
+        :data:`MAX_BREAKPOINT_CANDIDATES`.
+    """
+    candidates = {t_full}
+    for rate, capacity in grows:
+        for cycle in cycles:
+            step = capacity / cycle  # rate that fills one vehicle exactly
+            k = int((rate + t_full) // step)
+            if k >= 1:
+                t = k * step - rate
+                if EPSILON < t < t_full - EPSILON:
+                    candidates.add(t)
+    for rate, capacity in shrinks:
+        for cycle in cycles:
+            step = capacity / cycle
+            k = int((rate - EPSILON) // step)
+            if k >= 1:
+                t = rate - k * step
+                if EPSILON < t < t_full - EPSILON:
+                    candidates.add(t)
+    return sorted(candidates, reverse=True)[:MAX_BREAKPOINT_CANDIDATES]
+
+
 def _improve_flows(
     assignment: Assignment,
     villages: Mapping[int, VillageState],
@@ -754,32 +813,13 @@ def _improve_flows(
         return _crop_shape_ok(prospective)
 
     def _breakpoint_ts(resource, o1, d1, o2, d2, t_full):
-        """Transfer sizes worth trying besides all-of-min.
-
-        Vehicle cost is a staircase, so the best transfer is often a breakpoint
-        BELOW min(both): the size that lands a growing pair's batch exactly on a
-        multiple of its origin's capacity, wasting nothing. All-of-min restricts
-        the search to transportation-polytope vertices; these interior points
-        are where the ceiling-waste savings live.
-        """
-        candidates = {t_full}
-        for origin, dest in ((o1, d2), (o2, d1)):
-            capacity = capacities[origin]
-            old_rate = sum(pair.get((origin, dest), {}).values())
-            round_trip = 2.0 * _one_way((origin, dest))
-            cycle = cheapest_cycle(old_rate + t_full, round_trip, capacity, cycles).cycle_hours
-            step = capacity / cycle  # rate that fills one vehicle exactly
-            k = int((old_rate + t_full) // step)
-            while k >= 1:
-                t = k * step - old_rate
-                if t <= EPSILON:
-                    break
-                if t < t_full - EPSILON:
-                    candidates.add(t)
-                k -= 1
-                if len(candidates) >= 8:
-                    break
-        return sorted(candidates, reverse=True)
+        grows = [
+            (sum(pair.get(key, {}).values()), capacities[key[0]]) for key in ((o1, d2), (o2, d1))
+        ]
+        shrinks = [
+            (sum(pair.get(key, {}).values()), capacities[key[0]]) for key in ((o1, d1), (o2, d2))
+        ]
+        return breakpoint_candidates(grows, shrinks, t_full, cycles)
 
     def _best_swap(refinement: bool):
         """One full sweep; return the single best improving swap, or None.

@@ -30,6 +30,7 @@ from travian_api.services.distribution.optimizer import (
     VillageState,
     _flows_for_resource,
     _route_for_pair,
+    breakpoint_candidates,
     build_plan,
 )
 
@@ -712,6 +713,56 @@ class TestRelayGraphStaysShallow:
                 f"village {hub} forwards crop on to another hub {downstream & hubs}; "
                 f"that is a relay chain, not a single hop"
             )
+
+
+class TestBreakpointCandidates:
+    """Transfer sizes must include boundaries from SHRINKING pairs too.
+
+    Codex review counterexample (capacity 1,000): a pair carrying 200/h over a
+    1,800-minute round trip costs 8 merchants; at the 166.67/h boundary of a 6h
+    cycle it costs 5. With growing legs at 600/1,200-minute round trips, the
+    transfer t=33.33 that lands on that boundary saves a net merchant while the
+    full transfer t=100 costs a net merchant. The first implementation only
+    generated boundaries where a GROWING pair's batch crossed a capacity
+    multiple, so the one improving move was never tried and the search declared
+    convergence with an improvement still available.
+    """
+
+    def test_shrinking_pair_boundaries_are_generated(self):
+        ts = breakpoint_candidates(
+            grows=[(0.0, 1_000), (0.0, 1_000)],
+            shrinks=[(100.0, 1_000), (200.0, 1_000)],
+            t_full=100.0,
+            cycles=DAILY_BEAT_CYCLES,
+        )
+
+        assert any(abs(t - 100.0 / 3) < 0.01 for t in ts), (
+            f"the 166.67/h boundary of the shrinking 200/h pair (t=33.33) is "
+            f"missing: {[round(t, 2) for t in ts]}"
+        )
+
+    def test_the_full_transfer_is_always_first(self):
+        """The vertex move must never be silently dropped by the cap: it is the
+        one candidate the pre-refinement search already relies on."""
+        ts = breakpoint_candidates(
+            grows=[(950.0, 1_000), (990.0, 1_000)],
+            shrinks=[(970.0, 1_000), (960.0, 1_000)],
+            t_full=500.0,
+            cycles=DAILY_BEAT_CYCLES,
+        )
+
+        assert ts[0] == 500.0
+        assert len(ts) <= 12
+
+    def test_candidates_stay_inside_the_open_interval(self):
+        ts = breakpoint_candidates(
+            grows=[(123.0, 1_000)],
+            shrinks=[(456.0, 1_000)],
+            t_full=77.7,
+            cycles=DAILY_BEAT_CYCLES,
+        )
+
+        assert all(0 < t <= 77.7 for t in ts)
 
 
 class TestCrossResourceBundling:

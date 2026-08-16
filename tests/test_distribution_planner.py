@@ -5,6 +5,7 @@ checked across a range of sizes, because the real account grows and every figure
 changes between runs.
 """
 
+import math
 import random
 
 import pytest
@@ -458,7 +459,12 @@ class TestEndToEnd:
 
         for scheduled, row in zip(plan.beat.routes, plan.rows, strict=True):
             exact = sum(scheduled.route.batch_per_resource.values())
-            assert row.total_cargo == round(exact)
+            # Ceil, not round: the sheet must ship the same ceil(batch) the
+            # merchant budget was sized for. round() only agreed while every
+            # flow was integer-valued; breakpoint transfers made genuinely
+            # fractional batches possible, where the two differ and ceil is
+            # the designed contract. The tolerance mirrors route_cost's.
+            assert row.total_cargo == math.ceil(exact - 1e-6)
 
     def test_an_empty_account_yields_an_empty_sheet(self):
         plan = craft_plan({}, {}, {}, CONFIG)

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 from .allocation import Allocation, Resource, ResourcePlan, resolve_resource
 from .geometry import MapGeometry
-from .merchants import DAILY_BEAT_CYCLES, MerchantModel
+from .merchants import CEIL_DUST_TOLERANCE, DAILY_BEAT_CYCLES, MerchantModel
 from .optimizer import (
     DEFAULT_MERCHANT_RESERVE,
     MAX_IMPROVE_PASSES,
@@ -195,7 +195,9 @@ def craft_plan(
             # falls below .5.
             cargo=round_preserving_total(
                 scheduled.route.batch_per_resource,
-                target_total=math.ceil(sum(scheduled.route.batch_per_resource.values())),
+                target_total=math.ceil(
+                    sum(scheduled.route.batch_per_resource.values()) - CEIL_DUST_TOLERANCE
+                ),
             ),
             cycle_hours=scheduled.route.cycle_hours,
             dispatch_minute=scheduled.dispatch_minute,
