@@ -27,6 +27,90 @@ CONFIG = PlannerConfig(
 )
 
 
+class TestCollectThenShip:
+    """A relay hub must forward cargo it has already collected.
+
+    This was moot until crop relay existed: netting left every village a sender
+    or a receiver of a resource but never both, so nothing relayed and no
+    ordering constraint could arise. A hub whose outbound fires just before its
+    inbound lands ships from its own granary and waits nearly a whole cycle for
+    the replacement, which is exactly the buffer the relay was meant to avoid
+    needing.
+    """
+
+    def _leg(self, origin: int, destination: int, one_way: float, cycle: int = 4) -> Route:
+        return Route(
+            origin=origin,
+            destination=destination,
+            cargo_per_hour={Resource.CROP: 3000.0},
+            cycle_hours=cycle,
+            merchants_per_send=1,
+            sets_in_flight=1,
+            one_way_minutes=one_way,
+        )
+
+    def test_a_relay_hub_ships_soon_after_it_collects(self):
+        # 1 -> 2 -> 3: village 2 forwards what village 1 sends it.
+        inbound = self._leg(1, 2, one_way=30.0)
+        outbound = self._leg(2, 3, one_way=45.0)
+
+        beat = build_beat((inbound, outbound), min_arrival_gap_minutes=3)
+
+        placed = {s.route.origin: s for s in beat.routes}
+        arrivals = placed[1].arrival_minutes  # when cargo lands at the hub
+        dispatches = placed[2].dispatch_minutes  # when the hub forwards it
+
+        # Worst wait between collecting and shipping, measured round the clock.
+        worst = max(min((d - a) % MINUTES_PER_DAY for a in arrivals) for d in dispatches)
+        cycle_minutes = outbound.cycle_hours * 60
+        assert worst < cycle_minutes, (
+            f"hub waits {worst} min after collecting before it forwards, which is "
+            f"a whole {cycle_minutes} min cycle -- it is shipping stale stock"
+        )
+
+    def test_ordinary_routes_are_scheduled_exactly_as_before(self):
+        """Nothing relays here, so the collect-then-ship term must be inert: two
+        legs that merely share a destination are not a relay."""
+        a = self._leg(1, 3, one_way=30.0)
+        b = self._leg(2, 3, one_way=45.0)
+
+        beat = build_beat((a, b), min_arrival_gap_minutes=3)
+
+        assert beat.warnings == ()
+        # Both still get the widest-spacing treatment across the shared receiver.
+        first, second = (s.arrival_minutes[0] for s in beat.routes)
+        raw = abs(first - second)
+        assert min(raw, MINUTES_PER_DAY - raw) >= 3
+
+
+class TestReservedWindow:
+    def _route(self) -> Route:
+        return Route(
+            origin=1,
+            destination=2,
+            cargo_per_hour={Resource.LUMBER: 1000.0},
+            cycle_hours=24,
+            merchants_per_send=1,
+            sets_in_flight=1,
+            one_way_minutes=30.0,
+        )
+
+    def test_arrivals_avoid_the_reserved_npc_burst(self):
+        """schedule.py has honoured reserved_window all along; until now the
+        route never passed one, so the NPC slot could not actually be kept."""
+        window = (120, 300)  # 02:00-05:00
+
+        beat = build_beat((self._route(),), reserved_window=window)
+
+        for scheduled in beat.routes:
+            for minute in scheduled.arrival_minutes:
+                assert not (window[0] <= minute < window[1]), (
+                    f"arrival at {minute // 60:02d}:{minute % 60:02d} lands inside "
+                    f"the reserved window {window}"
+                )
+        assert beat.warnings == ()
+
+
 class TestBeatSpacing:
     def _route(self, origin: int) -> Route:
         return Route(

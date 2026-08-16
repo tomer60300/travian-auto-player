@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from .allocation import Resource
 from .optimizer import Route
 
 MINUTES_PER_DAY = 24 * 60
@@ -84,6 +85,25 @@ def _circular_gap(a: int, b: int) -> int:
     return min(raw, MINUTES_PER_DAY - raw)
 
 
+def _staleness(dispatches: Sequence[int], inbound_arrivals: Sequence[int]) -> int:
+    """How long the worst dispatch waits after the freshest inbound cargo.
+
+    Both schedules repeat daily, so "after" is measured modulo the day. For each
+    firing, the wait is the time since the most recent inbound arrival; the
+    figure returned is the worst of those, which is what the scheduler minimises
+    so a relay hub forwards cargo it has just collected rather than cargo it will
+    only receive later in the cycle.
+
+    Zero when there is no inbound to wait for, so ordinary routes are unaffected.
+    """
+    if not inbound_arrivals:
+        return 0
+    return max(
+        min((dispatch - arrival) % MINUTES_PER_DAY for arrival in inbound_arrivals)
+        for dispatch in dispatches
+    )
+
+
 def _worst_gap(candidate_arrivals: Sequence[int], taken: Sequence[int]) -> int:
     """Tightest spacing this candidate would create against already-placed ones."""
     if not taken:
@@ -127,23 +147,42 @@ def build_beat(
     warnings: list[str] = []
     # Arrivals already claimed, per destination.
     claimed: dict[int, list[int]] = {}
+    # Crop arrivals only, per village: what a relay hub is waiting to forward.
+    crop_arrivals: dict[int, list[int]] = {}
+
+    # A village that both receives and sends crop is forwarding it -- the crop
+    # relay the optimizer builds to lift load off villages that cannot staff
+    # their own haul. Its outbound must be scheduled after its inbound lands, or
+    # the route ships from the hub's own granary and the relay only refills it.
+    crop_senders = {r.origin for r in routes if Resource.CROP in r.cargo_per_hour}
+    crop_receivers = {r.destination for r in routes if Resource.CROP in r.cargo_per_hour}
+    relay_hubs = crop_senders & crop_receivers
 
     # Deterministic order: the busiest destinations are placed first, while they
-    # still have the whole day to spread across.
+    # still have the whole day to spread across. A hub's outbound goes last, so
+    # the inbound it must follow is already on the clock when it is placed.
     inbound_count: dict[int, int] = {}
     for route in routes:
         inbound_count[route.destination] = inbound_count.get(route.destination, 0) + 1
     ordered = sorted(
         routes,
-        key=lambda r: (-inbound_count[r.destination], r.destination, r.origin, r.cycle_hours),
+        key=lambda r: (
+            r.origin in relay_hubs and Resource.CROP in r.cargo_per_hour,
+            -inbound_count[r.destination],
+            r.destination,
+            r.origin,
+            r.cycle_hours,
+        ),
     )
 
     for route in ordered:
         window = route.cycle_hours * 60
         taken = claimed.setdefault(route.destination, [])
+        forwards_crop = route.origin in relay_hubs and Resource.CROP in route.cargo_per_hour
+        inbound = crop_arrivals.get(route.origin, []) if forwards_crop else []
 
         best_offset = 0
-        best_score: tuple[int, int] | None = None
+        best_score: tuple[int, int, int] | None = None
         for offset in range(0, window, step_minutes):
             candidate = ScheduledRoute(route=route, dispatch_minute=offset)
             arrivals = candidate.arrival_minutes
@@ -153,17 +192,23 @@ def build_beat(
                 if reserved_window is None
                 else sum(1 for minute in arrivals if _in_window(minute, reserved_window))
             )
-            # Prefer avoiding the reserved window, then the widest spacing.
-            # Every offset is evaluated: stopping at the first one that merely
-            # clears the minimum gap would crowd arrivals that had a whole day
-            # of room. The full sweep is pure CPU and runs off the event loop.
-            score = (-clear, gap)
+            # Collect-then-ship: how long the stalest dispatch waits after the
+            # freshest crop landed here. Zero for everything that is not a relay
+            # hub, which leaves non-relay scheduling byte-identical.
+            stale = _staleness(candidate.dispatch_minutes, inbound)
+            # Prefer avoiding the reserved window, then shipping soon after
+            # collecting, then the widest spacing. Every offset is evaluated:
+            # stopping at the first that merely clears the minimum gap would
+            # crowd arrivals that had a whole day of room.
+            score = (-clear, -stale, gap)
             if best_score is None or score > best_score:
                 best_score, best_offset = score, offset
 
         placement = ScheduledRoute(route=route, dispatch_minute=best_offset)
         scheduled.append(placement)
         taken.extend(placement.arrival_minutes)
+        if Resource.CROP in route.cargo_per_hour:
+            crop_arrivals.setdefault(route.destination, []).extend(placement.arrival_minutes)
 
         # A cycle shorter than the gap target violates the constraint all by
         # itself — no dispatch offset can space a route's own repeats.
@@ -176,7 +221,8 @@ def build_beat(
                 f"choosing a dispatch offset"
             )
 
-        achieved = best_score[1] if best_score else MINUTES_PER_DAY
+        # score is (-clear, -stale, gap); the achieved spacing is the last term.
+        achieved = best_score[2] if best_score else MINUTES_PER_DAY
         if achieved < min_arrival_gap_minutes:
             warnings.append(
                 f"route {route.origin} -> {route.destination} lands within "

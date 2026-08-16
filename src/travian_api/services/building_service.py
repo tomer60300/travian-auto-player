@@ -170,7 +170,7 @@ class BuildingService:
         self,
         granary_capacity: Optional[Dict[int, int]] = None,
         stocks: Optional[Dict[int, Dict[str, int]]] = None,
-    ) -> Tuple[Dict[int, CropBalance], int]:
+    ) -> Tuple[Dict[int, CropBalance], Dict[int, Dict[str, int]], int]:
         """True net crop for EVERY village in two requests.
 
         Reads absolute stocks and the granary countdown from the account-wide
@@ -193,10 +193,17 @@ class BuildingService:
                 paid for once.
 
         Returns:
-            Tuple of (village_id -> CropBalance, game requests spent). The count
-            is returned so callers can price the fetch honestly instead of
-            assuming the worst case. ``net_per_hour`` is None where it could not
-            be derived; it is never silently zero.
+            Tuple of ``(village_id -> CropBalance, village_id -> {warehouse,
+            granary} capacity, game requests spent)``. The count is returned so
+            callers can price the fetch honestly instead of assuming the worst
+            case. ``net_per_hour`` is None where it could not be derived; it is
+            never silently zero.
+
+            The capacity map is whatever this read already had to fetch, handed
+            back rather than discarded -- storage-safety checks need exactly the
+            same page, and re-fetching it would spend a request twice for data
+            already in hand. It is empty when every granary was draining, since
+            the derivation needed no capacity at all.
 
         Raises:
             TravianError: If a request fails
@@ -223,17 +230,22 @@ class BuildingService:
                     logger.warning("CROPDIAG dump failed: %s", exc)
 
             capacities = dict(granary_capacity or {})
+            # Both capacities off the same page. The granary figure drives the
+            # crop derivation below; the warehouse figure is carried out to the
+            # caller untouched, because storage-safety checks need it and it
+            # arrives free alongside the one we already came for.
+            storage: Dict[int, Dict[str, int]] = {}
             needs_capacity = [
                 vid
                 for vid, timer in timers.items()
                 if not timer["crop_draining"] and vid not in capacities
             ]
             if needs_capacity:
-                fetched = parse_village_stats_capacity(
+                storage = parse_village_stats_capacity(
                     await self.http_client.get_html("/village/statistics/resources/capacity")
                 )
                 requests_spent += 1
-                for vid, caps in fetched.items():
+                for vid, caps in storage.items():
                     capacities.setdefault(vid, caps["granary"])
         except Exception as e:
             raise TravianError(f"Failed to read crop balance: {e}") from e
@@ -287,7 +299,7 @@ class BuildingService:
                 "warehouse table, so they have no crop balance: %s",
                 sorted(missing_timer),
             )
-        return balances, requests_spent
+        return balances, storage, requests_spent
 
     async def get_building_detail(
         self, slot_id: int, village_id: Optional[int] = None

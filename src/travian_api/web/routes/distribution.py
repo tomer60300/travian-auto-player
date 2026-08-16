@@ -15,7 +15,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from travian_api.exceptions import TravianError
 from travian_api.parsers.html_parser import (
@@ -34,8 +34,19 @@ from travian_api.services.distribution.merchants import (
     EUROPE2_TEUTON,
     MerchantModel,
 )
-from travian_api.services.distribution.optimizer import VillageState
+from travian_api.services.distribution.optimizer import (
+    MAX_IMPROVE_PASSES,
+    MAX_RELAY_HOPS,
+    MIN_SEND_FILL,
+    VillageState,
+)
 from travian_api.services.distribution.planner import PlannerConfig, craft_plan
+from travian_api.services.distribution.schedule import MINUTES_PER_DAY
+from travian_api.services.distribution.storage import (
+    simulate_day,
+    storage_warnings,
+    store_status,
+)
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User
 from travian_api.web.sessions import TravianSession, get_live_travian_session
@@ -83,6 +94,20 @@ class VillageSnapshot(BaseModel):
     )
     crop_stock: int = 0
     crop_draining: bool = False
+    lumber_stock: int = 0
+    clay_stock: int = 0
+    iron_stock: int = 0
+    warehouse_capacity: int | None = Field(
+        default=None,
+        description=(
+            "Per-resource warehouse cap for lumber/clay/iron. None when the "
+            "capacity page was not needed by the crop read and so was not "
+            "fetched -- storage checks skip the village rather than guess."
+        ),
+    )
+    granary_capacity: int | None = Field(
+        default=None, description="Granary cap. None when it could not be read."
+    )
 
 
 class SnapshotResponse(BaseModel):
@@ -128,6 +153,47 @@ class PlanRequest(BaseModel):
     min_arrival_gap_minutes: int = Field(default=3, ge=0)
     map_span: int = Field(default=DEFAULT_MAP_SPAN, gt=0)
     speed_fields_per_hour: float = Field(default=DEFAULT_SPEED_FIELDS_PER_HOUR, gt=0)
+    min_send_fill: float = Field(
+        default=MIN_SEND_FILL,
+        ge=0,
+        le=1,
+        description=(
+            "How full a merchant must stay when idle merchants are spent on speed. "
+            "Lower it for faster routes on emptier merchants, raise it to keep them "
+            "full but slower. This is the latency/fill trade-off dial."
+        ),
+    )
+    max_improve_passes: int = Field(
+        default=MAX_IMPROVE_PASSES,
+        ge=1,
+        description=(
+            "Ceiling on route-search passes. Raise it for very large accounts; a "
+            "search that stops early says so in the warnings, because a truncated "
+            "one overstates how many villages are over budget."
+        ),
+    )
+    max_relay_hops: int = Field(
+        default=MAX_RELAY_HOPS,
+        ge=0,
+        description="Levels of crop relay through a sub-hub; 0 ships everything direct.",
+    )
+    reserved_window: tuple[int, int] | None = Field(
+        default=None,
+        description=(
+            "Minutes past midnight (start, end) to keep clear of arrivals for the "
+            "manual NPC burst. Arrivals avoid it where an alternative exists, and "
+            "the plan warns when geometry forces one into it."
+        ),
+    )
+
+    @field_validator("reserved_window")
+    @classmethod
+    def _window_within_the_day(cls, value: tuple[int, int] | None) -> tuple[int, int] | None:
+        # A window may wrap past midnight (start > end), so only the bounds are
+        # checked -- ordering carries meaning rather than being an error.
+        if value is not None and not all(0 <= minute < MINUTES_PER_DAY for minute in value):
+            raise ValueError(f"reserved_window minutes must be 0-{MINUTES_PER_DAY - 1}")
+        return value
 
 
 class SheetRowResponse(BaseModel):
@@ -139,6 +205,14 @@ class SheetRowResponse(BaseModel):
     dispatch: str
     arrival: str
     merchants: int
+    first_delivery_hours: float = Field(
+        default=0.0,
+        description=(
+            "Hours from creating this route to its first delivery landing. Every "
+            "other figure here is steady-state; on the day the route is created "
+            "the cargo still has to accumulate for one cycle and then travel."
+        ),
+    )
 
 
 class BudgetResponse(BaseModel):
@@ -202,7 +276,7 @@ async def get_snapshot(session: TravianSession = Depends(get_live_travian_sessio
         stocks = parse_village_stats_resources(
             await session.http_client.get_html("/village/statistics/resources")
         )
-        crop, crop_requests = await session.building_service.get_all_villages_net_crop(
+        crop, capacities, crop_requests = await session.building_service.get_all_villages_net_crop(
             stocks=stocks
         )
     except TravianError as exc:
@@ -250,6 +324,11 @@ async def get_snapshot(session: TravianSession = Depends(get_live_travian_sessio
                 crop_per_hour=balance.net_per_hour if balance else None,
                 crop_stock=balance.stock if balance else 0,
                 crop_draining=balance.draining if balance else False,
+                lumber_stock=merchants.get("lumber", 0),
+                clay_stock=merchants.get("clay", 0),
+                iron_stock=merchants.get("iron", 0),
+                warehouse_capacity=capacities.get(vid, {}).get("warehouse"),
+                granary_capacity=capacities.get(vid, {}).get("granary"),
             )
         )
 
@@ -270,6 +349,68 @@ async def get_snapshot(session: TravianSession = Depends(get_live_travian_sessio
         requests_used=2 + crop_requests,
         warnings=warnings,
     )
+
+
+_STOCK_FIELD = {
+    Resource.LUMBER: "lumber_stock",
+    Resource.CLAY: "clay_stock",
+    Resource.IRON: "iron_stock",
+    Resource.CROP: "crop_stock",
+}
+_RATE_FIELD = {
+    Resource.LUMBER: "lumber_per_hour",
+    Resource.CLAY: "clay_per_hour",
+    Resource.IRON: "iron_per_hour",
+    Resource.CROP: "crop_per_hour",
+}
+
+
+def _storage_warnings(body: PlanRequest, plan) -> list[str]:
+    """Overflow and starvation checks over the finished plan. Zero requests.
+
+    Every input is already in the snapshot the caller handed back, so this costs
+    nothing to run. Villages whose capacity was never read are simply skipped
+    rather than assumed -- the capacity page is only fetched when the crop
+    derivation needs it, and inventing a cap would produce confident nonsense.
+    """
+    statuses = []
+    stocks: dict[int, dict[Resource, int]] = {}
+    capacities: dict[int, dict[Resource, int]] = {}
+    own_rates: dict[int, dict[Resource, float]] = {}
+
+    # Net rate per village per resource AFTER the plan: own production plus what
+    # arrives minus what leaves. That is what the store actually sees.
+    shipped: dict[int, dict[Resource, float]] = {}
+    for route in plan.routing.routes:
+        for resource, amount in route.cargo_per_hour.items():
+            shipped.setdefault(route.destination, {})[resource] = (
+                shipped.setdefault(route.destination, {}).get(resource, 0.0) + amount
+            )
+            shipped.setdefault(route.origin, {})[resource] = (
+                shipped.setdefault(route.origin, {}).get(resource, 0.0) - amount
+            )
+
+    for village in body.snapshot:
+        vid = village.village_id
+        for resource in Resource:
+            own = getattr(village, _RATE_FIELD[resource])
+            if own is None:
+                continue  # unreadable rate; the plan already warned about it
+            stock = getattr(village, _STOCK_FIELD[resource])
+            cap = (
+                village.granary_capacity
+                if resource is Resource.CROP
+                else village.warehouse_capacity
+            )
+            net = float(own) + shipped.get(vid, {}).get(resource, 0.0)
+            stocks.setdefault(vid, {})[resource] = stock
+            own_rates.setdefault(vid, {})[resource] = net
+            if cap is not None:
+                capacities.setdefault(vid, {})[resource] = cap
+            statuses.append(store_status(vid, resource, stock, cap, net))
+
+    overflows = simulate_day(plan.beat, stocks, capacities, own_rates)
+    return list(storage_warnings(statuses, overflows))
 
 
 @router.post("/plan", response_model=PlanResponse)
@@ -330,6 +471,10 @@ async def post_plan(
         cycles=DAILY_BEAT_CYCLES,
         max_latency_hours=body.max_latency_hours,
         min_arrival_gap_minutes=body.min_arrival_gap_minutes,
+        reserved_window=body.reserved_window,
+        min_send_fill=body.min_send_fill,
+        max_improve_passes=body.max_improve_passes,
+        max_relay_hops=body.max_relay_hops,
     )
 
     extra_warnings: list[str] = []
@@ -380,6 +525,8 @@ async def post_plan(
                 f"shipments must release the rest before the sheet is executable"
             )
 
+    extra_warnings.extend(_storage_warnings(body, plan))
+
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
     over = {o.village_id for o in plan.over_budget}
 
@@ -394,6 +541,7 @@ async def post_plan(
                 dispatch=row.dispatch_clock(),
                 arrival=row.arrival_clock(),
                 merchants=row.merchants,
+                first_delivery_hours=row.first_delivery_hours,
             )
             for row in plan.rows
         ],

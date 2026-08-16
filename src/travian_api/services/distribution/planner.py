@@ -69,10 +69,24 @@ class SheetRow:
     dispatch_minute: int
     arrival_minute: int
     merchants: int
+    one_way_minutes: float = 0.0
 
     @property
     def total_cargo(self) -> int:
         return sum(self.cargo.values())
+
+    @property
+    def first_delivery_hours(self) -> float:
+        """Hours from creating the route to its first delivery landing.
+
+        Every other figure on the sheet is steady-state, which quietly assumes
+        the route has been running long enough to have a full batch waiting and
+        merchants already on the road. Neither is true on the day it is created:
+        the cargo has to accumulate over one cycle and then travel. Reading the
+        steady-state numbers as immediate is how a cold start gets mistaken for
+        a broken route.
+        """
+        return self.cycle_hours + self.one_way_minutes / 60.0
 
     def dispatch_clock(self) -> str:
         return f"{self.dispatch_minute // 60:02d}:{self.dispatch_minute % 60:02d}"
@@ -182,6 +196,7 @@ def craft_plan(
             # Per SEND: the row describes one Gold Club route definition. The
             # total commitment (x sets in flight) lives in the budget section.
             merchants=scheduled.route.merchants_per_send,
+            one_way_minutes=scheduled.route.one_way_minutes,
         )
         for scheduled in beat.routes
     )

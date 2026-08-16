@@ -212,6 +212,73 @@ def _plan_request(allocations, merchants_free=20, crop=None):
     )
 
 
+class TestStorageSafety:
+    """The plan must say when a village will starve or overflow.
+
+    A route set can balance perfectly as rates and still be wrong in the game:
+    a granary emptying inside the day kills troops, and a store that reaches its
+    cap silently discards everything above it. Both are computed from the
+    snapshot the caller already holds, so the check costs no game requests.
+    """
+
+    def _village(self, vid, **overrides):
+        base = dict(
+            village_id=vid,
+            name=str(vid),
+            x=0,
+            y=0,
+            merchants_total=20,
+            merchants_free=20,
+            lumber_per_hour=1000,
+            clay_per_hour=1000,
+            iron_per_hour=1000,
+            crop_per_hour=1000,
+            crop_stock=50_000,
+            lumber_stock=10_000,
+            clay_stock=10_000,
+            iron_stock=10_000,
+            warehouse_capacity=800_000,
+            granary_capacity=800_000,
+        )
+        base.update(overrides)
+        return base
+
+    def test_a_starving_village_is_reported(self):
+        body = PlanRequest(
+            snapshot=[
+                self._village(1, x=0, y=0),
+                # Eats far more crop than it grows, with hours of stock left.
+                self._village(2, x=5, y=0, crop_per_hour=-9000, crop_stock=9000),
+            ],
+        )
+
+        result = asyncio.run(post_plan(body, SimpleNamespace(id=1)))
+
+        starving = [w for w in result.warnings if "runs out" in w and "village 2" in w]
+        assert starving, f"no starvation warning in {result.warnings}"
+        assert "crop" in starving[0]
+
+    def test_a_village_without_a_capacity_reading_is_skipped_not_guessed(self):
+        """The capacity page is only fetched when the crop derivation needs it.
+        Where it was not read, the plan must stay quiet rather than invent a cap."""
+        body = PlanRequest(
+            snapshot=[
+                self._village(1, warehouse_capacity=None, granary_capacity=None),
+                self._village(2, x=5, warehouse_capacity=None, granary_capacity=None),
+            ],
+        )
+
+        result = asyncio.run(post_plan(body, SimpleNamespace(id=1)))
+
+        assert not [w for w in result.warnings if "fills its store" in w or "hits the cap" in w]
+
+    def test_storage_checks_cost_no_game_requests(self):
+        """post_plan takes no Travian session at all, so the whole check runs on
+        state the caller already has."""
+        for parameter in inspect.signature(post_plan).parameters.values():
+            assert getattr(parameter.default, "dependency", None) is not get_travian_session
+
+
 class TestPlanEndpoint:
     def test_needs_no_travian_session(self):
         """Planning is pure over the request body. A session dependency makes
