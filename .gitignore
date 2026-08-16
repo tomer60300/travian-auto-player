@@ -77,3 +77,10 @@ src/travian_api/web/static/
 farm-list-creation/.travian_pw
 farm-list-creation/__pycache__/
 farm-list-creation/logs/run*.log
+
+# Live-account artifacts: run output containing real village ids, map
+# coordinates and third-party raid targets. Never commit these — this repo is
+# public, and the data is reconnaissance about live accounts.
+farm-list-creation/progress.json
+scout-results*.md
+*-scout-results*.json

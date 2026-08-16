@@ -113,7 +113,7 @@ def _session(http: _SnapshotHttp, tribe_id: int = 2) -> SimpleNamespace:
     return SimpleNamespace(
         auth_state=SimpleNamespace(
             villages=[
-                SimpleNamespace(id=20003, name="03", x=23, y=88),
+                SimpleNamespace(id=20003, name="03", x=42, y=17),
                 SimpleNamespace(id=20011, name="11", x=30, y=90),
             ]
         ),

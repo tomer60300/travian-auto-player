@@ -554,7 +554,7 @@ The GraphQL API can fetch **metadata** for reports (but NOT resource data):
 
 **Fields:**
 - `time` — Unix timestamp (seconds)
-- `title` — Report subject line (e.g., "Chieftain`s village raids Unoccupied oasis (�-108|142)")
+- `title` — Report subject line (e.g., "Chieftain`s village raids Unoccupied oasis (−108|142)")
 - `defender.playerName` — Defender player name
 - `defender.village` — Defender village `{id, name, x, y}` (null for oasis targets)
 - `resources` — **⚠️ Always returns `null`** — use HTML parsing instead

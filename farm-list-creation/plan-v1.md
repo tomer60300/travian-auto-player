@@ -47,7 +47,7 @@ TravianSession(user_id=99001, server_url=SERVER, username=USER, password=PWD)
 
 - `SERVER` = `https://ts2.x1.europe.travian.com` (mission + JSON meta), read from
   `TRAVIAN_SERVER` env if present, else this literal.
-- `USER` = `TRAVIAN_USERNAME` env (= REDACTED@example.com).
+- `USER` = `TRAVIAN_USERNAME` env (read from the environment, never hardcoded).
 - `PWD`  = `TRAVIAN_PASSWORD` env. **Required.** If missing → stop cleanly (see §7).
 - After connect, `session.auth_state.villages` is populated. **Find V3** by
   matching coords (23,88) — and cross-check name == "V3". Call

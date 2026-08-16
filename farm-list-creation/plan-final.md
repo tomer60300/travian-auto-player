@@ -16,7 +16,7 @@ go/no-go execution spec.
 
 ## Locked parameters
 - Server: `https://ts2.x1.europe.travian.com` (env `TRAVIAN_SERVER` if set, else literal).
-- User: env `TRAVIAN_USERNAME` (= REDACTED@example.com). Password: env `TRAVIAN_PASSWORD` (REQUIRED).
+- User: env `TRAVIAN_USERNAME` (REQUIRED). Password: env `TRAVIAN_PASSWORD` (REQUIRED). Both come from the environment; neither is recorded here.
 - Sender village: **V3**, located by coords (23,88) in `auth_state.villages`; name cross-checked == "V3".
 - Tribe sanity: tribe_id == 2 (Teutons). Log-only.
 - Troops: raid lists → `{t1:2, t2..t10:0}`; HighRisk lists → `units=None` (all-zero). `active=False`. `force=False`.

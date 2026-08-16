@@ -245,7 +245,7 @@ query($isAbandoned: Boolean!, $id: Int!) {
 
 **Fields:**
 - `time` — Unix timestamp (seconds)
-- `title` — Report subject (e.g., `"Chieftain\`s village raids Unoccupied oasis (�-108|142)"`)
+- `title` — Report subject (e.g., `"Chieftain\`s village raids Unoccupied oasis (−108|142)"`)
 - `defender.playerName` — Defender name
 - `defender.village` — `{id, name, x, y}` (null for oasis targets)
 - `resources` — **⚠️ Always returns `null`** — resource data must come from HTML

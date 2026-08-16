@@ -13,7 +13,7 @@ You have full autonomy from start to finish. No user escalation. Make safe, cons
 The user sets these environment variables and ensures the data files are in the working directory:
 
 ```bash
-export TRAVIAN_USERNAME="REDACTED@example.com"
+export TRAVIAN_USERNAME="$TRAVIAN_USERNAME"  # set in your shell; never commit the real value
 export TRAVIAN_PASSWORD="<password from chat>"
 export TRAVIAN_SERVER="https://ts2.x1.europe.travian.com"
 ```

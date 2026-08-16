@@ -8,9 +8,9 @@ center at (cx - radius, cy - radius) covered the bottom-left
 quadrant only. Tiles north or east of (cx, cy) within the actual
 requested radius were silently outside the fetched window.
 
-Real-world repro: center (42, 17), radius 13. Tile (17, 96) sits
-at distance 10 (well inside r=13) but at y=96 — outside the
-fetched window [60, 90] when the only scan center was (10, 75).
+Repro shape: center (42, 17), radius 13. Tile (36, 25) sits at
+distance 10 (well inside r=13) but north of the centre — outside
+the fetched window when the only scan center was (29, 4).
 """
 
 from __future__ import annotations
@@ -40,26 +40,26 @@ def _coverage_includes(centers: list[tuple[int, int]], x: int, y: int) -> bool:
 
 
 def test_small_radius_centers_on_requested_point() -> None:
-    """The user's actual repro: radius=13 around (42, 17). The fix
-    must put the (sole) scan center AT (42, 17), not at (10, 75)."""
-    centers = _build_scan_centers(23, 88, 13)
+    """The reported repro: radius=13 around (42, 17). The fix must
+    put the (sole) scan center AT (42, 17), not at (29, 4)."""
+    centers = _build_scan_centers(42, 17, 13)
     assert centers == [(42, 17)]
 
 
 def test_small_radius_covers_north_corner_of_radius() -> None:
-    """(17, 96) is at distance 10 from (42, 17) — well inside r=13.
-    The previous algorithm fetched only (10, 75)'s region, which
-    covered y up to 90 only — (17, 96) was outside the window."""
-    centers = _build_scan_centers(23, 88, 13)
-    assert _coverage_includes(centers, 17, 96), (
-        f"(17, 96) should be in fetched region for r=13 around (42, 17); centers were {centers}"
+    """(36, 25) is at distance 10 from (42, 17) — well inside r=13.
+    The previous algorithm fetched only (29, 4)'s region, which
+    stopped short to the north — (36, 25) was outside the window."""
+    centers = _build_scan_centers(42, 17, 13)
+    assert _coverage_includes(centers, 36, 25), (
+        f"(36, 25) should be in fetched region for r=13 around (42, 17); centers were {centers}"
     )
 
 
 def test_small_radius_covers_every_tile_inside_circle() -> None:
     """Every tile within euclidean radius must fall inside at least
     one scan center's 31x31 window. Brute-force check."""
-    cx, cy, r = 23, 88, 13
+    cx, cy, r = 42, 17, 13
     centers = _build_scan_centers(cx, cy, r)
     missing = []
     for x in range(cx - r, cx + r + 1):

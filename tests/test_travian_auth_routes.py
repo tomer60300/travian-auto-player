@@ -47,7 +47,7 @@ def test_connect_succeeds_even_if_the_last_connected_stamp_fails(monkeypatch):
         tribe_id=1,
         active_village_id=20003,
         auth_state=SimpleNamespace(
-            villages=[SimpleNamespace(id=20003, name="03", x=23, y=88, is_main_village=True)]
+            villages=[SimpleNamespace(id=20003, name="03", x=42, y=17, is_main_village=True)]
         ),
     )
 
@@ -78,7 +78,7 @@ def test_saved_server_connect_succeeds_even_if_the_stamp_fails(monkeypatch):
         tribe_id=1,
         active_village_id=20003,
         auth_state=SimpleNamespace(
-            villages=[SimpleNamespace(id=20003, name="03", x=23, y=88, is_main_village=True)]
+            villages=[SimpleNamespace(id=20003, name="03", x=42, y=17, is_main_village=True)]
         ),
     )
 
@@ -171,7 +171,7 @@ def test_status_attempts_a_saved_credential_restore(monkeypatch):
         tribe_id=1,
         active_village_id=20003,
         auth_state=SimpleNamespace(
-            villages=[SimpleNamespace(id=20003, name="03", x=23, y=88, is_main_village=True)]
+            villages=[SimpleNamespace(id=20003, name="03", x=42, y=17, is_main_village=True)]
         ),
     )
 
@@ -429,7 +429,7 @@ def test_reconnect_restores_from_saved_credentials_when_no_live_session(monkeypa
         tribe_id=1,
         active_village_id=20003,
         auth_state=SimpleNamespace(
-            villages=[SimpleNamespace(id=20003, name="03", x=23, y=88, is_main_village=True)]
+            villages=[SimpleNamespace(id=20003, name="03", x=42, y=17, is_main_village=True)]
         ),
     )
     monkeypatch.setattr(auth_routes.session_manager, "get", lambda user_id: None)
