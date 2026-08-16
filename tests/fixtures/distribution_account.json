@@ -1,0 +1,802 @@
+{
+ "snapshot": [
+  {
+   "village_id": 1001,
+   "name": "Capital",
+   "x": 0,
+   "y": 0,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 9800.0,
+   "clay_per_hour": 9800.0,
+   "iron_per_hour": 8200.0,
+   "crop_per_hour": 74000.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1002,
+   "name": "Hammer",
+   "x": -6,
+   "y": 4,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1800.0,
+   "clay_per_hour": 1800.0,
+   "iron_per_hour": 1800.0,
+   "crop_per_hour": -7200.0,
+   "crop_stock": 40000,
+   "crop_draining": true
+  },
+  {
+   "village_id": 1003,
+   "name": "Anvil",
+   "x": 3,
+   "y": -5,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 2900.0,
+   "clay_per_hour": 3600.0,
+   "iron_per_hour": 2200.0,
+   "crop_per_hour": -1900.0,
+   "crop_stock": 40000,
+   "crop_draining": true
+  },
+  {
+   "village_id": 1004,
+   "name": "Oakfield",
+   "x": 9,
+   "y": 2,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 2100.0,
+   "clay_per_hour": 2100.0,
+   "iron_per_hour": 1750.0,
+   "crop_per_hour": 160.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1005,
+   "name": "Clayrun",
+   "x": -8,
+   "y": -7,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1575.0,
+   "clay_per_hour": 1750.0,
+   "iron_per_hour": 1750.0,
+   "crop_per_hour": 1120.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1006,
+   "name": "Ironhold",
+   "x": 14,
+   "y": -3,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1750.0,
+   "clay_per_hour": 1750.0,
+   "iron_per_hour": 1313.0,
+   "crop_per_hour": 1930.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1007,
+   "name": "Millbrook",
+   "x": 19,
+   "y": 6,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1750.0,
+   "clay_per_hour": 1750.0,
+   "iron_per_hour": 2100.0,
+   "crop_per_hour": 1570.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1008,
+   "name": "Stonegate",
+   "x": 5,
+   "y": 9,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1750.0,
+   "clay_per_hour": 1750.0,
+   "iron_per_hour": 1750.0,
+   "crop_per_hour": 2420.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1009,
+   "name": "Westmoor",
+   "x": -15,
+   "y": 3,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1750.0,
+   "clay_per_hour": 1750.0,
+   "iron_per_hour": 2100.0,
+   "crop_per_hour": 2680.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1010,
+   "name": "Eastvale",
+   "x": 22,
+   "y": -8,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 525.0,
+   "clay_per_hour": 350.0,
+   "iron_per_hour": 525.0,
+   "crop_per_hour": 9380.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1011,
+   "name": "Northrun",
+   "x": -4,
+   "y": 14,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1750.0,
+   "clay_per_hour": 1750.0,
+   "iron_per_hour": 2100.0,
+   "crop_per_hour": 2910.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1012,
+   "name": "Southbay",
+   "x": 7,
+   "y": -13,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1750.0,
+   "clay_per_hour": 2100.0,
+   "iron_per_hour": 1750.0,
+   "crop_per_hour": 2900.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1013,
+   "name": "Fernwick",
+   "x": -18,
+   "y": -11,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 2100.0,
+   "clay_per_hour": 1750.0,
+   "iron_per_hour": 1750.0,
+   "crop_per_hour": 2900.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1014,
+   "name": "Harrow",
+   "x": 26,
+   "y": 11,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1313.0,
+   "clay_per_hour": 2100.0,
+   "iron_per_hour": 1750.0,
+   "crop_per_hour": 4550.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1015,
+   "name": "Larkspur",
+   "x": -23,
+   "y": 16,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 3060.0,
+   "clay_per_hour": 1750.0,
+   "iron_per_hour": 1313.0,
+   "crop_per_hour": 3030.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1016,
+   "name": "Duskmere",
+   "x": 31,
+   "y": -6,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 2100.0,
+   "clay_per_hour": 2100.0,
+   "iron_per_hour": 1750.0,
+   "crop_per_hour": 3250.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1017,
+   "name": "Ravenholt",
+   "x": -9,
+   "y": -21,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1750.0,
+   "clay_per_hour": 2180.0,
+   "iron_per_hour": 1313.0,
+   "crop_per_hour": 3360.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1018,
+   "name": "Thornfield",
+   "x": 17,
+   "y": 24,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1750.0,
+   "clay_per_hour": 1313.0,
+   "iron_per_hour": 1750.0,
+   "crop_per_hour": 3490.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1019,
+   "name": "Emberlyn",
+   "x": -27,
+   "y": -4,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 1750.0,
+   "clay_per_hour": 2100.0,
+   "iron_per_hour": 1750.0,
+   "crop_per_hour": 2840.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1020,
+   "name": "Glasswood",
+   "x": 35,
+   "y": 18,
+   "merchants_total": 19,
+   "merchants_free": 19,
+   "lumber_per_hour": 1750.0,
+   "clay_per_hour": 1750.0,
+   "iron_per_hour": 1313.0,
+   "crop_per_hour": 4750.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1021,
+   "name": "Farhaven",
+   "x": 118,
+   "y": -47,
+   "merchants_total": 20,
+   "merchants_free": 20,
+   "lumber_per_hour": 438.0,
+   "clay_per_hour": 350.0,
+   "iron_per_hour": 175.0,
+   "crop_per_hour": 10400.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1022,
+   "name": "Saltmarsh",
+   "x": -52,
+   "y": 128,
+   "merchants_total": 15,
+   "merchants_free": 15,
+   "lumber_per_hour": 266.0,
+   "clay_per_hour": 266.0,
+   "iron_per_hour": 266.0,
+   "crop_per_hour": 5670.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  },
+  {
+   "village_id": 1023,
+   "name": "Windrest",
+   "x": 40,
+   "y": 152,
+   "merchants_total": 19,
+   "merchants_free": 19,
+   "lumber_per_hour": 254.0,
+   "clay_per_hour": 254.0,
+   "iron_per_hour": 254.0,
+   "crop_per_hour": 5600.0,
+   "crop_stock": 40000,
+   "crop_draining": false
+  }
+ ],
+ "config": [
+  {
+   "village_id": 1001,
+   "trade_office_level": 18
+  },
+  {
+   "village_id": 1002,
+   "trade_office_level": 6
+  },
+  {
+   "village_id": 1003,
+   "trade_office_level": 0
+  },
+  {
+   "village_id": 1004,
+   "trade_office_level": 12
+  },
+  {
+   "village_id": 1005,
+   "trade_office_level": 8
+  },
+  {
+   "village_id": 1006,
+   "trade_office_level": 8
+  },
+  {
+   "village_id": 1007,
+   "trade_office_level": 9
+  },
+  {
+   "village_id": 1008,
+   "trade_office_level": 11
+  },
+  {
+   "village_id": 1009,
+   "trade_office_level": 5
+  },
+  {
+   "village_id": 1010,
+   "trade_office_level": 13
+  },
+  {
+   "village_id": 1011,
+   "trade_office_level": 5
+  },
+  {
+   "village_id": 1012,
+   "trade_office_level": 7
+  },
+  {
+   "village_id": 1013,
+   "trade_office_level": 5
+  },
+  {
+   "village_id": 1014,
+   "trade_office_level": 14
+  },
+  {
+   "village_id": 1015,
+   "trade_office_level": 14
+  },
+  {
+   "village_id": 1016,
+   "trade_office_level": 11
+  },
+  {
+   "village_id": 1017,
+   "trade_office_level": 7
+  },
+  {
+   "village_id": 1018,
+   "trade_office_level": 13
+  },
+  {
+   "village_id": 1019,
+   "trade_office_level": 9
+  },
+  {
+   "village_id": 1020,
+   "trade_office_level": 11
+  },
+  {
+   "village_id": 1021,
+   "trade_office_level": 14
+  },
+  {
+   "village_id": 1022,
+   "trade_office_level": 0
+  },
+  {
+   "village_id": 1023,
+   "trade_office_level": 11
+  }
+ ],
+ "allocations": {
+  "lumber": {
+   "1001": {
+    "mode": "remainder",
+    "value": 0
+   },
+   "1002": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1003": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1004": {
+    "mode": "absolute",
+    "value": 7559
+   },
+   "1005": {
+    "mode": "absolute",
+    "value": 7559
+   },
+   "1006": {
+    "mode": "absolute",
+    "value": 7559
+   },
+   "1007": {
+    "mode": "absolute",
+    "value": 7559
+   },
+   "1008": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1009": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1010": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1011": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1012": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1013": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1014": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1015": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1016": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1017": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1018": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1019": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1020": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1021": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1022": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1023": {
+    "mode": "absolute",
+    "value": 827
+   }
+  },
+  "clay": {
+   "1001": {
+    "mode": "remainder",
+    "value": 0
+   },
+   "1002": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1003": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1004": {
+    "mode": "absolute",
+    "value": 4664
+   },
+   "1005": {
+    "mode": "absolute",
+    "value": 4664
+   },
+   "1006": {
+    "mode": "absolute",
+    "value": 4664
+   },
+   "1007": {
+    "mode": "absolute",
+    "value": 4664
+   },
+   "1008": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1009": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1010": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1011": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1012": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1013": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1014": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1015": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1016": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1017": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1018": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1019": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1020": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1021": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1022": {
+    "mode": "absolute",
+    "value": 926
+   },
+   "1023": {
+    "mode": "absolute",
+    "value": 926
+   }
+  },
+  "iron": {
+   "1001": {
+    "mode": "remainder",
+    "value": 0
+   },
+   "1002": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1003": {
+    "mode": "absolute",
+    "value": 827
+   },
+   "1004": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1005": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1006": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1007": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1008": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1009": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1010": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1011": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1012": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1013": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1014": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1015": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1016": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1017": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1018": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1019": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1020": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1021": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1022": {
+    "mode": "absolute",
+    "value": 891
+   },
+   "1023": {
+    "mode": "absolute",
+    "value": 891
+   }
+  },
+  "crop": {
+   "1001": {
+    "mode": "remainder",
+    "value": 0
+   },
+   "1002": {
+    "mode": "sustain",
+    "value": 3
+   },
+   "1003": {
+    "mode": "sustain",
+    "value": 3
+   },
+   "1004": {
+    "mode": "absolute",
+    "value": 1785
+   },
+   "1005": {
+    "mode": "absolute",
+    "value": 1785
+   },
+   "1006": {
+    "mode": "absolute",
+    "value": 1785
+   },
+   "1007": {
+    "mode": "absolute",
+    "value": 1785
+   },
+   "1008": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1009": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1010": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1011": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1012": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1013": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1014": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1015": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1016": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1017": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1018": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1019": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1020": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1021": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1022": {
+    "mode": "absolute",
+    "value": 187
+   },
+   "1023": {
+    "mode": "absolute",
+    "value": 187
+   }
+  }
+ },
+ "map_span": 401,
+ "speed_fields_per_hour": 12,
+ "merchant_base_capacity": 2200,
+ "trade_office_bonus_per_level": 0.2
+}

@@ -1,13 +1,20 @@
-"""Golden regression for the flow optimizer, frozen on a real 22-village account.
+"""Golden regression for the flow optimizer, frozen on a synthetic 23-village account.
 
 Profile Appendix A asks for exactly this: a frozen snapshot — production, coords,
 Trade Office levels and allocation targets in; route set and per-village merchant
 pool out — that pins the optimizer against silent regressions. It is deliberately
-*not* a live read (the account has already gone 20 -> 22 -> 23 villages; a golden
-test that reads current state stops being a regression test), and it captures the
-case that motivated the merchant-aware improvement pass: two geographically
-stranded villages (15 at 121|52, 21 at 7|35) whose crop surplus cannot be shipped
-within their merchant budget at any Trade Office level.
+*not* a live read: an account grows and every figure moves between runs, so a
+golden test that reads current state stops being a regression test.
+
+The fixture is **invented, not captured**. Village ids, names, coordinates and
+rates are made up. A real snapshot would be operational reconnaissance about a
+live account — map positions, which villages are starving, how many merchants
+each can field — and this repository is public, so no real account state belongs
+in it. What the fixture reproduces is the *structure* that makes the case
+interesting: a capital hub absorbing the remainder, two army villages eating more
+crop than they grow, a spread of Trade Office levels, sub-20-merchant villages,
+and three villages that cannot ship their surplus within budget — one bound by
+distance (no upgrade helps) and two bound by capacity (an upgrade does).
 
 On the assertions: the merchant-minimal figures are upper *bounds* (``<=``), not
 equalities, so a genuine search improvement passes rather than failing as a
@@ -42,27 +49,27 @@ from travian_api.services.distribution.optimizer import (
     build_plan,
 )
 
-FIXTURE = Path(__file__).parent / "fixtures" / "distribution_real_account.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "distribution_account.json"
 
-# The greedy seed's numbers on this account, measured before the improvement pass
-# existed. The improved optimizer must never do worse than these.
-SEED_TOTAL_MERCHANTS = 163
+# What the greedy seed alone commits on this account. The improved optimizer must
+# never do worse than this.
+SEED_TOTAL_MERCHANTS = 233
 
 # Ratchet on the merchant-minimal plan (latency pass off): the optimizer must do
 # at least this well. Tighten these when an improvement lands; never loosen them
 # without saying why.
-MAX_TOTAL_MERCHANTS = 152
-MAX_OVER_BUDGET_EXCESS = 17
+MAX_TOTAL_MERCHANTS = 210
+MAX_OVER_BUDGET_EXCESS = 62
 
-# Villages whose crop cannot be shipped within their merchant budget on this
+# Villages whose surplus cannot be shipped within their merchant budget on this
 # snapshot. They are NOT interchangeable, and the distinction is the point:
-#   20015 ("15", 121|52) is distance-bound -- 100+ fields from everything, so no
-#       Trade Office level shrinks the haul and the report says so.
-#   81449 ("21", 7|35) is capacity-bound -- it has a concrete TO+7 fix, so a
-#       future improvement may legitimately route it within budget.
-# Hence a subset assertion for the set and an exact assertion only for 20015.
-DISTANCE_BOUND_VILLAGE = 20015
-CAPACITY_BOUND_VILLAGE = 81449
+#   "Farhaven" is distance-bound -- 120+ fields from everything, so the trip
+#       rather than the load is the cost and no Trade Office level shrinks it.
+#   "Saltmarsh" is capacity-bound -- a Trade Office would fix it, so a future
+#       improvement may legitimately route it within budget.
+# Hence an exact assertion only for the distance-bound one.
+DISTANCE_BOUND_VILLAGE = 1021
+CAPACITY_BOUND_VILLAGE = 1022
 
 
 def _median_latency(plan):
