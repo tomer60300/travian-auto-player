@@ -18,7 +18,7 @@ resource:
 Both are asserted as invariants in the tests rather than defended with runtime
 checks, because the property comes from the data model, not from vigilance here.
 
-Two stages, per profile section 14 (``cluster -> assign -> improve``):
+Three stages, per profile section 14 (``cluster -> assign -> improve``):
 
 1. **Greedy seed** -- :func:`_flows_for_resource` matches each receiver to its
    nearest senders, largest demand first. Deterministic and explainable, but
@@ -253,10 +253,16 @@ def _flows_for_resource(
 FlowKey = tuple[int, int]
 Assignment = dict[Resource, dict[FlowKey, float]]
 
-# Backstop against a pathological non-converging sweep. Each accepted swap
-# strictly lowers the integer objective, so convergence is guaranteed well
-# inside this on any real account; the cap only bounds the worst case.
-MAX_IMPROVE_PASSES = 200
+# Ceiling on improvement passes. Termination does not depend on it -- each
+# accepted swap strictly lowers an integer objective -- so this exists only to
+# bound worst-case runtime, and hitting it is reported rather than hidden
+# (a truncated search overstates over_budget_excess, which becomes user-facing
+# Trade Office advice). Sized from measurement, not guessed: 200 truncated from
+# ~45 villages upward, which is an ordinary account, and at 100 villages that
+# cost 86 merchants of phantom excess. 1000 converges every account size
+# measured up to 120 villages; a 22-village account finishes in ~11 passes and
+# never approaches it. Tunable via PlannerConfig.max_improve_passes.
+MAX_IMPROVE_PASSES = 1000
 
 
 def _merge_pair_cargo(assignment: Assignment) -> dict[FlowKey, dict[Resource, float]]:
@@ -323,6 +329,7 @@ def _spend_idle_merchants_on_latency(
     cycles: Sequence[int],
     budgets: Mapping[int, int],
     latency_target: float,
+    min_send_fill: float = MIN_SEND_FILL,
 ) -> list[Route]:
     """Shorten over-target routes by spending each village's idle merchants.
 
@@ -366,7 +373,7 @@ def _spend_idle_merchants_on_latency(
                     if new_latency >= route.latency_hours:
                         continue
                     # Don't buy speed with half-empty merchants (axis 2).
-                    if cost.batch < MIN_SEND_FILL * cost.merchants_per_send * capacity:
+                    if cost.batch < min_send_fill * cost.merchants_per_send * capacity:
                         continue
                     compliant = int(new_latency <= latency_target)
                     per_merchant = (route.latency_hours - new_latency) / delta
@@ -404,7 +411,8 @@ def _improve_flows(
     merchant_model: MerchantModel,
     cycles: Sequence[int],
     budgets: Mapping[int, int],
-) -> Assignment:
+    max_passes: int = MAX_IMPROVE_PASSES,
+) -> tuple[Assignment, bool]:
     """Lower merchant commitment by reassigning flow, seeded by the greedy plan.
 
     The greedy seed matches each receiver to its nearest senders, which is
@@ -425,14 +433,40 @@ def _improve_flows(
     route_count)`` — feasibility first, then merchants (§8.3 objective 1), then
     route count (objective 4). A swap is applied only when it strictly lowers
     that tuple, so the result is deterministic and never worse than the seed.
+
+    Returns:
+        ``(flows, converged)``. ``converged`` is False when ``max_passes`` ran
+        out with improvements still available — the caller must surface that,
+        because a truncated search overstates ``over_budget_excess`` (the *first*
+        objective key), and that number drives both the over-budget report and
+        the Trade Office upgrade advice built from it.
     """
     # Working state, kept in sync: per-resource flows, merged pair cargo, the
     # merchant cost of each pair, and the running per-origin commitment.
     flows: Assignment = {resource: dict(legs) for resource, legs in assignment.items()}
+
+    # Distance and capacity are fixed for the whole search but were being
+    # recomputed inside the innermost loop, millions of times on a large account.
+    capacities = {vid: merchant_model.capacity(v.trade_office_level) for vid, v in villages.items()}
+    one_way_cache: dict[FlowKey, float] = {}
+
+    def merchants_for(origin: int, destination: int, cargo: Mapping[Resource, float]) -> int:
+        hourly_total = sum(cargo.values())
+        if hourly_total <= EPSILON:
+            return 0
+        one_way = one_way_cache.get((origin, destination))
+        if one_way is None:
+            one_way = geometry.one_way_minutes(
+                villages[origin].coords, villages[destination].coords
+            )
+            one_way_cache[(origin, destination)] = one_way
+        return cheapest_cycle(
+            hourly_total, 2.0 * one_way, capacities[origin], cycles
+        ).merchants_committed
+
     pair = _merge_pair_cargo(flows)
     pair_merch: dict[FlowKey, int] = {
-        key: _pair_merchants(key[0], key[1], cargo, villages, geometry, merchant_model, cycles)
-        for key, cargo in pair.items()
+        key: merchants_for(key[0], key[1], cargo) for key, cargo in pair.items()
     }
     committed: dict[int, int] = {}
     for (origin, _destination), merchants in pair_merch.items():
@@ -441,18 +475,38 @@ def _improve_flows(
     def excess(origin: int, count: int) -> int:
         return max(0, count - budgets.get(origin, 0))
 
-    for _pass in range(MAX_IMPROVE_PASSES):
+    # Pairs proven non-improving and not invalidated by a swap since. Purely a
+    # memo -- it never changes which swap is chosen, only how much work is
+    # repeated to find it.
+    settled: set[tuple[Resource, FlowKey, FlowKey]] = set()
+
+    converged = False
+    for _pass in range(max_passes):
         applied = False
         for resource in sorted(flows, key=lambda r: r.value):
             legs = flows[resource]
             edges = sorted(key for key, amount in legs.items() if amount > EPSILON)
             for i, (o1, d1) in enumerate(edges):
                 for o2, d2 in edges[i + 1 :]:
-                    if o1 == o2 or d1 == d2:
+                    # Skip pairs already proven non-improving that no swap since
+                    # has touched. This is the whole speedup: it preserves the
+                    # first-improving-in-sorted-order trajectory exactly (and so
+                    # the resulting plan), while avoiding the re-evaluation of
+                    # every untouched pair after each swap.
+                    if (resource, (o1, d1), (o2, d2)) in settled:
                         continue
-                    t = min(legs[(o1, d1)], legs[(o2, d2)])
+                    # o1 == d2 (or o2 == d1) would create a self-loop, whose
+                    # zero travel time makes it cost zero merchants -- the most
+                    # attractive move there is, silently deleting real delivery.
+                    # Unreachable while a village is either sender or receiver of
+                    # a resource but never both, but this must not depend on an
+                    # invariant owned by another module to stay correct.
+                    if o1 in (o2, d2) or d1 in (d2, o2):
+                        continue
+                    t = min(legs.get((o1, d1), 0.0), legs.get((o2, d2), 0.0))
                     if t <= EPSILON:
                         continue
+                    candidate = (resource, (o1, d1), (o2, d2))
 
                     # Cargo of the four pairs the swap touches, after the move.
                     moved = [((o1, d1), -t), ((o2, d2), -t), ((o1, d2), t), ((o2, d1), t)]
@@ -466,9 +520,7 @@ def _improve_flows(
                             cargo.pop(resource, None)
                         new_cargo[key] = cargo
                     new_merch = {
-                        key: _pair_merchants(
-                            key[0], key[1], cargo, villages, geometry, merchant_model, cycles
-                        )
+                        key: merchants_for(key[0], key[1], cargo)
                         for key, cargo in new_cargo.items()
                     }
 
@@ -496,6 +548,7 @@ def _improve_flows(
                     # The whole objective only shifts by these deltas, so the
                     # full tuple improves exactly when the delta tuple is < 0.
                     if (over_delta, total_delta, rc_delta) >= (0, 0, 0):
+                        settled.add(candidate)
                         continue
 
                     for key, cargo in new_cargo.items():
@@ -515,6 +568,19 @@ def _improve_flows(
                     for key in ((o1, d1), (o2, d2)):
                         if legs[key] <= EPSILON:
                             del legs[key]
+
+                    # This swap moved cargo on four pairs and changed the
+                    # commitment of two origins, so any cached verdict involving
+                    # those villages is stale. Everything else is untouched and
+                    # stays settled -- that is what makes the rescan cheap.
+                    touched = {o1, o2, d1, d2}
+                    settled.difference_update(
+                        [
+                            entry
+                            for entry in settled
+                            if touched & {entry[1][0], entry[1][1], entry[2][0], entry[2][1]}
+                        ]
+                    )
                     applied = True
                     break
                 if applied:
@@ -522,8 +588,9 @@ def _improve_flows(
             if applied:
                 break
         if not applied:
+            converged = True
             break
-    return flows
+    return flows, converged
 
 
 def build_plan(
@@ -535,6 +602,8 @@ def build_plan(
     merchant_reserve: int = DEFAULT_MERCHANT_RESERVE,
     cycles: Sequence[int] = DAILY_BEAT_CYCLES,
     max_latency_hours: float | None = 2.0,
+    min_send_fill: float = MIN_SEND_FILL,
+    max_improve_passes: int = MAX_IMPROVE_PASSES,
 ) -> Plan:
     """Build a route set from fetched state. Works for any village count.
 
@@ -577,7 +646,18 @@ def build_plan(
     # Reassign the greedy seed to cut merchants and relieve over-budget villages
     # wherever a cheaper routing exists; never worse than the seed (§8.3, §14).
     budgets = {vid: villages[vid].spare_merchants(merchant_reserve) for vid in villages}
-    assignment = _improve_flows(assignment, villages, geometry, merchant_model, cycles, budgets)
+    assignment, converged = _improve_flows(
+        assignment, villages, geometry, merchant_model, cycles, budgets, max_improve_passes
+    )
+    if not converged:
+        # Never let a truncated search masquerade as a converged one: it inflates
+        # over_budget_excess, so villages get reported over budget -- and handed
+        # Trade Office upgrade advice -- that a finished search would not flag.
+        warnings.append(
+            f"route search stopped after {max_improve_passes} improvement passes with "
+            f"better assignments still available; the over-budget figures below may "
+            f"overstate the real shortfall. Raise max_improve_passes to finish the search."
+        )
     pair_cargo = _merge_pair_cargo(assignment)
 
     routes: list[Route] = [
@@ -599,7 +679,7 @@ def build_plan(
     # leaving the plan purely merchant-minimal.
     if max_latency_hours is not None:
         routes = _spend_idle_merchants_on_latency(
-            routes, villages, merchant_model, cycles, budgets, max_latency_hours
+            routes, villages, merchant_model, cycles, budgets, max_latency_hours, min_send_fill
         )
 
     committed: dict[int, int] = {vid: 0 for vid in villages}

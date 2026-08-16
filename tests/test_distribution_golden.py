@@ -9,8 +9,18 @@ case that motivated the merchant-aware improvement pass: two geographically
 stranded villages (15 at 121|52, 21 at 7|35) whose crop surplus cannot be shipped
 within their merchant budget at any Trade Office level.
 
-The pinned totals track the current optimizer. Lowering them when a future search
-improvement does better is expected — raising them is a regression.
+On the assertions: the merchant-minimal figures are upper *bounds* (``<=``), not
+equalities, so a genuine search improvement passes rather than failing as a
+"regression". Equalities were tried first and were actively harmful — they made
+these two integers the only coverage for the fill floor, the pass cap and
+cross-resource bundling, so any legitimate re-baselining would have silently
+deleted that coverage. Those behaviours are now pinned directly in
+``test_distribution_optimizer.py``; what remains here is the ratchet.
+
+The latency plan is deliberately NOT bounded above by merchants: that pass exists
+to spend idle merchants on speed, so a better one may legitimately spend more.
+It is bounded by the properties that must hold instead — within budget, faster
+than the merchant-minimal plan, no new over-budget village.
 """
 
 import json
@@ -37,17 +47,22 @@ FIXTURE = Path(__file__).parent / "fixtures" / "distribution_real_account.json"
 # The greedy seed's numbers on this account, measured before the improvement pass
 # existed. The improved optimizer must never do worse than these.
 SEED_TOTAL_MERCHANTS = 163
-SEED_OVER_BUDGET_EXCESS = 22
 
-# The merchant-minimal plan (latency pass off). Pinned so an accidental
-# regression is caught; expected to only ever drop.
-EXPECTED_TOTAL_MERCHANTS = 152
-EXPECTED_OVER_BUDGET_EXCESS = 17
-# With the latency pass on (the default), idle merchants are spent on speed, so
-# the count rises within budget while travel time falls.
-EXPECTED_LATENCY_MERCHANTS = 163
-# Both remote and crop-heavy; no Trade Office upgrade shrinks village 15's haul.
-STRANDED_VILLAGES = {20015, 81449}
+# Ratchet on the merchant-minimal plan (latency pass off): the optimizer must do
+# at least this well. Tighten these when an improvement lands; never loosen them
+# without saying why.
+MAX_TOTAL_MERCHANTS = 152
+MAX_OVER_BUDGET_EXCESS = 17
+
+# Villages whose crop cannot be shipped within their merchant budget on this
+# snapshot. They are NOT interchangeable, and the distinction is the point:
+#   20015 ("15", 121|52) is distance-bound -- 100+ fields from everything, so no
+#       Trade Office level shrinks the haul and the report says so.
+#   81449 ("21", 7|35) is capacity-bound -- it has a concrete TO+7 fix, so a
+#       future improvement may legitimately route it within budget.
+# Hence a subset assertion for the set and an exact assertion only for 20015.
+DISTANCE_BOUND_VILLAGE = 20015
+CAPACITY_BOUND_VILLAGE = 81449
 
 
 def _median_latency(plan):
@@ -131,43 +146,58 @@ def test_the_improved_plan_never_costs_more_than_the_greedy_seed():
     assert plan.total_merchants <= seed
 
 
-def test_golden_totals_are_pinned():
+def test_the_optimizer_holds_its_ratchet():
     villages, plans, geometry, model = _load_case()
 
     plan = build_plan(villages, plans, geometry, model, max_latency_hours=None)
 
-    assert plan.total_merchants == EXPECTED_TOTAL_MERCHANTS
-    assert sum(o.excess for o in plan.over_budget) == EXPECTED_OVER_BUDGET_EXCESS
-    assert sum(o.excess for o in plan.over_budget) <= SEED_OVER_BUDGET_EXCESS
+    assert plan.total_merchants <= MAX_TOTAL_MERCHANTS
+    assert sum(o.excess for o in plan.over_budget) <= MAX_OVER_BUDGET_EXCESS
     assert not plan.shortfalls
+    # A finished search, so the over-budget figures below are trustworthy.
+    assert not [w for w in plan.warnings if "improvement passes" in w]
 
 
 def test_the_latency_pass_trades_idle_merchants_for_speed():
-    """With a latency target, otherwise-idle merchants shorten cycles: the count
-    rises within budget while median travel time falls, and no village that was
-    within budget is pushed over it."""
+    """With a latency target, otherwise-idle merchants shorten cycles: travel
+    time falls, spending stays inside every village's budget, and no village that
+    was within budget is pushed over it.
+
+    Deliberately no upper bound on merchants here -- see the module docstring.
+    """
     villages, plans, geometry, model = _load_case()
 
     minimal = build_plan(villages, plans, geometry, model, max_latency_hours=None)
     fast = build_plan(villages, plans, geometry, model, max_latency_hours=2.0)
 
-    assert fast.total_merchants == EXPECTED_LATENCY_MERCHANTS
-    assert fast.total_merchants > minimal.total_merchants
     assert _median_latency(fast) < _median_latency(minimal)
-    # Feasibility is unchanged: the same villages are over budget, no more.
-    assert {o.village_id for o in fast.over_budget} == {o.village_id for o in minimal.over_budget}
+    # Feasibility is unchanged: no village that was within budget is pushed over.
+    minimal_over = {o.village_id for o in minimal.over_budget}
+    assert {o.village_id for o in fast.over_budget} <= minimal_over
+    for vid, used in fast.merchants_committed.items():
+        if vid not in minimal_over:
+            assert used <= villages[vid].spare_merchants()
 
 
-def test_the_stranded_villages_are_reported_not_hidden():
-    """15 and 21 cannot ship their crop within budget; that must surface as an
-    honest over-budget report, and village 15 as unfixable by any upgrade."""
+def test_an_unroutable_village_is_reported_not_hidden():
+    """Village 15 cannot ship its crop within budget at any Trade Office level;
+    that must surface as an honest over-budget report saying no upgrade helps,
+    never as a silently trimmed plan."""
     villages, plans, geometry, model = _load_case()
 
     plan = build_plan(villages, plans, geometry, model)
 
-    assert {o.village_id for o in plan.over_budget} == STRANDED_VILLAGES
-    fifteen = next(o for o in plan.over_budget if o.village_id == 20015)
-    assert fifteen.trade_office_levels_needed is None  # 100+ fields out; distance-bound
+    over = {o.village_id: o for o in plan.over_budget}
+    assert DISTANCE_BOUND_VILLAGE in over
+    assert over[DISTANCE_BOUND_VILLAGE].excess > 0
+    # 100+ fields from everything: the trip, not the load, is the cost.
+    assert over[DISTANCE_BOUND_VILLAGE].trade_office_levels_needed is None
+
+    # The capacity-bound village may or may not still be over budget -- a better
+    # search could route it -- but while it is, it must carry its concrete fix.
+    capacity_bound = over.get(CAPACITY_BOUND_VILLAGE)
+    if capacity_bound is not None:
+        assert capacity_bound.trade_office_levels_needed is not None
 
 
 def test_golden_plan_is_deterministic():

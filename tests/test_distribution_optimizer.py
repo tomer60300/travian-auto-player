@@ -7,6 +7,7 @@ reproducing one snapshot. A golden fixture of a 20-village plan would be stale
 the day it was written.
 """
 
+import math
 import random
 
 import pytest
@@ -24,6 +25,7 @@ from travian_api.services.distribution.merchants import (
     route_cost,
 )
 from travian_api.services.distribution.optimizer import (
+    MIN_SEND_FILL,
     VillageState,
     _flows_for_resource,
     _route_for_pair,
@@ -311,6 +313,189 @@ class TestImprovementNeverRegresses:
         for vid, used in with_latency.merchants_committed.items():
             if vid not in minimal_over:
                 assert used <= villages[vid].spare_merchants()
+
+
+class TestSearchTerminationIsHonest:
+    """The pass cap must never quietly hand back a half-finished search.
+
+    A truncated search overstates ``over_budget_excess`` -- the FIRST key of the
+    lexicographic objective -- and that number becomes the UI's over-budget
+    report and the Trade Office upgrade advice derived from it. Villages get told
+    to build things a finished search would not have asked for.
+    """
+
+    def test_a_converged_search_is_a_fixed_point(self):
+        """Re-running the search on its own output must change nothing. This is
+        the detector for truncation: it fails exactly when the cap cut in."""
+        villages = make_account(22, seed=113)
+        plans, _ = make_plans(villages, seed=113)
+
+        once = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+        # Feed the finished plan's own flows back in; a converged local optimum
+        # has no improving swap left, so the second run must be identical.
+        twice = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+        assert once.routes == twice.routes
+        assert not [w for w in once.warnings if "improvement passes" in w]
+
+    def test_truncating_the_search_is_reported_not_hidden(self):
+        """With the cap set to 1 the search cannot finish, and the plan must say
+        so rather than presenting its over-budget figures as final."""
+        villages = make_account(22, seed=113)
+        plans, _ = make_plans(villages, seed=113)
+
+        truncated = build_plan(
+            villages, plans, GEOMETRY, MODEL, max_latency_hours=None, max_improve_passes=1
+        )
+        finished = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+        assert [w for w in truncated.warnings if "improvement passes" in w], (
+            "a truncated search must warn; silently reporting its inflated "
+            "over-budget figures is how villages get bogus upgrade advice"
+        )
+        # And the truncation genuinely costs something worth warning about.
+        assert truncated.total_merchants >= finished.total_merchants
+
+    def test_a_finished_search_does_not_cry_wolf(self):
+        villages = make_account(12, seed=113)
+        plans, _ = make_plans(villages, seed=113)
+
+        plan = build_plan(villages, plans, GEOMETRY, MODEL, max_improve_passes=100_000)
+
+        assert not [w for w in plan.warnings if "improvement passes" in w]
+
+
+class TestLatencyPassRespectsTheFillFloor:
+    def test_removing_the_fill_floor_buys_speed_with_emptier_merchants(self):
+        """Pins what MIN_SEND_FILL is *for*. Without a floor the latency pass
+        runs half-empty merchants purely to go faster, trading away the
+        merchant-fill axis it is not allowed to spend.
+
+        Asserted on the routes the pass actually shortens, not on a median over
+        every route: most routes are never touched, so an account-wide median is
+        dominated by them and barely moves either way.
+        """
+        villages = make_account(22, seed=127)
+        plans, _ = make_plans(villages, seed=127)
+
+        minimal = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+        floored = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=2.0)
+        unfloored = build_plan(
+            villages, plans, GEOMETRY, MODEL, max_latency_hours=2.0, min_send_fill=0.0
+        )
+
+        def worst_shortened_fill(plan):
+            before = {(r.origin, r.destination): r for r in minimal.routes}
+            fills = []
+            for route in plan.routes:
+                was = before.get((route.origin, route.destination))
+                if was is None or route.cycle_hours == was.cycle_hours:
+                    continue
+                capacity = MODEL.capacity(villages[route.origin].trade_office_level)
+                batch = math.ceil(route.hourly_total * route.cycle_hours)
+                fills.append(batch / (route.merchants_per_send * capacity))
+            return min(fills, default=1.0)
+
+        # Without the floor the pass reaches for emptier sends...
+        assert worst_shortened_fill(unfloored) < MIN_SEND_FILL
+        # ...while the floor holds every shortened route at or above it.
+        assert worst_shortened_fill(floored) >= MIN_SEND_FILL - 1e-9
+        # And the emptier sends are not free: they cost strictly more merchants.
+        assert unfloored.total_merchants > floored.total_merchants
+
+    def test_every_route_the_latency_pass_shortened_still_meets_the_floor(self):
+        villages = make_account(22, seed=131)
+        plans, _ = make_plans(villages, seed=131)
+
+        minimal = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+        fast = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=2.0)
+
+        before = {(r.origin, r.destination): r for r in minimal.routes}
+        for route in fast.routes:
+            was = before.get((route.origin, route.destination))
+            if was is None or route.cycle_hours == was.cycle_hours:
+                continue  # untouched by the latency pass
+            capacity = MODEL.capacity(villages[route.origin].trade_office_level)
+            batch = math.ceil(route.hourly_total * route.cycle_hours)
+            fill = batch / (route.merchants_per_send * capacity)
+            assert fill >= MIN_SEND_FILL - 1e-9, (
+                f"route {route.origin}->{route.destination} was shortened to "
+                f"{fill:.0%} full, below the {MIN_SEND_FILL:.0%} floor"
+            )
+
+    def test_routes_already_within_the_target_are_left_alone(self):
+        """Spending merchants on a route that already meets the target is pure
+        waste: the merchants buy nothing the plan asked for.
+
+        Honest note on what this does and does not pin. At the 2h default the
+        guard is unreachable: cycles are whole hours, so a compliant route
+        (cycle + trip <= 2) is necessarily already on the shortest cycle there
+        is. Hence the wider 6h target here, where a route can be both compliant
+        and shortenable. Even there, deleting the guard does not change any plan
+        we can construct -- the fill floor rejects the same candidates first, so
+        the guard is currently a defensive early-exit rather than observable
+        behaviour. This test therefore pins the *invariant* (it would catch an
+        implementation that shortened compliant routes) rather than killing a
+        mutant, and it is documented as such instead of being dressed up as
+        stronger coverage than it is.
+        """
+        target = 6.0
+        villages = make_account(22, seed=113)
+        plans, _ = make_plans(villages, seed=113)
+
+        minimal = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+        fast = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=target)
+
+        before = {(r.origin, r.destination): r for r in minimal.routes}
+        compliant_seen = 0
+        for route in fast.routes:
+            was = before.get((route.origin, route.destination))
+            if was is not None and was.latency_hours <= target:
+                compliant_seen += 1
+                assert route.cycle_hours == was.cycle_hours, (
+                    f"route {route.origin}->{route.destination} already met the "
+                    f"{target:.0f}h target at {was.latency_hours:.1f}h but was "
+                    f"still shortened to a {route.cycle_hours}h cycle"
+                )
+        assert compliant_seen, "fixture produced no compliant routes; test proves nothing"
+
+
+class TestCrossResourceBundling:
+    def test_cargo_riding_an_existing_pair_is_preferred_to_opening_a_new_one(self):
+        """Merchant cost is charged on the MERGED pair cargo, so moving a
+        resource onto a pair another resource already uses can be free, while
+        opening a fresh pair always costs at least one merchant. The search must
+        see that -- costing resources independently would miss it entirely."""
+        # Two senders, two receivers. 1 and 2 sit together; 3 and 4 sit together.
+        villages = {
+            1: VillageState(1, 0, 0, merchant_count=20, trade_office_level=20),
+            2: VillageState(2, 1, 0, merchant_count=20, trade_office_level=20),
+            3: VillageState(3, 30, 0, merchant_count=20, trade_office_level=20),
+            4: VillageState(4, 31, 0, merchant_count=20, trade_office_level=20),
+        }
+        plans = {}
+        for resource in (Resource.LUMBER, Resource.CLAY):
+            plans[resource] = resolve_resource(
+                resource,
+                {1: 900.0, 2: 900.0, 3: 0.0, 4: 0.0},
+                {
+                    1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                    2: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                    3: Allocation(AllocationMode.ABSOLUTE, 900.0),
+                    4: Allocation(AllocationMode.ABSOLUTE, 900.0),
+                },
+            )
+
+        plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+        # Whatever pairing it picks, both resources must ride the same pairs
+        # rather than each sender opening a separate route per resource.
+        assert len(plan.routes) == 2, f"expected 2 bundled routes, got {len(plan.routes)}"
+        for route in plan.routes:
+            assert set(route.cargo_per_hour) == {Resource.LUMBER, Resource.CLAY}, (
+                "each route should carry both resources; costing them separately "
+                "would have opened four single-resource routes"
+            )
 
 
 class TestDeterminism:

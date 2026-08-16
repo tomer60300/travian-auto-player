@@ -107,10 +107,16 @@ def test_saved_server_connect_succeeds_even_if_the_stamp_fails(monkeypatch):
     assert res.connected is True
 
 
-def test_saved_server_connect_stamps_the_password_matching_row(monkeypatch):
-    """connect_saved_server routes its last_connected stamp through the shared
-    duplicate-aware helper: among legacy duplicates the row whose password just
-    authenticated is stamped, not merely whichever row the id lookup returned."""
+def test_saved_server_connect_stamps_the_row_the_user_clicked(monkeypatch):
+    """The card the user pressed must be the card that lights up.
+
+    Routing this stamp through the duplicate-aware _update_last_connected helper
+    looks tidier but is wrong here: the password is decrypted from the clicked
+    row, so every duplicate sharing it matches, and the helper (ordering by id
+    desc) stamped the *other* row -- leaving the clicked card reading stale while
+    an accidental duplicate showed 'just now', and moving which row auto-restore
+    treats as canonical.
+    """
     live = SimpleNamespace(
         server_url="https://ts1.x1.europe.travian.com",
         player_name="Chieftain",
@@ -125,34 +131,34 @@ def test_saved_server_connect_stamps_the_password_matching_row(monkeypatch):
     monkeypatch.setattr(auth_routes.session_manager, "connect", ok_connect)
     monkeypatch.setattr(auth_routes, "decrypt_credential", lambda s: s.removeprefix("enc:"))
 
-    def row(row_id, password):
+    def row(row_id, label):
         return SimpleNamespace(
             id=row_id,
             server_url="https://ts1.x1.europe.travian.com",
             travian_username="alice",
-            encrypted_password=f"enc:{password}",
+            encrypted_password="enc:same-pw",
+            label=label,
             last_connected=None,
         )
 
-    clicked = row(3, "current-pw")  # the row addressed by server_id
-    newest_stale = row(9, "old-pw")  # a legacy duplicate holding the wrong password
-    older_correct = row(3, "current-pw")  # same account/password, distinct object
+    clicked = row(5, "Main")
+    duplicate = row(9, "Accidental duplicate")  # same account AND same password
 
     class _Db:
         async def execute(self, _query):
             return SimpleNamespace(
                 scalar_one_or_none=lambda: clicked,
-                scalars=lambda: SimpleNamespace(all=lambda: [newest_stale, older_correct]),
+                scalars=lambda: SimpleNamespace(all=lambda: [duplicate, clicked]),
             )
 
         async def commit(self):
             pass
 
-    res = asyncio.run(auth_routes.connect_saved_server(3, SimpleNamespace(id=1), _Db()))
+    res = asyncio.run(auth_routes.connect_saved_server(5, SimpleNamespace(id=1), _Db()))
 
     assert res.connected is True
-    assert older_correct.last_connected is not None
-    assert newest_stale.last_connected is None
+    assert clicked.last_connected is not None
+    assert duplicate.last_connected is None
 
 
 def test_status_attempts_a_saved_credential_restore(monkeypatch):

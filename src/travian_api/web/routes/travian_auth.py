@@ -412,10 +412,19 @@ async def connect_saved_server(
     # A proven-good login clears any failed-restore backoff (see /connect).
     reset_restore_backoff(user.id)
 
-    # 4. Update last_connected through the shared, duplicate-aware helper the
-    # /connect and /reconnect paths use, so legacy duplicate rows get the row
-    # holding the password that just authenticated stamped — not merely the one
-    # looked up by id. Best-effort: a DB hiccup must not fail the live login.
-    await _update_last_connected(db, user.id, cred.server_url, cred.travian_username, password)
+    # 4. Stamp THIS row directly. Deliberately not the duplicate-aware
+    # _update_last_connected helper that /connect and /reconnect use: there the
+    # password arrives from the request or session and genuinely is not tied to a
+    # row, so the helper has to search for the row it authenticated. Here the
+    # password was just decrypted from `cred` itself, so `cred` always matches --
+    # the helper could only ever pick a *different* duplicate holding the same
+    # password (it orders by id desc), stamping a row the user did not click and
+    # moving which row auto-restore treats as canonical. Best-effort: a DB hiccup
+    # must not report the successful login as a failure.
+    try:
+        cred.last_connected = datetime.now(UTC)
+        await db.commit()
+    except Exception:
+        logger.warning("Connected user %s but could not stamp last_connected", user.id)
 
     return _session_to_status(session)

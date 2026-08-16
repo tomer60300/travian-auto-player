@@ -22,6 +22,8 @@ from .geometry import MapGeometry
 from .merchants import DAILY_BEAT_CYCLES, MerchantModel
 from .optimizer import (
     DEFAULT_MERCHANT_RESERVE,
+    MAX_IMPROVE_PASSES,
+    MIN_SEND_FILL,
     OverBudget,
     Plan,
     Shortfall,
@@ -43,6 +45,14 @@ class PlannerConfig:
     max_latency_hours: float | None = 2.0
     min_arrival_gap_minutes: int = DEFAULT_MIN_ARRIVAL_GAP_MINUTES
     reserved_window: tuple[int, int] | None = None
+    min_send_fill: float = MIN_SEND_FILL
+    """How full a merchant must stay when idle merchants are spent on speed.
+
+    The latency/fill trade-off dial: lower it and routes get faster on emptier
+    merchants, raise it and they stay full but slower. It materially moves the
+    plan, so it belongs here rather than buried as a module constant.
+    """
+    max_improve_passes: int = MAX_IMPROVE_PASSES
 
 
 @dataclass(frozen=True)
@@ -138,6 +148,8 @@ def craft_plan(
         merchant_reserve=config.merchant_reserve,
         cycles=config.cycles,
         max_latency_hours=config.max_latency_hours,
+        min_send_fill=config.min_send_fill,
+        max_improve_passes=config.max_improve_passes,
     )
     warnings.extend(routing.warnings)
 

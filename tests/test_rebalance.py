@@ -268,6 +268,32 @@ class TestAssignRoleAndListName:
         roles = [p.target_list_role for p in ordered]
         assert roles == ["HIGH", "MID"]
 
+    def test_band_sizes_track_the_documented_split(self):
+        """Pin the whole curve, not just the sizes that happened to be noticed.
+
+        The bands are the nearest integer partition of 30/50/20, so no band may
+        sit further than one whole placement from its ideal share. Flooring a cut
+        breached this (n=6 put 67% in MID against a documented 50%), and because
+        only n=1,2,3,10 were pinned the drift was invisible for every other size.
+        """
+        for n in range(1, 31):
+            placements = [self._make_placement(1.0 - i * 0.01) for i in range(n)]
+            roles = [p.target_list_role for p in assign_role_and_list_name("V1", placements)]
+            got = (roles.count("HIGH"), roles.count("MID"), roles.count("INACTIVE"))
+
+            assert sum(got) == n, f"n={n}: placements lost, got {got}"
+            assert got[0] >= 1, f"n={n}: every village must keep a HIGH list"
+            # Roles are assigned best-first, so the bands must be contiguous.
+            assert roles == sorted(roles, key=["HIGH", "MID", "INACTIVE"].index), f"n={n}"
+            for band, share, count in zip(("HIGH", "MID", "INACTIVE"), (0.3, 0.5, 0.2), got):
+                # n=1..3 cannot honour the shares at all (a single placement is
+                # 100% HIGH by construction); above that the rounding must hold.
+                if n > 3:
+                    assert abs(count - n * share) < 1.0, (
+                        f"n={n} {band}={count} is more than one placement from "
+                        f"its {share:.0%} share ({n * share:.1f}); got {got}"
+                    )
+
     def test_list_name_uses_display_unit_and_village(self):
         p = self._make_placement(1.0, village="V3")
         assign_role_and_list_name("V3", [p])

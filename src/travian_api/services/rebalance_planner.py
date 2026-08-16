@@ -502,11 +502,15 @@ def assign_role_and_list_name(
     # Floored cuts would leave 1-3 placement villages with no HIGH list at all
     # (a single placement landed straight in INACTIVE), so every non-empty set
     # promotes at least its best target.
-    high_cut = max(1, int(n * HIGH_FRACTION)) if n else 0
-    # Round the MID boundary rather than floor it: flooring int(n * MID_FRACTION)
-    # pulls the cut a whole slot short whenever the fractional part is >= 0.5, so
-    # two placements (2 * 0.80 = 1.6 -> 1) sent the runner-up to INACTIVE instead
-    # of MID, deactivating a live raid target.
+    # Round BOTH cuts rather than floor them, so the bands land on the nearest
+    # integer partition of the documented 30/50/20 split. Flooring pulls a cut a
+    # whole slot short whenever the fractional part is >= 0.5: at the MID
+    # boundary that sent the runner-up of two placements (2 * 0.80 = 1.6 -> 1)
+    # to INACTIVE, deactivating a live raid target; at the HIGH boundary it
+    # undersized HIGH and left MID absorbing the shortfall (n=6 gave MID 67%
+    # against a documented 50%). Rounding both is never further from the target
+    # than flooring, for any n -- see test_band_sizes_track_the_documented_split.
+    high_cut = max(1, round(n * HIGH_FRACTION)) if n else 0
     mid_cut = max(high_cut, round(n * MID_FRACTION))
     for idx, p in enumerate(sorted_placements):
         if idx < high_cut:
