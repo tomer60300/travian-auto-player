@@ -140,8 +140,37 @@ class VillageConfig(BaseModel):
     )
 
 
+class ForeignTarget(BaseModel):
+    """Crop owed to a village outside the account (profile section 7.3).
+
+    Not a village and deliberately not modelled as one: it has no production, no
+    merchants and no stores, so it can receive crop and never send any. Giving it
+    a village row would invite treating it as one -- the profile is explicit that
+    foreign targets belong in their own section for exactly that reason.
+
+    Supplied by hand because nothing in the game tells us about it: a name to
+    recognise it by, where it is, and how much crop per hour was promised.
+    """
+
+    name: str = Field(min_length=1)
+    x: int
+    y: int
+    crop_per_hour: float = Field(gt=0)
+    safety_margin_pct: float = Field(
+        default=0.0,
+        ge=0,
+        le=100,
+        description=(
+            "Ship this much above the promise. Travel time and rounding mean a "
+            "route sized exactly to the obligation arrives a little short, and "
+            "being short on a tribute is worse than sending a few crop spare."
+        ),
+    )
+
+
 class PlanRequest(BaseModel):
     snapshot: list[VillageSnapshot]
+    foreign_targets: list[ForeignTarget] = []
     config: list[VillageConfig] = []
     # resource -> village_id -> allocation
     allocations: dict[Resource, dict[int, AllocationInput]] = {}
@@ -399,6 +428,8 @@ def _storage_warnings(body: PlanRequest, plan) -> list[str]:
                 shipped.setdefault(route.origin, {}).get(resource, 0.0) - amount
             )
 
+    # Only real villages have stores. A foreign tribute is a sink with no
+    # granary to overflow or starve, and it never appears in body.snapshot.
     for village in body.snapshot:
         vid = village.village_id
         for resource in Resource:
@@ -455,6 +486,24 @@ async def post_plan(
             detail="Snapshot is empty — fetch account state first.",
         )
 
+    # Foreign tributes join the plan as crop SINKS. Negative ids keep them
+    # clearly apart from real villages (which are always positive) so a target
+    # can never be confused for one, and merchant_count=0 makes it structurally
+    # impossible for one to ship anything: it can receive and nothing else.
+    foreign_ids: dict[int, ForeignTarget] = {}
+    for index, target in enumerate(body.foreign_targets):
+        target_id = -(index + 1)
+        foreign_ids[target_id] = target
+        names[target_id] = target.name
+        villages[target_id] = VillageState(
+            village_id=target_id,
+            x=target.x,
+            y=target.y,
+            merchant_count=0,
+            trade_office_level=0,
+            name=target.name,
+        )
+
     rate_field = {
         Resource.LUMBER: "lumber_per_hour",
         Resource.CLAY: "clay_per_hour",
@@ -470,6 +519,11 @@ async def post_plan(
             # than defaulted to 0, which would read as a healthy village.
             if getattr(v, field_name) is not None
         }
+        if resource is Resource.CROP and foreign_ids and rates:
+            # Zero production: a tribute grows nothing, it only consumes. Adding
+            # it to the crop map is what makes resolve_resource deduct the
+            # obligation from the account pool via the remainder village.
+            rates.update({vid: 0.0 for vid in foreign_ids})
         if rates:
             productions[resource] = rates
 
@@ -502,6 +556,14 @@ async def post_plan(
             }
             for resource, per_village in body.allocations.items()
         }
+        if foreign_ids:
+            # The tribute is a fixed retention target at the sink: it must end up
+            # holding exactly what was promised (plus margin), and since it grows
+            # nothing, all of that has to be shipped in.
+            crop_allocations = allocations.setdefault(Resource.CROP, {})
+            for target_id, target in foreign_ids.items():
+                owed = target.crop_per_hour * (1.0 + target.safety_margin_pct / 100.0)
+                crop_allocations[target_id] = Allocation(mode=AllocationMode.ABSOLUTE, value=owed)
         for resource in sorted(set(allocations) - set(productions), key=lambda r: r.value):
             if allocations.pop(resource):
                 extra_warnings.append(
@@ -539,6 +601,34 @@ async def post_plan(
             )
 
     extra_warnings.extend(_storage_warnings(body, plan))
+
+    for target_id, target in foreign_ids.items():
+        suppliers = sorted({row.origin for row in plan.rows if row.destination == target_id})
+        if not suppliers:
+            extra_warnings.append(
+                f"{target.name} ({target.x}|{target.y}) is owed "
+                f"{target.crop_per_hour:,.0f} crop/h but no village could supply it"
+            )
+            continue
+        if len(suppliers) > 1:
+            extra_warnings.append(
+                f"{target.name} ({target.x}|{target.y}) is supplied by "
+                + ", ".join(village_label(vid, names) for vid in suppliers)
+                + " — several routes to keep track of; consider raising one "
+                "supplier's share so a single route covers it"
+            )
+        # Section 7.3: a tribute must not lapse, and the first delivery only
+        # lands after a full one-way trip. Saying so is the difference between
+        # a planned gap and an apparent broken promise.
+        first = max(
+            (row.first_delivery_hours for row in plan.rows if row.destination == target_id),
+            default=0.0,
+        )
+        extra_warnings.append(
+            f"{target.name} ({target.x}|{target.y}): first delivery lands "
+            f"{first:.1f}h after the route is created, so the tribute starts "
+            f"late unless it is covered by hand until then"
+        )
 
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
     over = {o.village_id for o in plan.over_budget}

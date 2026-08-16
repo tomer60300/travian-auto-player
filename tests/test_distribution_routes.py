@@ -13,7 +13,9 @@ import pytest
 from fastapi import HTTPException
 
 from travian_api.services.building_service import BuildingService
+from travian_api.services.distribution.allocation import Resource
 from travian_api.web.routes.distribution import (
+    ForeignTarget,
     PlanRequest,
     get_snapshot,
     post_plan,
@@ -210,6 +212,81 @@ def _plan_request(allocations, merchants_free=20, crop=None):
             "allocations": allocations,
         }
     )
+
+
+class TestForeignTribute:
+    """Crop owed to a village outside the account (profile section 7.3).
+
+    Supplied by hand, because nothing in the game tells us about it. It is a
+    sink, not a village: it grows nothing, holds nothing and can never ship
+    anything, and the crop it is owed has to come out of the account's pool
+    rather than appearing from nowhere.
+    """
+
+    def _body(self, crop_per_hour=500.0, margin=0.0, **kw):
+        body = _plan_request(
+            {"crop": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}},
+            crop=3000.0,
+        )
+        body.foreign_targets = [
+            ForeignTarget(
+                name="Ally-Keep",
+                x=40,
+                y=40,
+                crop_per_hour=crop_per_hour,
+                safety_margin_pct=margin,
+                **kw,
+            )
+        ]
+        return body
+
+    def test_the_tribute_is_shipped_and_comes_out_of_the_pool(self):
+        with_tribute = asyncio.run(post_plan(self._body(crop_per_hour=500.0)))
+        without = asyncio.run(
+            post_plan(self._body(crop_per_hour=500.0).model_copy(update={"foreign_targets": []}))
+        )
+
+        delivered = sum(
+            row.cargo.get(Resource.CROP, 0) for row in with_tribute.rows if row.destination < 0
+        )
+        assert delivered > 0, "the tribute was never actually shipped"
+
+        # It is deducted, not conjured: the remainder village keeps less crop
+        # than it would have with no obligation.
+        crop_before = next(u for u in without.unallocated if u.resource is Resource.CROP)
+        crop_after = next(u for u in with_tribute.unallocated if u.resource is Resource.CROP)
+        assert crop_after.unallocated < crop_before.unallocated
+
+    def test_the_safety_margin_ships_above_the_promise(self):
+        plain = asyncio.run(post_plan(self._body(crop_per_hour=500.0, margin=0.0)))
+        padded = asyncio.run(post_plan(self._body(crop_per_hour=500.0, margin=20.0)))
+
+        def to_target(res):
+            return sum(row.cargo.get(Resource.CROP, 0) for row in res.rows if row.destination < 0)
+
+        assert to_target(padded) > to_target(plain)
+
+    def test_a_tribute_can_never_be_asked_to_ship(self):
+        """It has no merchants, so any plan that made it an origin would be
+        proposing something the game cannot execute."""
+        res = asyncio.run(post_plan(self._body()))
+
+        assert not [row for row in res.rows if row.origin < 0]
+
+    def test_the_cold_start_is_reported(self):
+        """The first delivery only lands after a full one-way trip; a tribute
+        that silently starts late looks like a broken promise."""
+        res = asyncio.run(post_plan(self._body()))
+
+        assert any("first delivery lands" in w and "Ally-Keep" in w for w in res.warnings)
+
+    def test_an_unsuppliable_tribute_says_so(self):
+        """Promising more crop than the account grows must be reported, not
+        quietly under-shipped."""
+        res = asyncio.run(post_plan(self._body(crop_per_hour=10_000_000.0)))
+
+        assert any("Ally-Keep" in w for w in res.warnings)
+        assert res.shortfalls or not res.feasible
 
 
 class TestWarningsNameVillages:

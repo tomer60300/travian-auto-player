@@ -71,6 +71,13 @@ DEFAULT_MERCHANT_RESERVE = 2
 # letting routes speed up where the trip, not the load, is the cost.
 MIN_SEND_FILL = 0.6
 
+# How much a route into a foreign tribute counts for, against the route-count
+# term. A tribute split across several villages is several routes to create and
+# watch for one obligation, so consolidating one is worth more than shedding an
+# ordinary route. Sinks are identified structurally -- they can receive but have
+# no merchants to send with -- rather than by any flag.
+SINK_ROUTE_WEIGHT = 4
+
 
 @dataclass(frozen=True)
 class VillageState:
@@ -374,11 +381,15 @@ def _spend_idle_merchants_on_latency(
         indices = by_origin[origin]
         spare = budgets.get(origin, 0) - sum(result[i].merchants_committed for i in indices)
         while spare > 0:
-            best: tuple[tuple[int, float, int, int], int, int, int, int] | None = None
+            best: tuple[tuple[int, int, float, int, int], int, int, int, int] | None = None
             for i in indices:
                 route = result[i]
-                if route.latency_hours <= latency_target:
-                    continue  # already fast enough; do not waste merchants on it
+                # Every route is a candidate, not only the ones over target.
+                # A 1h cycle really is better than a 3h one, so once the routes
+                # that breach the target have been dealt with, leftover idle
+                # merchants keep buying speed on the rest. Routes that already
+                # comply are simply ranked last, via `urgency` below.
+                urgency = int(route.latency_hours > latency_target)
                 one_way = route.one_way_minutes
                 for cost in cycle_sweep(route.hourly_total, 2.0 * one_way, capacity, cycles):
                     if cost.cycle_hours >= route.cycle_hours:
@@ -394,7 +405,9 @@ def _spend_idle_merchants_on_latency(
                         continue
                     compliant = int(new_latency <= latency_target)
                     per_merchant = (route.latency_hours - new_latency) / delta
-                    key = (compliant, per_merchant, -delta, -cost.cycle_hours)
+                    # Fix what breaches the target first, then buy the biggest
+                    # remaining latency cut per merchant spent.
+                    key = (urgency, compliant, per_merchant, -delta, -cost.cycle_hours)
                     if best is None or key > best[0]:
                         best = (
                             key,
@@ -493,6 +506,14 @@ def _improve_flows(
     def excess(origin: int, count: int) -> int:
         return max(0, count - budgets.get(origin, 0))
 
+    # A village with no merchants cannot ship, so it is a pure sink: a foreign
+    # tribute. Splitting one across suppliers is harder to run than an ordinary
+    # split, so each route into it weighs more in the route-count term.
+    sinks = {vid for vid, village in villages.items() if village.merchant_count == 0}
+
+    def route_weight(key: FlowKey) -> int:
+        return SINK_ROUTE_WEIGHT if key[1] in sinks else 1
+
     # Pairs proven non-improving and not invalidated by a swap since. Purely a
     # memo -- it never changes which swap is chosen, only how much work is
     # repeated to find it.
@@ -556,8 +577,8 @@ def _improve_flows(
             for origin, delta in per_origin.items()
         )
         total_delta = sum(new_merch.values()) - sum(pair_merch.get(key, 0) for key in touched_keys)
-        rc_delta = sum(1 for key in touched_keys if new_merch[key] > 0) - sum(
-            1 for key in touched_keys if pair_merch.get(key, 0) > 0
+        rc_delta = sum(route_weight(key) for key in touched_keys if new_merch[key] > 0) - sum(
+            route_weight(key) for key in touched_keys if pair_merch.get(key, 0) > 0
         )
         if (over_delta, total_delta, rc_delta) >= (0, 0, 0):
             return False
@@ -713,9 +734,9 @@ def _improve_flows(
                     total_delta = sum(new_merch.values()) - sum(
                         pair_merch.get(key, 0) for key, _ in moved
                     )
-                    rc_delta = sum(1 for key, _ in moved if new_merch[key] > 0) - sum(
-                        1 for key, _ in moved if pair_merch.get(key, 0) > 0
-                    )
+                    rc_delta = sum(
+                        route_weight(key) for key, _ in moved if new_merch[key] > 0
+                    ) - sum(route_weight(key) for key, _ in moved if pair_merch.get(key, 0) > 0)
 
                     # The whole objective only shifts by these deltas, so the
                     # full tuple improves exactly when the delta tuple is < 0.
