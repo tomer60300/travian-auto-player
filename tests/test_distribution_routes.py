@@ -272,6 +272,43 @@ class TestStorageSafety:
 
         assert not [w for w in result.warnings if "fills its store" in w or "hits the cap" in w]
 
+    def test_route_flows_are_not_counted_twice(self):
+        """The two checks take different inputs and must not be crossed.
+
+        store_status works on the post-plan NET rate, with routes folded into a
+        continuous average. simulate_day applies the routes itself, as discrete
+        dispatches and arrivals. Handing the net rate to the simulation banks
+        every delivery twice -- a receiver ends the day holding double what
+        arrived -- and invents overflows that do not exist.
+        """
+        body = PlanRequest(
+            snapshot=[
+                # A sender with a large surplus and a receiver sized so that one
+                # day of genuine delivery fits, but a doubled one does not.
+                self._village(
+                    1, x=0, y=0, lumber_per_hour=8000, lumber_stock=0, warehouse_capacity=2_000_000
+                ),
+                self._village(
+                    2,
+                    x=3,
+                    y=0,
+                    lumber_per_hour=0,
+                    lumber_stock=0,
+                    warehouse_capacity=250_000,
+                    crop_per_hour=1000,
+                ),
+            ],
+            allocations={
+                "lumber": {1: {"mode": "absolute", "value": 0}, 2: {"mode": "remainder"}},
+            },
+        )
+
+        result = asyncio.run(post_plan(body, SimpleNamespace(id=1)))
+
+        # 8,000/h = 192,000 a day, inside the 250,000 cap. Doubled it would not be.
+        bogus = [w for w in result.warnings if "hits the cap" in w and "village 2" in w]
+        assert not bogus, f"phantom overflow from double-counted deliveries: {bogus}"
+
     def test_storage_checks_cost_no_game_requests(self):
         """post_plan takes no Travian session at all, so the whole check runs on
         state the caller already has."""

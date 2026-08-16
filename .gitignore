@@ -84,3 +84,7 @@ farm-list-creation/logs/run*.log
 farm-list-creation/progress.json
 scout-results*.md
 *-scout-results*.json
+
+# Local dev/production server logs (started by the agent on 8000/8001)
+.server-*.log
+.server-*.log.err

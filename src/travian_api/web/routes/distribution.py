@@ -376,6 +376,12 @@ def _storage_warnings(body: PlanRequest, plan) -> list[str]:
     statuses = []
     stocks: dict[int, dict[Resource, int]] = {}
     capacities: dict[int, dict[Resource, int]] = {}
+    # OWN production only. The two checks need different inputs and mixing them
+    # up double-counts every route: store_status works on the post-plan net rate
+    # (a continuous average, routes folded in), while simulate_day applies the
+    # routes itself as discrete dispatches and arrivals. Feeding the net rate to
+    # the simulation makes a receiver bank its deliveries twice -- 48,000 a day
+    # where 24,000 arrives -- and invent overflows that do not exist.
     own_rates: dict[int, dict[Resource, float]] = {}
 
     # Net rate per village per resource AFTER the plan: own production plus what
@@ -404,7 +410,7 @@ def _storage_warnings(body: PlanRequest, plan) -> list[str]:
             )
             net = float(own) + shipped.get(vid, {}).get(resource, 0.0)
             stocks.setdefault(vid, {})[resource] = stock
-            own_rates.setdefault(vid, {})[resource] = net
+            own_rates.setdefault(vid, {})[resource] = float(own)
             if cap is not None:
                 capacities.setdefault(vid, {})[resource] = cap
             statuses.append(store_status(vid, resource, stock, cap, net))
