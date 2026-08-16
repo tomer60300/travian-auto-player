@@ -41,7 +41,6 @@ class RateLimiter:
     async def __call__(self, request: Request) -> None:
         key = self._key(request)
         now = time.monotonic()
-        # Prune old entries
         window_start = now - self.window
         self._calls[key] = [t for t in self._calls[key] if t > window_start]
         if len(self._calls[key]) >= self.max_calls:
@@ -50,11 +49,20 @@ class RateLimiter:
                 detail=f"Rate limit exceeded. Max {self.max_calls} requests per {self.window}s.",
             )
         self._calls[key].append(now)
-        # Prune empty keys to prevent unbounded memory growth
+        # Bound memory on a remotely-exposed instance seeing many source IPs.
+        # The current key was just refreshed, so an "empty key" sweep would
+        # never fire (it always has a fresh timestamp); instead prune every
+        # OTHER key down to its in-window timestamps and drop those left empty.
+        # Only sweep past a threshold so the common path stays O(1).
         if len(self._calls) > 100:
-            empty_keys = [k for k, v in self._calls.items() if not v]
-            for k in empty_keys:
-                del self._calls[k]
+            for k in list(self._calls):
+                if k == key:
+                    continue
+                fresh = [t for t in self._calls[k] if t > window_start]
+                if fresh:
+                    self._calls[k] = fresh
+                else:
+                    del self._calls[k]
 
 
 # Pre-configured limiters for different route groups

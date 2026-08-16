@@ -121,11 +121,15 @@ async def upgrade_building(
     _=Depends(action_limiter),
 ):
     """Upgrade an existing building to the next level."""
+    # Resolve BEFORE the try: require_village_id raises a deliberate 400 for a
+    # missing village, and the broad except below would otherwise rewrap that
+    # client error as a misleading 502. Every sibling route hoists it too.
+    vid = require_village_id(body.village_id)
     try:
         result = await session.building_service.upgrade_building(
             slot_id=body.slot_id,
             allow_gold=body.allow_gold,
-            village_id=require_village_id(body.village_id),
+            village_id=vid,
         )
     except Exception as exc:
         logger.exception("Failed to upgrade building slot %s", body.slot_id)

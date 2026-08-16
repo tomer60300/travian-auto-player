@@ -127,3 +127,17 @@ class TestConnectIsGuarded:
 
         assert exc.value.status_code == 400
         assert manager.get(1) is None
+
+    def test_the_locked_core_validates_so_restore_paths_are_covered(self):
+        """Auto-restore replays a saved URL by calling _connect_locked directly.
+        The guard lives there (not only in connect()), so a saved host that is
+        now unsafe -- moved DNS, or a legacy row from before the guard -- is
+        rejected at connection time rather than trusted."""
+        from travian_api.web.sessions import SessionManager
+
+        manager = SessionManager()
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(manager._connect_locked(1, "https://192.168.0.5", "u", "p"))
+
+        assert exc.value.status_code == 400
+        assert manager.get(1) is None

@@ -298,7 +298,9 @@ class UnallocatedResponse(BaseModel):
     resource: Resource
     total_production: float
     unallocated: float
-    remainder_village_id: int | None
+    # Optional in meaning (a resource may have no remainder village) and given
+    # an explicit default so the model never depends on the caller supplying it.
+    remainder_village_id: int | None = None
 
 
 class PlanResponse(BaseModel):

@@ -159,6 +159,24 @@ class MilitaryService:
                 x, y, troops, event_type, scout_target, village_id
             )
 
+    @staticmethod
+    def _send_succeeded(result_html: str, action_token: str) -> bool:
+        """Decide whether a confirmed troop send actually dispatched.
+
+        After confirming, the server returns the rally-point page. The send
+        failed if the confirmation form reappears with the SAME action token
+        (it was not processed) or an error div is present. 'confirmSendTroops'
+        is always a button on that page and is NOT a stuck-confirming signal.
+
+        A "troopMovement" element is deliberately NOT treated as a positive
+        signal: an account with other raids already in flight always shows one,
+        so trusting it would report a rejected send (form reappeared, or an
+        error present) as dispatched.
+        """
+        form_reappeared = bool(action_token) and f'value="{action_token}"' in result_html
+        has_error = bool(re.search(r'class="error[^"]*"', result_html))
+        return not form_reappeared and not has_error
+
     async def _send_troops_unlocked(
         self,
         x: int,
@@ -274,23 +292,7 @@ class MilitaryService:
                 rally_url, final_data, safe_to_retry=False
             )
 
-            # Success detection: after confirming, the server returns the rally point
-            # page. The key negative indicator is the confirmation form reappearing
-            # with the SAME action token (means it wasn't processed).
-            # Positive indicators: troop movements, rally overview, or simply
-            # a valid page without the form reappearing or an error message.
-            action_token = final_data.get("action", "")
-            form_reappeared = action_token and f'value="{action_token}"' in result_html
-            has_error = bool(re.search(r'class="error[^"]*"', result_html))
-            has_troop_movement = "troopMovement" in result_html
-
-            # Success: the old action token was consumed (not reappearing),
-            # no error divs, and ideally we see troop movements on the page.
-            # Note: 'confirmSendTroops' always appears as a button on the
-            # rally point page — it does NOT indicate we're stuck confirming.
-            success = not form_reappeared and not has_error
-            if has_troop_movement:
-                success = True
+            success = self._send_succeeded(result_html, final_data.get("action", ""))
 
             # Try to extract travel time from the confirmation we parsed
             travel_time = ""

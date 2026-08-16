@@ -61,6 +61,27 @@ class TestVillageContext:
 
         assert exc.value.status_code == 400
 
+    def test_upgrade_without_a_village_is_a_400_not_a_502(self):
+        """require_village_id raises a deliberate 400; when it ran inside the
+        service-error try it was rewrapped as a misleading 502. It must reach
+        the client as the 400 it is."""
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+
+        from travian_api.web.routes.buildings import upgrade_building
+
+        # A session whose service must never be reached: if the 400 is raised
+        # first (before the try), this stub is untouched.
+        session = SimpleNamespace(building_service=None)
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(
+                upgrade_building(UpgradeRequest(slot_id=1, village_id=None), session=session)
+            )
+
+        assert exc.value.status_code == 400
+
 
 class TestVillageSwitch:
     def test_switch_is_tab_local_and_does_not_mutate_shared_state(self):

@@ -225,15 +225,9 @@ class SessionManager:
         Serialized on the per-user reconnect lock so a logout that returns
         while this login is in flight cannot be undone when the new session
         installs. Auto-reconnect paths that already hold that lock call
-        :meth:`_connect_locked` directly instead -- they replay credentials
-        that already passed this guard when they were first connected.
-
-        The URL guard runs before anything else: the backend logs into
-        whatever URL it is given and follows the target's redirects, so an
-        unvalidated URL is an authenticated SSRF primitive (loopback, LAN
-        services) for any registered user.
+        :meth:`_connect_locked` directly -- the URL guard lives there so those
+        paths are validated too.
         """
-        await ensure_safe_server_url(server_url)
         async with self.get_reconnect_lock(user_id):
             return await self._connect_locked(user_id, server_url, username, password)
 
@@ -256,7 +250,14 @@ class SessionManager:
         pre-login check avoids wasting a real login in the common case; the
         re-check under the install lock closes the race with jobs that start
         while the login is in flight.
+
+        The SSRF guard runs here, the single choke point every path funnels
+        through -- foreground connect AND the auto-restore paths that replay a
+        saved URL. A saved host whose DNS has since moved to a private address,
+        or a legacy row from before the guard existed, is caught at connection
+        time rather than trusted because it was once accepted.
         """
+        await ensure_safe_server_url(server_url)
         if user_id in self._sessions:
             running = self._running_operation_labels(user_id)
             if running:
