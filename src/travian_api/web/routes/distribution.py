@@ -598,6 +598,14 @@ class DayCheckRequest(BaseModel):
 
     snapshot: list[VillageSnapshot]
     segments: list[DaySegmentInput] = Field(min_length=1)
+    foreign_targets: list[ForeignTarget] = Field(
+        default=[],
+        description=(
+            "The same tributes POST /plan ships. Each per-profile plan carries "
+            "them as absolute targets, so the composite day must drain them too "
+            "or it reads optimistic by 24x the tribute."
+        ),
+    )
     crop_ceilings: dict[int, float] = Field(
         default={},
         description=(
@@ -699,16 +707,64 @@ async def post_day_check(
                 capacities.setdefault(village.village_id, {})[resource] = cap
 
     warnings: list[str] = []
+    # A village with an unreadable rate sits the check out entirely for that
+    # resource -- its allocations are dropped from every segment and its rows
+    # (crop alert included) never appear. Silence here would let the response
+    # look complete while missing a village, so say so once per resource.
+    for resource in Resource:
+        missing = sorted(
+            v.village_id for v in body.snapshot if getattr(v, rate_field[resource]) is None
+        )
+        if missing:
+            note = (
+                f"{resource.value}: no rate could be read for "
+                + ", ".join(village_label(vid, names) for vid in missing)
+                + f", so their {resource.value} sits out the day check"
+            )
+            if resource is Resource.CROP and any(vid in body.crop_ceilings for vid in missing):
+                note += ", crop alert levels included"
+            warnings.append(note)
+
+    # Foreign tributes drain crop in every profile, exactly as POST /plan ships
+    # them (absolute targets on negative sink ids, margin included). The sinks
+    # get no trajectory of their own -- the drain lives in whoever funds them.
+    foreign_ids: dict[int, ForeignTarget] = {}
+    if body.foreign_targets and Resource.CROP not in productions:
+        warnings.append(
+            "crop: no rate could be read for any village, so the foreign tribute "
+            "cannot be simulated -- the day picture is missing that drain"
+        )
+    elif body.foreign_targets:
+        crop_rates = productions[Resource.CROP]
+        for index, target in enumerate(body.foreign_targets):
+            target_id = -(index + 1)
+            foreign_ids[target_id] = target
+            names[target_id] = target.name
+            crop_rates[target_id] = 0.0  # a tribute grows nothing, it only consumes
+
     segments: list[ProfileSegment] = []
     for segment in body.segments:
         ship: dict[int, dict[Resource, float]] = {}
-        for resource, per_village in segment.allocations.items():
+        for resource in Resource:
+            per_village = segment.allocations.get(resource, {})
             known = productions.get(resource, {})
             usable = {
                 vid: Allocation(mode=item.mode, value=item.value)
                 for vid, item in per_village.items()
                 if item.mode is not AllocationMode.KEEP and vid in known
             }
+            if resource is Resource.CROP and foreign_ids:
+                for target_id, target in foreign_ids.items():
+                    owed = target.crop_per_hour * (1.0 + target.safety_margin_pct / 100.0)
+                    usable[target_id] = Allocation(mode=AllocationMode.ABSOLUTE, value=owed)
+                # The sink's demand is funded through the remainder village; a
+                # profile without one leaves the tribute unpaid in those hours,
+                # which the composite would otherwise model silently.
+                if not any(a.mode is AllocationMode.REMAINDER for a in usable.values()):
+                    warnings.append(
+                        f"{segment.name}: no crop remainder village, so nothing funds "
+                        f"the tribute during it -- modeled as unpaid in those hours"
+                    )
             if not usable:
                 continue
             try:
@@ -719,6 +775,8 @@ async def post_day_check(
                     detail=f"{segment.name}: {exc}",
                 ) from exc
             for village in resolved.villages:
+                if village.village_id < 0:
+                    continue  # the sink itself is not simulated; see above
                 if abs(village.ship_per_hour) > 0:
                     ship.setdefault(village.village_id, {})[resource] = village.ship_per_hour
         segments.append(
@@ -739,7 +797,12 @@ async def post_day_check(
         when = f"at {_clock(breach.minute)} during {breach.segment}" + (
             f" on day {breach.day + 1}" if breach.day else " today"
         )
-        if breach.kind == "ceiling":
+        if breach.kind == "above":
+            ceiling = body.crop_ceilings.get(breach.village_id, 0)
+            warnings.append(
+                f"{label}: crop is already above its {ceiling:,.0f} alert level as the day starts"
+            )
+        elif breach.kind == "ceiling":
             ceiling = body.crop_ceilings.get(breach.village_id, 0)
             warnings.append(f"{label}: crop crosses its {ceiling:,.0f} alert level {when}")
         elif breach.kind == "capacity":

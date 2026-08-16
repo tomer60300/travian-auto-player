@@ -331,7 +331,7 @@ class TrajectoryBreach:
 
     village_id: int
     resource: Resource
-    kind: str  # "ceiling" | "capacity" | "empty"
+    kind: str  # "ceiling" | "above" | "capacity" | "empty"
     day: int
     minute: int
     segment: str
@@ -379,8 +379,9 @@ def simulate_profile_cycle(
     still clamp, exactly as the game does.
 
     ``ceilings`` is an operator-set alert level for CROP, below capacity --
-    typically an NPC trigger. Crossing it is reported with the day, minute and
-    the segment that was running.
+    typically an NPC trigger. Crossing it (from below, on the post-clamp level)
+    is reported with the day, minute and the segment that was running; a store
+    that already starts the day above it is reported once as kind "above".
 
     Runs until the daily trajectory repeats (steady state) or ``max_days``.
     A store still drifting at the horizon is reported unsettled with its daily
@@ -406,6 +407,19 @@ def simulate_profile_cycle(
                 return segment
         return None
 
+    # A store that BEGINS the day above its alert level never "crosses" it --
+    # for a draining store that claim would be factually inverted. Report the
+    # standing condition once, as its own kind, before any simulation runs.
+    for vid, ceiling in ceilings.items():
+        key = (vid, Resource.CROP)
+        if key in level and level[key] > ceiling:
+            first = segment_at(0)
+            breaches.append(
+                TrajectoryBreach(
+                    vid, Resource.CROP, "above", 0, 0, first.name if first else "no profile"
+                )
+            )
+
     for day in range(max_days):
         opening = dict(level)
         if day == max_days - 1 or settled_day >= 0:
@@ -424,22 +438,10 @@ def simulate_profile_cycle(
                         nominal[key] = nominal.get(key, 0.0) + rate * step_minutes / 60.0
                     if not rate:
                         continue
-                    updated = level.get(key, 0.0) + rate * step_minutes / 60.0
+                    previous = level.get(key, 0.0)
+                    updated = previous + rate * step_minutes / 60.0
                     cap = capacities.get(vid, {}).get(resource)
                     segment_name = active.name if active else "no profile"
-                    if resource is Resource.CROP:
-                        ceiling = ceilings.get(vid)
-                        if (
-                            ceiling is not None
-                            and updated > ceiling
-                            and (vid, resource, "ceiling") not in breached
-                        ):
-                            breached.add((vid, resource, "ceiling"))
-                            breaches.append(
-                                TrajectoryBreach(
-                                    vid, resource, "ceiling", day, minute, segment_name
-                                )
-                            )
                     if cap is not None and updated > cap:
                         if (vid, resource, "capacity") not in breached:
                             breached.add((vid, resource, "capacity"))
@@ -449,6 +451,24 @@ def simulate_profile_cycle(
                                 )
                             )
                         updated = float(cap)
+                    if resource is Resource.CROP:
+                        ceiling = ceilings.get(vid)
+                        # A crossing needs a below-side and an above-side: a store
+                        # already past the alert (reported as "above" up front)
+                        # must not fire "crosses" while it drains. Tested on the
+                        # post-clamp value so a ceiling misconfigured above the
+                        # cap can never fire at a level the store cannot reach.
+                        if (
+                            ceiling is not None
+                            and previous <= ceiling < updated
+                            and (vid, resource, "ceiling") not in breached
+                        ):
+                            breached.add((vid, resource, "ceiling"))
+                            breaches.append(
+                                TrajectoryBreach(
+                                    vid, resource, "ceiling", day, minute, segment_name
+                                )
+                            )
                     if updated <= 0.0:
                         if rate < 0 and (vid, resource, "empty") not in breached:
                             breached.add((vid, resource, "empty"))

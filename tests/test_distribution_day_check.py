@@ -110,6 +110,49 @@ class TestSimulateProfileCycle:
         # reading as "stable" about a village overflowing daily.
         assert crop.daily_net == pytest.approx(60_000, rel=0.01)
 
+    def test_a_store_already_above_its_alert_reports_standing_not_crossing(self):
+        """A draining store that starts above the ceiling never crosses it
+        upward. Claiming "crosses at 00:00" would be factually inverted -- the
+        standing condition is its own kind, reported once."""
+        segment = ProfileSegment(
+            name="Day",
+            start_minute=0,
+            end_minute=720,
+            ship_rates={},
+        )
+
+        _, breaches = simulate_profile_cycle(
+            [segment],
+            own_rates={1: {Resource.CROP: -500.0}},
+            stocks={1: {Resource.CROP: 90_000}},
+            capacities={1: {Resource.CROP: 240_000}},
+            ceilings={1: 50_000.0},
+        )
+
+        kinds = {b.kind for b in breaches}
+        assert "above" in kinds, f"the standing condition must be reported: {breaches}"
+        assert "ceiling" not in kinds, "a store draining from above never crosses upward"
+        above = next(b for b in breaches if b.kind == "above")
+        assert (above.day, above.minute) == (0, 0)
+
+    def test_a_ceiling_misconfigured_above_the_cap_never_fires(self):
+        """The ceiling is checked on the post-clamp level: the store physically
+        cannot exceed its cap, so an alert set above it must stay silent."""
+        segment = ProfileSegment(name="Day", start_minute=0, end_minute=720, ship_rates={})
+
+        _, breaches = simulate_profile_cycle(
+            [segment],
+            own_rates={1: {Resource.CROP: 4_000.0}},
+            stocks={1: {Resource.CROP: 79_000}},
+            capacities={1: {Resource.CROP: 80_000}},
+            ceilings={1: 90_000.0},
+        )
+
+        kinds = {b.kind for b in breaches}
+        assert "capacity" in kinds
+        assert "ceiling" not in kinds, "90k is unreachable behind an 80k cap"
+        assert "above" not in kinds
+
 
 class TestDayCheckEndpoint:
     def _village(self, vid, name, crop, crop_stock, granary):
@@ -174,6 +217,111 @@ class TestDayCheckEndpoint:
         capital = next(v for v in res.villages if v.village_id == 1 and v.resource is Resource.CROP)
         assert capital.village_name == "02"
         assert capital.daily_net > 0
+
+    def test_a_foreign_tribute_drains_the_day_it_would_otherwise_flatter(self):
+        """The backend reviewer's measured failure: a hub producing 3,000/h
+        owing a 4,000/h tribute showed +72,000/day when reality is net
+        -1,000/h and dry in ~50 hours. The tribute must drain the composite
+        exactly as POST /plan ships it."""
+        body = DayCheckRequest.model_validate(
+            {
+                "snapshot": [
+                    self._village(1, "02", crop=3_000, crop_stock=50_000, granary=200_000)
+                ],
+                "segments": [
+                    {
+                        "name": "All day",
+                        "window": [0, 1439],
+                        "allocations": {"crop": {"1": {"mode": "remainder"}}},
+                    }
+                ],
+                "foreign_targets": [
+                    {"name": "Ally capital", "x": 10, "y": 10, "crop_per_hour": 4_000}
+                ],
+            }
+        )
+
+        res = asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
+
+        hub = next(v for v in res.villages if v.village_id == 1 and v.resource is Resource.CROP)
+        assert hub.daily_net == pytest.approx(-24_000, rel=0.02), (
+            "own 3,000/h minus a 4,000/h tribute is net -1,000/h, not +3,000/h"
+        )
+        dry = [w for w in res.warnings if "runs dry" in w]
+        assert dry and dry[0].startswith("02:"), f"the starvation must be warned: {res.warnings}"
+        assert all(v.village_id > 0 for v in res.villages), (
+            "the sink has no trajectory of its own; its drain lives in the senders"
+        )
+
+    def test_a_profile_without_a_remainder_leaves_the_tribute_unpaid_and_says_so(self):
+        """No remainder village means nothing funds the sink's absolute target:
+        resolve leaves every real village at its own rate. Modeling that
+        silently would just move the optimism, so it must be said out loud."""
+        body = DayCheckRequest.model_validate(
+            {
+                "snapshot": [
+                    self._village(1, "02", crop=3_000, crop_stock=50_000, granary=200_000)
+                ],
+                "segments": [{"name": "Night", "window": [0, 1439], "allocations": {}}],
+                "foreign_targets": [
+                    {"name": "Ally capital", "x": 10, "y": 10, "crop_per_hour": 4_000}
+                ],
+            }
+        )
+
+        res = asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
+
+        unpaid = [w for w in res.warnings if "nothing funds the tribute" in w]
+        assert unpaid and unpaid[0].startswith("Night:"), f"warnings: {res.warnings}"
+        hub = next(v for v in res.villages if v.resource is Resource.CROP)
+        assert hub.daily_net == pytest.approx(72_000, rel=0.02), (
+            "unpaid means unpaid: the hub keeps its own production"
+        )
+
+    def test_an_unreadable_crop_rate_is_reported_not_silently_dropped(self):
+        """A crop_per_hour=None village sits the check out -- allocations
+        dropped, no crop row, its alert level ignored. The response must say
+        so instead of merely looking complete."""
+        body = DayCheckRequest.model_validate(
+            {
+                "snapshot": [
+                    self._village(1, "02", crop=5_000, crop_stock=10_000, granary=800_000),
+                    self._village(2, "05", crop=None, crop_stock=79_000, granary=80_000),
+                ],
+                "segments": [{"name": "Day", "window": [0, 1439], "allocations": {}}],
+                "crop_ceilings": {"2": 79_500},
+            }
+        )
+
+        res = asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
+
+        note = [w for w in res.warnings if "no rate could be read" in w]
+        assert note, f"warnings: {res.warnings}"
+        assert "05" in note[0], "the sidelined village must be named"
+        assert "crop alert levels included" in note[0], (
+            "its ignored ceiling is the dangerous part -- 1,000 under the cap"
+        )
+        assert not any(v.village_id == 2 and v.resource is Resource.CROP for v in res.villages)
+
+    def test_a_stock_already_above_its_alert_is_worded_as_standing(self):
+        body = DayCheckRequest.model_validate(
+            {
+                "snapshot": [
+                    self._village(1, "02", crop=-2_000, crop_stock=373_000, granary=800_000)
+                ],
+                "segments": [{"name": "Day", "window": [0, 1439], "allocations": {}}],
+                "crop_ceilings": {"1": 90_000},
+            }
+        )
+
+        res = asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
+
+        alert = [w for w in res.warnings if "alert" in w]
+        assert alert, f"warnings: {res.warnings}"
+        assert "already above its 90,000 alert level" in alert[0]
+        assert not any("crosses" in w for w in res.warnings), (
+            "a draining store above the alert never crosses it upward"
+        )
 
     def test_overlapping_windows_are_rejected(self):
         body = DayCheckRequest.model_validate(

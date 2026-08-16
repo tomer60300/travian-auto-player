@@ -60,6 +60,20 @@ const hhmmToMinutes = (t) => {
   return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null
 }
 
+// Only complete rows go to the backend: a half-typed target would 422 the
+// whole request, and the operator is mid-edit, not in error. Shared by the
+// plan build and the full-day check so both see the same tributes.
+const usableForeignTargets = (targets) =>
+  targets
+    .filter((t) => t.name.trim() && Number(t.crop_per_hour) > 0)
+    .map((t) => ({
+      name: t.name.trim(),
+      x: Number(t.x) || 0,
+      y: Number(t.y) || 0,
+      crop_per_hour: Number(t.crop_per_hour),
+      safety_margin_pct: Number(t.safety_margin_pct) || 0,
+    }))
+
 const RESOURCES = ['lumber', 'clay', 'iron', 'crop']
 const RESOURCE_LABEL = { lumber: 'Lumber', clay: 'Clay', iron: 'Iron', crop: 'Crop' }
 
@@ -401,6 +415,13 @@ export default function ResourcePlanner() {
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_WINDOWS), profileWindows)
   }, [profileWindows, hydratedKey, accountKey, storageKey])
+  // A day-check result is a pure function of these inputs; the moment any of
+  // them changes it describes a day that will never happen. Without this, the
+  // green all-clear banner could sit on screen after the operator changed
+  // everything it was computed from, mixing eras with the live Crop-now column.
+  useEffect(() => {
+    setDayCheck(null)
+  }, [profiles, profileWindows, cropCeilings, snapshot, foreignTargets])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_CROP_CEILING), cropCeilings)
@@ -486,17 +507,7 @@ export default function ResourcePlanner() {
           trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
         })),
         allocations: sendAllocations,
-        // Only complete rows go to the planner: a half-typed target would
-        // 422 the whole plan, and the operator is mid-edit, not in error.
-        foreign_targets: foreignTargets
-          .filter((t) => t.name.trim() && Number(t.crop_per_hour) > 0)
-          .map((t) => ({
-            name: t.name.trim(),
-            x: Number(t.x) || 0,
-            y: Number(t.y) || 0,
-            crop_per_hour: Number(t.crop_per_hour),
-            safety_margin_pct: Number(t.safety_margin_pct) || 0,
-          })),
+        foreign_targets: usableForeignTargets(foreignTargets),
         // Geometry defaults to the snapshot (map span + tribe-derived x1
         // merchant speed) but the operator can override both for non-Europe 2
         // worlds (x2/x3 speed, larger maps) — no extra Travian requests.
@@ -643,7 +654,11 @@ export default function ResourcePlanner() {
       // whole account total.
       const a = per[v.village_id] ?? { mode: 'keep', value: 0 }
       if (a.mode === 'remainder') continue
-      const own = v[`${resource}_per_hour`] ?? 0
+      const own = v[`${resource}_per_hour`]
+      // A village whose rate could not be read has its allocation DROPPED by
+      // the backend (with a warning), so counting it here skews the unassigned
+      // counter and, through it, the remainder village's displayed target.
+      if (own == null) continue
       if (a.mode === 'absolute') assigned += Number(a.value) || 0
       else if (a.mode === 'percentage') assigned += (total * (Number(a.value) || 0)) / 100
       else if (a.mode === 'sustain') assigned += own < 0 ? (-own * (Number(a.value) || 0)) / 100 : own
@@ -695,6 +710,9 @@ export default function ResourcePlanner() {
       const res = await api.post('/distribution/day-check', {
         snapshot: villages,
         segments,
+        // The same tributes the plan ships: without them the day picture is
+        // optimistic by 24x the tribute.
+        foreign_targets: usableForeignTargets(foreignTargets),
         crop_ceilings: ceilings,
       })
       if (requestedFor !== currentAccountKey()) return
@@ -751,6 +769,17 @@ export default function ResourcePlanner() {
       for (const [k, v] of Object.entries(prev)) next[k === activeProfile ? name : k] = v
       return next
     })
+    // The hours belong to the profile, not to its old name. Left keyed by the
+    // old name they orphan in localStorage -- and worse, resurrect: a FUTURE
+    // profile that happens to reuse the name silently inherits hours the user
+    // never set for it.
+    setProfileWindows((prev) => {
+      if (!(activeProfile in prev)) return prev
+      const next = { ...prev }
+      next[name] = next[activeProfile]
+      delete next[activeProfile]
+      return next
+    })
     setActiveProfile(name)
   }
 
@@ -762,6 +791,12 @@ export default function ResourcePlanner() {
     if (!window.confirm(`Delete profile "${activeProfile}"?`)) return
     const fallback = profileNames.find((n) => n !== activeProfile)
     setProfiles((prev) => {
+      const next = { ...prev }
+      delete next[activeProfile]
+      return next
+    })
+    setProfileWindows((prev) => {
+      if (!(activeProfile in prev)) return prev
       const next = { ...prev }
       delete next[activeProfile]
       return next
@@ -1428,11 +1463,14 @@ export default function ResourcePlanner() {
                             </td>
                             <td
                               className={`text-right px-2 font-mono ${
+                                // Either direction of drift needs attention:
+                                // up walks into the cap or the alert, down
+                                // walks toward an empty granary. Green would
+                                // read as "fine" about a village slowly
+                                // starving.
                                 Math.abs(t.daily_net) < 1
                                   ? 'text-secondary/60'
-                                  : t.daily_net > 0
-                                    ? 'text-orange-200'
-                                    : 'text-success'
+                                  : 'text-orange-200'
                               }`}
                             >
                               {signed(t.daily_net)}
@@ -1521,7 +1559,11 @@ export default function ResourcePlanner() {
                           target = (totals[resource].total * (Number(a.value) || 0)) / 100
                         else if (a.mode === 'sustain')
                           target = own < 0 ? (-own * (Number(a.value) || 0)) / 100 : own
-                        const ship = a.mode === 'remainder' ? null : target - (own ?? 0)
+                        // An unreadable rate means the backend drops this
+                        // allocation: promising a Ship/h figure here would be
+                        // cargo the plan never routes.
+                        const ship =
+                          a.mode === 'remainder' || own == null ? null : target - own
                         return (
                           <tr
                             key={v.village_id}
