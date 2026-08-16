@@ -18,6 +18,7 @@ from travian_api.services.recon_account import recon_account_manager
 from travian_api.web.auth import decrypt_credential, encrypt_credential, get_current_user
 from travian_api.web.models.db import ReconCredential, User, get_db
 from travian_api.web.sessions import TravianSession, get_travian_session
+from travian_api.web.url_guard import ensure_safe_server_url
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,10 @@ async def set_recon_credentials(
     row = result.scalar_one_or_none()
 
     server_url = body.server_url.rstrip("/") if body.server_url else None
+    if server_url:
+        # The recon account logs into this URL in the background; it must
+        # pass the same SSRF guard as a foreground connect.
+        await ensure_safe_server_url(server_url)
     if row is None:
         row = ReconCredential(
             travian_username=body.username,

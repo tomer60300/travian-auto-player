@@ -394,6 +394,12 @@ async def scan_defense_strength(
     """
     import time as _time
 
+    # Defense data comes from this account's own raid reports: the same
+    # coordinates mean different data per account, and per world they are
+    # different villages outright. The scope keeps users out of each other's
+    # cache entries (and in-flight futures).
+    cache_scope = f"{session.server_url.rstrip('/')}|{session.player_name}"
+
     async def _generate():
         scan_start = _time.monotonic()
 
@@ -420,7 +426,9 @@ async def scan_defense_strength(
                 continue  # will emit after classification
             coord_key = (slot.target.x, slot.target.y)
             if not body.force_refresh:
-                cached = defense_cache.get(slot.target.x, slot.target.y, slot.last_raid.time)
+                cached = defense_cache.get(
+                    cache_scope, slot.target.x, slot.target.y, slot.last_raid.time
+                )
                 if cached is not None:
                     cached_count += 1
                     continue
@@ -468,7 +476,9 @@ async def scan_defense_strength(
 
             if coord_key not in needs_fetch:
                 # This is a cache hit
-                cached = defense_cache.get(slot.target.x, slot.target.y, slot.last_raid.time)
+                cached = defense_cache.get(
+                    cache_scope, slot.target.x, slot.target.y, slot.last_raid.time
+                )
                 if cached is not None:
                     yield _line(
                         SlotDefenseInfo(
@@ -500,14 +510,14 @@ async def scan_defense_strength(
             )
 
             # Request coalescing
-            inflight = defense_cache.get_inflight(x, y)
+            inflight = defense_cache.get_inflight(cache_scope, x, y)
             if inflight is not None:
                 try:
                     defense_data = await inflight
                 except Exception:
                     defense_data = None
             else:
-                fut = defense_cache.set_inflight(x, y)
+                fut = defense_cache.set_inflight(cache_scope, x, y)
                 try:
                     defense_data = await _fetch_defense_for_coord(session, x, y)
                     fut.set_result(defense_data)
@@ -515,7 +525,7 @@ async def scan_defense_strength(
                     fut.set_exception(exc)
                     defense_data = None
                 finally:
-                    defense_cache.clear_inflight(x, y)
+                    defense_cache.clear_inflight(cache_scope, x, y)
 
             fetched_count += 1
 
@@ -538,7 +548,11 @@ async def scan_defense_strength(
                         | {"type": "result"}
                     )
                     defense_cache.put(
-                        slot.target.x, slot.target.y, slot.last_raid.time, defense_data
+                        cache_scope,
+                        slot.target.x,
+                        slot.target.y,
+                        slot.last_raid.time,
+                        defense_data,
                     )
                 else:
                     yield _line(

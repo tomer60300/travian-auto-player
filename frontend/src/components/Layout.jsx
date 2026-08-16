@@ -4,6 +4,7 @@ import useAuthStore from '../stores/authStore'
 import useGameStore from '../stores/gameStore'
 import useLogStore from '../stores/logStore'
 import { connectLogStream, disconnectLogStream } from '../logStream'
+import { useToast } from './Toast'
 import MobileNav from './MobileNav'
 import VillageSelector from './VillageSelector'
 // ToastContainer is mounted in App.jsx (global, works for all routes)
@@ -38,6 +39,7 @@ export default function Layout() {
   const playerName = useGameStore((s) => s.playerName)
   const checkStatus = useGameStore((s) => s.checkStatus)
   const disconnect = useGameStore((s) => s.disconnect)
+  const toast = useToast()
 
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -92,7 +94,14 @@ export default function Layout() {
   }
 
   const handleDisconnect = async () => {
-    await disconnect()
+    try {
+      await disconnect()
+    } catch (err) {
+      // Typically a 409: operations are still running and the backend kept
+      // the session alive. Navigating to /connect would lie about the state.
+      toast.error(err.response?.data?.detail || 'Disconnect failed — still connected')
+      return
+    }
     navigate('/connect', { replace: true })
   }
 

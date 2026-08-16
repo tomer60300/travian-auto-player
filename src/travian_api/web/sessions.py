@@ -33,6 +33,7 @@ from travian_api.services.target_resolver import TargetResolver
 from travian_api.services.video_reward_service import VideoRewardService
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User, get_db
+from travian_api.web.url_guard import ensure_safe_server_url
 
 logger = logging.getLogger(__name__)
 
@@ -224,8 +225,15 @@ class SessionManager:
         Serialized on the per-user reconnect lock so a logout that returns
         while this login is in flight cannot be undone when the new session
         installs. Auto-reconnect paths that already hold that lock call
-        :meth:`_connect_locked` directly instead.
+        :meth:`_connect_locked` directly instead -- they replay credentials
+        that already passed this guard when they were first connected.
+
+        The URL guard runs before anything else: the backend logs into
+        whatever URL it is given and follows the target's redirects, so an
+        unvalidated URL is an authenticated SSRF primitive (loopback, LAN
+        services) for any registered user.
         """
+        await ensure_safe_server_url(server_url)
         async with self.get_reconnect_lock(user_id):
             return await self._connect_locked(user_id, server_url, username, password)
 
@@ -315,9 +323,26 @@ class SessionManager:
         that lock across its whole login, so a logout arriving mid-login waits
         for the install and then tears it down — the explicit disconnect stays
         authoritative instead of being silently undone by the racing login.
+
+        Refused (409) while background operations are running, exactly like
+        reconnect and for the same reason: the detached job holds this
+        session's HttpClient, and closing it underneath makes every following
+        request in the job fail — loops that treat request failures as
+        nonfatal then fail indefinitely. The check sits under the locks with
+        no await before the pop, so an operation cannot start in between.
         """
         reconnect_lock = self.get_reconnect_lock(user_id)
         async with reconnect_lock, self._lock:
+            if user_id in self._sessions:
+                running = self._running_operation_labels(user_id)
+                if running:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            f"Cannot disconnect while operations are running: "
+                            f"{', '.join(running)}. Stop them first."
+                        ),
+                    )
             session = self._sessions.pop(user_id, None)
             self._explicit_disconnects.add(user_id)
         # The lock entry is deliberately never removed: waiters queued on it

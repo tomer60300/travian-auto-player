@@ -3,8 +3,13 @@
 L1: cachetools.TTLCache for hot reads (5-minute TTL, max 500 entries)
 L2: diskcache.Cache on disk (survives restarts, adaptive TTL per target)
 
-Cache key: "defense:{x}:{y}"
+Cache key: "defense:{scope}:{x}:{y}" where scope is "{server_url}|{player_name}"
 Cache value: dict with defense data + metadata for adaptive TTL
+
+The scope is not optional. Defense data is read out of the ACCOUNT'S OWN raid
+reports, so the same coordinates mean different data per account -- and per
+world they are simply different villages. An unscoped key let one user read
+another's report and raid on it.
 """
 
 from __future__ import annotations
@@ -46,12 +51,12 @@ class TieredDefenseCache:
         return self._l2
 
     @staticmethod
-    def _key(x: int, y: int) -> str:
-        return f"defense:{x}:{y}"
+    def _key(scope: str, x: int, y: int) -> str:
+        return f"defense:{scope}:{x}:{y}"
 
-    def get(self, x: int, y: int, last_raid_time: int) -> dict[str, Any] | None:
+    def get(self, scope: str, x: int, y: int, last_raid_time: int) -> dict[str, Any] | None:
         """Get cached defense data. Returns None if missing, expired, or stale."""
-        key = self._key(x, y)
+        key = self._key(scope, x, y)
 
         # L1 check
         entry = self._l1.get(key)
@@ -86,9 +91,11 @@ class TieredDefenseCache:
         self._stats["l2_hits"] += 1
         return entry
 
-    def put(self, x: int, y: int, last_raid_time: int, defense_data: dict[str, Any]) -> None:
+    def put(
+        self, scope: str, x: int, y: int, last_raid_time: int, defense_data: dict[str, Any]
+    ) -> None:
         """Store defense data in both L1 and L2."""
-        key = self._key(x, y)
+        key = self._key(scope, x, y)
 
         # Compute adaptive TTL from change history
         prev = None
@@ -136,19 +143,19 @@ class TieredDefenseCache:
             return _DEFAULT_TTL
         return _VOLATILE_TTL
 
-    def get_inflight(self, x: int, y: int) -> asyncio.Future | None:
+    def get_inflight(self, scope: str, x: int, y: int) -> asyncio.Future | None:
         """Check if a fetch is already in-flight for this coordinate."""
-        return self._inflight.get(self._key(x, y))
+        return self._inflight.get(self._key(scope, x, y))
 
-    def set_inflight(self, x: int, y: int) -> asyncio.Future:
+    def set_inflight(self, scope: str, x: int, y: int) -> asyncio.Future:
         """Register an in-flight fetch. Returns the Future to resolve."""
-        key = self._key(x, y)
+        key = self._key(scope, x, y)
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         self._inflight[key] = fut
         return fut
 
-    def clear_inflight(self, x: int, y: int) -> None:
-        self._inflight.pop(self._key(x, y), None)
+    def clear_inflight(self, scope: str, x: int, y: int) -> None:
+        self._inflight.pop(self._key(scope, x, y), None)
 
     def get_stats(self) -> dict[str, Any]:
         """Return cache statistics for observability."""
@@ -193,5 +200,6 @@ class TieredDefenseCache:
         self._stats = {"l1_hits": 0, "l2_hits": 0, "misses": 0}
 
 
-# Module-level singleton (shared across all users — keys include coordinates, not user_id)
+# Module-level singleton. Shared across all users, which is exactly why every
+# key carries the caller's scope (server + player) alongside the coordinates.
 defense_cache = TieredDefenseCache()

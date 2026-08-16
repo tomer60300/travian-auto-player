@@ -99,7 +99,11 @@ const useGameStore = create((set, get) => ({
   },
 
   disconnect: async () => {
-    try { await api.delete('/travian/disconnect'); } catch (e) { console.warn('Disconnect failed:', e) }
+    // No catch: clearing local state on a failed DELETE would paint the UI
+    // "disconnected" while the backend session stays alive and working (the
+    // server also refuses with a 409 while operations run). The caller
+    // surfaces the failure; state only changes when the backend confirmed.
+    await api.delete('/travian/disconnect')
     storeVillageId(villageStorageKey(get().serverUrl, get().playerName), null)
     set({
       connected: false,

@@ -46,6 +46,25 @@ except ImportError:
     CurlError = Exception  # placeholder for retry_if_exception_type
 
 
+# Shared transient-failure retry for the request methods. Every method whose
+# except-blocks say "let tenacity retry" must actually wear this decorator --
+# post_json/delete_json/post_form once relied on the comment alone and aborted
+# on the first transient failure. NetworkError is deliberately NOT retried:
+# the except blocks convert non-retryable failures (safe_to_retry=False) into
+# NetworkError precisely so this decorator lets them straight through.
+_transient_retry = retry(
+    stop=stop_after_attempt(3),
+    # Random-exponential backoff: avoids the textbook 1s, 2s, 4s, 8s cadence
+    # (a recognizable bot signature) by sampling each wait uniformly between
+    # 0 and 2^attempt — same expected throughput, no power-of-two stripes in
+    # request timing.
+    wait=wait_random_exponential(multiplier=0.8, max=12),
+    retry=retry_if_exception_type(
+        (httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ())
+    ),
+)
+
+
 def _jitter_penalty(base_seconds: float) -> float:
     """±15% jitter on a throttle penalty.
 
@@ -819,6 +838,7 @@ class HttpClient:
         self._sync_cookies_from_curl(response)
         return response
 
+    @_transient_retry
     async def post_json(
         self,
         url: str,
@@ -938,6 +958,7 @@ class HttpClient:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
+    @_transient_retry
     async def delete_json(
         self,
         url: str,
@@ -1032,6 +1053,7 @@ class HttpClient:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
+    @_transient_retry
     async def post_form(self, url: str, data: Dict[str, str], *, safe_to_retry: bool = True) -> str:
         """Make a POST request with form data."""
         if not url.startswith("http"):
@@ -1151,17 +1173,7 @@ class HttpClient:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
-    @retry(
-        stop=stop_after_attempt(3),
-        # Random-exponential backoff: avoids the textbook 1s, 2s, 4s, 8s
-        # cadence (a recognizable bot signature) by sampling each wait
-        # uniformly between 0 and 2^attempt — same expected throughput, no
-        # power-of-two stripes in request timing.
-        wait=wait_random_exponential(multiplier=0.8, max=12),
-        retry=retry_if_exception_type(
-            (httpx.RequestError, httpx.TimeoutException) + ((CurlError,) if HAS_CURL_CFFI else ())
-        ),
-    )
+    @_transient_retry
     async def get_html(
         self,
         url: str,

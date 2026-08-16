@@ -20,14 +20,22 @@ function logSource(url) {
   return 'api'
 }
 
-const SENSITIVE_URLS = ['/users/login', '/users/register', '/travian/connect', '/travian/servers']
 const SENSITIVE_KEYS = ['password', 'access_token', 'token', 'jwt']
 
+// Every body is redacted, not just an allowlist of URLs: the allowlist missed
+// /recon/credentials and logged a plaintext password into the log store,
+// where the Logs page displays and exports it. Recursive, because FastAPI
+// validation errors echo the submitted body back inside nested `input`
+// objects — a 422 on a credentials endpoint would otherwise re-leak the
+// password through the error path.
 function redactSensitive(data) {
+  if (Array.isArray(data)) return data.map(redactSensitive)
   if (!data || typeof data !== 'object') return data
-  const copy = { ...data }
-  for (const key of SENSITIVE_KEYS) {
-    if (key in copy) copy[key] = '[REDACTED]'
+  const copy = {}
+  for (const [key, value] of Object.entries(data)) {
+    copy[key] = SENSITIVE_KEYS.includes(key.toLowerCase())
+      ? '[REDACTED]'
+      : redactSensitive(value)
   }
   return copy
 }
@@ -48,10 +56,7 @@ api.interceptors.request.use((config) => {
   }
   const method = (config.method || 'get').toUpperCase()
   const url = config.url || ''
-  const isSensitive = SENSITIVE_URLS.some(s => url.includes(s))
-  const body = config.data
-    ? summarizeData(isSensitive ? redactSensitive(config.data) : config.data, 500)
-    : null
+  const body = config.data ? summarizeData(redactSensitive(config.data), 500) : null
   useLogStore.getState().addLog('info', logSource(url), `>> ${method} ${url}`, body)
   return config
 })
@@ -63,8 +68,7 @@ api.interceptors.response.use(
     const method = (response.config.method || 'get').toUpperCase()
     const url = response.config.url || ''
     const status = response.status
-    const isSensitive = SENSITIVE_URLS.some(s => url.includes(s))
-    const data = isSensitive ? redactSensitive(response.data) : response.data
+    const data = redactSensitive(response.data)
 
     // Build detail summary
     let detail = null
@@ -83,7 +87,7 @@ api.interceptors.response.use(
     const method = (error.config?.method || 'get').toUpperCase()
     const status = error.response?.status
     const detail = error.response?.data
-      ? summarizeData(error.response.data, 500)
+      ? summarizeData(redactSensitive(error.response.data), 500)
       : error.message
     useLogStore.getState().addLog('error', logSource(url), `<< ${method} ${url} ${status || 'ERR'}`, detail)
 

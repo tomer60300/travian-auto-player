@@ -188,13 +188,17 @@ async def get_scan_cache(
     row = result.scalar_one_or_none()
     if not row:
         return ScanCacheOut(has_cache=False)
-    # Check age
-    age = datetime.now(UTC) - row.updated_at
+    # SQLite returns naive datetimes despite the column's timezone=True; the
+    # value was stored in UTC, so restore it before the aware subtraction.
+    updated_at = (
+        row.updated_at.replace(tzinfo=UTC) if row.updated_at.tzinfo is None else row.updated_at
+    )
+    age = datetime.now(UTC) - updated_at
     if age > timedelta(seconds=SCAN_CACHE_MAX_AGE_SECONDS):
         return ScanCacheOut(has_cache=False)
     return ScanCacheOut(
         has_cache=True,
-        updated_at=row.updated_at,
+        updated_at=updated_at,
         scan=json.loads(row.scan_json),
     )
 

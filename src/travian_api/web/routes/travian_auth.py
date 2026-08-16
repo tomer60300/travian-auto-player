@@ -20,6 +20,7 @@ from travian_api.web.sessions import (
     session_manager,
     try_restore_session,
 )
+from travian_api.web.url_guard import ensure_safe_server_url
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +303,9 @@ async def save_server(
     last_connected stamping and let auto-restore pick an older row with an
     outdated password, so saving the same account again rotates it in place.
     """
+    # Validated at save time as well as at connect time: a saved row is
+    # replayed later by auto-restore, which deliberately skips the guard.
+    await ensure_safe_server_url(body.server_url)
     result = await db.execute(
         select(TravianCredential)
         .where(TravianCredential.user_id == user.id)

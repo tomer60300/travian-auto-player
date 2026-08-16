@@ -320,6 +320,38 @@ class TestDisconnectVsReconnectRace:
         assert exc.value.status_code == 409
         assert manager.get(1) is old
 
+    def test_disconnect_is_rejected_while_operations_run(self, monkeypatch):
+        """Same hazard as reconnect, same answer: a logout mid-operation
+        closes the HttpClient the detached job still holds, and loops that
+        treat request failures as nonfatal then fail forever. Refuse with a
+        409 and keep the session until the operations are stopped."""
+        from fastapi import HTTPException
+
+        import travian_api.operation_manager as op_module
+
+        manager = SessionManager()
+        live = SimpleNamespace(server_url="https://ts1.x1.europe.travian.com")
+        manager._sessions[1] = live
+
+        class _RunningTask:
+            def done(self):
+                return False
+
+        running_op = SimpleNamespace(label="oasis-raider", task=_RunningTask())
+        monkeypatch.setattr(
+            op_module.operation_manager, "list_for_user", lambda user_id: [running_op]
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(manager.disconnect(1))
+
+        assert exc.value.status_code == 409
+        assert "oasis-raider" in exc.value.detail
+        assert manager.get(1) is live, "a refused logout must leave the session running"
+        assert manager.auto_reconnect_allowed(1), (
+            "a refused logout is no logout: it must not flip the explicit-disconnect latch"
+        )
+
     def test_manual_connect_serializes_with_the_reconnect_lock(self, monkeypatch):
         """/api/travian/connect and /reconnect call SessionManager.connect
         directly; without the reconnect lock a logout that returned while that
