@@ -501,8 +501,11 @@ export default function ResourcePlanner() {
   const targetFor = (resource, v) => {
     const own = v[`${resource}_per_hour`]
     const a = allocations[resource]?.[v.village_id] ?? { mode: 'keep', value: 0 }
+    // Unreadable rate: the backend drops this village's allocation entirely
+    // (with a warning) rather than plan blind, so showing any target here --
+    // even an absolute one -- would promise something the plan will not do.
+    if (own == null && a.mode !== 'remainder') return null
     if (a.mode === 'remainder') return explicitTotal(resource)
-    if (own == null) return a.mode === 'absolute' ? Number(a.value) || 0 : null
     if (a.mode === 'absolute') return Number(a.value) || 0
     if (a.mode === 'percentage') return (totals[resource].total * (Number(a.value) || 0)) / 100
     if (a.mode === 'sustain') return own < 0 ? (-own * (Number(a.value) || 0)) / 100 : own
@@ -1082,6 +1085,11 @@ export default function ResourcePlanner() {
                         const isRest = remainderFor(resource) === v.village_id
                         return (
                           <td key={resource} className="text-right px-3 py-1.5 align-top">
+                            {/* A sign change is the story worth telling:
+                                -2,500/h own plus +4,000/h shipped IS +1,500/h,
+                                and a starving village turning surplus (or the
+                                reverse) must read as that transition, not as a
+                                bare final number. */}
                             <div
                               className={`font-mono ${
                                 after == null
@@ -1092,7 +1100,23 @@ export default function ResourcePlanner() {
                               }`}
                               title={own == null ? 'own production unknown' : `own ${fmt(own)}/h`}
                             >
-                              {after == null ? '?' : `${fmt(after)}/h`}
+                              {after == null ? (
+                                '?'
+                              ) : own != null && own < 0 !== after < 0 && Math.abs(ship) >= 1 ? (
+                                <>
+                                  <span className={own < 0 ? 'text-danger' : ''}>{fmt(own)}</span>
+                                  <span
+                                    className={
+                                      after >= 0 ? 'text-success mx-0.5' : 'text-danger mx-0.5'
+                                    }
+                                  >
+                                    {'\u2192'}
+                                  </span>
+                                  {`${fmt(after)}/h`}
+                                </>
+                              ) : (
+                                `${fmt(after)}/h`
+                              )}
                               {isRest && (
                                 <span className="ml-1 text-[10px] uppercase text-amber-300/80 font-sans">
                                   rest
@@ -1131,9 +1155,10 @@ export default function ResourcePlanner() {
                 </tfoot>
               </table>
               <p className="text-secondary text-[11px] mt-2">
-                Top line: retention after distribution (red = still negative). Bottom line: what
-                ships in (+) or out (−) to make it true. “rest” absorbs whatever the others leave
-                unassigned.
+                Top line: retention after distribution (red = still negative; a green arrow
+                marks a village whose crop crosses from starving to surplus — e.g. −2,500/h own
+                +4,000/h shipped → 1,500/h). Bottom line: what ships in (+) or out (−) to make it
+                true. “rest” absorbs whatever the others leave unassigned.
               </p>
             </div>
           )}
