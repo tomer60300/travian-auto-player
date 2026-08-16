@@ -9,6 +9,7 @@ import api from '../api'
 // snapshot the client sends, so rehydrating another account's villages would
 // generate a route sheet from the wrong account's data.
 const LS_TRADE_OFFICE = 'planner_trade_office'
+const LS_FOREIGN = 'planner_foreign_targets'
 const LS_ALLOCATIONS = 'planner_allocations' // legacy single-plan key (migrated)
 const LS_SNAPSHOT = 'planner_snapshot'
 const LS_MERCHANT = 'planner_merchant_model'
@@ -115,28 +116,83 @@ function CropCell({ village }) {
 function BudgetBar({ budget }) {
   const spare = Math.max(budget.spare, 1)
   const usedPct = Math.min(100, Math.round((budget.committed / spare) * 100))
+  // Over-budget villages open by default. "over by 2" says what happened but
+  // not what to do about it, and the same excess means different things when
+  // the trip is the cost than when the Trade Office is.
+  const [open, setOpen] = useState(false)
+  const legs = budget.legs ?? []
   return (
-    <div className="flex items-center gap-2">
-      <div
-        className="h-2 w-28 rounded bg-black/40 overflow-hidden"
-        role="img"
-        aria-label={`${budget.committed} of ${budget.spare} merchants committed`}
-      >
+    <div className="flex-1">
+      <div className="flex items-center gap-2">
         <div
-          className={`h-full ${budget.over_budget ? 'bg-red-500' : 'bg-emerald-500'}`}
-          style={{ width: `${usedPct}%` }}
-        />
-      </div>
-      <span className="font-mono text-xs">
-        {budget.committed}/{budget.spare}
-      </span>
-      {budget.over_budget && (
-        <span className="text-danger text-xs">
-          over by {budget.committed - budget.spare}
-          {budget.trade_office_levels_needed != null
-            ? ` · Trade Office +${budget.trade_office_levels_needed} would fit`
-            : ' · no upgrade fixes this'}
+          className="h-2 w-28 rounded bg-black/40 overflow-hidden shrink-0"
+          role="img"
+          aria-label={`${budget.committed} of ${budget.spare} merchants committed`}
+        >
+          <div
+            className={`h-full ${budget.over_budget ? 'bg-red-500' : 'bg-emerald-500'}`}
+            style={{ width: `${usedPct}%` }}
+          />
+        </div>
+        <span className="font-mono text-xs shrink-0">
+          {budget.committed}/{budget.spare}
         </span>
+        {budget.over_budget && (
+          <span className="text-danger text-xs">
+            over by {budget.committed - budget.spare}
+            {budget.trade_office_levels_needed != null
+              ? ` · Trade Office +${budget.trade_office_levels_needed} would fit`
+              : ' · no upgrade fixes this'}
+          </span>
+        )}
+        {legs.length > 0 && (
+          <button
+            type="button"
+            className="text-secondary hover:text-white text-xs underline shrink-0"
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? 'hide' : budget.over_budget ? 'why?' : 'routes'}
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div className="mt-1 mb-2 ml-2 pl-3 border-l border-gray-700">
+          {budget.explanation && (
+            <p className="text-xs text-amber-200 mb-1">{budget.explanation}</p>
+          )}
+          <table className="text-xs w-full max-w-2xl">
+            <thead className="text-secondary uppercase">
+              <tr>
+                <th className="text-left pr-3 font-normal">To</th>
+                <th className="text-right pr-3 font-normal">Cargo/h</th>
+                <th className="text-right pr-3 font-normal">Distance</th>
+                <th className="text-right pr-3 font-normal">One way</th>
+                <th className="text-right pr-3 font-normal">Cycle</th>
+                <th className="text-right font-normal">Merchants</th>
+              </tr>
+            </thead>
+            <tbody className="font-mono">
+              {legs.map((leg, i) => (
+                <tr key={i}>
+                  <td className="pr-3">{leg.destination}</td>
+                  <td className="text-right pr-3">{fmt(leg.per_hour)}</td>
+                  <td className="text-right pr-3">{Math.round(leg.distance_fields)}f</td>
+                  <td className="text-right pr-3">{leg.one_way_hours.toFixed(1)}h</td>
+                  <td className="text-right pr-3">{leg.cycle_hours}h</td>
+                  <td className="text-right">
+                    {leg.merchants_per_send}×{leg.sets_in_flight} = {leg.merchants}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="text-secondary text-xs mt-1">
+            A merchant is busy for the whole round trip, so a long haul keeps several sends in
+            the air at once — that multiplier, not just the cargo, is what spends merchants.
+          </p>
+        </div>
       )}
     </div>
   )
@@ -198,6 +254,10 @@ export default function ResourcePlanner() {
   const [profiles, setProfiles] = useState({ [DEFAULT_PROFILE]: {} })
   const [activeProfile, setActiveProfile] = useState(DEFAULT_PROFILE)
   const [merchantModel, setMerchantModel] = useState(DEFAULT_MERCHANT_MODEL)
+  // Villages outside the account that are owed crop. Hand-entered, because
+  // nothing in the game tells us about them, and cached per account like the
+  // Trade Office levels are.
+  const [foreignTargets, setForeignTargets] = useState([])
   // Per-resource checkbox selection for batch edits: { [resource]: number[] }.
   // Transient (not persisted); reset on account change and on a fresh snapshot
   // so it never targets villages from a previous account/snapshot.
@@ -245,6 +305,7 @@ export default function ResourcePlanner() {
       setSnapshot(null)
       setTradeOffice({})
       setProfiles({ [DEFAULT_PROFILE]: {} })
+      setForeignTargets([])
       setActiveProfile(DEFAULT_PROFILE)
       setMerchantModel(DEFAULT_MERCHANT_MODEL)
       setSelected({})
@@ -256,6 +317,7 @@ export default function ResourcePlanner() {
     const storedActive = loadJson(`${LS_ACTIVE_PROFILE}::${accountKey}`, DEFAULT_PROFILE)
     setSnapshot(loadJson(`${LS_SNAPSHOT}::${accountKey}`, null))
     setTradeOffice(loadJson(`${LS_TRADE_OFFICE}::${accountKey}`, {}))
+    setForeignTargets(loadJson(`${LS_FOREIGN}::${accountKey}`, []))
     setProfiles(loaded)
     setActiveProfile(loaded[storedActive] ? storedActive : Object.keys(loaded)[0])
     setMerchantModel(loadJson(`${LS_MERCHANT}::${accountKey}`, DEFAULT_MERCHANT_MODEL))
@@ -267,6 +329,9 @@ export default function ResourcePlanner() {
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_TRADE_OFFICE), tradeOffice)
   }, [tradeOffice, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_FOREIGN), foreignTargets)
+  }, [foreignTargets, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_PROFILES), profiles)
   }, [profiles, hydratedKey, accountKey, storageKey])
@@ -348,6 +413,17 @@ export default function ResourcePlanner() {
           trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
         })),
         allocations: sendAllocations,
+        // Only complete rows go to the planner: a half-typed target would
+        // 422 the whole plan, and the operator is mid-edit, not in error.
+        foreign_targets: foreignTargets
+          .filter((t) => t.name.trim() && Number(t.crop_per_hour) > 0)
+          .map((t) => ({
+            name: t.name.trim(),
+            x: Number(t.x) || 0,
+            y: Number(t.y) || 0,
+            crop_per_hour: Number(t.crop_per_hour),
+            safety_margin_pct: Number(t.safety_margin_pct) || 0,
+          })),
         // Geometry defaults to the snapshot (map span + tribe-derived x1
         // merchant speed) but the operator can override both for non-Europe 2
         // worlds (x2/x3 speed, larger maps) — no extra Travian requests.
@@ -369,7 +445,17 @@ export default function ResourcePlanner() {
     } finally {
       setPlanning(false)
     }
-  }, [villages, tradeOffice, allocations, toast, accountKey, currentAccountKey, snapshot, merchantModel])
+  }, [
+    villages,
+    tradeOffice,
+    allocations,
+    toast,
+    accountKey,
+    currentAccountKey,
+    snapshot,
+    merchantModel,
+    foreignTargets,
+  ])
 
   // Live unallocated counter, so slack is visible while typing rather than
   // discovered later (profile known issue #9).
@@ -770,6 +856,150 @@ export default function ResourcePlanner() {
               />
             </label>
           </div>
+
+          {/* Villages outside the account that are owed crop. Kept in their own
+              section rather than as rows in the village table: a tribute is not
+              a village, and giving it a village row invites treating it as one.
+              Saved as you type, like every other field here. */}
+          <div className="mt-4 border-t border-gray-800 pt-3">
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+              <div>
+                <span className="text-secondary text-xs uppercase">Crop owed to other players</span>
+                <p className="text-secondary text-xs mt-0.5">
+                  Shipped like any other demand and taken out of the account crop pool. The
+                  planner picks the supplier, and prefers a single one.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn-secondary text-xs py-1"
+                onClick={() =>
+                  setForeignTargets((prev) => [
+                    ...prev,
+                    { name: '', x: 0, y: 0, crop_per_hour: '', safety_margin_pct: 5 },
+                  ])
+                }
+              >
+                + Add target
+              </button>
+            </div>
+
+            {foreignTargets.length === 0 ? (
+              <p className="text-secondary text-xs italic">
+                None. Add one if you have promised crop to an ally or a sitter.
+              </p>
+            ) : (
+              <table className="w-full text-xs">
+                <thead className="text-secondary uppercase">
+                  <tr>
+                    <th className="text-left py-1 px-2">Village</th>
+                    <th className="text-right px-2">X</th>
+                    <th className="text-right px-2">Y</th>
+                    <th className="text-right px-2">Crop/h owed</th>
+                    <th
+                      className="text-right px-2"
+                      title="Ship this much above the promise, so travel and rounding cannot leave it short"
+                    >
+                      Margin %
+                    </th>
+                    <th className="text-right px-2">Ships/h</th>
+                    <th className="px-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {foreignTargets.map((t, i) => {
+                    const owed = Number(t.crop_per_hour) || 0
+                    const ships = owed * (1 + (Number(t.safety_margin_pct) || 0) / 100)
+                    const incomplete = !String(t.name).trim() || owed <= 0
+                    const patch = (field, value) =>
+                      setForeignTargets((prev) =>
+                        prev.map((row, j) => (j === i ? { ...row, [field]: value } : row))
+                      )
+                    return (
+                      <tr
+                        key={i}
+                        className="group border-t border-gray-800 hover:bg-white/5 focus-within:bg-amber-400/15 transition-colors"
+                      >
+                        <td className="py-1 px-2 border-l-2 border-l-transparent group-focus-within:border-l-amber-400">
+                          <input
+                            type="text"
+                            aria-label={`Foreign target ${i + 1} name`}
+                            placeholder="Ally name"
+                            className="input-field w-36 text-xs py-0.5"
+                            value={t.name}
+                            onChange={(e) => patch('name', e.target.value)}
+                          />
+                        </td>
+                        <td className="text-right px-2">
+                          <input
+                            type="number"
+                            aria-label={`Foreign target ${i + 1} x coordinate`}
+                            className="input-field w-16 text-right text-xs py-0.5"
+                            value={t.x}
+                            onChange={(e) => patch('x', e.target.value)}
+                          />
+                        </td>
+                        <td className="text-right px-2">
+                          <input
+                            type="number"
+                            aria-label={`Foreign target ${i + 1} y coordinate`}
+                            className="input-field w-16 text-right text-xs py-0.5"
+                            value={t.y}
+                            onChange={(e) => patch('y', e.target.value)}
+                          />
+                        </td>
+                        <td className="text-right px-2">
+                          <input
+                            type="number"
+                            min="0"
+                            aria-label={`Foreign target ${i + 1} crop per hour`}
+                            placeholder="0"
+                            className="input-field w-24 text-right text-xs py-0.5"
+                            value={t.crop_per_hour}
+                            onChange={(e) => patch('crop_per_hour', e.target.value)}
+                          />
+                        </td>
+                        <td className="text-right px-2">
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            aria-label={`Foreign target ${i + 1} safety margin`}
+                            className="input-field w-16 text-right text-xs py-0.5"
+                            value={t.safety_margin_pct}
+                            onChange={(e) => patch('safety_margin_pct', e.target.value)}
+                          />
+                        </td>
+                        <td className="text-right px-2 font-mono text-secondary">
+                          {ships > 0 ? fmt(ships) : '—'}
+                        </td>
+                        <td className="px-2 text-right whitespace-nowrap">
+                          {incomplete && (
+                            <span
+                              className="text-amber-300 mr-2"
+                              title="Needs a name and a crop rate before the planner uses it"
+                            >
+                              draft
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            aria-label={`Remove foreign target ${i + 1}`}
+                            className="text-danger hover:underline"
+                            onClick={() =>
+                              setForeignTargets((prev) => prev.filter((_, j) => j !== i))
+                            }
+                          >
+                            remove
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
         </div>
       )}
 
@@ -955,8 +1185,8 @@ export default function ResourcePlanner() {
                   {plan.budgets
                     .filter((b) => b.committed > 0 || b.over_budget)
                     .map((b) => (
-                      <div key={b.village_id} className="flex items-center gap-3 text-xs">
-                        <span className="w-28 truncate">
+                      <div key={b.village_id} className="flex items-start gap-3 text-xs">
+                        <span className="w-28 truncate shrink-0">
                           {villages.find((v) => v.village_id === b.village_id)?.name ??
                             b.village_id}
                         </span>

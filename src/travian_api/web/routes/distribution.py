@@ -245,6 +245,19 @@ class SheetRowResponse(BaseModel):
     )
 
 
+class BudgetLegResponse(BaseModel):
+    """One route's contribution to a village's merchant bill."""
+
+    destination: str
+    per_hour: float
+    distance_fields: float
+    one_way_hours: float
+    cycle_hours: int
+    merchants_per_send: int
+    sets_in_flight: int
+    merchants: int
+
+
 class BudgetResponse(BaseModel):
     village_id: int
     committed: int
@@ -252,6 +265,17 @@ class BudgetResponse(BaseModel):
     free: int
     over_budget: bool
     trade_office_levels_needed: int | None = None
+    legs: list[BudgetLegResponse] = []
+    """Where the merchants actually went, biggest bill first."""
+    explanation: str | None = Field(
+        default=None,
+        description=(
+            "Why this village is over budget, in the operator's terms. 'over by "
+            "2' says what happened but not what to do about it: the same excess "
+            "means something different when the trip is the cost than when the "
+            "Trade Office is."
+        ),
+    )
 
 
 class ShortfallResponse(BaseModel):
@@ -454,6 +478,87 @@ def _storage_warnings(body: PlanRequest, plan) -> list[str]:
     return list(storage_warnings(statuses, overflows, names=names))
 
 
+def _budget_legs(
+    village_id: int,
+    plan,
+    geometry: MapGeometry,
+    names: dict[int, str],
+    coords: dict[int, tuple[int, int]],
+) -> list[BudgetLegResponse]:
+    """Every route this village staffs, dearest first."""
+    legs = []
+    for route in plan.routing.routes:
+        if route.origin != village_id:
+            continue
+        legs.append(
+            BudgetLegResponse(
+                destination=village_label(route.destination, names),
+                per_hour=route.hourly_total,
+                distance_fields=geometry.distance(coords[village_id], coords[route.destination]),
+                one_way_hours=route.one_way_minutes / 60.0,
+                cycle_hours=route.cycle_hours,
+                merchants_per_send=route.merchants_per_send,
+                sets_in_flight=route.sets_in_flight,
+                merchants=route.merchants_committed,
+            )
+        )
+    return sorted(legs, key=lambda leg: (-leg.merchants, leg.destination))
+
+
+def _explain_over_budget(
+    label: str,
+    committed: int,
+    spare: int,
+    legs: list[BudgetLegResponse],
+    trade_office_level: int,
+    capacity: int,
+    upgrade: int | None,
+) -> str:
+    """Say why the merchants ran out, in terms that suggest what to do.
+
+    'over by 2' is true and useless. A village can overrun its merchants for two
+    quite different reasons and the fix is different for each: when the trip is
+    long, merchants are tied up in transit and only a shorter haul or a smaller
+    load helps; when the Trade Office is low, each merchant carries little and
+    the upgrade is the answer. So this names whichever dominates rather than
+    stating the arithmetic back.
+    """
+    if not legs:
+        return f"{label} is over its merchant budget, but no route explains it — this is a bug."
+
+    worst = legs[0]
+    parts = [f"{label} needs {committed} merchants but has {spare}."]
+
+    # The two factors multiply, so explain both rather than declaring a winner:
+    # merchants = (cargo / capacity, rounded up) x (round trip / cycle, rounded
+    # up). Naming only the larger one produced advice that argued with itself --
+    # "the Trade Office won't help much... Trade Office +5 would fix it".
+    parts.append(
+        f"Its biggest haul is {worst.per_hour:,.0f}/h to {worst.destination}, "
+        f"{worst.distance_fields:.0f} fields away, and costs {worst.merchants} merchants: "
+        f"{worst.merchants_per_send} per send "
+        f"(each carries {capacity:,} at Trade Office {trade_office_level}), "
+        f"and with a {worst.one_way_hours * 2:.1f}h round trip against a "
+        f"{worst.cycle_hours}h cycle, {worst.sets_in_flight} send(s) are in the air at once."
+    )
+    if len(legs) > 1:
+        others = sum(leg.merchants for leg in legs[1:])
+        rest = "route takes" if len(legs) == 2 else "routes take"
+        parts.append(f"Its other {len(legs) - 1} {rest} {others} more.")
+
+    if upgrade is not None:
+        parts.append(
+            f"Trade Office +{upgrade} raises what each merchant carries and would make this fit."
+        )
+    else:
+        parts.append(
+            "No Trade Office level fixes this: the merchants are tied up in travel time, "
+            "not short of carrying capacity. Ship less from here, send it somewhere "
+            "nearer, or consume the surplus locally."
+        )
+    return " ".join(parts)
+
+
 @router.post("/plan", response_model=PlanResponse)
 async def post_plan(
     body: PlanRequest,
@@ -632,6 +737,7 @@ async def post_plan(
 
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
     over = {o.village_id for o in plan.over_budget}
+    coords = {vid: village.coords for vid, village in villages.items()}
 
     return PlanResponse(
         rows=[
@@ -656,6 +762,20 @@ async def post_plan(
                 free=plan.free_merchants(vid),
                 over_budget=vid in over,
                 trade_office_levels_needed=upgrades.get(vid),
+                legs=_budget_legs(vid, plan, config.geometry, names, coords),
+                explanation=(
+                    _explain_over_budget(
+                        village_label(vid, names),
+                        plan.merchants_committed.get(vid, 0),
+                        plan.spare_merchants.get(vid, 0),
+                        _budget_legs(vid, plan, config.geometry, names, coords),
+                        trade_office.get(vid, 0),
+                        config.merchant_model.capacity(trade_office.get(vid, 0)),
+                        upgrades.get(vid),
+                    )
+                    if vid in over
+                    else None
+                ),
             )
             for vid in sorted(villages)
         ],
