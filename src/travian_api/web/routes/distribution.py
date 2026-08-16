@@ -27,6 +27,7 @@ from travian_api.services.distribution.allocation import (
     AllocationError,
     AllocationMode,
     Resource,
+    resolve_resource,
     village_label,
 )
 from travian_api.services.distribution.geometry import MapGeometry
@@ -44,7 +45,9 @@ from travian_api.services.distribution.optimizer import (
 from travian_api.services.distribution.planner import PlannerConfig, craft_plan
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY
 from travian_api.services.distribution.storage import (
+    ProfileSegment,
     simulate_day,
+    simulate_profile_cycle,
     storage_warnings,
     store_status,
 )
@@ -563,6 +566,205 @@ def _explain_over_budget(
             "nearer, or consume the surplus locally."
         )
     return " ".join(parts)
+
+
+class DaySegmentInput(BaseModel):
+    """One allocation profile plus the hours of the day it actually runs."""
+
+    name: str = Field(min_length=1)
+    window: tuple[int, int]
+    """Minutes past midnight (start, end); may wrap past midnight."""
+    allocations: dict[Resource, dict[int, AllocationInput]] = {}
+
+    @field_validator("window")
+    @classmethod
+    def _window_in_day(cls, value: tuple[int, int]) -> tuple[int, int]:
+        if not all(0 <= minute < MINUTES_PER_DAY for minute in value):
+            raise ValueError(f"window minutes must be 0-{MINUTES_PER_DAY - 1}")
+        if value[0] == value[1]:
+            raise ValueError("window is zero-width; give the profile some hours or omit it")
+        return value
+
+
+class DayCheckRequest(BaseModel):
+    """The whole day at once: every profile, each in its own hours.
+
+    Costs zero game requests. Profiles are planned in isolation, but the account
+    lives through all of them every day -- what the day profile ships decides
+    the stock the night profile starts from, so questions like "does the capital
+    cross 90k during the night?" can only be answered by simulating the day as
+    the profiles will actually run it.
+    """
+
+    snapshot: list[VillageSnapshot]
+    segments: list[DaySegmentInput] = Field(min_length=1)
+    crop_ceilings: dict[int, float] = Field(
+        default={},
+        description=(
+            "Operator alert level for a village's crop stock, below capacity -- "
+            "typically an NPC trigger. Crossing it is reported with the hour and "
+            "the profile that was running."
+        ),
+    )
+
+
+class VillageDayResponse(BaseModel):
+    village_id: int
+    village_name: str
+    resource: Resource
+    daily_net: float
+    low: float
+    high: float
+    settled: bool
+
+
+class DayCheckResponse(BaseModel):
+    villages: list[VillageDayResponse]
+    warnings: list[str]
+
+
+def _clock(minute: int) -> str:
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+@router.post("/day-check", response_model=DayCheckResponse)
+async def post_day_check(
+    body: DayCheckRequest,
+    _user: User = Depends(get_current_user),
+):
+    """Simulate the full day across every profile. Costs zero game requests.
+
+    Deliberate approximation, stated rather than hidden: each segment
+    contributes its plan's NET RATES, not discrete batches. Route phases do not
+    survive a profile switch (the operator recreates the routes), so batch
+    timing across the boundary is unknowable; the discrete-batch overflow check
+    still runs per profile inside POST /plan.
+    """
+    if not body.snapshot:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Snapshot is empty — fetch account state first.",
+        )
+
+    # Overlapping windows would double-ship: two profiles cannot run at once.
+    minutes_covered: set[int] = set()
+    for segment in body.segments:
+        start, end = segment.window
+        span = range(start, end) if start < end else [*range(start, MINUTES_PER_DAY), *range(end)]
+        span = set(span)
+        clash = minutes_covered & span
+        if clash:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"profile windows overlap around {_clock(min(clash))}: two profiles "
+                    f"cannot run at the same time"
+                ),
+            )
+        minutes_covered |= span
+
+    names = {v.village_id: v.name for v in body.snapshot}
+    rate_field = {
+        Resource.LUMBER: "lumber_per_hour",
+        Resource.CLAY: "clay_per_hour",
+        Resource.IRON: "iron_per_hour",
+        Resource.CROP: "crop_per_hour",
+    }
+    stock_field = {
+        Resource.LUMBER: "lumber_stock",
+        Resource.CLAY: "clay_stock",
+        Resource.IRON: "iron_stock",
+        Resource.CROP: "crop_stock",
+    }
+    productions: dict[Resource, dict[int, float]] = {}
+    own_rates: dict[int, dict[Resource, float]] = {}
+    stocks: dict[int, dict[Resource, int]] = {}
+    capacities: dict[int, dict[Resource, int]] = {}
+    for village in body.snapshot:
+        for resource in Resource:
+            own = getattr(village, rate_field[resource])
+            if own is None:
+                continue  # unreadable rate: the village sits this check out
+            productions.setdefault(resource, {})[village.village_id] = float(own)
+            own_rates.setdefault(village.village_id, {})[resource] = float(own)
+            stocks.setdefault(village.village_id, {})[resource] = getattr(
+                village, stock_field[resource]
+            )
+            cap = (
+                village.granary_capacity
+                if resource is Resource.CROP
+                else village.warehouse_capacity
+            )
+            if cap is not None:
+                capacities.setdefault(village.village_id, {})[resource] = cap
+
+    warnings: list[str] = []
+    segments: list[ProfileSegment] = []
+    for segment in body.segments:
+        ship: dict[int, dict[Resource, float]] = {}
+        for resource, per_village in segment.allocations.items():
+            known = productions.get(resource, {})
+            usable = {
+                vid: Allocation(mode=item.mode, value=item.value)
+                for vid, item in per_village.items()
+                if item.mode is not AllocationMode.KEEP and vid in known
+            }
+            if not usable:
+                continue
+            try:
+                resolved = resolve_resource(resource, known, usable, names)
+            except AllocationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"{segment.name}: {exc}",
+                ) from exc
+            for village in resolved.villages:
+                if abs(village.ship_per_hour) > 0:
+                    ship.setdefault(village.village_id, {})[resource] = village.ship_per_hour
+        segments.append(
+            ProfileSegment(
+                name=segment.name,
+                start_minute=segment.window[0],
+                end_minute=segment.window[1],
+                ship_rates=ship,
+            )
+        )
+
+    trajectories, breaches = simulate_profile_cycle(
+        segments, own_rates, stocks, capacities, body.crop_ceilings
+    )
+
+    for breach in sorted(breaches, key=lambda b: (b.day, b.minute)):
+        label = village_label(breach.village_id, names)
+        when = f"at {_clock(breach.minute)} during {breach.segment}" + (
+            f" on day {breach.day + 1}" if breach.day else " today"
+        )
+        if breach.kind == "ceiling":
+            ceiling = body.crop_ceilings.get(breach.village_id, 0)
+            warnings.append(f"{label}: crop crosses its {ceiling:,.0f} alert level {when}")
+        elif breach.kind == "capacity":
+            warnings.append(
+                f"{label}: {breach.resource.value} hits its store cap {when}; "
+                f"everything past it is lost"
+            )
+        else:
+            warnings.append(f"{label}: {breach.resource.value} runs dry {when}")
+
+    return DayCheckResponse(
+        villages=[
+            VillageDayResponse(
+                village_id=t.village_id,
+                village_name=village_label(t.village_id, names),
+                resource=t.resource,
+                daily_net=t.daily_net,
+                low=t.low,
+                high=t.high,
+                settled=t.settled,
+            )
+            for t in trajectories
+        ],
+        warnings=warnings,
+    )
 
 
 @router.post("/plan", response_model=PlanResponse)

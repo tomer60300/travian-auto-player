@@ -300,3 +300,181 @@ def storage_warnings(
             f"though the average rate fits"
         )
     return tuple(warnings)
+
+
+@dataclass(frozen=True)
+class ProfileSegment:
+    """One allocation profile's share of the day.
+
+    ``start_minute``/``end_minute`` are minutes past midnight; a segment may
+    wrap (start > end). ``ship_rates`` is what the profile's plan adds to or
+    removes from each village per hour while it is the one running --
+    ``village -> resource -> rate``, positive into the village.
+    """
+
+    name: str
+    start_minute: int
+    end_minute: int
+    ship_rates: Mapping[int, Mapping[Resource, float]]
+
+    def covers(self, minute: int) -> bool:
+        if self.start_minute == self.end_minute:
+            return False  # zero-width: validated away upstream, inert here
+        if self.start_minute < self.end_minute:
+            return self.start_minute <= minute < self.end_minute
+        return minute >= self.start_minute or minute < self.end_minute
+
+
+@dataclass(frozen=True)
+class TrajectoryBreach:
+    """A stock line crossing something it should not, with when and why."""
+
+    village_id: int
+    resource: Resource
+    kind: str  # "ceiling" | "capacity" | "empty"
+    day: int
+    minute: int
+    segment: str
+    """Which profile was running when the line crossed."""
+
+
+@dataclass(frozen=True)
+class VillageTrajectory:
+    """One village's crop-store day at steady state (or while still drifting)."""
+
+    village_id: int
+    resource: Resource
+    daily_net: float
+    """The UNCLAMPED nominal drift per day. Deliberately not measured off the
+    simulated levels: a store that hits its cap clamps there and its measured
+    net collapses to zero, which reads as "stable" about a village that is in
+    fact overflowing every day. The nominal keeps telling the truth."""
+    low: float
+    high: float
+    settled: bool
+
+
+def simulate_profile_cycle(
+    segments: Sequence[ProfileSegment],
+    own_rates: Mapping[int, Mapping[Resource, float]],
+    stocks: Mapping[int, Mapping[Resource, int]],
+    capacities: Mapping[int, Mapping[Resource, int]],
+    ceilings: Mapping[int, float] | None = None,
+    step_minutes: int = 15,
+    max_days: int = 45,
+) -> tuple[list[VillageTrajectory], list[TrajectoryBreach]]:
+    """Replay a day that switches between allocation profiles.
+
+    Each profile is planned in isolation, but the account lives through all of
+    them every day: what the day profile ships decides the stock the night
+    profile starts from. This runs the composite -- each segment's net shipping
+    active only inside its own hours, production always on, gaps between
+    segments meaning "no routes running" -- so questions like "does the capital
+    cross 90k during the night?" have an answer with an hour on it.
+
+    Deliberate approximation: segments contribute RATES, not discrete batches.
+    Route phases do not survive a profile switch (the operator recreates the
+    routes), so batch timing across the boundary is unknowable; within a single
+    profile the discrete check is :func:`simulate_day`. Overflow and starvation
+    still clamp, exactly as the game does.
+
+    ``ceilings`` is an operator-set alert level for CROP, below capacity --
+    typically an NPC trigger. Crossing it is reported with the day, minute and
+    the segment that was running.
+
+    Runs until the daily trajectory repeats (steady state) or ``max_days``.
+    A store still drifting at the horizon is reported unsettled with its daily
+    net, which is itself the answer: it will cross everything eventually.
+    """
+    level: dict[tuple[int, Resource], float] = {}
+    for vid, per in stocks.items():
+        for resource, amount in per.items():
+            level[(vid, resource)] = float(amount)
+
+    ceilings = ceilings or {}
+    nominal: dict[tuple[int, Resource], float] = {}
+    breaches: list[TrajectoryBreach] = []
+    breached: set[tuple[int, Resource, str]] = set()
+    lows: dict[tuple[int, Resource], float] = {}
+    highs: dict[tuple[int, Resource], float] = {}
+    day_nets: dict[tuple[int, Resource], float] = {}
+    settled_day = -1
+
+    def segment_at(minute: int) -> ProfileSegment | None:
+        for segment in segments:
+            if segment.covers(minute):
+                return segment
+        return None
+
+    for day in range(max_days):
+        opening = dict(level)
+        if day == max_days - 1 or settled_day >= 0:
+            lows = {k: v for k, v in level.items()}
+            highs = {k: v for k, v in level.items()}
+        for minute in range(0, MINUTES_PER_DAY, step_minutes):
+            active = segment_at(minute)
+            for vid, per in own_rates.items():
+                for resource, own in per.items():
+                    key = (vid, resource)
+                    ship = (
+                        float(active.ship_rates.get(vid, {}).get(resource, 0.0)) if active else 0.0
+                    )
+                    rate = own + ship
+                    if day == 0:
+                        nominal[key] = nominal.get(key, 0.0) + rate * step_minutes / 60.0
+                    if not rate:
+                        continue
+                    updated = level.get(key, 0.0) + rate * step_minutes / 60.0
+                    cap = capacities.get(vid, {}).get(resource)
+                    segment_name = active.name if active else "no profile"
+                    if resource is Resource.CROP:
+                        ceiling = ceilings.get(vid)
+                        if (
+                            ceiling is not None
+                            and updated > ceiling
+                            and (vid, resource, "ceiling") not in breached
+                        ):
+                            breached.add((vid, resource, "ceiling"))
+                            breaches.append(
+                                TrajectoryBreach(
+                                    vid, resource, "ceiling", day, minute, segment_name
+                                )
+                            )
+                    if cap is not None and updated > cap:
+                        if (vid, resource, "capacity") not in breached:
+                            breached.add((vid, resource, "capacity"))
+                            breaches.append(
+                                TrajectoryBreach(
+                                    vid, resource, "capacity", day, minute, segment_name
+                                )
+                            )
+                        updated = float(cap)
+                    if updated <= 0.0:
+                        if rate < 0 and (vid, resource, "empty") not in breached:
+                            breached.add((vid, resource, "empty"))
+                            breaches.append(
+                                TrajectoryBreach(vid, resource, "empty", day, minute, segment_name)
+                            )
+                        updated = 0.0
+                    level[key] = updated
+                    if settled_day >= 0 or day == max_days - 1:
+                        lows[key] = min(lows.get(key, updated), updated)
+                        highs[key] = max(highs.get(key, updated), updated)
+        day_nets = nominal
+        if settled_day >= 0:
+            break  # the settled day has now been measured; done
+        if all(abs(level[key] - opening.get(key, 0.0)) < 1.0 for key in level):
+            settled_day = day  # measure min/max over one more identical day
+
+    trajectories = [
+        VillageTrajectory(
+            village_id=vid,
+            resource=resource,
+            daily_net=day_nets.get((vid, resource), 0.0),
+            low=lows.get((vid, resource), level.get((vid, resource), 0.0)),
+            high=highs.get((vid, resource), level.get((vid, resource), 0.0)),
+            settled=settled_day >= 0,
+        )
+        for (vid, resource) in sorted(level)
+    ]
+    return trajectories, breaches

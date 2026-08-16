@@ -50,8 +50,57 @@ function loadProfiles(accountKey) {
 // server-side and travels in the snapshot.
 const DEFAULT_MERCHANT_MODEL = { base_capacity: 2200, bonus_per_to_level: 0.2 }
 
+const LS_WINDOWS = 'planner_profile_windows'
+const LS_CROP_CEILING = 'planner_crop_ceiling'
+// Sensible defaults by convention; anything else starts unset until the
+// operator gives it hours.
+const DEFAULT_WINDOWS = { Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] }
+const hhmmToMinutes = (t) => {
+  const [h, m] = String(t).split(':').map(Number)
+  return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null
+}
+
 const RESOURCES = ['lumber', 'clay', 'iron', 'crop']
 const RESOURCE_LABEL = { lumber: 'Lumber', clay: 'Clay', iron: 'Iron', crop: 'Crop' }
+
+// Minimal inline glyphs in the game's resource order, so cargo reads the way
+// the marketplace shows it. Drawn here rather than shipped as assets: no
+// external sprite, and they inherit currentColor for the strokes.
+function ResourceIcon({ resource }) {
+  const common = { width: 13, height: 13, viewBox: '0 0 16 16', 'aria-label': RESOURCE_LABEL[resource], role: 'img', className: 'inline-block align-[-2px]' }
+  if (resource === 'lumber')
+    return (
+      <svg {...common}>
+        <rect x="1" y="6" width="11" height="4" rx="2" fill="#a16207" />
+        <rect x="4" y="10" width="11" height="4" rx="2" fill="#854d0e" />
+        <circle cx="12" cy="8" r="1.6" fill="#fde68a" />
+        <circle cx="15" cy="12" r="1.4" fill="#fde68a" />
+      </svg>
+    )
+  if (resource === 'clay')
+    return (
+      <svg {...common}>
+        <rect x="1" y="4" width="9" height="5" rx="1" fill="#ea580c" />
+        <rect x="6" y="9" width="9" height="5" rx="1" fill="#c2410c" />
+      </svg>
+    )
+  if (resource === 'iron')
+    return (
+      <svg {...common}>
+        <path d="M3 12 L6 5 L10 5 L13 12 Z" fill="#94a3b8" />
+        <path d="M6 5 L8 8 L10 5 Z" fill="#e2e8f0" />
+      </svg>
+    )
+  return (
+    <svg {...common}>
+      <path d="M8 15 V6" stroke="#eab308" strokeWidth="1.4" />
+      <path d="M8 7 C5 6 4 4 4 1 C7 2 8 4 8 7 Z" fill="#facc15" />
+      <path d="M8 7 C11 6 12 4 12 1 C9 2 8 4 8 7 Z" fill="#eab308" />
+      <path d="M8 11 C6 10 5 9 5 7 C7 8 8 9 8 11 Z" fill="#facc15" />
+      <path d="M8 11 C10 10 11 9 11 7 C9 8 8 9 8 11 Z" fill="#eab308" />
+    </svg>
+  )
+}
 const MODES = [
   { value: 'keep', label: 'Keep own' },
   { value: 'absolute', label: 'Absolute /h' },
@@ -254,6 +303,15 @@ export default function ResourcePlanner() {
   // material is how the targets are EDITED; grouped by village is how the
   // operator actually thinks about the outcome.
   const [allocView, setAllocView] = useState('village')
+  // Which hours of the day each profile actually runs, 'HH:MM' pairs. The
+  // profiles are separate plans, but the account lives through all of them
+  // every day -- the windows are what lets the full-day check line them up.
+  const [profileWindows, setProfileWindows] = useState({})
+  // Operator alert level for a village's crop stock (e.g. an NPC trigger),
+  // below capacity. Cached per account like the Trade Office levels.
+  const [cropCeilings, setCropCeilings] = useState({})
+  const [dayCheck, setDayCheck] = useState(null)
+  const [dayChecking, setDayChecking] = useState(false)
   const [snapshot, setSnapshot] = useState(null)
   const [tradeOffice, setTradeOffice] = useState({})
   const [profiles, setProfiles] = useState({ [DEFAULT_PROFILE]: {} })
@@ -323,6 +381,9 @@ export default function ResourcePlanner() {
     setSnapshot(loadJson(`${LS_SNAPSHOT}::${accountKey}`, null))
     setTradeOffice(loadJson(`${LS_TRADE_OFFICE}::${accountKey}`, {}))
     setForeignTargets(loadJson(`${LS_FOREIGN}::${accountKey}`, []))
+    setProfileWindows(loadJson(`${LS_WINDOWS}::${accountKey}`, {}))
+    setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
+    setDayCheck(null)
     setProfiles(loaded)
     setActiveProfile(loaded[storedActive] ? storedActive : Object.keys(loaded)[0])
     setMerchantModel(loadJson(`${LS_MERCHANT}::${accountKey}`, DEFAULT_MERCHANT_MODEL))
@@ -337,6 +398,13 @@ export default function ResourcePlanner() {
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_FOREIGN), foreignTargets)
   }, [foreignTargets, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_WINDOWS), profileWindows)
+  }, [profileWindows, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_CROP_CEILING), cropCeilings)
+  }, [cropCeilings, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_PROFILES), profiles)
   }, [profiles, hydratedKey, accountKey, storageKey])
@@ -589,6 +657,55 @@ export default function ResourcePlanner() {
   // editing the set clears it.
   const profileNames = Object.keys(profiles)
 
+  const windowFor = (name) => profileWindows[name] ?? DEFAULT_WINDOWS[name] ?? null
+
+  const runDayCheck = async () => {
+    const requestedFor = accountKey
+    const segments = []
+    const skipped = []
+    for (const name of profileNames) {
+      const w = windowFor(name)
+      const start = w && hhmmToMinutes(w[0])
+      const end = w && hhmmToMinutes(w[1])
+      if (start == null || end == null || start === end) {
+        skipped.push(name)
+        continue
+      }
+      const per = profiles[name] ?? {}
+      const sendAllocations = {}
+      for (const resource of RESOURCES) {
+        const usable = {}
+        for (const [vid, a] of Object.entries(per[resource] ?? {})) {
+          if (a.mode !== 'keep') usable[vid] = a
+        }
+        if (Object.keys(usable).length) sendAllocations[resource] = usable
+      }
+      segments.push({ name, window: [start, end], allocations: sendAllocations })
+    }
+    if (!segments.length) {
+      toast.error('No profile has hours set — give each profile its window first')
+      return
+    }
+    setDayChecking(true)
+    try {
+      const ceilings = {}
+      for (const [vid, value] of Object.entries(cropCeilings)) {
+        if (Number(value) > 0) ceilings[vid] = Number(value)
+      }
+      const res = await api.post('/distribution/day-check', {
+        snapshot: villages,
+        segments,
+        crop_ceilings: ceilings,
+      })
+      if (requestedFor !== currentAccountKey()) return
+      setDayCheck({ ...res.data, skipped })
+    } catch (err) {
+      toast.error(errorDetail(err, 'Full-day check failed'))
+    } finally {
+      setDayChecking(false)
+    }
+  }
+
   const switchProfile = (name) => {
     if (!profiles[name] || name === activeProfile) return
     setActiveProfile(name)
@@ -711,6 +828,37 @@ export default function ResourcePlanner() {
         >
           Delete
         </button>
+        {/* The hours this profile actually runs. Profiles are separate plans,
+            but the account lives through all of them every day; without hours
+            the full-day check cannot line them up. */}
+        <span className="flex items-center gap-1 text-xs text-secondary ml-1">
+          runs
+          <input
+            type="time"
+            aria-label={`${activeProfile} window start`}
+            className="input-field text-xs py-0.5 px-1 w-[74px]"
+            value={(windowFor(activeProfile) ?? ['', ''])[0]}
+            onChange={(e) =>
+              setProfileWindows((prev) => ({
+                ...prev,
+                [activeProfile]: [e.target.value, (windowFor(activeProfile) ?? ['', ''])[1]],
+              }))
+            }
+          />
+          –
+          <input
+            type="time"
+            aria-label={`${activeProfile} window end`}
+            className="input-field text-xs py-0.5 px-1 w-[74px]"
+            value={(windowFor(activeProfile) ?? ['', ''])[1]}
+            onChange={(e) =>
+              setProfileWindows((prev) => ({
+                ...prev,
+                [activeProfile]: [(windowFor(activeProfile) ?? ['', ''])[0], e.target.value],
+              }))
+            }
+          />
+        </span>
         <span className="text-secondary">
           each profile builds its own routes — switching is free (no request)
         </span>
@@ -756,6 +904,12 @@ export default function ResourcePlanner() {
                 <th className="text-left px-2">Net crop</th>
                 <th className="text-right px-2">Merchants</th>
                 <th className="text-right px-2">Trade Office</th>
+                <th
+                  className="text-right px-2"
+                  title="Alert when this village's crop stock would cross this level (e.g. your NPC trigger). Used by the full-day check."
+                >
+                  Crop alert
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -794,6 +948,23 @@ export default function ResourcePlanner() {
                         setTradeOffice((prev) => ({
                           ...prev,
                           [v.village_id]: e.target.value === '' ? undefined : Number(e.target.value),
+                        }))
+                      }
+                    />
+                  </td>
+                  <td className="text-right px-2">
+                    <input
+                      type="number"
+                      min="0"
+                      aria-label={`Crop stock alert level for ${v.name}`}
+                      placeholder="—"
+                      className="input-field w-24 text-right text-xs py-1"
+                      value={cropCeilings[v.village_id] ?? ''}
+                      onChange={(e) =>
+                        setCropCeilings((prev) => ({
+                          ...prev,
+                          [v.village_id]:
+                            e.target.value === '' ? undefined : Number(e.target.value),
                         }))
                       }
                     />
@@ -1030,6 +1201,7 @@ export default function ResourcePlanner() {
             {[
               ['village', 'Result by village'],
               ['edit', 'Edit by resource'],
+              ['fullday', 'Full day (all profiles)'],
             ].map(([key, label]) => (
               <button
                 key={key}
@@ -1061,7 +1233,10 @@ export default function ResourcePlanner() {
                     <th className="text-left py-1.5 px-2">Village</th>
                     {RESOURCES.map((resource) => (
                       <th key={resource} className="text-right px-3">
-                        {RESOURCE_LABEL[resource]}
+                        <span className="inline-flex items-center gap-1">
+                          <ResourceIcon resource={resource} />
+                          {RESOURCE_LABEL[resource]}
+                        </span>
                       </th>
                     ))}
                   </tr>
@@ -1159,6 +1334,128 @@ export default function ResourcePlanner() {
                 marks a village whose crop crosses from starving to surplus — e.g. −2,500/h own
                 +4,000/h shipped → 1,500/h). Bottom line: what ships in (+) or out (−) to make it
                 true. “rest” absorbs whatever the others leave unassigned.
+              </p>
+            </div>
+          )}
+
+          {allocView === 'fullday' && (
+            <div className="card p-4">
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+                <div>
+                  <h3 className="font-semibold">The whole day, every profile in its hours</h3>
+                  <p className="text-secondary text-xs mt-0.5">
+                    Profiles are planned separately, but the account lives through all of them:
+                    what Day ships decides the stock Night starts from. This simulates the
+                    composite — net rates per window, production always on — and answers
+                    questions like “does 02 cross its crop alert at night?” with an hour on it.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn-primary text-xs py-1.5"
+                  disabled={dayChecking}
+                  onClick={runDayCheck}
+                >
+                  {dayChecking ? 'Simulating…' : dayCheck ? 'Re-run (0 requests)' : 'Run (0 requests)'}
+                </button>
+              </div>
+
+              {dayCheck?.skipped?.length > 0 && (
+                <p className="text-amber-300 text-xs mb-2">
+                  Skipped {dayCheck.skipped.join(', ')} — no hours set. Give each profile its
+                  window in the bar above.
+                </p>
+              )}
+
+              {dayCheck?.warnings?.length > 0 && (
+                <ul className="text-xs text-amber-300 list-disc list-inside mb-3 space-y-0.5">
+                  {dayCheck.warnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              )}
+              {dayCheck && dayCheck.warnings.length === 0 && (
+                <p className="text-success text-xs mb-3">
+                  No store crosses its cap, alert level or zero across the full day.
+                </p>
+              )}
+
+              {dayCheck && (
+                <table className="w-full text-xs">
+                  <thead className="text-secondary uppercase">
+                    <tr>
+                      <th className="text-left py-1 px-2">Village</th>
+                      <th className="text-right px-2">
+                        <span className="inline-flex items-center gap-1">
+                          <ResourceIcon resource="crop" />
+                          Crop now
+                        </span>
+                      </th>
+                      <th className="text-right px-2">Day swing (low → high)</th>
+                      <th className="text-right px-2">Drift/day</th>
+                      <th className="text-right px-2" title="Your alert level from the Snapshot tab">
+                        Alert at
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dayCheck.villages
+                      .filter((t) => t.resource === 'crop')
+                      .map((t) => {
+                        const ceiling = Number(cropCeilings[t.village_id]) || null
+                        const nearAlert = ceiling != null && t.high >= ceiling
+                        return (
+                          <tr
+                            key={t.village_id}
+                            className={`border-t border-gray-800 ${nearAlert ? 'bg-red-500/10' : ''}`}
+                          >
+                            <td className="py-1 px-2">{t.village_name}</td>
+                            <td className="text-right px-2 font-mono text-secondary">
+                              {fmt(
+                                villages.find((v) => v.village_id === t.village_id)?.crop_stock ?? 0
+                              )}
+                            </td>
+                            <td className="text-right px-2 font-mono">
+                              {fmt(t.low)} → {fmt(t.high)}
+                              {!t.settled && (
+                                <span
+                                  className="text-amber-300 ml-1"
+                                  title="Still drifting at the simulation horizon — the drift column is the story"
+                                >
+                                  ↗
+                                </span>
+                              )}
+                            </td>
+                            <td
+                              className={`text-right px-2 font-mono ${
+                                Math.abs(t.daily_net) < 1
+                                  ? 'text-secondary/60'
+                                  : t.daily_net > 0
+                                    ? 'text-amber-300'
+                                    : 'text-success'
+                              }`}
+                            >
+                              {signed(t.daily_net)}
+                            </td>
+                            <td className="text-right px-2 font-mono text-secondary">
+                              {ceiling != null ? fmt(ceiling) : '—'}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                  </tbody>
+                </table>
+              )}
+              {!dayCheck && !dayChecking && (
+                <p className="text-secondary text-xs italic">
+                  Not run yet. It costs no game requests — everything comes from the snapshot you
+                  already hold.
+                </p>
+              )}
+              <p className="text-secondary text-[11px] mt-2">
+                Approximation, stated plainly: each profile contributes its plan’s net rates, not
+                discrete batches — route phases don’t survive a profile switch. The per-profile
+                batch-level overflow check still runs when you build each plan.
               </p>
             </div>
           )}
@@ -1387,9 +1684,19 @@ export default function ResourcePlanner() {
                               row.destination)}
                         </td>
                         <td className="px-2 font-mono">
-                          {Object.entries(row.cargo)
-                            .map(([r, v]) => `${RESOURCE_LABEL[r]} ${v.toLocaleString()}`)
-                            .join(' · ')}
+                          {/* Always all four, in the marketplace's order, zeros
+                              included -- the sheet is copied into the game's
+                              trade-route dialog field by field. */}
+                          <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                            {RESOURCES.map((r) => (
+                              <span key={r} className="inline-flex items-center gap-1">
+                                <ResourceIcon resource={r} />
+                                <span className={row.cargo[r] ? '' : 'text-secondary/50'}>
+                                  {(row.cargo[r] ?? 0).toLocaleString()}
+                                </span>
+                              </span>
+                            ))}
+                          </span>
                         </td>
                         <td className="text-right px-2 font-mono">{row.cycle_hours}h</td>
                         <td className="text-right px-2 font-mono">{row.dispatch}</td>
