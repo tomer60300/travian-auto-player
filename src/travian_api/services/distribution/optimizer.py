@@ -41,12 +41,18 @@ Three stages, per profile section 14 (``cluster -> assign -> improve``):
 
 4. **Crop relay** -- :func:`_improve_flows` may also reroute a crop flow through
    an intermediate village that forwards it (profile section 3.5 permits this for
-   crop, never for materials). Relay cannot lower total merchants -- cost is
-   essentially ``cargo x round_trip / capacity``, linear in both, so the long haul
-   costs the same consolidated as split and the collection legs are pure addition
-   -- but it *moves* commitment off a village that cannot staff its own haul, and
-   occasionally sheds a merchant to integer rounding. Because excess is the first
-   objective key, it is adopted exactly when it pays and never merely to shuffle.
+   crop, never for materials). Its main use is *moving* commitment off a village
+   that cannot staff its own haul, but it can also genuinely lower the total:
+   the cost ``ceil(batch/capacity) x sets_in_flight`` multiplies each send's
+   partial-vehicle waste by every set in flight, and pooling several part-loads
+   onto one trunk removes that waste (five 900/h flows over a 1,200-min round
+   trip at capacity 1,000 cost 100 vehicles direct, 95 pooled). The continuous
+   relaxation -- where cost is linear in cargo x distance and relay can never
+   win -- only approximates the regime where batches are large relative to
+   capacity. Because excess is the first objective key, relay is adopted exactly
+   when it pays. NOTE: single-flow moves harvest pooling only partially; fully
+   pooling several senders needs a compound move each step of which is
+   break-even, which first-improvement cannot cross.
 
 What it still does *not* do is claim global optimality (the problem is NP-hard,
 section 14) or relay materials. A village over its merchant budget is reported,
@@ -461,9 +467,11 @@ def _improve_flows(
     that lands a resource on a pair another resource already uses is rewarded.
 
     The objective is lexicographic ``(over_budget_excess, total_merchants,
-    route_count)`` — feasibility first, then merchants (§8.3 objective 1), then
-    route count (objective 4). A swap is applied only when it strictly lowers
-    that tuple, so the result is deterministic and never worse than the seed.
+    route_count, cargo_weighted_round_trip)`` — feasibility first, then
+    merchants (§8.3 objective 1), then route count (objective 4), then shorter
+    hauls as the tie-break so equal-cost plans prefer nearer assignments. A move
+    is applied only when it strictly lowers that tuple, so the result is
+    deterministic and never worse than the seed.
 
     Returns:
         ``(flows, converged)``. ``converged`` is False when ``max_passes`` ran
@@ -494,6 +502,13 @@ def _improve_flows(
         return cheapest_cycle(
             hourly_total, 2.0 * one_way, capacities[origin], cycles
         ).merchants_committed
+
+    def _one_way(key: FlowKey) -> float:
+        cached = one_way_cache.get(key)
+        if cached is None:
+            cached = geometry.one_way_minutes(villages[key[0]].coords, villages[key[1]].coords)
+            one_way_cache[key] = cached
+        return cached
 
     pair = _merge_pair_cargo(flows)
     pair_merch: dict[FlowKey, int] = {
@@ -588,7 +603,22 @@ def _improve_flows(
         rc_delta = sum(route_weight(key) for key in touched_keys if new_merch[key] > 0) - sum(
             route_weight(key) for key in touched_keys if pair_merch.get(key, 0) > 0
         )
-        return (over_delta, total_delta, rc_delta), (
+        # Cargo-weighted round-trip, the final tie-break. Plans that tie on
+        # excess, merchants and route count used to be tie-broken by whatever
+        # move happened to be scanned first, which left the search actively
+        # latency-blind: two equal-cost assignments where one hauls the cargo
+        # twice as far were interchangeable. Rounded to an integer so the
+        # objective stays a strictly-decreasing bounded integer tuple and
+        # termination remains guaranteed.
+        rt_delta = round(
+            sum(
+                (sum(new_cargo[key].values()) - sum(pair.get(key, {}).values()))
+                * 2.0
+                * _one_way(key)
+                for key in touched_keys
+            )
+        )
+        return (over_delta, total_delta, rc_delta, rt_delta), (
             touched_keys,
             new_cargo,
             new_merch,
@@ -625,14 +655,16 @@ def _improve_flows(
     def _relay_scan() -> bool:
         """Reroute a crop flow through an intermediate village that forwards it.
 
-        Relay can never lower TOTAL merchants: cost is essentially
-        ``cargo x round_trip / capacity``, linear in both, so the long haul costs
-        the same consolidated as split and the collection legs are pure addition
-        (measured across every cluster geometry: best case break-even). What it
-        does is *move* commitment off a village that cannot staff its own haul
-        onto one with spare capacity. Since ``over_budget_excess`` is the first
-        objective key and merchants only the second, the accept test below adopts
-        relay exactly when it buys feasibility and never merely to shuffle load.
+        Two ways relay pays. It *moves* commitment off a village that cannot
+        staff its own haul onto one with spare capacity -- the feasibility case,
+        first key of the objective. And in the ceiling-waste regime it lowers
+        the TOTAL: each send's partial-vehicle waste ``batch mod capacity`` is
+        multiplied by ``sets_in_flight``, and pooling part-loads onto one trunk
+        eliminates it. An earlier version of this docstring claimed the second
+        case was impossible, from a linearity argument that only holds when
+        batches dwarf capacity; a sweep confined to that regime then "confirmed"
+        it. The acceptance test below never depended on the claim -- moves are
+        adopted whenever the objective strictly falls, whichever key improves.
 
         Crop only, per profile section 3.5: materials must not chain A->B->C, and
         restricting relay to crop keeps that no-waterfall rule true by
@@ -686,7 +718,7 @@ def _improve_flows(
                     ((hub, destination), Resource.CROP, amount),
                 ]
                 delta, state = _score_changes(changes)
-                if delta >= (0, 0, 0):
+                if delta >= (0, 0, 0, 0):
                     continue
                 # Tie-break on the collection leg: when two hubs cost the same,
                 # the nearer one is the better place to send cargo, and it keeps
@@ -701,134 +733,129 @@ def _improve_flows(
                 return True
         return False
 
-    converged = False
-    for _pass in range(max_passes):
-        applied = False
+    def _swap_changes(resource, o1, d1, o2, d2, t):
+        return [
+            ((o1, d1), resource, -t),
+            ((o2, d2), resource, -t),
+            ((o1, d2), resource, t),
+            ((o2, d1), resource, t),
+        ]
+
+    def _swap_shape_ok(resource, legs, o1, d1, o2, d2, t) -> bool:
+        # Swaps are blind to relay: rewiring a hub's legs can lengthen the chain
+        # or close a loop, either of which the beat cannot then schedule.
+        # Checked on the prospective edge set, never applied-then-undone.
+        if resource is not Resource.CROP or not relay_hubs:
+            return True
+        prospective = _crop_edges() | {(o1, d2), (o2, d1)}
+        for key in ((o1, d1), (o2, d2)):
+            if legs.get(key, 0.0) - t <= EPSILON:
+                prospective.discard(key)
+        return _crop_shape_ok(prospective)
+
+    def _breakpoint_ts(resource, o1, d1, o2, d2, t_full):
+        """Transfer sizes worth trying besides all-of-min.
+
+        Vehicle cost is a staircase, so the best transfer is often a breakpoint
+        BELOW min(both): the size that lands a growing pair's batch exactly on a
+        multiple of its origin's capacity, wasting nothing. All-of-min restricts
+        the search to transportation-polytope vertices; these interior points
+        are where the ceiling-waste savings live.
+        """
+        candidates = {t_full}
+        for origin, dest in ((o1, d2), (o2, d1)):
+            capacity = capacities[origin]
+            old_rate = sum(pair.get((origin, dest), {}).values())
+            round_trip = 2.0 * _one_way((origin, dest))
+            cycle = cheapest_cycle(old_rate + t_full, round_trip, capacity, cycles).cycle_hours
+            step = capacity / cycle  # rate that fills one vehicle exactly
+            k = int((old_rate + t_full) // step)
+            while k >= 1:
+                t = k * step - old_rate
+                if t <= EPSILON:
+                    break
+                if t < t_full - EPSILON:
+                    candidates.add(t)
+                k -= 1
+                if len(candidates) >= 8:
+                    break
+        return sorted(candidates, reverse=True)
+
+    def _best_swap(refinement: bool):
+        """One full sweep; return the single best improving swap, or None.
+
+        Best-improvement, not first-improvement. An order-perturbation audit
+        (reversed plus two seeded shuffles over 30 accounts) showed the previous
+        first-improving-in-sorted-order scan was beaten by some other order in
+        24 of 30 cases -- the scan order, which follows village ids, was quietly
+        deciding which local optimum the search landed in. Scanning everything
+        and taking the best removes that positional bias; ties break on the
+        sorted candidate tuple, so determinism is preserved.
+
+        ``refinement`` widens the neighbourhood to breakpoint transfer sizes.
+        It ignores ``settled``, whose entries only assert that the FULL transfer
+        does not improve, and it never adds to it for the same reason.
+        """
+        best = None
         for resource in sorted(flows, key=lambda r: r.value):
             legs = flows[resource]
             edges = sorted(key for key, amount in legs.items() if amount > EPSILON)
             for i, (o1, d1) in enumerate(edges):
                 for o2, d2 in edges[i + 1 :]:
-                    # Skip pairs already proven non-improving that no swap since
-                    # has touched. This is the whole speedup: it preserves the
-                    # first-improving-in-sorted-order trajectory exactly (and so
-                    # the resulting plan), while avoiding the re-evaluation of
-                    # every untouched pair after each swap.
-                    if (resource, (o1, d1), (o2, d2)) in settled:
+                    if not refinement and (resource, (o1, d1), (o2, d2)) in settled:
                         continue
-                    # o1 == d2 (or o2 == d1) would create a self-loop, whose
-                    # zero travel time makes it cost zero merchants -- the most
+                    # o1 == d2 (or o2 == d1) would create a self-loop, whose zero
+                    # travel time makes it cost zero merchants -- the most
                     # attractive move there is, silently deleting real delivery.
-                    # Unreachable while a village is either sender or receiver of
-                    # a resource but never both, but this must not depend on an
-                    # invariant owned by another module to stay correct.
                     if o1 in (o2, d2) or d1 in (d2, o2):
                         continue
-                    t = min(legs.get((o1, d1), 0.0), legs.get((o2, d2), 0.0))
-                    if t <= EPSILON:
+                    t_full = min(legs.get((o1, d1), 0.0), legs.get((o2, d2), 0.0))
+                    if t_full <= EPSILON:
                         continue
-                    candidate = (resource, (o1, d1), (o2, d2))
-
-                    # Cargo of the four pairs the swap touches, after the move.
-                    moved = [((o1, d1), -t), ((o2, d2), -t), ((o1, d2), t), ((o2, d1), t)]
-                    new_cargo: dict[FlowKey, dict[Resource, float]] = {}
-                    for key, delta in moved:
-                        cargo = dict(pair.get(key, {}))
-                        updated = cargo.get(resource, 0.0) + delta
-                        if updated > EPSILON:
-                            cargo[resource] = updated
-                        else:
-                            cargo.pop(resource, None)
-                        new_cargo[key] = cargo
-                    new_merch = {
-                        key: merchants_for(key[0], key[1], cargo)
-                        for key, cargo in new_cargo.items()
-                    }
-
-                    d_o1 = (new_merch[(o1, d1)] - pair_merch.get((o1, d1), 0)) + (
-                        new_merch[(o1, d2)] - pair_merch.get((o1, d2), 0)
+                    ts = (
+                        _breakpoint_ts(resource, o1, d1, o2, d2, t_full)
+                        if refinement
+                        else (t_full,)
                     )
-                    d_o2 = (new_merch[(o2, d2)] - pair_merch.get((o2, d2), 0)) + (
-                        new_merch[(o2, d1)] - pair_merch.get((o2, d1), 0)
-                    )
-                    new_o1, new_o2 = committed.get(o1, 0) + d_o1, committed.get(o2, 0) + d_o2
-
-                    over_delta = (
-                        excess(o1, new_o1)
-                        - excess(o1, committed.get(o1, 0))
-                        + excess(o2, new_o2)
-                        - excess(o2, committed.get(o2, 0))
-                    )
-                    total_delta = sum(new_merch.values()) - sum(
-                        pair_merch.get(key, 0) for key, _ in moved
-                    )
-                    rc_delta = sum(
-                        route_weight(key) for key, _ in moved if new_merch[key] > 0
-                    ) - sum(route_weight(key) for key, _ in moved if pair_merch.get(key, 0) > 0)
-
-                    # The whole objective only shifts by these deltas, so the
-                    # full tuple improves exactly when the delta tuple is < 0.
-                    if (over_delta, total_delta, rc_delta) >= (0, 0, 0):
-                        settled.add(candidate)
-                        continue
-
-                    if resource is Resource.CROP and relay_hubs:
-                        # Swaps are blind to relay: rewiring a hub's legs can
-                        # lengthen the chain or close a loop, either of which the
-                        # beat cannot then schedule. Checked on the prospective
-                        # edge set, never applied-then-undone.
-                        prospective = _crop_edges() | {(o1, d2), (o2, d1)}
-                        for key in ((o1, d1), (o2, d2)):
-                            if legs.get(key, 0.0) - t <= EPSILON:
-                                prospective.discard(key)
-                        if not _crop_shape_ok(prospective):
-                            settled.add(candidate)
+                    improving = None
+                    for t in ts:
+                        changes = _swap_changes(resource, o1, d1, o2, d2, t)
+                        delta, state = _score_changes(changes)
+                        if delta >= (0, 0, 0, 0):
                             continue
+                        if not _swap_shape_ok(resource, legs, o1, d1, o2, d2, t):
+                            continue
+                        if improving is None or delta < improving[0]:
+                            improving = (delta, changes, state)
+                    if improving is None:
+                        if not refinement:
+                            settled.add((resource, (o1, d1), (o2, d2)))
+                        continue
+                    # Deterministic tie-break: the sorted scan order itself.
+                    if best is None or improving[0] < best[0]:
+                        best = improving
+        return best
 
-                    for key, cargo in new_cargo.items():
-                        if cargo:
-                            pair[key] = cargo
-                        else:
-                            pair.pop(key, None)
-                        if new_merch[key] > 0:
-                            pair_merch[key] = new_merch[key]
-                        else:
-                            pair_merch.pop(key, None)
-                    committed[o1], committed[o2] = new_o1, new_o2
-                    legs[(o1, d1)] -= t
-                    legs[(o2, d2)] -= t
-                    legs[(o1, d2)] = legs.get((o1, d2), 0.0) + t
-                    legs[(o2, d1)] = legs.get((o2, d1), 0.0) + t
-                    for key in ((o1, d1), (o2, d2)):
-                        if legs[key] <= EPSILON:
-                            del legs[key]
-
-                    # This swap moved cargo on four pairs and changed the
-                    # commitment of two origins, so any cached verdict involving
-                    # those villages is stale. Everything else is untouched and
-                    # stays settled -- that is what makes the rescan cheap.
-                    touched = {o1, o2, d1, d2}
-                    settled.difference_update(
-                        [
-                            entry
-                            for entry in settled
-                            if touched & {entry[1][0], entry[1][1], entry[2][0], entry[2][1]}
-                        ]
-                    )
-                    applied = True
-                    break
-                if applied:
-                    break
-            if applied:
-                break
-        if not applied:
-            # Swaps are exhausted. Relay is tried only now, so a plan with no
-            # over-budget village -- where relay can never improve anything --
-            # comes out identical to one produced without this move at all.
-            applied = _relay_scan()
-        if not applied:
-            converged = True
-            break
+    converged = False
+    for _pass in range(max_passes):
+        move = _best_swap(refinement=False)
+        if move is not None:
+            _delta, changes, state = move
+            _commit_changes(changes, state)
+            continue
+        # Swaps are exhausted. Relay is tried only now, so a plan with no
+        # over-budget village and no ceiling waste comes out identical to one
+        # produced without the move at all.
+        if _relay_scan():
+            continue
+        # Both exhausted at full transfer sizes: widen to breakpoint transfers.
+        move = _best_swap(refinement=True)
+        if move is not None:
+            _delta, changes, state = move
+            _commit_changes(changes, state)
+            continue
+        converged = True
+        break
     return flows, converged
 
 
@@ -887,7 +914,11 @@ def build_plan(
         assignment[resource] = {key: amount for key, amount in flows.items() if amount > EPSILON}
 
     # Reassign the greedy seed to cut merchants and relieve over-budget villages
-    # wherever a cheaper routing exists; never worse than the seed (§8.3, §14).
+    # wherever a cheaper routing exists. Never worse than the seed on
+    # (excess, merchants) AT THIS STAGE -- the latency pass afterwards spends
+    # idle merchants on speed deliberately, so the end-to-end guarantee is
+    # per-phase: excess never rises anywhere; the merchant total is minimal here
+    # and may rise later, strictly within per-village budgets (§8.3, §14).
     budgets = {vid: villages[vid].spare_merchants(merchant_reserve) for vid in villages}
     assignment, converged = _improve_flows(
         assignment,

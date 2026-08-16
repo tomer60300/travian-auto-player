@@ -22,6 +22,7 @@ from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import (
     DAILY_BEAT_CYCLES,
     EUROPE2_TEUTON,
+    MerchantModel,
     route_cost,
 )
 from travian_api.services.distribution.optimizer import (
@@ -486,14 +487,54 @@ class TestLatencyPassRespectsTheFillFloor:
 
 
 class TestCropRelay:
-    """Relay exists to buy feasibility, never to save merchants.
+    """Relay buys feasibility, and in one regime it genuinely saves merchants.
 
-    Merchant cost is essentially cargo x round_trip / capacity -- linear in both
-    -- so consolidating n shipments into one long haul costs the same on the long
-    leg and adds the collection legs on top. Measured across every cluster
-    geometry, relay is at best break-even on total merchants. Its real use is to
-    move commitment off a village that cannot staff its own haul.
+    The first version of this docstring claimed it could NEVER save merchants,
+    from a linearity argument (cost ~ cargo x round_trip / capacity) -- and a
+    sweep that happened to sample only the large-batch regime "confirmed" it.
+    External review produced the counterexample: cost is really
+    ceil(batch/capacity) x sets_in_flight, so each send's partial-vehicle waste
+    is multiplied by every set in flight, and POOLING part-loads onto one trunk
+    removes that waste. Five 900/h flows over a 1,200-minute round trip at
+    capacity 1,000: 100 vehicles direct, 95 pooled.
+
+    Its primary use remains moving commitment off a village that cannot staff
+    its own haul (feasibility, the first objective key).
     """
+
+    def test_pooling_part_loads_can_genuinely_save_merchants(self):
+        """The ceiling-waste counterexample, end to end. Also pins the honest
+        limitation: single-flow relay moves harvest the pooling win only
+        PARTIALLY -- fully pooling all five senders needs a compound move whose
+        individual steps are break-even, which first-improvement cannot cross.
+        So this asserts only that relay ON strictly beats relay OFF, not that
+        the full theoretical saving is captured."""
+        model = MerchantModel(base_capacity=1_000, bonus_per_trade_office_level=0.0)
+        villages = {1: VillageState(1, 0, 0, merchant_count=200, trade_office_level=0)}
+        prod = {1: 0.0}
+        alloc = {1: Allocation(AllocationMode.REMAINDER)}
+        for i, vid in enumerate((2, 3, 4, 5, 6)):
+            villages[vid] = VillageState(vid, 120, i, merchant_count=25, trade_office_level=0)
+            prod[vid] = 900.0
+            alloc[vid] = Allocation(AllocationMode.ABSOLUTE, 0.0)
+        # The hub sits beside the cluster and already carries crop.
+        villages[7] = VillageState(7, 114, 2, merchant_count=200, trade_office_level=0)
+        prod[7] = 100.0
+        alloc[7] = Allocation(AllocationMode.ABSOLUTE, 0.0)
+        plans = {Resource.CROP: resolve_resource(Resource.CROP, prod, alloc)}
+
+        direct = build_plan(
+            villages, plans, GEOMETRY, model, max_latency_hours=None, max_relay_hops=0
+        )
+        relayed = build_plan(villages, plans, GEOMETRY, model, max_latency_hours=None)
+
+        assert not direct.over_budget and not relayed.over_budget, (
+            "budgets are deliberately huge; any excess means the fixture drifted"
+        )
+        assert relayed.total_merchants < direct.total_merchants, (
+            f"pooling saved nothing ({relayed.total_merchants} vs "
+            f"{direct.total_merchants}); the ceiling-waste win regressed"
+        )
 
     def _stranded_account(self):
         """A far village that cannot afford its own haul, plus a midpoint hub.
