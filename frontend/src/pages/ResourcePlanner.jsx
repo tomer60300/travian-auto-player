@@ -249,6 +249,11 @@ export default function ResourcePlanner() {
   // and the merchant model.
   const accountKey = serverUrl && playerName ? `${serverUrl.replace(/\/+$/, '')}|${playerName}` : null
   const [stage, setStage] = useState('snapshot')
+  // Allocate stage has two views: the per-resource editor, and a read-only
+  // result grid grouped by village showing what each ends up with. Grouping by
+  // material is how the targets are EDITED; grouped by village is how the
+  // operator actually thinks about the outcome.
+  const [allocView, setAllocView] = useState('village')
   const [snapshot, setSnapshot] = useState(null)
   const [tradeOffice, setTradeOffice] = useState({})
   const [profiles, setProfiles] = useState({ [DEFAULT_PROFILE]: {} })
@@ -489,6 +494,19 @@ export default function ResourcePlanner() {
       per[villageId] = { mode: 'keep', value: 0, ...(per[villageId] ?? {}), ...patch }
       return { ...prev, [resource]: per }
     })
+  }
+
+  // What a village ends up retaining per hour after the plan runs -- the same
+  // resolution the backend applies, so the grid never disagrees with the plan.
+  const targetFor = (resource, v) => {
+    const own = v[`${resource}_per_hour`]
+    const a = allocations[resource]?.[v.village_id] ?? { mode: 'keep', value: 0 }
+    if (a.mode === 'remainder') return explicitTotal(resource)
+    if (own == null) return a.mode === 'absolute' ? Number(a.value) || 0 : null
+    if (a.mode === 'absolute') return Number(a.value) || 0
+    if (a.mode === 'percentage') return (totals[resource].total * (Number(a.value) || 0)) / 100
+    if (a.mode === 'sustain') return own < 0 ? (-own * (Number(a.value) || 0)) / 100 : own
+    return own // keep
   }
 
   const isSelected = (resource, vid) => (selected[resource] ?? []).includes(vid)
@@ -1005,7 +1023,123 @@ export default function ResourcePlanner() {
 
       {stage === 'allocate' && villages.length > 0 && (
         <div className="space-y-4">
-          {RESOURCES.map((resource) => {
+          <div className="flex items-center gap-2">
+            {[
+              ['village', 'Result by village'],
+              ['edit', 'Edit by resource'],
+            ].map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                aria-pressed={allocView === key}
+                className={`text-xs px-3 py-1.5 rounded border transition-colors ${
+                  allocView === key
+                    ? 'border-amber-400/60 bg-amber-400/15 text-amber-200'
+                    : 'border-gray-700 text-secondary hover:text-white hover:border-gray-500'
+                }`}
+                onClick={() => setAllocView(key)}
+              >
+                {label}
+              </button>
+            ))}
+            {allocView === 'village' && (
+              <span className="text-secondary text-xs ml-2">
+                What each village keeps per hour once the routes run. Edit the targets in the
+                other view.
+              </span>
+            )}
+          </div>
+
+          {allocView === 'village' && (
+            <div className="card p-4 overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead className="text-secondary uppercase">
+                  <tr>
+                    <th className="text-left py-1.5 px-2">Village</th>
+                    {RESOURCES.map((resource) => (
+                      <th key={resource} className="text-right px-3">
+                        {RESOURCE_LABEL[resource]}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {villages.map((v) => (
+                    <tr
+                      key={v.village_id}
+                      className="border-t border-gray-800 hover:bg-white/5 transition-colors"
+                    >
+                      <td className="py-1.5 px-2 whitespace-nowrap">
+                        {v.name}{' '}
+                        <span className="text-secondary text-[11px]">
+                          ({v.x}|{v.y})
+                        </span>
+                      </td>
+                      {RESOURCES.map((resource) => {
+                        const own = v[`${resource}_per_hour`]
+                        const after = targetFor(resource, v)
+                        const ship = after == null || own == null ? null : after - own
+                        const isRest = remainderFor(resource) === v.village_id
+                        return (
+                          <td key={resource} className="text-right px-3 py-1.5 align-top">
+                            <div
+                              className={`font-mono ${
+                                after == null
+                                  ? 'text-secondary'
+                                  : after < 0
+                                    ? 'text-danger'
+                                    : ''
+                              }`}
+                              title={own == null ? 'own production unknown' : `own ${fmt(own)}/h`}
+                            >
+                              {after == null ? '?' : `${fmt(after)}/h`}
+                              {isRest && (
+                                <span className="ml-1 text-[10px] uppercase text-amber-300/80 font-sans">
+                                  rest
+                                </span>
+                              )}
+                            </div>
+                            {/* The delta is the cargo: what must arrive (+) or
+                                leave (−) to make the retention true. */}
+                            <div
+                              className={`text-[11px] font-mono ${
+                                ship == null || Math.abs(ship) < 1
+                                  ? 'text-secondary/60'
+                                  : ship > 0
+                                    ? 'text-success'
+                                    : 'text-amber-300'
+                              }`}
+                            >
+                              {ship == null ? '—' : Math.abs(ship) < 1 ? '·' : signed(ship)}
+                            </div>
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-gray-700 text-secondary">
+                    <td className="py-1.5 px-2 uppercase text-[11px]">Account total</td>
+                    {RESOURCES.map((resource) => (
+                      <td key={resource} className="text-right px-3 font-mono">
+                        {fmt(totals[resource].total)}/h
+                        {!totals[resource].known && ' ?'}
+                      </td>
+                    ))}
+                  </tr>
+                </tfoot>
+              </table>
+              <p className="text-secondary text-[11px] mt-2">
+                Top line: retention after distribution (red = still negative). Bottom line: what
+                ships in (+) or out (−) to make it true. “rest” absorbs whatever the others leave
+                unassigned.
+              </p>
+            </div>
+          )}
+
+          {allocView === 'edit' &&
+            RESOURCES.map((resource) => {
             const slack = explicitTotal(resource)
             const remainder = remainderFor(resource)
             const settled = Math.abs(slack) < 1 || remainder != null
@@ -1147,7 +1281,7 @@ export default function ResourcePlanner() {
                 </div>
               </div>
             )
-          })}
+            })}
         </div>
       )}
 
