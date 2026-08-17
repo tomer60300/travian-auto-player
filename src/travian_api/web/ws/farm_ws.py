@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 import time
 from datetime import datetime
 
@@ -31,6 +30,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.operation_manager import OperationContext, operation_manager
+from travian_api.stealth.timing import HumanTiming
 from travian_api.web.operation_gate import active_ops
 from travian_api.web.sessions import session_manager
 from travian_api.web.ws._resumable import subscribe_and_tail
@@ -73,6 +73,28 @@ async def _wait_for_start(ws: WebSocket) -> bool:
     return msg.get("action", "").lower() == "start"
 
 
+def _next_cycle_wait(ctx: OperationContext, interval: float) -> float:
+    """Inter-cycle sleep: heavy-tailed and tempo-scaled, not a metronome.
+
+    The old ``interval ± 15% uniform`` was a fixed-period metronome on the
+    highest-volume loop: a periodogram / Lomb-Scargle over cycle-start times
+    shows a razor-sharp peak at ``interval`` that ±15% jitter cannot smear, and
+    the flat jitter is itself the uniform-timing tell the rest of the stealth
+    stack works to avoid. ``HumanTiming.delay`` is heavy-tailed but bursty; at
+    ``variance_factor=1.0`` its expected value is ≈ ``interval`` (~0.97x,
+    measured), so average throughput is preserved — a LOWER factor scales the
+    exponential branch means down and would nearly halve the interval
+    (vf=0.5 → ~0.50x), doubling request volume, the opposite of what stealth
+    wants. ``tempo_scale`` couples the raid super-cadence to the shared session
+    rhythm instead of leaving it independently locked. Deterministic when
+    stealth is off so dev/test runs stay predictable.
+    """
+    hc = ctx.session.http_client
+    if not getattr(hc, "stealth_enabled", False):
+        return float(interval)
+    return max(1.0, hc.tempo_scale(HumanTiming.delay(interval, variance_factor=1.0)))
+
+
 async def _interruptible_sleep(ctx: OperationContext, seconds: float) -> bool:
     """Sleep with a small chunk granularity, returning True on stop signal.
 
@@ -90,6 +112,29 @@ async def _interruptible_sleep(ctx: OperationContext, seconds: float) -> bool:
             return True
         remaining -= step
     return False
+
+
+async def _maybe_rest(ctx: OperationContext) -> bool:
+    """Pause until morning if the account is in its night-rest window.
+
+    A human account goes quiet overnight; running the highest-volume loop
+    straight through the night is the strongest machine-vs-human signal. When
+    the client reports a rest pause, sleep it and resume — this is a graceful
+    pause, NOT the fatal budget-exhausted path. Returns True only if a stop
+    signal arrived during the sleep (so the caller breaks its loop); False
+    otherwise (rested-and-resumed, or not currently the rest window).
+    """
+    rest = ctx.session.http_client.rest_pause_seconds()
+    if rest <= 0:
+        return False
+    ctx.push(
+        {
+            "type": "info",
+            "message": f"Night rest — pausing ~{rest / 3600:.1f}h, resuming in the morning.",
+            "timestamp": _now_iso(),
+        }
+    )
+    return await _interruptible_sleep(ctx, rest)
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +193,11 @@ def _build_farm_run_coro(
             if end_time and time.time() >= end_time:
                 break
             if ctx.should_stop():
+                break
+
+            # Go quiet overnight and resume in the morning — a graceful pause,
+            # not the fatal budget path below (see _maybe_rest).
+            if await _maybe_rest(ctx):
                 break
 
             try:
@@ -221,9 +271,7 @@ def _build_farm_run_coro(
                     }
                 )
 
-            # Inter-cycle sleep with ±15 % jitter, interruptible by stop.
-            jitter = interval * random.uniform(-0.15, 0.15)
-            wait_time = max(1.0, interval + jitter)
+            wait_time = _next_cycle_wait(ctx, interval)
             if await _interruptible_sleep(ctx, wait_time):
                 break
 
@@ -290,6 +338,11 @@ def _build_farm_run_all_coro(
             if end_time and time.time() >= end_time:
                 break
             if ctx.should_stop():
+                break
+
+            # Go quiet overnight and resume in the morning — a graceful pause,
+            # not the fatal budget path below (see _maybe_rest).
+            if await _maybe_rest(ctx):
                 break
 
             try:
@@ -383,8 +436,7 @@ def _build_farm_run_all_coro(
                     }
                 )
 
-            jitter = interval * random.uniform(-0.15, 0.15)
-            wait_time = max(1.0, interval + jitter)
+            wait_time = _next_cycle_wait(ctx, interval)
             if await _interruptible_sleep(ctx, wait_time):
                 break
 

@@ -46,6 +46,33 @@ except ImportError:
     CurlError = Exception  # placeholder for retry_if_exception_type
 
 
+# Version markers tried, in order, when resolving the live gpack version for
+# the X-Version header. The old resolver matched only bare integers in the
+# gpack path and silently pinned the stale config fallback when the live path
+# was dotted or themed (e.g. gpack/4030.9/ or gpack/tichi_.../) — a stale
+# X-Version on every API call is a fingerprint. Each pattern's capture group
+# must be version-shaped (digits with optional dots); anything else is ignored.
+_X_VERSION_PATTERNS = (
+    re.compile(r"gpack/(?:[^/]*?[-_/])?(\d+(?:\.\d+)*)/"),
+    re.compile(r'window\.Travian\.version\s*=\s*["\'](\d+(?:\.\d+)*)["\']'),
+    re.compile(r'<meta[^>]+name=["\']?x?-?version["\']?[^>]+content=["\'](\d+(?:\.\d+)*)["\']'),
+)
+
+
+def extract_x_version(html: str) -> str | None:
+    """Return the gpack version from a game page's HTML, or None if absent.
+
+    Pure and side-effect-free so it can be unit-tested against real and
+    adversarial page shapes without any network. Returns the first
+    version-shaped match across the known markers.
+    """
+    for pattern in _X_VERSION_PATTERNS:
+        match = pattern.search(html)
+        if match:
+            return match.group(1)
+    return None
+
+
 # Shared transient-failure retry for the request methods. Every method whose
 # except-blocks say "let tenacity retry" must actually wear this decorator --
 # post_json/delete_json/post_form once relied on the comment alone and aborted
@@ -267,22 +294,24 @@ class HttpClient:
     async def try_resolve_x_version(self) -> None:
         """Attempt to resolve X-Version from a live game page.
 
-        Call this AFTER successful authentication.  Parses ``gpack/{VERSION}/``
-        from /dorf1.php.  On failure, keeps the config fallback silently.
+        Call this AFTER successful authentication. On failure, keeps the config
+        fallback but says so loudly — a stale X-Version stamped on every API
+        call while the live gpack has advanced is a header tell, so a persistent
+        failure must be visible to the operator, never silently pinned.
         """
         try:
             html = await self.get_html("/dorf1.php", skip_reauth=True)
-            m = re.search(r"gpack/(\d+)/", html)
-            if not m:
-                m = re.search(r'window\.Travian\.version\s*=\s*["\'](\d+)["\']', html)
-            if m:
-                self._resolved_x_version = m.group(1)
-                logger.info("Resolved X-Version from live page: %s", self._resolved_x_version)
+            version = extract_x_version(html)
+            if version is not None:
+                self._resolved_x_version = version
+                logger.info("Resolved X-Version from live page: %s", version)
             else:
-                # Page fetched fine but carried no version marker. Silence here
-                # would pin every request to a stale constant with no trace.
+                # Page fetched fine but carried no recognizable version marker.
+                # Silence here would pin every request to a stale constant with
+                # no trace — the exact "stale X-Version" fingerprint.
                 logger.warning(
-                    "No X-Version marker on /dorf1.php; still using configured %s",
+                    "No X-Version marker found on /dorf1.php; still using configured %s. "
+                    "If the live gpack has advanced, API calls now carry a stale version.",
                     self.settings.x_version,
                 )
         except Exception as e:
@@ -392,6 +421,23 @@ class HttpClient:
             reason = f"rolling 24h {rolling_h:.1f}h / {sched.max_daily_hours}h, session {session_h:.1f}h / {sched.max_continuous_hours}h"
         raise ActivityBudgetExhausted(f"Activity budget exhausted: {reason}")
 
+    def rest_pause_seconds(self) -> float:
+        """Seconds to sleep NOW if the account is in its night-rest window.
+
+        Lets a long-running loop go quiet overnight and resume in the morning
+        — the human sleep pattern — instead of running through the night, which
+        is the strongest machine-vs-human signal. Returns 0 when stealth is off
+        or it is not currently the rest window, so a caller can simply sleep the
+        returned duration when it is positive and carry on otherwise.
+        """
+        if not self._stealth_enabled:
+            return 0.0
+        # Sleep to the END of the rest window (not a fixed 6-9h night-break
+        # draw): one pause spans the whole remaining window, so the loop can't
+        # wake back inside it and fire an activity burst mid-window, nor
+        # oversleep hours past morning.
+        return self._activity_scheduler.seconds_until_rest_ends()
+
     def set_auth_callback(self, callback: callable) -> None:
         """Set callback function to call when re-authentication is needed."""
         self._auth_callback = callback
@@ -476,8 +522,14 @@ class HttpClient:
         else:
             headers = self._browser_headers.for_page_load(url)
 
-        # Always include X-Version
-        headers["X-Version"] = x_version
+        # X-Version belongs ONLY on the AJAX/API calls. Travian's own client
+        # injects it from its fetch wrapper (a gpack client/server mismatch
+        # check); a real browser NEVER sends it on a document navigation
+        # (page load, or the form POST + its PRG redirect GET). Emitting it on
+        # those — the highest-volume request class — is a custom header showing
+        # up exactly where the frontend cannot produce one.
+        if request_type in ("json", "xhr"):
+            headers["X-Version"] = x_version
 
         return headers
 

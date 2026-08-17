@@ -72,6 +72,18 @@ class RequestThrottler:
         self._gap_median_frac = random.uniform(0.30, 0.48)
         self._gap_sigma = random.uniform(0.45, 0.85)
 
+        # Jittered per-cycle burst threshold (see _roll_burst_threshold): a
+        # fixed count trigger produces a recognizable "N fast then a fixed
+        # cooldown" sawtooth that burst heuristics key on directly.
+        self._effective_burst_max = self._roll_burst_threshold()
+
+    def _roll_burst_threshold(self) -> int:
+        """A jittered burst-trigger count so the cap never lands on a round
+        constant twice running (±20% around the configured max)."""
+        lo = max(1, int(self.burst_max_requests * 0.8))
+        hi = max(lo, int(self.burst_max_requests * 1.2))
+        return random.randint(lo, hi)
+
     def set_captcha_guard(self, guard) -> None:
         """Attach a CaptchaGuard so requests block when captcha is active."""
         self._captcha_guard = guard
@@ -125,10 +137,13 @@ class RequestThrottler:
                 waited += penalty_wait
                 now = time.monotonic()
 
-            # Check burst limit
+            # Check burst limit against a JITTERED threshold, with a
+            # heavy-tailed cooldown — a hard count plus a flat cooldown is a
+            # machine-shaped sawtooth. The threshold is re-rolled after each
+            # trigger so successive cycles don't share a trigger point.
             self._cleanup_burst_window(now)
-            if len(self._request_times) >= self.burst_max_requests:
-                burst_wait = self.burst_cooldown_s + random.uniform(2.0, 8.0)
+            if len(self._request_times) >= self._effective_burst_max:
+                burst_wait = self.burst_cooldown_s + random.lognormvariate(math.log(3.0), 0.6)
                 if context:
                     logger.info(
                         f"Burst limit reached ({len(self._request_times)} reqs in {self.burst_window_s}s). "
@@ -140,15 +155,14 @@ class RequestThrottler:
                 waited += burst_wait
                 now = time.monotonic()
                 self._cleanup_burst_window(now)
+                self._effective_burst_max = self._roll_burst_threshold()
 
             # Enforce minimum gap with heavy-tailed jitter, scaled by the
             # shared session tempo (so consecutive gaps are positively
             # correlated, not iid) but never below the hard floor.
             if self._last_request_time > 0:
                 elapsed = now - self._last_request_time
-                target_gap = self._sample_gap()
-                if self._tempo is not None:
-                    target_gap = max(self.min_gap_s, target_gap * self._tempo.current())
+                target_gap = self._effective_gap()
                 if elapsed < target_gap:
                     gap_wait = target_gap - elapsed
                     await asyncio.sleep(gap_wait)
@@ -163,6 +177,22 @@ class RequestThrottler:
                 logger.debug(f"Throttled {waited:.1f}s before: {context}")
 
             return waited
+
+    def _effective_gap(self) -> float:
+        """The target inter-request gap after session-tempo scaling.
+
+        Tempo scales only the INCREMENT above the floor, never the whole gap:
+        multiplying the whole gap by a <1 tempo and clamping with
+        ``max(min_gap_s, …)`` pushed every low draw onto exactly ``min_gap_s``,
+        resurrecting the floor point-mass ``_sample_gap`` exists to avoid. The
+        increment is non-negative and tempo is positive, so the result is never
+        below the floor and the density there stays zero.
+        """
+        target_gap = self._sample_gap()
+        if self._tempo is not None:
+            increment = max(0.0, (target_gap - self.min_gap_s) * self._tempo.current())
+            target_gap = self.min_gap_s + increment
+        return target_gap
 
     def _sample_gap(self) -> float:
         """Sample an inter-request gap from a right-skewed distribution.

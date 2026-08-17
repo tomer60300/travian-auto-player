@@ -62,15 +62,22 @@ class BrowserHeaders:
         }
 
     def for_page_load(self, path: str = "") -> Dict[str, str]:
-        """Headers for a normal page navigation (GET request)."""
+        """Headers for a normal page navigation (GET request).
+
+        No ``Connection`` header: the curl_cffi transport negotiates HTTP/2,
+        on which ``Connection``/``Keep-Alive`` are forbidden hop-by-hop headers
+        (RFC 9113 §8.2.2) that Chrome never emits on an h2 stream — sending one
+        is an immediate header-analysis tell. No ``Cache-Control: max-age=0``
+        either: Chrome sends that only on a reload or address-bar navigation,
+        NOT on the link clicks the navigator simulates, so putting it on every
+        navigation is a uniform-behavior tell.
+        """
         headers = {
             "User-Agent": self._ua.ua,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": self._persona.accept_language,
             "Accept-Encoding": self._accept_encoding(),
-            "Connection": "keep-alive",
             "Upgrade-Insecure-Requests": "1",
-            "Cache-Control": "max-age=0",
         }
 
         # Sec-Fetch headers (Chrome/Edge only, Firefox doesn't send all of them)
@@ -95,7 +102,6 @@ class BrowserHeaders:
             "Accept-Language": self._persona.accept_language,
             "Accept-Encoding": self._accept_encoding(),
             "Content-Type": "application/json",
-            "Connection": "keep-alive",
             "Origin": self._base_url,
         }
 
@@ -118,10 +124,8 @@ class BrowserHeaders:
             "Accept-Language": self._persona.accept_language,
             "Accept-Encoding": self._accept_encoding(),
             "Content-Type": "application/x-www-form-urlencoded",
-            "Connection": "keep-alive",
             "Origin": self._base_url,
             "Upgrade-Insecure-Requests": "1",
-            "Cache-Control": "max-age=0",
         }
 
         if not self._ua.is_firefox:
@@ -137,13 +141,19 @@ class BrowserHeaders:
         return headers
 
     def for_xhr(self, path: str = "") -> Dict[str, str]:
-        """Headers for an XHR/fetch request (AJAX)."""
+        """Headers for an XHR/fetch request (AJAX).
+
+        Carries ``Origin`` like ``for_json_post``: Chrome sends ``Origin`` on
+        every non-GET/HEAD fetch, same-origin included, so an XHR POST/DELETE
+        without it (while the JSON POST has one) is both wrong and internally
+        inconsistent. No ``Connection`` header for the h2 reason above.
+        """
         headers = {
             "User-Agent": self._ua.ua,
             "Accept": "*/*",
             "Accept-Language": self._persona.accept_language,
             "Accept-Encoding": self._accept_encoding(),
-            "Connection": "keep-alive",
+            "Origin": self._base_url,
             "X-Requested-With": "XMLHttpRequest",
         }
 
