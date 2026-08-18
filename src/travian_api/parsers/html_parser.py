@@ -605,11 +605,13 @@ def parse_rally_point_troops(html: str) -> Dict[str, int]:
     return troops
 
 
-# Class tokens that conventionally hide an element via a stylesheet rule
+# Class tokens that unambiguously hide an element via a stylesheet rule
 # (e.g. `.hidden{display:none}`). Best-effort: the real gid=17 markup is
-# uncaptured, so we cannot resolve computed CSS — matching the common hiding
-# classes catches the usual honeypot pattern without a full CSS engine.
-_HIDDEN_CLASS_TOKENS = frozenset({"hidden", "hide", "hideme", "invisible", "d-none", "dn", "none"})
+# uncaptured, so we cannot resolve computed CSS. Kept to the few universal
+# framework hiding classes only — a broader set (e.g. "none"/"hide") risks
+# misreading a legitimately visible row (or ancestor) as hidden, which would
+# create a duplicate route.
+_HIDDEN_CLASS_TOKENS = frozenset({"hidden", "invisible", "d-none"})
 
 
 def _element_is_visible(el) -> bool:
