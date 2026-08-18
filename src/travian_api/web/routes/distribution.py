@@ -13,6 +13,8 @@ every fetch is a deliberate, priced action rather than a side effect of typing.
 
 import asyncio
 import logging
+import random
+from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -51,6 +53,7 @@ from travian_api.services.distribution.storage import (
     storage_warnings,
     store_status,
 )
+from travian_api.services.trade_route_service import PlannedRoute
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User
 from travian_api.web.sessions import TravianSession, get_live_travian_session
@@ -310,6 +313,53 @@ class PlanResponse(BaseModel):
     unallocated: list[UnallocatedResponse]
     total_merchants: int
     feasible: bool
+    warnings: list[str]
+
+
+class ExecuteRequest(PlanRequest):
+    """Same inputs as /plan (the server recomputes the exact plan rather than
+    trust client-sent rows) plus execution controls."""
+
+    dry_run: bool = Field(
+        default=True,
+        description="Preview only, zero game requests. Must be explicitly set "
+        "False to touch the game.",
+    )
+    disable_existing: bool = Field(
+        default=True,
+        description="Disable a village's existing routes before creating new ones.",
+    )
+    max_routes_per_run: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description="Routes to CREATE in one run. A human sets up a few at a "
+        "time over days, not in one sweep; the rest come back as `remaining` "
+        "for a later run.",
+    )
+
+
+class RouteActionResponse(BaseModel):
+    origin: int
+    origin_name: str
+    destination: int
+    destination_name: str
+    dest_x: int
+    dest_y: int
+    cargo: dict[Resource, int]
+    cycle_hours: int
+    merchants: int
+    status: str  # would_create | deferred | created | skipped | failed
+    detail: str = ""
+
+
+class ExecuteResponse(BaseModel):
+    dry_run: bool
+    live_enabled: bool
+    actions: list[RouteActionResponse]
+    disables: list[str]
+    created: int
+    remaining: int
     warnings: list[str]
 
 
@@ -840,17 +890,31 @@ async def post_day_check(
     )
 
 
-@router.post("/plan", response_model=PlanResponse)
-async def post_plan(
-    body: PlanRequest,
-    _user: User = Depends(get_current_user),
-):
-    """Compute a plan. Costs **zero** game requests.
+@dataclass
+class _PlannedAccount:
+    """Everything /plan and /execute both derive from one PlanRequest.
 
-    The caller supplies the snapshot it already fetched, so tuning allocation
-    targets is free and the planner stays pure. Deliberately auth-only: a
-    Travian-session dependency would auto-reconnect (real login traffic) or 403
-    for a computation that never touches the game.
+    Both build the account model, run the pure optimizer, and resolve
+    coordinates identically. /execute recomputes server-side through this — it
+    does NOT trust client-sent rows — so it acts on exactly the plan /plan
+    would display for the same inputs.
+    """
+
+    plan: object
+    villages: dict[int, VillageState]
+    coords: dict[int, tuple[int, int]]
+    names: dict[int, str]
+    trade_office: dict[int, int]
+    foreign_ids: dict[int, ForeignTarget]
+    config: PlannerConfig
+    warnings: list[str]
+
+
+async def _plan_account(body: PlanRequest) -> _PlannedAccount:
+    """Build the account model, run the optimizer, resolve coords + warnings.
+
+    Pure of game I/O, so it is shared by the zero-request /plan endpoint and by
+    the dry-run computation inside /execute.
     """
     # Warnings are read by a person: name villages the way they do, never by id.
     names = {v.village_id: v.name for v in body.snapshot if v.name}
@@ -1020,9 +1084,41 @@ async def post_plan(
         note += ", so it starts late unless covered by hand until then"
         extra_warnings.append(note)
 
+    coords = {vid: village.coords for vid, village in villages.items()}
+    return _PlannedAccount(
+        plan=plan,
+        villages=villages,
+        coords=coords,
+        names=names,
+        trade_office=trade_office,
+        foreign_ids=foreign_ids,
+        config=config,
+        warnings=extra_warnings,
+    )
+
+
+@router.post("/plan", response_model=PlanResponse)
+async def post_plan(
+    body: PlanRequest,
+    _user: User = Depends(get_current_user),
+):
+    """Compute a plan. Costs **zero** game requests.
+
+    The caller supplies the snapshot it already fetched, so tuning allocation
+    targets is free and the planner stays pure. Deliberately auth-only: a
+    Travian-session dependency would auto-reconnect (real login traffic) or 403
+    for a computation that never touches the game.
+    """
+    account = await _plan_account(body)
+    plan = account.plan
+    names = account.names
+    trade_office = account.trade_office
+    config = account.config
+    coords = account.coords
+    villages = account.villages
+    extra_warnings = account.warnings
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
     over = {o.village_id for o in plan.over_budget}
-    coords = {vid: village.coords for vid, village in villages.items()}
 
     return PlanResponse(
         rows=[
@@ -1088,4 +1184,146 @@ async def post_plan(
         total_merchants=plan.total_merchants,
         feasible=plan.is_feasible,
         warnings=[*plan.warnings, *extra_warnings],
+    )
+
+
+@router.post("/execute", response_model=ExecuteResponse)
+async def post_execute(
+    body: ExecuteRequest,
+    session: TravianSession = Depends(get_live_travian_session),
+):
+    """Create the plan's trade routes in-game — or preview them with dry_run.
+
+    Recomputes the plan server-side from the same inputs /plan uses (it does
+    NOT trust client-sent rows), then, per origin village, optionally disables
+    existing routes and creates the new ones. Deliberately rate-capped to a few
+    routes per run: a human sets routes up over days, not in one machine sweep,
+    so the rest come back as ``remaining`` for a later run and origins are
+    visited in randomized order. ``dry_run`` (default) previews with ZERO game
+    requests and never touches the session.
+    """
+    account = await _plan_account(body)
+    plan = account.plan
+    names = account.names
+    coords = account.coords
+    svc = session.trade_route_service
+    warnings = list(account.warnings)
+
+    # Each plan row is one route from a real origin village's marketplace to a
+    # destination (a real village or a foreign sink — coords cover both).
+    items: list[tuple[object, PlannedRoute]] = []
+    for row in plan.rows:
+        dest_xy = coords.get(row.destination)
+        if dest_xy is None:
+            warnings.append(
+                f"{village_label(row.origin, names)} → "
+                f"{village_label(row.destination, names)}: destination coordinates "
+                f"unknown, route skipped"
+            )
+            continue
+        items.append(
+            (
+                row,
+                PlannedRoute(
+                    origin_village_id=row.origin,
+                    dest_x=dest_xy[0],
+                    dest_y=dest_xy[1],
+                    dest_name=village_label(row.destination, names),
+                    cargo=dict(row.cargo),
+                    cycle_hours=row.cycle_hours,
+                    merchants=row.merchants,
+                ),
+            )
+        )
+
+    def _action(row, route: PlannedRoute, status_: str, detail: str = "") -> RouteActionResponse:
+        return RouteActionResponse(
+            origin=row.origin,
+            origin_name=village_label(row.origin, names),
+            destination=row.destination,
+            destination_name=village_label(row.destination, names),
+            dest_x=route.dest_x,
+            dest_y=route.dest_y,
+            cargo={r: amount for r, amount in row.cargo.items() if amount},
+            cycle_hours=row.cycle_hours,
+            merchants=row.merchants,
+            status=status_,
+            detail=detail,
+        )
+
+    cap = body.max_routes_per_run
+
+    if body.dry_run:
+        actions = [
+            _action(row, route, "would_create" if i < cap else "deferred")
+            for i, (row, route) in enumerate(items)
+        ]
+        disables: list[str] = []
+        if body.disable_existing:
+            origins = sorted({r.origin_village_id for _, r in items[:cap]})
+            disables = [
+                f"{village_label(o, names)}: existing routes would be disabled first "
+                f"(count read at execution)"
+                for o in origins
+            ]
+        return ExecuteResponse(
+            dry_run=True,
+            live_enabled=svc.live_enabled,
+            actions=actions,
+            disables=disables,
+            created=0,
+            remaining=max(0, len(items) - cap),
+            warnings=warnings,
+        )
+
+    # ── Live ───────────────────────────────────────────────────────────
+    if not svc.live_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Live trade-route execution is disabled until the "
+                "/api/v1/trade-routes request payload is captured and verified. "
+                "Use dry_run to preview what would be created."
+            ),
+        )
+
+    by_origin: dict[int, list[tuple[object, PlannedRoute]]] = {}
+    for row, route in items:
+        by_origin.setdefault(route.origin_village_id, []).append((row, route))
+    origins = list(by_origin)
+    random.shuffle(origins)  # not a predictable village-id sweep
+
+    actions = []
+    disables = []
+    created = 0
+    for origin in origins:
+        async with svc.origin_lock(origin):
+            existing = await svc.list_existing_routes(origin) if body.disable_existing else []
+            if body.disable_existing:
+                disabled = await svc.disable_routes(origin, existing)
+                if disabled is not None:
+                    disables.append(
+                        f"{village_label(origin, names)}: {disabled.status} {disabled.detail}".strip()
+                    )
+            existing_coords = {(e.dest_x, e.dest_y) for e in existing}
+            for row, route in by_origin[origin]:
+                if created >= cap:
+                    actions.append(_action(row, route, "deferred"))
+                    continue
+                if (route.dest_x, route.dest_y) in existing_coords:
+                    actions.append(_action(row, route, "skipped", "route already exists"))
+                    continue
+                result = await svc.create_route(route)
+                actions.append(_action(row, route, result.status, result.detail))
+                if result.status == "created":
+                    created += 1
+
+    return ExecuteResponse(
+        dry_run=False,
+        live_enabled=svc.live_enabled,
+        actions=actions,
+        disables=disables,
+        created=created,
+        remaining=sum(1 for a in actions if a.status == "deferred"),
+        warnings=warnings,
     )

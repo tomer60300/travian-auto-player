@@ -34,6 +34,7 @@ class ActionType(Enum):
     POST_LOGIN = "post_login"  # After logging in
     BETWEEN_RAIDS = "between_raids"  # Between sending farm list raids
     BETWEEN_SCOUTS = "between_scouts"  # Between sending scouts
+    BETWEEN_ROUTES = "between_routes"  # Between creating/disabling trade routes
     PRE_UPGRADE = "pre_upgrade"  # Before starting a building upgrade
     VIDEO_TICK = "video_tick"  # Between video reward ticks
 
@@ -50,6 +51,9 @@ _TIMING_PROFILES = {
     ActionType.POST_LOGIN: (1.5, 2.5, 4.0),
     ActionType.BETWEEN_RAIDS: (0.8, 1.5, 3.5),
     ActionType.BETWEEN_SCOUTS: (1.0, 2.0, 4.0),
+    # Filling the trade-route dialog (destination, resources, interval) is a
+    # slower, more deliberate action than a raid click — wider, longer profile.
+    ActionType.BETWEEN_ROUTES: (3.0, 7.0, 20.0),
     ActionType.PRE_UPGRADE: (1.0, 2.0, 5.0),
     ActionType.VIDEO_TICK: (2.5, 3.0, 3.8),  # Tight range — ATG expects ~3s
 }

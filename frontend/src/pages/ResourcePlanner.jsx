@@ -359,6 +359,8 @@ export default function ResourcePlanner() {
   const [plan, setPlan] = useState(null)
   const [fetching, setFetching] = useState(false)
   const [planning, setPlanning] = useState(false)
+  const [execResult, setExecResult] = useState(null)
+  const [executing, setExecuting] = useState(false)
 
   const storageKey = useCallback(
     (base) => (accountKey ? `${base}::${accountKey}` : null),
@@ -432,6 +434,9 @@ export default function ResourcePlanner() {
   useEffect(() => {
     planInputRev.current += 1
     setPlan(null)
+    // An execution preview/result belongs to the plan it was run against; the
+    // moment any input changes it describes routes for a stale plan.
+    setExecResult(null)
     // Depends on `snapshot`, not the derived `villages`: `villages` is declared
     // further down, and naming it here would evaluate this dependency array in
     // its temporal dead zone — a ReferenceError that drops the whole planner
@@ -492,6 +497,44 @@ export default function ResourcePlanner() {
     }
   }
 
+  // The shared request body for both /plan and /execute (execute recomputes
+  // the same plan server-side, so it must send identical inputs). Only entries
+  // the planner can act on go in: `keep` equals the backend default, and a
+  // village whose rate is unknown for this resource is not plannable.
+  const buildPlanPayload = useCallback(() => {
+    const sendAllocations = {}
+    for (const [resource, per] of Object.entries(allocations)) {
+      const usable = {}
+      for (const [vid, a] of Object.entries(per)) {
+        if (a.mode === 'keep') continue
+        const v = villages.find((x) => x.village_id === Number(vid))
+        if (!v || v[`${resource}_per_hour`] == null) continue
+        usable[vid] = a
+      }
+      if (Object.keys(usable).length) sendAllocations[resource] = usable
+    }
+    return {
+      snapshot: villages,
+      config: villages.map((v) => ({
+        village_id: v.village_id,
+        trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
+      })),
+      allocations: sendAllocations,
+      foreign_targets: usableForeignTargets(foreignTargets),
+      // Geometry defaults to the snapshot (map span + tribe-derived x1 merchant
+      // speed) but the operator can override both for non-Europe 2 worlds.
+      map_span: Number(merchantModel.map_span) || snapshot?.map_span,
+      speed_fields_per_hour:
+        Number(merchantModel.speed_fields_per_hour) || snapshot?.speed_fields_per_hour,
+      merchant_base_capacity: Number(merchantModel.base_capacity) || undefined,
+      // A per-level bonus of 0 is valid (a world with no Trade Office scaling),
+      // so preserve it — `|| undefined` would drop it and use the 0.2 default.
+      trade_office_bonus_per_level: Number.isFinite(Number(merchantModel.bonus_per_to_level))
+        ? Number(merchantModel.bonus_per_to_level)
+        : undefined,
+    }
+  }, [villages, tradeOffice, allocations, foreignTargets, merchantModel, snapshot])
+
   const buildPlan = useCallback(async () => {
     if (!villages.length) {
       toast.error('Fetch account state first')
@@ -504,41 +547,7 @@ export default function ResourcePlanner() {
     const requestedRev = planInputRev.current
     setPlanning(true)
     try {
-      // Send only entries the planner can act on: `keep` equals the backend
-      // default, and a village whose rate is unknown for this resource is not
-      // plannable — a stale or inert entry must not fail the whole plan.
-      const sendAllocations = {}
-      for (const [resource, per] of Object.entries(allocations)) {
-        const usable = {}
-        for (const [vid, a] of Object.entries(per)) {
-          if (a.mode === 'keep') continue
-          const v = villages.find((x) => x.village_id === Number(vid))
-          if (!v || v[`${resource}_per_hour`] == null) continue
-          usable[vid] = a
-        }
-        if (Object.keys(usable).length) sendAllocations[resource] = usable
-      }
-      const res = await api.post('/distribution/plan', {
-        snapshot: villages,
-        config: villages.map((v) => ({
-          village_id: v.village_id,
-          trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
-        })),
-        allocations: sendAllocations,
-        foreign_targets: usableForeignTargets(foreignTargets),
-        // Geometry defaults to the snapshot (map span + tribe-derived x1
-        // merchant speed) but the operator can override both for non-Europe 2
-        // worlds (x2/x3 speed, larger maps) — no extra Travian requests.
-        map_span: Number(merchantModel.map_span) || snapshot?.map_span,
-        speed_fields_per_hour:
-          Number(merchantModel.speed_fields_per_hour) || snapshot?.speed_fields_per_hour,
-        merchant_base_capacity: Number(merchantModel.base_capacity) || undefined,
-        // A per-level bonus of 0 is valid (a world with no Trade Office scaling),
-        // so preserve it — `|| undefined` would drop it and use the 0.2 default.
-        trade_office_bonus_per_level: Number.isFinite(Number(merchantModel.bonus_per_to_level))
-          ? Number(merchantModel.bonus_per_to_level)
-          : undefined,
-      })
+      const res = await api.post('/distribution/plan', buildPlanPayload())
       if (requestedFor !== currentAccountKey()) return
       if (requestedRev !== planInputRev.current) return
       setPlan(res.data)
@@ -548,17 +557,36 @@ export default function ResourcePlanner() {
     } finally {
       setPlanning(false)
     }
-  }, [
-    villages,
-    tradeOffice,
-    allocations,
-    toast,
-    accountKey,
-    currentAccountKey,
-    snapshot,
-    merchantModel,
-    foreignTargets,
-  ])
+  }, [villages, toast, accountKey, currentAccountKey, buildPlanPayload])
+
+  // Execute the plan as trade routes. dryRun previews (zero game requests);
+  // live requires an explicit confirm and only works once the backend's
+  // trade-route payload is verified (execResult.live_enabled).
+  const executePlan = useCallback(
+    async (dryRun) => {
+      const requestedFor = accountKey
+      setExecuting(true)
+      try {
+        const res = await api.post('/distribution/execute', {
+          ...buildPlanPayload(),
+          dry_run: dryRun,
+          disable_existing: true,
+          max_routes_per_run: 3,
+        })
+        if (requestedFor !== currentAccountKey()) return
+        setExecResult(res.data)
+        if (!dryRun) {
+          const left = res.data.remaining ? `, ${res.data.remaining} left for a later run` : ''
+          toast.success(`Created ${res.data.created} route(s)${left}`)
+        }
+      } catch (err) {
+        toast.error(errorDetail(err, dryRun ? 'Preview failed' : 'Execution failed'))
+      } finally {
+        setExecuting(false)
+      }
+    },
+    [accountKey, currentAccountKey, buildPlanPayload, toast],
+  )
 
   // Live unallocated counter, so slack is visible while typing rather than
   // discovered later (profile known issue #9).
@@ -1771,6 +1799,120 @@ export default function ResourcePlanner() {
                   A Gold Club route repeats from the moment it is created, so “create at” is the
                   clock time to press create — not a field you can set afterwards.
                 </p>
+              </div>
+
+              <div className="card p-4">
+                <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+                  <div>
+                    <h3 className="font-semibold">Execute as trade routes</h3>
+                    <p className="text-secondary text-xs mt-0.5">
+                      Creates these routes in-game instead of retyping them. Preview costs no
+                      requests. Going live disables each origin’s old routes first, then creates a
+                      few at a time — a human sets routes up over days, not all at once, so the
+                      rest wait for a later run.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-secondary text-xs py-1.5"
+                    disabled={executing || !plan.feasible}
+                    onClick={() => executePlan(true)}
+                  >
+                    {executing ? 'Working…' : 'Preview (0 requests)'}
+                  </button>
+                </div>
+
+                {!plan.feasible && (
+                  <p className="text-orange-200 text-xs mb-2">
+                    Resolve the plan (over budget / unroutable) before executing.
+                  </p>
+                )}
+
+                {execResult && (
+                  <>
+                    <p className="text-xs mb-2">
+                      {execResult.dry_run
+                        ? `Preview: ${
+                            execResult.actions.filter((a) => a.status === 'would_create').length
+                          } route(s) would be created` +
+                          (execResult.remaining
+                            ? `, ${execResult.remaining} deferred to a later run.`
+                            : '.')
+                        : `Created ${execResult.created} route(s)` +
+                          (execResult.remaining ? `, ${execResult.remaining} left.` : '.')}
+                    </p>
+                    {execResult.disables.length > 0 && (
+                      <ul className="text-xs text-secondary list-disc list-inside mb-2">
+                        {execResult.disables.map((d, i) => (
+                          <li key={i}>{d}</li>
+                        ))}
+                      </ul>
+                    )}
+                    <table className="w-full text-xs">
+                      <thead className="text-secondary uppercase">
+                        <tr>
+                          <th className="text-left py-1 px-2">From → To</th>
+                          <th className="text-right px-2">Cycle</th>
+                          <th className="text-right px-2">Merchants</th>
+                          <th className="text-left px-2">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {execResult.actions.map((a, i) => (
+                          <tr key={i} className="border-t border-gray-800">
+                            <td className="py-1 px-2">
+                              {a.origin_name} → {a.destination_name}{' '}
+                              <span className="text-secondary">
+                                ({a.dest_x}|{a.dest_y})
+                              </span>
+                            </td>
+                            <td className="text-right px-2 font-mono">{a.cycle_hours}h</td>
+                            <td className="text-right px-2 font-mono">{a.merchants}</td>
+                            <td
+                              className={`px-2 ${
+                                a.status === 'created'
+                                  ? 'text-success'
+                                  : a.status === 'failed'
+                                    ? 'text-danger'
+                                    : a.status === 'deferred' || a.status === 'skipped'
+                                      ? 'text-secondary'
+                                      : 'text-violet-200'
+                              }`}
+                              title={a.detail}
+                            >
+                              {a.status.replace('_', ' ')}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+
+                    {execResult.dry_run &&
+                      (execResult.live_enabled ? (
+                        <button
+                          type="button"
+                          className="btn-primary text-xs py-1.5 mt-3"
+                          disabled={executing}
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                'Create these routes in-game now? This sends live requests to Travian.'
+                              )
+                            )
+                              executePlan(false)
+                          }}
+                        >
+                          {executing ? 'Creating…' : 'Create live'}
+                        </button>
+                      ) : (
+                        <p className="text-orange-200 text-xs mt-3">
+                          Live creation is turned off on the server until Travian’s trade-route
+                          request format is captured and verified. Preview works today; the create
+                          step switches on once that’s confirmed.
+                        </p>
+                      ))}
+                  </>
+                )}
               </div>
 
               {plan.shortfalls.length > 0 && (
