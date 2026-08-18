@@ -565,9 +565,11 @@ export default function ResourcePlanner() {
   const executePlan = useCallback(
     async (dryRun) => {
       const requestedFor = accountKey
-      // Same staleness guard buildPlan uses: if the operator edits an input
-      // while a preview/execute is in flight, the revision bumps and the
-      // response must not be shown against the now-changed plan.
+      // Staleness guard (same as buildPlan): if the operator edits an input or
+      // switches account while a request is in flight, a stale response must
+      // not overwrite the current view. This applies to the zero-effect PREVIEW
+      // only — a live run mutates the game, so its result must ALWAYS be shown
+      // (dropping it would hide real in-game writes the operator must see).
       const requestedRev = planInputRev.current
       setExecuting(true)
       try {
@@ -577,11 +579,17 @@ export default function ResourcePlanner() {
           disable_existing: true,
           max_routes_per_run: 3,
         })
-        if (requestedFor !== currentAccountKey()) return
-        if (requestedRev !== planInputRev.current) return
+        if (
+          dryRun &&
+          (requestedFor !== currentAccountKey() || requestedRev !== planInputRev.current)
+        ) {
+          return
+        }
         setExecResult(res.data)
         if (!dryRun) {
-          const left = res.data.remaining ? `, ${res.data.remaining} left for a later run` : ''
+          const left = res.data.remaining
+            ? `, ${res.data.remaining} deferred to a later run`
+            : ''
           toast.success(`Created ${res.data.created} route(s)${left}`)
         }
       } catch (err) {
@@ -1844,7 +1852,9 @@ export default function ResourcePlanner() {
                             ? `, ${execResult.remaining} deferred to a later run.`
                             : '.')
                         : `Created ${execResult.created} route(s)` +
-                          (execResult.remaining ? `, ${execResult.remaining} left.` : '.')}
+                          (execResult.remaining
+                            ? `, ${execResult.remaining} deferred to a later run.`
+                            : '.')}
                     </p>
                     {execResult.dry_run && (
                       <p className="text-xs text-secondary mb-2">

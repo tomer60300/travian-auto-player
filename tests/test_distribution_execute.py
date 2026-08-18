@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from travian_api.parsers.html_parser import parse_trade_routes
 from travian_api.services.distribution.allocation import Resource
+from travian_api.services.distribution.planner import SheetRow
 from travian_api.services.trade_route_service import (
     ExistingRoute,
     PlannedRoute,
@@ -229,53 +230,59 @@ class TestLiveExecution:
     def _run(self, svc, **kw):
         return _execute(_exec_body(dry_run=False, **kw), svc=svc)
 
-    def test_only_missing_routes_are_created(self):
+    def test_missing_routes_are_created(self):
         desired = _desired_routes()
         svc = _FakeLiveSvc()  # empty marketplaces → everything is missing
-        self._run(svc, max_routes_per_run=50)
+        self._run(svc, disable_existing=False, max_routes_per_run=50)
         assert {(r.dest_x, r.dest_y) for r in svc.created} == {
             (a.dest_x, a.dest_y) for a in desired
         }
 
-    def test_existing_routes_are_skipped_not_recreated(self):
+    def test_incremental_leaves_active_routes_untouched(self):
         desired = _desired_routes()
         existing = {}
         for a in desired:
             existing.setdefault(a.origin, []).append(ExistingRoute(1, a.dest_x, a.dest_y))
         svc = _FakeLiveSvc(existing=existing)
-        res = self._run(svc, max_routes_per_run=50)
-        assert svc.created == [], "routes already in-game must not be recreated"
+        res = self._run(svc, disable_existing=False, max_routes_per_run=50)
+        assert svc.created == [], "incremental mode must not recreate active routes"
+        assert svc.disabled == [], "incremental mode disables nothing"
         assert all(a.status == "skipped" for a in res.actions)
 
-    def test_second_run_creates_nothing_new(self):
-        # The core convergence bug: a positional window re-creates the same
-        # routes every run. Existence-based selection must converge.
+    def test_incremental_second_run_creates_nothing_new(self):
+        # Convergence without churn: once routes exist, a later incremental run
+        # skips them all instead of rebuilding (a daily-rebuild bot signal).
         svc = _FakeLiveSvc()
-        self._run(svc, max_routes_per_run=50)
+        self._run(svc, disable_existing=False, max_routes_per_run=50)
         assert len(svc.created) > 0
         for r in svc.created:  # marketplace now reflects run 1's creations
             svc._existing.setdefault(r.origin_village_id, []).append(
                 ExistingRoute(1, r.dest_x, r.dest_y)
             )
         svc.created.clear()
-        self._run(svc, max_routes_per_run=50)
-        assert svc.created == [], "a second run must not rebuild the same routes"
+        self._run(svc, disable_existing=False, max_routes_per_run=50)
+        assert svc.created == [], "a second incremental run must not rebuild"
 
-    def test_disables_only_stale_routes_never_plan_routes(self):
+    def test_disable_existing_rebuilds_the_origin(self):
+        # Rebuild mode applies parameter changes: a destination that already has
+        # a route is disabled and recreated (coord-only dedup can't diff params),
+        # and stale routes are cleared.
         desired = _desired_routes()
         a = desired[0]
         plan_dest = (a.dest_x, a.dest_y)
         existing = {
             a.origin: [
-                ExistingRoute(1, *plan_dest),  # in the plan → must be kept
-                ExistingRoute(2, 99, 98),  # not in the plan → stale → disabled
+                ExistingRoute(1, *plan_dest),  # the plan still wants this dest
+                ExistingRoute(2, 99, 98),  # stale — plan no longer wants it
             ]
         }
         svc = _FakeLiveSvc(existing=existing)
         self._run(svc, disable_existing=True, max_routes_per_run=50)
         disabled_coords = {c for _, coords in svc.disabled for c in coords}
-        assert (99, 98) in disabled_coords, "a stale route must be disabled"
-        assert plan_dest not in disabled_coords, "a route the plan still wants must be kept"
+        assert {plan_dest, (99, 98)} <= disabled_coords, "rebuild disables all visible routes"
+        assert plan_dest in {(r.dest_x, r.dest_y) for r in svc.created}, (
+            "the wanted destination is recreated with the plan's current parameters"
+        )
 
     def test_hidden_honeypot_is_ignored_entirely(self):
         # A hidden route is invisible to a human, so the reconciler behaves like
@@ -295,6 +302,36 @@ class TestLiveExecution:
         disabled_coords = {c for _, coords in svc.disabled for c in coords}
         assert (97, 96) not in disabled_coords, "a hidden honeypot must never be disabled"
 
+    def test_duplicate_destination_rows_create_once(self):
+        # Two plan rows to the same origin+destination (e.g. two foreign targets
+        # at identical coords) must not create a duplicate route in one run.
+        row = SheetRow(
+            origin=20003,
+            destination=-1,
+            cargo={Resource.CROP: 100},
+            cycle_hours=6,
+            dispatch_minute=0,
+            arrival_minute=0,
+            merchants=2,
+        )
+        plan = SimpleNamespace(is_feasible=True, warnings=(), rows=(row, row))
+        account = SimpleNamespace(
+            plan=plan,
+            names={20003: "03", -1: "Ally"},
+            coords={20003: (0, 0), -1: (40, 40)},
+            warnings=[],
+        )
+
+        async def _fake_plan(_body):
+            return account
+
+        svc = _FakeLiveSvc()
+        with _patch(dist_module, "_plan_account", _fake_plan):
+            res = self._run(svc, max_routes_per_run=50)
+        created = [(r.dest_x, r.dest_y) for r in svc.created]
+        assert created.count((40, 40)) == 1, "the same destination is created only once"
+        assert any(a.status == "skipped" for a in res.actions)
+
     def test_cap_bounds_create_attempts_even_on_failure(self):
         svc = _FakeLiveSvc(create_status="failed")  # failures must not lift the cap
         res = self._run(svc, max_routes_per_run=1)
@@ -310,23 +347,27 @@ class TestLiveExecution:
         assert len(svc.listed) == 1, "no further marketplaces are read after the cap"
 
     def test_reads_are_bounded_when_all_routes_exist(self):
-        # Steady state: everything already provisioned, so every route is skipped
-        # and NO create ever fires. A create-only cap would never trip and the
-        # loop would sweep every village; capping origins VISITED prevents that.
+        # Steady state (incremental): everything already provisioned, so every
+        # route is skipped and NO create fires. A create-only cap would never
+        # trip and the loop would sweep every village; the origins-VISITED cap
+        # prevents that.
         desired = _desired_routes()
         existing = {}
         for a in desired:
             existing.setdefault(a.origin, []).append(ExistingRoute(1, a.dest_x, a.dest_y))
         svc = _FakeLiveSvc(existing=existing)
-        self._run(svc, max_routes_per_run=1)
+        self._run(svc, disable_existing=False, max_routes_per_run=1)
         assert svc.created == []
         assert len(svc.listed) <= 1, "a fully-provisioned account must not sweep every village"
 
-    def test_gold_club_skip_counts_as_outstanding(self):
-        svc = _FakeLiveSvc(create_status="skipped")  # Gold Club rejection
-        res = self._run(svc, max_routes_per_run=1)
+    def test_gold_club_rejection_aborts_the_run(self):
+        # A human without Gold Club would not keep firing rejected creates.
+        svc = _FakeLiveSvc(create_status="skipped")  # plus.error_goldclub
+        res = self._run(svc, max_routes_per_run=3)
         assert res.created == 0
-        assert res.remaining >= 1, "a Gold-Club skip is still outstanding work"
+        assert len(svc.created) == 1, "stop after the first Gold-Club rejection, no burst"
+        assert res.remaining >= 1, "the rejected route is still outstanding"
+        assert any("Gold Club" in w for w in res.warnings)
 
 
 class TestServiceGuards:

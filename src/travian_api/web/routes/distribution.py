@@ -1213,7 +1213,10 @@ async def post_execute(
     names = account.names
     coords = account.coords
     # Resolve the session lazily (not via a dependency) so dry-run works offline
-    # like /plan; the live path below requires a real connection.
+    # like /plan. The live path below requires a real connection: this mirrors
+    # get_live_travian_session's contract exactly — the live session if present,
+    # else 403, and deliberately NO implicit auto-reconnect (live execution must
+    # never spend login traffic behind the operator's back).
     session = session_manager.get(user.id)
     svc = session.trade_route_service if session is not None else None
     live_enabled = bool(svc is not None and svc.live_enabled)
@@ -1319,21 +1322,29 @@ async def post_execute(
         )
 
     # Reconcile the desired plan against what is actually on each marketplace,
-    # origin by origin, in randomized order (not a predictable village-id sweep):
-    #   * create only routes MISSING in-game, so a create sticks and the next
-    #     run naturally advances to the routes still absent — never re-creating
-    #     the same routes each run (a daily rebuild-the-same-routes bot signal);
-    #   * disable only VISIBLE routes the plan no longer wants — never a route we
-    #     are about to (re)create;
-    #   * hidden entries are honeypots: a human can't see them, so we neither act
-    #     on them (never disabled) nor let them influence us (not deduped
-    #     against) — behaving exactly like a human who cannot see them.
+    # origin by origin, in randomized order (not a predictable village-id sweep).
+    # `disable_existing` picks the reconciliation mode:
+    #   * True  — AUTHORITATIVE REBUILD of each visited origin: disable every
+    #     VISIBLE route (stale ones AND ones we will recreate), then create all
+    #     desired routes fresh. This is the only way a parameter change
+    #     (cargo/cycle/merchants) to a destination that already has a route gets
+    #     applied — the marketplace parser does not expose a route's parameters,
+    #     so we cannot diff and update in place, we rebuild. Re-running with no
+    #     plan change re-disables and re-creates, so it is an explicit,
+    #     rate-capped operator action, not a background loop.
+    #   * False — INCREMENTAL: leave active routes in place (resumable, zero
+    #     churn) and create only the destinations that have no visible route.
+    #     Existing routes are NOT updated (we can't read their parameters).
+    # Hidden entries are honeypots: a human can't see them, so we neither act on
+    # them (never disabled) nor let them influence us (never deduped against) —
+    # behaving exactly like a human who cannot see them.
+    #
     # The run is bounded by `cap` in BOTH dimensions: it reads at most `cap`
-    # marketplaces AND creates at most `cap` routes. That second bound (origins
-    # visited) is what keeps a fully-provisioned account from re-reading every
-    # village on every run — in steady state every route is "skipped" and no
-    # create ever fires, so a create-only cap would never stop the sweep. The
-    # rest defer to a later run; shuffling means successive runs cover them all.
+    # marketplaces AND fires at most `cap` creates. The origins-visited bound is
+    # what keeps a fully-provisioned account from re-reading every village every
+    # run (in steady state every route is skipped and no create fires, so a
+    # create-only cap would never stop the sweep). The rest defer to a later run;
+    # shuffling means successive runs cover them all.
     #
     # Known limitation: only origins the current plan still uses are visited, so
     # a village dropped from the plan entirely keeps its old routes until it
@@ -1352,33 +1363,40 @@ async def post_execute(
     visited = 0  # marketplaces read this run
     outstanding = 0  # creates attempted but not completed (failed / Gold Club)
     deferred: list[tuple[SheetRow, PlannedRoute]] = []
+    gold_club_blocked = False  # account-level: no route can be created at all
     for origin in origins:
-        if attempts >= cap or visited >= cap:
-            # Budget spent: defer every remaining origin WITHOUT reading its
-            # marketplace, so reads and disable writes stay bounded to this run.
+        if gold_club_blocked or attempts >= cap or visited >= cap:
+            # Budget spent (or Gold Club missing): defer every remaining origin
+            # WITHOUT reading its marketplace, so reads and disable writes stay
+            # bounded to this run.
             deferred.extend(desired_by_origin[origin])
             continue
         async with svc.origin_lock(origin):
             visited += 1
             existing = await svc.list_existing_routes(origin)
             desired = desired_by_origin[origin]
-            desired_coords = {(route.dest_x, route.dest_y) for _, route in desired}
-            # Only routes a human can see count as "already there" / disable-able;
-            # hidden honeypots are ignored entirely.
-            visible_coords = {(e.dest_x, e.dest_y) for e in existing if e.visible}
+            # Honeypots (hidden) are ignored entirely — neither disabled nor
+            # treated as occupying their destination.
+            visible = [e for e in existing if e.visible]
 
             if body.disable_existing:
-                stale = [
-                    e for e in existing if e.visible and (e.dest_x, e.dest_y) not in desired_coords
-                ]
-                disabled = await svc.disable_routes(origin, stale)
+                # Rebuild: clear every visible route, then recreate from scratch.
+                disabled = await svc.disable_routes(origin, visible)
                 if disabled is not None:
                     disables.append(
                         f"{village_label(origin, names)}: {disabled.status} {disabled.detail}".strip()
                     )
+                done_coords: set[tuple[int, int]] = set()
+            else:
+                # Incremental: destinations that already have a visible route are
+                # left untouched.
+                done_coords = {(e.dest_x, e.dest_y) for e in visible}
 
-            for row, route in desired:
-                if (route.dest_x, route.dest_y) in visible_coords:
+            for i, (row, route) in enumerate(desired):
+                coord = (route.dest_x, route.dest_y)
+                # `done_coords` also collapses two desired rows to the same
+                # destination in one run, so we never create a duplicate route.
+                if coord in done_coords:
                     actions.append(_action(row, route, "skipped", "route already active"))
                     continue
                 if attempts >= cap:
@@ -1386,11 +1404,25 @@ async def post_execute(
                     continue
                 attempts += 1
                 result = await svc.create_route(route)
-                if result.status != "created":
-                    outstanding += 1  # failed or Gold-Club-skipped → still to do
                 actions.append(_action(row, route, result.status, result.detail))
+                if result.status == "created":
+                    done_coords.add(coord)
+                    continue
+                outstanding += 1
+                if result.status == "skipped":
+                    # Gold Club is required and missing — an account-level block.
+                    # A human would not keep firing rejected creates, so stop the
+                    # whole run and defer the rest rather than burst failed POSTs.
+                    gold_club_blocked = True
+                    deferred.extend(desired[i + 1 :])
+                    break
 
     actions += [_action(row, route, "deferred") for row, route in deferred]
+    if gold_club_blocked:
+        warnings.append(
+            "Gold Club is required to create trade routes; no routes were created. "
+            "The remaining routes are deferred until Gold Club is active."
+        )
 
     return ExecuteResponse(
         dry_run=False,
