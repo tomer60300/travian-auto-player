@@ -26,6 +26,7 @@ from travian_api.services.trade_route_service import (
     TradeRoutePayloadUnverified,
     TradeRouteService,
 )
+from travian_api.web.operation_gate import active_ops, captcha_stop
 from travian_api.web.routes import distribution as dist_module
 from travian_api.web.routes.distribution import ExecuteRequest, ForeignTarget, post_execute
 
@@ -207,15 +208,38 @@ class _FakeLiveSvc:
     """A live-enabled trade-route service that records calls instead of hitting
     the game. ``existing`` maps origin id → the routes already on its marketplace."""
 
-    def __init__(self, existing=None, create_status="created", disable_status="disabled"):
+    def __init__(
+        self,
+        existing=None,
+        create_status="created",
+        disable_status="disabled",
+        enable_status="enabled",
+        budget_ok=True,
+        read_raises=None,
+    ):
         self.live_enabled = True
         self._existing = existing or {}
         self._create_status = create_status
         self._disable_status = disable_status
+        self._enable_status = enable_status
+        self._read_raises = read_raises or set()  # origin ids whose read raises
         self.created = []  # PlannedRoute objects a create was ATTEMPTED for
         self.disabled = []  # (origin, sorted tuple of disabled dest coords)
+        self.enabled = []  # (origin, sorted tuple of re-enabled dest coords)
         self.listed = []  # origin ids whose marketplace was READ
         self.execute_lock = asyncio.Lock()
+        self.on_create = None  # optional hook fired inside create_route
+        budget_checks = self._budget_checks = []
+
+        def _check_budget():
+            budget_checks.append(True)
+            if not budget_ok:
+                from travian_api.exceptions import ActivityBudgetExhausted
+
+                raise ActivityBudgetExhausted("budget exhausted (test)")
+            return True
+
+        self.http_client = SimpleNamespace(check_activity_budget=_check_budget)
 
     def origin_lock(self, vid):
         @contextlib.asynccontextmanager
@@ -226,6 +250,10 @@ class _FakeLiveSvc:
 
     async def list_existing_routes(self, vid):
         self.listed.append(vid)
+        if vid in self._read_raises:
+            from travian_api.exceptions import NetworkError
+
+            raise NetworkError("marketplace read failed (test)")
         return list(self._existing.get(vid, []))
 
     async def disable_routes(self, vid, routes):
@@ -236,10 +264,20 @@ class _FakeLiveSvc:
         self.disabled.append((vid, tuple(sorted((r.dest_x, r.dest_y) for r in routes))))
         return RouteActionResult(vid, 0, 0, self._disable_status, f"{len(routes)} route(s)")
 
+    async def enable_routes(self, vid, routes):
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        if not routes:
+            return None
+        self.enabled.append((vid, tuple(sorted((r.dest_x, r.dest_y) for r in routes))))
+        return RouteActionResult(vid, 0, 0, self._enable_status, f"{len(routes)} route(s)")
+
     async def create_route(self, route):
         from travian_api.services.trade_route_service import RouteActionResult
 
         self.created.append(route)
+        if self.on_create is not None:
+            self.on_create()
         return RouteActionResult(
             route.origin_village_id, route.dest_x, route.dest_y, self._create_status
         )
@@ -453,3 +491,146 @@ class TestTradeRouteParser:
 
     def test_row_without_coordinates_is_skipped_not_guessed(self):
         assert parse_trade_routes('<div data-route-id="7">no coords</div>') == []
+
+    def test_disabled_route_is_flagged_inactive(self):
+        html = """
+        <div data-route-id="1" data-x="40" data-y="40"></div>
+        <div data-route-id="2" data-x="5" data-y="5" data-active="false"></div>
+        <div data-route-id="3" data-x="6" data-y="6" class="route disabled"></div>
+        """
+        routes = {r["route_id"]: r for r in parse_trade_routes(html)}
+        assert routes[1]["active"] is True
+        assert routes[2]["active"] is False
+        assert routes[3]["active"] is False
+
+
+def _two_origin_account():
+    """A feasible plan: two origins → two destinations, with distinct dispatch
+    minutes — for hardening tests that need deterministic multi-origin control."""
+    rows = (
+        SheetRow(
+            origin=20003,
+            destination=-1,
+            cargo={Resource.CROP: 100},
+            cycle_hours=6,
+            dispatch_minute=100,
+            arrival_minute=0,
+            merchants=2,
+        ),
+        SheetRow(
+            origin=20011,
+            destination=-2,
+            cargo={Resource.CROP: 100},
+            cycle_hours=6,
+            dispatch_minute=700,
+            arrival_minute=0,
+            merchants=2,
+        ),
+    )
+    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=rows)
+    return SimpleNamespace(
+        plan=plan,
+        names={20003: "03", 20011: "11", -1: "A", -2: "B"},
+        coords={20003: (0, 0), 20011: (10, 0), -1: (40, 40), -2: (50, 50)},
+        warnings=[],
+    )
+
+
+def _run_live(svc, account, **body_kw):
+    """Live-execute against an injected plan, with shuffle disabled so origins
+    stay in insertion order [20003, 20011] for deterministic assertions."""
+
+    async def _plan(_body):
+        return account
+
+    with (
+        _patch(dist_module, "_plan_account", _plan),
+        _patch(dist_module.random, "shuffle", lambda seq: None),
+    ):
+        return _execute(_exec_body(dry_run=False, **body_kw), svc=svc)
+
+
+class TestExecutionHardening:
+    def test_dispatch_minute_survives_into_created_routes(self):  # #58
+        svc = _FakeLiveSvc()  # empty marketplaces → both created
+        _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        assert {r.dispatch_minute for r in svc.created} == {100, 700}, (
+            "each route's scheduled send time must reach the create payload"
+        )
+
+    def test_create_payload_serializes_the_send_time(self):  # #58
+        route = PlannedRoute(20003, 40, 40, "A", {Resource.CROP: 100}, 6, 2, dispatch_minute=615)
+        payload = TradeRouteService(http_client=SimpleNamespace())._build_create_payload(route)
+        assert payload["startMinute"] == 615
+        assert payload["startTime"] == "10:15"
+
+    def test_disabled_desired_route_is_re_enabled_not_duplicated(self):  # #60
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(1, 40, 40, active=False)]})
+        _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        assert (20003, ((40, 40),)) in svc.enabled, "a disabled desired route must be re-enabled"
+        assert (40, 40) not in {(r.dest_x, r.dest_y) for r in svc.created}, "no duplicate create"
+
+    def test_a_disabled_route_does_not_count_as_active(self):  # #60
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(1, 40, 40, active=False)]}, enable_status="failed"
+        )
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        assert any(
+            a.status == "blocked" for a in res.actions if (a.dest_x, a.dest_y) == (40, 40)
+        ), "a disabled route whose re-enable failed is blocked, not 'already active'"
+        assert (40, 40) not in {(r.dest_x, r.dest_y) for r in svc.created}
+
+    def test_failed_disable_defers_new_routes_for_that_origin(self):  # #61
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(9, 99, 98, active=True)]}, disable_status="failed"
+        )
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        assert (40, 40) not in {(r.dest_x, r.dest_y) for r in svc.created}, (
+            "a failed stale-disable must stop new routes on that origin"
+        )
+        assert any("disable" in p.lower() for p in res.problems)
+
+    def test_captcha_resolution_halts_the_run(self):  # #62
+        import itertools
+        import time as _time
+
+        svc = _FakeLiveSvc()
+        svc.on_create = lambda: captcha_stop.signal(_USER.id)  # first create → stop
+        # A strictly-increasing monotonic clock so the signal timestamp is
+        # unambiguously after the run's start (real captcha resolution is seconds
+        # later; on a coarse clock the same-tick case would be a test artifact).
+        clock = itertools.count(1)
+        try:
+            with _patch(_time, "monotonic", lambda: next(clock)):
+                res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        finally:
+            captcha_stop.clear(_USER.id)
+        assert len(svc.created) == 1, "no further creates after the captcha-stop signal"
+        assert any(a.status == "deferred" for a in res.actions)
+
+    def test_execution_registers_and_unregisters_the_active_op(self):  # #63
+        seen = []
+        svc = _FakeLiveSvc()
+        svc.on_create = lambda: seen.append(list(active_ops.get_active(_USER.id)))
+        _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        assert seen and all("trade-route-execute" in labels for labels in seen), (
+            "a live run must be a registered active op so disconnect can't close its client"
+        )
+        assert "trade-route-execute" not in active_ops.get_active(_USER.id), (
+            "and it must unregister when finished"
+        )
+
+    def test_exhausted_budget_blocks_all_execution(self):  # #64
+        svc = _FakeLiveSvc(budget_ok=False)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        assert svc.created == [] and svc.listed == [], "no reads or writes once budget is spent"
+        assert any("budget" in p.lower() for p in res.problems)
+
+    def test_marketplace_read_failure_keeps_earlier_commits(self):  # #65
+        # 20003 is visited first (shuffle disabled) and commits; 20011's read
+        # raises — the endpoint returns a structured result, not a 500.
+        svc = _FakeLiveSvc(read_raises={20011})
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        assert res.dry_run is False
+        assert (40, 40) in {(r.dest_x, r.dest_y) for r in svc.created}, "20003's route committed"
+        assert any("marketplace read failed" in p for p in res.problems)

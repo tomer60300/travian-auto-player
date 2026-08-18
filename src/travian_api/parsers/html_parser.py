@@ -640,16 +640,41 @@ def _element_is_visible(el) -> bool:
     return True
 
 
+_INACTIVE_CLASS_TOKENS = frozenset({"inactive", "disabled", "paused", "off"})
+
+
+def _route_is_active(el) -> bool:
+    """Whether a marketplace route row is ENABLED (best-effort).
+
+    Travian keeps DISABLED routes in the list so they can be re-enabled, so a row
+    being present does not mean it is active. Reads an explicit
+    ``data-active``/``data-enabled`` flag when present, else looks for a
+    conventional inactive/disabled class; defaults to True (assume active) when
+    nothing says otherwise, so an unparseable flag errs toward leaving the route
+    alone rather than churning it.
+    """
+    for attr in ("data-active", "data-enabled"):
+        val = el.get(attr)
+        if val is not None:
+            return str(val).strip().lower() not in ("false", "0", "no", "off")
+    classes = el.get("class") or []
+    if isinstance(classes, str):
+        classes = classes.split()
+    return not any(c.lower() in _INACTIVE_CLASS_TOKENS for c in classes)
+
+
 def parse_trade_routes(html: str) -> List[Dict[str, Any]]:
     """Existing trade routes from a marketplace (gid=17) page.
 
-    Returns dicts ``{route_id, dest_x, dest_y, visible}``. BEST-EFFORT: the
-    exact gid=17 markup has not been captured, so this recognizes the common
+    Returns dicts ``{route_id, dest_x, dest_y, visible, active}``. BEST-EFFORT:
+    the exact gid=17 markup has not been captured, so this recognizes the common
     Travian shape (a route row exposing a numeric route id plus destination
     coordinates) and returns an EMPTY list for markup it does not recognize —
     never a guess. An empty list means "nothing to disable", which is the safe
     default. Hidden rows are flagged ``visible=False`` so callers can ignore
-    honeypot entries.
+    honeypot entries; disabled rows are flagged ``active=False`` so a
+    still-desired-but-disabled route is re-enabled rather than mistaken for one
+    that already satisfies the plan.
     """
     soup = BeautifulSoup(html, "html.parser")
     routes: List[Dict[str, Any]] = []
@@ -676,6 +701,7 @@ def parse_trade_routes(html: str) -> List[Dict[str, Any]]:
                 "dest_x": dest_x,
                 "dest_y": dest_y,
                 "visible": _element_is_visible(el),
+                "active": _route_is_active(el),
             }
         )
     return routes

@@ -52,6 +52,11 @@ class PlannedRoute:
     cargo: dict[Resource, int]
     cycle_hours: int
     merchants: int
+    # Scheduled send time, minutes past midnight (the planner's beat phase). A
+    # Gold Club route has an explicit "Send at" time; dropping it would create
+    # every route around the click instant, collapsing the beat that spaces
+    # arrivals and orders relay hubs after their inbound crop.
+    dispatch_minute: int = 0
 
 
 @dataclass
@@ -73,6 +78,11 @@ class ExistingRoute:
     dest_x: int
     dest_y: int
     visible: bool = True  # UI-visible; hidden entries are treated as honeypots
+    # Whether the route is currently ENABLED. Travian keeps disabled routes in
+    # the list (they can be re-enabled), so a visible row at a desired coordinate
+    # is NOT necessarily satisfying the plan — only an enabled one is. Defaults
+    # True so a parser that cannot read the flag errs toward "leave it alone".
+    active: bool = True
 
 
 class TradeRouteService:
@@ -136,7 +146,11 @@ class TradeRouteService:
 
         return [
             ExistingRoute(
-                route_id=r["route_id"], dest_x=r["dest_x"], dest_y=r["dest_y"], visible=r["visible"]
+                route_id=r["route_id"],
+                dest_x=r["dest_x"],
+                dest_y=r["dest_y"],
+                visible=r["visible"],
+                active=r.get("active", True),
             )
             for r in parse_trade_routes(html)
         ]
@@ -159,12 +173,18 @@ class TradeRouteService:
             "resources": {r.value: route.cargo.get(r, 0) for r in Resource},
             "interval": route.cycle_hours,
             "merchants": route.merchants,
+            # Scheduled "Send at" time (minutes past midnight). Field name is a
+            # guess like the rest of this UNVERIFIED body, but the value must not
+            # be dropped — the beat depends on it. Sent as HH:MM too since some
+            # variants take a clock string.
+            "startMinute": route.dispatch_minute,
+            "startTime": f"{route.dispatch_minute // 60:02d}:{route.dispatch_minute % 60:02d}",
             "active": True,
         }
 
-    def _build_disable_payload(self, route_ids: list[int]) -> dict:
-        """Best-effort disable/toggle body. UNVERIFIED (see _build_create_payload)."""
-        return {"ids": route_ids, "active": False}
+    def _build_disable_payload(self, route_ids: list[int], *, active: bool) -> dict:
+        """Best-effort enable/disable toggle body. UNVERIFIED (see _build_create_payload)."""
+        return {"ids": route_ids, "active": active}
 
     def _require_live(self) -> None:
         if not self.live_enabled:
@@ -206,27 +226,41 @@ class TradeRouteService:
             )
         return RouteActionResult(route.origin_village_id, route.dest_x, route.dest_y, "created")
 
-    async def disable_routes(
-        self, origin_village_id: int, routes: list[ExistingRoute]
+    async def _toggle_routes(
+        self, origin_village_id: int, routes: list[ExistingRoute], *, active: bool
     ) -> RouteActionResult | None:
-        """Disable a village's existing routes (LIVE). Gated on ``live_enabled``.
+        """Enable/disable a village's existing routes (LIVE). Gated on ``live_enabled``.
 
-        Returns None when there is nothing to disable (so no request is sent).
+        Returns None when there is nothing to toggle (so no request is sent).
         One coarse call for all of the origin's routes, not one per route.
         """
         if not routes:
             return None
         self._require_live()
-        await self.http_client.human_delay.wait(
-            ActionType.BETWEEN_ROUTES, "disabling old trade routes"
-        )
+        verb = "enabling" if active else "disabling"
+        await self.http_client.human_delay.wait(ActionType.BETWEEN_ROUTES, f"{verb} trade routes")
         try:
             await self.http_client.post_json(
                 "/api/v1/trade-routes/toggle-group",
-                self._build_disable_payload([r.route_id for r in routes]),
+                self._build_disable_payload([r.route_id for r in routes], active=active),
                 request_type="xhr",
                 safe_to_retry=False,
             )
         except NetworkError as exc:
-            return RouteActionResult(origin_village_id, 0, 0, "failed", f"disable failed: {exc}")
-        return RouteActionResult(origin_village_id, 0, 0, "disabled", f"{len(routes)} route(s)")
+            return RouteActionResult(origin_village_id, 0, 0, "failed", f"{verb} failed: {exc}")
+        status = "enabled" if active else "disabled"
+        return RouteActionResult(origin_village_id, 0, 0, status, f"{len(routes)} route(s)")
+
+    async def disable_routes(
+        self, origin_village_id: int, routes: list[ExistingRoute]
+    ) -> RouteActionResult | None:
+        """Disable a village's stale routes the plan no longer wants."""
+        return await self._toggle_routes(origin_village_id, routes, active=False)
+
+    async def enable_routes(
+        self, origin_village_id: int, routes: list[ExistingRoute]
+    ) -> RouteActionResult | None:
+        """Re-enable a village's disabled routes that the plan still wants, rather
+        than creating a duplicate. Travian keeps disabled routes in the list, so a
+        desired-but-disabled route is restored by re-enabling it."""
+        return await self._toggle_routes(origin_village_id, routes, active=True)

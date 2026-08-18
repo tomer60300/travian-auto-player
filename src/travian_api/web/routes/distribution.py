@@ -14,12 +14,13 @@ every fetch is a deliberate, priced action rather than a side effect of typing.
 import asyncio
 import logging
 import random
+import time
 from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
-from travian_api.exceptions import TravianError
+from travian_api.exceptions import ActivityBudgetExhausted, NetworkError, TravianError
 from travian_api.parsers.html_parser import (
     parse_village_stats_production,
     parse_village_stats_resources,
@@ -61,11 +62,17 @@ from travian_api.services.distribution.storage import (
 from travian_api.services.trade_route_service import PlannedRoute
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User
+from travian_api.web.operation_gate import active_ops, captcha_stop
 from travian_api.web.sessions import TravianSession, get_live_travian_session, session_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/distribution", tags=["distribution"])
+
+# Active-op label for a live trade-route execution, so the session-lifecycle
+# guards (disconnect/reconnect) see the work and don't close the HttpClient
+# underneath it, and the captcha-stop signal can halt it.
+_EXECUTE_OP_LABEL = "trade-route-execute"
 
 # Europe 2 is x1 with coordinates running -200..+200. Exposed in the response so
 # the UI can show what the distances were computed against.
@@ -1253,6 +1260,10 @@ async def post_execute(
                     cargo=dict(row.cargo),
                     cycle_hours=row.cycle_hours,
                     merchants=row.merchants,
+                    # Carry the planner's scheduled send time through to live
+                    # execution — without it the beat that spaces arrivals and
+                    # orders relay hubs is lost.
+                    dispatch_minute=row.dispatch_minute,
                 ),
             )
         )
@@ -1377,79 +1388,174 @@ async def post_execute(
 
     actions: list[RouteActionResponse] = []
     disables: list[str] = []
-    problems: list[str] = []  # execution failures (failed disable, Gold Club)
+    problems: list[str] = []  # execution failures (failed disable, Gold Club, …)
     attempts = 0  # create requests fired this run
     visited = 0  # marketplaces read this run
     outstanding = 0  # creates attempted but not completed (failed / Gold Club)
     deferred: list[tuple[SheetRow, PlannedRoute]] = []
     gold_club_blocked = False  # account-level: no route can be created at all
-    async with svc.execute_lock:
-        for origin in origins:
-            if gold_club_blocked or attempts >= cap or visited >= cap:
-                # Budget spent (or Gold Club missing): defer every remaining
-                # origin WITHOUT reading its marketplace, so reads and disable
-                # writes stay bounded to this run.
-                deferred.extend(desired_by_origin[origin])
-                continue
-            async with svc.origin_lock(origin):
-                visited += 1
-                existing = await svc.list_existing_routes(origin)
-                desired = desired_by_origin[origin]
-                desired_coords = {(route.dest_x, route.dest_y) for _, route in desired}
-                # Honeypots (hidden) are ignored entirely — neither disabled nor
-                # treated as occupying their destination.
-                visible = [e for e in existing if e.visible]
+    stopped_early = False  # captcha resolved, budget exhausted, or a read failed
 
-                if body.disable_existing:
-                    stale = [e for e in visible if (e.dest_x, e.dest_y) not in desired_coords]
-                    disabled = await svc.disable_routes(origin, stale)
-                    if disabled is not None:
-                        line = (
-                            f"{village_label(origin, names)}: {disabled.status} {disabled.detail}"
-                        ).strip()
-                        if disabled.status == "failed":
-                            # A failed disable leaves stale routes live — a real
-                            # execution problem, not a benign planner note.
-                            problems.append(f"Could not disable stale routes — {line}")
-                        else:
+    # Register the run so the session-lifecycle guards see it: disconnect/
+    # reconnect consults ActiveOpRegistry and will not close this HttpClient
+    # underneath the run (issue #63). Registered synchronously before the first
+    # game await so a concurrent disconnect can't slip in between. Unregistered
+    # in `finally`. `started_at` lets the captcha-stop signal target only this run.
+    started_at = time.monotonic()
+    active_ops.register(user.id, _EXECUTE_OP_LABEL)
+    try:
+        async with svc.execute_lock:
+            # Refuse to start if the activity budget is already exhausted, and
+            # recheck before each origin so exhaustion mid-run stops the rest
+            # (issue #64). check_activity_budget raises; per-request activity is
+            # accounted by the HttpClient, as for the farm/oasis loops.
+            try:
+                svc.http_client.check_activity_budget()
+            except ActivityBudgetExhausted as exc:
+                problems.append(f"Activity budget exhausted; no routes were created: {exc}")
+                deferred.extend(items)
+                origins = []
+
+            for origin in origins:
+                if gold_club_blocked or attempts >= cap or visited >= cap:
+                    # Budget spent (or Gold Club missing): defer every remaining
+                    # origin WITHOUT reading its marketplace, so reads and disable
+                    # writes stay bounded to this run.
+                    deferred.extend(desired_by_origin[origin])
+                    continue
+                # After captcha resolution the guard releases the pending request
+                # AND signals stop; halt here so a resolved challenge does not
+                # auto-resume the mutation backlog (issue #62).
+                if captcha_stop.should_stop(user.id, started_after=started_at):
+                    stopped_early = True
+                    deferred.extend(desired_by_origin[origin])
+                    continue
+                try:
+                    svc.http_client.check_activity_budget()
+                except ActivityBudgetExhausted as exc:
+                    problems.append(f"Activity budget exhausted mid-run: {exc}")
+                    stopped_early = True
+                    deferred.extend(desired_by_origin[origin])
+                    continue
+
+                async with svc.origin_lock(origin):
+                    # A marketplace read can fail AFTER earlier origins already
+                    # committed writes; keep those in the structured response and
+                    # stop rather than 500 out and lose the record (issue #65).
+                    try:
+                        existing = await svc.list_existing_routes(origin)
+                    except NetworkError as exc:
+                        problems.append(
+                            f"{village_label(origin, names)}: marketplace read failed "
+                            f"({exc}); remaining routes deferred"
+                        )
+                        deferred.extend(desired_by_origin[origin])
+                        stopped_early = True
+                        break
+                    visited += 1
+                    desired = desired_by_origin[origin]
+                    desired_coords = {(route.dest_x, route.dest_y) for _, route in desired}
+                    # Honeypots (hidden) are ignored entirely — neither acted on
+                    # nor treated as occupying a destination.
+                    visible = [e for e in existing if e.visible]
+
+                    if body.disable_existing:
+                        # Disable only ACTIVE visible routes the plan no longer
+                        # wants; a route already disabled needs no action.
+                        stale = [
+                            e
+                            for e in visible
+                            if e.active and (e.dest_x, e.dest_y) not in desired_coords
+                        ]
+                        disabled = await svc.disable_routes(origin, stale)
+                        if disabled is not None:
+                            line = (
+                                f"{village_label(origin, names)}: "
+                                f"{disabled.status} {disabled.detail}"
+                            ).strip()
+                            if disabled.status == "failed":
+                                # A failed/ambiguous disable leaves stale routes
+                                # live; do NOT add new routes on top for this
+                                # origin — defer them and reconcile on a later run
+                                # after re-reading state (issue #61).
+                                problems.append(
+                                    f"Could not disable stale routes — {line}; "
+                                    "skipping new routes for this origin this run"
+                                )
+                                deferred.extend(desired)
+                                continue
                             disables.append(line)
 
-                # A destination that already has a visible route is satisfied;
-                # this set also collapses two desired rows to the same
-                # destination in one run, so we never create a duplicate.
-                done_coords = {(e.dest_x, e.dest_y) for e in visible}
-                for i, (row, route) in enumerate(desired):
-                    coord = (route.dest_x, route.dest_y)
-                    if coord in done_coords:
-                        actions.append(_action(row, route, "skipped", "route already active"))
-                        continue
-                    if attempts >= cap:
-                        deferred.append((row, route))
-                        continue
-                    attempts += 1
-                    result = await svc.create_route(route)
-                    if result.status == "created":
-                        actions.append(_action(row, route, "created", result.detail))
-                        done_coords.add(coord)
-                        continue
-                    outstanding += 1
-                    if result.status == "skipped":
-                        # Gold Club is required and missing — an account-level
-                        # block. Report it as "blocked" (distinct from an
-                        # "already active" skip so the table can't read it as
-                        # satisfied), then stop the run and defer the rest — a
-                        # human would not keep firing rejected creates.
-                        actions.append(_action(row, route, "blocked", result.detail))
-                        gold_club_blocked = True
-                        deferred.extend(desired[i + 1 :])
-                        break
-                    actions.append(_action(row, route, "failed", result.detail))
+                    # Only ENABLED routes satisfy the plan. A desired destination
+                    # whose route exists but is DISABLED is re-enabled rather than
+                    # duplicated; a desired destination with no route is created.
+                    satisfied = {(e.dest_x, e.dest_y) for e in visible if e.active}
+                    disabled_desired = [
+                        e
+                        for e in visible
+                        if not e.active and (e.dest_x, e.dest_y) in desired_coords
+                    ]
+                    blocked: set[tuple[int, int]] = set()
+                    if disabled_desired:
+                        enabled = await svc.enable_routes(origin, disabled_desired)
+                        if enabled is not None and enabled.status == "enabled":
+                            satisfied.update((e.dest_x, e.dest_y) for e in disabled_desired)
+                            disables.append(
+                                f"{village_label(origin, names)}: re-enabled {enabled.detail}"
+                            )
+                        else:
+                            # Couldn't re-enable — don't create a duplicate on top;
+                            # report blocked so it isn't mistaken for satisfied.
+                            blocked = {(e.dest_x, e.dest_y) for e in disabled_desired}
+                            problems.append(
+                                f"{village_label(origin, names)}: could not re-enable a "
+                                "disabled route the plan still wants"
+                            )
+
+                    for i, (row, route) in enumerate(desired):
+                        coord = (route.dest_x, route.dest_y)
+                        if coord in satisfied:
+                            actions.append(_action(row, route, "skipped", "route already active"))
+                            continue
+                        if coord in blocked:
+                            actions.append(
+                                _action(row, route, "blocked", "route disabled; re-enable failed")
+                            )
+                            outstanding += 1
+                            continue
+                        if attempts >= cap:
+                            deferred.append((row, route))
+                            continue
+                        attempts += 1
+                        result = await svc.create_route(route)
+                        if result.status == "created":
+                            actions.append(_action(row, route, "created", result.detail))
+                            satisfied.add(coord)
+                            continue
+                        outstanding += 1
+                        if result.status == "skipped":
+                            # Gold Club is required and missing — an account-level
+                            # block. Report it as "blocked" (distinct from an
+                            # "already active" skip), then stop the run and defer
+                            # the rest — a human would not keep firing rejects.
+                            actions.append(_action(row, route, "blocked", result.detail))
+                            gold_club_blocked = True
+                            deferred.extend(desired[i + 1 :])
+                            break
+                        actions.append(_action(row, route, "failed", result.detail))
+    finally:
+        active_ops.unregister(user.id, _EXECUTE_OP_LABEL)
 
     actions += [_action(row, route, "deferred") for row, route in deferred]
     if gold_club_blocked:
         problems.append(
             "Gold Club is required to create trade routes; no routes were created. "
             "The remaining routes are deferred until Gold Club is active."
+        )
+    if stopped_early and not gold_club_blocked:
+        problems.append(
+            "Execution stopped early (captcha resolved, activity budget, or a read "
+            "failure); remaining routes are deferred to a later run."
         )
 
     return ExecuteResponse(
