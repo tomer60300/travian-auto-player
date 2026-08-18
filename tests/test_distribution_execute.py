@@ -267,6 +267,7 @@ class TestLiveExecution:
         assert svc.created == [], "incremental mode must not recreate active routes"
         assert svc.disabled == [], "incremental mode disables nothing"
         assert all(a.status == "skipped" for a in res.actions)
+        assert res.problems == [], "a clean run reports no execution problems"
 
     def test_incremental_second_run_creates_nothing_new(self):
         # Convergence without churn: once routes exist, a later incremental run
@@ -388,22 +389,26 @@ class TestLiveExecution:
         assert res.created == 0
         assert len(svc.created) == 1, "stop after the first Gold-Club rejection, no burst"
         assert res.remaining >= 1, "the rejected route is still outstanding"
-        assert any("Gold Club" in w for w in res.warnings)
-        # A Gold-Club block is "blocked", distinct from an "already active" skip.
+        # A Gold-Club block is a problem (not a benign planner warning).
+        assert any("Gold Club" in p for p in res.problems)
+        assert res.warnings == [] or all("Gold Club" not in w for w in res.warnings)
+        # It is "blocked", distinct from an "already active" skip.
         assert any(a.status == "blocked" for a in res.actions)
         assert not any(a.status == "skipped" for a in res.actions)
 
-    def test_failed_disable_is_surfaced_as_a_warning(self):
-        # A failed disable leaves stale routes live — it must not be a neutral
-        # note that lets the run read as a clean success.
+    def test_failed_disable_is_surfaced_as_a_problem(self):
+        # A failed disable leaves stale routes live — it must land in `problems`
+        # (a real failure), not `warnings` (benign notes), so the run does not
+        # read as a clean success.
         desired = _desired_routes()
         a = desired[0]
         existing = {a.origin: [ExistingRoute(1, 99, 98)]}  # stale, plan doesn't want it
         svc = _FakeLiveSvc(existing=existing, disable_status="failed")
         res = self._run(svc, disable_existing=True, max_routes_per_run=50)
-        assert any("disable" in w.lower() for w in res.warnings), (
-            "a failed disable must surface as a warning, not a silent note"
+        assert any("disable" in p.lower() for p in res.problems), (
+            "a failed disable must surface as a problem, not a silent note"
         )
+        assert all("disable" not in w.lower() for w in res.warnings)
 
 
 class TestServiceGuards:

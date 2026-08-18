@@ -354,7 +354,7 @@ class RouteActionResponse(BaseModel):
     cargo: dict[Resource, int]
     cycle_hours: int
     merchants: int
-    status: str  # would_create | deferred | created | skipped | failed
+    status: str  # would_create | deferred | created | skipped | blocked | failed
     detail: str = ""
 
 
@@ -365,7 +365,13 @@ class ExecuteResponse(BaseModel):
     disables: list[str]
     created: int
     remaining: int
+    # Benign, informational notes computed while planning (coordinate resolution,
+    # tribute timing, storage/merchant hints). NOT failures.
     warnings: list[str]
+    # Genuine execution problems the operator must act on (a failed disable, a
+    # Gold-Club block). Kept separate from `warnings` so a benign planner note
+    # never makes a successful run look failed.
+    problems: list[str] = []
 
 
 @router.get("/snapshot", response_model=SnapshotResponse)
@@ -1369,6 +1375,7 @@ async def post_execute(
 
     actions: list[RouteActionResponse] = []
     disables: list[str] = []
+    problems: list[str] = []  # execution failures (failed disable, Gold Club)
     attempts = 0  # create requests fired this run
     visited = 0  # marketplaces read this run
     outstanding = 0  # creates attempted but not completed (failed / Gold Club)
@@ -1399,10 +1406,9 @@ async def post_execute(
                             f"{village_label(origin, names)}: {disabled.status} {disabled.detail}"
                         ).strip()
                         if disabled.status == "failed":
-                            # A failed disable leaves stale routes live — surface
-                            # it as a warning, not a neutral note, so the run does
-                            # not read as a clean success.
-                            warnings.append(f"Could not disable stale routes — {line}")
+                            # A failed disable leaves stale routes live — a real
+                            # execution problem, not a benign planner note.
+                            problems.append(f"Could not disable stale routes — {line}")
                         else:
                             disables.append(line)
 
@@ -1439,7 +1445,7 @@ async def post_execute(
 
     actions += [_action(row, route, "deferred") for row, route in deferred]
     if gold_club_blocked:
-        warnings.append(
+        problems.append(
             "Gold Club is required to create trade routes; no routes were created. "
             "The remaining routes are deferred until Gold Club is active."
         )
@@ -1455,4 +1461,5 @@ async def post_execute(
         created=sum(1 for a in actions if a.status == "created"),
         remaining=len(deferred) + outstanding,
         warnings=warnings,
+        problems=problems,
     )

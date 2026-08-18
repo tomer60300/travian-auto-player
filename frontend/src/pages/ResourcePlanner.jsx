@@ -592,14 +592,16 @@ export default function ResourcePlanner() {
           const left = res.data.remaining
             ? `, ${res.data.remaining} deferred to a later run`
             : ''
+          // `problems` are real execution failures (failed disable, Gold Club);
+          // `warnings` are benign planner notes and must NOT read as failure.
           const blocked =
-            (res.data.warnings && res.data.warnings.length > 0) ||
+            (res.data.problems && res.data.problems.length > 0) ||
             res.data.actions.some((a) => a.status === 'failed')
           if (res.data.created > 0) {
             toast.success(`Created ${res.data.created} route(s)${left}`)
           } else if (blocked) {
             // Nothing created because of a block/failure — do not signal success.
-            toast.error(res.data.warnings?.[0] || 'No routes were created (a create failed).')
+            toast.error(res.data.problems?.[0] || 'No routes were created (a create failed).')
           } else {
             toast.success(`No new routes needed${left}`)
           }
@@ -1877,13 +1879,20 @@ export default function ResourcePlanner() {
                     )}
                     {!execResult.dry_run &&
                       execResult.remaining > 0 &&
-                      execResult.warnings.length === 0 &&
+                      (!execResult.problems || execResult.problems.length === 0) &&
                       !execResult.actions.some((a) => a.status === 'failed') && (
                         <p className="text-xs text-secondary mb-2">
                           Deferred routes were not checked this run (a few villages are handled per
                           run). Run again to continue — already-active routes are skipped.
                         </p>
                       )}
+                    {execResult.problems && execResult.problems.length > 0 && (
+                      <ul className="text-xs text-danger list-disc list-inside mb-2">
+                        {execResult.problems.map((p, i) => (
+                          <li key={i}>{p}</li>
+                        ))}
+                      </ul>
+                    )}
                     {execResult.disables.length > 0 && (
                       <ul className="text-xs text-secondary list-disc list-inside mb-2">
                         {execResult.disables.map((d, i) => (
@@ -1892,7 +1901,7 @@ export default function ResourcePlanner() {
                       </ul>
                     )}
                     {execResult.warnings.length > 0 && (
-                      <ul className="text-xs text-orange-200 list-disc list-inside mb-2">
+                      <ul className="text-xs text-secondary list-disc list-inside mb-2">
                         {execResult.warnings.map((w, i) => (
                           <li key={i}>{w}</li>
                         ))}
