@@ -16,6 +16,7 @@ touches the game and does not depend on any of this.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -84,6 +85,10 @@ class TradeRouteService:
         # production account is exactly what this guard prevents.
         self.live_enabled = live_enabled
         self._origin_lock = KeyedLock()
+        # Serializes whole execute runs for this account so a double-click or a
+        # second tab can't fire two concurrent reconciliations (which would
+        # bypass the per-run request caps and burst writes).
+        self.execute_lock = asyncio.Lock()
 
     def origin_lock(self, village_id: int) -> AbstractAsyncContextManager[None]:
         """Serialize the disable+create sequence for one origin village, so a

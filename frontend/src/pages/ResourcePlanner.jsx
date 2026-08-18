@@ -590,7 +590,17 @@ export default function ResourcePlanner() {
           const left = res.data.remaining
             ? `, ${res.data.remaining} deferred to a later run`
             : ''
-          toast.success(`Created ${res.data.created} route(s)${left}`)
+          const blocked =
+            (res.data.warnings && res.data.warnings.length > 0) ||
+            res.data.actions.some((a) => a.status === 'failed')
+          if (res.data.created > 0) {
+            toast.success(`Created ${res.data.created} route(s)${left}`)
+          } else if (blocked) {
+            // Nothing created because of a block/failure — do not signal success.
+            toast.error(res.data.warnings?.[0] || 'No routes were created (a create failed).')
+          } else {
+            toast.success(`No new routes needed${left}`)
+          }
         }
       } catch (err) {
         toast.error(errorDetail(err, dryRun ? 'Preview failed' : 'Execution failed'))
@@ -1867,6 +1877,13 @@ export default function ResourcePlanner() {
                       <ul className="text-xs text-secondary list-disc list-inside mb-2">
                         {execResult.disables.map((d, i) => (
                           <li key={i}>{d}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {execResult.warnings.length > 0 && (
+                      <ul className="text-xs text-orange-200 list-disc list-inside mb-2">
+                        {execResult.warnings.map((w, i) => (
+                          <li key={i}>{w}</li>
                         ))}
                       </ul>
                     )}

@@ -178,6 +178,23 @@ class TestLiveGate:
         assert exc.value.status_code == 422
         assert "feasible" in exc.value.detail.lower()
 
+    def test_concurrent_execute_is_rejected(self):
+        # A second live run for the same account while one is in flight is a 409,
+        # so a double-click can't fire two reconciliations that bypass the caps.
+        svc = _FakeLiveSvc()
+
+        async def _run() -> int:
+            async with svc.execute_lock:  # simulate an in-flight run holding it
+                mgr = _SessMgr(svc, connected=True)
+                with (
+                    _patch(dist_module, "session_manager", mgr),
+                    pytest.raises(HTTPException) as exc,
+                ):
+                    await post_execute(_exec_body(dry_run=False), _USER)
+                return exc.value.status_code
+
+        assert asyncio.run(_run()) == 409
+
 
 def _desired_routes():
     """The routes the plan wants — discovered via a zero-request dry-run — so
@@ -197,6 +214,7 @@ class _FakeLiveSvc:
         self.created = []  # PlannedRoute objects a create was ATTEMPTED for
         self.disabled = []  # (origin, sorted tuple of disabled dest coords)
         self.listed = []  # origin ids whose marketplace was READ
+        self.execute_lock = asyncio.Lock()
 
     def origin_lock(self, vid):
         @contextlib.asynccontextmanager
@@ -263,10 +281,10 @@ class TestLiveExecution:
         self._run(svc, disable_existing=False, max_routes_per_run=50)
         assert svc.created == [], "a second incremental run must not rebuild"
 
-    def test_disable_existing_rebuilds_the_origin(self):
-        # Rebuild mode applies parameter changes: a destination that already has
-        # a route is disabled and recreated (coord-only dedup can't diff params),
-        # and stale routes are cleared.
+    def test_disable_existing_disables_stale_but_keeps_matching(self):
+        # disable_existing clears only routes the plan no longer wants; a route
+        # the plan still wants is left in place — never disabled (no churn) and
+        # never a disable-then-create on the same coord (no duplicate risk).
         desired = _desired_routes()
         a = desired[0]
         plan_dest = (a.dest_x, a.dest_y)
@@ -277,12 +295,14 @@ class TestLiveExecution:
             ]
         }
         svc = _FakeLiveSvc(existing=existing)
-        self._run(svc, disable_existing=True, max_routes_per_run=50)
+        res = self._run(svc, disable_existing=True, max_routes_per_run=50)
         disabled_coords = {c for _, coords in svc.disabled for c in coords}
-        assert {plan_dest, (99, 98)} <= disabled_coords, "rebuild disables all visible routes"
-        assert plan_dest in {(r.dest_x, r.dest_y) for r in svc.created}, (
-            "the wanted destination is recreated with the plan's current parameters"
+        assert (99, 98) in disabled_coords, "the stale route is disabled"
+        assert plan_dest not in disabled_coords, "a wanted route is kept, not churned"
+        assert plan_dest not in {(r.dest_x, r.dest_y) for r in svc.created}, (
+            "a route that already exists is not recreated (params are not diffed)"
         )
+        assert any(a.status == "skipped" for a in res.actions)
 
     def test_hidden_honeypot_is_ignored_entirely(self):
         # A hidden route is invisible to a human, so the reconciler behaves like
