@@ -93,13 +93,14 @@ def _build_oasis_coro(config: OasisRaiderConfig):
             )
             ctx.push({"type": "status", "data": {"state": "sleeping"}})
 
+        recurring = config.repeat_interval_seconds > 0
         while not ctx.should_stop():
             # Go quiet overnight and resume in the morning — a graceful, VISIBLE
             # pause (night_rest_pause announces it and flips the status), not the
-            # fatal budget path below. This recurring loop is unbounded, so it
-            # rests every night; a restart during the night rests too rather
-            # than firing a night sweep.
-            if await night_rest_pause(ctx, announce=_announce_rest):
+            # fatal budget path below. ONLY for a recurring raid: a one-shot
+            # (repeat_interval=0, the default) is a single sweep the operator
+            # wants now, not something to delay a whole night before firing.
+            if recurring and await night_rest_pause(ctx, announce=_announce_rest):
                 break
 
             try:
@@ -134,18 +135,17 @@ def _build_oasis_coro(config: OasisRaiderConfig):
             # loop): ±10% micro-jitter on a fixed interval still leaves a sharp
             # periodogram peak at repeat_interval, so the whole cadence is
             # replaced by a bursty draw whose expected value is the interval.
-            wait_secs = recurring_wait(ctx, float(config.repeat_interval_seconds))
+            # Round once so the announced countdown matches the actual sleep.
+            wait_secs = max(1, round(recurring_wait(ctx, float(config.repeat_interval_seconds))))
             await send_log(
                 "RECURRING",
                 "⏱️",
-                f"Iteration #{iteration} complete — next run in {wait_secs:.0f}s",
+                f"Iteration #{iteration} complete — next run in {wait_secs}s",
                 "info",
             )
             ctx.push({"type": "status", "data": {"state": "sleeping"}})
 
-            # 1s floor: recurring_wait already floors at 1.0, and round() keeps
-            # a whole-second wait for the countdown display.
-            stopped_during_sleep = await ctx.wait_or_stop(max(1, round(wait_secs)))
+            stopped_during_sleep = await ctx.wait_or_stop(wait_secs)
             if stopped_during_sleep:
                 break
 

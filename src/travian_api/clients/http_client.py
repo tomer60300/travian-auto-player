@@ -500,14 +500,19 @@ class HttpClient:
         x_version = await self._fetch_x_version()
 
         if not self._stealth_enabled:
-            return {
+            headers = {
                 "Content-Type": "application/json"
                 if request_type == "json"
                 else "application/x-www-form-urlencoded"
                 if request_type == "form"
                 else "",
-                "X-Version": x_version,
             }
+            # X-Version belongs only on the AJAX/API calls, same rule as the
+            # stealth path — a real browser never sends it on a page load or
+            # form POST, so don't leak it there even in non-stealth mode.
+            if request_type in ("json", "xhr"):
+                headers["X-Version"] = x_version
+            return headers
 
         # Throttle
         await self._throttler.wait(context=url)

@@ -158,15 +158,15 @@ def _build_farm_run_coro(
 
             # Go quiet overnight and resume in the morning — a graceful, VISIBLE
             # pause (see night_rest_pause), not the fatal budget path below.
-            # Applies to unbounded runs AND long bounded runs that genuinely
-            # span a night; a short bounded run runs through to its deadline
-            # (resting it would overrun the requested duration by hours). Gating
-            # on run length, not iteration count, also means a restart during
-            # the night rests rather than firing a night sweep.
-            remaining_s = (end_time - time.time()) if end_time is not None else None
-            if (
-                remaining_s is None or remaining_s > _NIGHT_REST_MIN_RUN_S
-            ) and await night_rest_pause(ctx):
+            # Gated on TOTAL run length (fixed, not the shrinking remaining
+            # time): unbounded runs and long bounded runs that genuinely span a
+            # night rest; a short bounded run is a deliberate fixed session and
+            # runs through so its cadence isn't shredded by a mid-session sleep.
+            # The deadline caps the sleep so even a long run ending mid-night
+            # stops on time instead of lingering asleep past its finish.
+            if (duration == 0 or duration * 60 > _NIGHT_REST_MIN_RUN_S) and await night_rest_pause(
+                ctx, deadline=end_time
+            ):
                 break
 
             try:
@@ -311,15 +311,15 @@ def _build_farm_run_all_coro(
 
             # Go quiet overnight and resume in the morning — a graceful, VISIBLE
             # pause (see night_rest_pause), not the fatal budget path below.
-            # Applies to unbounded runs AND long bounded runs that genuinely
-            # span a night; a short bounded run runs through to its deadline
-            # (resting it would overrun the requested duration by hours). Gating
-            # on run length, not iteration count, also means a restart during
-            # the night rests rather than firing a night sweep.
-            remaining_s = (end_time - time.time()) if end_time is not None else None
-            if (
-                remaining_s is None or remaining_s > _NIGHT_REST_MIN_RUN_S
-            ) and await night_rest_pause(ctx):
+            # Gated on TOTAL run length (fixed, not the shrinking remaining
+            # time): unbounded runs and long bounded runs that genuinely span a
+            # night rest; a short bounded run is a deliberate fixed session and
+            # runs through so its cadence isn't shredded by a mid-session sleep.
+            # The deadline caps the sleep so even a long run ending mid-night
+            # stops on time instead of lingering asleep past its finish.
+            if (duration == 0 or duration * 60 > _NIGHT_REST_MIN_RUN_S) and await night_rest_pause(
+                ctx, deadline=end_time
+            ):
                 break
 
             try:
