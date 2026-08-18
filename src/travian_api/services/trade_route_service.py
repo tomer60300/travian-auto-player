@@ -107,11 +107,15 @@ class TradeRouteService:
         stealth layer advances the Referer chain across the two page GETs
         automatically. The marketplace GET doubles as the read of existing
         routes, so "disable old routes if needed" needs no further request.
+
+        ``newdid`` rides on the dorf2 GET only: switching the active village
+        there sets it server-side, so a human's subsequent marketplace click is a
+        bare ``build.php?gid=17`` with no redundant ``newdid`` — matching that
+        avoids a parameter the real UI would not re-attach after the switch.
         """
         newdid_q = f"?newdid={village_id}" if village_id else ""
-        newdid_amp = f"&newdid={village_id}" if village_id else ""
         await self.http_client.get_html(f"/dorf2.php{newdid_q}")
-        return await self.http_client.get_html(f"/build.php?gid={MARKETPLACE_GID}{newdid_amp}")
+        return await self.http_client.get_html(f"/build.php?gid={MARKETPLACE_GID}")
 
     async def list_existing_routes(self, village_id: int) -> list[ExistingRoute]:
         """Existing trade routes on a village's marketplace, visibility preserved.

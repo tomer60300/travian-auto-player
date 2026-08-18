@@ -207,10 +207,11 @@ class _FakeLiveSvc:
     """A live-enabled trade-route service that records calls instead of hitting
     the game. ``existing`` maps origin id → the routes already on its marketplace."""
 
-    def __init__(self, existing=None, create_status="created"):
+    def __init__(self, existing=None, create_status="created", disable_status="disabled"):
         self.live_enabled = True
         self._existing = existing or {}
         self._create_status = create_status
+        self._disable_status = disable_status
         self.created = []  # PlannedRoute objects a create was ATTEMPTED for
         self.disabled = []  # (origin, sorted tuple of disabled dest coords)
         self.listed = []  # origin ids whose marketplace was READ
@@ -233,7 +234,7 @@ class _FakeLiveSvc:
         if not routes:
             return None
         self.disabled.append((vid, tuple(sorted((r.dest_x, r.dest_y) for r in routes))))
-        return RouteActionResult(vid, 0, 0, "disabled", f"{len(routes)} route(s)")
+        return RouteActionResult(vid, 0, 0, self._disable_status, f"{len(routes)} route(s)")
 
     async def create_route(self, route):
         from travian_api.services.trade_route_service import RouteActionResult
@@ -388,6 +389,21 @@ class TestLiveExecution:
         assert len(svc.created) == 1, "stop after the first Gold-Club rejection, no burst"
         assert res.remaining >= 1, "the rejected route is still outstanding"
         assert any("Gold Club" in w for w in res.warnings)
+        # A Gold-Club block is "blocked", distinct from an "already active" skip.
+        assert any(a.status == "blocked" for a in res.actions)
+        assert not any(a.status == "skipped" for a in res.actions)
+
+    def test_failed_disable_is_surfaced_as_a_warning(self):
+        # A failed disable leaves stale routes live — it must not be a neutral
+        # note that lets the run read as a clean success.
+        desired = _desired_routes()
+        a = desired[0]
+        existing = {a.origin: [ExistingRoute(1, 99, 98)]}  # stale, plan doesn't want it
+        svc = _FakeLiveSvc(existing=existing, disable_status="failed")
+        res = self._run(svc, disable_existing=True, max_routes_per_run=50)
+        assert any("disable" in w.lower() for w in res.warnings), (
+            "a failed disable must surface as a warning, not a silent note"
+        )
 
 
 class TestServiceGuards:
@@ -417,11 +433,14 @@ class TestTradeRouteParser:
         <div data-route-id="1" data-x="40" data-y="40"></div>
         <div data-route-id="2" data-x="12" data-y="99" style="display:none"></div>
         <div data-route-id="3" data-x="5" data-y="5" hidden></div>
+        <div data-route-id="4" data-x="6" data-y="6" class="row hidden"></div>
         """
         routes = {r["route_id"]: r for r in parse_trade_routes(html)}
         assert routes[1]["visible"] is True
         assert routes[2]["visible"] is False
         assert routes[3]["visible"] is False
+        # A stylesheet-hidden honeypot (class, not inline style) is caught too.
+        assert routes[4]["visible"] is False
 
     def test_unknown_markup_yields_nothing(self):
         # Safe default: no recognizable routes → nothing to disable.

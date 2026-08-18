@@ -605,13 +605,20 @@ def parse_rally_point_troops(html: str) -> Dict[str, int]:
     return troops
 
 
+# Class tokens that conventionally hide an element via a stylesheet rule
+# (e.g. `.hidden{display:none}`). Best-effort: the real gid=17 markup is
+# uncaptured, so we cannot resolve computed CSS — matching the common hiding
+# classes catches the usual honeypot pattern without a full CSS engine.
+_HIDDEN_CLASS_TOKENS = frozenset({"hidden", "hide", "hideme", "invisible", "d-none", "dn", "none"})
+
+
 def _element_is_visible(el) -> bool:
     """Whether an element (and its chain) is visible to a real user.
 
     Honeypot guard: a route present in the markup but hidden — display:none,
-    visibility:hidden, a `hidden` attribute, or aria-hidden — is one a human
-    could never see or act on, so acting on it (disabling it) is a pure bot
-    signal. Checks the element and its ancestors.
+    visibility:hidden, a `hidden` attribute, aria-hidden, or a conventional
+    hiding class — is one a human could never see or act on, so acting on it
+    (disabling it) is a pure bot signal. Checks the element and its ancestors.
     """
     node = el
     while node is not None and getattr(node, "attrs", None) is not None:
@@ -621,6 +628,11 @@ def _element_is_visible(el) -> bool:
             return False
         style = str(node.get("style", "")).replace(" ", "").lower()
         if "display:none" in style or "visibility:hidden" in style:
+            return False
+        classes = node.get("class") or []
+        if isinstance(classes, str):
+            classes = classes.split()
+        if any(c.lower() in _HIDDEN_CLASS_TOKENS for c in classes):
             return False
         node = node.parent
     return True

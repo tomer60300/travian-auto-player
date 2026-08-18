@@ -431,8 +431,16 @@ export default function ResourcePlanner() {
   // revision counter also kills in-flight builds: a response that started
   // before the latest edit must not resurrect a stale sheet.
   const planInputRev = useRef(0)
+  // Mirrors `executing` for the reset effect below, which must not depend on
+  // `executing` (that would re-run and wipe the result the instant a run ends).
+  const executingRef = useRef(false)
   useEffect(() => {
     planInputRev.current += 1
+    // Never tear down the view while a run is in flight: a live run commits
+    // in-game writes and its result table must survive an input edit made
+    // mid-request. The rev bump above still invalidates any stale PREVIEW
+    // response on return, and a live response is shown regardless of the rev.
+    if (executingRef.current) return
     setPlan(null)
     // An execution preview/result belongs to the plan it was run against; the
     // moment any input changes it describes routes for a stale plan.
@@ -572,6 +580,7 @@ export default function ResourcePlanner() {
       // (dropping it would hide real in-game writes the operator must see).
       const requestedRev = planInputRev.current
       setExecuting(true)
+      executingRef.current = true
       try {
         const res = await api.post('/distribution/execute', {
           ...buildPlanPayload(),
@@ -606,6 +615,7 @@ export default function ResourcePlanner() {
         toast.error(errorDetail(err, dryRun ? 'Preview failed' : 'Execution failed'))
       } finally {
         setExecuting(false)
+        executingRef.current = false
       }
     },
     [accountKey, currentAccountKey, buildPlanPayload, toast],
@@ -1873,6 +1883,12 @@ export default function ResourcePlanner() {
                         longer wants), so it may create fewer than shown.
                       </p>
                     )}
+                    {!execResult.dry_run && execResult.remaining > 0 && (
+                      <p className="text-xs text-secondary mb-2">
+                        Deferred routes were not checked this run (a few villages are handled per
+                        run). Run again to continue — already-active routes are skipped.
+                      </p>
+                    )}
                     {execResult.disables.length > 0 && (
                       <ul className="text-xs text-secondary list-disc list-inside mb-2">
                         {execResult.disables.map((d, i) => (
@@ -1911,7 +1927,7 @@ export default function ResourcePlanner() {
                               className={`px-2 ${
                                 a.status === 'created'
                                   ? 'text-success'
-                                  : a.status === 'failed'
+                                  : a.status === 'failed' || a.status === 'blocked'
                                     ? 'text-danger'
                                     : a.status === 'deferred' || a.status === 'skipped'
                                       ? 'text-secondary'

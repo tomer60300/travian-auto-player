@@ -1395,10 +1395,16 @@ async def post_execute(
                     stale = [e for e in visible if (e.dest_x, e.dest_y) not in desired_coords]
                     disabled = await svc.disable_routes(origin, stale)
                     if disabled is not None:
-                        disables.append(
-                            f"{village_label(origin, names)}: "
-                            f"{disabled.status} {disabled.detail}".strip()
-                        )
+                        line = (
+                            f"{village_label(origin, names)}: {disabled.status} {disabled.detail}"
+                        ).strip()
+                        if disabled.status == "failed":
+                            # A failed disable leaves stale routes live — surface
+                            # it as a warning, not a neutral note, so the run does
+                            # not read as a clean success.
+                            warnings.append(f"Could not disable stale routes — {line}")
+                        else:
+                            disables.append(line)
 
                 # A destination that already has a visible route is satisfied;
                 # this set also collapses two desired rows to the same
@@ -1414,18 +1420,22 @@ async def post_execute(
                         continue
                     attempts += 1
                     result = await svc.create_route(route)
-                    actions.append(_action(row, route, result.status, result.detail))
                     if result.status == "created":
+                        actions.append(_action(row, route, "created", result.detail))
                         done_coords.add(coord)
                         continue
                     outstanding += 1
                     if result.status == "skipped":
                         # Gold Club is required and missing — an account-level
-                        # block. A human would not keep firing rejected creates,
-                        # so stop the whole run and defer the rest.
+                        # block. Report it as "blocked" (distinct from an
+                        # "already active" skip so the table can't read it as
+                        # satisfied), then stop the run and defer the rest — a
+                        # human would not keep firing rejected creates.
+                        actions.append(_action(row, route, "blocked", result.detail))
                         gold_club_blocked = True
                         deferred.extend(desired[i + 1 :])
                         break
+                    actions.append(_action(row, route, "failed", result.detail))
 
     actions += [_action(row, route, "deferred") for row, route in deferred]
     if gold_club_blocked:
