@@ -75,6 +75,14 @@ class TestSecondsUntilRestEnds:
         secs = self._sched().seconds_until_rest_ends(_at(5.5))
         assert 0.5 * 3600 <= secs <= 0.5 * 3600 + 2700
 
+    def test_the_exact_window_edge_never_returns_a_full_day(self):
+        # One second before the end (05:59:59, end 06:00): the remaining-time
+        # math and the window check share one instant, so it must be ~1s (+
+        # buffer), never the ~24h wrap the old double-clock-sample could produce.
+        s = self._sched()
+        secs = s.seconds_until_rest_ends(datetime(2026, 1, 1, 5, 59, 59))
+        assert 0 <= secs <= 2700 + 5, secs
+
     def test_one_pause_clears_the_window_so_wake_is_past_it(self):
         s = self._sched()
         for enter in (23.0, 0.5, 2.0, 5.9):

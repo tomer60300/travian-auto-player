@@ -81,7 +81,6 @@ def _build_oasis_coro(config: OasisRaiderConfig):
         async def check_stop() -> bool:
             return ctx.should_stop()
 
-        ctx.push({"type": "status", "data": {"state": "running"}})
         iteration = 0
 
         # Announce a night pause in the oasis UI's own vocabulary: send_log is

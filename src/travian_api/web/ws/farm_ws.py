@@ -40,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# A bounded run whose remaining time exceeds this genuinely spans a night, so
+# it night-rests like an unbounded run. A shorter bounded run is a deliberate
+# operator session that runs through to its deadline rather than absorbing a
+# multi-hour sleep (which would also overrun the requested duration).
+_NIGHT_REST_MIN_RUN_S = 12 * 3600
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -151,13 +157,16 @@ def _build_farm_run_coro(
                 break
 
             # Go quiet overnight and resume in the morning — a graceful, VISIBLE
-            # pause (see night_rest_pause), not the fatal budget path below. Only
-            # for an UNBOUNDED run: a run with a duration is an operator-directed
-            # session that must finish on time, not absorb a multi-hour sleep,
-            # and it's short enough that resting through a night rarely applies.
-            # Gating on the run kind (not the iteration count) also means a
-            # restart during the night rests instead of firing a night sweep.
-            if end_time is None and await night_rest_pause(ctx):
+            # pause (see night_rest_pause), not the fatal budget path below.
+            # Applies to unbounded runs AND long bounded runs that genuinely
+            # span a night; a short bounded run runs through to its deadline
+            # (resting it would overrun the requested duration by hours). Gating
+            # on run length, not iteration count, also means a restart during
+            # the night rests rather than firing a night sweep.
+            remaining_s = (end_time - time.time()) if end_time is not None else None
+            if (
+                remaining_s is None or remaining_s > _NIGHT_REST_MIN_RUN_S
+            ) and await night_rest_pause(ctx):
                 break
 
             try:
@@ -301,13 +310,16 @@ def _build_farm_run_all_coro(
                 break
 
             # Go quiet overnight and resume in the morning — a graceful, VISIBLE
-            # pause (see night_rest_pause), not the fatal budget path below. Only
-            # for an UNBOUNDED run: a run with a duration is an operator-directed
-            # session that must finish on time, not absorb a multi-hour sleep,
-            # and it's short enough that resting through a night rarely applies.
-            # Gating on the run kind (not the iteration count) also means a
-            # restart during the night rests instead of firing a night sweep.
-            if end_time is None and await night_rest_pause(ctx):
+            # pause (see night_rest_pause), not the fatal budget path below.
+            # Applies to unbounded runs AND long bounded runs that genuinely
+            # span a night; a short bounded run runs through to its deadline
+            # (resting it would overrun the requested duration by hours). Gating
+            # on run length, not iteration count, also means a restart during
+            # the night rests rather than firing a night sweep.
+            remaining_s = (end_time - time.time()) if end_time is not None else None
+            if (
+                remaining_s is None or remaining_s > _NIGHT_REST_MIN_RUN_S
+            ) and await night_rest_pause(ctx):
                 break
 
             try:

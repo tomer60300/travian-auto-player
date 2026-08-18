@@ -408,16 +408,19 @@ class ActivityScheduler:
         stretch and a wake time that is near morning but jittered, not a sharp
         daily constant.
         """
+        # Resolve the clock ONCE and share it with the window check. Sampling
+        # now separately for is_rest_window and the remaining-time math let the
+        # two straddle the window-end boundary: is_rest_window(now1) True, then
+        # hour(now2) just past the end, so (end - hour) % 24 wraps to ~24h and
+        # the account slept for a day. One instant closes that.
+        now = now or datetime.now()
         if not self.is_rest_window(now):
             return 0.0
-        now = now or datetime.now()
         hour = now.hour + now.minute / 60.0 + now.second / 3600.0
         remaining_h = (self._night_end_hour - hour) % 24.0
         if remaining_h <= 0.0:
-            # Edge/rounding case is_rest_window's exclusive bound didn't align
-            # with. Return no pause rather than a full-day sleep: 0 lets the
-            # loop resume (a sweep at the window edge is harmless), a 24h
-            # fallback would take the account dark for a day.
+            # Defensive net for the exact-boundary instant: resume, never a
+            # full-day sleep.
             return 0.0
         buffer_s = random.uniform(0.0, 2700.0)  # up to 45 min so wake isn't a constant
         return remaining_h * 3600.0 + buffer_s
