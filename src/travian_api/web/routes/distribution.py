@@ -1226,7 +1226,9 @@ async def post_execute(
     session = session_manager.get(user.id)
     svc = session.trade_route_service if session is not None else None
     live_enabled = bool(svc is not None and svc.live_enabled)
-    warnings = list(account.warnings)
+    # Same warning set /plan surfaces (both share _plan_account): the optimizer's
+    # own notes plus the account-level ones, so the two endpoints never disagree.
+    warnings = [*plan.warnings, *account.warnings]
 
     # Each plan row is one route from a real origin village's marketplace to a
     # destination (a real village or a foreign sink — coords cover both).

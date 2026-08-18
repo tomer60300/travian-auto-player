@@ -594,14 +594,19 @@ export default function ResourcePlanner() {
             : ''
           // `problems` are real execution failures (failed disable, Gold Club);
           // `warnings` are benign planner notes and must NOT read as failure.
-          const blocked =
-            (res.data.problems && res.data.problems.length > 0) ||
-            res.data.actions.some((a) => a.status === 'failed')
-          if (res.data.created > 0) {
+          const problem =
+            res.data.problems?.[0] ||
+            (res.data.actions.some((a) => a.status === 'failed')
+              ? 'a create failed — see the result panel'
+              : null)
+          if (res.data.created > 0 && problem) {
+            // Some routes went through, but a real failure occurred too — don't
+            // let the green count hide it.
+            toast.error(`Created ${res.data.created} route(s), but ${problem}`)
+          } else if (res.data.created > 0) {
             toast.success(`Created ${res.data.created} route(s)${left}`)
-          } else if (blocked) {
-            // Nothing created because of a block/failure — do not signal success.
-            toast.error(res.data.problems?.[0] || 'No routes were created (a create failed).')
+          } else if (problem) {
+            toast.error(problem)
           } else {
             toast.success(`No new routes needed${left}`)
           }
