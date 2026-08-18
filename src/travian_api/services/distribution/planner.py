@@ -17,7 +17,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .allocation import Allocation, Resource, ResourcePlan, resolve_resource
+from .allocation import EPSILON, Allocation, Resource, ResourcePlan, resolve_resource
 from .geometry import MapGeometry
 from .merchants import CEIL_DUST_TOLERANCE, DAILY_BEAT_CYCLES, MerchantModel
 from .optimizer import (
@@ -77,14 +77,16 @@ class SheetRow:
 
     @property
     def first_delivery_hours(self) -> float:
-        """Hours from creating the route to its first delivery landing.
+        """WORST-CASE hours from creating the route to its first delivery landing.
 
-        Every other figure on the sheet is steady-state, which quietly assumes
-        the route has been running long enough to have a full batch waiting and
-        merchants already on the road. Neither is true on the day it is created:
-        the cargo has to accumulate over one cycle and then travel. Reading the
-        steady-state numbers as immediate is how a cold start gets mistaken for
-        a broken route.
+        A Gold Club route sends at its scheduled ``dispatch_minute`` ("Send at")
+        time, so the first delivery lands at the next occurrence of that time plus
+        travel. The longest that can be — the route created just after its send
+        time — is one whole cycle plus travel, which is what this returns. It is
+        an upper bound on the manual-coverage window, not a fixed startup: create
+        the route shortly before its send time and the first crop lands in roughly
+        travel time. The steady-state figures elsewhere on the sheet assume a full
+        batch already waiting and merchants on the road, neither true on day one.
         """
         return self.cycle_hours + self.one_way_minutes / 60.0
 
@@ -109,7 +111,22 @@ class DistributionPlan:
 
     @property
     def is_feasible(self) -> bool:
-        return self.routing.is_feasible
+        # Routing feasibility is not enough: an allocation that over-claims the
+        # account drives the remainder village's target negative, which the
+        # optimizer will faithfully route as if the village could ship more than
+        # it produces. That sheet is unsustainable and must not read as feasible.
+        return self.routing.is_feasible and not self.over_allocated
+
+    @property
+    def over_allocated(self) -> tuple[Resource, ...]:
+        """Resources whose explicit allocations exceed production (the remainder
+        village would have to ship more than it makes). Diagnostic-only rows may
+        still be shown, but the plan is not executable."""
+        return tuple(
+            resource
+            for resource, rp in self.resource_plans.items()
+            if rp.remainder_village_id is not None and rp.unallocated < -EPSILON
+        )
 
     @property
     def over_budget(self) -> tuple[OverBudget, ...]:

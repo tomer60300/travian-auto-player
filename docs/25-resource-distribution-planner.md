@@ -358,11 +358,11 @@ I re-derived the §8.1 worked example independently and it reproduces exactly, i
 
 Without this restriction the beat's LCM is unbounded and the output table is not a schedule.
 
-## R6 — Dispatch phase may not be a free variable
+## R6 — Dispatch phase IS a free variable (resolved)
 
-§9 assumes `dispatch_min` is chosen. In Gold Club, a trade route's phase is set by **when the route is created** — it repeats every N hours from that moment. If so, the planner cannot set dispatch minutes; it can only tell the operator **what time to create each route**, and the sheet needs a "create at HH:MM" column rather than a "dispatch" column.
+§9 assumes `dispatch_min` is chosen. This is correct: per current official documentation ([Trade Routes](https://support.travian.com/en/articles/60-trade-routes)), a Gold Club route has an explicit **Send at / Deliver at** scheduled time plus a separate repeat interval — the phase is a route field, **not** the wall-clock instant the form is submitted. So the planner's `dispatch_minute` maps directly to the route's "Send at" field, and the sheet's column is labelled **Send at**, not "create at".
 
-This is unverified and sits directly under the schedule solver. It should join open question #1 as an empirical check before §5 is built — and it is cheap to answer by creating one route and observing.
+Consequence for cold-start: `first_delivery_hours` is a WORST-CASE upper bound (a full cycle plus travel, if the route is created just after its send time), used only to bound the manual-coverage window — not a fixed startup. An earlier revision wrongly told the operator to press create at the dispatch clock; that has been corrected.
 
 ## R7 — Storage safety only models the filling direction
 

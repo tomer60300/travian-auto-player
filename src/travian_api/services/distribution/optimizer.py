@@ -740,7 +740,17 @@ def _improve_flows(
         # break the idempotent re-plan that route diffing depends on (known issue
         # #10): merely adding a village would reshuffle routes that have nothing
         # to do with it. Computed once per scan, not per edge.
-        hubs = sorted({v for key in legs for v in key})
+        # A hub relays crop through itself, so it must be a real village that can
+        # actually staff the extra leg. Foreign sinks (merchant_count == 0) and
+        # anything absent from the account are excluded: including a sink let the
+        # search adopt an impossible sink->sink leg (zero distance between two
+        # co-located tributes costs zero merchants), emitting a route whose origin
+        # is a negative foreign id.
+        hubs = sorted(
+            v
+            for v in {v for key in legs for v in key}
+            if v in villages and villages[v].merchant_count > 0
+        )
         for origin, destination in sorted(key for key, amount in legs.items() if amount > EPSILON):
             # Both ends must be outside the relay graph, not just the origin.
             # Guarding only the origin let a leg that *ends* at an existing hub
@@ -980,6 +990,18 @@ def build_plan(
             f"overstate the real shortfall. Raise max_improve_passes to finish the search."
         )
     pair_cargo = _merge_pair_cargo(assignment)
+
+    # A route can only originate at a real village that can staff merchants. This
+    # is guaranteed by construction (senders come from surplus, relay hubs are
+    # filtered to merchant-capable villages), but assert it before emitting the
+    # plan: a route whose origin is a foreign sink is impossible to execute, and
+    # silently shipping it is worse than failing loudly.
+    for origin, _destination in pair_cargo:
+        if origin not in villages or villages[origin].merchant_count <= 0:
+            raise AssertionError(
+                f"route origin {origin} is not a merchant-capable village; "
+                "the optimizer built an impossible route"
+            )
 
     routes: list[Route] = [
         _route_for_pair(

@@ -178,10 +178,12 @@ class BuildingService:
         dorf1 per village. On a 22-village account that is 2 requests instead
         of 22.
 
-        Capacity is only needed for villages whose granary is *filling*, and it
-        changes only when a granary is upgraded -- so pass a cached mapping to
-        stay at two requests. Without one, a third request is made, and only if
-        some village is actually filling.
+        The account-wide capacity page is fetched whenever there are villages,
+        because its warehouse/granary figures are the only source for storage
+        overflow safety -- fetching it only for a *filling* granary would leave
+        an all-draining account with no overflow checks at all. A cached granary
+        mapping still seeds crop derivation, but the page is read regardless so
+        the returned storage map is always complete (three requests, not two).
 
         Args:
             granary_capacity: village id -> granary capacity. Fetched when
@@ -199,11 +201,9 @@ class BuildingService:
             case. ``net_per_hour`` is None where it could not be derived; it is
             never silently zero.
 
-            The capacity map is whatever this read already had to fetch, handed
-            back rather than discarded -- storage-safety checks need exactly the
-            same page, and re-fetching it would spend a request twice for data
-            already in hand. It is empty when every granary was draining, since
-            the derivation needed no capacity at all.
+            The capacity map is the full warehouse+granary read for every
+            village, so storage-safety checks always have it. It is empty only
+            when there are no villages at all.
 
         Raises:
             TravianError: If a request fails
@@ -230,17 +230,14 @@ class BuildingService:
                     logger.warning("CROPDIAG dump failed: %s", exc)
 
             capacities = dict(granary_capacity or {})
-            # Both capacities off the same page. The granary figure drives the
-            # crop derivation below; the warehouse figure is carried out to the
-            # caller untouched, because storage-safety checks need it and it
-            # arrives free alongside the one we already came for.
+            # Fetch the capacity page whenever the account has any village, not
+            # only when a *filling* granary needs its cap to derive net crop.
+            # This page's warehouse + granary figures are the planner's ONLY
+            # source for storage-overflow safety, so gating it on crop direction
+            # silently disabled every lumber/clay/iron overflow check on an
+            # all-draining account. One request buys a complete safety snapshot.
             storage: Dict[int, Dict[str, int]] = {}
-            needs_capacity = [
-                vid
-                for vid, timer in timers.items()
-                if not timer["crop_draining"] and vid not in capacities
-            ]
-            if needs_capacity:
+            if timers:
                 storage = parse_village_stats_capacity(
                     await self.http_client.get_html("/village/statistics/resources/capacity")
                 )

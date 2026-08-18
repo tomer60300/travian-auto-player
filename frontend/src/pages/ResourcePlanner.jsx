@@ -12,6 +12,11 @@ const LS_TRADE_OFFICE = 'planner_trade_office'
 const LS_FOREIGN = 'planner_foreign_targets'
 const LS_ALLOCATIONS = 'planner_allocations' // legacy single-plan key (migrated)
 const LS_SNAPSHOT = 'planner_snapshot'
+// When the snapshot was fetched (client receipt time, ms). A snapshot carries
+// fast-changing production/stock/merchant state, so a restored one must show its
+// age and go stale rather than pass silently as live.
+const LS_SNAPSHOT_AT = 'planner_snapshot_at'
+const SNAPSHOT_TTL_MS = 30 * 60 * 1000 // 30 minutes
 const LS_MERCHANT = 'planner_merchant_model'
 // Named allocation profiles (e.g. Day / Night). Trade Office and the merchant
 // model stay account-wide — only the allocations differ per profile, so
@@ -72,6 +77,7 @@ const usableForeignTargets = (targets) =>
       y: Number(t.y) || 0,
       crop_per_hour: Number(t.crop_per_hour),
       safety_margin_pct: Number(t.safety_margin_pct) || 0,
+      route_eligible: Boolean(t.route_eligible),
     }))
 
 const RESOURCES = ['lumber', 'clay', 'iron', 'crop']
@@ -326,7 +332,14 @@ export default function ResourcePlanner() {
   const [cropCeilings, setCropCeilings] = useState({})
   const [dayCheck, setDayCheck] = useState(null)
   const [dayChecking, setDayChecking] = useState(false)
+  // Invalidates an in-flight day-check when its inputs change, so a stale
+  // response cannot resurrect a result computed from pre-edit inputs.
+  const dayCheckInputRev = useRef(0)
   const [snapshot, setSnapshot] = useState(null)
+  // Client receipt time of the current snapshot, and an explicit opt-in to plan
+  // from a stale one (see SNAPSHOT_TTL_MS).
+  const [snapshotFetchedAt, setSnapshotFetchedAt] = useState(null)
+  const [useStaleSnapshot, setUseStaleSnapshot] = useState(false)
   const [tradeOffice, setTradeOffice] = useState({})
   const [profiles, setProfiles] = useState({ [DEFAULT_PROFILE]: {} })
   const [activeProfile, setActiveProfile] = useState(DEFAULT_PROFILE)
@@ -380,6 +393,8 @@ export default function ResourcePlanner() {
       // Disconnected: the page stays routable, so showing (or planning from)
       // the previous account's villages would act on stale data.
       setSnapshot(null)
+      setSnapshotFetchedAt(null)
+      setUseStaleSnapshot(false)
       setTradeOffice({})
       setProfiles({ [DEFAULT_PROFILE]: {} })
       setForeignTargets([])
@@ -393,6 +408,8 @@ export default function ResourcePlanner() {
     const loaded = loadProfiles(accountKey)
     const storedActive = loadJson(`${LS_ACTIVE_PROFILE}::${accountKey}`, DEFAULT_PROFILE)
     setSnapshot(loadJson(`${LS_SNAPSHOT}::${accountKey}`, null))
+    setSnapshotFetchedAt(loadJson(`${LS_SNAPSHOT_AT}::${accountKey}`, null))
+    setUseStaleSnapshot(false)
     setTradeOffice(loadJson(`${LS_TRADE_OFFICE}::${accountKey}`, {}))
     setForeignTargets(loadJson(`${LS_FOREIGN}::${accountKey}`, []))
     setProfileWindows(loadJson(`${LS_WINDOWS}::${accountKey}`, {}))
@@ -420,6 +437,11 @@ export default function ResourcePlanner() {
   // green all-clear banner could sit on screen after the operator changed
   // everything it was computed from, mixing eras with the live Crop-now column.
   useEffect(() => {
+    // Bump the revision so a day-check request already in flight cannot install
+    // its stale result after these inputs changed (same discipline as the route
+    // sheet below). Clearing the visible result alone does not stop an
+    // in-progress request from resurrecting a pre-edit "all clear".
+    dayCheckInputRev.current += 1
     setDayCheck(null)
   }, [profiles, profileWindows, cropCeilings, snapshot, foreignTargets])
   // Same rule for the route sheet, with higher stakes: its rows are copied
@@ -466,8 +488,12 @@ export default function ResourcePlanner() {
     try {
       const res = await api.get('/distribution/snapshot', { timeout: 0 })
       if (requestedFor !== currentAccountKey()) return
+      const fetchedAt = Date.now()
       setSnapshot(res.data)
+      setSnapshotFetchedAt(fetchedAt)
+      setUseStaleSnapshot(false)
       saveJson(`${LS_SNAPSHOT}::${requestedFor}`, res.data)
+      saveJson(`${LS_SNAPSHOT_AT}::${requestedFor}`, fetchedAt)
       setPlan(null)
       // A new snapshot can have different village ids — drop stale selections.
       setSelected({})
@@ -695,6 +721,7 @@ export default function ResourcePlanner() {
 
   const runDayCheck = async () => {
     const requestedFor = accountKey
+    const requestedRev = dayCheckInputRev.current
     const segments = []
     const skipped = []
     for (const name of profileNames) {
@@ -734,7 +761,10 @@ export default function ResourcePlanner() {
         foreign_targets: usableForeignTargets(foreignTargets),
         crop_ceilings: ceilings,
       })
+      // Drop the response if the account switched OR any day-check input changed
+      // while it was in flight — otherwise a pre-edit "all clear" resurfaces.
       if (requestedFor !== currentAccountKey()) return
+      if (requestedRev !== dayCheckInputRev.current) return
       setDayCheck({ ...res.data, skipped })
     } catch (err) {
       toast.error(errorDetail(err, 'Full-day check failed'))
@@ -830,6 +860,20 @@ export default function ResourcePlanner() {
     { id: 'plan', label: 'Plan' },
   ]
 
+  // A snapshot carries fast-changing production/stock/merchant state; once it is
+  // older than the TTL (or its receipt time is unknown, e.g. an older cache),
+  // treat it as stale so it is not silently planned from as if it were live.
+  const snapshotAgeMs = snapshot ? (snapshotFetchedAt ? Date.now() - snapshotFetchedAt : null) : null
+  const snapshotStale = !!snapshot && (snapshotFetchedAt == null || snapshotAgeMs > SNAPSHOT_TTL_MS)
+  const snapshotAgeLabel =
+    snapshotAgeMs == null
+      ? 'age unknown'
+      : snapshotAgeMs < 60_000
+        ? 'just now'
+        : snapshotAgeMs < 3_600_000
+          ? `${Math.round(snapshotAgeMs / 60_000)}m old`
+          : `${Math.round(snapshotAgeMs / 3_600_000)}h old`
+
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex justify-between items-center mb-4 gap-3 flex-wrap">
@@ -838,16 +882,44 @@ export default function ResourcePlanner() {
           <span className="text-secondary text-xs">
             {villages.length ? `${villages.length} villages` : 'no snapshot yet'}
           </span>
+          {snapshot && (
+            <span className={`text-xs ${snapshotStale ? 'text-orange-200' : 'text-secondary'}`}>
+              · {snapshotAgeLabel}
+            </span>
+          )}
           {/* Every fetch is priced in the label — requests are the scarce
               resource, so the cost is stated before it is spent. */}
           <button className="btn-primary btn-sm" onClick={fetchSnapshot} disabled={fetching}>
             {fetching ? 'Reading…' : 'Fetch state (3–4 requests)'}
           </button>
-          <button className="btn-secondary btn-sm" onClick={buildPlan} disabled={planning}>
+          <button
+            className="btn-secondary btn-sm"
+            onClick={buildPlan}
+            disabled={planning || (snapshotStale && !useStaleSnapshot)}
+          >
             {planning ? 'Planning…' : 'Build plan (0 requests)'}
           </button>
         </div>
       </div>
+
+      {snapshotStale && (
+        <div className="card p-3 mb-4 border border-orange-200/40">
+          <p className="text-orange-200 text-xs">
+            This snapshot is {snapshotAgeLabel}
+            {snapshotFetchedAt == null && ' (restored from a previous session)'} — production,
+            stocks and free merchants may have changed. Fetch fresh state before building, or
+            acknowledge to plan from it anyway.
+          </p>
+          <label className="text-secondary text-xs flex items-center gap-1.5 mt-1.5">
+            <input
+              type="checkbox"
+              checked={useStaleSnapshot}
+              onChange={(e) => setUseStaleSnapshot(e.target.checked)}
+            />
+            Plan from this stale snapshot anyway
+          </label>
+        </div>
+      )}
 
       {/* Named allocation profiles (e.g. Day / Night). Only the allocations
           differ per profile; the snapshot and merchant model are shared, so
@@ -1112,8 +1184,10 @@ export default function ResourcePlanner() {
               <div>
                 <span className="text-secondary text-xs uppercase">Crop owed to other players</span>
                 <p className="text-secondary text-xs mt-0.5">
-                  Shipped like any other demand and taken out of the account crop pool. The
-                  planner picks the supplier, and prefers a single one.
+                  Travian only allows a Gold Club trade route to your own, Wonder, or
+                  alliance/confederacy artifact villages. Tick “route-eligible” only for those —
+                  the planner then ships it like any other demand. An ordinary ally/sitter village
+                  is reported as a manual transfer and is left out of the route plan.
                 </p>
               </div>
               <button
@@ -1122,7 +1196,14 @@ export default function ResourcePlanner() {
                 onClick={() =>
                   setForeignTargets((prev) => [
                     ...prev,
-                    { name: '', x: 0, y: 0, crop_per_hour: '', safety_margin_pct: 5 },
+                    {
+                      name: '',
+                      x: 0,
+                      y: 0,
+                      crop_per_hour: '',
+                      safety_margin_pct: 5,
+                      route_eligible: false,
+                    },
                   ])
                 }
               >
@@ -1149,6 +1230,12 @@ export default function ResourcePlanner() {
                       Margin %
                     </th>
                     <th className="text-right px-2">Ships/h</th>
+                    <th
+                      className="text-center px-2"
+                      title="Tick only for your own, Wonder, or alliance/confederacy artifact villages — the only destinations Travian allows a Gold Club route to. Others are manual transfers."
+                    >
+                      Route?
+                    </th>
                     <th className="px-2"></th>
                   </tr>
                 </thead>
@@ -1218,6 +1305,15 @@ export default function ResourcePlanner() {
                         </td>
                         <td className="text-right px-2 font-mono text-secondary">
                           {ships > 0 ? fmt(ships) : '—'}
+                        </td>
+                        <td className="text-center px-2">
+                          <input
+                            type="checkbox"
+                            aria-label={`Foreign target ${i + 1} is eligible for a trade route`}
+                            title="Own / Wonder / alliance-artifact village only. Unticked = manual transfer, left out of the route plan."
+                            checked={Boolean(t.route_eligible)}
+                            onChange={(e) => patch('route_eligible', e.target.checked)}
+                          />
                         </td>
                         <td className="px-2 text-right whitespace-nowrap">
                           {incomplete && (
@@ -1724,7 +1820,7 @@ export default function ResourcePlanner() {
                       <th className="text-left px-2">To</th>
                       <th className="text-left px-2">Cargo per send</th>
                       <th className="text-right px-2">Cycle</th>
-                      <th className="text-right px-2">Create at</th>
+                      <th className="text-right px-2">Send at</th>
                       <th className="text-right px-2">Arrives</th>
                       <th className="text-right px-2">Merchants</th>
                     </tr>
@@ -1768,8 +1864,9 @@ export default function ResourcePlanner() {
                   </tbody>
                 </table>
                 <p className="text-secondary text-xs mt-2">
-                  A Gold Club route repeats from the moment it is created, so “create at” is the
-                  clock time to press create — not a field you can set afterwards.
+                  “Send at” is the route's scheduled send time — enter it in the trade route's
+                  <span className="whitespace-nowrap"> Send at</span> field; the repeat interval is
+                  set separately. It is not the wall-clock instant you must press create.
                 </p>
               </div>
 

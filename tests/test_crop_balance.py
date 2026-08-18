@@ -188,21 +188,22 @@ class TestAccountWideFetch:
         assert balances[20003].draining is True
         assert balances[20011].net_per_hour > 0
 
-    def test_costs_two_requests_when_capacity_is_cached(self):
-        """Granary capacity changes only on upgrade, so it caches."""
+    def test_still_fetches_capacity_for_storage_safety_even_when_granary_cached(self):
+        """A cached granary map seeds crop derivation, but the capacity page is
+        still read: its WAREHOUSE figures are the planner's only source for
+        lumber/clay/iron overflow safety, and skipping the page would silently
+        disable those checks."""
         http = _StatsHttp()
 
-        balances, _caps, requests_spent = asyncio.run(
+        balances, caps, requests_spent = asyncio.run(
             BuildingService(http).get_all_villages_net_crop(
                 granary_capacity={20003: 240000, 20011: 160000}
             )
         )
 
-        assert http.urls == [
-            "/village/statistics/resources",
-            "/village/statistics/resources/warehouse",
-        ]
-        assert requests_spent == 2
+        assert "/village/statistics/resources/capacity" in http.urls
+        assert requests_spent == 3
+        assert caps and all("warehouse" in c for c in caps.values())
         assert balances[20011].net_per_hour > 0
 
     def test_a_village_with_no_stock_reading_is_underived_not_zero(self):
@@ -224,14 +225,20 @@ class TestAccountWideFetch:
         assert balances[20003].net_per_hour is None
         assert balances[20003].draining is True
 
-    def test_an_all_draining_account_never_fetches_capacity(self):
-        """Capacity only matters for filling villages."""
+    def test_an_all_draining_account_still_fetches_capacity_for_storage_safety(self):
+        """Regression for the silent-overflow bug: even when every granary is
+        draining (so crop derivation needs no capacity), the capacity page must
+        still be fetched — its warehouse figures are the only source for storage
+        overflow safety, and gating it on crop direction disabled those checks."""
         http = _StatsHttp()
         http.get_html = _only_draining(http)
 
-        asyncio.run(BuildingService(http).get_all_villages_net_crop())
+        _balances, caps, _spent = asyncio.run(BuildingService(http).get_all_villages_net_crop())
 
-        assert not any("capacity" in url for url in http.urls)
+        assert any("capacity" in url for url in http.urls), (
+            "storage safety needs the capacity page even on an all-draining account"
+        )
+        assert caps and all("warehouse" in c for c in caps.values())
 
 
 def _only_draining(http: _StatsHttp):
@@ -245,7 +252,7 @@ def _only_draining(http: _StatsHttp):
         if url.endswith("/warehouse"):
             return draining_only
         if url.endswith("/capacity"):
-            raise AssertionError("capacity must not be fetched when nothing is filling")
+            return CAPACITY_HTML
         return RESOURCES_HTML
 
     return get_html
