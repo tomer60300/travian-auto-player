@@ -17,7 +17,8 @@ touches the game and does not depend on any of this.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from contextlib import AbstractAsyncContextManager
+from dataclasses import dataclass
 
 from ..clients.http_client import HttpClient
 from ..concurrency import KeyedLock
@@ -73,15 +74,6 @@ class ExistingRoute:
     visible: bool = True  # UI-visible; hidden entries are treated as honeypots
 
 
-@dataclass
-class OriginExecution:
-    """Per-origin unit of work: what to disable first, then what to create."""
-
-    origin_village_id: int
-    to_disable: list[ExistingRoute] = field(default_factory=list)
-    to_create: list[PlannedRoute] = field(default_factory=list)
-
-
 class TradeRouteService:
     """Create/disable Travian trade routes from a distribution plan."""
 
@@ -93,7 +85,7 @@ class TradeRouteService:
         self.live_enabled = live_enabled
         self._origin_lock = KeyedLock()
 
-    def origin_lock(self, village_id: int):
+    def origin_lock(self, village_id: int) -> AbstractAsyncContextManager[None]:
         """Serialize the disable+create sequence for one origin village, so a
         concurrent execute (or other op) can't interleave route writes on it."""
         return self._origin_lock(village_id)
@@ -117,23 +109,24 @@ class TradeRouteService:
         return await self.http_client.get_html(f"/build.php?gid={MARKETPLACE_GID}{newdid_amp}")
 
     async def list_existing_routes(self, village_id: int) -> list[ExistingRoute]:
-        """Existing UI-VISIBLE trade routes on a village's marketplace.
+        """Existing trade routes on a village's marketplace, visibility preserved.
 
-        Only routes a human could see are returned: a route present in the
-        markup but hidden from the UI is treated as a honeypot and never acted
-        on (disabling an invisible route is a pure bot signal). Parsing is
-        best-effort until a real marketplace page is captured; an unparseable
-        page yields an empty list rather than a guess.
+        Both visible and hidden entries are returned, each tagged with
+        ``visible``. Callers must never *act on* an invisible route (disabling a
+        route a human can't see is a pure bot signal — it is a honeypot), but a
+        hidden route still occupies its destination, so its coordinates must be
+        honored when deduplicating so we don't stack a visible duplicate on top
+        of a honeypot. Parsing is best-effort until a real marketplace page is
+        captured; an unparseable page yields an empty list rather than a guess.
         """
         html = await self.open_marketplace(village_id)
         from ..parsers.html_parser import parse_trade_routes
 
         return [
             ExistingRoute(
-                route_id=r["route_id"], dest_x=r["dest_x"], dest_y=r["dest_y"], visible=True
+                route_id=r["route_id"], dest_x=r["dest_x"], dest_y=r["dest_y"], visible=r["visible"]
             )
             for r in parse_trade_routes(html)
-            if r["visible"]  # honeypot guard: never act on a route a human can't see
         ]
 
     # ── Write (gated: payload UNVERIFIED) ─────────────────────────────

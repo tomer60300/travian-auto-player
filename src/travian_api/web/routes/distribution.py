@@ -44,7 +44,12 @@ from travian_api.services.distribution.optimizer import (
     MIN_SEND_FILL,
     VillageState,
 )
-from travian_api.services.distribution.planner import PlannerConfig, craft_plan
+from travian_api.services.distribution.planner import (
+    DistributionPlan,
+    PlannerConfig,
+    SheetRow,
+    craft_plan,
+)
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY
 from travian_api.services.distribution.storage import (
     ProfileSegment,
@@ -900,7 +905,7 @@ class _PlannedAccount:
     would display for the same inputs.
     """
 
-    plan: object
+    plan: DistributionPlan
     villages: dict[int, VillageState]
     coords: dict[int, tuple[int, int]]
     names: dict[int, str]
@@ -1211,7 +1216,7 @@ async def post_execute(
 
     # Each plan row is one route from a real origin village's marketplace to a
     # destination (a real village or a foreign sink — coords cover both).
-    items: list[tuple[object, PlannedRoute]] = []
+    items: list[tuple[SheetRow, PlannedRoute]] = []
     for row in plan.rows:
         dest_xy = coords.get(row.destination)
         if dest_xy is None:
@@ -1236,7 +1241,9 @@ async def post_execute(
             )
         )
 
-    def _action(row, route: PlannedRoute, status_: str, detail: str = "") -> RouteActionResponse:
+    def _action(
+        row: SheetRow, route: PlannedRoute, status_: str, detail: str = ""
+    ) -> RouteActionResponse:
         return RouteActionResponse(
             origin=row.origin,
             origin_name=village_label(row.origin, names),
@@ -1253,33 +1260,27 @@ async def post_execute(
 
     cap = body.max_routes_per_run
 
-    # Select WHICH routes run this session ONCE, so the dry-run preview and the
-    # live run can't diverge. The first `cap` routes are created this run; the
-    # rest are deferred. Only origins that actually get a create are disabled —
-    # disabling an origin we then defer would strip its working routes with no
-    # replacement, and the cap counts SELECTED routes (not successes) so a run
-    # can never fire more than `cap` create requests.
-    to_create = items[:cap]
-    deferred = items[cap:]
-    origins_to_disable = (
-        sorted({r.origin_village_id for _, r in to_create}) if body.disable_existing else []
-    )
-
     if body.dry_run:
-        actions = [_action(row, route, "would_create") for row, route in to_create]
-        actions += [_action(row, route, "deferred") for row, route in deferred]
-        disables = [
-            f"{village_label(o, names)}: existing routes would be disabled first "
-            f"(count read at execution)"
-            for o in origins_to_disable
-        ]
+        # Zero game requests: the exact routes already on each marketplace are
+        # unknown here, so this previews the DESIRED plan against a worst-case
+        # empty marketplace (first `cap` created, the rest deferred). The live
+        # run reads each marketplace and only creates the routes that are
+        # actually missing and disables only the ones the plan no longer wants,
+        # so it may create/disable fewer than shown.
+        actions = [_action(row, route, "would_create") for row, route in items[:cap]]
+        actions += [_action(row, route, "deferred") for row, route in items[cap:]]
+        disables = (
+            ["Existing routes not in this plan would be disabled first (read at execution)."]
+            if body.disable_existing
+            else []
+        )
         return ExecuteResponse(
             dry_run=True,
             live_enabled=svc.live_enabled,
             actions=actions,
             disables=disables,
             created=0,
-            remaining=len(deferred),
+            remaining=max(0, len(items) - cap),
             warnings=warnings,
         )
 
@@ -1294,40 +1295,56 @@ async def post_execute(
             ),
         )
 
-    # Process only the SELECTED routes, grouped by origin, in randomized origin
-    # order (not a predictable village-id sweep). Deferred routes are reported
-    # unchanged — never disabled, never touched.
-    selected_by_origin: dict[int, list[tuple[object, PlannedRoute]]] = {}
-    for row, route in to_create:
-        selected_by_origin.setdefault(route.origin_village_id, []).append((row, route))
-    origins = list(selected_by_origin)
+    # Reconcile the desired plan against what is actually on each marketplace,
+    # origin by origin, in randomized order (not a predictable village-id sweep):
+    #   * create only routes MISSING in-game, so a create sticks and the next
+    #     run naturally advances to the routes still absent — never re-creating
+    #     the same routes each run (a daily rebuild-the-same-routes bot signal);
+    #   * disable only VISIBLE routes the plan no longer wants — never a route we
+    #     are about to (re)create, and never a hidden honeypot;
+    #   * a route already at a destination (INCLUDING a hidden honeypot) blocks a
+    #     duplicate create there, but honeypots are never disabled.
+    # The per-run cap bounds create ATTEMPTS across the whole run, so a run of
+    # failures can't fan out into unbounded requests; routes past the cap defer
+    # to the next run (where they are still missing, so they get picked up).
+    desired_by_origin: dict[int, list[tuple[SheetRow, PlannedRoute]]] = {}
+    for row, route in items:
+        desired_by_origin.setdefault(route.origin_village_id, []).append((row, route))
+    origins = list(desired_by_origin)
     random.shuffle(origins)
 
     actions: list[RouteActionResponse] = []
-    disables = []
+    disables: list[str] = []
+    attempts = 0
+    deferred_count = 0
     for origin in origins:
         async with svc.origin_lock(origin):
             existing = await svc.list_existing_routes(origin)
+            desired = desired_by_origin[origin]
+            desired_coords = {(route.dest_x, route.dest_y) for _, route in desired}
+            occupied = {(e.dest_x, e.dest_y) for e in existing}  # incl. hidden honeypots
+
             if body.disable_existing:
-                disabled = await svc.disable_routes(origin, existing)
+                stale = [
+                    e for e in existing if e.visible and (e.dest_x, e.dest_y) not in desired_coords
+                ]
+                disabled = await svc.disable_routes(origin, stale)
                 if disabled is not None:
                     disables.append(
                         f"{village_label(origin, names)}: {disabled.status} {disabled.detail}".strip()
                     )
-                # Disabled them all, so recreate every selected route — do NOT
-                # skip a destination just because it had a (now-disabled) route.
-                skip_coords: set[tuple[int, int]] = set()
-            else:
-                # Not disabling: leave an already-active route in place rather
-                # than duplicate it (resumability across runs).
-                skip_coords = {(e.dest_x, e.dest_y) for e in existing}
-            for row, route in selected_by_origin[origin]:
-                if (route.dest_x, route.dest_y) in skip_coords:
+
+            for row, route in desired:
+                if (route.dest_x, route.dest_y) in occupied:
                     actions.append(_action(row, route, "skipped", "route already active"))
                     continue
+                if attempts >= cap:
+                    actions.append(_action(row, route, "deferred"))
+                    deferred_count += 1
+                    continue
+                attempts += 1
                 result = await svc.create_route(route)
                 actions.append(_action(row, route, result.status, result.detail))
-    actions += [_action(row, route, "deferred") for row, route in deferred]
 
     return ExecuteResponse(
         dry_run=False,
@@ -1335,6 +1352,6 @@ async def post_execute(
         actions=actions,
         disables=disables,
         created=sum(1 for a in actions if a.status == "created"),
-        remaining=len(deferred),
+        remaining=deferred_count,
         warnings=warnings,
     )

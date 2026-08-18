@@ -1,11 +1,13 @@
 """The trade-route execute endpoint + service.
 
 The dry-run path is the safe, fully-functional deliverable: it recomputes the
-plan server-side and previews exactly what would be created/disabled with zero
-game requests. Live execution is gated until the /api/v1/trade-routes payload
-is captured. These pin dry-run behavior, coordinate resolution (incl. foreign
-sinks), the per-run cap, the live gate, honeypot filtering, and the service's
-payload-unverified guard.
+plan server-side and previews the desired routes with zero game requests. Live
+execution (gated until the /api/v1/trade-routes payload is captured) reconciles
+that plan against each marketplace — creating only missing routes, disabling
+only stale ones, never touching honeypots. These pin dry-run behavior,
+coordinate resolution (incl. foreign sinks), the per-run cap, convergence across
+runs, stale-vs-plan disabling, honeypot handling, and the payload-unverified
+guard.
 """
 
 import asyncio
@@ -111,16 +113,23 @@ class TestLiveGate:
         assert "payload" in exc.value.detail.lower()
 
 
+def _desired_routes():
+    """The routes the plan wants — discovered via a zero-request dry-run — so
+    the live tests can seed marketplaces without hard-coding optimizer output."""
+    res = asyncio.run(post_execute(_exec_body(dry_run=True, max_routes_per_run=50), _session()))
+    return [a for a in res.actions if a.status in ("would_create", "deferred")]
+
+
 class _FakeLiveSvc:
     """A live-enabled trade-route service that records calls instead of hitting
-    the game — every marketplace it reads already has a route to (40|40)."""
+    the game. ``existing`` maps origin id → the routes already on its marketplace."""
 
-    def __init__(self, create_status="created"):
+    def __init__(self, existing=None, create_status="created"):
         self.live_enabled = True
+        self._existing = existing or {}
         self._create_status = create_status
-        self.created = []  # PlannedRoute objects a create was attempted for
-        self.disabled = []  # origin ids disabled
-        self.listed = []  # origin ids whose marketplace was read
+        self.created = []  # PlannedRoute objects a create was ATTEMPTED for
+        self.disabled = []  # (origin, sorted tuple of disabled dest coords)
 
     def origin_lock(self, vid):
         import contextlib
@@ -132,16 +141,15 @@ class _FakeLiveSvc:
         return _cm()
 
     async def list_existing_routes(self, vid):
-        self.listed.append(vid)
-        return [ExistingRoute(route_id=1, dest_x=40, dest_y=40)]
+        return list(self._existing.get(vid, []))
 
     async def disable_routes(self, vid, routes):
         from travian_api.services.trade_route_service import RouteActionResult
 
         if not routes:
             return None
-        self.disabled.append(vid)
-        return RouteActionResult(vid, 0, 0, "disabled", str(len(routes)))
+        self.disabled.append((vid, tuple(sorted((r.dest_x, r.dest_y) for r in routes))))
+        return RouteActionResult(vid, 0, 0, "disabled", f"{len(routes)} route(s)")
 
     async def create_route(self, route):
         from travian_api.services.trade_route_service import RouteActionResult
@@ -157,47 +165,74 @@ class TestLiveExecution:
         body = _exec_body(dry_run=False, **kw)
         return asyncio.run(post_execute(body, SimpleNamespace(trade_route_service=svc)))
 
-    def test_no_origin_is_disabled_without_a_create(self):
-        # The route-loss bug: an origin disabled but never recreated this run.
-        svc = _FakeLiveSvc()
-        self._run(svc, max_routes_per_run=5)
-        created_origins = {r.origin_village_id for r in svc.created}
-        assert set(svc.disabled) <= created_origins, (
-            "every disabled origin must get at least one create this run"
-        )
+    def test_only_missing_routes_are_created(self):
+        desired = _desired_routes()
+        svc = _FakeLiveSvc()  # empty marketplaces → everything is missing
+        self._run(svc, max_routes_per_run=50)
+        assert {(r.dest_x, r.dest_y) for r in svc.created} == {
+            (a.dest_x, a.dest_y) for a in desired
+        }
 
-    def test_disable_existing_recreates_the_matching_route(self):
-        # The disable-then-skip bug: a route to (40|40) is disabled and then
-        # skipped as 'already exists', leaving it gone. With disable_existing it
-        # must be recreated.
-        svc = _FakeLiveSvc()
-        self._run(svc, disable_existing=True)
-        dests = {(r.dest_x, r.dest_y) for r in svc.created}
-        assert (40, 40) in dests, "the disabled tribute route must be recreated"
+    def test_existing_routes_are_skipped_not_recreated(self):
+        desired = _desired_routes()
+        existing = {}
+        for a in desired:
+            existing.setdefault(a.origin, []).append(ExistingRoute(1, a.dest_x, a.dest_y))
+        svc = _FakeLiveSvc(existing=existing)
+        res = self._run(svc, max_routes_per_run=50)
+        assert svc.created == [], "routes already in-game must not be recreated"
+        assert all(a.status == "skipped" for a in res.actions)
 
-    def test_without_disable_existing_the_active_route_is_skipped(self):
+    def test_second_run_creates_nothing_new(self):
+        # The core convergence bug: a positional window re-creates the same
+        # routes every run. Existence-based selection must converge.
         svc = _FakeLiveSvc()
-        res = self._run(svc, disable_existing=False)
-        assert not svc.disabled, "disable_existing=False must disable nothing"
-        assert any(a.status == "skipped" for a in res.actions), (
-            "an already-active route must be left in place, not duplicated"
-        )
+        self._run(svc, max_routes_per_run=50)
+        assert len(svc.created) > 0
+        for r in svc.created:  # marketplace now reflects run 1's creations
+            svc._existing.setdefault(r.origin_village_id, []).append(
+                ExistingRoute(1, r.dest_x, r.dest_y)
+            )
+        svc.created.clear()
+        self._run(svc, max_routes_per_run=50)
+        assert svc.created == [], "a second run must not rebuild the same routes"
 
-    def test_creates_never_exceed_the_cap(self):
+    def test_disables_only_stale_routes_never_plan_routes(self):
+        desired = _desired_routes()
+        a = desired[0]
+        plan_dest = (a.dest_x, a.dest_y)
+        existing = {
+            a.origin: [
+                ExistingRoute(1, *plan_dest),  # in the plan → must be kept
+                ExistingRoute(2, 99, 98),  # not in the plan → stale → disabled
+            ]
+        }
+        svc = _FakeLiveSvc(existing=existing)
+        self._run(svc, disable_existing=True, max_routes_per_run=50)
+        disabled_coords = {c for _, coords in svc.disabled for c in coords}
+        assert (99, 98) in disabled_coords, "a stale route must be disabled"
+        assert plan_dest not in disabled_coords, "a route the plan still wants must be kept"
+
+    def test_hidden_honeypot_blocks_duplicate_and_is_never_disabled(self):
+        desired = _desired_routes()
+        a = desired[0]
+        existing = {
+            a.origin: [
+                ExistingRoute(1, a.dest_x, a.dest_y, visible=False),  # honeypot at a plan dest
+                ExistingRoute(2, 97, 96, visible=False),  # honeypot at a non-plan dest
+            ]
+        }
+        svc = _FakeLiveSvc(existing=existing)
+        self._run(svc, disable_existing=True, max_routes_per_run=50)
+        created_coords = {(r.dest_x, r.dest_y) for r in svc.created}
+        assert (a.dest_x, a.dest_y) not in created_coords, "must not duplicate onto a honeypot"
+        disabled_coords = {c for _, coords in svc.disabled for c in coords}
+        assert (97, 96) not in disabled_coords, "a hidden honeypot must never be disabled"
+
+    def test_cap_bounds_create_attempts_even_on_failure(self):
         svc = _FakeLiveSvc(create_status="failed")  # failures must not lift the cap
         self._run(svc, max_routes_per_run=1)
         assert len(svc.created) <= 1, "the cap bounds create ATTEMPTS, not successes"
-
-    def test_dry_run_preview_matches_the_live_disable_set(self):
-        dry = asyncio.run(
-            post_execute(
-                _exec_body(dry_run=True), SimpleNamespace(trade_route_service=_FakeLiveSvc())
-            )
-        )
-        svc = _FakeLiveSvc()
-        live = self._run(svc)
-        assert dry.remaining == live.remaining
-        assert len(dry.disables) == len(svc.disabled)
 
 
 class TestServiceGuards:
