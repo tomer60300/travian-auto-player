@@ -340,6 +340,10 @@ export default function ResourcePlanner() {
   // from a stale one (see SNAPSHOT_TTL_MS).
   const [snapshotFetchedAt, setSnapshotFetchedAt] = useState(null)
   const [useStaleSnapshot, setUseStaleSnapshot] = useState(false)
+  // Staleness is derived from the clock, but time passing does not re-render
+  // React — so `nowMs` is bumped by a timer that fires exactly when the current
+  // snapshot crosses the TTL, engaging the gate even if the page just sits open.
+  const [nowMs, setNowMs] = useState(() => Date.now())
   const [tradeOffice, setTradeOffice] = useState({})
   const [profiles, setProfiles] = useState({ [DEFAULT_PROFILE]: {} })
   const [activeProfile, setActiveProfile] = useState(DEFAULT_PROFILE)
@@ -389,6 +393,21 @@ export default function ResourcePlanner() {
       ? `${s.serverUrl.replace(/\/+$/, '')}|${s.playerName}`
       : null
   }, [])
+
+  // Fire a re-render exactly when the current snapshot crosses the freshness TTL,
+  // so the stale banner appears and Build plan gates without waiting for some
+  // unrelated state change. Re-armed whenever the snapshot/receipt time changes;
+  // cleared on unmount.
+  useEffect(() => {
+    if (!snapshot || snapshotFetchedAt == null) return undefined
+    const remaining = snapshotFetchedAt + SNAPSHOT_TTL_MS - Date.now()
+    if (remaining <= 0) {
+      setNowMs(Date.now())
+      return undefined
+    }
+    const timer = setTimeout(() => setNowMs(Date.now()), remaining + 50)
+    return () => clearTimeout(timer)
+  }, [snapshot, snapshotFetchedAt])
 
   useEffect(() => {
     if (!accountKey) {
@@ -568,6 +587,18 @@ export default function ResourcePlanner() {
       toast.error('Fetch account state first')
       return
     }
+    // Re-check freshness from the LIVE clock, not the last render, so a stale
+    // snapshot cannot be planned from by racing a not-yet-updated rendered value
+    // (the button-disable is a UI hint; this is the authoritative guard).
+    if (
+      !useStaleSnapshot &&
+      (snapshotFetchedAt == null || Date.now() - snapshotFetchedAt > SNAPSHOT_TTL_MS)
+    ) {
+      toast.error(
+        'Snapshot is stale — fetch fresh state, or tick “plan from this stale snapshot anyway”.'
+      )
+      return
+    }
     // Guard against the account changing mid-request: a plan built from
     // account A's snapshot must not be presented under account B. The input
     // revision closes the same race for edits within one account.
@@ -585,13 +616,36 @@ export default function ResourcePlanner() {
     } finally {
       setPlanning(false)
     }
-  }, [villages, toast, accountKey, currentAccountKey, buildPlanPayload])
+  }, [
+    villages,
+    toast,
+    accountKey,
+    currentAccountKey,
+    buildPlanPayload,
+    // Read by the live freshness guard above.
+    snapshotFetchedAt,
+    useStaleSnapshot,
+  ])
 
   // Execute the plan as trade routes. dryRun previews (zero game requests);
   // live requires an explicit confirm and only works once the backend's
   // trade-route payload is verified (execResult.live_enabled).
   const executePlan = useCallback(
     async (dryRun) => {
+      // Re-check freshness from the LIVE clock at action time (issue #66). The
+      // disabled button is only a hint computed at render; a snapshot can cross
+      // the TTL between that render and this click, and Preview/Execute must not
+      // act on outdated stock/merchant/capacity state — Execute sends live
+      // Travian mutations.
+      if (
+        !useStaleSnapshot &&
+        (snapshotFetchedAt == null || Date.now() - snapshotFetchedAt > SNAPSHOT_TTL_MS)
+      ) {
+        toast.error(
+          'Snapshot is stale — fetch fresh state, or tick “plan from this stale snapshot anyway”.'
+        )
+        return
+      }
       const requestedFor = accountKey
       // Staleness guard (same as buildPlan): if the operator edits an input or
       // switches account while a request is in flight, a stale response must
@@ -643,7 +697,7 @@ export default function ResourcePlanner() {
         setExecuting(false)
       }
     },
-    [accountKey, currentAccountKey, buildPlanPayload, toast],
+    [accountKey, currentAccountKey, buildPlanPayload, toast, snapshotFetchedAt, useStaleSnapshot],
   )
 
   // Live unallocated counter, so slack is visible while typing rather than
@@ -923,7 +977,11 @@ export default function ResourcePlanner() {
   // A snapshot carries fast-changing production/stock/merchant state; once it is
   // older than the TTL (or its receipt time is unknown, e.g. an older cache),
   // treat it as stale so it is not silently planned from as if it were live.
-  const snapshotAgeMs = snapshot ? (snapshotFetchedAt ? Date.now() - snapshotFetchedAt : null) : null
+  const snapshotAgeMs = snapshot
+    ? snapshotFetchedAt
+      ? nowMs - snapshotFetchedAt
+      : null
+    : null
   const snapshotStale = !!snapshot && (snapshotFetchedAt == null || snapshotAgeMs > SNAPSHOT_TTL_MS)
   const snapshotAgeLabel =
     snapshotAgeMs == null
