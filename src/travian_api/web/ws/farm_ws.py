@@ -150,12 +150,14 @@ def _build_farm_run_coro(
             if ctx.should_stop():
                 break
 
-            # Go quiet overnight and resume in the morning — a graceful pause,
-            # not the fatal budget path below (see night_rest_pause). Skipped on
-            # the first iteration: an operator starting the loop at night gets
-            # one sweep now (they're clearly awake), then the loop rests — vs a
-            # multi-hour sleep before any work, which reads as a hang.
-            if cycle > 0 and await night_rest_pause(ctx):
+            # Go quiet overnight and resume in the morning — a graceful, VISIBLE
+            # pause (see night_rest_pause), not the fatal budget path below. Only
+            # for an UNBOUNDED run: a run with a duration is an operator-directed
+            # session that must finish on time, not absorb a multi-hour sleep,
+            # and it's short enough that resting through a night rarely applies.
+            # Gating on the run kind (not the iteration count) also means a
+            # restart during the night rests instead of firing a night sweep.
+            if end_time is None and await night_rest_pause(ctx):
                 break
 
             try:
@@ -298,12 +300,14 @@ def _build_farm_run_all_coro(
             if ctx.should_stop():
                 break
 
-            # Go quiet overnight and resume in the morning — a graceful pause,
-            # not the fatal budget path below (see night_rest_pause). Skipped on
-            # the first iteration: an operator starting the loop at night gets
-            # one sweep now (they're clearly awake), then the loop rests — vs a
-            # multi-hour sleep before any work, which reads as a hang.
-            if cycle > 0 and await night_rest_pause(ctx):
+            # Go quiet overnight and resume in the morning — a graceful, VISIBLE
+            # pause (see night_rest_pause), not the fatal budget path below. Only
+            # for an UNBOUNDED run: a run with a duration is an operator-directed
+            # session that must finish on time, not absorb a multi-hour sleep,
+            # and it's short enough that resting through a night rarely applies.
+            # Gating on the run kind (not the iteration count) also means a
+            # restart during the night rests instead of firing a night sweep.
+            if end_time is None and await night_rest_pause(ctx):
                 break
 
             try:

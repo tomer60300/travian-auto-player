@@ -386,7 +386,9 @@ class ActivityScheduler:
         if not self.enabled:
             return False
         now = now or datetime.now()
-        hour = now.hour + now.minute / 60.0
+        # Second precision, matching seconds_until_rest_ends, so the two share
+        # one boundary and can't disagree about the window edge.
+        hour = now.hour + now.minute / 60.0 + now.second / 3600.0
         start = self._night_start_hour % 24.0  # seed can draw up to 24.0
         end = self._night_end_hour
         if start < end:

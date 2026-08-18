@@ -95,14 +95,13 @@ def _build_oasis_coro(config: OasisRaiderConfig):
             ctx.push({"type": "status", "data": {"state": "sleeping"}})
 
         while not ctx.should_stop():
-            # Go quiet overnight and resume in the morning — graceful, not the
-            # fatal budget path below. Skipped on the first iteration: an
-            # operator starting it at night gets one sweep now (clearly awake),
-            # then the loop rests, vs a multi-hour sleep before any work.
-            if iteration > 0:
-                if await night_rest_pause(ctx, announce=_announce_rest):
-                    break
-                ctx.push({"type": "status", "data": {"state": "running"}})
+            # Go quiet overnight and resume in the morning — a graceful, VISIBLE
+            # pause (night_rest_pause announces it and flips the status), not the
+            # fatal budget path below. This recurring loop is unbounded, so it
+            # rests every night; a restart during the night rests too rather
+            # than firing a night sweep.
+            if await night_rest_pause(ctx, announce=_announce_rest):
+                break
 
             try:
                 ctx.session.http_client.check_activity_budget()
@@ -122,7 +121,9 @@ def _build_oasis_coro(config: OasisRaiderConfig):
                     f"(repeat_interval={config.repeat_interval_seconds}s)",
                     "info",
                 )
-                ctx.push({"type": "status", "data": {"state": "running"}})
+            # One running-status push per iteration, right before the sweep — it
+            # also covers resuming from a night pause, which left it "sleeping".
+            ctx.push({"type": "status", "data": {"state": "running"}})
 
             stats = await service.run_sweep(config, send_log, check_stop)
             ctx.push({"type": "summary", "data": stats})
