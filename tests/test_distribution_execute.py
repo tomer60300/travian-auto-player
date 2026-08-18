@@ -69,7 +69,17 @@ def _exec_body(dry_run=True, disable_existing=True, max_routes_per_run=3, margin
         }
     )
     body.foreign_targets = [
-        ForeignTarget(name="Ally-Keep", x=40, y=40, crop_per_hour=500.0, safety_margin_pct=margin)
+        # route_eligible so the tribute is actually shipped as a route (a WW /
+        # artifact / own village); ineligible foreign targets are covered by the
+        # planner-side tests.
+        ForeignTarget(
+            name="Ally-Keep",
+            x=40,
+            y=40,
+            crop_per_hour=500.0,
+            safety_margin_pct=margin,
+            route_eligible=True,
+        )
     ]
     return body
 
@@ -229,11 +239,12 @@ class _FakeLiveSvc:
         self.listed = []  # origin ids whose marketplace was READ
         self.execute_lock = asyncio.Lock()
         self.on_create = None  # optional hook fired inside create_route
+        self.budget_ok = budget_ok  # mutable: a test can exhaust it mid-run
         budget_checks = self._budget_checks = []
 
         def _check_budget():
             budget_checks.append(True)
-            if not budget_ok:
+            if not self.budget_ok:
                 from travian_api.exceptions import ActivityBudgetExhausted
 
                 raise ActivityBudgetExhausted("budget exhausted (test)")
@@ -536,9 +547,44 @@ def _two_origin_account():
     )
 
 
+def _row(origin, destination, x, y, dispatch_minute=0):
+    return SheetRow(
+        origin=origin,
+        destination=destination,
+        cargo={Resource.CROP: 100},
+        cycle_hours=6,
+        dispatch_minute=dispatch_minute,
+        arrival_minute=0,
+        merchants=2,
+    )
+
+
+def _account(rows, coords, names):
+    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=tuple(rows))
+    return SimpleNamespace(plan=plan, names=names, coords=coords, warnings=[])
+
+
+def _same_origin_account():
+    """Two desired routes from ONE origin (20003) — for same-origin stop tests."""
+    return _account(
+        [_row(20003, -1, 40, 40, 100), _row(20003, -2, 50, 50, 700)],
+        {20003: (0, 0), -1: (40, 40), -2: (50, 50)},
+        {20003: "03", -1: "A", -2: "B"},
+    )
+
+
+def _three_origin_account():
+    """Three origins in insertion order [20003, 20011, 20019]."""
+    return _account(
+        [_row(20003, -1, 40, 40), _row(20011, -2, 50, 50), _row(20019, -3, 60, 60)],
+        {20003: (0, 0), 20011: (10, 0), 20019: (20, 0), -1: (40, 40), -2: (50, 50), -3: (60, 60)},
+        {20003: "03", 20011: "11", 20019: "19", -1: "A", -2: "B", -3: "C"},
+    )
+
+
 def _run_live(svc, account, **body_kw):
     """Live-execute against an injected plan, with shuffle disabled so origins
-    stay in insertion order [20003, 20011] for deterministic assertions."""
+    stay in insertion order for deterministic assertions."""
 
     async def _plan(_body):
         return account
@@ -634,3 +680,54 @@ class TestExecutionHardening:
         assert res.dry_run is False
         assert (40, 40) in {(r.dest_x, r.dest_y) for r in svc.created}, "20003's route committed"
         assert any("marketplace read failed" in p for p in res.problems)
+
+    def test_negative_origin_route_is_never_executed(self):  # #48 execution boundary
+        acct = _account(
+            [_row(20003, -1, 40, 40), _row(-5, -2, 50, 50)],  # second: impossible origin
+            {20003: (0, 0), -5: (0, 0), -1: (40, 40), -2: (50, 50)},
+            {20003: "03", -5: "BAD", -1: "A", -2: "B"},
+        )
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, acct, max_routes_per_run=50)
+        created_origins = {r.origin_village_id for r in svc.created}
+        assert -5 not in created_origins, "a negative (foreign) origin must never be executed"
+        assert 20003 in created_origins
+        assert any("not a real account village" in w for w in res.warnings)
+
+    def test_captcha_stop_halts_remaining_same_origin_routes(self):  # #62
+        import itertools
+        import time as _time
+
+        svc = _FakeLiveSvc()  # two routes from ONE origin; first create signals stop
+        svc.on_create = lambda: captcha_stop.signal(_USER.id)
+        clock = itertools.count(1)
+        try:
+            with _patch(_time, "monotonic", lambda: next(clock)):
+                res = _run_live(svc, _same_origin_account(), max_routes_per_run=50)
+        finally:
+            captcha_stop.clear(_USER.id)
+        assert len(svc.created) == 1, "the second same-origin route must not be created"
+        assert any(a.status == "deferred" for a in res.actions)
+
+    def test_budget_exhaustion_halts_remaining_same_origin_routes(self):  # #64
+        svc = _FakeLiveSvc()  # two routes from ONE origin
+
+        def _exhaust():
+            svc.budget_ok = False  # budget runs out right after the first create
+
+        svc.on_create = _exhaust
+        res = _run_live(svc, _same_origin_account(), max_routes_per_run=50)
+        assert len(svc.created) == 1, "the second same-origin route must not be created"
+        assert any("budget" in p.lower() for p in res.problems)
+        assert any(a.status == "deferred" for a in res.actions)
+
+    def test_read_failure_defers_every_later_origin_not_just_the_failing_one(self):  # #65
+        # Three origins in order [20003, 20011, 20019]; the MIDDLE read fails.
+        svc = _FakeLiveSvc(read_raises={20011})
+        res = _run_live(svc, _three_origin_account(), max_routes_per_run=50)
+        assert (40, 40) in {(r.dest_x, r.dest_y) for r in svc.created}, "20003 committed"
+        assert 20019 not in svc.listed, "later origins are not read after a failure"
+        deferred_dests = {(a.dest_x, a.dest_y) for a in res.actions if a.status == "deferred"}
+        assert (50, 50) in deferred_dests, "the failing origin's route is deferred"
+        assert (60, 60) in deferred_dests, "the unvisited later origin is deferred, not lost"
+        assert res.remaining >= 2

@@ -1275,6 +1275,18 @@ async def post_execute(
     # destination (a real village or a foreign sink — coords cover both).
     items: list[tuple[SheetRow, PlannedRoute]] = []
     for row in plan.rows:
+        # Fail-closed execution-boundary guard: a live route may only originate
+        # at a real, positive account village. The optimizer already excludes
+        # non-sender origins, but an impossible negative-id (foreign sink) origin
+        # must never reach a marketplace/create request even if a future planner
+        # change regressed — drop it loudly rather than fire it at the game.
+        if row.origin <= 0:
+            warnings.append(
+                f"{village_label(row.origin, names)} → "
+                f"{village_label(row.destination, names)}: route origin is not a real "
+                f"account village, skipped (it can never be executed)"
+            )
+            continue
         dest_xy = coords.get(row.destination)
         if dest_xy is None:
             warnings.append(
@@ -1451,10 +1463,12 @@ async def post_execute(
                 origins = []
 
             for origin in origins:
-                if gold_club_blocked or attempts >= cap or visited >= cap:
-                    # Budget spent (or Gold Club missing): defer every remaining
-                    # origin WITHOUT reading its marketplace, so reads and disable
-                    # writes stay bounded to this run.
+                if stopped_early or gold_club_blocked or attempts >= cap or visited >= cap:
+                    # Budget spent, Gold Club missing, or the run was stopped
+                    # (captcha / budget / a read failure): defer EVERY remaining
+                    # origin WITHOUT reading its marketplace, so reads and writes
+                    # stay bounded and no later origin's routes are silently lost
+                    # from the response (issue #65).
                     deferred.extend(desired_by_origin[origin])
                     continue
                 # After captcha resolution the guard releases the pending request
@@ -1484,8 +1498,11 @@ async def post_execute(
                             f"({exc}); remaining routes deferred"
                         )
                         deferred.extend(desired_by_origin[origin])
+                        # Stop, but do NOT break: `continue` lets the top-of-loop
+                        # guard defer every still-unvisited origin too, so they are
+                        # counted in `remaining` instead of vanishing (issue #65).
                         stopped_early = True
-                        break
+                        continue
                     visited += 1
                     desired = desired_by_origin[origin]
                     desired_coords = {(route.dest_x, route.dest_y) for _, route in desired}
@@ -1560,6 +1577,22 @@ async def post_execute(
                         if attempts >= cap:
                             deferred.append((row, route))
                             continue
+                        # Re-check the stop signals before EVERY mutation, not just
+                        # once per origin: a captcha resolved (issue #62) or the
+                        # budget exhausted (issue #64) during an earlier route of
+                        # THIS origin must stop the remaining same-origin writes,
+                        # deferring the unprocessed remainder for a later run.
+                        if captcha_stop.should_stop(user.id, started_after=started_at):
+                            stopped_early = True
+                            deferred.extend(desired[i:])
+                            break
+                        try:
+                            svc.http_client.check_activity_budget()
+                        except ActivityBudgetExhausted as exc:
+                            problems.append(f"Activity budget exhausted mid-run: {exc}")
+                            stopped_early = True
+                            deferred.extend(desired[i:])
+                            break
                         attempts += 1
                         result = await svc.create_route(route)
                         if result.status == "created":
