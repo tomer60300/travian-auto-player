@@ -32,7 +32,11 @@ from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.operation_manager import OperationContext, operation_manager
 from travian_api.web.operation_gate import active_ops
 from travian_api.web.sessions import session_manager
-from travian_api.web.ws._loop_stealth import night_rest_pause, recurring_wait
+from travian_api.web.ws._loop_stealth import (
+    interruptible_sleep,
+    night_rest_pause,
+    recurring_wait,
+)
 from travian_api.web.ws._resumable import subscribe_and_tail
 from travian_api.web.ws.manager import ws_manager
 
@@ -77,25 +81,6 @@ async def _wait_for_start(ws: WebSocket) -> bool:
     if not isinstance(msg, dict):
         return False
     return msg.get("action", "").lower() == "start"
-
-
-async def _interruptible_sleep(ctx: OperationContext, seconds: float) -> bool:
-    """Sleep with a small chunk granularity, returning True on stop signal.
-
-    Uses :meth:`OperationContext.wait_or_stop` for the explicit stop event but
-    breaks the wait into chunks so the captcha-stop poll fires reasonably
-    often during long inter-cycle sleeps.
-    """
-    remaining = seconds
-    chunk = 2.0
-    while remaining > 0:
-        step = min(chunk, remaining)
-        if await ctx.wait_or_stop(step):
-            return True
-        if ctx.should_stop():  # captcha-stop
-            return True
-        remaining -= step
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +153,11 @@ def _build_farm_run_coro(
                 ctx, deadline=end_time
             ):
                 break
+            # A deadline-capped pause can return right at end_time; re-check here
+            # so a bounded run doesn't fire one more cycle past its deadline (the
+            # loop-top check alone runs only after the cycle below).
+            if end_time and time.time() >= end_time:
+                break
 
             try:
                 ctx.session.http_client.check_activity_budget()
@@ -177,6 +167,10 @@ def _build_farm_run_coro(
 
             cycle += 1
             ctx.push({"type": "cycle_start", "cycle": cycle, "timestamp": _now_iso()})
+            # Draw the (heavy-tailed) inter-cycle wait now so the reported
+            # next-send time below matches the sleep actually taken at the end
+            # of the cycle, rather than the raw interval.
+            wait_time = recurring_wait(ctx, interval)
 
             try:
                 result = await farm_service.send_farm_list(list_id)
@@ -210,7 +204,7 @@ def _build_farm_run_coro(
                             }
                         )
 
-                next_time = time.time() + interval
+                next_time = time.time() + wait_time
                 next_send = (
                     None
                     if end_time and next_time >= end_time
@@ -240,8 +234,7 @@ def _build_farm_run_coro(
                     }
                 )
 
-            wait_time = recurring_wait(ctx, interval)
-            if await _interruptible_sleep(ctx, wait_time):
+            if await interruptible_sleep(ctx, wait_time):
                 break
 
         ctx.push(
@@ -321,6 +314,11 @@ def _build_farm_run_all_coro(
                 ctx, deadline=end_time
             ):
                 break
+            # A deadline-capped pause can return right at end_time; re-check here
+            # so a bounded run doesn't fire one more cycle past its deadline (the
+            # loop-top check alone runs only after the cycle below).
+            if end_time and time.time() >= end_time:
+                break
 
             try:
                 ctx.session.http_client.check_activity_budget()
@@ -330,6 +328,10 @@ def _build_farm_run_all_coro(
 
             cycle += 1
             ctx.push({"type": "cycle_start", "cycle": cycle, "timestamp": _now_iso()})
+            # Draw the (heavy-tailed) inter-cycle wait now so the reported
+            # next-send time below matches the sleep actually taken at the end
+            # of the cycle, rather than the raw interval.
+            wait_time = recurring_wait(ctx, interval)
 
             try:
                 results = await farm_service.send_all_farm_lists(send_ids)
@@ -383,7 +385,7 @@ def _build_farm_run_all_coro(
                 total_success += cycle_success
                 total_fail += cycle_fail
 
-                next_time = time.time() + interval
+                next_time = time.time() + wait_time
                 next_send = (
                     None
                     if end_time and next_time >= end_time
@@ -413,8 +415,7 @@ def _build_farm_run_all_coro(
                     }
                 )
 
-            wait_time = recurring_wait(ctx, interval)
-            if await _interruptible_sleep(ctx, wait_time):
+            if await interruptible_sleep(ctx, wait_time):
                 break
 
         ctx.push(

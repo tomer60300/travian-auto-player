@@ -1164,12 +1164,13 @@ class HttpClient:
                     # Content-Type/Origin/Sec-Fetch-Dest=document headers across.
                     # Reusing form headers on the GET is a recognizable
                     # automation tell, so build page-load headers for the
-                    # redirected GET instead.
+                    # redirected GET instead. NO X-Version here: this is a
+                    # document navigation, and X-Version belongs only on the
+                    # AJAX/API calls (the invariant _stealth_pre_request enforces).
                     if self._stealth_enabled:
                         redirect_headers = self._browser_headers.for_page_load(target_url)
-                        redirect_headers["X-Version"] = await self._fetch_x_version()
                     else:
-                        redirect_headers = {"X-Version": await self._fetch_x_version()}
+                        redirect_headers = {}
                     if self._use_curl:
                         response = await self._curl_get(
                             target_url, redirect_headers, follow_redirects=True

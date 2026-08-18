@@ -45,6 +45,27 @@ def recurring_wait(ctx: OperationContext, interval: float) -> float:
     return max(1.0, min(drawn, interval * _MAX_WAIT_INTERVAL_MULTIPLE))
 
 
+async def interruptible_sleep(ctx: OperationContext, seconds: float, chunk: float = 2.0) -> bool:
+    """Sleep, returning True on stop. Chunked so BOTH stop signals are honored.
+
+    ``ctx.wait_or_stop`` watches only the explicit stop event; the timestamp-
+    based captcha-stop needs a separate ``should_stop()`` poll. Breaking the
+    wait into small chunks polls both often, so a captcha resolved mid-sleep
+    (or an explicit stop) is picked up within ``chunk`` seconds rather than
+    after a multi-hour wait. Shared by the farm and oasis loops and by
+    night_rest_pause so all three sleep the same way.
+    """
+    remaining = seconds
+    while remaining > 0:
+        step = min(chunk, remaining)
+        if await ctx.wait_or_stop(step):
+            return True
+        if ctx.should_stop():  # captcha-stop
+            return True
+        remaining -= step
+    return False
+
+
 async def night_rest_pause(
     ctx: OperationContext,
     announce: Callable[[float], Awaitable[None]] | None = None,
@@ -86,13 +107,4 @@ async def night_rest_pause(
                 "message": f"Night rest — pausing ~{hours:.1f}h, resuming in the morning.",
             }
         )
-    remaining = rest
-    chunk = 15.0
-    while remaining > 0:
-        step = min(chunk, remaining)
-        if await ctx.wait_or_stop(step):
-            return True
-        if ctx.should_stop():  # captcha-stop
-            return True
-        remaining -= step
-    return False
+    return await interruptible_sleep(ctx, rest, chunk=15.0)

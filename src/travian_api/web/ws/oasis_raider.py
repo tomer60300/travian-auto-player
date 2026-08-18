@@ -27,7 +27,11 @@ from travian_api.operation_manager import OperationContext, operation_manager
 from travian_api.services.oasis_raider_service import OasisRaiderConfig, OasisRaiderService
 from travian_api.web.log_broadcast import log_stream_manager
 from travian_api.web.sessions import TravianSession, session_manager
-from travian_api.web.ws._loop_stealth import night_rest_pause, recurring_wait
+from travian_api.web.ws._loop_stealth import (
+    interruptible_sleep,
+    night_rest_pause,
+    recurring_wait,
+)
 from travian_api.web.ws._resumable import subscribe_and_tail
 from travian_api.web.ws.manager import ws_manager
 
@@ -145,8 +149,10 @@ def _build_oasis_coro(config: OasisRaiderConfig):
             )
             ctx.push({"type": "status", "data": {"state": "sleeping"}})
 
-            stopped_during_sleep = await ctx.wait_or_stop(wait_secs)
-            if stopped_during_sleep:
+            # Captcha-aware chunked sleep (shared with the farm loop): a captcha
+            # resolved mid-wait is honored within seconds, not after the full
+            # (up to 4x interval) wait.
+            if await interruptible_sleep(ctx, wait_secs):
                 break
 
         terminal = "stopped" if ctx.should_stop() else "completed"
