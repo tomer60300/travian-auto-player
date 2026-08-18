@@ -18,31 +18,42 @@ from collections.abc import Awaitable, Callable
 from travian_api.operation_manager import OperationContext
 from travian_api.stealth.timing import HumanTiming
 
-# Upper bound on a single inter-cycle wait, as a multiple of the configured
-# interval. HumanTiming.delay's own clamp is 15x — on an hour-long interval a
-# 15h stall that reads as a hang. 4x keeps the periodogram-smearing heavy tail
-# and a realistic ~0.84x average throughput while bounding any single wait to
-# something an operator won't mistake for a stuck loop (4h on an hourly sweep,
-# minutes on a typical farm interval).
+# Upper bound on the VARIABLE part of an inter-cycle wait, as a multiple of the
+# configured interval. HumanTiming.delay's own clamp is 15x — on an hour-long
+# interval a 15h stall that reads as a hang. 4x keeps the periodogram-smearing
+# heavy tail while bounding any single wait to something an operator won't
+# mistake for a stuck loop (the wait is `floor + <=4x*interval`).
 _MAX_WAIT_INTERVAL_MULTIPLE = 4.0
 
 
-def recurring_wait(ctx: OperationContext, interval: float) -> float:
+def recurring_wait(ctx: OperationContext, interval: float, *, floor: float = 0.0) -> float:
     """Inter-cycle sleep for a recurring loop: heavy-tailed, tempo-scaled.
 
-    ``HumanTiming.delay`` at variance_factor=1.0 keeps the expected value ≈
-    ``interval`` (~0.97x, measured) so average throughput is preserved while the
-    bursty shape smears the fixed-period peak; ``tempo_scale`` couples the
-    super-cadence to the shared session rhythm. The result is capped at
-    ``_MAX_WAIT_INTERVAL_MULTIPLE`` × interval so a large interval (e.g. an
-    hourly oasis sweep) can't draw a multi-hour stall. Deterministic when
-    stealth is off so dev/test runs stay predictable.
+    ``floor`` is the loop's ABSOLUTE minimum wait (the farm's 60s stealth floor).
+    The heavy-tailed variable part is drawn with ``HumanTiming.delay`` and ADDED
+    to the floor rather than clamped against it. This fixes two ways the previous
+    sampler broke the floor's intent:
+
+    * ``HumanTiming.delay``'s own lower bound is ``0.1 * mean`` — a 6s wait at a
+      60s interval — so ``delay(interval)`` alone routinely dipped below the
+      60s floor. Adding the variable part to the floor makes every wait strictly
+      greater than the floor, with continuous density just above it (no
+      detectable point mass that a hard ``max(floor, …)`` clamp would create).
+    * the ``_MAX_WAIT_INTERVAL_MULTIPLE`` tail cut pulled ``delay(interval)``'s
+      mean to ~0.84x, i.e. ~19% MORE requests than configured. ``floor + …``
+      lifts the mean back to at least the configured interval across the farm's
+      operating range, so cadence can only run slower than asked, never faster.
+
+    ``tempo_scale`` couples the super-cadence to the shared session rhythm.
+    Deterministic when stealth is off so dev/test runs stay predictable.
     """
     hc = ctx.session.http_client
     if not getattr(hc, "stealth_enabled", False):
         return float(interval)
+    interval = float(interval)
+    floor = max(0.0, float(floor))
     drawn = hc.tempo_scale(HumanTiming.delay(interval, variance_factor=1.0))
-    return max(1.0, min(drawn, interval * _MAX_WAIT_INTERVAL_MULTIPLE))
+    return floor + min(drawn, interval * _MAX_WAIT_INTERVAL_MULTIPLE)
 
 
 async def interruptible_sleep(ctx: OperationContext, seconds: float, chunk: float = 2.0) -> bool:

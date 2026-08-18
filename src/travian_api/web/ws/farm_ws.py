@@ -93,6 +93,7 @@ def _build_farm_run_coro(
     interval: int,
     duration: int,
     verbose: bool,
+    floor: int = 0,
 ):
     """Returns the coroutine OperationManager will run in the background."""
 
@@ -169,8 +170,9 @@ def _build_farm_run_coro(
             ctx.push({"type": "cycle_start", "cycle": cycle, "timestamp": _now_iso()})
             # Draw the (heavy-tailed) inter-cycle wait now so the reported
             # next-send time below matches the sleep actually taken at the end
-            # of the cycle, rather than the raw interval.
-            wait_time = recurring_wait(ctx, interval)
+            # of the cycle, rather than the raw interval. `floor` keeps every
+            # wait at or above the stealth minimum.
+            wait_time = recurring_wait(ctx, interval, floor=floor)
 
             try:
                 result = await farm_service.send_farm_list(list_id)
@@ -234,7 +236,14 @@ def _build_farm_run_coro(
                     }
                 )
 
-            if await interruptible_sleep(ctx, wait_time):
+            # Cap the inter-cycle sleep to the remaining bounded duration: the
+            # heavy-tailed wait can be drawn well past a short run's deadline, and
+            # sleeping it out would keep the operation "running" past when the
+            # operator asked it to end. The loop-top deadline check then stops it.
+            sleep_time = wait_time
+            if end_time is not None:
+                sleep_time = max(0.0, min(wait_time, end_time - time.time()))
+            if await interruptible_sleep(ctx, sleep_time):
                 break
 
         ctx.push(
@@ -266,6 +275,7 @@ def _build_farm_run_all_coro(
     duration: int,
     verbose: bool,
     list_ids_param: str,
+    floor: int = 0,
 ):
     """Returns the coroutine OperationManager will run for the run-all op."""
 
@@ -331,7 +341,7 @@ def _build_farm_run_all_coro(
             # Draw the (heavy-tailed) inter-cycle wait now so the reported
             # next-send time below matches the sleep actually taken at the end
             # of the cycle, rather than the raw interval.
-            wait_time = recurring_wait(ctx, interval)
+            wait_time = recurring_wait(ctx, interval, floor=floor)
 
             try:
                 results = await farm_service.send_all_farm_lists(send_ids)
@@ -415,7 +425,14 @@ def _build_farm_run_all_coro(
                     }
                 )
 
-            if await interruptible_sleep(ctx, wait_time):
+            # Cap the inter-cycle sleep to the remaining bounded duration: the
+            # heavy-tailed wait can be drawn well past a short run's deadline, and
+            # sleeping it out would keep the operation "running" past when the
+            # operator asked it to end. The loop-top deadline check then stops it.
+            sleep_time = wait_time
+            if end_time is not None:
+                sleep_time = max(0.0, min(wait_time, end_time - time.time()))
+            if await interruptible_sleep(ctx, sleep_time):
                 break
 
         ctx.push(
@@ -501,7 +518,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int) -> None:
         session_type="farm-run",
         session_label=f"Farm Run - #{list_id}",
         session=session,
-        coro=_build_farm_run_coro(list_id, interval, duration, verbose),
+        coro=_build_farm_run_coro(list_id, interval, duration, verbose, floor=floor),
         require_unique_label=True,
     )
     if op is None:
@@ -632,6 +649,7 @@ async def ws_farm_run_all(websocket: WebSocket) -> None:
             duration=duration,
             verbose=verbose,
             list_ids_param=list_ids_param,
+            floor=floor,
         ),
         # Disjoint run-alls are intentionally allowed to coexist — only
         # the per-list ``farm:{lid}`` extras need to be unique. Setting

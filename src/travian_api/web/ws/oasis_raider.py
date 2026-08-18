@@ -139,8 +139,13 @@ def _build_oasis_coro(config: OasisRaiderConfig):
             # loop): ±10% micro-jitter on a fixed interval still leaves a sharp
             # periodogram peak at repeat_interval, so the whole cadence is
             # replaced by a bursty draw whose expected value is the interval.
+            # No hard floor is passed (floor=0): unlike the farm's per-minute
+            # cadence, an oasis sweep's repeat_interval is already coarse
+            # (minutes to hours), so it needs no sub-interval stealth floor.
             # Round once so the announced countdown matches the actual sleep.
-            wait_secs = max(1, round(recurring_wait(ctx, float(config.repeat_interval_seconds))))
+            wait_secs = max(
+                1, round(recurring_wait(ctx, float(config.repeat_interval_seconds), floor=0.0))
+            )
             await send_log(
                 "RECURRING",
                 "⏱️",
