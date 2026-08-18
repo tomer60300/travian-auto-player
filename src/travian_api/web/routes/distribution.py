@@ -1307,6 +1307,16 @@ async def post_execute(
                 "Use dry_run to preview what would be created."
             ),
         )
+    # Feasibility is enforced server-side, not just by the disabled UI button: a
+    # direct API call must not commit an over-budget/unroutable plan (dry_run
+    # still previews it, warnings and all).
+    if not plan.is_feasible:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Plan is not feasible; refusing to execute in-game. " + " ".join(plan.warnings)
+            ).strip(),
+        )
 
     # Reconcile the desired plan against what is actually on each marketplace,
     # origin by origin, in randomized order (not a predictable village-id sweep):
@@ -1318,10 +1328,18 @@ async def post_execute(
     #   * hidden entries are honeypots: a human can't see them, so we neither act
     #     on them (never disabled) nor let them influence us (not deduped
     #     against) — behaving exactly like a human who cannot see them.
-    # The whole run stops once `cap` creates have been attempted: not just the
-    # creates but the marketplace READS and disable writes are bounded to the
-    # origins needed this run, so one run touches only a few villages (the human
-    # "a few at a time" model), the rest deferred to a later run.
+    # The run is bounded by `cap` in BOTH dimensions: it reads at most `cap`
+    # marketplaces AND creates at most `cap` routes. That second bound (origins
+    # visited) is what keeps a fully-provisioned account from re-reading every
+    # village on every run — in steady state every route is "skipped" and no
+    # create ever fires, so a create-only cap would never stop the sweep. The
+    # rest defer to a later run; shuffling means successive runs cover them all.
+    #
+    # Known limitation: only origins the current plan still uses are visited, so
+    # a village dropped from the plan entirely keeps its old routes until it
+    # re-enters a plan. Cleaning those would require reading every village's
+    # marketplace — the exact full sweep this bound exists to avoid — so it is
+    # deliberately left to a plan that still includes the village.
     desired_by_origin: dict[int, list[tuple[SheetRow, PlannedRoute]]] = {}
     for row, route in items:
         desired_by_origin.setdefault(route.origin_village_id, []).append((row, route))
@@ -1330,16 +1348,18 @@ async def post_execute(
 
     actions: list[RouteActionResponse] = []
     disables: list[str] = []
-    attempts = 0
-    failed = 0
+    attempts = 0  # create requests fired this run
+    visited = 0  # marketplaces read this run
+    outstanding = 0  # creates attempted but not completed (failed / Gold Club)
     deferred: list[tuple[SheetRow, PlannedRoute]] = []
     for origin in origins:
-        if attempts >= cap:
-            # Cap reached: defer the rest of this origin's plan AND every
-            # remaining origin without reading their marketplaces.
+        if attempts >= cap or visited >= cap:
+            # Budget spent: defer every remaining origin WITHOUT reading its
+            # marketplace, so reads and disable writes stay bounded to this run.
             deferred.extend(desired_by_origin[origin])
             continue
         async with svc.origin_lock(origin):
+            visited += 1
             existing = await svc.list_existing_routes(origin)
             desired = desired_by_origin[origin]
             desired_coords = {(route.dest_x, route.dest_y) for _, route in desired}
@@ -1366,8 +1386,8 @@ async def post_execute(
                     continue
                 attempts += 1
                 result = await svc.create_route(route)
-                if result.status == "failed":
-                    failed += 1
+                if result.status != "created":
+                    outstanding += 1  # failed or Gold-Club-skipped → still to do
                 actions.append(_action(row, route, result.status, result.detail))
 
     actions += [_action(row, route, "deferred") for row, route in deferred]
@@ -1377,10 +1397,10 @@ async def post_execute(
         live_enabled=live_enabled,
         actions=actions,
         disables=disables,
-        # `remaining` = work still outstanding for a later run: routes past the
-        # cap PLUS any that failed this run (they'll show as missing again next
-        # run), so the summary never under-reports a partially-failed run.
+        # `remaining` = work still outstanding for a later run: routes deferred by
+        # the cap PLUS any create that did not complete (failed / Gold Club), so
+        # the summary never makes a partially-done run look complete.
         created=sum(1 for a in actions if a.status == "created"),
-        remaining=len(deferred) + failed,
+        remaining=len(deferred) + outstanding,
         warnings=warnings,
     )

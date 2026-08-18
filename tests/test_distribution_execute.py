@@ -162,6 +162,21 @@ class TestLiveGate:
             _execute(_exec_body(dry_run=False), connected=False)
         assert exc.value.status_code == 403
 
+    def test_live_refuses_an_infeasible_plan(self):
+        # The UI disables the button on !feasible; the server must refuse too, so
+        # a direct API call can't commit an over-budget plan.
+        async def _fake_plan(_body):
+            plan = SimpleNamespace(is_feasible=False, warnings=("merchants over budget",), rows=())
+            return SimpleNamespace(plan=plan, names={}, coords={}, warnings=[])
+
+        with (
+            _patch(dist_module, "_plan_account", _fake_plan),
+            pytest.raises(HTTPException) as exc,
+        ):
+            _execute(_exec_body(dry_run=False), svc=_dry_svc(live_enabled=True))
+        assert exc.value.status_code == 422
+        assert "feasible" in exc.value.detail.lower()
+
 
 def _desired_routes():
     """The routes the plan wants — discovered via a zero-request dry-run — so
@@ -293,6 +308,25 @@ class TestLiveExecution:
         svc = _FakeLiveSvc()  # empty marketplaces → the first origin has work
         self._run(svc, max_routes_per_run=1)
         assert len(svc.listed) == 1, "no further marketplaces are read after the cap"
+
+    def test_reads_are_bounded_when_all_routes_exist(self):
+        # Steady state: everything already provisioned, so every route is skipped
+        # and NO create ever fires. A create-only cap would never trip and the
+        # loop would sweep every village; capping origins VISITED prevents that.
+        desired = _desired_routes()
+        existing = {}
+        for a in desired:
+            existing.setdefault(a.origin, []).append(ExistingRoute(1, a.dest_x, a.dest_y))
+        svc = _FakeLiveSvc(existing=existing)
+        self._run(svc, max_routes_per_run=1)
+        assert svc.created == []
+        assert len(svc.listed) <= 1, "a fully-provisioned account must not sweep every village"
+
+    def test_gold_club_skip_counts_as_outstanding(self):
+        svc = _FakeLiveSvc(create_status="skipped")  # Gold Club rejection
+        res = self._run(svc, max_routes_per_run=1)
+        assert res.created == 0
+        assert res.remaining >= 1, "a Gold-Club skip is still outstanding work"
 
 
 class TestServiceGuards:
