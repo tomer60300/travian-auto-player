@@ -224,6 +224,12 @@ def resolve_resource(
     unallocated = total - sum(targets.values())
 
     if remainder_id is not None:
+        # The remainder holds whatever is left. When over-allocated this goes
+        # negative, which the day-check needs verbatim to model the sender
+        # draining its stock. The PLAN must not treat that negative target as
+        # sustainable surplus, though: the optimizer caps each sender's shippable
+        # surplus at its own production, so the shortfall surfaces there and the
+        # plan is reported infeasible rather than emitting an impossible rate.
         targets[remainder_id] = unallocated
         if unallocated < -EPSILON:
             warnings.append(

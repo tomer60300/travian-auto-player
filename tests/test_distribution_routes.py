@@ -76,7 +76,8 @@ WAREHOUSE_HTML = """
 </table>
 """
 
-# Both villages draining: capacity is never needed, so the snapshot is cheaper.
+# Both villages draining: crop derivation needs no capacity, but the capacity
+# page is still fetched for storage-overflow safety (see the pricing test).
 WAREHOUSE_ALL_DRAINING_HTML = WAREHOUSE_HTML.replace(
     '<span class="timer" counting="down" value="211328" data-value="211328">',
     '<span class="timer crit" counting="down" value="211328" data-value="211328">',
@@ -136,15 +137,18 @@ class TestSnapshotPricing:
             dependency = getattr(parameter.default, "dependency", None)
             assert dependency is not reconnecting
 
-    def test_reports_three_requests_when_nothing_is_filling(self):
-        """The capacity page is only fetched for filling villages, and the
-        reported price must match what was actually spent."""
+    def test_reports_four_requests_including_capacity_when_nothing_is_filling(self):
+        """The capacity page is fetched even on an all-draining account — its
+        warehouse figures are the only source for storage overflow safety, so it
+        must not be skipped just because crop derivation didn't need it. The
+        reported price matches what was actually spent."""
         http = _SnapshotHttp(warehouse=WAREHOUSE_ALL_DRAINING_HTML)
 
         res = asyncio.run(get_snapshot(_session(http)))
 
-        assert len(http.urls) == 3
-        assert res.requests_used == 3
+        assert any("capacity" in url for url in http.urls)
+        assert len(http.urls) == 4
+        assert res.requests_used == 4
 
     def test_reports_four_requests_when_capacity_is_fetched(self):
         http = _SnapshotHttp()
@@ -242,6 +246,10 @@ class TestForeignTribute:
                 y=40,
                 crop_per_hour=crop_per_hour,
                 safety_margin_pct=margin,
+                # These tests exercise a tribute that IS shipped by a route, so
+                # the target must be one Travian allows a route to (own / WW /
+                # alliance-artifact). Ineligible targets are covered separately.
+                route_eligible=kw.pop("route_eligible", True),
                 **kw,
             )
         ]
@@ -300,14 +308,14 @@ class TestForeignTribute:
             assert shortfall.village_name, "shortfalls must be named, never numbered"
 
     def test_the_cold_start_is_reported(self):
-        """The first delivery only lands after a full one-way trip; a tribute
-        that silently starts late looks like a broken promise. With several
-        suppliers the FIRST crop lands at the minimum startup, not the
-        maximum -- calling the last route's startup "first delivery" would
-        overstate the gap the operator has to cover by hand."""
+        """The first delivery can take up to a full cycle plus travel (worst case
+        being the route created just after its scheduled send time); a tribute
+        that silently starts late looks like a broken promise. The warning states
+        this as an upper bound on the manual-coverage window, using the minimum
+        startup across suppliers as the first-crop bound."""
         res = asyncio.run(post_plan(self._body()))
 
-        cold = [w for w in res.warnings if "first crop lands" in w and "Ally-Keep" in w]
+        cold = [w for w in res.warnings if "first crop can take up to" in w and "Ally-Keep" in w]
         assert cold, f"warnings: {res.warnings}"
         tribute_firsts = [row.first_delivery_hours for row in res.rows if row.destination < 0]
         assert f"{min(tribute_firsts):.1f}h" in cold[0]
@@ -319,6 +327,51 @@ class TestForeignTribute:
 
         assert any("Ally-Keep" in w for w in res.warnings)
         assert res.shortfalls or not res.feasible
+
+    def test_two_tributes_at_the_same_coords_never_relay_through_each_other(self):
+        """Two foreign obligations at identical coordinates are plausible operator
+        input. The zero-distance leg between them must not let the crop relay
+        adopt a sink as a hub — no route may originate at a foreign (negative) id,
+        and the plan may not claim feasible while emitting an impossible row."""
+        body = self._body()
+        body.foreign_targets = [
+            ForeignTarget(name="A", x=40, y=40, crop_per_hour=500.0, route_eligible=True),
+            ForeignTarget(name="B", x=40, y=40, crop_per_hour=500.0, route_eligible=True),
+        ]
+        res = asyncio.run(post_plan(body))
+        assert all(row.origin > 0 for row in res.rows), (
+            f"a route originates at a foreign sink: {[(r.origin, r.destination) for r in res.rows]}"
+        )
+
+    def test_an_ineligible_target_is_a_manual_transfer_not_a_route(self):
+        """Travian only allows routes to own / WW / alliance-artifact villages.
+        An ordinary foreign village must not be emitted as an executable route;
+        it is reported as a manual transfer instead."""
+        res = asyncio.run(post_plan(self._body(route_eligible=False)))
+        assert not [row for row in res.rows if row.destination < 0], (
+            "an ordinary foreign village must not become a Gold Club route row"
+        )
+        assert any("manual transfer" in w.lower() and "Ally-Keep" in w for w in res.warnings)
+
+
+class TestOverAllocation:
+    def test_over_allocation_is_infeasible_not_a_green_plan(self):
+        """Explicit targets exceeding production drive the remainder village's
+        target negative — an unsustainable "ship more than you make" allocation.
+        The routing may still show diagnostic rows, but the plan must NOT be
+        reported feasible, and the over-allocation must be surfaced in words."""
+        body = _plan_request(
+            {
+                "lumber": {
+                    # 3000 + 500(remainder floor) far exceeds total 2500/h produced
+                    "20003": {"mode": "absolute", "value": 3000},
+                    "20011": {"mode": "remainder"},
+                }
+            }
+        )
+        res = asyncio.run(post_plan(body))
+        assert res.feasible is False, "an over-allocated sheet must not read as feasible"
+        assert any("exceed production" in w for w in res.warnings)
 
 
 class TestWarningsNameVillages:

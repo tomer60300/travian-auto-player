@@ -184,6 +184,18 @@ class ForeignTarget(BaseModel):
             "being short on a tribute is worse than sending a few crop spare."
         ),
     )
+    route_eligible: bool = Field(
+        default=False,
+        description=(
+            "Whether Travian will actually let a Gold Club trade route target "
+            "this village. Routes are only allowed to your OWN villages, Wonder "
+            "of the World villages, or artifact villages in your alliance / "
+            "confederacy — not an ordinary ally or sitter village. The operator "
+            "must assert this (it cannot be verified server-side). When false the "
+            "obligation is reported as a MANUAL transfer and is not emitted as a "
+            "route or given merchants in the plan."
+        ),
+    )
 
 
 class PlanRequest(BaseModel):
@@ -958,8 +970,18 @@ async def _plan_account(body: PlanRequest) -> _PlannedAccount:
     # clearly apart from real villages (which are always positive) so a target
     # can never be confused for one, and merchant_count=0 makes it structurally
     # impossible for one to ship anything: it can receive and nothing else.
+    #
+    # Only route-eligible targets (own / WW / alliance-artifact villages) enter
+    # the route optimizer: Travian will not create a Gold Club route to an
+    # ordinary foreign village, so emitting one would be an unexecutable row that
+    # also reserves merchants and crop the operator cannot actually use that way.
+    # Ineligible targets are reported as manual transfers instead.
     foreign_ids: dict[int, ForeignTarget] = {}
+    manual_targets: list[ForeignTarget] = []
     for index, target in enumerate(body.foreign_targets):
+        if not target.route_eligible:
+            manual_targets.append(target)
+            continue
         target_id = -(index + 1)
         foreign_ids[target_id] = target
         names[target_id] = target.name
@@ -1012,6 +1034,15 @@ async def _plan_account(body: PlanRequest) -> _PlannedAccount:
     )
 
     extra_warnings: list[str] = []
+    for target in manual_targets:
+        extra_warnings.append(
+            f"{target.name} ({target.x}|{target.y}): Travian only allows Gold Club "
+            f"trade routes to your own, Wonder, or alliance/confederacy artifact "
+            f"villages, so its {target.crop_per_hour:.0f}/h crop obligation is a MANUAL "
+            f"transfer — it is not in the route plan and no merchants are reserved for "
+            f"it. Ship it by hand, or mark it route-eligible if it really is one of "
+            f"those villages."
+        )
     try:
         # Explicit `keep` entries mean exactly what an absent entry means, so
         # they are dropped here rather than allowed to 400 the whole plan when
@@ -1085,21 +1116,24 @@ async def _plan_account(body: PlanRequest) -> _PlannedAccount:
                 + " — several routes to keep track of; consider raising one "
                 "supplier's share so a single route covers it"
             )
-        # Section 7.3: a tribute must not lapse, and the first delivery only
-        # lands after a full one-way trip. Saying so is the difference between
-        # a planned gap and an apparent broken promise. With several suppliers
-        # the first crop lands at the EARLIEST route's startup; the slowest
-        # route only marks when the full rate is flowing.
+        # Section 7.3: a tribute must not lapse. A Gold Club route sends at its
+        # scheduled "Send at" time, so the first delivery lands at the next
+        # occurrence of that time plus travel. Worst case — the route is created
+        # just after its send time — that is a full cycle plus travel; this is the
+        # conservative upper bound on how long the operator must cover it by hand.
+        # With several suppliers the earliest route bounds first crop; the slowest
+        # bounds when the full rate is flowing.
         firsts = [row.first_delivery_hours for row in plan.rows if row.destination == target_id]
         first = min(firsts, default=0.0)
         full = max(firsts, default=0.0)
         note = (
-            f"{target.name} ({target.x}|{target.y}): the first crop lands "
-            f"{first:.1f}h after the routes are created"
+            f"{target.name} ({target.x}|{target.y}): the first crop can take up to "
+            f"{first:.1f}h to land (a full cycle plus travel if the route is created "
+            f"just after its scheduled send time)"
         )
         if full > first + 0.05:
-            note += f" and the full tribute only flows from {full:.1f}h"
-        note += ", so it starts late unless covered by hand until then"
+            note += f", and the full tribute up to {full:.1f}h"
+        note += ", so cover it by hand until the first scheduled send lands"
         extra_warnings.append(note)
 
     coords = {vid: village.coords for vid, village in villages.items()}
