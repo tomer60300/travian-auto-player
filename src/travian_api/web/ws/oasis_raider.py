@@ -27,6 +27,7 @@ from travian_api.operation_manager import OperationContext, operation_manager
 from travian_api.services.oasis_raider_service import OasisRaiderConfig, OasisRaiderService
 from travian_api.web.log_broadcast import log_stream_manager
 from travian_api.web.sessions import TravianSession, session_manager
+from travian_api.web.ws._loop_stealth import night_rest_pause, recurring_wait
 from travian_api.web.ws._resumable import subscribe_and_tail
 from travian_api.web.ws.manager import ws_manager
 
@@ -83,6 +84,11 @@ def _build_oasis_coro(config: OasisRaiderConfig):
         ctx.push({"type": "status", "data": {"state": "running"}})
         iteration = 0
         while not ctx.should_stop():
+            # Go quiet overnight and resume in the morning — graceful, not the
+            # fatal budget path below (same pattern as the farm loop).
+            if await night_rest_pause(ctx):
+                break
+
             try:
                 ctx.session.http_client.check_activity_budget()
             except ActivityBudgetExhausted as exc:
@@ -109,11 +115,11 @@ def _build_oasis_coro(config: OasisRaiderConfig):
             if ctx.should_stop() or config.repeat_interval_seconds <= 0:
                 break
 
-            # Stealth: micro-jitter the recurring interval so the request
-            # bursts don't sit on perfect second boundaries indefinitely.
-            from travian_api.stealth.timing import HumanTiming as _HT
-
-            wait_secs = _HT.micro_jitter(float(config.repeat_interval_seconds), 0.10)
+            # Heavy-tailed, tempo-scaled inter-sweep wait (shared with the farm
+            # loop): ±10% micro-jitter on a fixed interval still leaves a sharp
+            # periodogram peak at repeat_interval, so the whole cadence is
+            # replaced by a bursty draw whose expected value is the interval.
+            wait_secs = recurring_wait(ctx, float(config.repeat_interval_seconds))
             await send_log(
                 "RECURRING",
                 "⏱️",
@@ -122,9 +128,8 @@ def _build_oasis_coro(config: OasisRaiderConfig):
             )
             ctx.push({"type": "status", "data": {"state": "sleeping"}})
 
-            # round + 1s floor: micro_jitter on a 1s configured interval can
-            # land below 1.0; int() would truncate to 0 and create a tight
-            # busy loop.
+            # 1s floor: recurring_wait already floors at 1.0, and round() keeps
+            # a whole-second wait for the countdown display.
             stopped_during_sleep = await ctx.wait_or_stop(max(1, round(wait_secs)))
             if stopped_during_sleep:
                 break

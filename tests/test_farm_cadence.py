@@ -9,7 +9,7 @@ pins the expected value near the interval so that regression can't recur.
 
 from types import SimpleNamespace
 
-from travian_api.web.ws.farm_ws import _next_cycle_wait
+from travian_api.web.ws._loop_stealth import recurring_wait as _next_cycle_wait
 
 
 class _StubClient:
