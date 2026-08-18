@@ -48,3 +48,17 @@ def test_pauses_and_resumes_when_in_window():
 def test_stop_during_pause_breaks_the_loop():
     ctx = _Ctx(rest_seconds=3600, stop_after=1)
     assert asyncio.run(night_rest_pause(ctx)) is True
+
+
+def test_custom_announce_replaces_the_default_info_push():
+    # A loop whose UI has no "info" case passes its own announce; the default
+    # info frame must NOT be pushed then (it would be invisible in that UI).
+    ctx = _Ctx(rest_seconds=30)
+    seen = []
+
+    async def announce(hours):
+        seen.append(hours)
+
+    asyncio.run(night_rest_pause(ctx, announce=announce))
+    assert seen and abs(seen[0] - 30 / 3600) < 1e-6
+    assert not any(m.get("type") == "info" for m in ctx.pushed)

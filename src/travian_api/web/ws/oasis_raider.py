@@ -83,11 +83,26 @@ def _build_oasis_coro(config: OasisRaiderConfig):
 
         ctx.push({"type": "status", "data": {"state": "running"}})
         iteration = 0
+
+        # Announce a night pause in the oasis UI's own vocabulary: send_log is
+        # both visible in the UI and mirrored to the log stream (its message
+        # switch has no "info" case), and the sleeping/running status keeps the
+        # indicator honest rather than stuck on "running" through the night.
+        async def _announce_rest(hours: float) -> None:
+            await send_log(
+                "RECURRING", "🌙", f"Night rest — pausing ~{hours:.1f}h, resuming in the morning."
+            )
+            ctx.push({"type": "status", "data": {"state": "sleeping"}})
+
         while not ctx.should_stop():
             # Go quiet overnight and resume in the morning — graceful, not the
-            # fatal budget path below (same pattern as the farm loop).
-            if await night_rest_pause(ctx):
-                break
+            # fatal budget path below. Skipped on the first iteration: an
+            # operator starting it at night gets one sweep now (clearly awake),
+            # then the loop rests, vs a multi-hour sleep before any work.
+            if iteration > 0:
+                if await night_rest_pause(ctx, announce=_announce_rest):
+                    break
+                ctx.push({"type": "status", "data": {"state": "running"}})
 
             try:
                 ctx.session.http_client.check_activity_budget()

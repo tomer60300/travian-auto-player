@@ -412,7 +412,11 @@ class ActivityScheduler:
         hour = now.hour + now.minute / 60.0 + now.second / 3600.0
         remaining_h = (self._night_end_hour - hour) % 24.0
         if remaining_h <= 0.0:
-            remaining_h = 24.0  # safety net; is_rest_window already excludes the edge
+            # Edge/rounding case is_rest_window's exclusive bound didn't align
+            # with. Return no pause rather than a full-day sleep: 0 lets the
+            # loop resume (a sweep at the window edge is harmless), a 24h
+            # fallback would take the account dark for a day.
+            return 0.0
         buffer_s = random.uniform(0.0, 2700.0)  # up to 45 min so wake isn't a constant
         return remaining_h * 3600.0 + buffer_s
 

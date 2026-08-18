@@ -151,8 +151,11 @@ def _build_farm_run_coro(
                 break
 
             # Go quiet overnight and resume in the morning — a graceful pause,
-            # not the fatal budget path below (see night_rest_pause).
-            if await night_rest_pause(ctx):
+            # not the fatal budget path below (see night_rest_pause). Skipped on
+            # the first iteration: an operator starting the loop at night gets
+            # one sweep now (they're clearly awake), then the loop rests — vs a
+            # multi-hour sleep before any work, which reads as a hang.
+            if cycle > 0 and await night_rest_pause(ctx):
                 break
 
             try:
@@ -296,8 +299,11 @@ def _build_farm_run_all_coro(
                 break
 
             # Go quiet overnight and resume in the morning — a graceful pause,
-            # not the fatal budget path below (see night_rest_pause).
-            if await night_rest_pause(ctx):
+            # not the fatal budget path below (see night_rest_pause). Skipped on
+            # the first iteration: an operator starting the loop at night gets
+            # one sweep now (they're clearly awake), then the loop rests — vs a
+            # multi-hour sleep before any work, which reads as a hang.
+            if cycle > 0 and await night_rest_pause(ctx):
                 break
 
             try:

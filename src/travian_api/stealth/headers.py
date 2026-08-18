@@ -141,12 +141,16 @@ class BrowserHeaders:
         return headers
 
     def for_xhr(self, path: str = "") -> Dict[str, str]:
-        """Headers for an XHR/fetch request (AJAX).
+        """Headers for a legacy-XHR request (the endpoints Travian's client
+        drives via XMLHttpRequest, which set ``X-Requested-With``).
 
-        Carries ``Origin`` like ``for_json_post``: Chrome sends ``Origin`` on
-        every non-GET/HEAD fetch, same-origin included, so an XHR POST/DELETE
-        without it (while the JSON POST has one) is both wrong and internally
-        inconsistent. No ``Connection`` header for the h2 reason above.
+        ``Origin`` + ``Sec-Fetch-*`` + ``X-Requested-With`` coexist on purpose:
+        a real jQuery/XHR POST carries all three — the browser adds Origin (on
+        any same-origin non-GET) and Sec-Fetch-* to every request, and the page
+        sets X-Requested-With. This is NOT the plain-``fetch()`` shape (fetch
+        never adds X-Requested-With) — that traffic uses ``for_json_post``
+        instead. Dropping Origin here would leave an XHR POST without the Origin
+        Chrome always sends. No ``Connection`` header for the h2 reason above.
         """
         headers = {
             "User-Agent": self._ua.ua,

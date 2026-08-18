@@ -12,6 +12,8 @@ Two tells they share, factored here so there is one implementation:
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
 from travian_api.operation_manager import OperationContext
 from travian_api.stealth.timing import HumanTiming
 
@@ -31,7 +33,10 @@ def recurring_wait(ctx: OperationContext, interval: float) -> float:
     return max(1.0, hc.tempo_scale(HumanTiming.delay(interval, variance_factor=1.0)))
 
 
-async def night_rest_pause(ctx: OperationContext) -> bool:
+async def night_rest_pause(
+    ctx: OperationContext,
+    announce: Callable[[float], Awaitable[None]] | None = None,
+) -> bool:
     """Pause until morning if the account is in its night-rest window.
 
     Returns True only if a stop signal arrived during the pause (so the caller
@@ -39,16 +44,26 @@ async def night_rest_pause(ctx: OperationContext) -> bool:
     window). A graceful pause, NOT the fatal budget-exhausted path. WS liveness
     across the long sleep is covered by the operation manager's global
     keepalive. Polls the stop event in chunks so a captcha-stop is honored.
+
+    ``announce`` lets each loop surface the pause in ITS own frontend's message
+    vocabulary (the farm and oasis UIs handle different frame types) and mirror
+    it to the log stream; it receives the pause length in hours. Without it a
+    plain ``info`` frame is pushed — a loop whose UI has no ``info`` case must
+    pass its own announce or the multi-hour pause is invisible.
     """
     rest = ctx.session.http_client.rest_pause_seconds()
     if rest <= 0:
         return False
-    ctx.push(
-        {
-            "type": "info",
-            "message": f"Night rest — pausing ~{rest / 3600:.1f}h, resuming in the morning.",
-        }
-    )
+    hours = rest / 3600.0
+    if announce is not None:
+        await announce(hours)
+    else:
+        ctx.push(
+            {
+                "type": "info",
+                "message": f"Night rest — pausing ~{hours:.1f}h, resuming in the morning.",
+            }
+        )
     remaining = rest
     chunk = 15.0
     while remaining > 0:

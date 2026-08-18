@@ -52,9 +52,16 @@ def _impersonate_for(chrome_major: int) -> str:
 
 
 def _sec_ch_ua_for(chrome_major: int) -> str:
-    """Build sec-ch-ua header value from Chrome major version."""
+    """Build sec-ch-ua header value from Chrome major version.
+
+    The GREASE brand uses the CURRENT-era token (``"Not?A_Brand";v="24"``), not
+    the legacy ``"Not-A.Brand";v="99"`` from the Chrome ~100 era — a v="99"
+    GREASE on a Chrome 14x UA is an obvious mismatch. The GREASE is
+    spec-randomized and servers must ignore it, so a plausible current token is
+    what matters; the real brand versions track the UA major so they can't skew.
+    """
     return (
-        f'"Chromium";v="{chrome_major}", "Google Chrome";v="{chrome_major}", "Not-A.Brand";v="99"'
+        f'"Chromium";v="{chrome_major}", "Google Chrome";v="{chrome_major}", "Not?A_Brand";v="24"'
     )
 
 
