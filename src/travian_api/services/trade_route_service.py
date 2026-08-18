@@ -112,12 +112,13 @@ class TradeRouteService:
         """Existing trade routes on a village's marketplace, visibility preserved.
 
         Both visible and hidden entries are returned, each tagged with
-        ``visible``. Callers must never *act on* an invisible route (disabling a
-        route a human can't see is a pure bot signal — it is a honeypot), but a
-        hidden route still occupies its destination, so its coordinates must be
-        honored when deduplicating so we don't stack a visible duplicate on top
-        of a honeypot. Parsing is best-effort until a real marketplace page is
-        captured; an unparseable page yields an empty list rather than a guess.
+        ``visible``, so the caller can tell them apart. Hidden entries are
+        honeypots — a human can't see them — and the reconciler ignores them
+        entirely: it never disables one (acting on an invisible route is a pure
+        bot signal) and never lets one influence a create decision (conditioning
+        behavior on invisible data is the same tell in reverse). Parsing is
+        best-effort until a real marketplace page is captured; an unparseable
+        page yields an empty list rather than a guess.
         """
         html = await self.open_marketplace(village_id)
         from ..parsers.html_parser import parse_trade_routes

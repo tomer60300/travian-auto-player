@@ -11,6 +11,7 @@ guard.
 """
 
 import asyncio
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,7 @@ from travian_api.services.trade_route_service import (
     TradeRoutePayloadUnverified,
     TradeRouteService,
 )
+from travian_api.web.routes import distribution as dist_module
 from travian_api.web.routes.distribution import ExecuteRequest, ForeignTarget, post_execute
 
 
@@ -70,22 +72,65 @@ def _exec_body(dry_run=True, disable_existing=True, max_routes_per_run=3, margin
     return body
 
 
-def _session(live_enabled=False):
-    return SimpleNamespace(trade_route_service=SimpleNamespace(live_enabled=live_enabled))
+_USER = SimpleNamespace(id=1)
+
+
+class _SessMgr:
+    """Stand-in for the module-level session_manager the endpoint reads."""
+
+    def __init__(self, svc, connected):
+        self._svc = svc
+        self._connected = connected
+
+    def get(self, _uid):
+        if not self._connected:
+            return None
+        return SimpleNamespace(trade_route_service=self._svc)
+
+
+def _execute(body, *, svc=None, connected=True):
+    """Call post_execute with session_manager pointed at a fake session.
+
+    ``connected=False`` simulates a disconnected user (no session); otherwise
+    the endpoint sees a session whose trade_route_service is ``svc``.
+    """
+    mgr = _SessMgr(svc, connected)
+    with _patch(dist_module, "session_manager", mgr):
+        return asyncio.run(post_execute(body, _USER))
+
+
+@contextlib.contextmanager
+def _patch(obj, name, value):
+    original = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, original)
+
+
+def _dry_svc(live_enabled=False):
+    # Dry-run only reads `live_enabled`; any method call would raise here.
+    return SimpleNamespace(live_enabled=live_enabled)
 
 
 class TestDryRun:
     def test_previews_routes_without_touching_the_game(self):
-        # A session with only `live_enabled` — if the endpoint called any service
-        # method, this stub would raise AttributeError.
-        res = asyncio.run(post_execute(_exec_body(dry_run=True), _session()))
+        res = _execute(_exec_body(dry_run=True), svc=_dry_svc())
         assert res.dry_run is True
         assert res.created == 0
         assert res.actions, "the plan ships a tribute, so there is at least one route"
         assert all(a.status in ("would_create", "deferred") for a in res.actions)
 
+    def test_preview_works_while_disconnected(self):
+        # Like /plan, the zero-request preview must not require a live session.
+        res = _execute(_exec_body(dry_run=True), connected=False)
+        assert res.dry_run is True
+        assert res.live_enabled is False
+        assert res.actions
+
     def test_resolves_foreign_sink_coordinates(self):
-        res = asyncio.run(post_execute(_exec_body(dry_run=True), _session()))
+        res = _execute(_exec_body(dry_run=True), svc=_dry_svc())
         tribute = [a for a in res.actions if a.destination < 0]
         assert tribute, "the foreign tribute row must be present"
         # Coordinates come from the operator-entered foreign target (40|40),
@@ -94,29 +139,34 @@ class TestDryRun:
         assert tribute[0].destination_name == "Ally-Keep"
 
     def test_per_run_cap_defers_the_rest(self):
-        res = asyncio.run(post_execute(_exec_body(dry_run=True, max_routes_per_run=1), _session()))
+        res = _execute(_exec_body(dry_run=True, max_routes_per_run=1), svc=_dry_svc())
         would = [a for a in res.actions if a.status == "would_create"]
         deferred = [a for a in res.actions if a.status == "deferred"]
         assert len(would) <= 1
         assert res.remaining == len(deferred)
 
     def test_disable_note_is_surfaced_but_no_request_made(self):
-        res = asyncio.run(post_execute(_exec_body(dry_run=True, disable_existing=True), _session()))
+        res = _execute(_exec_body(dry_run=True, disable_existing=True), svc=_dry_svc())
         assert any("disabled first" in d for d in res.disables)
 
 
 class TestLiveGate:
     def test_live_without_the_flag_is_409(self):
         with pytest.raises(HTTPException) as exc:
-            asyncio.run(post_execute(_exec_body(dry_run=False), _session(live_enabled=False)))
+            _execute(_exec_body(dry_run=False), svc=_dry_svc(live_enabled=False))
         assert exc.value.status_code == 409
         assert "payload" in exc.value.detail.lower()
+
+    def test_live_without_a_session_is_403(self):
+        with pytest.raises(HTTPException) as exc:
+            _execute(_exec_body(dry_run=False), connected=False)
+        assert exc.value.status_code == 403
 
 
 def _desired_routes():
     """The routes the plan wants — discovered via a zero-request dry-run — so
     the live tests can seed marketplaces without hard-coding optimizer output."""
-    res = asyncio.run(post_execute(_exec_body(dry_run=True, max_routes_per_run=50), _session()))
+    res = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
     return [a for a in res.actions if a.status in ("would_create", "deferred")]
 
 
@@ -130,10 +180,9 @@ class _FakeLiveSvc:
         self._create_status = create_status
         self.created = []  # PlannedRoute objects a create was ATTEMPTED for
         self.disabled = []  # (origin, sorted tuple of disabled dest coords)
+        self.listed = []  # origin ids whose marketplace was READ
 
     def origin_lock(self, vid):
-        import contextlib
-
         @contextlib.asynccontextmanager
         async def _cm():
             yield
@@ -141,6 +190,7 @@ class _FakeLiveSvc:
         return _cm()
 
     async def list_existing_routes(self, vid):
+        self.listed.append(vid)
         return list(self._existing.get(vid, []))
 
     async def disable_routes(self, vid, routes):
@@ -162,8 +212,7 @@ class _FakeLiveSvc:
 
 class TestLiveExecution:
     def _run(self, svc, **kw):
-        body = _exec_body(dry_run=False, **kw)
-        return asyncio.run(post_execute(body, SimpleNamespace(trade_route_service=svc)))
+        return _execute(_exec_body(dry_run=False, **kw), svc=svc)
 
     def test_only_missing_routes_are_created(self):
         desired = _desired_routes()
@@ -213,7 +262,9 @@ class TestLiveExecution:
         assert (99, 98) in disabled_coords, "a stale route must be disabled"
         assert plan_dest not in disabled_coords, "a route the plan still wants must be kept"
 
-    def test_hidden_honeypot_blocks_duplicate_and_is_never_disabled(self):
+    def test_hidden_honeypot_is_ignored_entirely(self):
+        # A hidden route is invisible to a human, so the reconciler behaves like
+        # a human who can't see it: it neither blocks a create nor gets disabled.
         desired = _desired_routes()
         a = desired[0]
         existing = {
@@ -225,14 +276,23 @@ class TestLiveExecution:
         svc = _FakeLiveSvc(existing=existing)
         self._run(svc, disable_existing=True, max_routes_per_run=50)
         created_coords = {(r.dest_x, r.dest_y) for r in svc.created}
-        assert (a.dest_x, a.dest_y) not in created_coords, "must not duplicate onto a honeypot"
+        assert (a.dest_x, a.dest_y) in created_coords, "a route the plan wants is still created"
         disabled_coords = {c for _, coords in svc.disabled for c in coords}
         assert (97, 96) not in disabled_coords, "a hidden honeypot must never be disabled"
 
     def test_cap_bounds_create_attempts_even_on_failure(self):
         svc = _FakeLiveSvc(create_status="failed")  # failures must not lift the cap
-        self._run(svc, max_routes_per_run=1)
+        res = self._run(svc, max_routes_per_run=1)
         assert len(svc.created) <= 1, "the cap bounds create ATTEMPTS, not successes"
+        # A failed create is still outstanding work, so it counts toward remaining.
+        assert res.remaining >= 1
+
+    def test_reads_stop_once_the_cap_is_reached(self):
+        # Not just creates: marketplace READS (and disables) are bounded per run,
+        # so one run touches only the villages it needs — not a full sweep.
+        svc = _FakeLiveSvc()  # empty marketplaces → the first origin has work
+        self._run(svc, max_routes_per_run=1)
+        assert len(svc.listed) == 1, "no further marketplaces are read after the cap"
 
 
 class TestServiceGuards:

@@ -61,7 +61,7 @@ from travian_api.services.distribution.storage import (
 from travian_api.services.trade_route_service import PlannedRoute
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User
-from travian_api.web.sessions import TravianSession, get_live_travian_session
+from travian_api.web.sessions import TravianSession, get_live_travian_session, session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -1195,23 +1195,28 @@ async def post_plan(
 @router.post("/execute", response_model=ExecuteResponse)
 async def post_execute(
     body: ExecuteRequest,
-    session: TravianSession = Depends(get_live_travian_session),
+    user: User = Depends(get_current_user),
 ):
     """Create the plan's trade routes in-game — or preview them with dry_run.
 
     Recomputes the plan server-side from the same inputs /plan uses (it does
-    NOT trust client-sent rows), then, per origin village, optionally disables
-    existing routes and creates the new ones. Deliberately rate-capped to a few
-    routes per run: a human sets routes up over days, not in one machine sweep,
-    so the rest come back as ``remaining`` for a later run and origins are
-    visited in randomized order. ``dry_run`` (default) previews with ZERO game
-    requests and never touches the session.
+    NOT trust client-sent rows), then, per origin village, disables the routes
+    the plan no longer wants and creates the ones still missing. Deliberately
+    rate-capped to a few routes per run: a human sets routes up over days, not
+    in one machine sweep, so the run stops once the cap is reached (leaving the
+    rest as ``remaining`` for a later run) and origins are visited in randomized
+    order. ``dry_run`` (default) previews with ZERO game requests and, like
+    /plan, is auth-only — it never resolves a live session so it works offline.
     """
     account = await _plan_account(body)
     plan = account.plan
     names = account.names
     coords = account.coords
-    svc = session.trade_route_service
+    # Resolve the session lazily (not via a dependency) so dry-run works offline
+    # like /plan; the live path below requires a real connection.
+    session = session_manager.get(user.id)
+    svc = session.trade_route_service if session is not None else None
+    live_enabled = bool(svc is not None and svc.live_enabled)
     warnings = list(account.warnings)
 
     # Each plan row is one route from a real origin village's marketplace to a
@@ -1276,7 +1281,7 @@ async def post_execute(
         )
         return ExecuteResponse(
             dry_run=True,
-            live_enabled=svc.live_enabled,
+            live_enabled=live_enabled,
             actions=actions,
             disables=disables,
             created=0,
@@ -1285,7 +1290,15 @@ async def post_execute(
         )
 
     # ── Live ───────────────────────────────────────────────────────────
-    if not svc.live_enabled:
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Not connected. Reconnect first — live trade-route execution "
+                "never spends login traffic implicitly. Use dry_run to preview."
+            ),
+        )
+    if not live_enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -1301,12 +1314,14 @@ async def post_execute(
     #     run naturally advances to the routes still absent — never re-creating
     #     the same routes each run (a daily rebuild-the-same-routes bot signal);
     #   * disable only VISIBLE routes the plan no longer wants — never a route we
-    #     are about to (re)create, and never a hidden honeypot;
-    #   * a route already at a destination (INCLUDING a hidden honeypot) blocks a
-    #     duplicate create there, but honeypots are never disabled.
-    # The per-run cap bounds create ATTEMPTS across the whole run, so a run of
-    # failures can't fan out into unbounded requests; routes past the cap defer
-    # to the next run (where they are still missing, so they get picked up).
+    #     are about to (re)create;
+    #   * hidden entries are honeypots: a human can't see them, so we neither act
+    #     on them (never disabled) nor let them influence us (not deduped
+    #     against) — behaving exactly like a human who cannot see them.
+    # The whole run stops once `cap` creates have been attempted: not just the
+    # creates but the marketplace READS and disable writes are bounded to the
+    # origins needed this run, so one run touches only a few villages (the human
+    # "a few at a time" model), the rest deferred to a later run.
     desired_by_origin: dict[int, list[tuple[SheetRow, PlannedRoute]]] = {}
     for row, route in items:
         desired_by_origin.setdefault(route.origin_village_id, []).append((row, route))
@@ -1316,13 +1331,21 @@ async def post_execute(
     actions: list[RouteActionResponse] = []
     disables: list[str] = []
     attempts = 0
-    deferred_count = 0
+    failed = 0
+    deferred: list[tuple[SheetRow, PlannedRoute]] = []
     for origin in origins:
+        if attempts >= cap:
+            # Cap reached: defer the rest of this origin's plan AND every
+            # remaining origin without reading their marketplaces.
+            deferred.extend(desired_by_origin[origin])
+            continue
         async with svc.origin_lock(origin):
             existing = await svc.list_existing_routes(origin)
             desired = desired_by_origin[origin]
             desired_coords = {(route.dest_x, route.dest_y) for _, route in desired}
-            occupied = {(e.dest_x, e.dest_y) for e in existing}  # incl. hidden honeypots
+            # Only routes a human can see count as "already there" / disable-able;
+            # hidden honeypots are ignored entirely.
+            visible_coords = {(e.dest_x, e.dest_y) for e in existing if e.visible}
 
             if body.disable_existing:
                 stale = [
@@ -1335,23 +1358,29 @@ async def post_execute(
                     )
 
             for row, route in desired:
-                if (route.dest_x, route.dest_y) in occupied:
+                if (route.dest_x, route.dest_y) in visible_coords:
                     actions.append(_action(row, route, "skipped", "route already active"))
                     continue
                 if attempts >= cap:
-                    actions.append(_action(row, route, "deferred"))
-                    deferred_count += 1
+                    deferred.append((row, route))
                     continue
                 attempts += 1
                 result = await svc.create_route(route)
+                if result.status == "failed":
+                    failed += 1
                 actions.append(_action(row, route, result.status, result.detail))
+
+    actions += [_action(row, route, "deferred") for row, route in deferred]
 
     return ExecuteResponse(
         dry_run=False,
-        live_enabled=svc.live_enabled,
+        live_enabled=live_enabled,
         actions=actions,
         disables=disables,
+        # `remaining` = work still outstanding for a later run: routes past the
+        # cap PLUS any that failed this run (they'll show as missing again next
+        # run), so the summary never under-reports a partially-failed run.
         created=sum(1 for a in actions if a.status == "created"),
-        remaining=deferred_count,
+        remaining=len(deferred) + failed,
         warnings=warnings,
     )

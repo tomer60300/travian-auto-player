@@ -1846,6 +1846,13 @@ export default function ResourcePlanner() {
                         : `Created ${execResult.created} route(s)` +
                           (execResult.remaining ? `, ${execResult.remaining} left.` : '.')}
                     </p>
+                    {execResult.dry_run && (
+                      <p className="text-xs text-secondary mb-2">
+                        Preview assumes an empty marketplace. The live run reads each village
+                        first and only creates routes that are missing (disabling ones the plan no
+                        longer wants), so it may create fewer than shown.
+                      </p>
+                    )}
                     {execResult.disables.length > 0 && (
                       <ul className="text-xs text-secondary list-disc list-inside mb-2">
                         {execResult.disables.map((d, i) => (
