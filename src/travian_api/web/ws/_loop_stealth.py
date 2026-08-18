@@ -107,4 +107,11 @@ async def night_rest_pause(
                 "message": f"Night rest — pausing ~{hours:.1f}h, resuming in the morning.",
             }
         )
+    # Re-clamp after the (possibly slow, awaited) announce so the sleep still
+    # ends by the deadline — keeps deadline and an I/O-doing announce composable
+    # even though no current caller passes both.
+    if deadline is not None:
+        rest = min(rest, deadline - time.time())
+        if rest <= 0:
+            return False
     return await interruptible_sleep(ctx, rest, chunk=15.0)
