@@ -565,6 +565,10 @@ export default function ResourcePlanner() {
   const executePlan = useCallback(
     async (dryRun) => {
       const requestedFor = accountKey
+      // Same staleness guard buildPlan uses: if the operator edits an input
+      // while a preview/execute is in flight, the revision bumps and the
+      // response must not be shown against the now-changed plan.
+      const requestedRev = planInputRev.current
       setExecuting(true)
       try {
         const res = await api.post('/distribution/execute', {
@@ -574,6 +578,7 @@ export default function ResourcePlanner() {
           max_routes_per_run: 3,
         })
         if (requestedFor !== currentAccountKey()) return
+        if (requestedRev !== planInputRev.current) return
         setExecResult(res.data)
         if (!dryRun) {
           const left = res.data.remaining ? `, ${res.data.remaining} left for a later run` : ''

@@ -1253,26 +1253,33 @@ async def post_execute(
 
     cap = body.max_routes_per_run
 
+    # Select WHICH routes run this session ONCE, so the dry-run preview and the
+    # live run can't diverge. The first `cap` routes are created this run; the
+    # rest are deferred. Only origins that actually get a create are disabled —
+    # disabling an origin we then defer would strip its working routes with no
+    # replacement, and the cap counts SELECTED routes (not successes) so a run
+    # can never fire more than `cap` create requests.
+    to_create = items[:cap]
+    deferred = items[cap:]
+    origins_to_disable = (
+        sorted({r.origin_village_id for _, r in to_create}) if body.disable_existing else []
+    )
+
     if body.dry_run:
-        actions = [
-            _action(row, route, "would_create" if i < cap else "deferred")
-            for i, (row, route) in enumerate(items)
+        actions = [_action(row, route, "would_create") for row, route in to_create]
+        actions += [_action(row, route, "deferred") for row, route in deferred]
+        disables = [
+            f"{village_label(o, names)}: existing routes would be disabled first "
+            f"(count read at execution)"
+            for o in origins_to_disable
         ]
-        disables: list[str] = []
-        if body.disable_existing:
-            origins = sorted({r.origin_village_id for _, r in items[:cap]})
-            disables = [
-                f"{village_label(o, names)}: existing routes would be disabled first "
-                f"(count read at execution)"
-                for o in origins
-            ]
         return ExecuteResponse(
             dry_run=True,
             live_enabled=svc.live_enabled,
             actions=actions,
             disables=disables,
             created=0,
-            remaining=max(0, len(items) - cap),
+            remaining=len(deferred),
             warnings=warnings,
         )
 
@@ -1287,43 +1294,47 @@ async def post_execute(
             ),
         )
 
-    by_origin: dict[int, list[tuple[object, PlannedRoute]]] = {}
-    for row, route in items:
-        by_origin.setdefault(route.origin_village_id, []).append((row, route))
-    origins = list(by_origin)
-    random.shuffle(origins)  # not a predictable village-id sweep
+    # Process only the SELECTED routes, grouped by origin, in randomized origin
+    # order (not a predictable village-id sweep). Deferred routes are reported
+    # unchanged — never disabled, never touched.
+    selected_by_origin: dict[int, list[tuple[object, PlannedRoute]]] = {}
+    for row, route in to_create:
+        selected_by_origin.setdefault(route.origin_village_id, []).append((row, route))
+    origins = list(selected_by_origin)
+    random.shuffle(origins)
 
-    actions = []
+    actions: list[RouteActionResponse] = []
     disables = []
-    created = 0
     for origin in origins:
         async with svc.origin_lock(origin):
-            existing = await svc.list_existing_routes(origin) if body.disable_existing else []
+            existing = await svc.list_existing_routes(origin)
             if body.disable_existing:
                 disabled = await svc.disable_routes(origin, existing)
                 if disabled is not None:
                     disables.append(
                         f"{village_label(origin, names)}: {disabled.status} {disabled.detail}".strip()
                     )
-            existing_coords = {(e.dest_x, e.dest_y) for e in existing}
-            for row, route in by_origin[origin]:
-                if created >= cap:
-                    actions.append(_action(row, route, "deferred"))
-                    continue
-                if (route.dest_x, route.dest_y) in existing_coords:
-                    actions.append(_action(row, route, "skipped", "route already exists"))
+                # Disabled them all, so recreate every selected route — do NOT
+                # skip a destination just because it had a (now-disabled) route.
+                skip_coords: set[tuple[int, int]] = set()
+            else:
+                # Not disabling: leave an already-active route in place rather
+                # than duplicate it (resumability across runs).
+                skip_coords = {(e.dest_x, e.dest_y) for e in existing}
+            for row, route in selected_by_origin[origin]:
+                if (route.dest_x, route.dest_y) in skip_coords:
+                    actions.append(_action(row, route, "skipped", "route already active"))
                     continue
                 result = await svc.create_route(route)
                 actions.append(_action(row, route, result.status, result.detail))
-                if result.status == "created":
-                    created += 1
+    actions += [_action(row, route, "deferred") for row, route in deferred]
 
     return ExecuteResponse(
         dry_run=False,
         live_enabled=svc.live_enabled,
         actions=actions,
         disables=disables,
-        created=created,
-        remaining=sum(1 for a in actions if a.status == "deferred"),
+        created=sum(1 for a in actions if a.status == "created"),
+        remaining=len(deferred),
         warnings=warnings,
     )
