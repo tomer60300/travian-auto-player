@@ -14,12 +14,22 @@ Two review findings are pinned here:
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from travian_api.stealth.persona import (
     _SEC_CH_UA_BY_MAJOR,
     _sec_ch_ua_for,
     build_persona,
     load_persona,
 )
+
+
+def _ua(major):
+    return (
+        f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    )
+
 
 _UA_146 = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -93,3 +103,51 @@ class TestPersistedPersonaNormalization:
         assert persona.salt == "stablesalt123456", "salt must be preserved"
         # created_at is untouched so the 365-day TTL is not reset.
         assert json.loads(path.read_text())["created_at"] == created
+
+
+class TestLegacyPersonaMigration:
+    """Personas persisted by an earlier revision used Chrome 136/133/131 UAs.
+    curl_cffi still impersonates those exactly, so they must stay coherent on
+    load (UA major == TLS target), not fall back to chrome146 (#57). A UA major
+    with no impersonation target at all is rotated to a fresh identity."""
+
+    def _write(self, path, ua, sec_ch_ua):
+        path.write_text(
+            json.dumps(
+                {
+                    "user_agent": ua,
+                    "impersonate": "chrome146",  # what the buggy fallback wrote
+                    "sec_ch_ua": sec_ch_ua,
+                    "sec_ch_ua_platform": '"Windows"',
+                    "sec_ch_ua_mobile": "?0",
+                    "accept_language": "en-US,en;q=0.9",
+                    "is_chromium": True,
+                    "salt": "legacysalt000001",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "server_url": _SERVER,
+                }
+            )
+        )
+
+    @pytest.mark.parametrize("major", [136, 133, 131])
+    def test_legacy_supported_major_stays_coherent(self, tmp_path, major):
+        path = tmp_path / ".travian_persona.json"
+        legacy = f'"Chromium";v="{major}", "Google Chrome";v="{major}", "Not-A.Brand";v="99"'
+        self._write(path, _ua(major), legacy)
+
+        persona = load_persona(path, server_url=_SERVER)
+
+        assert persona is not None, "a supported legacy major must NOT be rotated away"
+        assert persona.impersonate == f"chrome{major}", "UA major and TLS target must agree"
+        assert f'v="{major}"' in persona.sec_ch_ua
+        assert persona.user_agent == _ua(major)
+        assert persona.salt == "legacysalt000001"
+
+    def test_unsupported_major_is_rotated(self, tmp_path):
+        # Chrome 120 has no entry in _IMPERSONATE_MAP → cannot be coherent →
+        # load returns None so the caller builds a fresh, coherent persona.
+        path = tmp_path / ".travian_persona.json"
+        self._write(
+            path, _ua(120), '"Chromium";v="120", "Google Chrome";v="120", "Not-A.Brand";v="99"'
+        )
+        assert load_persona(path, server_url=_SERVER) is None, "an unmapped major must rotate"

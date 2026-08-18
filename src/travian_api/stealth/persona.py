@@ -30,12 +30,21 @@ _CHROME_WINDOWS_UAS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
 ]
 
-# Map Chrome major version -> curl_cffi impersonate target.
-# Only exact matches — no version skew between UA and TLS fingerprint.
+# Map Chrome major version -> curl_cffi impersonate target. Only EXACT matches,
+# so a persona's UA major always has a TLS fingerprint of the same version — no
+# skew. Fresh personas are built from the newest three (see _CHROME_WINDOWS_UAS),
+# but the older 131/133/136 remain mapped because an EARLIER revision persisted
+# personas with those UAs: curl_cffi 0.15.0 still impersonates them exactly, so
+# on load they stay coherent (UA 136 -> chrome136 TLS) instead of falling back to
+# chrome146 and creating a UA/TLS-major mismatch. A UA major absent from this map
+# cannot be impersonated coherently and is ROTATED to a fresh identity on load.
 _IMPERSONATE_MAP: dict[int, str] = {
     146: "chrome146",
     145: "chrome145",
     142: "chrome142",
+    136: "chrome136",
+    133: "chrome133",
+    131: "chrome131",
 }
 _IMPERSONATE_FALLBACK = "chrome146"
 
@@ -264,6 +273,17 @@ def load_persona(
         # created_at are preserved so cookies see no identity rotation and the TTL
         # is not reset.
         major = _chrome_major(data["user_agent"])
+        if major and major not in _IMPERSONATE_MAP:
+            # The persisted UA major has no EXACT curl_cffi impersonation target,
+            # so its UA/client-hints cannot be made coherent with the TLS
+            # fingerprint (they would skew to the chrome146 fallback). Rotate to a
+            # fresh, fully-coherent identity — one deliberate transition — rather
+            # than keep serving a UA-major/TLS-major mismatch for the whole TTL.
+            # Returning None makes the caller build and persist a fresh persona.
+            logger.info(
+                "Persona UA major %s has no impersonation target — rotating identity", major
+            )
+            return None
         canonical_sec_ch_ua = _sec_ch_ua_for(major) if major else data["sec_ch_ua"]
         canonical_impersonate = _impersonate_for(major) if major else data["impersonate"]
         persona = Persona(
