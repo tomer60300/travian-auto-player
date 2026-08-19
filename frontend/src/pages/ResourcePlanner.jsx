@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
+import useLogStore from '../stores/logStore'
 import api from '../api'
 
 // Owned state the game will not tell us, kept per village. Trade Office level
@@ -16,6 +17,10 @@ const LS_SNAPSHOT = 'planner_snapshot'
 // fast-changing production/stock/merchant state, so a restored one must show its
 // age and go stale rather than pass silently as live.
 const LS_SNAPSHOT_AT = 'planner_snapshot_at'
+// Durable record of the last LIVE trade-route run. The in-page result panel is
+// cleared whenever planner inputs change, but a run that mutated the game must
+// stay auditable across input edits and reloads.
+const LS_LAST_RUN = 'planner_last_live_run'
 const SNAPSHOT_TTL_MS = 30 * 60 * 1000 // 30 minutes
 const LS_MERCHANT = 'planner_merchant_model'
 // Named allocation profiles (e.g. Day / Night). Trade Office and the merchant
@@ -378,6 +383,9 @@ export default function ResourcePlanner() {
   const [planning, setPlanning] = useState(false)
   const [execResult, setExecResult] = useState(null)
   const [executing, setExecuting] = useState(false)
+  // Durable audit of the last LIVE run (see LS_LAST_RUN): survives the input
+  // edits that clear execResult, and page reloads.
+  const [lastRun, setLastRun] = useState(null)
 
   const storageKey = useCallback(
     (base) => (accountKey ? `${base}::${accountKey}` : null),
@@ -415,6 +423,7 @@ export default function ResourcePlanner() {
       // the previous account's villages would act on stale data.
       setSnapshot(null)
       setSnapshotFetchedAt(null)
+      setLastRun(null)
       setUseStaleSnapshot(false)
       setTradeOffice({})
       setProfiles({ [DEFAULT_PROFILE]: {} })
@@ -430,6 +439,7 @@ export default function ResourcePlanner() {
     const storedActive = loadJson(`${LS_ACTIVE_PROFILE}::${accountKey}`, DEFAULT_PROFILE)
     setSnapshot(loadJson(`${LS_SNAPSHOT}::${accountKey}`, null))
     setSnapshotFetchedAt(loadJson(`${LS_SNAPSHOT_AT}::${accountKey}`, null))
+    setLastRun(loadJson(`${LS_LAST_RUN}::${accountKey}`, null))
     setUseStaleSnapshot(false)
     setTradeOffice(loadJson(`${LS_TRADE_OFFICE}::${accountKey}`, {}))
     setForeignTargets(loadJson(`${LS_FOREIGN}::${accountKey}`, []))
@@ -669,6 +679,48 @@ export default function ResourcePlanner() {
         }
         setExecResult(res.data)
         if (!dryRun) {
+          // A live run mutated the game, so record a human-readable audit entry
+          // (Activity Log, source "planner") AND persist it, because the in-page
+          // panel is cleared on the next input edit and lost on reload (#69).
+          const counts = res.data.actions.reduce((acc, a) => {
+            acc[a.status] = (acc[a.status] || 0) + 1
+            return acc
+          }, {})
+          const record = {
+            at: new Date().toISOString(),
+            account: requestedFor,
+            created: res.data.created,
+            remaining: res.data.remaining,
+            counts,
+            disables: res.data.disables || [],
+            problems: res.data.problems || [],
+            // Per-route outcomes, so an operator can reconstruct the run later.
+            routes: res.data.actions.map((a) => ({
+              from: a.origin_name,
+              to: a.destination_name,
+              at: `${a.dest_x}|${a.dest_y}`,
+              status: a.status,
+              detail: a.detail || '',
+            })),
+          }
+          saveJson(`${LS_LAST_RUN}::${requestedFor}`, record)
+          setLastRun(record)
+          const summary =
+            `Trade routes executed: ${res.data.created} created, ` +
+            Object.entries(counts)
+              .filter(([status]) => status !== 'created')
+              .map(([status, n]) => `${n} ${status}`)
+              .join(', ') +
+            `${res.data.disables?.length ? `, ${res.data.disables.length} disable action(s)` : ''}` +
+            `${res.data.problems?.length ? `, ${res.data.problems.length} problem(s)` : ''}`
+          useLogStore
+            .getState()
+            .addLog(
+              res.data.problems?.length ? 'warning' : 'success',
+              'planner',
+              summary,
+              record
+            )
           const left = res.data.remaining
             ? `, ${res.data.remaining} deferred to a later run`
             : ''
@@ -991,6 +1043,31 @@ export default function ResourcePlanner() {
         : snapshotAgeMs < 3_600_000
           ? `${Math.round(snapshotAgeMs / 60_000)}m old`
           : `${Math.round(snapshotAgeMs / 3_600_000)}h old`
+
+  // What going live will actually do, derived from the PREVIEW the operator is
+  // looking at, so the confirmation states real numbers rather than a vague
+  // "create these routes" (issue #67).
+  const previewCreates = execResult
+    ? execResult.actions.filter((a) => a.status === 'would_create')
+    : []
+  const plannedCreateCount = previewCreates.length
+  const plannedOriginCount = new Set(previewCreates.map((a) => a.origin)).size
+  const plannedSkipCount = execResult
+    ? execResult.actions.filter((a) => a.status === 'skipped').length
+    : 0
+  const liveConfirmMessage = [
+    'Execute this plan against Travian now?',
+    '',
+    `• Disable existing routes this plan no longer wants, on ${plannedOriginCount} origin village(s)`,
+    `• Create up to ${plannedCreateCount} new route(s)`,
+    plannedSkipCount ? `• Leave ${plannedSkipCount} already-active route(s) untouched` : null,
+    execResult?.remaining ? `• Defer ${execResult.remaining} route(s) to a later run` : null,
+    '',
+    'This sends live requests to Travian. If a create fails after a disable, old',
+    'routes can remain disabled without their replacements — re-run to reconcile.',
+  ]
+    .filter((line) => line !== null)
+    .join('\n')
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
@@ -2033,9 +2110,47 @@ export default function ResourcePlanner() {
                 </div>
 
                 {!plan.feasible && (
-                  <p className="text-orange-200 text-xs mb-2">
+                  <p className="text-warning text-xs mb-2">
                     Resolve the plan (over budget / unroutable) before executing.
                   </p>
+                )}
+
+                {/* Durable audit of the last LIVE run. The result panel below is
+                    tied to the current inputs and disappears when they change;
+                    a run that mutated the game must stay reconstructible, so it
+                    is persisted per account and shown here after reloads too. */}
+                {lastRun && (
+                  <details className="mb-3 text-xs">
+                    <summary className="cursor-pointer text-secondary">
+                      Last live run — {new Date(lastRun.at).toLocaleString()} ·{' '}
+                      {lastRun.created} created
+                      {lastRun.problems.length ? ` · ${lastRun.problems.length} problem(s)` : ''}
+                    </summary>
+                    <div className="mt-2 space-y-1">
+                      {lastRun.problems.length > 0 && (
+                        <ul className="text-danger list-disc list-inside">
+                          {lastRun.problems.map((p, i) => (
+                            <li key={i}>{p}</li>
+                          ))}
+                        </ul>
+                      )}
+                      {lastRun.disables.length > 0 && (
+                        <ul className="text-secondary list-disc list-inside">
+                          {lastRun.disables.map((d, i) => (
+                            <li key={i}>{d}</li>
+                          ))}
+                        </ul>
+                      )}
+                      <ul className="list-disc list-inside">
+                        {lastRun.routes.map((r, i) => (
+                          <li key={i}>
+                            {r.from} → {r.to} ({r.at}): <strong>{r.status}</strong>
+                            {r.detail ? ` — ${r.detail}` : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </details>
                 )}
 
                 {execResult && (
@@ -2097,6 +2212,10 @@ export default function ResourcePlanner() {
                           <th className="text-right px-2">Cycle</th>
                           <th className="text-right px-2">Merchants</th>
                           <th className="text-left px-2">Status</th>
+                          {/* Detail is a real column, not a hover-only `title`:
+                              tooltips are unreachable on touch, awkward for
+                              keyboard users, and invisible to screen readers. */}
+                          <th className="text-left px-2">Detail</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -2118,12 +2237,18 @@ export default function ResourcePlanner() {
                                     ? 'text-danger'
                                     : a.status === 'deferred' || a.status === 'skipped'
                                       ? 'text-secondary'
-                                      : 'text-violet-200'
+                                      : 'text-info'
                               }`}
-                              title={a.detail}
                             >
+                              {/* Glyph + word, so outcome is never colour-only. */}
+                              {a.status === 'created'
+                                ? '✓ '
+                                : a.status === 'failed' || a.status === 'blocked'
+                                  ? '✕ '
+                                  : ''}
                               {a.status.replace('_', ' ')}
                             </td>
+                            <td className="px-2 text-secondary">{a.detail || '—'}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -2131,23 +2256,38 @@ export default function ResourcePlanner() {
 
                     {execResult.dry_run &&
                       (execResult.live_enabled ? (
-                        <button
-                          type="button"
-                          className="btn-primary text-xs py-1.5 mt-3"
-                          disabled={executing}
-                          onClick={() => {
-                            if (
-                              window.confirm(
-                                'Create these routes in-game now? This sends live requests to Travian.'
-                              )
-                            )
-                              executePlan(false)
-                          }}
-                        >
-                          {executing ? 'Creating…' : 'Create live'}
-                        </button>
+                        <>
+                          {/* The confirmation must name every state-changing
+                              effect, not just creation: the request carries
+                              disable_existing, so stale routes are switched off
+                              first and a partial failure can leave them off with
+                              replacements missing (issue #67). */}
+                          <p className="text-warning text-xs mt-3">
+                            ⚠ Going live will first <strong>disable existing routes this plan no
+                            longer wants</strong> on the {plannedOriginCount} origin village
+                            {plannedOriginCount === 1 ? '' : 's'} it touches, then create up to{' '}
+                            {plannedCreateCount} route{plannedCreateCount === 1 ? '' : 's'}
+                            {execResult.remaining
+                              ? `, leaving ${execResult.remaining} deferred to a later run`
+                              : ''}
+                            . If creation fails after a disable, old routes can stay off without
+                            their replacements — re-run to reconcile.
+                          </p>
+                          <button
+                            type="button"
+                            className="btn-primary text-xs py-1.5 mt-2"
+                            disabled={executing}
+                            onClick={() => {
+                              if (window.confirm(liveConfirmMessage)) executePlan(false)
+                            }}
+                          >
+                            {executing
+                              ? 'Working…'
+                              : `Disable old routes & create ${plannedCreateCount}`}
+                          </button>
+                        </>
                       ) : (
-                        <p className="text-orange-200 text-xs mt-3">
+                        <p className="text-warning text-xs mt-3">
                           Live creation is turned off on the server until Travian’s trade-route
                           request format is captured and verified. Preview works today; the create
                           step switches on once that’s confirmed.
