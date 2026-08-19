@@ -129,6 +129,24 @@ class TestLegacyPersonaMigration:
             )
         )
 
+    # Exact (impersonate target, sec-ch-ua) captured from curl_cffi 0.15.0. Note
+    # 133 → "chrome133a" (not "chrome133", which errors), and each legacy major
+    # has its own GREASE token/version/order.
+    _LEGACY = {
+        136: (
+            "chrome136",
+            '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+        ),
+        133: (
+            "chrome133a",
+            '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+        ),
+        131: (
+            "chrome131",
+            '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        ),
+    }
+
     @pytest.mark.parametrize("major", [136, 133, 131])
     def test_legacy_supported_major_stays_coherent(self, tmp_path, major):
         path = tmp_path / ".travian_persona.json"
@@ -136,10 +154,13 @@ class TestLegacyPersonaMigration:
         self._write(path, _ua(major), legacy)
 
         persona = load_persona(path, server_url=_SERVER)
+        expected_target, expected_hint = self._LEGACY[major]
 
         assert persona is not None, "a supported legacy major must NOT be rotated away"
-        assert persona.impersonate == f"chrome{major}", "UA major and TLS target must agree"
-        assert f'v="{major}"' in persona.sec_ch_ua
+        # Full target name — catches the chrome133 vs chrome133a bug.
+        assert persona.impersonate == expected_target
+        # Exact full header — catches brand order / GREASE-token mismatches.
+        assert persona.sec_ch_ua == expected_hint
         assert persona.user_agent == _ua(major)
         assert persona.salt == "legacysalt000001"
 

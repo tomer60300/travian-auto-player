@@ -43,7 +43,10 @@ _IMPERSONATE_MAP: dict[int, str] = {
     145: "chrome145",
     142: "chrome142",
     136: "chrome136",
-    133: "chrome133",
+    # curl_cffi 0.15.0 ships the Chrome 133 profile as "chrome133a" — plain
+    # "chrome133" is NOT a valid target and raises ImpersonateError at request
+    # time, so the exact package spelling matters here.
+    133: "chrome133a",
     131: "chrome131",
 }
 _IMPERSONATE_FALLBACK = "chrome146"
@@ -70,9 +73,16 @@ def _impersonate_for(chrome_major: int) -> str:
 # whether the UA advertises Windows or macOS. Re-verify with a live capture (see
 # test_persona_client_hints) whenever curl_cffi is upgraded.
 _SEC_CH_UA_BY_MAJOR: dict[int, str] = {
+    # Fresh-pool targets.
     142: '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
     145: '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
     146: '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+    # Legacy persisted-persona targets (chrome131 / chrome133a / chrome136),
+    # captured from curl_cffi 0.15.0 — each ships a different GREASE token, GREASE
+    # version, and brand order, so these must be exact, not synthesized.
+    136: '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+    133: '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+    131: '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
 }
 
 
