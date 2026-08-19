@@ -21,6 +21,10 @@ const LS_SNAPSHOT_AT = 'planner_snapshot_at'
 // cleared whenever planner inputs change, but a run that mutated the game must
 // stay auditable across input edits and reloads.
 const LS_LAST_RUN = 'planner_last_live_run'
+// Per-run route cap sent to /distribution/execute. Also bounds how many origin
+// villages a single run VISITS (and therefore may disable stale routes on), so
+// the confirmation copy derives its counts from the same number the request uses.
+const MAX_ROUTES_PER_RUN = 3
 const SNAPSHOT_TTL_MS = 30 * 60 * 1000 // 30 minutes
 const LS_MERCHANT = 'planner_merchant_model'
 // Named allocation profiles (e.g. Day / Night). Trade Office and the merchant
@@ -669,7 +673,7 @@ export default function ResourcePlanner() {
           ...buildPlanPayload(),
           dry_run: dryRun,
           disable_existing: true,
-          max_routes_per_run: 3,
+          max_routes_per_run: MAX_ROUTES_PER_RUN,
         })
         if (
           dryRun &&
@@ -703,8 +707,14 @@ export default function ResourcePlanner() {
               detail: a.detail || '',
             })),
           }
+          // Always PERSIST under the account the run actually targeted, so the
+          // audit is never lost. Only adopt it as the *displayed* record if we
+          // are still on that account — otherwise account A's routes/counts
+          // would render as account B's "last run" (the dry-run staleness guard
+          // above is deliberately skipped for live runs, so this needs its own
+          // account check). Switching back to A re-hydrates A's record.
           saveJson(`${LS_LAST_RUN}::${requestedFor}`, record)
-          setLastRun(record)
+          if (requestedFor === currentAccountKey()) setLastRun(record)
           const summary =
             `Trade routes executed: ${res.data.created} created, ` +
             Object.entries(counts)
@@ -1051,17 +1061,29 @@ export default function ResourcePlanner() {
     ? execResult.actions.filter((a) => a.status === 'would_create')
     : []
   const plannedCreateCount = previewCreates.length
-  const plannedOriginCount = new Set(previewCreates.map((a) => a.origin)).size
-  const plannedSkipCount = execResult
-    ? execResult.actions.filter((a) => a.status === 'skipped').length
+  // Disables are NOT limited to the origins shown as would_create. The live run
+  // walks the plan's origins in randomized order and clears stale routes on each
+  // origin it VISITS, up to the per-run cap — which can include origins whose own
+  // routes the preview shows as `deferred`. So the honest figure is an UPPER
+  // BOUND: distinct origins across every planned row, capped by the visit budget.
+  const plannedOriginCount = execResult
+    ? Math.min(
+        MAX_ROUTES_PER_RUN,
+        new Set(
+          execResult.actions
+            .filter((a) => a.status === 'would_create' || a.status === 'deferred')
+            .map((a) => a.origin)
+        ).size
+      )
     : 0
   const liveConfirmMessage = [
     'Execute this plan against Travian now?',
     '',
-    `• Disable existing routes this plan no longer wants, on ${plannedOriginCount} origin village(s)`,
+    `• Disable existing routes this plan no longer wants, on up to ${plannedOriginCount} origin village(s)`,
     `• Create up to ${plannedCreateCount} new route(s)`,
-    plannedSkipCount ? `• Leave ${plannedSkipCount} already-active route(s) untouched` : null,
     execResult?.remaining ? `• Defer ${execResult.remaining} route(s) to a later run` : null,
+    '',
+    'Already-active routes that the plan still wants are left untouched.',
     '',
     'This sends live requests to Travian. If a create fails after a disable, old',
     'routes can remain disabled without their replacements — re-run to reconcile.',
@@ -1982,6 +2004,46 @@ export default function ResourcePlanner() {
         </div>
       )}
 
+      {/* Durable audit of the last LIVE run, rendered OUTSIDE the stage/plan
+          gates on purpose: `plan` is cleared by any input edit and `stage`
+          resets to 'snapshot' on reload, so nesting this inside them would hide
+          the record in exactly the two situations it is persisted for. */}
+      {lastRun && (
+        <div className="card p-3 mb-4">
+          <details className="text-xs">
+            <summary className="cursor-pointer text-secondary">
+              Last live trade-route run — {new Date(lastRun.at).toLocaleString()} ·{' '}
+              {lastRun.created} created
+              {lastRun.problems.length ? ` · ${lastRun.problems.length} problem(s)` : ''}
+            </summary>
+            <div className="mt-2 space-y-1">
+              {lastRun.problems.length > 0 && (
+                <ul className="text-danger list-disc list-inside">
+                  {lastRun.problems.map((p, i) => (
+                    <li key={i}>{p}</li>
+                  ))}
+                </ul>
+              )}
+              {lastRun.disables.length > 0 && (
+                <ul className="text-secondary list-disc list-inside">
+                  {lastRun.disables.map((d, i) => (
+                    <li key={i}>{d}</li>
+                  ))}
+                </ul>
+              )}
+              <ul className="list-disc list-inside">
+                {lastRun.routes.map((r, i) => (
+                  <li key={i}>
+                    {r.from} → {r.to} ({r.at}): <strong>{r.status}</strong>
+                    {r.detail ? ` — ${r.detail}` : ''}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </details>
+        </div>
+      )}
+
       {stage === 'plan' && (
         <div className="space-y-4">
           {!plan && (
@@ -2115,44 +2177,6 @@ export default function ResourcePlanner() {
                   </p>
                 )}
 
-                {/* Durable audit of the last LIVE run. The result panel below is
-                    tied to the current inputs and disappears when they change;
-                    a run that mutated the game must stay reconstructible, so it
-                    is persisted per account and shown here after reloads too. */}
-                {lastRun && (
-                  <details className="mb-3 text-xs">
-                    <summary className="cursor-pointer text-secondary">
-                      Last live run — {new Date(lastRun.at).toLocaleString()} ·{' '}
-                      {lastRun.created} created
-                      {lastRun.problems.length ? ` · ${lastRun.problems.length} problem(s)` : ''}
-                    </summary>
-                    <div className="mt-2 space-y-1">
-                      {lastRun.problems.length > 0 && (
-                        <ul className="text-danger list-disc list-inside">
-                          {lastRun.problems.map((p, i) => (
-                            <li key={i}>{p}</li>
-                          ))}
-                        </ul>
-                      )}
-                      {lastRun.disables.length > 0 && (
-                        <ul className="text-secondary list-disc list-inside">
-                          {lastRun.disables.map((d, i) => (
-                            <li key={i}>{d}</li>
-                          ))}
-                        </ul>
-                      )}
-                      <ul className="list-disc list-inside">
-                        {lastRun.routes.map((r, i) => (
-                          <li key={i}>
-                            {r.from} → {r.to} ({r.at}): <strong>{r.status}</strong>
-                            {r.detail ? ` — ${r.detail}` : ''}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  </details>
-                )}
-
                 {execResult && (
                   <>
                     <p className="text-xs mb-2">
@@ -2264,8 +2288,8 @@ export default function ResourcePlanner() {
                               replacements missing (issue #67). */}
                           <p className="text-warning text-xs mt-3">
                             ⚠ Going live will first <strong>disable existing routes this plan no
-                            longer wants</strong> on the {plannedOriginCount} origin village
-                            {plannedOriginCount === 1 ? '' : 's'} it touches, then create up to{' '}
+                            longer wants</strong> on up to {plannedOriginCount} origin village
+                            {plannedOriginCount === 1 ? '' : 's'} it visits, then create up to{' '}
                             {plannedCreateCount} route{plannedCreateCount === 1 ? '' : 's'}
                             {execResult.remaining
                               ? `, leaving ${execResult.remaining} deferred to a later run`
