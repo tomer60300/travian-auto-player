@@ -25,11 +25,46 @@ const ResourcePlanner = lazy(() => import('./pages/ResourcePlanner'))
 
 export const TabContext = createContext(null)
 
-function LoadingScreen() {
+function LoadingScreen({ retryAttempt = 0, retryLimit = 0 }) {
+  // A bare spinner cannot distinguish "starting up" from "the backend is down".
+  // Once a retry is in flight, say so and show which attempt this is.
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-base gap-4">
+    <div className="min-h-screen flex flex-col items-center justify-center bg-base gap-4 p-6 text-center">
       <span className="logo-text-lg">Travian Auto Player</span>
       <div className="spinner spinner-lg" />
+      {retryAttempt > 0 && (
+        <div className="max-w-sm">
+          <p className="text-warning text-sm font-semibold">Server unavailable — restoring session</p>
+          <p className="text-secondary text-xs mt-1">
+            Retrying (attempt {retryAttempt} of {retryLimit}) · next try in ~5s. Your saved sign-in
+            is kept.
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AuthOutageScreen({ onRetry }) {
+  // Automatic retries were exhausted while the stored token was KEPT: this is an
+  // outage, not a credential rejection, so do not present the ordinary login
+  // screen as if the sign-in were invalid.
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center bg-base gap-4 p-6 text-center">
+      <span className="logo-text-lg">Travian Auto Player</span>
+      <div className="max-w-sm">
+        <p className="text-warning text-sm font-semibold">⚠ Cannot reach the server</p>
+        <p className="text-secondary text-xs mt-1">
+          Your session could not be verified because the backend did not respond. Your saved
+          sign-in has NOT been cleared — retry once the server is back.
+        </p>
+      </div>
+      <button className="btn-primary btn-sm" onClick={onRetry}>
+        Retry
+      </button>
+      <a className="text-secondary text-xs underline" href="/login">
+        Sign in with a different account
+      </a>
     </div>
   )
 }
@@ -56,6 +91,10 @@ export default function App() {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
   const initialCheckDone = useAuthStore((s) => s.initialCheckDone)
   const checkAuth = useAuthStore((s) => s.checkAuth)
+  const authRetryAttempt = useAuthStore((s) => s.authRetryAttempt)
+  const authRetryLimit = useAuthStore((s) => s.authRetryLimit)
+  const authOutage = useAuthStore((s) => s.authOutage)
+  const retryAuth = useAuthStore((s) => s.retryAuth)
   const tabId = useMemo(() => {
     try { return crypto.randomUUID() } catch { return Math.random().toString(36).slice(2) + Date.now().toString(36) }
   }, [])
@@ -67,7 +106,17 @@ export default function App() {
   if (!initialCheckDone) {
     return (
       <TabContext.Provider value={tabId}>
-        <LoadingScreen />
+        <LoadingScreen retryAttempt={authRetryAttempt} retryLimit={authRetryLimit} />
+      </TabContext.Provider>
+    )
+  }
+
+  // Outage (retries exhausted, token kept) — explain it and offer Retry rather
+  // than routing to /login, which would read as "your credentials were wrong".
+  if (authOutage && !isAuthenticated) {
+    return (
+      <TabContext.Provider value={tabId}>
+        <AuthOutageScreen onRetry={retryAuth} />
       </TabContext.Provider>
     )
   }
