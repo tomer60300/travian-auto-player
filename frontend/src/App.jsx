@@ -45,7 +45,7 @@ function LoadingScreen({ retryAttempt = 0, retryLimit = 0 }) {
   )
 }
 
-function AuthOutageScreen({ onRetry }) {
+function AuthOutageScreen({ onRetry, onSignInAsOther }) {
   // Automatic retries were exhausted while the stored token was KEPT: this is an
   // outage, not a credential rejection, so do not present the ordinary login
   // screen as if the sign-in were invalid.
@@ -62,9 +62,14 @@ function AuthOutageScreen({ onRetry }) {
       <button className="btn-primary btn-sm" onClick={onRetry}>
         Retry
       </button>
-      <a className="text-secondary text-xs underline" href="/login">
-        Sign in with a different account
-      </a>
+      {/* Must CLEAR the session, not navigate: this screen renders ahead of the
+          router, so an <a href="/login"> would full-reload, find the token still
+          in storage, fail its retries again and land right back here — an
+          inescapable loop when /users/me is persistently broken. logout() drops
+          the token and the outage flag, so the login route can actually render. */}
+      <button className="text-secondary text-xs underline bg-transparent border-0 cursor-pointer" onClick={onSignInAsOther}>
+        Sign out and sign in with a different account
+      </button>
     </div>
   )
 }
@@ -95,6 +100,7 @@ export default function App() {
   const authRetryLimit = useAuthStore((s) => s.authRetryLimit)
   const authOutage = useAuthStore((s) => s.authOutage)
   const retryAuth = useAuthStore((s) => s.retryAuth)
+  const logout = useAuthStore((s) => s.logout)
   const tabId = useMemo(() => {
     try { return crypto.randomUUID() } catch { return Math.random().toString(36).slice(2) + Date.now().toString(36) }
   }, [])
@@ -116,7 +122,7 @@ export default function App() {
   if (authOutage && !isAuthenticated) {
     return (
       <TabContext.Provider value={tabId}>
-        <AuthOutageScreen onRetry={retryAuth} />
+        <AuthOutageScreen onRetry={retryAuth} onSignInAsOther={logout} />
       </TabContext.Provider>
     )
   }

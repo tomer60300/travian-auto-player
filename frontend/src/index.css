@@ -327,41 +327,56 @@ h1, h2, h3 {
 .text-warning { color: var(--warning); }
 .text-info { color: var(--info); }
 
-/* Theme-aware status borders. Needed because Tailwind opacity modifiers
+/* Theme-aware status border. Needed because Tailwind opacity modifiers
    (e.g. `border-warning/40`) only apply to Tailwind-generated utilities, not to
    the semantic classes above — a bare `border-warning` would render colorless. */
 .border-warning { border-color: var(--warning); }
-.border-danger { border-color: var(--danger); }
 
 /* ── Wide-table mobile ergonomics ──
    A dense editor table (village × mode/value/ship/rest) cannot fit a 390px
    viewport. Rather than clip it, the row's identity column is pinned while the
    rest scrolls horizontally, so an edited field is always attributable to the
    right village. Opaque background + z-index so scrolled cells pass underneath,
-   not through. */
-.sticky-col {
-  position: sticky;
-  left: 0;
-  z-index: 2;
-  background-color: var(--bg-card);
-  /* Hairline separator marks where the pinned column ends and the scrolling
-     region begins — the visual cue that more columns exist off to the right. */
-  box-shadow: 1px 0 0 var(--border);
-}
-thead .sticky-col { z-index: 3; }
+   not through.
 
-/* Comfortable touch targets on coarse pointers (WCAG 2.5.5 / 44px), without
-   inflating the desktop layout. */
+   Deliberately scoped to narrow viewports: at desktop widths the table does not
+   overflow, so pinning there would only add a permanent hairline and — because
+   the opaque background must win over the row tint — drop the identity cell out
+   of the hover/selected highlight used to confirm batch-apply targets. */
+@media (max-width: 640px) {
+  .sticky-col {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background-color: var(--bg-card);
+    /* Hairline separator marks where the pinned column ends and the scrolling
+       region begins — the cue that more columns exist off to the right. */
+    box-shadow: 1px 0 0 var(--border);
+  }
+  thead .sticky-col { z-index: 3; }
+}
+
+/* Touch targets on coarse pointers, without inflating the desktop layout.
+   Text/select controls get the 44px comfortable size (WCAG 2.5.5); the per-row
+   checkbox/radio get 24px — the WCAG 2.5.8 (AA) minimum — plus roomy cell
+   padding for the surrounding hit area, because a 44px-wide native checkbox on
+   every row eats ~13% of a 390px viewport. `min-height` is set on the controls
+   themselves, not on .touch-target, since the class sits on a <tr> and
+   min-height does not apply to table rows. */
 @media (pointer: coarse) {
-  .touch-target,
-  .touch-target input[type="checkbox"],
   .touch-target select,
   .touch-target input[type="number"],
   .touch-target input[type="text"] {
     min-height: 44px;
   }
-  .touch-target input[type="checkbox"] {
-    min-width: 44px;
+  .touch-target input[type="checkbox"],
+  .touch-target input[type="radio"] {
+    width: 24px;
+    height: 24px;
+  }
+  .touch-target > td {
+    padding-top: 0.625rem;
+    padding-bottom: 0.625rem;
   }
 }
 

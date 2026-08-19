@@ -1669,7 +1669,7 @@ export default function ResourcePlanner() {
                                 `${fmt(after)}/h`
                               )}
                               {isRest && (
-                                <span className="ml-1 text-[10px] uppercase text-info/80 font-sans">
+                                <span className="ml-1 text-[10px] uppercase text-info font-sans">
                                   rest
                                 </span>
                               )}
