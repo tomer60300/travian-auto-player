@@ -238,7 +238,10 @@ class _FakeLiveSvc:
         self.enabled = []  # (origin, sorted tuple of re-enabled dest coords)
         self.listed = []  # origin ids whose marketplace was READ
         self.execute_lock = asyncio.Lock()
-        self.on_create = None  # optional hook fired inside create_route
+        self.on_create = None  # optional hook fired after a create is recorded
+        self.on_pacing = None  # optional hook fired inside create_route BEFORE its
+        # stop_check — simulates a signal arriving during the pacing wait
+        self.on_read = None  # optional hook fired inside list_existing_routes
         self.budget_ok = budget_ok  # mutable: a test can exhaust it mid-run
         budget_checks = self._budget_checks = []
 
@@ -261,31 +264,43 @@ class _FakeLiveSvc:
 
     async def list_existing_routes(self, vid):
         self.listed.append(vid)
+        if self.on_read is not None:
+            self.on_read()  # e.g. signal captcha / exhaust budget DURING the read
         if vid in self._read_raises:
             from travian_api.exceptions import NetworkError
 
             raise NetworkError("marketplace read failed (test)")
         return list(self._existing.get(vid, []))
 
-    async def disable_routes(self, vid, routes):
+    async def disable_routes(self, vid, routes, *, stop_check=None):
         from travian_api.services.trade_route_service import RouteActionResult
 
         if not routes:
             return None
+        if stop_check is not None and (reason := stop_check()):
+            return RouteActionResult(vid, 0, 0, "stopped", reason)
         self.disabled.append((vid, tuple(sorted((r.dest_x, r.dest_y) for r in routes))))
         return RouteActionResult(vid, 0, 0, self._disable_status, f"{len(routes)} route(s)")
 
-    async def enable_routes(self, vid, routes):
+    async def enable_routes(self, vid, routes, *, stop_check=None):
         from travian_api.services.trade_route_service import RouteActionResult
 
         if not routes:
             return None
+        if stop_check is not None and (reason := stop_check()):
+            return RouteActionResult(vid, 0, 0, "stopped", reason)
         self.enabled.append((vid, tuple(sorted((r.dest_x, r.dest_y) for r in routes))))
         return RouteActionResult(vid, 0, 0, self._enable_status, f"{len(routes)} route(s)")
 
-    async def create_route(self, route):
+    async def create_route(self, route, *, stop_check=None):
         from travian_api.services.trade_route_service import RouteActionResult
 
+        if self.on_pacing is not None:
+            self.on_pacing()  # something happens during the (simulated) pacing wait
+        if stop_check is not None and (reason := stop_check()):
+            return RouteActionResult(
+                route.origin_village_id, route.dest_x, route.dest_y, "stopped", reason
+            )
         self.created.append(route)
         if self.on_create is not None:
             self.on_create()
@@ -731,3 +746,54 @@ class TestExecutionHardening:
         assert (50, 50) in deferred_dests, "the failing origin's route is deferred"
         assert (60, 60) in deferred_dests, "the unvisited later origin is deferred, not lost"
         assert res.remaining >= 2
+
+    def test_captcha_during_read_blocks_disable_and_create(self):  # #62 round 3
+        import itertools
+        import time as _time
+
+        # One stale ACTIVE route to disable + missing desired routes to create;
+        # the captcha is signalled DURING the marketplace read, so NEITHER the
+        # disable nor the create mutation may fire.
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(9, 99, 99, active=True)]})
+        svc.on_read = lambda: captcha_stop.signal(_USER.id)
+        clock = itertools.count(1)
+        try:
+            with _patch(_time, "monotonic", lambda: next(clock)):
+                res = _run_live(svc, _same_origin_account(), max_routes_per_run=50)
+        finally:
+            captcha_stop.clear(_USER.id)
+        assert svc.disabled == [], "no disable after a captcha signalled during the read"
+        assert svc.created == [], "no create after a captcha signalled during the read"
+        assert any(a.status == "deferred" for a in res.actions)
+
+    def test_budget_exhausted_during_read_blocks_disable_and_create(self):  # #64 round 3
+        # Budget runs out DURING the read; the disable and create that follow in
+        # the same origin must not fire.
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(9, 99, 99, active=True)]})
+
+        def _exhaust():
+            svc.budget_ok = False
+
+        svc.on_read = _exhaust
+        res = _run_live(svc, _same_origin_account(), max_routes_per_run=50)
+        assert svc.disabled == [], "no disable after budget exhausted during the read"
+        assert svc.created == [], "no create after budget exhausted during the read"
+        assert any("budget" in p.lower() for p in res.problems)
+
+    def test_stop_during_create_pacing_wait_prevents_the_post(self):  # #62/#64 post-pacing
+        # The endpoint's pre-create check passes, then a captcha is signalled
+        # DURING create_route's pacing wait; the service's post-pacing stop_check
+        # must catch it and skip the POST (no route created).
+        import itertools
+        import time as _time
+
+        svc = _FakeLiveSvc()
+        svc.on_pacing = lambda: captcha_stop.signal(_USER.id)
+        clock = itertools.count(1)
+        try:
+            with _patch(_time, "monotonic", lambda: next(clock)):
+                res = _run_live(svc, _same_origin_account(), max_routes_per_run=50)
+        finally:
+            captcha_stop.clear(_USER.id)
+        assert svc.created == [], "a stop during the pacing wait must prevent the POST"
+        assert any(a.status == "deferred" for a in res.actions)

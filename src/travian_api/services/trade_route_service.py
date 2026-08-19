@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 
@@ -195,16 +196,27 @@ class TradeRouteService:
                 "then enable live execution."
             )
 
-    async def create_route(self, route: PlannedRoute) -> RouteActionResult:
+    async def create_route(
+        self, route: PlannedRoute, *, stop_check: Callable[[], str | None] | None = None
+    ) -> RouteActionResult:
         """Create one trade route (LIVE). Gated on ``live_enabled``.
 
         Paced by a BETWEEN_ROUTES human delay, sent xhr-shaped and
         non-retryable (a committed create that loses its response must not be
         replayed into a duplicate route). Gold Club rejections are mapped to a
         skipped result, not raised.
+
+        ``stop_check`` is consulted AFTER the pacing delay and immediately before
+        the POST: if it returns a reason the request is not sent and a "stopped"
+        result is returned, so a captcha resolved or budget exhausted DURING the
+        human delay cannot let the write through (issues #62/#64).
         """
         self._require_live()
         await self.http_client.human_delay.wait(ActionType.BETWEEN_ROUTES, "creating trade route")
+        if stop_check is not None and (reason := stop_check()):
+            return RouteActionResult(
+                route.origin_village_id, route.dest_x, route.dest_y, "stopped", reason
+            )
         try:
             await self.http_client.post_json(
                 "/api/v1/trade-routes",
@@ -227,18 +239,28 @@ class TradeRouteService:
         return RouteActionResult(route.origin_village_id, route.dest_x, route.dest_y, "created")
 
     async def _toggle_routes(
-        self, origin_village_id: int, routes: list[ExistingRoute], *, active: bool
+        self,
+        origin_village_id: int,
+        routes: list[ExistingRoute],
+        *,
+        active: bool,
+        stop_check: Callable[[], str | None] | None = None,
     ) -> RouteActionResult | None:
         """Enable/disable a village's existing routes (LIVE). Gated on ``live_enabled``.
 
         Returns None when there is nothing to toggle (so no request is sent).
         One coarse call for all of the origin's routes, not one per route.
+        ``stop_check`` is consulted after the pacing delay, before the POST, so a
+        captcha/budget stop during the delay cannot let the toggle through
+        (issues #62/#64) — it returns a "stopped" result instead.
         """
         if not routes:
             return None
         self._require_live()
         verb = "enabling" if active else "disabling"
         await self.http_client.human_delay.wait(ActionType.BETWEEN_ROUTES, f"{verb} trade routes")
+        if stop_check is not None and (reason := stop_check()):
+            return RouteActionResult(origin_village_id, 0, 0, "stopped", reason)
         try:
             await self.http_client.post_json(
                 "/api/v1/trade-routes/toggle-group",
@@ -252,15 +274,27 @@ class TradeRouteService:
         return RouteActionResult(origin_village_id, 0, 0, status, f"{len(routes)} route(s)")
 
     async def disable_routes(
-        self, origin_village_id: int, routes: list[ExistingRoute]
+        self,
+        origin_village_id: int,
+        routes: list[ExistingRoute],
+        *,
+        stop_check: Callable[[], str | None] | None = None,
     ) -> RouteActionResult | None:
         """Disable a village's stale routes the plan no longer wants."""
-        return await self._toggle_routes(origin_village_id, routes, active=False)
+        return await self._toggle_routes(
+            origin_village_id, routes, active=False, stop_check=stop_check
+        )
 
     async def enable_routes(
-        self, origin_village_id: int, routes: list[ExistingRoute]
+        self,
+        origin_village_id: int,
+        routes: list[ExistingRoute],
+        *,
+        stop_check: Callable[[], str | None] | None = None,
     ) -> RouteActionResult | None:
         """Re-enable a village's disabled routes that the plan still wants, rather
         than creating a duplicate. Travian keeps disabled routes in the list, so a
         desired-but-disabled route is restored by re-enabling it."""
-        return await self._toggle_routes(origin_village_id, routes, active=True)
+        return await self._toggle_routes(
+            origin_village_id, routes, active=True, stop_check=stop_check
+        )

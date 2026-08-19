@@ -1448,6 +1448,20 @@ async def post_execute(
     # game await so a concurrent disconnect can't slip in between. Unregistered
     # in `finally`. `started_at` lets the captcha-stop signal target only this run.
     started_at = time.monotonic()
+
+    def _stop_reason() -> str | None:
+        """Why the run must stop right now, or None. Checked before EVERY mutation
+        (create/disable/enable) and again inside the service after its pacing wait
+        (right before the POST), so no state-changing request slips past a captcha
+        resolution (#62) or an exhausted activity budget (#64)."""
+        if captcha_stop.should_stop(user.id, started_after=started_at):
+            return "captcha resolved — execution stopped"
+        try:
+            svc.http_client.check_activity_budget()
+        except ActivityBudgetExhausted as exc:
+            return f"activity budget exhausted: {exc}"
+        return None
+
     active_ops.register(user.id, _EXECUTE_OP_LABEL)
     try:
         async with svc.execute_lock:
@@ -1471,18 +1485,13 @@ async def post_execute(
                     # from the response (issue #65).
                     deferred.extend(desired_by_origin[origin])
                     continue
-                # After captcha resolution the guard releases the pending request
-                # AND signals stop; halt here so a resolved challenge does not
-                # auto-resume the mutation backlog (issue #62).
-                if captcha_stop.should_stop(user.id, started_after=started_at):
+                # Don't even read a marketplace if the run is already stopped
+                # (captcha resolved / budget exhausted). Fires once — later
+                # origins are caught by the top-of-loop guard above.
+                reason = _stop_reason()
+                if reason:
                     stopped_early = True
-                    deferred.extend(desired_by_origin[origin])
-                    continue
-                try:
-                    svc.http_client.check_activity_budget()
-                except ActivityBudgetExhausted as exc:
-                    problems.append(f"Activity budget exhausted mid-run: {exc}")
-                    stopped_early = True
+                    problems.append(reason)
                     deferred.extend(desired_by_origin[origin])
                     continue
 
@@ -1518,12 +1527,29 @@ async def post_execute(
                             for e in visible
                             if e.active and (e.dest_x, e.dest_y) not in desired_coords
                         ]
-                        disabled = await svc.disable_routes(origin, stale)
+                        if stale:
+                            # Gate the disable mutation itself (issues #62/#64):
+                            # check before, and again inside the service after its
+                            # pacing wait via stop_check.
+                            reason = _stop_reason()
+                            if reason:
+                                stopped_early = True
+                                problems.append(reason)
+                                deferred.extend(desired)
+                                continue
+                        disabled = await svc.disable_routes(origin, stale, stop_check=_stop_reason)
                         if disabled is not None:
                             line = (
                                 f"{village_label(origin, names)}: "
                                 f"{disabled.status} {disabled.detail}"
                             ).strip()
+                            if disabled.status == "stopped":
+                                # Stopped after the pacing wait, before the POST —
+                                # nothing changed; defer this origin.
+                                stopped_early = True
+                                problems.append(disabled.detail)
+                                deferred.extend(desired)
+                                continue
                             if disabled.status == "failed":
                                 # A failed/ambiguous disable leaves stale routes
                                 # live; do NOT add new routes on top for this
@@ -1548,7 +1574,21 @@ async def post_execute(
                     ]
                     blocked: set[tuple[int, int]] = set()
                     if disabled_desired:
-                        enabled = await svc.enable_routes(origin, disabled_desired)
+                        # Gate the re-enable mutation too (issues #62/#64).
+                        reason = _stop_reason()
+                        if reason:
+                            stopped_early = True
+                            problems.append(reason)
+                            deferred.extend(desired)
+                            continue
+                        enabled = await svc.enable_routes(
+                            origin, disabled_desired, stop_check=_stop_reason
+                        )
+                        if enabled is not None and enabled.status == "stopped":
+                            stopped_early = True
+                            problems.append(enabled.detail)
+                            deferred.extend(desired)
+                            continue
                         if enabled is not None and enabled.status == "enabled":
                             satisfied.update((e.dest_x, e.dest_y) for e in disabled_desired)
                             disables.append(
@@ -1577,24 +1617,27 @@ async def post_execute(
                         if attempts >= cap:
                             deferred.append((row, route))
                             continue
-                        # Re-check the stop signals before EVERY mutation, not just
-                        # once per origin: a captcha resolved (issue #62) or the
-                        # budget exhausted (issue #64) during an earlier route of
-                        # THIS origin must stop the remaining same-origin writes,
-                        # deferring the unprocessed remainder for a later run.
-                        if captcha_stop.should_stop(user.id, started_after=started_at):
+                        # Re-check before EVERY create, not once per origin: a
+                        # captcha resolved (#62) or the budget exhausted (#64)
+                        # during an earlier route of THIS origin must stop the
+                        # remaining same-origin writes. The service rechecks again
+                        # after its pacing wait (right before the POST).
+                        reason = _stop_reason()
+                        if reason:
                             stopped_early = True
-                            deferred.extend(desired[i:])
-                            break
-                        try:
-                            svc.http_client.check_activity_budget()
-                        except ActivityBudgetExhausted as exc:
-                            problems.append(f"Activity budget exhausted mid-run: {exc}")
-                            stopped_early = True
+                            problems.append(reason)
                             deferred.extend(desired[i:])
                             break
                         attempts += 1
-                        result = await svc.create_route(route)
+                        result = await svc.create_route(route, stop_check=_stop_reason)
+                        if result.status == "stopped":
+                            # Stopped after the pacing wait, before the POST —
+                            # nothing was created; defer the remainder.
+                            attempts -= 1
+                            stopped_early = True
+                            problems.append(result.detail)
+                            deferred.extend(desired[i:])
+                            break
                         if result.status == "created":
                             actions.append(_action(row, route, "created", result.detail))
                             satisfied.add(coord)
