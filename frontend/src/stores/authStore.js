@@ -15,6 +15,13 @@ const useAuthStore = create((set, get) => ({
   // Don't trust localStorage token alone — wait for checkAuth to verify
   isAuthenticated: false,
   initialCheckDone: false,
+  // Recovery state, so the shell can explain a transient backend outage instead
+  // of showing a bare spinner and then an unexplained login screen: which retry
+  // is in flight, and whether automatic retries were exhausted while the stored
+  // token was still kept (an outage, NOT invalid credentials).
+  authRetryAttempt: 0,
+  authRetryLimit: AUTH_RETRY_LIMIT,
+  authOutage: false,
 
   login: async (username, password) => {
     const res = await api.post('/users/login', { username, password });
@@ -53,37 +60,76 @@ const useAuthStore = create((set, get) => ({
     try {
       const res = await api.get('/users/me');
       authRetryCount = 0;
-      set({ user: res.data, isAuthenticated: true, initialCheckDone: true });
+      set({
+        user: res.data,
+        isAuthenticated: true,
+        initialCheckDone: true,
+        authRetryAttempt: 0,
+        authOutage: false,
+      });
     } catch (e) {
       // Only discard the token when the server says it is bad; a restart,
       // timeout, or 5xx during the initial check must not log the user out.
       if (e.response?.status === 401 || e.response?.status === 403) {
         authRetryCount = 0;
         localStorage.removeItem('token');
-        set({ token: null, user: null, isAuthenticated: false, initialCheckDone: true });
+        set({
+          token: null,
+          user: null,
+          isAuthenticated: false,
+          initialCheckDone: true,
+          authRetryAttempt: 0,
+          // A genuine credential rejection is NOT an outage — route to login.
+          authOutage: false,
+        });
       } else if (authRetryCount < AUTH_RETRY_LIMIT) {
         // Transient failure: auth state is UNKNOWN. Leave it untouched — the
         // loading gate stays up on first load instead of bouncing to /login,
         // an already verified session keeps its pages — and retry shortly.
+        // Publish the attempt so the shell can say what it is doing.
         authRetryCount += 1;
+        set({ authRetryAttempt: authRetryCount, authOutage: false });
         setTimeout(() => { get().checkAuth() }, 5000);
       } else {
-        // Retries exhausted: stop blocking the UI. The token is kept, so a
-        // later login-page load or manual retry can still restore the
-        // session once the backend recovers; a verified session stays put.
+        // Retries exhausted with the token still stored: this is a backend
+        // outage, not bad credentials. Stop blocking the UI, but flag the
+        // outage so the shell offers an explicit Retry instead of silently
+        // presenting the ordinary login screen. A verified session stays put.
         authRetryCount = 0;
+        const stillHasToken = !!localStorage.getItem('token');
         if (get().isAuthenticated) {
-          set({ initialCheckDone: true });
+          set({ initialCheckDone: true, authRetryAttempt: 0, authOutage: false });
         } else {
-          set({ isAuthenticated: false, initialCheckDone: true });
+          set({
+            isAuthenticated: false,
+            initialCheckDone: true,
+            authRetryAttempt: 0,
+            authOutage: stillHasToken,
+          });
         }
       }
     }
   },
 
+  // Operator-triggered retry after automatic attempts were exhausted.
+  retryAuth: async () => {
+    authRetryCount = 0;
+    set({ authOutage: false, authRetryAttempt: 0, initialCheckDone: false });
+    await get().checkAuth();
+  },
+
   logout: () => {
     localStorage.removeItem('token');
-    set({ token: null, user: null, isAuthenticated: false, initialCheckDone: true });
+    // An explicit logout is never an outage — clear the recovery flags so the
+    // normal login screen is shown.
+    set({
+      token: null,
+      user: null,
+      isAuthenticated: false,
+      initialCheckDone: true,
+      authRetryAttempt: 0,
+      authOutage: false,
+    });
     // Clean up other stores to prevent data leaking to next user
     useGameStore.setState({
       connected: false, serverUrl: null, playerName: null, tribeId: null,

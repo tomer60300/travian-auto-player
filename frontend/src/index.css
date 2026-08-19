@@ -327,6 +327,44 @@ h1, h2, h3 {
 .text-warning { color: var(--warning); }
 .text-info { color: var(--info); }
 
+/* Theme-aware status borders. Needed because Tailwind opacity modifiers
+   (e.g. `border-warning/40`) only apply to Tailwind-generated utilities, not to
+   the semantic classes above — a bare `border-warning` would render colorless. */
+.border-warning { border-color: var(--warning); }
+.border-danger { border-color: var(--danger); }
+
+/* ── Wide-table mobile ergonomics ──
+   A dense editor table (village × mode/value/ship/rest) cannot fit a 390px
+   viewport. Rather than clip it, the row's identity column is pinned while the
+   rest scrolls horizontally, so an edited field is always attributable to the
+   right village. Opaque background + z-index so scrolled cells pass underneath,
+   not through. */
+.sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background-color: var(--bg-card);
+  /* Hairline separator marks where the pinned column ends and the scrolling
+     region begins — the visual cue that more columns exist off to the right. */
+  box-shadow: 1px 0 0 var(--border);
+}
+thead .sticky-col { z-index: 3; }
+
+/* Comfortable touch targets on coarse pointers (WCAG 2.5.5 / 44px), without
+   inflating the desktop layout. */
+@media (pointer: coarse) {
+  .touch-target,
+  .touch-target input[type="checkbox"],
+  .touch-target select,
+  .touch-target input[type="number"],
+  .touch-target input[type="text"] {
+    min-height: 44px;
+  }
+  .touch-target input[type="checkbox"] {
+    min-width: 44px;
+  }
+}
+
 .bg-base { background-color: var(--bg-base); }
 .bg-surface { background-color: var(--bg-surface); }
 .bg-card { background-color: var(--bg-card); }
