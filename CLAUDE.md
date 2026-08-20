@@ -1,6 +1,6 @@
 # Travian Auto-Player
 
-Full-stack web app. Python 3.12 FastAPI backend + React 19/Vite/TypeScript frontend.
+Full-stack web app. Python 3.12 FastAPI backend + React 19/Vite frontend in plain JavaScript (`.jsx`/`.js`, no TypeScript).
 Automates Travian Legends gameplay: farming, scouting, build queues, military, reports.
 
 ## Repository Structure
@@ -21,9 +21,19 @@ Automates Travian Legends gameplay: farming, scouting, build queues, military, r
 - Match existing code patterns. Read before writing.
 - Minimal diffs only. No unrequested refactors.
 
+## Branches
+- Default branch is `main` (renamed from `feature/web-ui`). `travian-developer-platform` no longer exists.
+- Name branches after the Conventional Commit type they carry: `feat/<slug>`, `fix/<slug>`,
+  `docs/<slug>`, `chore/<slug>`, `refactor/<slug>`.
+- CI (`.github/workflows/ci.yml`) runs on `main` only — pushes to `main` and PRs targeting it.
+
 ## Dual Server Environment
-- Port 8000: Stable production server. NEVER restart without explicit permission.
-- Port 8001: Debug/dev server. Restart freely after Python changes.
+- Port 80: Stable production server (`--host 0.0.0.0`). NEVER restart without explicit permission.
+- Port 8001: Debug/dev server (`--host 0.0.0.0`). Restart freely after Python changes.
+- Nothing runs on port 8000 any more. Older docs and prompts that say "production is 8000" are stale.
+- Both servers run from this same checkout and serve the same built `src/travian_api/web/static`.
+  So `npm run build` ships to production immediately — there is no staging step between debug
+  and production, and no server restart is needed for a frontend change to go live.
 
 ## Commands
 ### Backend
@@ -59,11 +69,18 @@ Automates Travian Legends gameplay: farming, scouting, build queues, military, r
 - When unsure, inspect the codebase instead of inventing patterns.
 
 ### Prohibited
-- No `any` types in TypeScript
-- No default exports (named exports only)
 - No console.log in production code
 - Never delete or skip existing tests
 - No dependencies added without clear justification
+
+### Frontend Export Convention
+The frontend is plain JavaScript, so there is no `any` rule to enforce. Match the existing
+export style instead of imposing a new one:
+- Default export for React components, pages, and Zustand stores (plus the axios instance in
+  `src/api.js`) — that is all 43 `export default` declarations in `frontend/src` today, and
+  `src/App.jsx` imports them that way.
+- Named exports for hooks, utilities, and constants (`src/hooks/`, `src/utils/`, `src/constants/`,
+  `src/ws.js`, `src/logStream.js`).
 
 ## Delivery Workflow (MANDATORY for all features and bug fixes)
 

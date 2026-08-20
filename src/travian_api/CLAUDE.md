@@ -6,7 +6,7 @@
 - Dependency injection via `Depends()` — never import db sessions directly
 - Fernet encryption keys from environment variables, never hardcoded
 - WebSocket handlers in dedicated modules under `web/ws/`
-- Use structlog or rich for logging, never print()
+- Logging via stdlib `logging.getLogger(__name__)`, never print(). structlog is not a dependency; rich is CLI output only.
 - HTTP client: httpx for standard requests, curl_cffi for stealth/anti-bot
 - HTML parsing: BeautifulSoup4 + lxml, parsers live in `parsers/`
 - Retry logic via tenacity decorators
