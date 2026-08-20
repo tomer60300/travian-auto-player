@@ -35,4 +35,12 @@ async def main():
     await c.close()
     print("\nAll stealth integration tests passed!")
 
-asyncio.run(main())
+# Guarded so importing this module cannot run it. These are live integration
+# scripts, not unit tests: main() logs in to the real server with the
+# credentials in .env and spends real requests. pytest's testpaths is
+# "tests", so a bare `pytest` never collected them -- but `pytest
+# test_stealth_upgrade.py`, or an editor's "run this file", imported the
+# module and did it for real.
+if __name__ == "__main__":
+    asyncio.run(main())
+
