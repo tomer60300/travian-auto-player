@@ -14,7 +14,6 @@ A Python library, CLI, and self-hosted web UI for automating Travian Legends gam
 ```bash
 git clone https://github.com/tomer60300/travian-auto-player.git
 cd travian-auto-player
-git checkout feature/web-ui
 ```
 
 Then one command:
@@ -145,6 +144,8 @@ TRAVIAN_PASSWORD=secret
 ---
 
 ## CLI Reference
+
+The commands below cover everyday use. The exhaustive reference, with every flag and example, is in [CLI-README.md](CLI-README.md).
 
 ### Authentication
 
