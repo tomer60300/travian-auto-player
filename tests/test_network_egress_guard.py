@@ -219,3 +219,32 @@ class TestLiveTradeRouteWritesStayDisarmed:
 
         assert "TRAVIAN_TRADE_ROUTE_LIVE" not in os.environ
         assert "TRAVIAN_PASSWORD" not in os.environ
+
+
+class TestTheDatabaseIsIsolated:
+    """The suite must not touch the live database.
+
+    ``web/models/db.py`` defaults to ``~/.travian/travian_web.db`` -- the file
+    both running servers hold open, holding real users and their encrypted
+    Travian credentials. Before this was isolated, any test calling init_db() or
+    taking a session wrote to production data, and a run could collide with a
+    live server mid-write.
+    """
+
+    def test_the_resolved_database_is_not_the_live_one(self):
+        from pathlib import Path
+
+        from travian_api.web.models.db import DATABASE_URL
+
+        live = (Path.home() / ".travian" / "travian_web.db").resolve()
+        assert str(live) not in DATABASE_URL.replace("/", "\\"), (
+            f"the suite resolved the LIVE database: {DATABASE_URL}"
+        )
+
+    def test_the_path_is_exported_so_subprocess_tests_inherit_it(self):
+        import os
+
+        # tests/test_web_entry.py boots the app in a subprocess, which re-reads
+        # the environment rather than any in-process patch, so the isolation has
+        # to live in os.environ to reach it.
+        assert os.environ.get("TRAVIAN_DB_PATH"), "isolation must be inheritable"

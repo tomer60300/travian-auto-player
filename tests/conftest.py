@@ -28,9 +28,13 @@ private/loopback/unresolvable outcomes.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import ipaddress
 import os
+import shutil
 import socket
+import tempfile
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
@@ -207,7 +211,28 @@ def _scrub_travian_credentials() -> None:
     config.settings = config.Settings()
 
 
+def _isolate_the_database() -> None:
+    """Point the suite at a throwaway SQLite file, never the live one.
+
+    ``web/models/db.py`` resolves TRAVIAN_DB_PATH at IMPORT time, defaulting to
+    ``~/.travian/travian_web.db`` -- the database both running servers hold open
+    and the one that holds real users and encrypted Travian credentials. Any
+    test that calls ``init_db()`` or takes a session was therefore writing to
+    production data, and a run could collide with a live server mid-write.
+
+    Set before the block below imports anything, so nothing has resolved the
+    path yet. An explicit TRAVIAN_DB_PATH is respected: a developer who points
+    the suite somewhere deliberately keeps that choice.
+    """
+    if os.environ.get("TRAVIAN_DB_PATH"):
+        return
+    directory = tempfile.mkdtemp(prefix="travian-test-db-")
+    os.environ["TRAVIAN_DB_PATH"] = str(Path(directory) / "travian_web.db")
+    atexit.register(shutil.rmtree, directory, True)
+
+
 def pytest_configure(config: pytest.Config) -> None:
+    _isolate_the_database()
     _scrub_travian_credentials()
     _install_network_block()
 
