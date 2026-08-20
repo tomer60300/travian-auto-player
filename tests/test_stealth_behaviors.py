@@ -663,8 +663,16 @@ def test_idle_browse_is_persona_weighted_not_uniform():
         nav = PageNavigator(http, HumanDelay(enabled=False), enabled=True)
         nav.seed_routes(identity)
         random.seed(0)  # same draw stream -> any difference is the persona weights
-        for _ in range(5000):
-            asyncio.run(nav.idle_browse(village_id=5))
+
+        async def draw() -> None:
+            # One event loop for all 5,000 draws rather than one per draw.
+            # asyncio.run costs ~1.2ms of loop construction against ~0.01ms of
+            # actual work here, which was 12 of this test's 15 seconds. The
+            # draw stream is unchanged: asyncio.run consumes no randomness.
+            for _ in range(5000):
+                await nav.idle_browse(village_id=5)
+
+        asyncio.run(draw())
         for url in http.urls:
             assert url.split("?")[0] in allowed  # no impossible page
         return Counter(u.split("?")[0] for u in http.urls)
