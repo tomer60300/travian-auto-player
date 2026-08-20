@@ -34,6 +34,8 @@ import json
 import statistics
 from pathlib import Path
 
+import pytest
+
 from travian_api.services.distribution.allocation import (
     Allocation,
     AllocationMode,
@@ -156,21 +158,40 @@ def _seed_total_merchants(villages, plans, geometry, model):
     return total
 
 
-def test_the_improved_plan_never_costs_more_than_the_greedy_seed():
-    villages, plans, geometry, model = _load_case()
+# The optimizer's route search is cubic in village count, so each build_plan on
+# this 23-village fixture costs seconds. The file asked for eight builds across
+# only three distinct configurations; these share them. Module-scoped
+# deliberately: build_plan is pure and every test here only reads the result,
+# so there is nothing to contaminate.
+@pytest.fixture(scope="module")
+def case():
+    """The frozen account from Appendix A."""
+    return _load_case()
+
+
+@pytest.fixture(scope="module")
+def minimal_plan(case):
+    """Merchant-minimal: the latency pass off."""
+    return build_plan(*case, max_latency_hours=None)
+
+
+@pytest.fixture(scope="module")
+def default_plan(case):
+    """The plan as POST /plan would produce it, latency pass included."""
+    return build_plan(*case)
+
+
+def test_the_improved_plan_never_costs_more_than_the_greedy_seed(case, minimal_plan):
+    villages, plans, geometry, model = case
 
     seed = _seed_total_merchants(villages, plans, geometry, model)
-    # Latency pass off: this property is about the merchant-minimal stage.
-    plan = build_plan(villages, plans, geometry, model, max_latency_hours=None)
 
     assert seed == SEED_TOTAL_MERCHANTS
-    assert plan.total_merchants <= seed
+    assert minimal_plan.total_merchants <= seed
 
 
-def test_the_optimizer_holds_its_ratchet():
-    villages, plans, geometry, model = _load_case()
-
-    plan = build_plan(villages, plans, geometry, model, max_latency_hours=None)
+def test_the_optimizer_holds_its_ratchet(minimal_plan):
+    plan = minimal_plan
 
     assert (sum(o.excess for o in plan.over_budget), plan.total_merchants) <= (
         MAX_OVER_BUDGET_EXCESS,
@@ -181,16 +202,16 @@ def test_the_optimizer_holds_its_ratchet():
     assert not [w for w in plan.warnings if "improvement passes" in w]
 
 
-def test_the_latency_pass_trades_idle_merchants_for_speed():
+def test_the_latency_pass_trades_idle_merchants_for_speed(case, minimal_plan):
     """With a latency target, otherwise-idle merchants shorten cycles: travel
     time falls, spending stays inside every village's budget, and no village that
     was within budget is pushed over it.
 
     Deliberately no upper bound on merchants here -- see the module docstring.
     """
-    villages, plans, geometry, model = _load_case()
+    villages, plans, geometry, model = case
 
-    minimal = build_plan(villages, plans, geometry, model, max_latency_hours=None)
+    minimal = minimal_plan
     fast = build_plan(villages, plans, geometry, model, max_latency_hours=2.0)
 
     assert _median_latency(fast) < _median_latency(minimal)
@@ -202,13 +223,11 @@ def test_the_latency_pass_trades_idle_merchants_for_speed():
             assert used <= villages[vid].spare_merchants()
 
 
-def test_an_unroutable_village_is_reported_not_hidden():
+def test_an_unroutable_village_is_reported_not_hidden(default_plan):
     """Village 15 cannot ship its crop within budget at any Trade Office level;
     that must surface as an honest over-budget report saying no upgrade helps,
     never as a silently trimmed plan."""
-    villages, plans, geometry, model = _load_case()
-
-    plan = build_plan(villages, plans, geometry, model)
+    plan = default_plan
 
     over = {o.village_id: o for o in plan.over_budget}
     assert DISTANCE_BOUND_VILLAGE in over
@@ -223,20 +242,19 @@ def test_an_unroutable_village_is_reported_not_hidden():
         assert capacity_bound.trade_office_levels_needed is not None
 
 
-def test_golden_plan_is_deterministic():
-    villages, plans, geometry, model = _load_case()
-
-    first = build_plan(villages, plans, geometry, model)
-    second = build_plan(villages, plans, geometry, model)
+def test_golden_plan_is_deterministic(case, default_plan):
+    # A second, independent build of the same inputs, compared against the one
+    # the other tests use -- which is exactly what "same inputs, same plan" means.
+    first = default_plan
+    second = build_plan(*case)
 
     assert first.routes == second.routes
     assert first.merchants_committed == second.merchants_committed
 
 
-def test_golden_plan_respects_the_structural_invariants():
-    villages, plans, geometry, model = _load_case()
-
-    plan = build_plan(villages, plans, geometry, model)
+def test_golden_plan_respects_the_structural_invariants(case, default_plan):
+    villages, plans, _geometry, _model = case
+    plan = default_plan
 
     # No two-way pair (issue #2), and no relay of a MATERIAL: the no-waterfall
     # rule is W/C/I only. Crop relay is permitted (profile 3.5) and is how the
