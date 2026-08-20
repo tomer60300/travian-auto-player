@@ -478,3 +478,76 @@ class TestImpactTimeAttribution:
         assert capital.high == pytest.approx(5_000.0), (
             "only the 5,000 the sender actually had may arrive, not the 20,000 batch"
         )
+
+
+class TestNarrowProfileWindow:
+    """A profile that runs two hours must still ship inside them.
+
+    Measured: a farm making 200 crop/h 25 fields out is routed on a 6h cycle,
+    and the beat -- which knew nothing of the profile's hours -- phased all four
+    of its daily firings outside a 20:00-22:00 profile. The dispatch filter then
+    correctly dropped every one of them, so the capital received +0/day while
+    the farm banked the lot: a starved receiver and a hoarding sender, silently.
+    """
+
+    def _body(self):
+        def village(vid, name, crop, x, y):
+            return {
+                "village_id": vid,
+                "name": name,
+                "x": x,
+                "y": y,
+                "merchants_total": 20,
+                "merchants_free": 20,
+                "lumber_per_hour": 0,
+                "clay_per_hour": 0,
+                "iron_per_hour": 0,
+                "crop_per_hour": crop,
+                "crop_stock": 200_000,
+                "granary_capacity": 800_000,
+                "warehouse_capacity": 400_000,
+            }
+
+        return DayCheckRequest.model_validate(
+            {
+                "snapshot": [
+                    village(1, "capital", crop=0, x=0, y=0),
+                    village(2, "farm", crop=200, x=20, y=15),
+                ],
+                "segments": [
+                    {
+                        "name": "Burst",
+                        "window": [20 * 60, 22 * 60],
+                        "allocations": {
+                            "crop": {
+                                "1": {"mode": "remainder"},
+                                "2": {"mode": "absolute", "value": 0},
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+
+    def test_the_receiver_is_not_starved_by_the_beats_phase(self):
+        res = asyncio.run(post_day_check(self._body(), SimpleNamespace(id=1)))
+
+        capital = next(v for v in res.villages if v.village_id == 1 and v.resource is Resource.CROP)
+        farm = next(v for v in res.villages if v.village_id == 2 and v.resource is Resource.CROP)
+        # One 6h batch is 1,200 crop. That is all a 2h profile can host, but it
+        # must actually land -- the window-blind beat delivered nothing at all.
+        assert capital.daily_net == pytest.approx(1_200, rel=0.01), (
+            f"the capital receives {capital.daily_net:,.0f}/day; the route sends "
+            f"nothing inside the profile's hours"
+        )
+        assert farm.daily_net == pytest.approx(4_800 - 1_200, rel=0.01), (
+            "what leaves the farm must be what lands at the capital"
+        )
+
+    def test_a_cycle_longer_than_the_profile_warns_under_its_name(self):
+        res = asyncio.run(post_day_check(self._body(), SimpleNamespace(id=1)))
+
+        unachievable = [w for w in res.warnings if "repeats every 6h" in w]
+        assert unachievable, f"warnings: {res.warnings}"
+        assert unachievable[0].startswith("Burst:"), "the warning must name the profile"
+        assert "once a day" in unachievable[0]

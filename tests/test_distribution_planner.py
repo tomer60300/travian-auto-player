@@ -170,6 +170,109 @@ class TestReservedWindow:
         assert beat.warnings == ()
 
 
+class TestProfileWindow:
+    """A profile that owns part of the day must still ship inside its hours.
+
+    ``storage.simulate_profile_cycle`` drops any firing whose dispatch falls
+    outside the sending profile's window, which is right -- a Day route must not
+    send at night. But a beat that knows nothing about those hours can phase
+    every one of a route's firings into the gap, and then the route ships
+    nothing at all: the receiver reads as starved, the sender as a hoarder, and
+    nothing says why.
+    """
+
+    def _route(self, cycle_hours: int, origin: int = 1) -> Route:
+        return Route(
+            origin=origin,
+            destination=99,
+            cargo_per_hour={Resource.LUMBER: 500.0},
+            cycle_hours=cycle_hours,
+            merchants_per_send=1,
+            sets_in_flight=1,
+            one_way_minutes=30.0,
+        )
+
+    def test_a_long_cycle_route_sends_inside_a_narrow_window(self):
+        """A 6h cycle fires four times a day and a 2h profile can host one of
+        them; the phase decides whether it hosts any."""
+        window = (20 * 60, 22 * 60)
+
+        beat = build_beat((self._route(6),), dispatch_window=window)
+
+        (scheduled,) = beat.routes
+        inside = [m for m in scheduled.dispatch_minutes if window[0] <= m < window[1]]
+        assert inside, (
+            f"every send falls outside the 20:00-22:00 profile: {scheduled.dispatch_minutes}"
+        )
+        assert window[0] <= scheduled.dispatch_minute < window[1], (
+            "the sheet's Send at time must be an hour the profile is running"
+        )
+
+    def test_a_window_that_wraps_past_midnight_is_phased_too(self):
+        window = (23 * 60, 60)  # 23:00-01:00
+
+        beat = build_beat((self._route(8),), dispatch_window=window)
+
+        (scheduled,) = beat.routes
+        assert any(m >= window[0] or m < window[1] for m in scheduled.dispatch_minutes), (
+            f"nothing sends across midnight: {scheduled.dispatch_minutes}"
+        )
+
+    def test_every_route_in_a_plan_sends_inside_a_narrow_window(self):
+        """Measured on five villages whose rates are small enough for 6-12h
+        cycles: the window-blind beat kept 1 of 17 firings in a 20:00-22:00
+        profile, and three of its four routes shipped nothing at all."""
+        villages = {
+            vid: VillageState(village_id=vid, x=vid * 12, y=vid * 9, merchant_count=20)
+            for vid in range(1, 6)
+        }
+        productions = {Resource.LUMBER: {1: 40.0, 2: 60.0, 3: 80.0, 4: 100.0, 5: 0.0}}
+        allocations = {
+            Resource.LUMBER: {
+                1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                2: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                3: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                4: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                5: Allocation(AllocationMode.REMAINDER),
+            }
+        }
+        window = (20 * 60, 22 * 60)
+        config = PlannerConfig(
+            geometry=CONFIG.geometry,
+            merchant_model=CONFIG.merchant_model,
+            dispatch_window=window,
+        )
+
+        plan = craft_plan(villages, productions, allocations, config)
+
+        assert plan.rows
+        for scheduled in plan.beat.routes:
+            assert any(window[0] <= m < window[1] for m in scheduled.dispatch_minutes), (
+                f"{scheduled.route.origin} -> {scheduled.route.destination} "
+                f"({scheduled.route.cycle_hours}h) never sends while the profile runs"
+            )
+
+    def test_a_cycle_outlasting_the_window_says_it_cannot_keep_its_rate(self):
+        """One send a day carries one cycle of cargo, not a day of it, so the
+        rate the route was sized for is unachievable however it is phased."""
+        beat = build_beat((self._route(6),), dispatch_window=(20 * 60, 22 * 60))
+
+        assert any("every 6h" in w and "once a day" in w for w in beat.warnings), beat.warnings
+
+    def test_an_all_day_window_does_not_nag_about_a_daily_cycle(self):
+        """00:00-23:59 is a minute short of a 24h cycle and that minute costs
+        nothing: the route still sends its planned once a day."""
+        beat = build_beat((self._route(24),), dispatch_window=(0, MINUTES_PER_DAY - 1))
+
+        assert beat.warnings == ()
+
+    def test_a_zero_width_window_is_rejected(self):
+        """No minute of the day is inside it, so no phase can ship. Returning a
+        beat that quietly ships nothing is the failure being fixed."""
+        with pytest.raises(ValueError):
+            build_beat((self._route(6),), dispatch_window=(600, 600))
+
+
 class TestBeatSpacing:
     def _route(self, origin: int) -> Route:
         return Route(

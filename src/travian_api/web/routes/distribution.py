@@ -732,11 +732,12 @@ async def post_day_check(
 ):
     """Simulate the full day across every profile. Costs zero game requests.
 
-    Deliberate approximation, stated rather than hidden: each segment
-    contributes its plan's NET RATES, not discrete batches. Route phases do not
-    survive a profile switch (the operator recreates the routes), so batch
-    timing across the boundary is unknowable; the discrete-batch overflow check
-    still runs per profile inside POST /plan.
+    Each profile is planned through the same planner /plan uses, told the hours
+    it runs, so its sends are phased into them and its cargo lands as discrete
+    batches at the minute it arrives -- under whichever profile owns that
+    minute. Obligations no route can carry are the exception: they have no
+    dispatch or travel time to model, so they run as a rate confined to their
+    profile's hours.
     """
     if not body.snapshot:
         raise HTTPException(
@@ -839,9 +840,13 @@ async def post_day_check(
         # merchant budgets, relays and shortfalls -- rather than from allocation
         # intent that no route may realise. It also means the two endpoints
         # cannot answer the same account differently.
+        #
+        # The profile's own hours go with it: the beat must phase its sends into
+        # them, or every firing can land in hours the profile is not running and
+        # the route ships nothing at all.
         per_profile = body.model_copy(update={"allocations": segment.allocations})
         try:
-            account = await _plan_account(per_profile)
+            account = await _plan_account(per_profile, dispatch_window=segment.window)
         except HTTPException as exc:
             raise HTTPException(
                 status_code=exc.status_code, detail=f"{segment.name}: {exc.detail}"
@@ -960,11 +965,18 @@ class _PlannedAccount:
     warnings: list[str]
 
 
-async def _plan_account(body: PlanRequest) -> _PlannedAccount:
+async def _plan_account(
+    body: PlanRequest, dispatch_window: tuple[int, int] | None = None
+) -> _PlannedAccount:
     """Build the account model, run the optimizer, resolve coords + warnings.
 
     Pure of game I/O, so it is shared by the zero-request /plan endpoint and by
     the dry-run computation inside /execute.
+
+    ``dispatch_window`` is the hours of the day this route set runs, for a plan
+    that belongs to one allocation profile rather than to the whole day. It
+    phases the sends into those hours; /plan and /execute leave it None and get
+    the round-the-clock beat.
     """
     # Warnings are read by a person: name villages the way they do, never by id.
     names = {v.village_id: v.name for v in body.snapshot if v.name}
@@ -1048,6 +1060,7 @@ async def _plan_account(body: PlanRequest) -> _PlannedAccount:
         max_latency_hours=body.max_latency_hours,
         min_arrival_gap_minutes=body.min_arrival_gap_minutes,
         reserved_window=body.reserved_window,
+        dispatch_window=dispatch_window,
         min_send_fill=body.min_send_fill,
         max_improve_passes=body.max_improve_passes,
         max_relay_hops=body.max_relay_hops,
