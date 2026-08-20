@@ -78,7 +78,7 @@ where = ["src"]
 target-version = "py311"
 line-length = 100
 # Only lint the real codebase, not debug scripts at root
-include = ["src/**/*.py", "tests/**/*.py"]
+include = ["src/**/*.py", "tests/**/*.py", "conftest.py"]
 
 [tool.ruff.lint]
 select = [
