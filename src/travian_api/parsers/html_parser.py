@@ -618,7 +618,13 @@ def parse_troop_confirm_page(html: str) -> Dict[str, Any]:
     soup = BeautifulSoup(html, "html.parser")
     fields = {}
 
-    # Extract all hidden inputs
+    # Echo the hidden inputs back on the confirm POST. This mirrors a native
+    # HTML form submit (a browser sends every hidden input in the form), which
+    # is what Travian's rally-point two-step is. NOTE: this assumes the submit
+    # is a native form, not a JS-curated fetch — if Travian ever moves troop
+    # confirmation to a fetch that hand-picks fields, echoing *every* hidden
+    # input could include a honeypot field the real client strips, so revisit
+    # this (scope the harvest to the send form) if that changes.
     for hidden_input in soup.find_all("input", type="hidden"):
         name = hidden_input.get("name", "")
         value = hidden_input.get("value", "")
@@ -637,13 +643,13 @@ def parse_troop_confirm_page(html: str) -> Dict[str, Any]:
 
     fields["checksum"] = checksum
 
-    # Also extract visible fields like coordinates and village name
-    coord_inputs = soup.find_all("input", {"name": re.compile(r"[xy]")})
-    for coord_input in coord_inputs:
-        name = coord_input.get("name", "")
-        value = coord_input.get("value", "")
-        if name in ["x", "y"]:
-            fields[name] = value
+    # Coordinate fields, matched by EXACT name. The old `re.compile(r"[xy]")`
+    # matched any input whose name merely contained an x or y (system, day,
+    # gpx…) before narrowing to x/y — an over-broad scan and exactly the loose
+    # selector a planted decoy field would exploit. The name filter already
+    # restricts to x/y, so no second guard is needed.
+    for coord_input in soup.find_all("input", {"name": ["x", "y"]}):
+        fields[coord_input.get("name", "")] = coord_input.get("value", "")
 
     # Extract village name if present
     village_input = soup.find("input", {"name": "villagename"})

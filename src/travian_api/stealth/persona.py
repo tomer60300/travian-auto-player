@@ -21,21 +21,35 @@ logger = logging.getLogger(__name__)
 # ── Chrome-on-Windows UA pool (curl_cffi can impersonate these) ────────
 
 _CHROME_WINDOWS_UAS = [
-    # Only versions with exact curl_cffi impersonation support.
-    # This ensures UA, sec-ch-ua, and TLS fingerprint all match.
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    # Only versions with EXACT curl_cffi impersonation support, so the UA,
+    # sec-ch-ua and TLS fingerprint always agree. Keep this in step with the
+    # newest targets the installed curl_cffi ships (see _IMPERSONATE_MAP): a
+    # pool pinned years behind real Chrome ages every layer in lockstep.
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
 ]
 
-# Map Chrome major version -> curl_cffi impersonate target.
-# Only exact matches — no version skew between UA and TLS fingerprint.
+# Map Chrome major version -> curl_cffi impersonate target. Only EXACT matches,
+# so a persona's UA major always has a TLS fingerprint of the same version — no
+# skew. Fresh personas are built from the newest three (see _CHROME_WINDOWS_UAS),
+# but the older 131/133/136 remain mapped because an EARLIER revision persisted
+# personas with those UAs: curl_cffi 0.15.0 still impersonates them exactly, so
+# on load they stay coherent (UA 136 -> chrome136 TLS) instead of falling back to
+# chrome146 and creating a UA/TLS-major mismatch. A UA major absent from this map
+# cannot be impersonated coherently and is ROTATED to a fresh identity on load.
 _IMPERSONATE_MAP: dict[int, str] = {
+    146: "chrome146",
+    145: "chrome145",
+    142: "chrome142",
     136: "chrome136",
+    # curl_cffi 0.15.0 ships the Chrome 133 profile as "chrome133a" — plain
+    # "chrome133" is NOT a valid target and raises ImpersonateError at request
+    # time, so the exact package spelling matters here.
     133: "chrome133a",
     131: "chrome131",
 }
-_IMPERSONATE_FALLBACK = "chrome136"
+_IMPERSONATE_FALLBACK = "chrome146"
 
 
 def _chrome_major(ua: str) -> int:
@@ -49,10 +63,42 @@ def _impersonate_for(chrome_major: int) -> str:
     return _IMPERSONATE_MAP.get(chrome_major, _IMPERSONATE_FALLBACK)
 
 
+# Exact sec-ch-ua the libcurl-impersonate transport advertises for each pinned
+# target, captured from the locked curl_cffi 0.15.0. Chrome's GREASE brand token,
+# its version, AND the brand ORDER differ from release to release, so a single
+# synthesized string cannot match every target: a detector that knows the target
+# (from the TLS/HTTP2 fingerprint) can compare the expected brand list against
+# what we send. Sending the target's real value keeps the two coherent. The
+# brand list is OS-independent (it carries no platform), so these are correct
+# whether the UA advertises Windows or macOS. Re-verify with a live capture (see
+# test_persona_client_hints) whenever curl_cffi is upgraded.
+_SEC_CH_UA_BY_MAJOR: dict[int, str] = {
+    # Fresh-pool targets.
+    142: '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+    145: '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+    146: '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+    # Legacy persisted-persona targets (chrome131 / chrome133a / chrome136),
+    # captured from curl_cffi 0.15.0 — each ships a different GREASE token, GREASE
+    # version, and brand order, so these must be exact, not synthesized.
+    136: '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+    133: '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+    131: '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+}
+
+
 def _sec_ch_ua_for(chrome_major: int) -> str:
-    """Build sec-ch-ua header value from Chrome major version."""
+    """sec-ch-ua header value for a Chrome major version.
+
+    Uses the exact per-target brand list the transport advertises (see
+    ``_SEC_CH_UA_BY_MAJOR``). An unknown/future major falls back to the
+    current-era GREASE format (``"Not-A.Brand";v="24"``) rather than the legacy
+    ``v="99"`` marker, with the real brand versions tracking the UA major.
+    """
+    exact = _SEC_CH_UA_BY_MAJOR.get(chrome_major)
+    if exact is not None:
+        return exact
     return (
-        f'"Chromium";v="{chrome_major}", "Google Chrome";v="{chrome_major}", "Not-A.Brand";v="99"'
+        f'"Chromium";v="{chrome_major}", "Not-A.Brand";v="24", "Google Chrome";v="{chrome_major}"'
     )
 
 
@@ -141,6 +187,12 @@ def build_persona(ua: str | None = None, server_url: str = "") -> Persona:
         ua = random.choice(_CHROME_WINDOWS_UAS)
         major = _chrome_major(ua)
 
+    # Platform is advertised as Windows to match the Windows UA pool above. The
+    # libcurl-impersonate transport's own TLS/HTTP2 fingerprint for these targets
+    # may present a different OS; the sec-ch-ua brand list is OS-independent so it
+    # stays coherent either way, but if a transport upgrade makes the OS a
+    # correlatable tell, switch the UA pool and this platform together (they must
+    # always agree). Kept as a single deliberate choice here rather than split.
     return Persona(
         user_agent=ua,
         impersonate=_impersonate_for(major),
@@ -222,23 +274,51 @@ def load_persona(
                 server_url,
             )
             return None
+        # Client hints are DERIVED from the User-Agent, so recompute them on load
+        # from the persisted UA rather than trusting the serialized values. A
+        # persona written by an earlier revision keeps the stale sec-ch-ua GREASE
+        # (e.g. the legacy Not-A.Brand;v=99 marker) for its whole 365-day TTL
+        # otherwise — the in-place upgrade population that most needs the hardening
+        # would never get it. The UA, impersonation target, salt, server URL and
+        # created_at are preserved so cookies see no identity rotation and the TTL
+        # is not reset.
+        major = _chrome_major(data["user_agent"])
+        if major and major not in _IMPERSONATE_MAP:
+            # The persisted UA major has no EXACT curl_cffi impersonation target,
+            # so its UA/client-hints cannot be made coherent with the TLS
+            # fingerprint (they would skew to the chrome146 fallback). Rotate to a
+            # fresh, fully-coherent identity — one deliberate transition — rather
+            # than keep serving a UA-major/TLS-major mismatch for the whole TTL.
+            # Returning None makes the caller build and persist a fresh persona.
+            logger.info(
+                "Persona UA major %s has no impersonation target — rotating identity", major
+            )
+            return None
+        canonical_sec_ch_ua = _sec_ch_ua_for(major) if major else data["sec_ch_ua"]
+        canonical_impersonate = _impersonate_for(major) if major else data["impersonate"]
         persona = Persona(
             user_agent=data["user_agent"],
-            impersonate=data["impersonate"],
-            sec_ch_ua=data["sec_ch_ua"],
+            impersonate=canonical_impersonate,
+            sec_ch_ua=canonical_sec_ch_ua,
             sec_ch_ua_platform=data["sec_ch_ua_platform"],
             sec_ch_ua_mobile=data["sec_ch_ua_mobile"],
             accept_language=data["accept_language"],
             is_chromium=data["is_chromium"],
             salt=data.get("salt", ""),
         )
+        normalized = (
+            canonical_sec_ch_ua != data["sec_ch_ua"] or canonical_impersonate != data["impersonate"]
+        )
         if not persona.salt:
-            # Migrate a pre-salt persona file: generate a stable salt and
-            # persist it (preserving created_at so the TTL isn't reset) so the
-            # account's behavioral seeds stay fixed across future restarts. If
-            # the legacy file also lacked a server_url, pin it to the current
-            # server now so future server-mismatch rotation works.
+            # Migrate a pre-salt persona file: generate a stable salt so the
+            # account's behavioral seeds stay fixed across future restarts.
             persona.salt = _new_salt()
+            normalized = True
+        if normalized:
+            # Persist the normalization (and/or backfilled salt), preserving
+            # created_at so the TTL isn't reset; pin a missing server_url now so
+            # future server-mismatch rotation works. A second load then returns
+            # the same result without rotating identity.
             save_persona(
                 persona,
                 path,

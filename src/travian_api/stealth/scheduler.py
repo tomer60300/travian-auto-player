@@ -373,6 +373,58 @@ class ActivityScheduler:
 
         return True
 
+    def is_rest_window(self, now: datetime | None = None) -> bool:
+        """True during this account's night-rest window (wrap-aware).
+
+        The window can wrap past midnight (start ~23:00, end ~06:00). A human
+        account is quiet then, so a long-running loop should pause and resume in
+        the morning rather than run straight through — activity that respects no
+        sleep window is the most reliable machine-vs-human signal there is. The
+        boundaries are per-account (seed_circadian), so a fleet on one host does
+        not share a synchronized night phase.
+        """
+        if not self.enabled:
+            return False
+        now = now or datetime.now()
+        # Second precision, matching seconds_until_rest_ends, so the two share
+        # one boundary and can't disagree about the window edge.
+        hour = now.hour + now.minute / 60.0 + now.second / 3600.0
+        start = self._night_start_hour % 24.0  # seed can draw up to 24.0
+        end = self._night_end_hour
+        if start < end:
+            return start <= hour < end
+        return hour >= start or hour < end
+
+    def seconds_until_rest_ends(self, now: datetime | None = None) -> float:
+        """Seconds to sleep so the loop wakes just after the rest window.
+
+        Returns 0 outside the window. Inside it, ONE pause spans the whole
+        remaining window (time from now to ``night_end_hour``, wrap-aware) plus
+        a small random buffer. That is deliberately NOT ``next_break_duration``'s
+        fixed 6–9h draw, which can oversleep hours past morning (enter at 05:30,
+        draw 8h) or undersleep and wake back inside the window (enter at 23:00,
+        draw 6h) — the latter would let the loop fire a full activity burst
+        mid-window on wake. Aligning to the window end guarantees a single quiet
+        stretch and a wake time that is near morning but jittered, not a sharp
+        daily constant.
+        """
+        # Resolve the clock ONCE and share it with the window check. Sampling
+        # now separately for is_rest_window and the remaining-time math let the
+        # two straddle the window-end boundary: is_rest_window(now1) True, then
+        # hour(now2) just past the end, so (end - hour) % 24 wraps to ~24h and
+        # the account slept for a day. One instant closes that.
+        now = now or datetime.now()
+        if not self.is_rest_window(now):
+            return 0.0
+        hour = now.hour + now.minute / 60.0 + now.second / 3600.0
+        remaining_h = (self._night_end_hour - hour) % 24.0
+        if remaining_h <= 0.0:
+            # Defensive net for the exact-boundary instant: resume, never a
+            # full-day sleep.
+            return 0.0
+        buffer_s = random.uniform(0.0, 2700.0)  # up to 45 min so wake isn't a constant
+        return remaining_h * 3600.0 + buffer_s
+
     def next_break_duration(self) -> float:
         """How long to break (in seconds).
 
@@ -384,7 +436,6 @@ class ActivityScheduler:
             return 0.0
 
         now = datetime.now()
-        hour = now.hour + now.minute / 60.0  # fractional, for per-account phase
         rolling_hours = self._rolling_24h_seconds() / 3600.0
 
         # Triangular (not uniform) so the duration histogram tapers to zero at
@@ -392,10 +443,11 @@ class ActivityScheduler:
         # the same anti-uniform reasoning the continuous-session caps use
         # (see _sample_continuous_cap).
 
-        # Night break: if it's late, take a long rest. The window boundaries and
-        # the wake-duration band are per-account (seed_circadian), so accounts
-        # on one host don't share a synchronized night phase / wake-time CDF.
-        if hour >= self._night_start_hour or hour < self._night_end_hour:
+        # Night break: if it's late, take a long rest. Reuse is_rest_window as
+        # the single source of truth for "is it night" (it normalizes a
+        # start hour of 24.0) so this duration path can never disagree with the
+        # detection path about where the window is.
+        if self.is_rest_window(now):
             lo, hi, mode = self._night_break_band
             duration_h = random.triangular(lo, hi, mode)
             logger.info("Night break: sleeping %.1fh", duration_h)

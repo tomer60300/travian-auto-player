@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 import time
 from datetime import datetime
 
@@ -33,12 +32,23 @@ from travian_api.exceptions import ActivityBudgetExhausted
 from travian_api.operation_manager import OperationContext, operation_manager
 from travian_api.web.operation_gate import active_ops
 from travian_api.web.sessions import session_manager
+from travian_api.web.ws._loop_stealth import (
+    interruptible_sleep,
+    night_rest_pause,
+    recurring_wait,
+)
 from travian_api.web.ws._resumable import subscribe_and_tail
 from travian_api.web.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# A bounded run whose remaining time exceeds this genuinely spans a night, so
+# it night-rests like an unbounded run. A shorter bounded run is a deliberate
+# operator session that runs through to its deadline rather than absorbing a
+# multi-hour sleep (which would also overrun the requested duration).
+_NIGHT_REST_MIN_RUN_S = 12 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -73,25 +83,6 @@ async def _wait_for_start(ws: WebSocket) -> bool:
     return msg.get("action", "").lower() == "start"
 
 
-async def _interruptible_sleep(ctx: OperationContext, seconds: float) -> bool:
-    """Sleep with a small chunk granularity, returning True on stop signal.
-
-    Uses :meth:`OperationContext.wait_or_stop` for the explicit stop event but
-    breaks the wait into chunks so the captcha-stop poll fires reasonably
-    often during long inter-cycle sleeps.
-    """
-    remaining = seconds
-    chunk = 2.0
-    while remaining > 0:
-        step = min(chunk, remaining)
-        if await ctx.wait_or_stop(step):
-            return True
-        if ctx.should_stop():  # captcha-stop
-            return True
-        remaining -= step
-    return False
-
-
 # ---------------------------------------------------------------------------
 # Single-list loop coroutine
 # ---------------------------------------------------------------------------
@@ -102,6 +93,7 @@ def _build_farm_run_coro(
     interval: int,
     duration: int,
     verbose: bool,
+    floor: int = 0,
 ):
     """Returns the coroutine OperationManager will run in the background."""
 
@@ -150,6 +142,24 @@ def _build_farm_run_coro(
             if ctx.should_stop():
                 break
 
+            # Go quiet overnight and resume in the morning — a graceful, VISIBLE
+            # pause (see night_rest_pause), not the fatal budget path below.
+            # Gated on TOTAL run length (fixed, not the shrinking remaining
+            # time): unbounded runs and long bounded runs that genuinely span a
+            # night rest; a short bounded run is a deliberate fixed session and
+            # runs through so its cadence isn't shredded by a mid-session sleep.
+            # The deadline caps the sleep so even a long run ending mid-night
+            # stops on time instead of lingering asleep past its finish.
+            if (duration == 0 or duration * 60 > _NIGHT_REST_MIN_RUN_S) and await night_rest_pause(
+                ctx, deadline=end_time
+            ):
+                break
+            # A deadline-capped pause can return right at end_time; re-check here
+            # so a bounded run doesn't fire one more cycle past its deadline (the
+            # loop-top check alone runs only after the cycle below).
+            if end_time and time.time() >= end_time:
+                break
+
             try:
                 ctx.session.http_client.check_activity_budget()
             except ActivityBudgetExhausted as exc:
@@ -158,6 +168,11 @@ def _build_farm_run_coro(
 
             cycle += 1
             ctx.push({"type": "cycle_start", "cycle": cycle, "timestamp": _now_iso()})
+            # Draw the (heavy-tailed) inter-cycle wait now so the reported
+            # next-send time below matches the sleep actually taken at the end
+            # of the cycle, rather than the raw interval. `floor` keeps every
+            # wait at or above the stealth minimum.
+            wait_time = recurring_wait(ctx, interval, floor=floor)
 
             try:
                 result = await farm_service.send_farm_list(list_id)
@@ -191,7 +206,7 @@ def _build_farm_run_coro(
                             }
                         )
 
-                next_time = time.time() + interval
+                next_time = time.time() + wait_time
                 next_send = (
                     None
                     if end_time and next_time >= end_time
@@ -221,10 +236,14 @@ def _build_farm_run_coro(
                     }
                 )
 
-            # Inter-cycle sleep with ±15 % jitter, interruptible by stop.
-            jitter = interval * random.uniform(-0.15, 0.15)
-            wait_time = max(1.0, interval + jitter)
-            if await _interruptible_sleep(ctx, wait_time):
+            # Cap the inter-cycle sleep to the remaining bounded duration: the
+            # heavy-tailed wait can be drawn well past a short run's deadline, and
+            # sleeping it out would keep the operation "running" past when the
+            # operator asked it to end. The loop-top deadline check then stops it.
+            sleep_time = wait_time
+            if end_time is not None:
+                sleep_time = max(0.0, min(wait_time, end_time - time.time()))
+            if await interruptible_sleep(ctx, sleep_time):
                 break
 
         ctx.push(
@@ -256,6 +275,7 @@ def _build_farm_run_all_coro(
     duration: int,
     verbose: bool,
     list_ids_param: str,
+    floor: int = 0,
 ):
     """Returns the coroutine OperationManager will run for the run-all op."""
 
@@ -292,6 +312,24 @@ def _build_farm_run_all_coro(
             if ctx.should_stop():
                 break
 
+            # Go quiet overnight and resume in the morning — a graceful, VISIBLE
+            # pause (see night_rest_pause), not the fatal budget path below.
+            # Gated on TOTAL run length (fixed, not the shrinking remaining
+            # time): unbounded runs and long bounded runs that genuinely span a
+            # night rest; a short bounded run is a deliberate fixed session and
+            # runs through so its cadence isn't shredded by a mid-session sleep.
+            # The deadline caps the sleep so even a long run ending mid-night
+            # stops on time instead of lingering asleep past its finish.
+            if (duration == 0 or duration * 60 > _NIGHT_REST_MIN_RUN_S) and await night_rest_pause(
+                ctx, deadline=end_time
+            ):
+                break
+            # A deadline-capped pause can return right at end_time; re-check here
+            # so a bounded run doesn't fire one more cycle past its deadline (the
+            # loop-top check alone runs only after the cycle below).
+            if end_time and time.time() >= end_time:
+                break
+
             try:
                 ctx.session.http_client.check_activity_budget()
             except ActivityBudgetExhausted as exc:
@@ -300,6 +338,10 @@ def _build_farm_run_all_coro(
 
             cycle += 1
             ctx.push({"type": "cycle_start", "cycle": cycle, "timestamp": _now_iso()})
+            # Draw the (heavy-tailed) inter-cycle wait now so the reported
+            # next-send time below matches the sleep actually taken at the end
+            # of the cycle, rather than the raw interval.
+            wait_time = recurring_wait(ctx, interval, floor=floor)
 
             try:
                 results = await farm_service.send_all_farm_lists(send_ids)
@@ -353,7 +395,7 @@ def _build_farm_run_all_coro(
                 total_success += cycle_success
                 total_fail += cycle_fail
 
-                next_time = time.time() + interval
+                next_time = time.time() + wait_time
                 next_send = (
                     None
                     if end_time and next_time >= end_time
@@ -383,9 +425,14 @@ def _build_farm_run_all_coro(
                     }
                 )
 
-            jitter = interval * random.uniform(-0.15, 0.15)
-            wait_time = max(1.0, interval + jitter)
-            if await _interruptible_sleep(ctx, wait_time):
+            # Cap the inter-cycle sleep to the remaining bounded duration: the
+            # heavy-tailed wait can be drawn well past a short run's deadline, and
+            # sleeping it out would keep the operation "running" past when the
+            # operator asked it to end. The loop-top deadline check then stops it.
+            sleep_time = wait_time
+            if end_time is not None:
+                sleep_time = max(0.0, min(wait_time, end_time - time.time()))
+            if await interruptible_sleep(ctx, sleep_time):
                 break
 
         ctx.push(
@@ -471,7 +518,7 @@ async def ws_farm_run(websocket: WebSocket, list_id: int) -> None:
         session_type="farm-run",
         session_label=f"Farm Run - #{list_id}",
         session=session,
-        coro=_build_farm_run_coro(list_id, interval, duration, verbose),
+        coro=_build_farm_run_coro(list_id, interval, duration, verbose, floor=floor),
         require_unique_label=True,
     )
     if op is None:
@@ -602,6 +649,7 @@ async def ws_farm_run_all(websocket: WebSocket) -> None:
             duration=duration,
             verbose=verbose,
             list_ids_param=list_ids_param,
+            floor=floor,
         ),
         # Disjoint run-alls are intentionally allowed to coexist — only
         # the per-list ``farm:{lid}`` extras need to be unique. Setting

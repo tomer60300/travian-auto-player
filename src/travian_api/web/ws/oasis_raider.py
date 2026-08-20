@@ -27,6 +27,11 @@ from travian_api.operation_manager import OperationContext, operation_manager
 from travian_api.services.oasis_raider_service import OasisRaiderConfig, OasisRaiderService
 from travian_api.web.log_broadcast import log_stream_manager
 from travian_api.web.sessions import TravianSession, session_manager
+from travian_api.web.ws._loop_stealth import (
+    interruptible_sleep,
+    night_rest_pause,
+    recurring_wait,
+)
 from travian_api.web.ws._resumable import subscribe_and_tail
 from travian_api.web.ws.manager import ws_manager
 
@@ -80,9 +85,28 @@ def _build_oasis_coro(config: OasisRaiderConfig):
         async def check_stop() -> bool:
             return ctx.should_stop()
 
-        ctx.push({"type": "status", "data": {"state": "running"}})
         iteration = 0
+
+        # Announce a night pause in the oasis UI's own vocabulary: send_log is
+        # both visible in the UI and mirrored to the log stream (its message
+        # switch has no "info" case), and the sleeping/running status keeps the
+        # indicator honest rather than stuck on "running" through the night.
+        async def _announce_rest(hours: float) -> None:
+            await send_log(
+                "RECURRING", "🌙", f"Night rest — pausing ~{hours:.1f}h, resuming in the morning."
+            )
+            ctx.push({"type": "status", "data": {"state": "sleeping"}})
+
+        recurring = config.repeat_interval_seconds > 0
         while not ctx.should_stop():
+            # Go quiet overnight and resume in the morning — a graceful, VISIBLE
+            # pause (night_rest_pause announces it and flips the status), not the
+            # fatal budget path below. ONLY for a recurring raid: a one-shot
+            # (repeat_interval=0, the default) is a single sweep the operator
+            # wants now, not something to delay a whole night before firing.
+            if recurring and await night_rest_pause(ctx, announce=_announce_rest):
+                break
+
             try:
                 ctx.session.http_client.check_activity_budget()
             except ActivityBudgetExhausted as exc:
@@ -101,7 +125,9 @@ def _build_oasis_coro(config: OasisRaiderConfig):
                     f"(repeat_interval={config.repeat_interval_seconds}s)",
                     "info",
                 )
-                ctx.push({"type": "status", "data": {"state": "running"}})
+            # One running-status push per iteration, right before the sweep — it
+            # also covers resuming from a night pause, which left it "sleeping".
+            ctx.push({"type": "status", "data": {"state": "running"}})
 
             stats = await service.run_sweep(config, send_log, check_stop)
             ctx.push({"type": "summary", "data": stats})
@@ -109,24 +135,29 @@ def _build_oasis_coro(config: OasisRaiderConfig):
             if ctx.should_stop() or config.repeat_interval_seconds <= 0:
                 break
 
-            # Stealth: micro-jitter the recurring interval so the request
-            # bursts don't sit on perfect second boundaries indefinitely.
-            from travian_api.stealth.timing import HumanTiming as _HT
-
-            wait_secs = _HT.micro_jitter(float(config.repeat_interval_seconds), 0.10)
+            # Heavy-tailed, tempo-scaled inter-sweep wait (shared with the farm
+            # loop): ±10% micro-jitter on a fixed interval still leaves a sharp
+            # periodogram peak at repeat_interval, so the whole cadence is
+            # replaced by a bursty draw whose expected value is the interval.
+            # No hard floor is passed (floor=0): unlike the farm's per-minute
+            # cadence, an oasis sweep's repeat_interval is already coarse
+            # (minutes to hours), so it needs no sub-interval stealth floor.
+            # Round once so the announced countdown matches the actual sleep.
+            wait_secs = max(
+                1, round(recurring_wait(ctx, float(config.repeat_interval_seconds), floor=0.0))
+            )
             await send_log(
                 "RECURRING",
                 "⏱️",
-                f"Iteration #{iteration} complete — next run in {wait_secs:.0f}s",
+                f"Iteration #{iteration} complete — next run in {wait_secs}s",
                 "info",
             )
             ctx.push({"type": "status", "data": {"state": "sleeping"}})
 
-            # round + 1s floor: micro_jitter on a 1s configured interval can
-            # land below 1.0; int() would truncate to 0 and create a tight
-            # busy loop.
-            stopped_during_sleep = await ctx.wait_or_stop(max(1, round(wait_secs)))
-            if stopped_during_sleep:
+            # Captcha-aware chunked sleep (shared with the farm loop): a captcha
+            # resolved mid-wait is honored within seconds, not after the full
+            # (up to 4x interval) wait.
+            if await interruptible_sleep(ctx, wait_secs):
                 break
 
         terminal = "stopped" if ctx.should_stop() else "completed"

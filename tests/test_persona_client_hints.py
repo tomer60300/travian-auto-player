@@ -1,0 +1,174 @@
+"""Client-hint coherence for the browser persona.
+
+Two review findings are pinned here:
+  * #59 — the sec-ch-ua brand list must match the selected impersonation target
+    per Chrome version (the transport advertises a different GREASE token,
+    version and brand order per release), not one synthesized value for all;
+  * #57 — a persisted persona from an earlier revision must have its DERIVED
+    client hints normalized to the current policy on load, without rotating the
+    identity (UA / salt / created_at preserved), so the in-place upgrade
+    population actually receives the hardening instead of keeping a stale
+    fingerprint for the persona's 365-day TTL.
+"""
+
+import json
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from travian_api.stealth.persona import (
+    _SEC_CH_UA_BY_MAJOR,
+    _sec_ch_ua_for,
+    build_persona,
+    load_persona,
+)
+
+
+def _ua(major):
+    return (
+        f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+    )
+
+
+_UA_146 = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+)
+_SERVER = "https://ts1.x1.europe.travian.com"
+
+
+class TestPerVersionClientHints:
+    def test_each_pinned_target_carries_its_own_brand_list(self):
+        values = [_sec_ch_ua_for(m) for m in (142, 145, 146)]
+        assert len(set(values)) == 3, "one synthesized value for all targets is the bug"
+        for major in (142, 145, 146):
+            assert _sec_ch_ua_for(major) == _SEC_CH_UA_BY_MAJOR[major]
+            assert f'v="{major}"' in _sec_ch_ua_for(major)
+
+    def test_unknown_major_uses_current_era_grease_not_the_legacy_marker(self):
+        value = _sec_ch_ua_for(999)
+        assert '"Not-A.Brand";v="24"' in value
+        assert 'v="99"' not in value
+
+    def test_build_persona_carries_the_per_version_hint(self):
+        ua = _UA_146.replace("146", "145")
+        persona = build_persona(ua=ua)
+        assert persona.sec_ch_ua == _SEC_CH_UA_BY_MAJOR[145]
+        assert persona.impersonate == "chrome145"
+
+
+class TestPersistedPersonaNormalization:
+    def _write(self, path, ua, sec_ch_ua, *, created_at=None, salt="abcdef0123456789"):
+        path.write_text(
+            json.dumps(
+                {
+                    "user_agent": ua,
+                    "impersonate": "chrome146",
+                    "sec_ch_ua": sec_ch_ua,
+                    "sec_ch_ua_platform": '"Windows"',
+                    "sec_ch_ua_mobile": "?0",
+                    "accept_language": "en-US,en;q=0.9",
+                    "is_chromium": True,
+                    "salt": salt,
+                    "created_at": created_at or datetime.now(UTC).isoformat(),
+                    "server_url": _SERVER,
+                }
+            )
+        )
+
+    def test_legacy_client_hint_is_normalized_on_load(self, tmp_path):
+        path = tmp_path / ".travian_persona.json"
+        legacy = '"Chromium";v="146", "Google Chrome";v="146", "Not-A.Brand";v="99"'
+        self._write(path, _UA_146, legacy)
+
+        persona = load_persona(path, server_url=_SERVER)
+
+        assert persona is not None
+        assert persona.sec_ch_ua == _sec_ch_ua_for(146), "the stale GREASE must be normalized"
+        assert persona.sec_ch_ua != legacy
+        # The normalized value is persisted: a second load returns it unchanged.
+        again = load_persona(path, server_url=_SERVER)
+        assert again.sec_ch_ua == persona.sec_ch_ua
+
+    def test_normalization_preserves_identity_and_ttl(self, tmp_path):
+        path = tmp_path / ".travian_persona.json"
+        created = (datetime.now(UTC) - timedelta(days=200)).isoformat()
+        legacy = '"Chromium";v="146", "Google Chrome";v="146", "Not-A.Brand";v="99"'
+        self._write(path, _UA_146, legacy, created_at=created, salt="stablesalt123456")
+
+        persona = load_persona(path, server_url=_SERVER)
+
+        assert persona.user_agent == _UA_146, "UA must not change (no identity rotation)"
+        assert persona.salt == "stablesalt123456", "salt must be preserved"
+        # created_at is untouched so the 365-day TTL is not reset.
+        assert json.loads(path.read_text())["created_at"] == created
+
+
+class TestLegacyPersonaMigration:
+    """Personas persisted by an earlier revision used Chrome 136/133/131 UAs.
+    curl_cffi still impersonates those exactly, so they must stay coherent on
+    load (UA major == TLS target), not fall back to chrome146 (#57). A UA major
+    with no impersonation target at all is rotated to a fresh identity."""
+
+    def _write(self, path, ua, sec_ch_ua):
+        path.write_text(
+            json.dumps(
+                {
+                    "user_agent": ua,
+                    "impersonate": "chrome146",  # what the buggy fallback wrote
+                    "sec_ch_ua": sec_ch_ua,
+                    "sec_ch_ua_platform": '"Windows"',
+                    "sec_ch_ua_mobile": "?0",
+                    "accept_language": "en-US,en;q=0.9",
+                    "is_chromium": True,
+                    "salt": "legacysalt000001",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "server_url": _SERVER,
+                }
+            )
+        )
+
+    # Exact (impersonate target, sec-ch-ua) captured from curl_cffi 0.15.0. Note
+    # 133 → "chrome133a" (not "chrome133", which errors), and each legacy major
+    # has its own GREASE token/version/order.
+    _LEGACY = {
+        136: (
+            "chrome136",
+            '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+        ),
+        133: (
+            "chrome133a",
+            '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+        ),
+        131: (
+            "chrome131",
+            '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        ),
+    }
+
+    @pytest.mark.parametrize("major", [136, 133, 131])
+    def test_legacy_supported_major_stays_coherent(self, tmp_path, major):
+        path = tmp_path / ".travian_persona.json"
+        legacy = f'"Chromium";v="{major}", "Google Chrome";v="{major}", "Not-A.Brand";v="99"'
+        self._write(path, _ua(major), legacy)
+
+        persona = load_persona(path, server_url=_SERVER)
+        expected_target, expected_hint = self._LEGACY[major]
+
+        assert persona is not None, "a supported legacy major must NOT be rotated away"
+        # Full target name — catches the chrome133 vs chrome133a bug.
+        assert persona.impersonate == expected_target
+        # Exact full header — catches brand order / GREASE-token mismatches.
+        assert persona.sec_ch_ua == expected_hint
+        assert persona.user_agent == _ua(major)
+        assert persona.salt == "legacysalt000001"
+
+    def test_unsupported_major_is_rotated(self, tmp_path):
+        # Chrome 120 has no entry in _IMPERSONATE_MAP → cannot be coherent →
+        # load returns None so the caller builds a fresh, coherent persona.
+        path = tmp_path / ".travian_persona.json"
+        self._write(
+            path, _ua(120), '"Chromium";v="120", "Google Chrome";v="120", "Not-A.Brand";v="99"'
+        )
+        assert load_persona(path, server_url=_SERVER) is None, "an unmapped major must rotate"
