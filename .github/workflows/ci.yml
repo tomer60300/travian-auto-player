@@ -63,5 +63,7 @@ jobs:
       - run: npm ci
       - name: ESLint
         run: npx eslint . --max-warnings=20
+      - name: Test
+        run: npm test
       - name: Build
         run: npm run build
