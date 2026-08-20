@@ -692,8 +692,22 @@ export default function ResourcePlanner() {
       }
       if (Object.keys(usable).length) sendAllocations[resource] = usable
     }
+    // The active profile's own hours. Without them the optimizer phases each
+    // route's send time anywhere in its cycle, so a profile that runs only part
+    // of the day gets sheet rows -- and, via /execute, REAL routes -- that fire
+    // while a different profile is meant to be running. Read inline rather than
+    // through windowFor(), which is declared further down: naming it in the
+    // dependency array below would evaluate it in its temporal dead zone.
+    const hours = profileWindows[activeProfile] ?? DEFAULT_WINDOWS[activeProfile] ?? null
+    const from = hours && hhmmToMinutes(hours[0])
+    const to = hours && hhmmToMinutes(hours[1])
+    // A zero-width or unparseable window is sent as null, not as a broken pair:
+    // the backend rejects start === end, and an all-day profile needs no phasing.
+    const dispatchWindow = from == null || to == null || from === to ? null : [from, to]
+
     return {
       snapshot: villages,
+      dispatch_window: dispatchWindow,
       config: villages.map((v) => ({
         village_id: v.village_id,
         trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
@@ -712,7 +726,7 @@ export default function ResourcePlanner() {
         ? Number(merchantModel.bonus_per_to_level)
         : undefined,
     }
-  }, [villages, tradeOffice, allocations, foreignTargets, merchantModel, snapshot])
+  }, [villages, tradeOffice, allocations, foreignTargets, merchantModel, snapshot, profileWindows, activeProfile])
 
   const buildPlan = useCallback(async () => {
     if (!villages.length) {
@@ -1052,7 +1066,14 @@ export default function ResourcePlanner() {
       // model and the geometry. Reusing the plan payload is what keeps the two
       // from answering the same account differently. Allocations are dropped
       // because a profile carries its own -- the backend rejects them here.
-      const { allocations: _perProfileInstead, ...planInputs } = buildPlanPayload()
+      // Both allocations and dispatch_window are dropped: a profile carries
+      // its own of each, so the backend rejects them at the top level rather
+      // than silently applying one profile's hours to all of them.
+      const {
+        allocations: _perProfileAllocations,
+        dispatch_window: _perProfileWindow,
+        ...planInputs
+      } = buildPlanPayload()
       const res = await api.post('/distribution/day-check', {
         ...planInputs,
         segments,

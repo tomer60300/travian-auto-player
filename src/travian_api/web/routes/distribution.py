@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from travian_api.exceptions import ActivityBudgetExhausted, NetworkError, TravianError
 from travian_api.parsers.html_parser import (
@@ -244,14 +244,40 @@ class PlanRequest(BaseModel):
             "the plan warns when geometry forces one into it."
         ),
     )
+    dispatch_window: tuple[int, int] | None = Field(
+        default=None,
+        description=(
+            "Minutes past midnight (start, end) of the hours this route set "
+            "actually runs, so each route's send time is phased into them. Send "
+            "this whenever the plan belongs to a profile that does not run all "
+            "day: without it the sheet prints -- and /execute CREATES -- routes "
+            "whose send time can fall outside the profile's own hours, which in "
+            "game means shipping that profile's allocation while a different one "
+            "is meant to be running. May wrap past midnight."
+        ),
+    )
 
-    @field_validator("reserved_window")
+    @field_validator("reserved_window", "dispatch_window")
     @classmethod
-    def _window_within_the_day(cls, value: tuple[int, int] | None) -> tuple[int, int] | None:
-        # A window may wrap past midnight (start > end), so only the bounds are
-        # checked -- ordering carries meaning rather than being an error.
-        if value is not None and not all(0 <= minute < MINUTES_PER_DAY for minute in value):
-            raise ValueError(f"reserved_window minutes must be 0-{MINUTES_PER_DAY - 1}")
+    def _window_within_the_day(
+        cls, value: tuple[int, int] | None, info: ValidationInfo
+    ) -> tuple[int, int] | None:
+        # A window may wrap past midnight (start > end), so ordering carries
+        # meaning rather than being an error; only the bounds are checked.
+        if value is None:
+            return value
+        field = info.field_name or "window"
+        if not all(0 <= minute < MINUTES_PER_DAY for minute in value):
+            raise ValueError(f"{field} minutes must be 0-{MINUTES_PER_DAY - 1}")
+        # Zero width means something different for each. An empty reserved
+        # window simply reserves nothing, which is harmless; an empty DISPATCH
+        # window says no minute of the day may carry a send, which build_beat
+        # rejects outright -- so accepting it here would turn a client typo into
+        # a 500 rather than a validation error.
+        if field == "dispatch_window" and value[0] == value[1]:
+            raise ValueError(
+                "dispatch_window is zero-width; give the profile some hours or omit it"
+            )
         return value
 
 
@@ -694,6 +720,17 @@ class DayCheckRequest(PlanRequest):
         ),
     )
 
+    @field_validator("dispatch_window")
+    @classmethod
+    def _windows_live_on_segments(cls, value: tuple[int, int] | None) -> tuple[int, int] | None:
+        """Each segment carries its own hours; a single top-level one is wrong."""
+        if value is not None:
+            raise ValueError(
+                "dispatch_window belongs to each entry in `segments`, not at the "
+                "top level -- every profile runs its own hours"
+            )
+        return value
+
     @field_validator("allocations")
     @classmethod
     def _allocations_live_on_segments(cls, value: dict) -> dict:
@@ -1065,7 +1102,10 @@ async def _plan_account(
         max_latency_hours=body.max_latency_hours,
         min_arrival_gap_minutes=body.min_arrival_gap_minutes,
         reserved_window=body.reserved_window,
-        dispatch_window=dispatch_window,
+        # The explicit argument wins (the day check passes each segment's own
+        # hours); otherwise take what the client sent on the request, which is
+        # how /plan and /execute learn the active profile's window.
+        dispatch_window=dispatch_window if dispatch_window is not None else body.dispatch_window,
         min_send_fill=body.min_send_fill,
         max_improve_passes=body.max_improve_passes,
         max_relay_hops=body.max_relay_hops,

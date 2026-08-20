@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from travian_api.services.building_service import BuildingService
 from travian_api.services.distribution.allocation import Resource
@@ -646,3 +647,63 @@ class TestPlanEndpoint:
 
         assert res.total_merchants > 0
         assert any("free" in w for w in res.warnings)
+
+
+class TestPlanRespectsTheProfileWindow:
+    """A plan belonging to a part-day profile must be phased into its hours.
+
+    /execute recomputes the plan server-side and turns its rows into REAL trade
+    routes, and the captured wire format carries an explicit hour and minute --
+    so an unphased send time is not a display quirk. It is a route that fires
+    while a different profile is meant to be running.
+    """
+
+    WINDOW = (20 * 60, 22 * 60)
+
+    @staticmethod
+    def _covers(window, minute):
+        start, end = window
+        return start <= minute < end if start < end else (minute >= start or minute < end)
+
+    @staticmethod
+    def _minutes(clock):
+        hours, minutes = clock.split(":")
+        return int(hours) * 60 + int(minutes)
+
+    def _plan(self, window):
+        body = _plan_request(
+            {"lumber": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}}
+        )
+        if window is not None:
+            body = body.model_copy(update={"dispatch_window": window})
+        return asyncio.run(post_plan(body))
+
+    def test_every_send_time_lands_inside_a_part_day_window(self):
+        res = self._plan(self.WINDOW)
+
+        assert res.rows, "expected at least one route to reason about"
+        outside = [
+            r.dispatch for r in res.rows if not self._covers(self.WINDOW, self._minutes(r.dispatch))
+        ]
+        assert not outside, f"send times outside the profile's 20:00-22:00 hours: {outside}"
+
+    def test_omitting_the_window_keeps_the_round_the_clock_behaviour(self):
+        # Nothing changed for a caller that sends nothing: the field is optional
+        # and /plan still phases across the whole day.
+        assert self._plan(None).rows
+
+    def test_a_zero_width_window_is_rejected_not_silently_ignored(self):
+        # No minute of the day is inside it, which build_beat refuses outright.
+        # Accepting it here would turn a client typo into a 500.
+        base = _plan_request({"lumber": {"20011": {"mode": "remainder"}}})
+        with pytest.raises(ValidationError, match="zero-width"):
+            PlanRequest.model_validate(
+                {**base.model_dump(mode="json"), "dispatch_window": (600, 600)}
+            )
+
+    def test_a_window_outside_the_day_is_rejected_and_names_its_field(self):
+        base = _plan_request({"lumber": {"20011": {"mode": "remainder"}}})
+        with pytest.raises(ValidationError, match="dispatch_window minutes must be"):
+            PlanRequest.model_validate(
+                {**base.model_dump(mode="json"), "dispatch_window": (0, 1440)}
+            )
