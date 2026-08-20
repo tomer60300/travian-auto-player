@@ -11,7 +11,7 @@ Gold Club costs 200 Gold (one-time per game round) and unlocks premium features.
 | Feature | UI Locked | API CRUD | API Execute | Enforcement |
 |---------|:-:|:-:|:-:|-------------|
 | **Farm Lists** | ✅ | ✅ Works | ❌ Send blocked | Server blocks `farm-list/send` only |
-| **Trade Routes** | ✅ | ❓ Untested | ❓ Untested | Needs Gold Club to verify |
+| **Trade Routes** | ✅ | ✅ Works | ✅ Works | Verified 2026-08-20 with Gold Club: create `201`, toggle `200` |
 | **Archive (Reports/Messages)** | ✅ | ❓ Untested | ❓ Untested | Needs Gold Club to verify |
 | **Map Crop Finder** | ✅ | ❓ Untested | ❓ Untested | Needs Gold Club to verify |
 | **Troop Evasion** | ✅ | ❓ Untested | ❓ Untested | Needs Gold Club to verify |
@@ -73,20 +73,74 @@ But to **actually send** the raids, you need either:
 **Gold Club cost:** Included in Gold Club
 **What it provides:** Automatic scheduled resource deliveries between own villages
 
-### Known Endpoints
+### Verified Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `POST /api/v1/trade-routes` | POST | CRUD for trade routes |
-| `POST /api/v1/trade-routes/toggle-group` | POST | Enable/disable a trade route group |
+Captured from a real client on 2026-08-20 (gpack 597.6, Europe 2, Gold Club active). Both are `application/json; charset=UTF-8`, sent as `fetch` with `sec-fetch-mode: cors` from the marketplace page.
+
+| Endpoint | Method | Description | Response |
+|----------|--------|-------------|----------|
+| `/api/v1/trade-routes` | **POST** | Create one route | `201`, empty body |
+| `/api/v1/trade-routes` | **PUT** | Enable/disable routes in bulk | `200`, updated routes |
+
+There is **no** `/api/v1/trade-routes/toggle-group`; an earlier note here guessed one. Enable/disable is a PUT to the same collection endpoint.
+
+#### Create — `POST /api/v1/trade-routes`
+
+```json
+{
+  "action": "traderoute",
+  "sourceVillageId": 20031,
+  "targetCoordinates": { "x": 23, "y": 88 },
+  "resources": { "lumber": 1, "clay": 2, "iron": 3, "crop": 4 },
+  "mode": "send",
+  "hour": 15,
+  "minute": 27,
+  "deliveries": 1,
+  "repeatEvery": 1,
+  "enabled": true,
+  "useTradeShips": false
+}
+```
+
+Notes, all of which corrected an earlier assumption:
+
+- **`hour` + `minute` set the send time**, so a route's phase is chosen at creation rather than being fixed to the moment of the click. This resolves review R6 in `docs/25-resource-distribution-planner.md`: a planned beat is realisable exactly as scheduled.
+- **The destination is nested** under `targetCoordinates`, not flat `x`/`y`.
+- **`repeatEvery`** is the cycle length in hours.
+- **No merchant count is sent.** The game derives it from the cargo, so a planner's merchant figures are for budgeting and warnings only, never wire data.
+- **All four resources are always present**, zeros included.
+- `mode` was `"send"`; `deliveries` was `1`; `useTradeShips` was `false` (no boats on this server).
+- The response body is **empty**, so the new route's id is not returned — reconciliation has to re-read the marketplace page.
+
+#### Enable / disable — `PUT /api/v1/trade-routes`
+
+```json
+{
+  "action": "traderoute",
+  "routes": [
+    { "enabled": false, "id": 647196 },
+    { "enabled": false, "id": 647197 }
+  ]
+}
+```
+
+One request carries every route being switched — the capture toggled 24 in a single call. Only the disable direction was observed; enabling is the identical body with `"enabled": true`.
+
+> Village ids, coordinates and route ids above are stand-ins. The real capture identifies a live account and this repository is public.
 
 ### UI Access
 
-Trade routes are managed from the Marketplace building (`/build.php?gid=17`).
+Trade routes are managed from the Marketplace building (`/build.php?gid=17`), tab `t=3`.
 
 ### API Enforcement
 
-Without Gold Club, `POST /api/v1/trade-routes` returns `api.unexpectedError` — unclear if this is a Gold Club lock or a parameter issue. Further testing needed with Gold Club active.
+Without Gold Club, `POST /api/v1/trade-routes` returns `api.unexpectedError`. With Gold Club active the same request returns `201`, which confirms the error was the Gold Club lock rather than a malformed payload.
+
+### Still open
+
+- Whether Gold Club caps the number of routes per village.
+- What `deliveries` controls beyond the observed value of `1`.
+- Whether `mode` accepts a fetch/receive direction as well as `"send"`.
 
 ---
 

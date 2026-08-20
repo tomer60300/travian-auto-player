@@ -620,10 +620,13 @@ class TestExecutionHardening:
         )
 
     def test_create_payload_serializes_the_send_time(self):  # #58
+        # Was pinning the guessed startMinute/startTime pair. The captured
+        # client request splits the send time into two integers instead; the
+        # full wire format lives in tests/test_trade_route_payload.py.
         route = PlannedRoute(20003, 40, 40, "A", {Resource.CROP: 100}, 6, 2, dispatch_minute=615)
         payload = TradeRouteService(http_client=SimpleNamespace())._build_create_payload(route)
-        assert payload["startMinute"] == 615
-        assert payload["startTime"] == "10:15"
+        assert payload["hour"] == 10
+        assert payload["minute"] == 15
 
     def test_disabled_desired_route_is_re_enabled_not_duplicated(self):  # #60
         svc = _FakeLiveSvc(existing={20003: [ExistingRoute(1, 40, 40, active=False)]})

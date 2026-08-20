@@ -98,7 +98,11 @@ class TravianSession:
         self.farm_service = FarmListService(self.http_client)
         self.scout_service = AutoScoutService(self.http_client)
         self.video_service = VideoRewardService(self.http_client)
-        self.trade_route_service = TradeRouteService(self.http_client)
+        # Live creation stays refused unless the operator has explicitly enabled
+        # it, because the trade-route wire payload is still unverified.
+        self.trade_route_service = TradeRouteService(
+            self.http_client, live_enabled=self.settings.trade_route_live
+        )
 
         # ── Lazy services (need auth_state) ──────────────────────────
         self._raid_analyzer: Optional[RaidAnalyzerService] = None

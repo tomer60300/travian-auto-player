@@ -81,6 +81,20 @@ class Settings(BaseSettings):
         default=0.4, description="Delay variance factor (0=tight, 1=very spread)"
     )
 
+    # Live trade-route creation. Off until the /api/v1/trade-routes request
+    # payload has been captured from a real client and TradeRouteService's
+    # _build_*_payload confirmed against it. This is not a convenience toggle:
+    # the current body is a best-effort guess, and a request with wrong or extra
+    # fields is a bot fingerprint -- exactly what the stealth layer exists to
+    # avoid. Preview (dry_run) never depends on it.
+    trade_route_live: bool = Field(
+        default=False,
+        description=(
+            "Allow live trade-route creation. Only enable once the "
+            "/api/v1/trade-routes payload is captured and verified."
+        ),
+    )
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

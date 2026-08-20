@@ -868,6 +868,19 @@ class HttpClient:
         self._sync_cookies_from_curl(response)
         return response
 
+    async def _curl_put_json(self, url: str, headers: Dict[str, str], data: Dict[str, Any]) -> Any:
+        """Make a PUT request via curl_cffi."""
+        session = await self._ensure_curl_session()
+        response = await session.put(
+            url,
+            headers=headers,
+            json=data,
+            timeout=self.settings.timeout,
+            allow_redirects=False,
+        )
+        self._sync_cookies_from_curl(response)
+        return response
+
     async def _curl_post_form(self, url: str, form_data: str, headers: Dict[str, str]) -> Any:
         """Make a POST request with form data via curl_cffi."""
         session = await self._ensure_curl_session()
@@ -1106,6 +1119,97 @@ class HttpClient:
                 if not safe_to_retry:
                     raise NetworkError(f"Request failed (curl, non-retryable): {e}")
                 raise  # Let tenacity retry
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
+            raise
+
+    async def put_json(
+        self,
+        url: str,
+        data: Dict[str, Any],
+        *,
+        skip_reauth: bool = False,
+        safe_to_retry: bool = True,
+        request_type: str = "json",
+    ) -> Dict[str, Any]:
+        """Make a PUT request with a JSON body (JSON response expected).
+
+        Added for the Gold Club trade-route toggle, which is a PUT to
+        ``/api/v1/trade-routes`` rather than a POST. Deliberately NOT decorated
+        with ``_transient_retry``: callers pass ``safe_to_retry=False`` for a
+        committed write, and replaying a PUT whose response was lost is how a
+        toggle turns into a double action.
+
+        Args:
+            request_type: "json" (default) or "xhr" — see post_json.
+        """
+        if not url.startswith("http"):
+            url = urljoin(self.base_url, url.lstrip("/"))
+
+        rt = "xhr" if request_type == "xhr" else "json"
+        headers = await self._stealth_pre_request(url, rt)
+        if rt == "xhr" and not headers.get("Content-Type"):
+            headers["Content-Type"] = "application/json"
+
+        try:
+            logger.debug(f"PUT {url}")
+
+            if self._use_curl:
+                response = await self._curl_put_json(url, headers, data)
+            else:
+                response = await self.client.request("PUT", url, json=data, headers=headers)
+
+            # Check for session expiry indicators
+            if not skip_reauth and (
+                response.status_code == 302
+                or ("redirectTo" in response.text and "code" not in response.text)
+            ):
+                await self._handle_session_expired()
+                if self._use_curl:
+                    response = await self._curl_put_json(url, headers, data)
+                else:
+                    response = await self.client.request("PUT", url, json=data, headers=headers)
+
+            # Check for bot detection
+            await self._check_suspicious_response(
+                response.text, url=url, status_code=response.status_code
+            )
+
+            if response.status_code >= 400:
+                if response.status_code == 429:
+                    if self._stealth_enabled:
+                        self._throttler.add_penalty(_jitter_penalty(120.0))
+                        logger.warning("429 Too Many Requests — adding 120s penalty")
+                raise NetworkError(
+                    f"HTTP {response.status_code}: {response.text}", response.status_code
+                )
+
+            self._stealth_post_request("json", response, fallback_url=url)
+
+            try:
+                return response.json()
+            except (json.JSONDecodeError, ValueError):
+                return {"response_text": response.text}
+
+        except NetworkError:
+            raise
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                if self._stealth_enabled:
+                    self._throttler.add_penalty(_jitter_penalty(120.0))
+                    logger.warning("429 Too Many Requests — adding 120s penalty")
+            raise NetworkError(
+                f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
+            )
+        except httpx.RequestError as e:
+            if not safe_to_retry:
+                raise NetworkError(f"Request failed (non-retryable): {e}")
+            raise
+        except Exception as e:
+            if HAS_CURL_CFFI and isinstance(e, CurlError):
+                if not safe_to_retry:
+                    raise NetworkError(f"Request failed (curl, non-retryable): {e}")
+                raise
             if not safe_to_retry:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise

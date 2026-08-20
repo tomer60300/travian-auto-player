@@ -5,13 +5,26 @@ the FarmListService mutation pattern: xhr-shaped POSTs through the stealth
 HttpClient, ``safe_to_retry=False`` on every write, a per-origin ``KeyedLock``,
 and Gold Club errors mapped rather than raised.
 
-IMPORTANT — the exact ``/api/v1/trade-routes`` request payload has never been
-captured from a live client. The wire shape below (``_build_create_payload`` /
-``_build_disable_payload``) is a best-effort derived from the documented
-endpoint and the farm-list analogy, and is therefore GATED: live creation
-raises unless the operator explicitly enables it after capturing/confirming the
-real payload (see ``TradeRouteService.live_enabled``). The dry-run path never
-touches the game and does not depend on any of this.
+The wire format is VERIFIED against a real client request captured from
+Europe 2 on 2026-08-20 (gpack 597.6): ``POST /api/v1/trade-routes`` to create
+(201, empty body) and ``PUT /api/v1/trade-routes`` to enable/disable in bulk
+(200). ``tests/test_trade_route_payload.py`` pins both shapes to that capture.
+
+Live writes remain OFF by default behind ``TradeRouteService.live_enabled``
+(``TRAVIAN_TRADE_ROUTE_LIVE``), because the payload being correct is necessary
+but not sufficient: creating routes mutates a real account. The dry-run path
+never touches the game and does not depend on any of this.
+
+Two things the capture settled that the planner had been guessing at:
+
+* **Dispatch phase is settable.** The body carries an explicit ``hour`` and
+  ``minute``, so a route's send time is chosen at creation rather than being
+  fixed to the moment of the click. Review R6 in
+  ``docs/25-resource-distribution-planner.md`` assumed the opposite was
+  possible; it is not the case, and the beat is therefore realisable as planned.
+* **Merchant count is not sent.** The game derives it from the cargo, so the
+  planner's merchant figures are for budgeting and warnings only, never wire
+  data.
 """
 
 from __future__ import annotations
@@ -159,41 +172,51 @@ class TradeRouteService:
     # ── Write (gated: payload UNVERIFIED) ─────────────────────────────
 
     def _build_create_payload(self, route: PlannedRoute) -> dict:
-        """Best-effort ``POST /api/v1/trade-routes`` body. UNVERIFIED.
+        """``POST /api/v1/trade-routes`` body. VERIFIED against a real request.
 
-        Derived from the documented endpoint + the farm-list slot shape. The
-        real field names/nesting must be confirmed from a captured request
-        before this is trusted; that is why live creation is gated. Kept in one
-        place so finalizing the feature is a single-function edit — send exactly
-        what the game sends, no extra fields (an extra field is a fingerprint).
+        Field-for-field from the capture, and deliberately nothing more: an
+        extra field the client never sends is a fingerprint.
+
+        ``hour``/``minute`` are the send time, which is why the planner's beat
+        survives into the game. ``deliveries`` was 1 in the capture and is left
+        at 1 -- a route sends one load per cycle. ``mode`` is "send" (the
+        marketplace also has a fetch direction we never use), and
+        ``useTradeShips`` is false because this server has no boats.
         """
         return {
+            "action": "traderoute",
             "sourceVillageId": route.origin_village_id,
-            "x": route.dest_x,
-            "y": route.dest_y,
+            "targetCoordinates": {"x": route.dest_x, "y": route.dest_y},
             "resources": {r.value: route.cargo.get(r, 0) for r in Resource},
-            "interval": route.cycle_hours,
-            "merchants": route.merchants,
-            # Scheduled "Send at" time (minutes past midnight). Field name is a
-            # guess like the rest of this UNVERIFIED body, but the value must not
-            # be dropped — the beat depends on it. Sent as HH:MM too since some
-            # variants take a clock string.
-            "startMinute": route.dispatch_minute,
-            "startTime": f"{route.dispatch_minute // 60:02d}:{route.dispatch_minute % 60:02d}",
-            "active": True,
+            "mode": "send",
+            "hour": route.dispatch_minute // 60,
+            "minute": route.dispatch_minute % 60,
+            "deliveries": 1,
+            "repeatEvery": route.cycle_hours,
+            "enabled": True,
+            "useTradeShips": False,
         }
 
-    def _build_disable_payload(self, route_ids: list[int], *, active: bool) -> dict:
-        """Best-effort enable/disable toggle body. UNVERIFIED (see _build_create_payload)."""
-        return {"ids": route_ids, "active": active}
+    def _build_toggle_payload(self, route_ids: list[int], *, active: bool) -> dict:
+        """``PUT /api/v1/trade-routes`` body. VERIFIED against a real request.
+
+        One call carries every route being switched, each as its own
+        ``{enabled, id}`` entry -- the capture toggled 24 routes in a single
+        request. Note the verb and path: it is a PUT to the same collection
+        endpoint as create, not a POST to a separate toggle route.
+        """
+        return {
+            "action": "traderoute",
+            "routes": [{"enabled": active, "id": route_id} for route_id in route_ids],
+        }
 
     def _require_live(self) -> None:
         if not self.live_enabled:
             raise TradeRoutePayloadUnverified(
-                "Live trade-route writes are disabled: the /api/v1/trade-routes "
-                "request payload has not been captured and verified yet. Capture a "
-                "real create/disable request, confirm _build_*_payload matches it, "
-                "then enable live execution."
+                "Live trade-route writes are disabled. The wire payload is verified "
+                "against a captured client request, so this is an explicit opt-in and "
+                "not a missing capability: set TRAVIAN_TRADE_ROUTE_LIVE=true to allow "
+                "creating and toggling real routes. Preview (dry_run) needs no flag."
             )
 
     async def create_route(
@@ -262,9 +285,9 @@ class TradeRouteService:
         if stop_check is not None and (reason := stop_check()):
             return RouteActionResult(origin_village_id, 0, 0, "stopped", reason)
         try:
-            await self.http_client.post_json(
-                "/api/v1/trade-routes/toggle-group",
-                self._build_disable_payload([r.route_id for r in routes], active=active),
+            await self.http_client.put_json(
+                "/api/v1/trade-routes",
+                self._build_toggle_payload([r.route_id for r in routes], active=active),
                 request_type="xhr",
                 safe_to_retry=False,
             )
