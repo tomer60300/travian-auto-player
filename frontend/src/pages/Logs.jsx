@@ -16,6 +16,7 @@ const SOURCE_LABELS = {
   farm: 'Farm',
   scout: 'Scout',
   queue: 'Queue',
+  planner: 'Planner',
   build_queue: 'Build Queue',
   oasis_raider: 'Oasis Raider',
   farm_builder: 'Farm Builder',

@@ -8,6 +8,10 @@ const api = axios.create({
 
 function logSource(url) {
   if (!url) return 'api'
+  // Planner traffic (snapshot / plan / day-check / execute) gets its own source
+  // so a live trade-route run is filterable in the Activity Log instead of
+  // vanishing into the generic `API` bucket.
+  if (url.includes('/distribution')) return 'planner'
   if (url.includes('/travian')) return 'auth'
   if (url.includes('/buildings') || url.includes('/villages')) return 'game'
   if (url.includes('/military')) return 'military'

@@ -605,6 +605,108 @@ def parse_rally_point_troops(html: str) -> Dict[str, int]:
     return troops
 
 
+# Class tokens that unambiguously hide an element via a stylesheet rule
+# (e.g. `.hidden{display:none}`). Best-effort: the real gid=17 markup is
+# uncaptured, so we cannot resolve computed CSS. Kept to the few universal
+# framework hiding classes only — a broader set (e.g. "none"/"hide") risks
+# misreading a legitimately visible row (or ancestor) as hidden, which would
+# create a duplicate route.
+_HIDDEN_CLASS_TOKENS = frozenset({"hidden", "invisible", "d-none"})
+
+
+def _element_is_visible(el) -> bool:
+    """Whether an element (and its chain) is visible to a real user.
+
+    Honeypot guard: a route present in the markup but hidden — display:none,
+    visibility:hidden, a `hidden` attribute, aria-hidden, or a conventional
+    hiding class — is one a human could never see or act on, so acting on it
+    (disabling it) is a pure bot signal. Checks the element and its ancestors.
+    """
+    node = el
+    while node is not None and getattr(node, "attrs", None) is not None:
+        if node.get("hidden") is not None:
+            return False
+        if str(node.get("aria-hidden", "")).lower() == "true":
+            return False
+        style = str(node.get("style", "")).replace(" ", "").lower()
+        if "display:none" in style or "visibility:hidden" in style:
+            return False
+        classes = node.get("class") or []
+        if isinstance(classes, str):
+            classes = classes.split()
+        if any(c.lower() in _HIDDEN_CLASS_TOKENS for c in classes):
+            return False
+        node = node.parent
+    return True
+
+
+_INACTIVE_CLASS_TOKENS = frozenset({"inactive", "disabled", "paused", "off"})
+
+
+def _route_is_active(el) -> bool:
+    """Whether a marketplace route row is ENABLED (best-effort).
+
+    Travian keeps DISABLED routes in the list so they can be re-enabled, so a row
+    being present does not mean it is active. Reads an explicit
+    ``data-active``/``data-enabled`` flag when present, else looks for a
+    conventional inactive/disabled class; defaults to True (assume active) when
+    nothing says otherwise, so an unparseable flag errs toward leaving the route
+    alone rather than churning it.
+    """
+    for attr in ("data-active", "data-enabled"):
+        val = el.get(attr)
+        if val is not None:
+            return str(val).strip().lower() not in ("false", "0", "no", "off")
+    classes = el.get("class") or []
+    if isinstance(classes, str):
+        classes = classes.split()
+    return not any(c.lower() in _INACTIVE_CLASS_TOKENS for c in classes)
+
+
+def parse_trade_routes(html: str) -> List[Dict[str, Any]]:
+    """Existing trade routes from a marketplace (gid=17) page.
+
+    Returns dicts ``{route_id, dest_x, dest_y, visible, active}``. BEST-EFFORT:
+    the exact gid=17 markup has not been captured, so this recognizes the common
+    Travian shape (a route row exposing a numeric route id plus destination
+    coordinates) and returns an EMPTY list for markup it does not recognize —
+    never a guess. An empty list means "nothing to disable", which is the safe
+    default. Hidden rows are flagged ``visible=False`` so callers can ignore
+    honeypot entries; disabled rows are flagged ``active=False`` so a
+    still-desired-but-disabled route is re-enabled rather than mistaken for one
+    that already satisfies the plan.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    routes: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+
+    for el in soup.find_all(attrs={"data-route-id": True}):
+        try:
+            route_id = int(el.get("data-route-id"))
+        except (TypeError, ValueError):
+            continue
+        if route_id in seen:
+            continue
+        x = el.get("data-x")
+        y = el.get("data-y")
+        try:
+            dest_x, dest_y = int(x), int(y)
+        except (TypeError, ValueError):
+            # Coordinates not on the same element — skip rather than guess.
+            continue
+        seen.add(route_id)
+        routes.append(
+            {
+                "route_id": route_id,
+                "dest_x": dest_x,
+                "dest_y": dest_y,
+                "visible": _element_is_visible(el),
+                "active": _route_is_active(el),
+            }
+        )
+    return routes
+
+
 def parse_troop_confirm_page(html: str) -> Dict[str, Any]:
     """
     Parse troop sending confirmation page for hidden fields.

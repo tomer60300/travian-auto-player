@@ -30,6 +30,7 @@ from travian_api.services.military_service import MilitaryService
 from travian_api.services.raid_analyzer_service import RaidAnalyzerService
 from travian_api.services.reports_service import ReportsService
 from travian_api.services.target_resolver import TargetResolver
+from travian_api.services.trade_route_service import TradeRouteService
 from travian_api.services.video_reward_service import VideoRewardService
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User, get_db
@@ -97,6 +98,7 @@ class TravianSession:
         self.farm_service = FarmListService(self.http_client)
         self.scout_service = AutoScoutService(self.http_client)
         self.video_service = VideoRewardService(self.http_client)
+        self.trade_route_service = TradeRouteService(self.http_client)
 
         # ── Lazy services (need auth_state) ──────────────────────────
         self._raid_analyzer: Optional[RaidAnalyzerService] = None

@@ -13,11 +13,14 @@ every fetch is a deliberate, priced action rather than a side effect of typing.
 
 import asyncio
 import logging
+import random
+import time
+from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
-from travian_api.exceptions import TravianError
+from travian_api.exceptions import ActivityBudgetExhausted, NetworkError, TravianError
 from travian_api.parsers.html_parser import (
     parse_village_stats_production,
     parse_village_stats_resources,
@@ -42,7 +45,12 @@ from travian_api.services.distribution.optimizer import (
     MIN_SEND_FILL,
     VillageState,
 )
-from travian_api.services.distribution.planner import PlannerConfig, craft_plan
+from travian_api.services.distribution.planner import (
+    DistributionPlan,
+    PlannerConfig,
+    SheetRow,
+    craft_plan,
+)
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY
 from travian_api.services.distribution.storage import (
     ProfileSegment,
@@ -51,13 +59,20 @@ from travian_api.services.distribution.storage import (
     storage_warnings,
     store_status,
 )
+from travian_api.services.trade_route_service import PlannedRoute
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User
-from travian_api.web.sessions import TravianSession, get_live_travian_session
+from travian_api.web.operation_gate import active_ops, captcha_stop
+from travian_api.web.sessions import TravianSession, get_live_travian_session, session_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/distribution", tags=["distribution"])
+
+# Active-op label for a live trade-route execution, so the session-lifecycle
+# guards (disconnect/reconnect) see the work and don't close the HttpClient
+# underneath it, and the captcha-stop signal can halt it.
+_EXECUTE_OP_LABEL = "trade-route-execute"
 
 # Europe 2 is x1 with coordinates running -200..+200. Exposed in the response so
 # the UI can show what the distances were computed against.
@@ -323,6 +338,59 @@ class PlanResponse(BaseModel):
     total_merchants: int
     feasible: bool
     warnings: list[str]
+
+
+class ExecuteRequest(PlanRequest):
+    """Same inputs as /plan (the server recomputes the exact plan rather than
+    trust client-sent rows) plus execution controls."""
+
+    dry_run: bool = Field(
+        default=True,
+        description="Preview only, zero game requests. Must be explicitly set "
+        "False to touch the game.",
+    )
+    disable_existing: bool = Field(
+        default=True,
+        description="Disable a village's existing routes before creating new ones.",
+    )
+    max_routes_per_run: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description="Routes to CREATE in one run. A human sets up a few at a "
+        "time over days, not in one sweep; the rest come back as `remaining` "
+        "for a later run.",
+    )
+
+
+class RouteActionResponse(BaseModel):
+    origin: int
+    origin_name: str
+    destination: int
+    destination_name: str
+    dest_x: int
+    dest_y: int
+    cargo: dict[Resource, int]
+    cycle_hours: int
+    merchants: int
+    status: str  # would_create | deferred | created | skipped | blocked | failed
+    detail: str = ""
+
+
+class ExecuteResponse(BaseModel):
+    dry_run: bool
+    live_enabled: bool
+    actions: list[RouteActionResponse]
+    disables: list[str]
+    created: int
+    remaining: int
+    # Benign, informational notes computed while planning (coordinate resolution,
+    # tribute timing, storage/merchant hints). NOT failures.
+    warnings: list[str]
+    # Genuine execution problems the operator must act on (a failed disable, a
+    # Gold-Club block). Kept separate from `warnings` so a benign planner note
+    # never makes a successful run look failed.
+    problems: list[str] = []
 
 
 @router.get("/snapshot", response_model=SnapshotResponse)
@@ -852,17 +920,31 @@ async def post_day_check(
     )
 
 
-@router.post("/plan", response_model=PlanResponse)
-async def post_plan(
-    body: PlanRequest,
-    _user: User = Depends(get_current_user),
-):
-    """Compute a plan. Costs **zero** game requests.
+@dataclass
+class _PlannedAccount:
+    """Everything /plan and /execute both derive from one PlanRequest.
 
-    The caller supplies the snapshot it already fetched, so tuning allocation
-    targets is free and the planner stays pure. Deliberately auth-only: a
-    Travian-session dependency would auto-reconnect (real login traffic) or 403
-    for a computation that never touches the game.
+    Both build the account model, run the pure optimizer, and resolve
+    coordinates identically. /execute recomputes server-side through this — it
+    does NOT trust client-sent rows — so it acts on exactly the plan /plan
+    would display for the same inputs.
+    """
+
+    plan: DistributionPlan
+    villages: dict[int, VillageState]
+    coords: dict[int, tuple[int, int]]
+    names: dict[int, str]
+    trade_office: dict[int, int]
+    foreign_ids: dict[int, ForeignTarget]
+    config: PlannerConfig
+    warnings: list[str]
+
+
+async def _plan_account(body: PlanRequest) -> _PlannedAccount:
+    """Build the account model, run the optimizer, resolve coords + warnings.
+
+    Pure of game I/O, so it is shared by the zero-request /plan endpoint and by
+    the dry-run computation inside /execute.
     """
     # Warnings are read by a person: name villages the way they do, never by id.
     names = {v.village_id: v.name for v in body.snapshot if v.name}
@@ -1054,9 +1136,41 @@ async def post_plan(
         note += ", so cover it by hand until the first scheduled send lands"
         extra_warnings.append(note)
 
+    coords = {vid: village.coords for vid, village in villages.items()}
+    return _PlannedAccount(
+        plan=plan,
+        villages=villages,
+        coords=coords,
+        names=names,
+        trade_office=trade_office,
+        foreign_ids=foreign_ids,
+        config=config,
+        warnings=extra_warnings,
+    )
+
+
+@router.post("/plan", response_model=PlanResponse)
+async def post_plan(
+    body: PlanRequest,
+    _user: User = Depends(get_current_user),
+):
+    """Compute a plan. Costs **zero** game requests.
+
+    The caller supplies the snapshot it already fetched, so tuning allocation
+    targets is free and the planner stays pure. Deliberately auth-only: a
+    Travian-session dependency would auto-reconnect (real login traffic) or 403
+    for a computation that never touches the game.
+    """
+    account = await _plan_account(body)
+    plan = account.plan
+    names = account.names
+    trade_office = account.trade_office
+    config = account.config
+    coords = account.coords
+    villages = account.villages
+    extra_warnings = account.warnings
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
     over = {o.village_id for o in plan.over_budget}
-    coords = {vid: village.coords for vid, village in villages.items()}
 
     return PlanResponse(
         rows=[
@@ -1122,4 +1236,448 @@ async def post_plan(
         total_merchants=plan.total_merchants,
         feasible=plan.is_feasible,
         warnings=[*plan.warnings, *extra_warnings],
+    )
+
+
+@router.post("/execute", response_model=ExecuteResponse)
+async def post_execute(
+    body: ExecuteRequest,
+    user: User = Depends(get_current_user),
+):
+    """Create the plan's trade routes in-game — or preview them with dry_run.
+
+    Recomputes the plan server-side from the same inputs /plan uses (it does
+    NOT trust client-sent rows), then, per origin village, disables the routes
+    the plan no longer wants and creates the ones still missing. Deliberately
+    rate-capped to a few routes per run: a human sets routes up over days, not
+    in one machine sweep, so the run stops once the cap is reached (leaving the
+    rest as ``remaining`` for a later run) and origins are visited in randomized
+    order. ``dry_run`` (default) previews with ZERO game requests and, like
+    /plan, is auth-only — it never resolves a live session so it works offline.
+    """
+    account = await _plan_account(body)
+    plan = account.plan
+    names = account.names
+    coords = account.coords
+    # Resolve the session lazily (not via a dependency) so dry-run works offline
+    # like /plan. The live path below requires a real connection: this mirrors
+    # get_live_travian_session's contract exactly — the live session if present,
+    # else 403, and deliberately NO implicit auto-reconnect (live execution must
+    # never spend login traffic behind the operator's back).
+    session = session_manager.get(user.id)
+    svc = session.trade_route_service if session is not None else None
+    live_enabled = bool(svc is not None and svc.live_enabled)
+    # Same warning set /plan surfaces (both share _plan_account): the optimizer's
+    # own notes plus the account-level ones, so the two endpoints never disagree.
+    warnings = [*plan.warnings, *account.warnings]
+
+    # Each plan row is one route from a real origin village's marketplace to a
+    # destination (a real village or a foreign sink — coords cover both).
+    items: list[tuple[SheetRow, PlannedRoute]] = []
+    for row in plan.rows:
+        # Fail-closed execution-boundary guard: a live route may only originate
+        # at a real, positive account village. The optimizer already excludes
+        # non-sender origins, but an impossible negative-id (foreign sink) origin
+        # must never reach a marketplace/create request even if a future planner
+        # change regressed — drop it loudly rather than fire it at the game.
+        if row.origin <= 0:
+            warnings.append(
+                f"{village_label(row.origin, names)} → "
+                f"{village_label(row.destination, names)}: route origin is not a real "
+                f"account village, skipped (it can never be executed)"
+            )
+            continue
+        dest_xy = coords.get(row.destination)
+        if dest_xy is None:
+            warnings.append(
+                f"{village_label(row.origin, names)} → "
+                f"{village_label(row.destination, names)}: destination coordinates "
+                f"unknown, route skipped"
+            )
+            continue
+        items.append(
+            (
+                row,
+                PlannedRoute(
+                    origin_village_id=row.origin,
+                    dest_x=dest_xy[0],
+                    dest_y=dest_xy[1],
+                    dest_name=village_label(row.destination, names),
+                    cargo=dict(row.cargo),
+                    cycle_hours=row.cycle_hours,
+                    merchants=row.merchants,
+                    # Carry the planner's scheduled send time through to live
+                    # execution — without it the beat that spaces arrivals and
+                    # orders relay hubs is lost.
+                    dispatch_minute=row.dispatch_minute,
+                ),
+            )
+        )
+
+    def _action(
+        row: SheetRow, route: PlannedRoute, status_: str, detail: str = ""
+    ) -> RouteActionResponse:
+        return RouteActionResponse(
+            origin=row.origin,
+            origin_name=village_label(row.origin, names),
+            destination=row.destination,
+            destination_name=village_label(row.destination, names),
+            dest_x=route.dest_x,
+            dest_y=route.dest_y,
+            cargo={r: amount for r, amount in row.cargo.items() if amount},
+            cycle_hours=row.cycle_hours,
+            merchants=row.merchants,
+            status=status_,
+            detail=detail,
+        )
+
+    cap = body.max_routes_per_run
+
+    if body.dry_run:
+        # Zero game requests: the exact routes already on each marketplace are
+        # unknown here, so this previews the DESIRED plan against a worst-case
+        # empty marketplace (first `cap` created, the rest deferred). The live
+        # run reads each marketplace and only creates the routes that are
+        # actually missing and disables only the ones the plan no longer wants,
+        # so it may create/disable fewer than shown.
+        actions = [_action(row, route, "would_create") for row, route in items[:cap]]
+        actions += [_action(row, route, "deferred") for row, route in items[cap:]]
+        disables = (
+            ["Existing routes not in this plan would be disabled first (read at execution)."]
+            if body.disable_existing
+            else []
+        )
+        return ExecuteResponse(
+            dry_run=True,
+            live_enabled=live_enabled,
+            actions=actions,
+            disables=disables,
+            created=0,
+            remaining=max(0, len(items) - cap),
+            warnings=warnings,
+        )
+
+    # ── Live ───────────────────────────────────────────────────────────
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Not connected. Reconnect first — live trade-route execution "
+                "never spends login traffic implicitly. Use dry_run to preview."
+            ),
+        )
+    if not live_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Live trade-route execution is disabled until the "
+                "/api/v1/trade-routes request payload is captured and verified. "
+                "Use dry_run to preview what would be created."
+            ),
+        )
+    # Feasibility is enforced server-side, not just by the disabled UI button: a
+    # direct API call must not commit an over-budget/unroutable plan (dry_run
+    # still previews it, warnings and all).
+    if not plan.is_feasible:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Plan is not feasible; refusing to execute in-game. " + " ".join(plan.warnings)
+            ).strip(),
+        )
+
+    # Reconcile the desired plan against what is actually on each marketplace,
+    # origin by origin, in randomized order (not a predictable village-id sweep):
+    #   * create only routes MISSING in-game, so a create sticks and the next run
+    #     advances to the routes still absent — never re-creating the same routes
+    #     each run (a daily rebuild-the-same-routes bot signal);
+    #   * with `disable_existing`, disable only STALE visible routes (a
+    #     destination the plan no longer wants). We NEVER disable a destination we
+    #     are about to create, so a failed disable can never leave a duplicate,
+    #     and an origin is never stripped of routes we cannot immediately replace;
+    #   * a destination that already has a visible route is left untouched. Its
+    #     parameters are NOT updated: the marketplace parser does not expose a
+    #     route's cargo/cycle, so we cannot tell a changed route from an unchanged
+    #     one, and blindly rebuilding would churn every route every run. Updating
+    #     an existing route's parameters is therefore deferred to the same gate
+    #     that finalizes the create payload (operator disables it in-game to
+    #     force a rebuild until then);
+    #   * hidden entries are honeypots: invisible to a human, so we neither act on
+    #     them (never disabled) nor let them influence us (never deduped against).
+    #
+    # The run is bounded by `cap` in BOTH dimensions: it reads at most `cap`
+    # marketplaces AND fires at most `cap` creates. The origins-visited bound is
+    # what keeps a fully-provisioned account from re-reading every village every
+    # run (in steady state every route is skipped and no create fires, so a
+    # create-only cap would never stop the sweep). The rest defer to a later run;
+    # shuffling means successive runs cover them all.
+    #
+    # Known limitation: only origins the current plan still uses are visited, so
+    # a village dropped from the plan entirely keeps its old routes until it
+    # re-enters a plan. Cleaning those would require reading every village's
+    # marketplace — the exact full sweep this bound exists to avoid — so it is
+    # deliberately left to a plan that still includes the village.
+    desired_by_origin: dict[int, list[tuple[SheetRow, PlannedRoute]]] = {}
+    for row, route in items:
+        desired_by_origin.setdefault(route.origin_village_id, []).append((row, route))
+    origins = list(desired_by_origin)
+    random.shuffle(origins)
+
+    # One execute run per account at a time: a double-click or a second tab must
+    # not fire two concurrent reconciliations that together bypass the per-run
+    # caps and burst writes. Reject the overlap rather than queue it.
+    if svc.execute_lock.locked():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A trade-route execution is already in progress for this account.",
+        )
+
+    actions: list[RouteActionResponse] = []
+    disables: list[str] = []
+    problems: list[str] = []  # execution failures (failed disable, Gold Club, …)
+    attempts = 0  # create requests fired this run
+    visited = 0  # marketplaces read this run
+    outstanding = 0  # creates attempted but not completed (failed / Gold Club)
+    deferred: list[tuple[SheetRow, PlannedRoute]] = []
+    gold_club_blocked = False  # account-level: no route can be created at all
+    stopped_early = False  # captcha resolved, budget exhausted, or a read failed
+
+    # Register the run so the session-lifecycle guards see it: disconnect/
+    # reconnect consults ActiveOpRegistry and will not close this HttpClient
+    # underneath the run (issue #63). Registered synchronously before the first
+    # game await so a concurrent disconnect can't slip in between. Unregistered
+    # in `finally`. `started_at` lets the captcha-stop signal target only this run.
+    started_at = time.monotonic()
+
+    def _stop_reason() -> str | None:
+        """Why the run must stop right now, or None. Checked before EVERY mutation
+        (create/disable/enable) and again inside the service after its pacing wait
+        (right before the POST), so no state-changing request slips past a captcha
+        resolution (#62) or an exhausted activity budget (#64)."""
+        if captcha_stop.should_stop(user.id, started_after=started_at):
+            return "captcha resolved — execution stopped"
+        try:
+            svc.http_client.check_activity_budget()
+        except ActivityBudgetExhausted as exc:
+            return f"activity budget exhausted: {exc}"
+        return None
+
+    active_ops.register(user.id, _EXECUTE_OP_LABEL)
+    try:
+        async with svc.execute_lock:
+            # Refuse to start if the activity budget is already exhausted, and
+            # recheck before each origin so exhaustion mid-run stops the rest
+            # (issue #64). check_activity_budget raises; per-request activity is
+            # accounted by the HttpClient, as for the farm/oasis loops.
+            try:
+                svc.http_client.check_activity_budget()
+            except ActivityBudgetExhausted as exc:
+                problems.append(f"Activity budget exhausted; no routes were created: {exc}")
+                deferred.extend(items)
+                origins = []
+
+            for origin in origins:
+                if stopped_early or gold_club_blocked or attempts >= cap or visited >= cap:
+                    # Budget spent, Gold Club missing, or the run was stopped
+                    # (captcha / budget / a read failure): defer EVERY remaining
+                    # origin WITHOUT reading its marketplace, so reads and writes
+                    # stay bounded and no later origin's routes are silently lost
+                    # from the response (issue #65).
+                    deferred.extend(desired_by_origin[origin])
+                    continue
+                # Don't even read a marketplace if the run is already stopped
+                # (captcha resolved / budget exhausted). Fires once — later
+                # origins are caught by the top-of-loop guard above.
+                reason = _stop_reason()
+                if reason:
+                    stopped_early = True
+                    problems.append(reason)
+                    deferred.extend(desired_by_origin[origin])
+                    continue
+
+                async with svc.origin_lock(origin):
+                    # A marketplace read can fail AFTER earlier origins already
+                    # committed writes; keep those in the structured response and
+                    # stop rather than 500 out and lose the record (issue #65).
+                    try:
+                        existing = await svc.list_existing_routes(origin)
+                    except NetworkError as exc:
+                        problems.append(
+                            f"{village_label(origin, names)}: marketplace read failed "
+                            f"({exc}); remaining routes deferred"
+                        )
+                        deferred.extend(desired_by_origin[origin])
+                        # Stop, but do NOT break: `continue` lets the top-of-loop
+                        # guard defer every still-unvisited origin too, so they are
+                        # counted in `remaining` instead of vanishing (issue #65).
+                        stopped_early = True
+                        continue
+                    visited += 1
+                    desired = desired_by_origin[origin]
+                    desired_coords = {(route.dest_x, route.dest_y) for _, route in desired}
+                    # Honeypots (hidden) are ignored entirely — neither acted on
+                    # nor treated as occupying a destination.
+                    visible = [e for e in existing if e.visible]
+
+                    if body.disable_existing:
+                        # Disable only ACTIVE visible routes the plan no longer
+                        # wants; a route already disabled needs no action.
+                        stale = [
+                            e
+                            for e in visible
+                            if e.active and (e.dest_x, e.dest_y) not in desired_coords
+                        ]
+                        if stale:
+                            # Gate the disable mutation itself (issues #62/#64):
+                            # check before, and again inside the service after its
+                            # pacing wait via stop_check.
+                            reason = _stop_reason()
+                            if reason:
+                                stopped_early = True
+                                problems.append(reason)
+                                deferred.extend(desired)
+                                continue
+                        disabled = await svc.disable_routes(origin, stale, stop_check=_stop_reason)
+                        if disabled is not None:
+                            line = (
+                                f"{village_label(origin, names)}: "
+                                f"{disabled.status} {disabled.detail}"
+                            ).strip()
+                            if disabled.status == "stopped":
+                                # Stopped after the pacing wait, before the POST —
+                                # nothing changed; defer this origin.
+                                stopped_early = True
+                                problems.append(disabled.detail)
+                                deferred.extend(desired)
+                                continue
+                            if disabled.status == "failed":
+                                # A failed/ambiguous disable leaves stale routes
+                                # live; do NOT add new routes on top for this
+                                # origin — defer them and reconcile on a later run
+                                # after re-reading state (issue #61).
+                                problems.append(
+                                    f"Could not disable stale routes — {line}; "
+                                    "skipping new routes for this origin this run"
+                                )
+                                deferred.extend(desired)
+                                continue
+                            disables.append(line)
+
+                    # Only ENABLED routes satisfy the plan. A desired destination
+                    # whose route exists but is DISABLED is re-enabled rather than
+                    # duplicated; a desired destination with no route is created.
+                    satisfied = {(e.dest_x, e.dest_y) for e in visible if e.active}
+                    disabled_desired = [
+                        e
+                        for e in visible
+                        if not e.active and (e.dest_x, e.dest_y) in desired_coords
+                    ]
+                    blocked: set[tuple[int, int]] = set()
+                    if disabled_desired:
+                        # Gate the re-enable mutation too (issues #62/#64).
+                        reason = _stop_reason()
+                        if reason:
+                            stopped_early = True
+                            problems.append(reason)
+                            deferred.extend(desired)
+                            continue
+                        enabled = await svc.enable_routes(
+                            origin, disabled_desired, stop_check=_stop_reason
+                        )
+                        if enabled is not None and enabled.status == "stopped":
+                            stopped_early = True
+                            problems.append(enabled.detail)
+                            deferred.extend(desired)
+                            continue
+                        if enabled is not None and enabled.status == "enabled":
+                            satisfied.update((e.dest_x, e.dest_y) for e in disabled_desired)
+                            disables.append(
+                                f"{village_label(origin, names)}: re-enabled {enabled.detail}"
+                            )
+                        else:
+                            # Couldn't re-enable — don't create a duplicate on top;
+                            # report blocked so it isn't mistaken for satisfied.
+                            blocked = {(e.dest_x, e.dest_y) for e in disabled_desired}
+                            problems.append(
+                                f"{village_label(origin, names)}: could not re-enable a "
+                                "disabled route the plan still wants"
+                            )
+
+                    for i, (row, route) in enumerate(desired):
+                        coord = (route.dest_x, route.dest_y)
+                        if coord in satisfied:
+                            actions.append(_action(row, route, "skipped", "route already active"))
+                            continue
+                        if coord in blocked:
+                            actions.append(
+                                _action(row, route, "blocked", "route disabled; re-enable failed")
+                            )
+                            outstanding += 1
+                            continue
+                        if attempts >= cap:
+                            deferred.append((row, route))
+                            continue
+                        # Re-check before EVERY create, not once per origin: a
+                        # captcha resolved (#62) or the budget exhausted (#64)
+                        # during an earlier route of THIS origin must stop the
+                        # remaining same-origin writes. The service rechecks again
+                        # after its pacing wait (right before the POST).
+                        reason = _stop_reason()
+                        if reason:
+                            stopped_early = True
+                            problems.append(reason)
+                            deferred.extend(desired[i:])
+                            break
+                        attempts += 1
+                        result = await svc.create_route(route, stop_check=_stop_reason)
+                        if result.status == "stopped":
+                            # Stopped after the pacing wait, before the POST —
+                            # nothing was created; defer the remainder.
+                            attempts -= 1
+                            stopped_early = True
+                            problems.append(result.detail)
+                            deferred.extend(desired[i:])
+                            break
+                        if result.status == "created":
+                            actions.append(_action(row, route, "created", result.detail))
+                            satisfied.add(coord)
+                            continue
+                        outstanding += 1
+                        if result.status == "skipped":
+                            # Gold Club is required and missing — an account-level
+                            # block. Report it as "blocked" (distinct from an
+                            # "already active" skip), then stop the run and defer
+                            # the rest — a human would not keep firing rejects.
+                            actions.append(_action(row, route, "blocked", result.detail))
+                            gold_club_blocked = True
+                            deferred.extend(desired[i + 1 :])
+                            break
+                        actions.append(_action(row, route, "failed", result.detail))
+    finally:
+        active_ops.unregister(user.id, _EXECUTE_OP_LABEL)
+
+    actions += [_action(row, route, "deferred") for row, route in deferred]
+    if gold_club_blocked:
+        problems.append(
+            "Gold Club is required to create trade routes; no routes were created. "
+            "The remaining routes are deferred until Gold Club is active."
+        )
+    if stopped_early and not gold_club_blocked:
+        problems.append(
+            "Execution stopped early (captcha resolved, activity budget, or a read "
+            "failure); remaining routes are deferred to a later run."
+        )
+
+    return ExecuteResponse(
+        dry_run=False,
+        live_enabled=live_enabled,
+        actions=actions,
+        disables=disables,
+        # `remaining` = work still outstanding for a later run: routes deferred by
+        # the cap PLUS any create that did not complete (failed / Gold Club), so
+        # the summary never makes a partially-done run look complete.
+        created=sum(1 for a in actions if a.status == "created"),
+        remaining=len(deferred) + outstanding,
+        warnings=warnings,
+        problems=problems,
     )
