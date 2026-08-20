@@ -118,6 +118,7 @@ def build_beat(
     reserved_window: tuple[int, int] | None = None,
     step_minutes: int = 1,
     names: Mapping[int, str] | None = None,
+    dispatch_window: tuple[int, int] | None = None,
 ) -> Beat:
     """Place every route on the daily beat, spacing arrivals at each destination.
 
@@ -134,6 +135,12 @@ def build_beat(
             manual NPC burst. Arrivals avoid it when an alternative exists.
         step_minutes: granularity of candidate dispatch minutes. 1 tries every
             minute; coarser values trade precision for speed on large accounts.
+        dispatch_window: ``(start_minute, end_minute)``, possibly wrapping past
+            midnight, of the allocation profile these routes belong to. Sends
+            are phased into it: a profile only runs part of the day, and a
+            firing outside its hours does not happen at all (see
+            :func:`~.storage.simulate_profile_cycle`). Left None the whole day
+            is open, which is what a single round-the-clock route set wants.
 
     Returns:
         A :class:`Beat`. Every route is always scheduled -- a route that cannot
@@ -143,6 +150,8 @@ def build_beat(
         raise ValueError("min_arrival_gap_minutes cannot be negative")
     if step_minutes < 1:
         raise ValueError("step_minutes must be at least 1")
+    if dispatch_window is not None and _window_length(dispatch_window) == 0:
+        raise ValueError("dispatch_window is zero-width: no minute of the day is inside it")
 
     scheduled: list[ScheduledRoute] = []
     warnings: list[str] = []
@@ -211,15 +220,30 @@ def build_beat(
     ordered = non_crop + layered
 
     for route in ordered:
-        window = route.cycle_hours * 60
+        cycle_minutes = route.cycle_hours * 60
         taken = claimed.setdefault(route.destination, [])
         forwards_crop = route.origin in relay_hubs and Resource.CROP in route.cargo_per_hour
         inbound = crop_arrivals.get(route.origin, []) if forwards_crop else []
 
-        best_offset = 0
-        best_score: tuple[int, int, int, int] | None = None
-        for offset in range(0, window, step_minutes):
-            candidate = ScheduledRoute(route=route, dispatch_minute=offset)
+        # Where the phase search starts, and how far it runs. Firing patterns
+        # repeat every cycle, so one cycle from midnight covers all of them.
+        # Inside a profile the search starts at the profile's first minute and
+        # never runs past its last, so the route's own "Send at" time is an hour
+        # the operator is running it. Nothing worth having is cut off: a window
+        # shorter than a cycle can hold one firing at most anyway.
+        base = 0 if dispatch_window is None else dispatch_window[0]
+        span = (
+            cycle_minutes
+            if dispatch_window is None
+            else min(cycle_minutes, _window_length(dispatch_window))
+        )
+
+        best_minute = base
+        best_score: tuple[int, int, int, int, int] | None = None
+        for offset in range(0, span, step_minutes):
+            candidate = ScheduledRoute(
+                route=route, dispatch_minute=(base + offset) % MINUTES_PER_DAY
+            )
             arrivals = candidate.arrival_minutes
             gap = _worst_gap(arrivals, taken)
             clear = (
@@ -231,9 +255,23 @@ def build_beat(
             # freshest crop landed here. Zero for everything that is not a relay
             # hub, which leaves non-relay scheduling byte-identical.
             stale = _staleness(candidate.dispatch_minutes, inbound)
-            # Order of preference: clear the reserved window, then MEET the
-            # arrival-gap target, then ship soon after collecting, then widen
-            # the spacing further.
+            # Sends that actually happen. A firing outside the profile's hours
+            # is not dispatched, so a phase with none inside it ships nothing at
+            # all -- which no amount of tidy arrival spacing makes up for, hence
+            # first in the ranking. Constant zero without a window, leaving the
+            # round-the-clock ordering below exactly as it was.
+            sends = (
+                0
+                if dispatch_window is None
+                else sum(
+                    1
+                    for minute in candidate.dispatch_minutes
+                    if _in_window(minute, dispatch_window)
+                )
+            )
+            # Order of preference: send at all, then clear the reserved window,
+            # then MEET the arrival-gap target, then ship soon after collecting,
+            # then widen the spacing further.
             #
             # The gap term saturates at the target deliberately. Ranking raw
             # staleness above raw gap made the target unenforceable for relay
@@ -243,11 +281,11 @@ def build_beat(
             # where the previous scheduler kept them 15 apart. Saturating means
             # a few minutes of extra staleness can never buy a collision, while
             # beyond the target staleness is still free to choose.
-            score = (-clear, min(gap, min_arrival_gap_minutes), -stale, gap)
+            score = (sends, -clear, min(gap, min_arrival_gap_minutes), -stale, gap)
             if best_score is None or score > best_score:
-                best_score, best_offset = score, offset
+                best_score, best_minute = score, candidate.dispatch_minute
 
-        placement = ScheduledRoute(route=route, dispatch_minute=best_offset)
+        placement = ScheduledRoute(route=route, dispatch_minute=best_minute)
         scheduled.append(placement)
         taken.extend(placement.arrival_minutes)
         if Resource.CROP in route.cargo_per_hour:
@@ -255,7 +293,6 @@ def build_beat(
 
         # A cycle shorter than the gap target violates the constraint all by
         # itself — no dispatch offset can space a route's own repeats.
-        cycle_minutes = route.cycle_hours * 60
         if cycle_minutes < min_arrival_gap_minutes:
             warnings.append(
                 f"route {village_label(route.origin, names)} -> "
@@ -265,8 +302,27 @@ def build_beat(
                 f"choosing a dispatch offset"
             )
 
-        # score is (-clear, saturated_gap, -stale, gap); spacing is the last term.
-        achieved = best_score[3] if best_score else MINUTES_PER_DAY
+        # A cycle the profile's hours cannot contain fires at most once inside
+        # them however it is phased, so the route moves one cycle of cargo a day
+        # where its rate was sized for a day of it. The daily-cycle guard is the
+        # boundary case: an all-day 00:00-23:59 window is a minute short of a
+        # 24h cycle, and that minute costs nothing -- the route still sends the
+        # once a day it was planned to.
+        if dispatch_window is not None:
+            window_minutes = _window_length(dispatch_window)
+            if window_minutes < cycle_minutes < MINUTES_PER_DAY:
+                warnings.append(
+                    f"route {village_label(route.origin, names)} -> "
+                    f"{village_label(route.destination, names)} repeats every "
+                    f"{route.cycle_hours}h but its profile runs only {window_minutes} min, "
+                    f"so it sends once a day instead of "
+                    f"{MINUTES_PER_DAY // cycle_minutes} times and cannot deliver its "
+                    f"planned {route.hourly_total:,.0f}/h; shorten the cycle or widen "
+                    f"the profile"
+                )
+
+        # score is (sends, -clear, saturated_gap, -stale, gap); spacing is last.
+        achieved = best_score[4] if best_score else MINUTES_PER_DAY
         if achieved < min_arrival_gap_minutes:
             warnings.append(
                 f"route {village_label(route.origin, names)} -> "
@@ -276,7 +332,7 @@ def build_beat(
                 f"has {inbound_count[route.destination]} inbound routes and may be "
                 f"too busy to space them"
             )
-        if reserved_window is not None and best_score and best_score[0] < 0:
+        if reserved_window is not None and best_score and best_score[1] < 0:
             warnings.append(
                 f"route {village_label(route.origin, names)} -> "
                 f"{village_label(route.destination, names)} unavoidably lands in "
@@ -295,3 +351,9 @@ def _in_window(minute: int, window: tuple[int, int]) -> bool:
     if start <= end:
         return start <= minute < end
     return minute >= start or minute < end
+
+
+def _window_length(window: tuple[int, int]) -> int:
+    """Minutes a possibly midnight-wrapping window spans."""
+    start, end = window
+    return (end - start) % MINUTES_PER_DAY

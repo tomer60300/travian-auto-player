@@ -46,6 +46,10 @@ class PlannerConfig:
     max_latency_hours: float | None = 2.0
     min_arrival_gap_minutes: int = DEFAULT_MIN_ARRIVAL_GAP_MINUTES
     reserved_window: tuple[int, int] | None = None
+    dispatch_window: tuple[int, int] | None = None
+    """Hours of the day this route set actually runs, when it is one allocation
+    profile's rather than the whole day's. Sends are phased into it; left None
+    the beat may use any minute, which is what a round-the-clock set wants."""
     min_send_fill: float = MIN_SEND_FILL
     """How full a merchant must stay when idle merchants are spent on speed.
 
@@ -199,6 +203,7 @@ def craft_plan(
         min_arrival_gap_minutes=config.min_arrival_gap_minutes,
         reserved_window=config.reserved_window,
         names=names,
+        dispatch_window=config.dispatch_window,
     )
     warnings.extend(beat.warnings)
 
