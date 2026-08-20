@@ -3,6 +3,14 @@ import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
 import useLogStore from '../stores/logStore'
 import api from '../api'
+import {
+  SetupFileError,
+  buildSetup,
+  mergeSetup,
+  parseSetup,
+  setupFilename,
+  setupMatchesAccount,
+} from '../utils/plannerSetup'
 
 // Owned state the game will not tell us, kept per village. Trade Office level
 // changes only when the operator builds one, so it is stored rather than fetched.
@@ -152,6 +160,19 @@ function saveJson(key, value) {
   } catch {
     /* storage full or disabled — the plan still works, it just will not persist */
   }
+}
+
+/** Hand the browser a file to save. Same shape as the other pages' exports. */
+function downloadJson(filename, value) {
+  const blob = new Blob([JSON.stringify(value, null, 2)], {
+    type: 'application/json;charset=utf-8',
+  })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 /** FastAPI puts validation failures in `detail` as an ARRAY of error objects;
@@ -339,6 +360,13 @@ export default function ResourcePlanner() {
   // Operator alert level for a village's crop stock (e.g. an NPC trigger),
   // below capacity. Cached per account like the Trade Office levels.
   const [cropCeilings, setCropCeilings] = useState({})
+  // Result of the last setup-file load, kept on screen rather than only in a
+  // toast: a file that is missing villages produces a quietly wrong plan, so
+  // what it did and did not cover has to stay readable.
+  const [setupReport, setSetupReport] = useState(null)
+  const [pasteOpen, setPasteOpen] = useState(false)
+  const [pasteText, setPasteText] = useState('')
+  const setupFileRef = useRef(null)
   const [dayCheck, setDayCheck] = useState(null)
   const [dayChecking, setDayChecking] = useState(false)
   // Invalidates an in-flight day-check when its inputs change, so a stale
@@ -562,6 +590,90 @@ export default function ResourcePlanner() {
   // the same plan server-side, so it must send identical inputs). Only entries
   // the planner can act on go in: `keep` equals the backend default, and a
   // village whose rate is unknown for this resource is not plannable.
+  // ── Setup file: the hand-typed columns, saved and reloaded ──────────
+  // Trade Office and the crop alert are typed once per account, but they live
+  // in localStorage, which is per ORIGIN — the same app on :80, on :8001, on
+  // the LAN address and over Tailscale keeps four separate copies. Exporting
+  // them makes the typing survive that, and every rebuild.
+  const exportSetup = useCallback(() => {
+    if (!villages.length) {
+      toast.error('Fetch account state first, so the file records village names too')
+      return
+    }
+    const typed = villages.filter(
+      (v) => tradeOffice[v.village_id] != null || cropCeilings[v.village_id] != null
+    ).length
+    if (!typed) {
+      toast.error('Nothing typed yet — fill in a Trade Office level or crop alert first')
+      return
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    downloadJson(
+      setupFilename(playerName, stamp),
+      buildSetup({
+        account: accountKey,
+        villages,
+        tradeOffice,
+        cropCeilings,
+        exportedAt: new Date().toISOString(),
+      })
+    )
+    toast.success(`Saved ${typed} village(s) — keep the file, load it after a rebuild`)
+  }, [villages, tradeOffice, cropCeilings, accountKey, playerName, toast])
+
+  const applySetupText = useCallback(
+    (text) => {
+      if (!villages.length) {
+        toast.error('Fetch account state first — a file cannot be matched to villages without it')
+        return
+      }
+      let setup
+      try {
+        setup = parseSetup(text)
+      } catch (err) {
+        toast.error(err instanceof SetupFileError ? err.message : 'Could not read that file')
+        return
+      }
+      // A file from another account would apply its levels to whatever village
+      // happens to share an id, which is a silently wrong plan rather than a
+      // visible error. Refuse unless the operator insists.
+      if (!setupMatchesAccount(setup, accountKey)) {
+        const proceed = window.confirm(
+          `This file was exported from a different account:\n\n` +
+            `  file:    ${setup.account}\n  current: ${accountKey}\n\n` +
+            `Village ids are per-account, so loading it can attach the wrong ` +
+            `Trade Office levels to the wrong villages. Load it anyway?`
+        )
+        if (!proceed) return
+      }
+      const merged = mergeSetup({ setup, villages, tradeOffice, cropCeilings })
+      setTradeOffice(merged.tradeOffice)
+      setCropCeilings(merged.cropCeilings)
+      setSetupReport(merged.report)
+      setPasteOpen(false)
+      setPasteText('')
+      // The plan was built from the old values, so it no longer describes the
+      // inputs on screen.
+      setPlan(null)
+      toast.success(`Loaded ${merged.report.loaded} village(s) from the setup file`)
+    },
+    [villages, tradeOffice, cropCeilings, accountKey, toast]
+  )
+
+  const onSetupFileChosen = useCallback(
+    (event) => {
+      const file = event.target.files?.[0]
+      // Cleared straight away so choosing the same file twice fires again.
+      event.target.value = ''
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => applySetupText(String(reader.result ?? ''))
+      reader.onerror = () => toast.error('Could not read that file')
+      reader.readAsText(file)
+    },
+    [applySetupText, toast]
+  )
+
   const buildPlanPayload = useCallback(() => {
     const sendAllocations = {}
     for (const [resource, per] of Object.entries(allocations)) {
@@ -1239,6 +1351,78 @@ export default function ResourcePlanner() {
 
       {stage === 'snapshot' && villages.length > 0 && (
         <div className="card p-4 overflow-x-auto">
+          {/* Trade Office and Crop alert below are typed by hand and stored per
+              origin, so they do not follow you between :80, :8001, the LAN
+              address or Tailscale. Save them once and reload them instead. */}
+          <div className="flex items-center gap-2 flex-wrap mb-3">
+            <span className="text-secondary text-xs">Typed columns:</span>
+            <button className="btn-secondary btn-sm" onClick={exportSetup}>
+              Save setup to file
+            </button>
+            <button className="btn-secondary btn-sm" onClick={() => setupFileRef.current?.click()}>
+              Load setup from file
+            </button>
+            <button
+              className="btn-secondary btn-sm"
+              onClick={() => setPasteOpen((v) => !v)}
+              aria-expanded={pasteOpen}
+            >
+              {pasteOpen ? 'Cancel paste' : 'Paste setup'}
+            </button>
+            <input
+              ref={setupFileRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={onSetupFileChosen}
+            />
+            <span className="text-secondary text-xs">0 Travian requests</span>
+          </div>
+
+          {pasteOpen && (
+            <div className="mb-3">
+              {/* A paste box as well as a file picker: this gets used from a
+                  phone over Tailscale, where picking a file is awkward. */}
+              <textarea
+                className="input-field w-full h-28 text-xs font-mono"
+                placeholder='Paste the contents of a setup file here, then press Load'
+                aria-label="Setup file contents"
+                value={pasteText}
+                onChange={(e) => setPasteText(e.target.value)}
+              />
+              <button
+                className="btn-primary btn-sm mt-2"
+                disabled={!pasteText.trim()}
+                onClick={() => applySetupText(pasteText)}
+              >
+                Load pasted setup
+              </button>
+            </div>
+          )}
+
+          {setupReport && (
+            <div className="mb-3 text-xs space-y-1">
+              <div className="text-success">
+                Loaded {setupReport.loaded} village(s) from the setup file.
+              </div>
+              {setupReport.missingFromAccount.length > 0 && (
+                <div className="text-amber-300">
+                  {setupReport.missingFromAccount.length} village(s) in the file are not in this
+                  account and were skipped:{' '}
+                  {setupReport.missingFromAccount.map((v) => v.name || v.village_id).join(', ')}
+                </div>
+              )}
+              {setupReport.stillUnknown.length > 0 && (
+                <div className="text-amber-300">
+                  {setupReport.stillUnknown.length} village(s) still have no Trade Office level and
+                  are planned as 0, which over-provisions merchants rather than breaching the
+                  budget:{' '}
+                  {setupReport.stillUnknown.map((v) => v.name || v.village_id).join(', ')}
+                </div>
+              )}
+            </div>
+          )}
+
           <table className="w-full text-sm">
             <thead className="text-secondary text-xs uppercase">
               <tr>
