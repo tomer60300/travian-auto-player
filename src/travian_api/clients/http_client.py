@@ -1136,12 +1136,17 @@ class HttpClient:
 
         Added for the Gold Club trade-route toggle, which is a PUT to
         ``/api/v1/trade-routes`` rather than a POST. Deliberately NOT decorated
-        with ``_transient_retry``: callers pass ``safe_to_retry=False`` for a
-        committed write, and replaying a PUT whose response was lost is how a
-        toggle turns into a double action.
+        with ``_transient_retry``, and it never retries internally either:
+        replaying a PUT whose response was lost is how one toggle becomes two.
+        Every failure is therefore wrapped as :class:`NetworkError` rather than
+        re-raised bare for a retry decorator that is not there.
 
         Args:
             request_type: "json" (default) or "xhr" — see post_json.
+            safe_to_retry: accepted for signature symmetry with post_json and
+                delete_json, and worth passing False at a call site to record
+                that the write is committed. It changes nothing here: a PUT is
+                never retried regardless of what is passed.
         """
         if not url.startswith("http"):
             url = urljoin(self.base_url, url.lstrip("/"))
@@ -1201,17 +1206,25 @@ class HttpClient:
             raise NetworkError(
                 f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
             )
+        except (ConnectionResetError, ConnectionError, OSError) as e:
+            # A forcible close is Travian's rate-limit tell, so the throttler has
+            # to learn about it. post_json also retries once here; a PUT
+            # deliberately does not, because a committed write must never be
+            # replayed -- but dropping the signal entirely left the stealth layer
+            # unaware it had just been rate-limited mid toggle-burst.
+            if self._stealth_enabled:
+                penalty = _jitter_penalty(30.0)
+                self._throttler.add_penalty(penalty)
+                logger.warning("Connection reset in put_json — %.0fs penalty: %s", penalty, e)
+            raise NetworkError(f"Connection reset (non-retryable): {e}")
         except httpx.RequestError as e:
-            if not safe_to_retry:
-                raise NetworkError(f"Request failed (non-retryable): {e}")
-            raise
+            # Always wrapped, unlike post_json: this method carries no
+            # _transient_retry decorator, so re-raising bare would hand the
+            # caller a naked httpx error that `except NetworkError` misses.
+            raise NetworkError(f"Request failed: {e}")
         except Exception as e:
             if HAS_CURL_CFFI and isinstance(e, CurlError):
-                if not safe_to_retry:
-                    raise NetworkError(f"Request failed (curl, non-retryable): {e}")
-                raise
-            if not safe_to_retry:
-                raise NetworkError(f"Request failed (non-retryable): {e}")
+                raise NetworkError(f"Request failed (curl): {e}")
             raise
 
     @_transient_retry

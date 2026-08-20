@@ -903,8 +903,13 @@ async def post_day_check(
                 manual_rates=manual,
             )
         )
-    trajectories, breaches = simulate_profile_cycle(
-        segments, own_rates, stocks, capacities, body.crop_ceilings
+    # Off the event loop for the same reason craft_plan is: pure CPU that must
+    # not stall WebSocket frames or stealth-timed game requests. The simulation
+    # got much heavier when it became discrete -- a tick per dispatch and per
+    # arrival on top of a 5-minute grid, ~1,800 ticks a day against 96 before --
+    # and it measured ~1.9s of uninterruptible work on a 20-village account.
+    trajectories, breaches = await asyncio.to_thread(
+        simulate_profile_cycle, segments, own_rates, stocks, capacities, body.crop_ceilings
     )
 
     for breach in sorted(breaches, key=lambda b: (b.day, b.minute)):

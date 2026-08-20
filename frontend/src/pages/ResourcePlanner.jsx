@@ -506,7 +506,13 @@ export default function ResourcePlanner() {
     // in-progress request from resurrecting a pre-edit "all clear".
     dayCheckInputRev.current += 1
     setDayCheck(null)
-  }, [profiles, profileWindows, cropCeilings, snapshot, foreignTargets])
+    // Trade Office and the merchant model belong here too: the day check now
+    // routes every profile through the same optimizer /plan uses, so its
+    // request carries the whole plan payload. Before that it sent only the
+    // snapshot and the allocations, and this list still described that older,
+    // narrower request -- so editing a Trade Office level left the green
+    // all-clear on screen describing a day computed from the old capacity.
+  }, [profiles, profileWindows, cropCeilings, snapshot, foreignTargets, tradeOffice, merchantModel])
   // Same rule for the route sheet, with higher stakes: its rows are copied
   // field by field into the game's trade-route dialog. A sheet computed from
   // yesterday's allocations, Trade Office levels, merchant model, tributes or
