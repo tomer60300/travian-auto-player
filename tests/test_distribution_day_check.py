@@ -551,3 +551,70 @@ class TestNarrowProfileWindow:
         assert unachievable, f"warnings: {res.warnings}"
         assert unachievable[0].startswith("Burst:"), "the warning must name the profile"
         assert "once a day" in unachievable[0]
+
+
+class TestCargoConservationAndSinks:
+    """Two regressions the impact-time refactor introduced, both found by review."""
+
+    @staticmethod
+    def _route(origin, destination, crop_per_hour, cycle_hours, one_way_minutes, dispatch_minute):
+        return ScheduledRoute(
+            route=Route(
+                origin=origin,
+                destination=destination,
+                cargo_per_hour={Resource.CROP: crop_per_hour},
+                cycle_hours=cycle_hours,
+                merchants_per_send=1,
+                sets_in_flight=1,
+                one_way_minutes=one_way_minutes,
+            ),
+            dispatch_minute=dispatch_minute,
+        )
+
+    def test_an_arrival_that_wraps_past_midnight_invents_no_cargo(self):
+        """A firing whose arrival minute precedes its dispatch minute lands
+        before the dispatch on day 0. Standing in the nominal batch credits
+        cargo the origin never had, and nothing ever drains it -- so the
+        invention survives into the settled day, `high` and `daily_net`,
+        contradicting the conservation the module promises."""
+        # Village 1 holds nothing and produces nothing, so it can never ship.
+        day = ProfileSegment(
+            name="All day",
+            start_minute=0,
+            end_minute=1439,
+            routes=(self._route(1, 2, 24_000 / 24, 24, 120.0, 23 * 60 + 20),),
+        )
+        trajectories, _ = simulate_profile_cycle(
+            [day],
+            own_rates={1: {Resource.CROP: 0.0}, 2: {Resource.CROP: 0.0}},
+            stocks={1: {Resource.CROP: 0}, 2: {Resource.CROP: 0}},
+            capacities={1: {Resource.CROP: 800_000}, 2: {Resource.CROP: 800_000}},
+        )
+        receiver = next(t for t in trajectories if t.village_id == 2)
+        assert receiver.high == 0.0, "the sender has nothing to send, so nothing may arrive"
+        assert receiver.daily_net == 0.0
+
+    def test_a_destination_with_no_store_gets_no_trajectory(self):
+        """Foreign tributes enter the optimizer as negative-id pseudo-villages
+        with no production, no capacity and no consumption, so a route to one
+        would grow an unbounded phantom store. It never settles, and `settled`
+        is one global flag -- so a single tribute makes every village in the
+        response report as still drifting."""
+        day = ProfileSegment(
+            name="All day",
+            start_minute=0,
+            end_minute=1439,
+            routes=(self._route(1, -1, 500.0, 6, 30.0, 60),),
+        )
+        trajectories, _ = simulate_profile_cycle(
+            [day],
+            own_rates={1: {Resource.CROP: 500.0}},
+            stocks={1: {Resource.CROP: 100_000}},
+            capacities={1: {Resource.CROP: 800_000}},
+        )
+        assert [t.village_id for t in trajectories] == [1], (
+            "the sink is not a village and must not get a row"
+        )
+        assert all(t.settled for t in trajectories), (
+            "an untracked sink must not keep the whole account from settling"
+        )

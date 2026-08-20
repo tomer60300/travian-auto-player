@@ -99,7 +99,7 @@ class TravianSession:
         self.scout_service = AutoScoutService(self.http_client)
         self.video_service = VideoRewardService(self.http_client)
         # Live creation stays refused unless the operator has explicitly enabled
-        # it, because the trade-route wire payload is still unverified.
+        # it: the payload is verified, but a live run mutates the real account.
         self.trade_route_service = TradeRouteService(
             self.http_client, live_enabled=self.settings.trade_route_live
         )

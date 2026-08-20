@@ -169,7 +169,7 @@ class TradeRouteService:
             for r in parse_trade_routes(html)
         ]
 
-    # ── Write (gated: payload UNVERIFIED) ─────────────────────────────
+    # ── Write (gated: live opt-in; payload verified) ────────────────────────────
 
     def _build_create_payload(self, route: PlannedRoute) -> dict:
         """``POST /api/v1/trade-routes`` body. VERIFIED against a real request.

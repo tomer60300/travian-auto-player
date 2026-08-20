@@ -472,6 +472,15 @@ def simulate_profile_cycle(
         for resource, amount in per.items():
             level[(vid, resource)] = float(amount)
 
+    # Only somewhere with a store is simulated. A route's destination need not
+    # be a village at all: a foreign tribute joins the optimizer as a
+    # negative-id pseudo-village with no production, no capacity and nothing
+    # consuming it, so crediting arrivals to one grows a phantom store that can
+    # never settle -- and `settled` is a single flag for the whole account, so
+    # one tribute would report every real village as still drifting. The
+    # dispatch still debits the origin: the cargo really does leave.
+    simulated = set(stocks) | set(own_rates)
+
     nominal: dict[tuple[int, Resource], float] = {}
     breaches: list[TrajectoryBreach] = []
     breached: set[tuple[int, Resource, str]] = set()
@@ -549,13 +558,19 @@ def simulate_profile_cycle(
                 if shipped:
                     apply(origin, resource, -shipped, minute, day, draining=True)
             # Impact: credited at the minute it lands, in whatever profile owns
-            # that minute. On the first day a load whose arrival wraps past
-            # midnight has no funded amount yet, so the nominal batch stands in.
+            # that minute -- but only what the origin actually funded. A firing
+            # whose arrival minute precedes its dispatch minute lands before
+            # that dispatch on day 0, so nothing has been funded yet and there
+            # is nothing to deliver. Standing in the nominal batch there would
+            # credit cargo the origin never had, and nothing drains it again, so
+            # the invention survives into the settled day and its daily net.
             for index in arrivals_at.get(minute, ()):
-                _out, _in, _origin, destination, resource, amount = firings[index]
-                apply(
-                    destination, resource, in_flight.get(index, amount), minute, day, draining=False
-                )
+                _out, _in, _origin, destination, resource, _amount = firings[index]
+                if destination not in simulated:
+                    continue
+                shipped = in_flight.get(index)
+                if shipped:
+                    apply(destination, resource, shipped, minute, day, draining=False)
             # Production for the span up to the next tick, always on.
             end = ticks[position + 1] if position + 1 < len(ticks) else MINUTES_PER_DAY
             span_hours = (end - minute) / 60.0
