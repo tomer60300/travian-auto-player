@@ -98,12 +98,34 @@ Every task MUST follow this exact pipeline. Do not skip steps.
 3. If the task requires frontend changes, rebuild: `cd frontend && npm run build`
 
 ### Phase 3: Verify
-1. Run backend linting: `uv run ruff check . && uv run ruff format --check .`
-2. Run backend tests: `uv run pytest -x -v --tb=short`
-3. Run frontend linting: `cd frontend && npx eslint . --max-warnings=20`
-4. If frontend changed, verify the build succeeds: `cd frontend && npm run build`
-5. Show ALL output to the user. Never claim "it works" without evidence.
-6. If fixing a bug: write a FAILING test first, then fix, then show test passing.
+
+Scope the gate to what you actually changed. The full backend suite takes ~4-5
+minutes, and it is paid on every iteration — running it to verify a Markdown
+edit verifies nothing and is pure waste.
+
+**Always:**
+1. Backend linting, if any Python changed: `uv run ruff check . && uv run ruff format --check .`
+2. Show ALL output to the user. Never claim "it works" without evidence.
+3. If fixing a bug: write a FAILING test first, then fix, then show it passing.
+
+**Backend (Python) changed:**
+4. `uv run --extra dev --extra web pytest -q --tb=short`
+   Use `--extra dev --extra web`. A bare `uv run pytest` does NOT install the
+   optional extras, so it silently falls through to a global pytest whose
+   editable install may point at a different checkout — which has already
+   produced test results describing the wrong source tree.
+   While iterating, `-m "not slow"` skips the largest-account planner cases
+   (~48% of runtime, 20 tests). Run the full set before committing.
+
+**Frontend changed:**
+5. `cd frontend && npx eslint . --max-warnings=20 && npm test && npm run build`
+
+**Docs, comments or CI YAML only:** none of the above apply beyond a sanity
+read. Do not run the test suite.
+
+> The build writes into `src/travian_api/web/static`, which the production
+> server on :80 serves directly. There is no staging step: a frontend build is
+> live the moment it finishes.
 
 ### Phase 4: Submit
 1. Stage only the relevant files (never `git add -A`).
