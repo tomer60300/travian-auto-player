@@ -300,7 +300,36 @@ def cheapest_cycle(
     """
     if not cycles:
         raise ValueError("cycles must not be empty")
-    return min(
-        cycle_sweep(hourly_cargo, round_trip_minutes, merchant_capacity, cycles),
-        key=lambda cost: (cost.merchants_committed, cost.cycle_hours),
+
+    # Deliberately not `min(cycle_sweep(...))`. This is the hottest function in
+    # the planner -- the route search calls it millions of times per plan, and
+    # building a RouteCost for every candidate only to discard all but one was
+    # measurably the largest single cost in generating a plan. The arithmetic
+    # below is exactly route_cost's, kept in step with it, and only the winner
+    # is materialised. cycle_sweep still exists for the UI, which wants the
+    # whole curve.
+    best: tuple[int, int, int, int, int] | None = None  # committed, cycle, batch, send, sets
+    for cycle_hours in cycles:
+        # Same checks in the same order as route_cost, so an invalid argument
+        # still raises the same error rather than a different one.
+        if cycle_hours <= 0:
+            raise ValueError(f"cycle_hours must be positive, got {cycle_hours}")
+        if merchant_capacity <= 0:
+            raise ValueError(f"merchant_capacity must be positive, got {merchant_capacity}")
+        if hourly_cargo < 0:
+            raise ValueError(f"hourly_cargo cannot be negative, got {hourly_cargo}")
+
+        batch = math.ceil(hourly_cargo * cycle_hours - CEIL_DUST_TOLERANCE)
+        send = math.ceil(batch / merchant_capacity)
+        sets = math.ceil(round_trip_minutes / (cycle_hours * 60))
+        candidate = (send * sets, cycle_hours, batch, send, sets)
+        if best is None or candidate[:2] < best[:2]:
+            best = candidate
+
+    _committed, cycle_hours, batch, send, sets = best
+    return RouteCost(
+        cycle_hours=cycle_hours,
+        batch=batch,
+        merchants_per_send=send,
+        sets_in_flight=sets,
     )
