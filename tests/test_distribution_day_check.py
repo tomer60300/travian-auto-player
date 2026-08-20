@@ -14,6 +14,8 @@ import pytest
 from fastapi import HTTPException
 
 from travian_api.services.distribution.allocation import Resource
+from travian_api.services.distribution.optimizer import Route
+from travian_api.services.distribution.schedule import ScheduledRoute
 from travian_api.services.distribution.storage import ProfileSegment, simulate_profile_cycle
 from travian_api.web.routes.distribution import DayCheckRequest, post_day_check
 
@@ -29,13 +31,13 @@ class TestSimulateProfileCycle:
             name="Day",
             start_minute=7 * 60,
             end_minute=23 * 60,
-            ship_rates={1: {Resource.CROP: 10_000.0}},
+            manual_rates={1: {Resource.CROP: 10_000.0}},
         )
         night = ProfileSegment(
             name="Night",
             start_minute=23 * 60,
             end_minute=7 * 60,
-            ship_rates={1: {Resource.CROP: 500.0}},
+            manual_rates={1: {Resource.CROP: 500.0}},
         )
 
         trajectories, breaches = simulate_profile_cycle(
@@ -63,13 +65,13 @@ class TestSimulateProfileCycle:
             name="Day",
             start_minute=8 * 60,
             end_minute=20 * 60,  # 12h at -2,000/h net = -24,000
-            ship_rates={1: {Resource.CROP: -6_000.0}},
+            manual_rates={1: {Resource.CROP: -6_000.0}},
         )
         night = ProfileSegment(
             name="Night",
             start_minute=20 * 60,
             end_minute=8 * 60,  # 12h at +2,000/h net = +24,000
-            ship_rates={1: {Resource.CROP: -2_000.0}},
+            manual_rates={1: {Resource.CROP: -2_000.0}},
         )
 
         trajectories, breaches = simulate_profile_cycle(
@@ -93,7 +95,7 @@ class TestSimulateProfileCycle:
             name="Day",
             start_minute=6 * 60,
             end_minute=18 * 60,
-            ship_rates={1: {Resource.CROP: -5_000.0}},
+            manual_rates={1: {Resource.CROP: -5_000.0}},
         )
 
         trajectories, _ = simulate_profile_cycle(
@@ -118,7 +120,7 @@ class TestSimulateProfileCycle:
             name="Day",
             start_minute=0,
             end_minute=720,
-            ship_rates={},
+            manual_rates={},
         )
 
         _, breaches = simulate_profile_cycle(
@@ -138,7 +140,7 @@ class TestSimulateProfileCycle:
     def test_a_ceiling_misconfigured_above_the_cap_never_fires(self):
         """The ceiling is checked on the post-clamp level: the store physically
         cannot exceed its cap, so an alert set above it must stay silent."""
-        segment = ProfileSegment(name="Day", start_minute=0, end_minute=720, ship_rates={})
+        segment = ProfileSegment(name="Day", start_minute=0, end_minute=720, manual_rates={})
 
         _, breaches = simulate_profile_cycle(
             [segment],
@@ -374,3 +376,105 @@ class TestDayCheckEndpoint:
 
         for parameter in inspect.signature(post_day_check).parameters.values():
             assert getattr(parameter.default, "dependency", None) is not get_travian_session
+
+
+class TestImpactTimeAttribution:
+    """Cargo belongs to the profile it LANDS in, not the one that sent it.
+
+    A route dispatched at 22:00 under Day, travelling 100 minutes, arrives at
+    23:40 -- under Night. Modelling each profile's shipping as a rate confined
+    to its own hours drops that delivery entirely: the night's inflow is
+    understated by whatever was in the air at the boundary, which is the
+    optimistic direction for an overnight overflow.
+    """
+
+    @staticmethod
+    def _route(origin, destination, crop_per_hour, cycle_hours, one_way_minutes, dispatch_minute):
+        return ScheduledRoute(
+            route=Route(
+                origin=origin,
+                destination=destination,
+                cargo_per_hour={Resource.CROP: crop_per_hour},
+                cycle_hours=cycle_hours,
+                merchants_per_send=1,
+                sets_in_flight=1,
+                one_way_minutes=one_way_minutes,
+            ),
+            dispatch_minute=dispatch_minute,
+        )
+
+    def test_a_day_dispatch_landing_at_night_is_credited_at_night(self):
+        # 20,000 crop leaves village 2 at 22:00 (inside Day) and lands at 23:40
+        # (inside Night). The capital sits 5,000 under its alert and produces
+        # nothing of its own, so ONLY that delivery can cross the alert -- and
+        # the crossing must be reported at 23:40, during Night.
+        day = ProfileSegment(
+            name="Day",
+            start_minute=7 * 60,
+            end_minute=23 * 60,
+            routes=(self._route(2, 1, 20_000 / 24, 24, 100.0, 22 * 60),),
+        )
+        night = ProfileSegment(name="Night", start_minute=23 * 60, end_minute=7 * 60, routes=())
+
+        _, breaches = simulate_profile_cycle(
+            [day, night],
+            own_rates={1: {Resource.CROP: 0.0}, 2: {Resource.CROP: 900.0}},
+            stocks={1: {Resource.CROP: 95_000}, 2: {Resource.CROP: 200_000}},
+            capacities={1: {Resource.CROP: 800_000}, 2: {Resource.CROP: 2_000_000}},
+            ceilings={1: 100_000.0},
+        )
+
+        hits = [b for b in breaches if b.kind == "ceiling" and b.village_id == 1]
+        assert hits, "the delivery pushes the capital from 95k over its 100k alert"
+        first = hits[0]
+        assert first.minute == 22 * 60 + 100, "credited at the ARRIVAL minute, not the dispatch"
+        assert first.segment == "Night", (
+            "the cargo left under Day but lands under Night, so Night owns its impact"
+        )
+
+    def test_the_origin_is_debited_when_it_dispatches_not_when_it_arrives(self):
+        # The same route seen from the sender: it loses the cargo at 22:00,
+        # while it is still Day. Outflow keeps dispatch time; only the credit
+        # moves to impact time.
+        day = ProfileSegment(
+            name="Day",
+            start_minute=7 * 60,
+            end_minute=23 * 60,
+            routes=(self._route(2, 1, 20_000 / 24, 24, 100.0, 22 * 60),),
+        )
+        night = ProfileSegment(name="Night", start_minute=23 * 60, end_minute=7 * 60, routes=())
+
+        _, breaches = simulate_profile_cycle(
+            [day, night],
+            own_rates={1: {Resource.CROP: 0.0}, 2: {Resource.CROP: 0.0}},
+            # The sender holds exactly one batch, so dispatching empties it.
+            stocks={1: {Resource.CROP: 0}, 2: {Resource.CROP: 20_000}},
+            capacities={1: {Resource.CROP: 800_000}, 2: {Resource.CROP: 800_000}},
+        )
+
+        empties = [b for b in breaches if b.kind == "empty" and b.village_id == 2]
+        assert empties, "the sender is emptied by its own dispatch"
+        assert empties[0].minute == 22 * 60
+        assert empties[0].segment == "Day"
+
+    def test_cargo_is_conserved_when_the_origin_cannot_fund_the_batch(self):
+        # The sender holds only a quarter of the batch. The destination must be
+        # credited what actually left, not the nominal batch -- crediting the
+        # full amount invents resources and then reports the invention as an
+        # overflow at the far end.
+        day = ProfileSegment(
+            name="Day",
+            start_minute=0,
+            end_minute=23 * 60,
+            routes=(self._route(2, 1, 20_000 / 24, 24, 60.0, 10 * 60),),
+        )
+        trajectories, _ = simulate_profile_cycle(
+            [day],
+            own_rates={1: {Resource.CROP: 0.0}, 2: {Resource.CROP: 0.0}},
+            stocks={1: {Resource.CROP: 0}, 2: {Resource.CROP: 5_000}},
+            capacities={1: {Resource.CROP: 800_000}, 2: {Resource.CROP: 800_000}},
+        )
+        capital = next(t for t in trajectories if t.village_id == 1)
+        assert capital.high == pytest.approx(5_000.0), (
+            "only the 5,000 the sender actually had may arrive, not the 20,000 batch"
+        )

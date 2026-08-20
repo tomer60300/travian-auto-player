@@ -30,7 +30,6 @@ from travian_api.services.distribution.allocation import (
     AllocationError,
     AllocationMode,
     Resource,
-    resolve_resource,
     village_label,
 )
 from travian_api.services.distribution.geometry import MapGeometry
@@ -668,7 +667,7 @@ class DaySegmentInput(BaseModel):
         return value
 
 
-class DayCheckRequest(BaseModel):
+class DayCheckRequest(PlanRequest):
     """The whole day at once: every profile, each in its own hours.
 
     Costs zero game requests. Profiles are planned in isolation, but the account
@@ -676,18 +675,16 @@ class DayCheckRequest(BaseModel):
     the stock the night profile starts from, so questions like "does the capital
     cross 90k during the night?" can only be answered by simulating the day as
     the profiles will actually run it.
+
+    Inherits every planner input from :class:`PlanRequest` -- snapshot, Trade
+    Office levels, merchant model, geometry, tributes -- because each profile is
+    routed through the same optimizer /plan uses. Sharing the model is what stops
+    the two endpoints drifting into different answers for the same account. Only
+    ``allocations`` moves: it lives per segment, since that is what a profile
+    *is*.
     """
 
-    snapshot: list[VillageSnapshot]
     segments: list[DaySegmentInput] = Field(min_length=1)
-    foreign_targets: list[ForeignTarget] = Field(
-        default=[],
-        description=(
-            "The same tributes POST /plan ships. Each per-profile plan carries "
-            "them as absolute targets, so the composite day must drain them too "
-            "or it reads optimistic by 24x the tribute."
-        ),
-    )
     crop_ceilings: dict[int, float] = Field(
         default={},
         description=(
@@ -696,6 +693,17 @@ class DayCheckRequest(BaseModel):
             "the profile that was running."
         ),
     )
+
+    @field_validator("allocations")
+    @classmethod
+    def _allocations_live_on_segments(cls, value: dict) -> dict:
+        """Reject a top-level allocation set rather than silently ignoring it."""
+        if value:
+            raise ValueError(
+                "allocations belong to each entry in `segments`, not at the top "
+                "level -- a profile is defined by its own allocations"
+            )
+        return value
 
 
 class VillageDayResponse(BaseModel):
@@ -826,58 +834,70 @@ async def post_day_check(
 
     segments: list[ProfileSegment] = []
     for segment in body.segments:
-        ship: dict[int, dict[Resource, float]] = {}
-        for resource in Resource:
-            per_village = segment.allocations.get(resource, {})
-            known = productions.get(resource, {})
-            usable = {
-                vid: Allocation(mode=item.mode, value=item.value)
-                for vid, item in per_village.items()
-                if item.mode is not AllocationMode.KEEP and vid in known
-            }
-            if resource is Resource.CROP and foreign_ids:
-                for target_id, target in foreign_ids.items():
-                    owed = target.crop_per_hour * (1.0 + target.safety_margin_pct / 100.0)
-                    usable[target_id] = Allocation(mode=AllocationMode.ABSOLUTE, value=owed)
-                # The sink's demand is funded through the remainder village; a
-                # profile without one leaves the tribute unpaid in those hours,
-                # which the composite would otherwise model silently.
-                if not any(a.mode is AllocationMode.REMAINDER for a in usable.values()):
-                    warnings.append(
-                        f"{segment.name}: no crop remainder village, so nothing funds "
-                        f"the tribute during it -- modeled as unpaid in those hours"
-                    )
-            if not usable:
-                continue
-            try:
-                resolved = resolve_resource(resource, known, usable, names)
-            except AllocationError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"{segment.name}: {exc}",
-                ) from exc
-            # A profile that does not conserve mass (an absolute receiver with
-            # no remainder to source it) makes resolve_resource emit a warning
-            # and hand back a receiver inflow no route actually supplies.
-            # Discarding it would let the day picture credit crop from nothing
-            # and still report a green all-clear where /plan would show a
-            # shortfall. Surface the warning so the safety check cannot lie.
-            for warning in resolved.warnings:
-                warnings.append(f"{segment.name}: {warning}")
-            for village in resolved.villages:
-                if village.village_id < 0:
-                    continue  # the sink itself is not simulated; see above
-                if abs(village.ship_per_hour) > 0:
-                    ship.setdefault(village.village_id, {})[resource] = village.ship_per_hour
+        # Route each profile through the SAME planner /plan and /execute use, so
+        # the day picture is built from the real route set -- actual cycles,
+        # merchant budgets, relays and shortfalls -- rather than from allocation
+        # intent that no route may realise. It also means the two endpoints
+        # cannot answer the same account differently.
+        per_profile = body.model_copy(update={"allocations": segment.allocations})
+        try:
+            account = await _plan_account(per_profile)
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail=f"{segment.name}: {exc.detail}"
+            ) from exc
+        # /plan surfaces plan.warnings and account.warnings separately, so a
+        # profile needs both: the allocation-level ones (unallocated slack, a
+        # receiver nothing sources) live on the plan.
+        for warning in (*account.plan.warnings, *account.warnings):
+            warnings.append(f"{segment.name}: {warning}")
+        # Demand the optimizer could not route is not a rate the day can spend:
+        # crediting it would let the composite report a green all-clear over a
+        # shortfall /plan is already reporting in red.
+        for shortfall in account.plan.shortfalls:
+            warnings.append(
+                f"{segment.name}: {village_label(shortfall.village_id, names)} is short "
+                f"{shortfall.per_hour:,.0f}/h of {shortfall.resource.value} -- "
+                f"{shortfall.reason}, so the day runs without it"
+            )
+        # Tributes Travian will not let a route target are still a real drain on
+        # whoever ships them by hand. The optimizer correctly leaves them out of
+        # the route set, so carry them as a manual rate instead -- dropping them
+        # would flatter the day by the whole obligation, every hour of it.
+        manual: dict[int, dict[Resource, float]] = {}
+        owed_by_hand = sum(
+            target.crop_per_hour * (1.0 + target.safety_margin_pct / 100.0)
+            for target in body.foreign_targets
+            if not target.route_eligible
+        )
+        if owed_by_hand:
+            crop_allocations = segment.allocations.get(Resource.CROP, {})
+            funder = next(
+                (
+                    vid
+                    for vid, item in crop_allocations.items()
+                    if item.mode is AllocationMode.REMAINDER
+                ),
+                None,
+            )
+            if funder is None:
+                warnings.append(
+                    f"{segment.name}: no crop remainder village, so nothing funds the "
+                    f"tribute ({owed_by_hand:,.0f}/h owed by hand) during it -- modeled "
+                    f"as unpaid in those hours"
+                )
+            else:
+                manual.setdefault(funder, {})[Resource.CROP] = -owed_by_hand
+
         segments.append(
             ProfileSegment(
                 name=segment.name,
                 start_minute=segment.window[0],
                 end_minute=segment.window[1],
-                ship_rates=ship,
+                routes=account.plan.beat.routes,
+                manual_rates=manual,
             )
         )
-
     trajectories, breaches = simulate_profile_cycle(
         segments, own_rates, stocks, capacities, body.crop_ceilings
     )

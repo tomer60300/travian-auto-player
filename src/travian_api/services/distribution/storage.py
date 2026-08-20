@@ -26,11 +26,11 @@ Pure functions over already-fetched state. Nothing here spends a game request.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .allocation import Resource, village_label
-from .schedule import MINUTES_PER_DAY, Beat
+from .schedule import MINUTES_PER_DAY, Beat, ScheduledRoute
 
 # Rates below this are treated as level rather than drifting. Dividing by a rate
 # of 0.01/h yields a "time to full" of centuries, which is noise dressed as a
@@ -128,6 +128,13 @@ class OverflowEvent:
 # store that converges to exactly its cap leaves a few nano-resources of
 # rounding behind, and reporting that as a daily loss is noise.
 MIN_REPORTED_WASTE = 1.0
+
+# Accumulating production in fractional steps leaves float residue: eighteen
+# five-minute spans of 20,000/h land on 30,000.000000000004, not 30,000. Without
+# a tolerance a store that reaches its alert level exactly is reported as having
+# crossed it one step early, so the hour in the warning is an artifact of the
+# step grid rather than a fact about the account.
+CROSSING_TOLERANCE = 1e-6
 
 # Days to run before believing the numbers. Convergence is normally immediate
 # once the transient has drained; this only bounds a pathological input.
@@ -304,18 +311,31 @@ def storage_warnings(
 
 @dataclass(frozen=True)
 class ProfileSegment:
-    """One allocation profile's share of the day.
+    """One allocation profile's share of the day, as the routes it runs.
 
     ``start_minute``/``end_minute`` are minutes past midnight; a segment may
-    wrap (start > end). ``ship_rates`` is what the profile's plan adds to or
-    removes from each village per hour while it is the one running --
-    ``village -> resource -> rate``, positive into the village.
+    wrap (start > end). ``routes`` is the profile's own beat -- the scheduled
+    routes its plan produced.
+
+    Routes rather than a netted per-village rate, because a rate cannot say
+    *when* cargo lands. A route dispatched at 22:00 that travels 100 minutes
+    arrives at 23:40, in the next profile's hours, and the destination's stock
+    rises then -- not spread across the sending profile's afternoon. See
+    :func:`simulate_profile_cycle`.
     """
 
     name: str
     start_minute: int
     end_minute: int
-    ship_rates: Mapping[int, Mapping[Resource, float]]
+    routes: tuple[ScheduledRoute, ...] = ()
+    manual_rates: Mapping[int, Mapping[Resource, float]] = field(default_factory=dict)
+    """Continuous per-village rates this profile runs that are NOT routes.
+
+    A hand-shipped obligation -- a tribute Travian will not let a Gold Club
+    route target, say -- has no route and therefore no dispatch or travel time
+    to model, so a rate confined to the profile's hours is the honest shape for
+    it. Leaving it out entirely would flatter the day by the whole obligation.
+    """
 
     def covers(self, minute: int) -> bool:
         if self.start_minute == self.end_minute:
@@ -360,46 +380,46 @@ def simulate_profile_cycle(
     stocks: Mapping[int, Mapping[Resource, int]],
     capacities: Mapping[int, Mapping[Resource, int]],
     ceilings: Mapping[int, float] | None = None,
-    step_minutes: int = 15,
+    step_minutes: int = 5,
     max_days: int = 45,
 ) -> tuple[list[VillageTrajectory], list[TrajectoryBreach]]:
     """Replay a day that switches between allocation profiles.
 
     Each profile is planned in isolation, but the account lives through all of
     them every day: what the day profile ships decides the stock the night
-    profile starts from. This runs the composite -- each segment's net shipping
-    active only inside its own hours, production always on, gaps between
-    segments meaning "no routes running" -- so questions like "does the capital
-    cross 90k during the night?" have an answer with an hour on it.
+    profile starts from. This runs the composite -- production always on, each
+    profile's routes dispatching only inside its own hours -- so questions like
+    "does the capital cross 90k during the night?" have an answer with an hour
+    on it.
 
-    Deliberate approximation: segments contribute RATES, not discrete batches.
-    Route phases do not survive a profile switch (the operator recreates the
-    routes), so batch timing across the boundary is unknowable; within a single
-    profile the discrete check is :func:`simulate_day`. Overflow and starvation
-    still clamp, exactly as the game does.
+    **Cargo is attributed by impact, not by dispatch.** A load that leaves at
+    22:00 under Day and travels 100 minutes lands at 23:40, under Night: it is
+    Night's stock that rises, and Night that is named in any breach it causes.
+    Only the *dispatch* keeps the sending profile's hours, because that is when
+    the origin actually parts with the cargo. Modelling a profile's shipping as
+    a rate confined to its own hours drops those boundary-crossing deliveries
+    entirely, understating the night's inflow -- the optimistic direction for an
+    overnight overflow, and so the wrong way to be wrong.
+
+    **Cargo is conserved.** A dispatch takes what the origin actually has, and
+    the matching arrival delivers exactly that. Crediting a batch the origin
+    could not fund invents resources, and the invention resurfaces as overflow
+    at the far end.
 
     ``ceilings`` is an operator-set alert level for CROP, below capacity --
     typically an NPC trigger. Crossing it (from below, on the post-clamp level)
-    is reported with the day, minute and the segment that was running; a store
-    that already starts the day above it is reported once as kind "above".
+    is reported with the day, the minute, and the profile that was running at
+    the moment of impact; a store that already starts the day above it is
+    reported once as kind "above".
 
     Runs until the daily trajectory repeats (steady state) or ``max_days``.
     A store still drifting at the horizon is reported unsettled with its daily
     net, which is itself the answer: it will cross everything eventually.
     """
-    level: dict[tuple[int, Resource], float] = {}
-    for vid, per in stocks.items():
-        for resource, amount in per.items():
-            level[(vid, resource)] = float(amount)
+    if step_minutes < 1:
+        raise ValueError(f"step_minutes must be at least 1, got {step_minutes}")
 
     ceilings = ceilings or {}
-    nominal: dict[tuple[int, Resource], float] = {}
-    breaches: list[TrajectoryBreach] = []
-    breached: set[tuple[int, Resource, str]] = set()
-    lows: dict[tuple[int, Resource], float] = {}
-    highs: dict[tuple[int, Resource], float] = {}
-    day_nets: dict[tuple[int, Resource], float] = {}
-    settled_day = -1
 
     def segment_at(minute: int) -> ProfileSegment | None:
         for segment in segments:
@@ -407,79 +427,162 @@ def simulate_profile_cycle(
                 return segment
         return None
 
+    def segment_name_at(minute: int) -> str:
+        active = segment_at(minute)
+        return active.name if active else "no profile"
+
+    # One firing per route per cycle, kept only where the sending profile is
+    # actually running: a Day route stops dispatching when Day ends, but a load
+    # already in the air still lands.
+    firings: list[tuple[int, int, int, int, Resource, float]] = []
+    for segment in segments:
+        for scheduled in segment.routes:
+            pairs = zip(scheduled.dispatch_minutes, scheduled.arrival_minutes, strict=True)
+            for out_minute, in_minute in pairs:
+                if not segment.covers(out_minute):
+                    continue
+                for resource, amount in scheduled.route.batch_per_resource.items():
+                    if amount > 0:
+                        firings.append(
+                            (
+                                out_minute,
+                                in_minute,
+                                scheduled.route.origin,
+                                scheduled.route.destination,
+                                resource,
+                                amount,
+                            )
+                        )
+
+    departures: dict[int, list[int]] = {}
+    arrivals_at: dict[int, list[int]] = {}
+    for index, firing in enumerate(firings):
+        departures.setdefault(firing[0], []).append(index)
+        arrivals_at.setdefault(firing[1], []).append(index)
+
+    # Tick on the production grid plus every event minute, so a dispatch or an
+    # arrival lands on the minute it happens instead of being rounded into a
+    # step. Ticking every minute would cost 1,440 x max_days x stores instead.
+    ticks = sorted(
+        set(range(0, MINUTES_PER_DAY, step_minutes)) | set(departures) | set(arrivals_at)
+    )
+
+    level: dict[tuple[int, Resource], float] = {}
+    for vid, per in stocks.items():
+        for resource, amount in per.items():
+            level[(vid, resource)] = float(amount)
+
+    nominal: dict[tuple[int, Resource], float] = {}
+    breaches: list[TrajectoryBreach] = []
+    breached: set[tuple[int, Resource, str]] = set()
+    lows: dict[tuple[int, Resource], float] = {}
+    highs: dict[tuple[int, Resource], float] = {}
+    in_flight: dict[int, float] = {}
+    day_nets: dict[tuple[int, Resource], float] = {}
+    settled_day = -1
+
     # A store that BEGINS the day above its alert level never "crosses" it --
     # for a draining store that claim would be factually inverted. Report the
     # standing condition once, as its own kind, before any simulation runs.
     for vid, ceiling in ceilings.items():
         key = (vid, Resource.CROP)
         if key in level and level[key] > ceiling:
-            first = segment_at(0)
-            breaches.append(
-                TrajectoryBreach(
-                    vid, Resource.CROP, "above", 0, 0, first.name if first else "no profile"
+            breaches.append(TrajectoryBreach(vid, Resource.CROP, "above", 0, 0, segment_name_at(0)))
+
+    def apply(
+        vid: int, resource: Resource, amount: float, minute: int, day: int, *, draining: bool
+    ) -> None:
+        """Move one store by *amount*, clamping as the game does, recording why."""
+        key = (vid, resource)
+        previous = level.get(key, 0.0)
+        updated = previous + amount
+        if day == 0:
+            nominal[key] = nominal.get(key, 0.0) + amount
+        cap = capacities.get(vid, {}).get(resource)
+        if cap is not None and updated > cap:
+            if (vid, resource, "capacity") not in breached:
+                breached.add((vid, resource, "capacity"))
+                breaches.append(
+                    TrajectoryBreach(
+                        vid, resource, "capacity", day, minute, segment_name_at(minute)
+                    )
                 )
-            )
+            updated = float(cap)
+        if resource is Resource.CROP:
+            ceiling = ceilings.get(vid)
+            # A crossing needs a below-side and an above-side: a store already
+            # past the alert (reported as "above" up front) must not fire
+            # "crosses" while it drains. Tested on the post-clamp value, so a
+            # ceiling set above the cap can never fire at a level the store
+            # cannot reach.
+            if (
+                ceiling is not None
+                and previous - CROSSING_TOLERANCE <= ceiling < updated - CROSSING_TOLERANCE
+                and (vid, resource, "ceiling") not in breached
+            ):
+                breached.add((vid, resource, "ceiling"))
+                breaches.append(
+                    TrajectoryBreach(vid, resource, "ceiling", day, minute, segment_name_at(minute))
+                )
+        if updated <= 0.0:
+            if draining and (vid, resource, "empty") not in breached:
+                breached.add((vid, resource, "empty"))
+                breaches.append(
+                    TrajectoryBreach(vid, resource, "empty", day, minute, segment_name_at(minute))
+                )
+            updated = 0.0
+        level[key] = updated
 
     for day in range(max_days):
         opening = dict(level)
-        if day == max_days - 1 or settled_day >= 0:
-            lows = {k: v for k, v in level.items()}
-            highs = {k: v for k, v in level.items()}
-        for minute in range(0, MINUTES_PER_DAY, step_minutes):
-            active = segment_at(minute)
-            for vid, per in own_rates.items():
-                for resource, own in per.items():
-                    key = (vid, resource)
-                    ship = (
-                        float(active.ship_rates.get(vid, {}).get(resource, 0.0)) if active else 0.0
-                    )
-                    rate = own + ship
-                    if day == 0:
-                        nominal[key] = nominal.get(key, 0.0) + rate * step_minutes / 60.0
-                    if not rate:
-                        continue
-                    previous = level.get(key, 0.0)
-                    updated = previous + rate * step_minutes / 60.0
-                    cap = capacities.get(vid, {}).get(resource)
-                    segment_name = active.name if active else "no profile"
-                    if cap is not None and updated > cap:
-                        if (vid, resource, "capacity") not in breached:
-                            breached.add((vid, resource, "capacity"))
-                            breaches.append(
-                                TrajectoryBreach(
-                                    vid, resource, "capacity", day, minute, segment_name
+        measuring = settled_day >= 0 or day == max_days - 1
+        if measuring:
+            lows = dict(level)
+            highs = dict(level)
+        for position, minute in enumerate(ticks):
+            # Dispatch: the origin parts with the cargo now, under whichever
+            # profile is running now.
+            for index in departures.get(minute, ()):
+                _out, _in, origin, _destination, resource, amount = firings[index]
+                shipped = min(amount, max(0.0, level.get((origin, resource), 0.0)))
+                in_flight[index] = shipped
+                if shipped:
+                    apply(origin, resource, -shipped, minute, day, draining=True)
+            # Impact: credited at the minute it lands, in whatever profile owns
+            # that minute. On the first day a load whose arrival wraps past
+            # midnight has no funded amount yet, so the nominal batch stands in.
+            for index in arrivals_at.get(minute, ()):
+                _out, _in, _origin, destination, resource, amount = firings[index]
+                apply(
+                    destination, resource, in_flight.get(index, amount), minute, day, draining=False
+                )
+            # Production for the span up to the next tick, always on.
+            end = ticks[position + 1] if position + 1 < len(ticks) else MINUTES_PER_DAY
+            span_hours = (end - minute) / 60.0
+            if span_hours > 0:
+                for vid, per in own_rates.items():
+                    for resource, own in per.items():
+                        if own:
+                            apply(vid, resource, own * span_hours, minute, day, draining=own < 0)
+                # Hand-shipped obligations: rate-based, and only while the
+                # profile that owns them is the one running.
+                active = segment_at(minute)
+                if active is not None:
+                    for vid, per in active.manual_rates.items():
+                        for resource, rate in per.items():
+                            if rate:
+                                apply(
+                                    vid,
+                                    resource,
+                                    rate * span_hours,
+                                    minute,
+                                    day,
+                                    draining=rate < 0,
                                 )
-                            )
-                        updated = float(cap)
-                    if resource is Resource.CROP:
-                        ceiling = ceilings.get(vid)
-                        # A crossing needs a below-side and an above-side: a store
-                        # already past the alert (reported as "above" up front)
-                        # must not fire "crosses" while it drains. Tested on the
-                        # post-clamp value so a ceiling misconfigured above the
-                        # cap can never fire at a level the store cannot reach.
-                        if (
-                            ceiling is not None
-                            and previous <= ceiling < updated
-                            and (vid, resource, "ceiling") not in breached
-                        ):
-                            breached.add((vid, resource, "ceiling"))
-                            breaches.append(
-                                TrajectoryBreach(
-                                    vid, resource, "ceiling", day, minute, segment_name
-                                )
-                            )
-                    if updated <= 0.0:
-                        if rate < 0 and (vid, resource, "empty") not in breached:
-                            breached.add((vid, resource, "empty"))
-                            breaches.append(
-                                TrajectoryBreach(vid, resource, "empty", day, minute, segment_name)
-                            )
-                        updated = 0.0
-                    level[key] = updated
-                    if settled_day >= 0 or day == max_days - 1:
-                        lows[key] = min(lows.get(key, updated), updated)
-                        highs[key] = max(highs.get(key, updated), updated)
+            if measuring:
+                for key, value in level.items():
+                    lows[key] = min(lows.get(key, value), value)
+                    highs[key] = max(highs.get(key, value), value)
         day_nets = nominal
         if settled_day >= 0:
             break  # the settled day has now been measured; done

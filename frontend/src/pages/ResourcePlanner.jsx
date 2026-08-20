@@ -1041,12 +1041,15 @@ export default function ResourcePlanner() {
       for (const [vid, value] of Object.entries(cropCeilings)) {
         if (Number(value) > 0) ceilings[vid] = Number(value)
       }
+      // The day check routes every profile through the SAME optimizer as
+      // /plan, so it needs the same inputs: Trade Office levels, the merchant
+      // model and the geometry. Reusing the plan payload is what keeps the two
+      // from answering the same account differently. Allocations are dropped
+      // because a profile carries its own -- the backend rejects them here.
+      const { allocations: _perProfileInstead, ...planInputs } = buildPlanPayload()
       const res = await api.post('/distribution/day-check', {
-        snapshot: villages,
+        ...planInputs,
         segments,
-        // The same tributes the plan ships: without them the day picture is
-        // optimistic by 24x the tribute.
-        foreign_targets: usableForeignTargets(foreignTargets),
         crop_ceilings: ceilings,
       })
       // Drop the response if the account switched OR any day-check input changed
