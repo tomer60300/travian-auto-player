@@ -11,6 +11,9 @@ import {
   setupFilename,
   setupMatchesAccount,
 } from '../utils/plannerSetup'
+import { METER_TONE, allocationMeterSeverity } from '../utils/plannerAllocation'
+import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
+import { copyToClipboard } from '../utils/clipboard'
 
 // Owned state the game will not tell us, kept per village. Trade Office level
 // changes only when the operator builds one, so it is stored rather than fetched.
@@ -247,7 +250,7 @@ function BudgetBar({ budget }) {
         {legs.length > 0 && (
           <button
             type="button"
-            className="text-secondary hover:text-white text-xs underline shrink-0"
+            className="text-secondary hover:text-primary text-xs underline shrink-0"
             aria-expanded={open}
             onClick={() => setOpen((v) => !v)}
           >
@@ -464,6 +467,9 @@ export default function ResourcePlanner() {
       setMerchantModel(DEFAULT_MERCHANT_MODEL)
       setSelected({})
       setPlan(null)
+      // The load report names villages from the snapshot it was matched
+      // against, so it cannot outlive that account.
+      setSetupReport(null)
       setHydratedKey(null)
       return
     }
@@ -483,6 +489,7 @@ export default function ResourcePlanner() {
     setMerchantModel(loadJson(`${LS_MERCHANT}::${accountKey}`, DEFAULT_MERCHANT_MODEL))
     setSelected({})
     setPlan(null)
+    setSetupReport(null)
     setHydratedKey(accountKey)
   }, [accountKey])
 
@@ -584,8 +591,11 @@ export default function ResourcePlanner() {
       saveJson(`${LS_SNAPSHOT}::${requestedFor}`, res.data)
       saveJson(`${LS_SNAPSHOT_AT}::${requestedFor}`, fetchedAt)
       setPlan(null)
-      // A new snapshot can have different village ids — drop stale selections.
+      // A new snapshot can have different village ids — drop stale selections,
+      // and the setup-file report with them: it was computed against the
+      // previous village list, so it can name villages that are now gone.
       setSelected({})
+      setSetupReport(null)
       // Villages get lost, chiefed or renamed between fetches; allocations kept
       // for ids no longer in the snapshot would fail every future plan call.
       // Prune every profile, not just the active one.
@@ -795,10 +805,13 @@ export default function ResourcePlanner() {
     async (dryRun) => {
       // Re-check freshness from the LIVE clock at action time (issue #66). The
       // disabled button is only a hint computed at render; a snapshot can cross
-      // the TTL between that render and this click, and Preview/Execute must not
-      // act on outdated stock/merchant/capacity state — Execute sends live
-      // Travian mutations.
+      // the TTL between that render and this click, and a LIVE run must not
+      // send Travian mutations computed from outdated stock/merchant/capacity
+      // state. A preview is exempt: it mutates nothing, spends no requests, and
+      // refusing it withholds the free diagnostic from the operator whose
+      // snapshot just went stale — the one person who needs to look.
       if (
+        !dryRun &&
         !useStaleSnapshot &&
         (snapshotFetchedAt == null || Date.now() - snapshotFetchedAt > SNAPSHOT_TTL_MS)
       ) {
@@ -1191,6 +1204,33 @@ export default function ResourcePlanner() {
     setPlan(null)
   }
 
+  // One sheet row with its names resolved. Server-resolved names win: the
+  // snapshot cannot know foreign tributes, whose negative ids rendered as "-1"
+  // before the plan carried names itself. Used by the table AND the clipboard,
+  // so a copied row can never name a different village than the one on screen.
+  const sheetRow = (row) => ({
+    from:
+      row.origin_name ||
+      (villages.find((v) => v.village_id === row.origin)?.name ?? String(row.origin)),
+    to:
+      row.destination_name ||
+      (villages.find((v) => v.village_id === row.destination)?.name ?? String(row.destination)),
+    cargo: row.cargo,
+    cycleHours: row.cycle_hours,
+    dispatch: row.dispatch,
+    arrival: row.arrival,
+    merchants: row.merchants,
+  })
+
+  // Live creation is opt-in and off by default, so this sheet is the working
+  // output path: copying beats retyping four cargo numbers per row out of a
+  // seven-column table. Success is reported only when the clipboard actually
+  // took it (see copyToClipboard) — a false "copied" is worse than none.
+  const copySheetText = async (text, what) => {
+    if (await copyToClipboard(text)) toast.success(`${what} copied — tab-separated columns`)
+    else toast.error('Could not reach the clipboard — select the text and copy it manually')
+  }
+
   const stages = [
     { id: 'snapshot', label: 'Snapshot' },
     { id: 'allocate', label: 'Allocate' },
@@ -1214,6 +1254,14 @@ export default function ResourcePlanner() {
         : snapshotAgeMs < 3_600_000
           ? `${Math.round(snapshotAgeMs / 60_000)}m old`
           : `${Math.round(snapshotAgeMs / 3_600_000)}h old`
+
+  // The report records one load, but "still has no Trade Office level" is a
+  // LIVE fact: the operator's next keystroke can answer it. Re-checked against
+  // the current levels, so the line shrinks as they type and disappears when
+  // the last one is filled in, instead of naming villages that are now known.
+  const setupStillUnknown = setupReport
+    ? setupReport.stillUnknown.filter((v) => tradeOffice[v.village_id] == null)
+    : []
 
   // What going live will actually do, derived from the PREVIEW the operator is
   // looking at, so the confirmation states real numbers rather than a vague
@@ -1385,8 +1433,8 @@ export default function ResourcePlanner() {
             aria-current={stage === s.id ? 'page' : undefined}
             className={`px-4 py-2 text-sm rounded-t ${
               stage === s.id
-                ? 'bg-black/40 text-white border-b-2 border-violet-400'
-                : 'text-secondary hover:text-white'
+                ? 'bg-card text-primary border-b-2 border-violet-400'
+                : 'text-secondary hover:text-primary'
             }`}
           >
             {s.label}
@@ -1462,102 +1510,114 @@ export default function ResourcePlanner() {
                 Loaded {setupReport.loaded} village(s) from the setup file.
               </div>
               {setupReport.missingFromAccount.length > 0 && (
-                <div className="text-amber-300">
+                <div className="text-warning">
                   {setupReport.missingFromAccount.length} village(s) in the file are not in this
                   account and were skipped:{' '}
                   {setupReport.missingFromAccount.map((v) => v.name || v.village_id).join(', ')}
                 </div>
               )}
-              {setupReport.stillUnknown.length > 0 && (
-                <div className="text-amber-300">
-                  {setupReport.stillUnknown.length} village(s) still have no Trade Office level and
+              {setupStillUnknown.length > 0 && (
+                <div className="text-warning">
+                  {setupStillUnknown.length} village(s) still have no Trade Office level and
                   are planned as 0, which over-provisions merchants rather than breaching the
                   budget:{' '}
-                  {setupReport.stillUnknown.map((v) => v.name || v.village_id).join(', ')}
+                  {setupStillUnknown.map((v) => v.name || v.village_id).join(', ')}
                 </div>
               )}
             </div>
           )}
 
-          <table className="w-full text-sm">
-            <thead className="text-secondary text-xs uppercase">
-              <tr>
-                <th className="text-left py-2 px-2">Village</th>
-                <th className="text-right px-2">Lumber/h</th>
-                <th className="text-right px-2">Clay/h</th>
-                <th className="text-right px-2">Iron/h</th>
-                <th className="text-left px-2">Net crop</th>
-                <th className="text-right px-2">Merchants</th>
-                <th className="text-right px-2">Trade Office</th>
-                <th
-                  className="text-right px-2"
-                  title="Alert when this village's crop stock would cross this level (e.g. your NPC trigger). Used by the full-day check."
-                >
-                  Crop alert
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {villages.map((v) => (
-                <tr
-                  key={v.village_id}
-                  className="group border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors"
-                >
-                  <td className="py-1.5 px-2 border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
-                    {v.name}{' '}
-                    <span className="text-secondary text-xs">
-                      ({v.x}|{v.y})
-                    </span>
-                  </td>
-                  <td className="text-right px-2 font-mono">{fmt(v.lumber_per_hour)}</td>
-                  <td className="text-right px-2 font-mono">{fmt(v.clay_per_hour)}</td>
-                  <td className="text-right px-2 font-mono">{fmt(v.iron_per_hour)}</td>
-                  <td className="px-2 font-mono">
-                    <CropCell village={v} />
-                  </td>
-                  <td className="text-right px-2 font-mono">
-                    {v.merchants_free}/{v.merchants_total}
-                  </td>
-                  <td className="text-right px-2">
-                    {/* Owned, not fetched — editable, and blank means "unknown",
-                        which the planner floors to 0 rather than guessing up. */}
-                    <input
-                      type="number"
-                      min="0"
-                      max="20"
-                      aria-label={`Trade Office level for ${v.name}`}
-                      placeholder="?"
-                      className="input-field w-16 text-right text-xs py-1"
-                      value={tradeOffice[v.village_id] ?? ''}
-                      onChange={(e) =>
-                        setTradeOffice((prev) => ({
-                          ...prev,
-                          [v.village_id]: e.target.value === '' ? undefined : Number(e.target.value),
-                        }))
-                      }
-                    />
-                  </td>
-                  <td className="text-right px-2">
-                    <input
-                      type="number"
-                      min="0"
-                      aria-label={`Crop stock alert level for ${v.name}`}
-                      placeholder="—"
-                      className="input-field w-24 text-right text-xs py-1"
-                      value={cropCeilings[v.village_id] ?? ''}
-                      onChange={(e) =>
-                        setCropCeilings((prev) => ({
-                          ...prev,
-                          [v.village_id]:
-                            e.target.value === '' ? undefined : Number(e.target.value),
-                        }))
-                      }
-                    />
-                  </td>
+          {/* Same rule as the Allocate grid, and for higher stakes: the two
+              hand-typed columns are the RIGHTMOST of eight, so on a phone the
+              village name is off-screen exactly while a Trade Office level is
+              being typed — and a level typed one row off breaches that
+              village's merchant budget without a warning anywhere. Pin the
+              identity column and say the rest are there. */}
+          <p className="text-secondary text-xs mb-1 sm:hidden">
+            Swipe the table sideways for Merchants, Trade Office and Crop alert — the village
+            column stays pinned.
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-secondary text-xs uppercase">
+                <tr>
+                  <th className="text-left py-2 px-2 sticky-col">Village</th>
+                  <th className="text-right px-2">Lumber/h</th>
+                  <th className="text-right px-2">Clay/h</th>
+                  <th className="text-right px-2">Iron/h</th>
+                  <th className="text-left px-2">Net crop</th>
+                  <th className="text-right px-2">Merchants</th>
+                  <th className="text-right px-2">Trade Office</th>
+                  <th
+                    className="text-right px-2"
+                    title="Alert when this village's crop stock would cross this level (e.g. your NPC trigger). Used by the full-day check."
+                  >
+                    Crop alert
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {villages.map((v) => (
+                  <tr
+                    key={v.village_id}
+                    className="group touch-target border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors"
+                  >
+                    <td className="py-1.5 px-2 sticky-col border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
+                      {v.name}{' '}
+                      <span className="text-secondary text-xs">
+                        ({v.x}|{v.y})
+                      </span>
+                    </td>
+                    <td className="text-right px-2 font-mono">{fmt(v.lumber_per_hour)}</td>
+                    <td className="text-right px-2 font-mono">{fmt(v.clay_per_hour)}</td>
+                    <td className="text-right px-2 font-mono">{fmt(v.iron_per_hour)}</td>
+                    <td className="px-2 font-mono">
+                      <CropCell village={v} />
+                    </td>
+                    <td className="text-right px-2 font-mono">
+                      {v.merchants_free}/{v.merchants_total}
+                    </td>
+                    <td className="text-right px-2">
+                      {/* Owned, not fetched — editable, and blank means "unknown",
+                          which the planner floors to 0 rather than guessing up. */}
+                      <input
+                        type="number"
+                        min="0"
+                        max="20"
+                        aria-label={`Trade Office level for ${v.name}`}
+                        placeholder="?"
+                        className="input-field w-16 text-right text-xs py-1"
+                        value={tradeOffice[v.village_id] ?? ''}
+                        onChange={(e) =>
+                          setTradeOffice((prev) => ({
+                            ...prev,
+                            [v.village_id]: e.target.value === '' ? undefined : Number(e.target.value),
+                          }))
+                        }
+                      />
+                    </td>
+                    <td className="text-right px-2">
+                      <input
+                        type="number"
+                        min="0"
+                        aria-label={`Crop stock alert level for ${v.name}`}
+                        placeholder="—"
+                        className="input-field w-24 text-right text-xs py-1"
+                        value={cropCeilings[v.village_id] ?? ''}
+                        onChange={(e) =>
+                          setCropCeilings((prev) => ({
+                            ...prev,
+                            [v.village_id]:
+                              e.target.value === '' ? undefined : Number(e.target.value),
+                          }))
+                        }
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           {snapshot?.warnings?.length > 0 && (
             <div className="mt-3">
               {/* Explicit label so "this is a warning" is not carried by colour
@@ -1682,130 +1742,138 @@ export default function ResourcePlanner() {
                 None. Add one if you have promised crop to an ally or a sitter.
               </p>
             ) : (
-              <table className="w-full text-xs">
-                <thead className="text-secondary uppercase">
-                  <tr>
-                    <th className="text-left py-1 px-2">Village</th>
-                    <th className="text-right px-2">X</th>
-                    <th className="text-right px-2">Y</th>
-                    <th className="text-right px-2">Crop/h owed</th>
-                    <th
-                      className="text-right px-2"
-                      title="Ship this much above the promise, so travel and rounding cannot leave it short"
-                    >
-                      Margin %
-                    </th>
-                    <th className="text-right px-2">Ships/h</th>
-                    <th
-                      className="text-center px-2"
-                      title="Tick only for your own, Wonder, or alliance/confederacy artifact villages — the only destinations Travian allows a Gold Club route to. Others are manual transfers."
-                    >
-                      Route?
-                    </th>
-                    <th className="px-2"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {foreignTargets.map((t, i) => {
-                    const owed = Number(t.crop_per_hour) || 0
-                    const ships = owed * (1 + (Number(t.safety_margin_pct) || 0) / 100)
-                    const incomplete = !String(t.name).trim() || owed <= 0
-                    const patch = (field, value) =>
-                      setForeignTargets((prev) =>
-                        prev.map((row, j) => (j === i ? { ...row, [field]: value } : row))
-                      )
-                    return (
-                      <tr
-                        key={i}
-                        className="group border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors"
-                      >
-                        <td className="py-1 px-2 border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
-                          <input
-                            type="text"
-                            aria-label={`Foreign target ${i + 1} name`}
-                            placeholder="Ally name"
-                            className="input-field w-36 text-xs py-0.5"
-                            value={t.name}
-                            onChange={(e) => patch('name', e.target.value)}
-                          />
-                        </td>
-                        <td className="text-right px-2">
-                          <input
-                            type="number"
-                            aria-label={`Foreign target ${i + 1} x coordinate`}
-                            className="input-field w-16 text-right text-xs py-0.5"
-                            value={t.x}
-                            onChange={(e) => patch('x', e.target.value)}
-                          />
-                        </td>
-                        <td className="text-right px-2">
-                          <input
-                            type="number"
-                            aria-label={`Foreign target ${i + 1} y coordinate`}
-                            className="input-field w-16 text-right text-xs py-0.5"
-                            value={t.y}
-                            onChange={(e) => patch('y', e.target.value)}
-                          />
-                        </td>
-                        <td className="text-right px-2">
-                          <input
-                            type="number"
-                            min="0"
-                            aria-label={`Foreign target ${i + 1} crop per hour`}
-                            placeholder="0"
-                            className="input-field w-24 text-right text-xs py-0.5"
-                            value={t.crop_per_hour}
-                            onChange={(e) => patch('crop_per_hour', e.target.value)}
-                          />
-                        </td>
-                        <td className="text-right px-2">
-                          <input
-                            type="number"
-                            min="0"
-                            max="100"
-                            aria-label={`Foreign target ${i + 1} safety margin`}
-                            className="input-field w-16 text-right text-xs py-0.5"
-                            value={t.safety_margin_pct}
-                            onChange={(e) => patch('safety_margin_pct', e.target.value)}
-                          />
-                        </td>
-                        <td className="text-right px-2 font-mono text-secondary">
-                          {ships > 0 ? fmt(ships) : '—'}
-                        </td>
-                        <td className="text-center px-2">
-                          <input
-                            type="checkbox"
-                            aria-label={`Foreign target ${i + 1} is eligible for a trade route`}
-                            title="Own / Wonder / alliance-artifact village only. Unticked = manual transfer, left out of the route plan."
-                            checked={Boolean(t.route_eligible)}
-                            onChange={(e) => patch('route_eligible', e.target.checked)}
-                          />
-                        </td>
-                        <td className="px-2 text-right whitespace-nowrap">
-                          {incomplete && (
-                            <span
-                              className="text-warning mr-2"
-                              title="Needs a name and a crop rate before the planner uses it"
-                            >
-                              draft
-                            </span>
-                          )}
-                          <button
-                            type="button"
-                            aria-label={`Remove foreign target ${i + 1}`}
-                            className="text-danger hover:underline"
-                            onClick={() =>
-                              setForeignTargets((prev) => prev.filter((_, j) => j !== i))
-                            }
-                          >
-                            remove
-                          </button>
-                        </td>
+              <>
+                <p className="text-secondary text-xs mb-1 sm:hidden">
+                  Swipe sideways for the coordinates, crop owed, margin and route flag — the name
+                  column stays pinned.
+                </p>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="text-secondary uppercase">
+                      <tr>
+                        <th className="text-left py-1 px-2 sticky-col">Village</th>
+                        <th className="text-right px-2">X</th>
+                        <th className="text-right px-2">Y</th>
+                        <th className="text-right px-2">Crop/h owed</th>
+                        <th
+                          className="text-right px-2"
+                          title="Ship this much above the promise, so travel and rounding cannot leave it short"
+                        >
+                          Margin %
+                        </th>
+                        <th className="text-right px-2">Ships/h</th>
+                        <th
+                          className="text-center px-2"
+                          title="Tick only for your own, Wonder, or alliance/confederacy artifact villages — the only destinations Travian allows a Gold Club route to. Others are manual transfers."
+                        >
+                          Route?
+                        </th>
+                        <th className="px-2"></th>
                       </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+                    </thead>
+                    <tbody>
+                      {foreignTargets.map((t, i) => {
+                        const owed = Number(t.crop_per_hour) || 0
+                        const ships = owed * (1 + (Number(t.safety_margin_pct) || 0) / 100)
+                        const incomplete = !String(t.name).trim() || owed <= 0
+                        const patch = (field, value) =>
+                          setForeignTargets((prev) =>
+                            prev.map((row, j) => (j === i ? { ...row, [field]: value } : row))
+                          )
+                        return (
+                          <tr
+                            key={i}
+                            className="group touch-target border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors"
+                          >
+                            <td className="py-1 px-2 sticky-col border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
+                              <input
+                                type="text"
+                                aria-label={`Foreign target ${i + 1} name`}
+                                placeholder="Ally name"
+                                className="input-field w-36 text-xs py-0.5"
+                                value={t.name}
+                                onChange={(e) => patch('name', e.target.value)}
+                              />
+                            </td>
+                            <td className="text-right px-2">
+                              <input
+                                type="number"
+                                aria-label={`Foreign target ${i + 1} x coordinate`}
+                                className="input-field w-16 text-right text-xs py-0.5"
+                                value={t.x}
+                                onChange={(e) => patch('x', e.target.value)}
+                              />
+                            </td>
+                            <td className="text-right px-2">
+                              <input
+                                type="number"
+                                aria-label={`Foreign target ${i + 1} y coordinate`}
+                                className="input-field w-16 text-right text-xs py-0.5"
+                                value={t.y}
+                                onChange={(e) => patch('y', e.target.value)}
+                              />
+                            </td>
+                            <td className="text-right px-2">
+                              <input
+                                type="number"
+                                min="0"
+                                aria-label={`Foreign target ${i + 1} crop per hour`}
+                                placeholder="0"
+                                className="input-field w-24 text-right text-xs py-0.5"
+                                value={t.crop_per_hour}
+                                onChange={(e) => patch('crop_per_hour', e.target.value)}
+                              />
+                            </td>
+                            <td className="text-right px-2">
+                              <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                aria-label={`Foreign target ${i + 1} safety margin`}
+                                className="input-field w-16 text-right text-xs py-0.5"
+                                value={t.safety_margin_pct}
+                                onChange={(e) => patch('safety_margin_pct', e.target.value)}
+                              />
+                            </td>
+                            <td className="text-right px-2 font-mono text-secondary">
+                              {ships > 0 ? fmt(ships) : '—'}
+                            </td>
+                            <td className="text-center px-2">
+                              <input
+                                type="checkbox"
+                                aria-label={`Foreign target ${i + 1} is eligible for a trade route`}
+                                title="Own / Wonder / alliance-artifact village only. Unticked = manual transfer, left out of the route plan."
+                                checked={Boolean(t.route_eligible)}
+                                onChange={(e) => patch('route_eligible', e.target.checked)}
+                              />
+                            </td>
+                            <td className="px-2 text-right whitespace-nowrap">
+                              {incomplete && (
+                                <span
+                                  className="text-warning mr-2"
+                                  title="Needs a name and a crop rate before the planner uses it"
+                                >
+                                  draft
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                aria-label={`Remove foreign target ${i + 1}`}
+                                className="text-danger hover:underline"
+                                onClick={() =>
+                                  setForeignTargets((prev) => prev.filter((_, j) => j !== i))
+                                }
+                              >
+                                remove
+                              </button>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -1826,7 +1894,7 @@ export default function ResourcePlanner() {
                 className={`text-xs px-3 py-1.5 rounded border transition-colors ${
                   allocView === key
                     ? 'border-violet-400/60 bg-violet-400/15 text-info'
-                    : 'border-gray-700 text-secondary hover:text-white hover:border-gray-500'
+                    : 'border-gray-700 text-secondary hover:text-primary hover:border-gray-500'
                 }`}
                 onClick={() => setAllocView(key)}
               >
@@ -2088,7 +2156,18 @@ export default function ResourcePlanner() {
             RESOURCES.map((resource) => {
             const slack = explicitTotal(resource)
             const remainder = remainderFor(resource)
-            const settled = Math.abs(slack) < 1 || remainder != null
+            // Sign convention: slack is production MINUS everything assigned,
+            // so a NEGATIVE value means the targets promise more than the
+            // account makes and the Rest village would have to ship what it
+            // does not have. The backend warns about exactly that, but only at
+            // the Plan stage — after the data-entry moment this widget exists
+            // to protect. So over-allocation reads as an error here.
+            const severity = allocationMeterSeverity(slack, remainder != null)
+            const restName =
+              remainder == null
+                ? null
+                : (villages.find((v) => v.village_id === remainder)?.name ??
+                  `village ${remainder}`)
             return (
               <div key={resource} className="card p-4">
                 <div className="flex justify-between items-baseline mb-2 flex-wrap gap-2">
@@ -2103,11 +2182,22 @@ export default function ResourcePlanner() {
                         total {fmt(totals[resource].total)}/h
                         {!totals[resource].known && ' (some villages unknown)'} ·{' '}
                       </span>
-                      <span className={settled ? 'text-success' : 'text-danger'}>
-                        {fmt(slack)}/h unassigned
-                        {remainder != null
-                          ? ` → ${villages.find((v) => v.village_id === remainder)?.name ?? `village ${remainder}`}`
-                          : ' · no remainder village set'}
+                      <span className={METER_TONE[severity]}>
+                        {/* Over-allocation is stated in words as well as in red:
+                            severity is never carried by colour alone. */}
+                        {severity === 'over' ? (
+                          <>
+                            ⚠ over-allocated by {fmt(-slack)}/h —{' '}
+                            {restName
+                              ? `${restName} cannot ship what the account does not produce`
+                              : 'the targets ask for more than the account produces'}
+                          </>
+                        ) : (
+                          <>
+                            {fmt(slack)}/h unassigned
+                            {restName ? ` → ${restName}` : ' · no remainder village set'}
+                          </>
+                        )}
                       </span>
                     </div>
                   </div>
@@ -2330,9 +2420,24 @@ export default function ResourcePlanner() {
               </div>
 
               <div className="card p-4 overflow-x-auto">
-                <h3 className="font-semibold mb-2">
-                  Setup sheet <span className="text-secondary">· {activeProfile}</span>
-                </h3>
+                <div className="flex items-baseline justify-between flex-wrap gap-2 mb-2">
+                  <h3 className="font-semibold">
+                    Setup sheet <span className="text-secondary">· {activeProfile}</span>
+                  </h3>
+                  <button
+                    type="button"
+                    className="btn-secondary btn-xs"
+                    disabled={!plan.rows.length}
+                    onClick={() =>
+                      copySheetText(
+                        routeSheetText(plan.rows.map(sheetRow)),
+                        `${plan.rows.length} row${plan.rows.length === 1 ? '' : 's'}`
+                      )
+                    }
+                  >
+                    Copy all ({plan.rows.length}) · 0 requests
+                  </button>
+                </div>
                 <table className="w-full text-xs">
                   <thead className="text-secondary uppercase">
                     <tr>
@@ -2343,46 +2448,55 @@ export default function ResourcePlanner() {
                       <th className="text-right px-2">Send at</th>
                       <th className="text-right px-2">Arrives</th>
                       <th className="text-right px-2">Merchants</th>
+                      <th className="px-2"></th>
                     </tr>
                   </thead>
                   <tbody>
-                    {plan.rows.map((row, i) => (
-                      <tr key={i} className="border-t border-gray-800">
-                        <td className="py-1 px-2">
-                          {/* Server-resolved names: the snapshot cannot know
-                              foreign tributes, whose negative ids rendered as
-                              "-1" here before the plan carried names itself. */}
-                          {row.origin_name ||
-                            (villages.find((v) => v.village_id === row.origin)?.name ?? row.origin)}
-                        </td>
-                        <td className="px-2">
-                          {row.destination_name ||
-                            (villages.find((v) => v.village_id === row.destination)?.name ??
-                              row.destination)}
-                        </td>
-                        <td className="px-2 font-mono">
-                          {/* Always all four, in the marketplace's order, zeros
-                              included -- the sheet is copied into the game's
-                              trade-route dialog field by field. */}
-                          <span className="inline-flex items-center gap-2 whitespace-nowrap">
-                            {RESOURCES.map((r) => (
-                              <span key={r} className="inline-flex items-center gap-1">
-                                <ResourceIcon resource={r} />
-                                <span className={row.cargo[r] ? '' : 'text-secondary/50'}>
-                                  {(row.cargo[r] ?? 0).toLocaleString()}
+                    {plan.rows.map((row, i) => {
+                      const sheet = sheetRow(row)
+                      return (
+                        <tr key={i} className="border-t border-gray-800">
+                          <td className="py-1 px-2">{sheet.from}</td>
+                          <td className="px-2">{sheet.to}</td>
+                          <td className="px-2 font-mono">
+                            {/* Always all four, in the marketplace's order, zeros
+                                included -- the sheet is copied into the game's
+                                trade-route dialog field by field. */}
+                            <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                              {RESOURCES.map((r) => (
+                                <span key={r} className="inline-flex items-center gap-1">
+                                  <ResourceIcon resource={r} />
+                                  <span className={row.cargo[r] ? '' : 'text-secondary/50'}>
+                                    {(row.cargo[r] ?? 0).toLocaleString()}
+                                  </span>
                                 </span>
-                              </span>
-                            ))}
-                          </span>
-                        </td>
-                        <td className="text-right px-2 font-mono">{row.cycle_hours}h</td>
-                        <td className="text-right px-2 font-mono">{row.dispatch}</td>
-                        <td className="text-right px-2 font-mono">{row.arrival}</td>
-                        <td className="text-right px-2 font-mono">{row.merchants}</td>
-                      </tr>
-                    ))}
+                              ))}
+                            </span>
+                          </td>
+                          <td className="text-right px-2 font-mono">{row.cycle_hours}h</td>
+                          <td className="text-right px-2 font-mono">{row.dispatch}</td>
+                          <td className="text-right px-2 font-mono">{row.arrival}</td>
+                          <td className="text-right px-2 font-mono">{row.merchants}</td>
+                          <td className="px-2 text-right">
+                            <button
+                              type="button"
+                              className="text-info hover:underline"
+                              aria-label={`Copy the route from ${sheet.from} to ${sheet.to}`}
+                              onClick={() => copySheetText(routeSheetRow(sheet), 'Route')}
+                            >
+                              copy
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
+                <p className="text-secondary text-xs mt-2">
+                  Copy writes tab-separated columns with the cargo split into one column per
+                  resource, unformatted — so it pastes one value per cell into a spreadsheet, and
+                  the numbers still paste into the game's own fields. “Copy all” adds a header row.
+                </p>
                 <p className="text-secondary text-xs mt-2">
                   “Send at” is the route's scheduled send time — enter it in the trade route's
                   <span className="whitespace-nowrap"> Send at</span> field; the repeat interval is
@@ -2404,7 +2518,7 @@ export default function ResourcePlanner() {
                   <button
                     type="button"
                     className="btn-secondary text-xs py-1.5"
-                    disabled={executing || !plan.feasible}
+                    disabled={executing}
                     onClick={() => executePlan(true)}
                   >
                     {executing ? 'Working…' : 'Preview (0 requests)'}
@@ -2413,7 +2527,10 @@ export default function ResourcePlanner() {
 
                 {!plan.feasible && (
                   <p className="text-warning text-xs mb-2">
-                    Resolve the plan (over budget / unroutable) before executing.
+                    Over budget / unroutable — <strong>going live is blocked</strong> until that is
+                    resolved, and the server refuses it too. Preview is not blocked: it changes
+                    nothing, costs no requests, and naming the routes that break is how you
+                    resolve it.
                   </p>
                 )}
 
@@ -2537,10 +2654,19 @@ export default function ResourcePlanner() {
                             . If creation fails after a disable, old routes can stay off without
                             their replacements — re-run to reconcile.
                           </p>
+                          {/* The gate Preview no longer carries lands here, where
+                              it belongs: this is the irreversible branch, and the
+                              backend refuses an infeasible live run anyway. */}
+                          {!plan.feasible && (
+                            <p className="text-danger text-xs mt-2">
+                              ⚠ Blocked while this plan is not feasible. Fix the over-budget /
+                              unroutable rows above, build the plan again, then preview.
+                            </p>
+                          )}
                           <button
                             type="button"
                             className="btn-primary text-xs py-1.5 mt-2"
-                            disabled={executing}
+                            disabled={executing || !plan.feasible}
                             onClick={() => {
                               if (window.confirm(liveConfirmMessage)) executePlan(false)
                             }}
