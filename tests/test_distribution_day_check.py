@@ -618,3 +618,57 @@ class TestCargoConservationAndSinks:
         assert all(t.settled for t in trajectories), (
             "an untracked sink must not keep the whole account from settling"
         )
+
+
+class TestTheReportedDayIsOneDay:
+    """low, high and daily_net must all describe the SAME day.
+
+    A dispatch delivers only what the origin could fund, so a figure taken on
+    day 0 depends on the snapshot's opening stock -- while low and high are read
+    off the settled day. Review measured the same account reporting 48,000/day
+    or 46,000/day purely from the sender's opening stock, with an identical
+    steady state and `settled=True` either way.
+    """
+
+    @staticmethod
+    def _segment(cycle_hours=12):
+        return ProfileSegment(
+            name="All day",
+            start_minute=0,
+            end_minute=1439,
+            routes=(
+                ScheduledRoute(
+                    route=Route(
+                        origin=2,
+                        destination=1,
+                        cargo_per_hour={Resource.CROP: 2_000.0},
+                        cycle_hours=cycle_hours,
+                        merchants_per_send=1,
+                        sets_in_flight=1,
+                        one_way_minutes=30.0,
+                    ),
+                    dispatch_minute=60,
+                ),
+            ),
+        )
+
+    def _run(self, sender_opening):
+        return simulate_profile_cycle(
+            [self._segment()],
+            own_rates={1: {Resource.CROP: 0.0}, 2: {Resource.CROP: 2_000.0}},
+            stocks={1: {Resource.CROP: 0}, 2: {Resource.CROP: sender_opening}},
+            capacities={1: {Resource.CROP: 800_000}, 2: {Resource.CROP: 800_000}},
+        )
+
+    def test_the_opening_stock_does_not_change_the_reported_daily_net(self):
+        full, _ = self._run(200_000)
+        empty, _ = self._run(0)
+
+        def net(trajectories, vid):
+            return next(t.daily_net for t in trajectories if t.village_id == vid)
+
+        assert net(full, 1) == pytest.approx(net(empty, 1)), (
+            "the receiver's daily net must describe the settled day, "
+            "not whatever the sender happened to be holding at snapshot time"
+        )
+        assert net(full, 2) == pytest.approx(net(empty, 2))

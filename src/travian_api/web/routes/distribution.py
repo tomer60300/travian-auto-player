@@ -75,6 +75,10 @@ _EXECUTE_OP_LABEL = "trade-route-execute"
 
 # Europe 2 is x1 with coordinates running -200..+200. Exposed in the response so
 # the UI can show what the distances were computed against.
+# Below this a store counts as level rather than drifting. Float residue from
+# the settling loop is not a trend worth naming in a warning.
+NEGLIGIBLE_DRIFT_PER_DAY = 1.0
+
 DEFAULT_MAP_SPAN = 401
 DEFAULT_SPEED_FIELDS_PER_HOUR = 12.0
 
@@ -969,6 +973,34 @@ async def post_day_check(
             )
         else:
             warnings.append(f"{label}: {breach.resource.value} runs dry {when}")
+
+    # `settled` is one flag for the whole day, so an unsettled run marks every
+    # row without saying which store is responsible -- and low/high then
+    # describe the horizon day rather than a repeating one. Whole-batch cargo
+    # rarely equals what a village produced inside a finite profile window, so
+    # this is the normal outcome for a part-day plan rather than a rare fault.
+    # Name the worst drifters: the daily net already says which they are.
+    if trajectories and not all(t.settled for t in trajectories):
+        drifting = sorted(
+            (t for t in trajectories if abs(t.daily_net) >= NEGLIGIBLE_DRIFT_PER_DAY),
+            key=lambda t: -abs(t.daily_net),
+        )[:3]
+        if drifting:
+            named = ", ".join(
+                f"{village_label(t.village_id, names)} {t.resource.value} {t.daily_net:+,.0f}/day"
+                for t in drifting
+            )
+            warnings.append(
+                f"the day never repeats: {named}. Stocks shown are the last "
+                f"simulated day, not a settled one, and a store drifting this way "
+                f"crosses its cap or empties eventually — usually a cycle that "
+                f"does not divide evenly into its profile's hours"
+            )
+        else:
+            warnings.append(
+                "the day never repeats, though no store drifts meaningfully — "
+                "the stocks shown are the last simulated day rather than a settled one"
+            )
 
     return DayCheckResponse(
         villages=[

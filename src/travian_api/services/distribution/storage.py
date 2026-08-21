@@ -498,6 +498,10 @@ def simulate_profile_cycle(
         if key in level and level[key] > ceiling:
             breaches.append(TrajectoryBreach(vid, Resource.CROP, "above", 0, 0, segment_name_at(0)))
 
+    # Set per day below; apply() reads it to know whether this day is the one
+    # being reported.
+    measured: dict[str, bool] = {"day": False}
+
     def apply(
         vid: int, resource: Resource, amount: float, minute: int, day: int, *, draining: bool
     ) -> None:
@@ -505,7 +509,13 @@ def simulate_profile_cycle(
         key = (vid, resource)
         previous = level.get(key, 0.0)
         updated = previous + amount
-        if day == 0:
+        if measured["day"]:
+            # Accumulated on the measured day, not day 0. A dispatch now
+            # contributes what the origin could actually FUND, so day 0's figure
+            # depends on the snapshot's opening stock -- a route on a
+            # just-emptied sender under-reports by up to a batch while low/high
+            # describe the settled day. Measuring both on the same day makes the
+            # three numbers describe one day again.
             nominal[key] = nominal.get(key, 0.0) + amount
         cap = capacities.get(vid, {}).get(resource)
         if cap is not None and updated > cap:
@@ -545,9 +555,11 @@ def simulate_profile_cycle(
     for day in range(max_days):
         opening = dict(level)
         measuring = settled_day >= 0 or day == max_days - 1
+        measured["day"] = measuring
         if measuring:
             lows = dict(level)
             highs = dict(level)
+            nominal.clear()  # exactly one day's worth, this day's
         for position, minute in enumerate(ticks):
             # Dispatch: the origin parts with the cargo now, under whichever
             # profile is running now.
