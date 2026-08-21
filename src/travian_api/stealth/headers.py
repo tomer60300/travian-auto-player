@@ -12,6 +12,32 @@ from typing import Dict, Optional
 from .persona import Persona
 from .user_agents import UserAgentRotator
 
+# Headers curl-impersonate injects from its own Chrome default block, which are
+# correct for a NAVIGATION and impossible on a fetch/XHR. Mapping a name to None
+# makes curl_cffi emit "name:" on the wire, which deletes it; the httpx path
+# strips these keys instead, since httpx adds nothing of its own.
+#
+# Verified on the wire, not assumed: with our XHR dict and no suppression,
+# curl-impersonate sent `Upgrade-Insecure-Requests: 1` and `Sec-Fetch-User: ?1`
+# alongside `Sec-Fetch-Mode: cors` and `Sec-Fetch-Dest: empty` -- a combination
+# Chrome is structurally incapable of producing, on every API request the app
+# makes. curl_easy_impersonate applies its defaults AFTER CurlOpt.HTTPHEADER, so
+# our dict could override values but never remove keys, which is why this was
+# invisible from Python.
+_NAVIGATION_ONLY_HEADERS = {
+    "Sec-Fetch-User": None,
+    "Upgrade-Insecure-Requests": None,
+}
+
+# Fetch/XHR priority. curl-impersonate's default is the DOCUMENT priority
+# `u=0, i`; a captured real client request carried `u=1, i`.
+_SUBRESOURCE_PRIORITY = "u=1, i"
+
+
+def _as_subresource(headers: Dict[str, str]) -> Dict[str, Optional[str]]:
+    """Strip the navigation-only headers curl-impersonate would re-add."""
+    return {**headers, **_NAVIGATION_ONLY_HEADERS, "Priority": _SUBRESOURCE_PRIORITY}
+
 
 class BrowserHeaders:
     """Generates realistic browser headers for each request type.
@@ -94,7 +120,7 @@ class BrowserHeaders:
 
         return headers
 
-    def for_json_post(self, path: str = "") -> Dict[str, str]:
+    def for_json_post(self, path: str = "") -> Dict[str, Optional[str]]:
         """Headers for an API POST (JSON body, e.g., GraphQL)."""
         headers = {
             "User-Agent": self._ua.ua,
@@ -114,9 +140,9 @@ class BrowserHeaders:
         if self._last_page:
             headers["Referer"] = self._last_page
 
-        return headers
+        return _as_subresource(headers)
 
-    def for_form_post(self, path: str = "") -> Dict[str, str]:
+    def for_form_post(self, path: str = "") -> Dict[str, Optional[str]]:
         """Headers for a form POST (URL-encoded body)."""
         headers = {
             "User-Agent": self._ua.ua,
@@ -138,9 +164,14 @@ class BrowserHeaders:
         if self._last_page:
             headers["Referer"] = self._last_page
 
+        # NOT _as_subresource: a form POST is a document navigation in Travian's
+        # flow (it answers with a PRG redirect to a page), so
+        # Upgrade-Insecure-Requests and Sec-Fetch-User are exactly what a
+        # browser sends here. Its Sec-Fetch-Dest is `document`, which is how
+        # the wire test tells the two classes apart.
         return headers
 
-    def for_xhr(self, path: str = "") -> Dict[str, str]:
+    def for_xhr(self, path: str = "") -> Dict[str, Optional[str]]:
         """Headers for a legacy-XHR request (the endpoints Travian's client
         drives via XMLHttpRequest, which set ``X-Requested-With``).
 
@@ -170,4 +201,4 @@ class BrowserHeaders:
         if self._last_page:
             headers["Referer"] = self._last_page
 
-        return headers
+        return _as_subresource(headers)

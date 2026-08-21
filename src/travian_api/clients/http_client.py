@@ -92,6 +92,12 @@ _transient_retry = retry(
 )
 
 
+# The charset a real client sends. A captured Travian request used
+# "application/json; charset=UTF-8"; bare "application/json" differs from it
+# in a byte-exact, trivially indexable way on every JSON write.
+JSON_CONTENT_TYPE = "application/json; charset=UTF-8"
+
+
 def _jitter_penalty(base_seconds: float) -> float:
     """±15% jitter on a throttle penalty.
 
@@ -536,6 +542,14 @@ class HttpClient:
         if request_type in ("json", "xhr"):
             headers["X-Version"] = x_version
 
+        # A None value is the suppression sentinel for curl_cffi: it emits
+        # "name:" on the wire, deleting a header curl-impersonate would
+        # otherwise inject from its Chrome NAVIGATION defaults. httpx has no
+        # such defaults and would reject a None value outright, so drop the
+        # sentinels on that transport instead of forwarding them.
+        if not self._use_curl:
+            headers = {k: v for k, v in headers.items() if v is not None}
+
         return headers
 
     def _stealth_post_request(
@@ -940,7 +954,7 @@ class HttpClient:
         # bypass the `not in` form of this guard. `not headers.get(...)`
         # treats both "missing" and "empty string" identically.
         if rt == "xhr" and not headers.get("Content-Type"):
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = JSON_CONTENT_TYPE
 
         try:
             masked_data = mask_sensitive_data(json.dumps(data))
@@ -1050,7 +1064,7 @@ class HttpClient:
         rt = "xhr" if request_type == "xhr" else "json"
         headers = await self._stealth_pre_request(url, rt)
         if rt == "xhr" and data is not None and not headers.get("Content-Type"):
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = JSON_CONTENT_TYPE
 
         try:
             logger.debug(f"DELETE {url}")
@@ -1154,7 +1168,7 @@ class HttpClient:
         rt = "xhr" if request_type == "xhr" else "json"
         headers = await self._stealth_pre_request(url, rt)
         if rt == "xhr" and not headers.get("Content-Type"):
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = JSON_CONTENT_TYPE
 
         try:
             logger.debug(f"PUT {url}")
