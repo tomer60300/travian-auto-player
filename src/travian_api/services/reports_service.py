@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..clients.http_client import HttpClient
@@ -32,7 +33,9 @@ class ReportsService:
         Fetch reports from /report/all pages.
 
         Args:
-            max_age_hours: Only fetch reports newer than this (basic date filter)
+            max_age_hours: Ignored here -- kept for call-site compatibility.
+                Age-based early exit lives in :meth:`fetch_reports_robust`;
+                adding it here would drop reports this method returns today.
             max_pages: Maximum pages to scrape (30 reports/page)
 
         Returns:
@@ -45,7 +48,10 @@ class ReportsService:
         for page in range(1, max_pages + 1):
             try:
                 html = await self.client.get_html(f"/report/all?page={page}")
-                page_reports = parse_report_list(html)
+                # BeautifulSoup over a full page is tens of milliseconds, and
+                # max_pages runs to 100. Off the loop, so a long list of pages
+                # cannot stall stealth-timed requests or WebSocket frames.
+                page_reports = await asyncio.to_thread(parse_report_list, html)
                 pages_fetched += 1
 
                 if not page_reports:

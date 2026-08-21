@@ -306,6 +306,7 @@ async def delete_target(
 # Defender strength lookup (background-friendly)
 # ---------------------------------------------------------------------------
 
+from travian_api.models.farm_list import FarmListSlot
 from travian_api.services.defense_cache import defense_cache
 
 
@@ -325,6 +326,15 @@ class SlotDefenseInfo(BaseModel):
     report_age_hours: float | None = None
     report_id: str | None = None
     never_raided: bool = False
+
+
+def _cache_target(slot: FarmListSlot) -> tuple[int, int, int]:
+    """The ``(x, y, last_raid_time)`` triple a cached defense entry is keyed by.
+
+    Only for slots that carry a last raid: an un-raided slot has no report to
+    have cached.
+    """
+    return (slot.target.x, slot.target.y, slot.last_raid.time)
 
 
 async def _fetch_defense_for_coord(
@@ -421,17 +431,22 @@ async def scan_defense_strength(
         cached_count = 0
 
         # ── Phase 1: classify slots (cached vs needs-fetch) ──────────
-        for slot in fl.slots:
-            if not slot.last_raid or not slot.last_raid.time:
-                continue  # will emit after classification
+        raided = [s for s in fl.slots if s.last_raid and s.last_raid.time]
+
+        # One batched lookup for the whole list: the L2 reads are SQLite
+        # queries, and up to 100 of them inline is the event loop held shut
+        # before the scan's first network await.
+        cached_entries: dict[tuple[int, int, int], dict | None] = {}
+        if raided and not body.force_refresh:
+            cached_entries = await defense_cache.get_many(
+                cache_scope, [_cache_target(s) for s in raided]
+            )
+
+        for slot in raided:
             coord_key = (slot.target.x, slot.target.y)
-            if not body.force_refresh:
-                cached = defense_cache.get(
-                    cache_scope, slot.target.x, slot.target.y, slot.last_raid.time
-                )
-                if cached is not None:
-                    cached_count += 1
-                    continue
+            if cached_entries.get(_cache_target(slot)) is not None:
+                cached_count += 1
+                continue
             if coord_key not in needs_fetch:
                 needs_fetch[coord_key] = []
             needs_fetch[coord_key].append(slot)
@@ -475,10 +490,8 @@ async def scan_defense_strength(
             age_hours = round((now_ts - slot.last_raid.time) / 3600, 1)
 
             if coord_key not in needs_fetch:
-                # This is a cache hit
-                cached = defense_cache.get(
-                    cache_scope, slot.target.x, slot.target.y, slot.last_raid.time
-                )
+                # This is a cache hit -- Phase 1 already read it
+                cached = cached_entries.get(_cache_target(slot))
                 if cached is not None:
                     yield _line(
                         SlotDefenseInfo(
@@ -528,6 +541,7 @@ async def scan_defense_strength(
                     defense_cache.clear_inflight(cache_scope, x, y)
 
             fetched_count += 1
+            to_store: list[tuple[int, int, int]] = []
 
             for slot in slots:
                 age_hours = (
@@ -547,13 +561,7 @@ async def scan_defense_strength(
                         ).model_dump()
                         | {"type": "result"}
                     )
-                    defense_cache.put(
-                        cache_scope,
-                        slot.target.x,
-                        slot.target.y,
-                        slot.last_raid.time,
-                        defense_data,
-                    )
+                    to_store.append(_cache_target(slot))
                 else:
                     yield _line(
                         SlotDefenseInfo(
@@ -565,6 +573,9 @@ async def scan_defense_strength(
                         ).model_dump()
                         | {"type": "result"}
                     )
+
+            if to_store:
+                await defense_cache.put_many(cache_scope, to_store, defense_data)
 
             yield _line(
                 {

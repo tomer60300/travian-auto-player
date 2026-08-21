@@ -54,28 +54,31 @@ class TieredDefenseCache:
     def _key(scope: str, x: int, y: int) -> str:
         return f"defense:{scope}:{x}:{y}"
 
-    def get(self, scope: str, x: int, y: int, last_raid_time: int) -> dict[str, Any] | None:
-        """Get cached defense data. Returns None if missing, expired, or stale."""
-        key = self._key(scope, x, y)
-
-        # L1 check
+    def _l1_get(self, key: str, last_raid_time: int) -> dict[str, Any] | None:
+        """L1 lookup. Drops the entry when the target has been raided since."""
         entry = self._l1.get(key)
-        if entry is not None:
-            if entry.get("last_raid_ts") != last_raid_time:
-                self._l1.pop(key, None)
-            else:
-                self._stats["l1_hits"] += 1
-                return entry
+        if entry is None:
+            return None
+        if entry.get("last_raid_ts") != last_raid_time:
+            self._l1.pop(key, None)
+            return None
+        self._stats["l1_hits"] += 1
+        return entry
 
-        # L2 check
+    def _l2_get(self, key: str, last_raid_time: int) -> dict[str, Any] | None:
+        """Blocking L2 read: a SQLite query plus an unpickle.
+
+        Also prunes an entry the target has been raided past, which is another
+        SQLite statement -- so this is the whole reason async callers have to
+        stay off :meth:`get`.
+        """
         try:
             l2 = self._ensure_l2()
             entry = l2.get(key)
         except Exception:
-            entry = None
+            return None
 
         if entry is None:
-            self._stats["misses"] += 1
             return None
 
         if entry.get("last_raid_ts") != last_raid_time:
@@ -83,18 +86,79 @@ class TieredDefenseCache:
                 l2.delete(key)
             except Exception:
                 pass
-            self._stats["misses"] += 1
             return None
 
-        # Promote to L1
+        return entry
+
+    def _record_l2(self, key: str, entry: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Count an L2 outcome and promote a hit into L1.
+
+        Never call from a worker thread: cachetools caches are not thread-safe,
+        and the loop thread may be reading L1 at the same moment.
+        """
+        if entry is None:
+            self._stats["misses"] += 1
+            return None
         self._l1[key] = entry
         self._stats["l2_hits"] += 1
         return entry
 
-    def put(
+    def get(self, scope: str, x: int, y: int, last_raid_time: int) -> dict[str, Any] | None:
+        """Get cached defense data. Returns None if missing, expired, or stale.
+
+        Blocking on an L1 miss. Async callers use :meth:`get_many`.
+        """
+        key = self._key(scope, x, y)
+        entry = self._l1_get(key, last_raid_time)
+        if entry is not None:
+            return entry
+        return self._record_l2(key, self._l2_get(key, last_raid_time))
+
+    async def get_many(
+        self, scope: str, targets: list[tuple[int, int, int]]
+    ) -> dict[tuple[int, int, int], dict[str, Any] | None]:
+        """Look up many ``(x, y, last_raid_time)`` targets off the event loop.
+
+        L1 is a dict read, so it stays on the loop; every L2 read left over is
+        handed to ONE worker thread. Batching beats wrapping each :meth:`get`
+        individually: a farm list is up to 100 slots, so per-call offloading
+        would pay 100 executor round-trips to move the same SQLite work, and
+        diskcache serialises those queries on one connection per thread anyway.
+        """
+        results: dict[tuple[int, int, int], dict[str, Any] | None] = {}
+        pending: list[tuple[int, int, int]] = []
+
+        for target in dict.fromkeys(targets):
+            entry = self._l1_get(self._key(scope, target[0], target[1]), target[2])
+            if entry is not None:
+                results[target] = entry
+            else:
+                pending.append(target)
+
+        if pending:
+            from_l2 = await asyncio.to_thread(self._l2_get_batch, scope, pending)
+            for target in pending:
+                key = self._key(scope, target[0], target[1])
+                results[target] = self._record_l2(key, from_l2[target])
+
+        return results
+
+    def _l2_get_batch(
+        self, scope: str, targets: list[tuple[int, int, int]]
+    ) -> dict[tuple[int, int, int], dict[str, Any] | None]:
+        """Blocking: read every target from L2. Runs in a worker thread, so it
+        touches neither L1 nor the stats."""
+        return {t: self._l2_get(self._key(scope, t[0], t[1]), t[2]) for t in targets}
+
+    def _l2_put(
         self, scope: str, x: int, y: int, last_raid_time: int, defense_data: dict[str, Any]
-    ) -> None:
-        """Store defense data in both L1 and L2."""
+    ) -> tuple[str, dict[str, Any]]:
+        """Blocking: build the entry and write it to L2.
+
+        The adaptive TTL is derived from the previous entry, so a write is a
+        read plus a write. Returns the ``(key, entry)`` pair for the caller to
+        put into L1 on the loop thread.
+        """
         key = self._key(scope, x, y)
 
         # Compute adaptive TTL from change history
@@ -122,15 +186,38 @@ class TieredDefenseCache:
 
         ttl = self._compute_ttl(check_count, change_count)
 
-        # Write to L1
-        self._l1[key] = entry
-
-        # Write to L2
         try:
             l2 = self._ensure_l2()
             l2.set(key, entry, expire=ttl)
         except Exception as exc:
             logger.debug("Defense cache L2 write failed for (%s,%s): %s", x, y, exc)
+
+        return key, entry
+
+    def put(
+        self, scope: str, x: int, y: int, last_raid_time: int, defense_data: dict[str, Any]
+    ) -> None:
+        """Store defense data in both L1 and L2.
+
+        Blocking. Async callers use :meth:`put_many`.
+        """
+        key, entry = self._l2_put(scope, x, y, last_raid_time, defense_data)
+        self._l1[key] = entry
+
+    async def put_many(
+        self, scope: str, targets: list[tuple[int, int, int]], defense_data: dict[str, Any]
+    ) -> None:
+        """Store *defense_data* for every ``(x, y, last_raid_time)`` target off
+        the event loop, in one thread hop for the whole group."""
+        written = await asyncio.to_thread(self._l2_put_batch, scope, targets, defense_data)
+        for key, entry in written:
+            self._l1[key] = entry
+
+    def _l2_put_batch(
+        self, scope: str, targets: list[tuple[int, int, int]], defense_data: dict[str, Any]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        """Blocking: :meth:`_l2_put` for each target, sequentially, in one thread."""
+        return [self._l2_put(scope, x, y, ts, defense_data) for x, y, ts in targets]
 
     @staticmethod
     def _compute_ttl(check_count: int, change_count: int) -> int:
