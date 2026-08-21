@@ -77,6 +77,10 @@ _EXECUTE_OP_LABEL = "trade-route-execute"
 # the UI can show what the distances were computed against.
 # Below this a store counts as level rather than drifting. Float residue from
 # the settling loop is not a trend worth naming in a warning.
+# A day has room for a handful of meaningfully different allocation profiles.
+# The real ceiling is cost, not arithmetic: each one is its own optimizer run.
+MAX_DAY_SEGMENTS = 12
+
 NEGLIGIBLE_DRIFT_PER_DAY = 1.0
 
 DEFAULT_MAP_SPAN = 401
@@ -718,7 +722,16 @@ class DayCheckRequest(PlanRequest):
     *is*.
     """
 
-    segments: list[DaySegmentInput] = Field(min_length=1)
+    segments: list[DaySegmentInput] = Field(
+        min_length=1,
+        max_length=MAX_DAY_SEGMENTS,
+        description=(
+            "One entry per allocation profile. Capped because each segment runs a "
+            "full optimizer pass plus a storage replay, so the handler's cost is "
+            "linear in this length -- and windows only have to be non-overlapping, "
+            "so 1,440 one-minute profiles would otherwise validate."
+        ),
+    )
     crop_ceilings: dict[int, float] = Field(
         default={},
         description=(
@@ -1213,7 +1226,13 @@ async def _plan_account(
                 f"shipments must release the rest before the sheet is executable"
             )
 
-    extra_warnings.extend(_storage_warnings(body, plan))
+    # Off the loop for the same reason craft_plan is, three lines above: this
+    # runs simulate_day, a 14-day discrete replay of the beat. Measured with a
+    # 10ms heartbeat alongside the request, it was a single 292ms stall at 23
+    # villages and 566ms at 40 -- and the day check calls this once per profile,
+    # so three profiles blocked the loop for ~1.6s while stealth-timed game
+    # requests and WebSocket frames waited.
+    extra_warnings.extend(await asyncio.to_thread(_storage_warnings, body, plan))
 
     for target_id, target in foreign_ids.items():
         suppliers = sorted({row.origin for row in plan.rows if row.destination == target_id})

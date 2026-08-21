@@ -548,6 +548,13 @@ def _improve_flows(
     capacities = {vid: merchant_model.capacity(v.trade_office_level) for vid, v in villages.items()}
     one_way_cache: dict[FlowKey, float] = {}
 
+    # The improvement search asks for the same (rate, trip, capacity) triple over
+    # and over: measured, 92.4% of these calls repeat their arguments at 23
+    # villages and 93.8% at 40, and cheapest_cycle is still the largest leaf in
+    # the profile at ~43% of build_plan. The memo lives and dies inside this one
+    # build_plan call, so nothing leaks between requests or between accounts.
+    cost_memo: dict[tuple[int, float, float], int] = {}
+
     def merchants_for(origin: int, destination: int, cargo: Mapping[Resource, float]) -> int:
         hourly_total = sum(cargo.values())
         if hourly_total <= EPSILON:
@@ -558,9 +565,22 @@ def _improve_flows(
                 villages[origin].coords, villages[destination].coords
             )
             one_way_cache[(origin, destination)] = one_way
-        return cheapest_cycle(
-            hourly_total, 2.0 * one_way, capacities[origin], cycles
+        capacity = capacities[origin]
+        # Keyed on the float rate itself, not a rounded one: the search lands
+        # rates exactly on capacity boundaries on purpose, and rounding the key
+        # would collapse two rates that genuinely cost different merchants.
+        # The round trip MUST be in the key: it sets sets_in_flight, so the same
+        # rate to a nearer village costs fewer merchants. Leaving it out returned
+        # one destination's cost for another's.
+        key = (capacity, hourly_total, one_way)
+        hit = cost_memo.get(key)
+        if hit is not None:
+            return hit
+        committed = cheapest_cycle(
+            hourly_total, 2.0 * one_way, capacity, cycles
         ).merchants_committed
+        cost_memo[key] = committed
+        return committed
 
     def _one_way(key: FlowKey) -> float:
         cached = one_way_cache.get(key)

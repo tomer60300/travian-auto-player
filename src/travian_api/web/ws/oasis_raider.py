@@ -37,6 +37,11 @@ from travian_api.web.ws.manager import ws_manager
 
 logger = logging.getLogger(__name__)
 
+# Largest map radius one sweep will scan. Generous against the UI's default of
+# 15, and low enough to keep the quadratic ordering pass off the event loop for
+# more than a moment.
+MAX_OASIS_SCAN_RADIUS = 50
+
 router = APIRouter()
 
 CHANNEL = "oasis_raider"
@@ -219,7 +224,11 @@ async def oasis_raider_ws(websocket: WebSocket) -> None:
 
     cfg = msg.get("config", {}) or {}
     config = OasisRaiderConfig(
-        radius=cfg.get("radius", 15),
+        # Clamped server-side: the sweep's target-ordering and entropy passes are
+        # O(oases^2) in pure Python, and the oasis count grows with the square of
+        # the radius. Measured, 2,000 oases cost ~205ms of uninterruptible loop
+        # time; an unclamped radius of 200 is minutes of it. The UI sends 15.
+        radius=max(1, min(int(cfg.get("radius", 15) or 15), MAX_OASIS_SCAN_RADIUS)),
         troops=cfg.get("troops", {}),
         max_targets=cfg.get("max_targets", 0),
         bonus_filter=cfg.get("bonus_filter", []),

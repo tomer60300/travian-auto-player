@@ -23,6 +23,7 @@ Two things this deliberately does not do:
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -104,11 +105,33 @@ def _staleness(dispatches: Sequence[int], inbound_arrivals: Sequence[int]) -> in
     )
 
 
-def _worst_gap(candidate_arrivals: Sequence[int], taken: Sequence[int]) -> int:
-    """Tightest spacing this candidate would create against already-placed ones."""
-    if not taken:
+def _worst_gap(candidate_arrivals: Sequence[int], taken_sorted: Sequence[int]) -> int:
+    """Tightest spacing this candidate would create against already-placed ones.
+
+    ``taken_sorted`` must be sorted ascending. On a circle the nearest placed
+    arrival to a candidate is always one of the two entries bracketing it, so a
+    bisect finds it in log time instead of scanning every pair. That matters
+    because this runs once per candidate dispatch minute -- up to 1,440 times
+    per route -- against every arrival already claimed at the destination, and a
+    real account funnels its remainder into one capital hub: the frozen
+    23-village fixture puts 292 arrivals a day on a single node, which cost more
+    than a generated 50-village account with the load spread out.
+    """
+    if not taken_sorted:
         return MINUTES_PER_DAY
-    return min(_circular_gap(arrival, other) for arrival in candidate_arrivals for other in taken)
+    count = len(taken_sorted)
+    worst = MINUTES_PER_DAY
+    for arrival in candidate_arrivals:
+        index = bisect_left(taken_sorted, arrival)
+        # The entry at or after `arrival`, and the one before it -- both wrapping
+        # past midnight, which is why _circular_gap does the distance.
+        for neighbour in (taken_sorted[index % count], taken_sorted[index - 1]):
+            gap = _circular_gap(arrival, neighbour)
+            if gap < worst:
+                worst = gap
+                if worst == 0:
+                    return 0
+    return worst
 
 
 def build_beat(
@@ -240,12 +263,14 @@ def build_beat(
 
         best_minute = base
         best_score: tuple[int, int, int, int, int] | None = None
+        # Sorted once per route rather than inside the offset sweep below.
+        taken_sorted = sorted(taken)
         for offset in range(0, span, step_minutes):
             candidate = ScheduledRoute(
                 route=route, dispatch_minute=(base + offset) % MINUTES_PER_DAY
             )
             arrivals = candidate.arrival_minutes
-            gap = _worst_gap(arrivals, taken)
+            gap = _worst_gap(arrivals, taken_sorted)
             clear = (
                 0
                 if reserved_window is None
