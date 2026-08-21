@@ -73,7 +73,10 @@ class _RecordingClient:
 
 def _service() -> tuple[TradeRouteService, _RecordingClient]:
     client = _RecordingClient()
-    return TradeRouteService(client, live_enabled=True), client
+    # reconciler_verified: this file tests the WIRE SHAPE, not the reconciler.
+    # The gate that normally blocks a create is exercised in
+    # tests/test_trade_route_reconciler_gate.py.
+    return TradeRouteService(client, live_enabled=True, reconciler_verified=True), client
 
 
 def _route(*, dispatch_minute: int = 15 * 60 + 27, cycle_hours: int = 1) -> PlannedRoute:

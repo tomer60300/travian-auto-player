@@ -54,6 +54,28 @@ class TradeRoutePayloadUnverified(TravianError):
     """Raised when live creation is attempted before the wire payload is confirmed."""
 
 
+class TradeRouteReconcilerUnverified(TravianError):
+    """Raised when a route would be CREATED without being able to read existing ones."""
+
+
+# Whether parse_trade_routes has been confirmed against real gid=17&t=3 markup.
+#
+# This gates CREATION specifically, and the asymmetry is the point. The parser
+# returns [] for markup it does not recognise, which is the safe answer for
+# disabling -- an empty list disables nothing. It is the DANGEROUS answer for
+# creating, because the reconciler reads [] as "this village has no routes" and
+# creates the whole plan again. Every run. Duplicates accumulate in-game and the
+# repeated identical creates are exactly the daily rebuild-the-same-routes
+# pattern the code elsewhere says it avoids.
+#
+# The 2026-08-20 capture recorded the POST and PUT bodies but not the page HTML,
+# so the row markup (`data-route-id`, `data-x`, `data-y`) is still a guess.
+# To lift this: save the HTML of /build.php?gid=17&t=3 with at least one route
+# present, confirm parse_trade_routes finds it, add that page as a fixture, and
+# set this True.
+ROUTE_LIST_MARKUP_VERIFIED = False
+
+
 @dataclass(frozen=True)
 class PlannedRoute:
     """One route to create: origin village → destination coordinates."""
@@ -102,12 +124,22 @@ class ExistingRoute:
 class TradeRouteService:
     """Create/disable Travian trade routes from a distribution plan."""
 
-    def __init__(self, http_client: HttpClient, *, live_enabled: bool = False) -> None:
+    def __init__(
+        self,
+        http_client: HttpClient,
+        *,
+        live_enabled: bool = False,
+        reconciler_verified: bool = ROUTE_LIST_MARKUP_VERIFIED,
+    ) -> None:
         self.http_client = http_client
         # Live creation stays OFF until the real payload is captured and this is
         # flipped on deliberately. Guessing the wire shape and firing it at a
         # production account is exactly what this guard prevents.
         self.live_enabled = live_enabled
+        # An instance attribute rather than a module lookup so the gate can be
+        # exercised: a caller that genuinely can read route state says so here,
+        # and the production default stays False until the markup is captured.
+        self.reconciler_verified = reconciler_verified
         self._origin_lock = KeyedLock()
         # Serializes whole execute runs for this account so a double-click or a
         # second tab can't fire two concurrent reconciliations (which would
@@ -141,7 +173,11 @@ class TradeRouteService:
         newdid_q = f"?newdid={village_id}" if village_id else ""
         newdid_amp = f"&newdid={village_id}" if village_id else ""
         await self.http_client.get_html(f"/dorf2.php{newdid_q}")
-        return await self.http_client.get_html(f"/build.php?gid={MARKETPLACE_GID}{newdid_amp}")
+        # `t=3` is the trade-route tab. Without it we never load the tab the
+        # routes live on -- so the reconciler read a page that cannot contain
+        # them, and a server-side "did this session render the trade-route tab
+        # before POSTing to it?" check would fail outright.
+        return await self.http_client.get_html(f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}")
 
     async def list_existing_routes(self, village_id: int) -> list[ExistingRoute]:
         """Existing trade routes on a village's marketplace, visibility preserved.
@@ -153,7 +189,9 @@ class TradeRouteService:
         bot signal) and never lets one influence a create decision (conditioning
         behavior on invisible data is the same tell in reverse). Parsing is
         best-effort until a real marketplace page is captured; an unparseable
-        page yields an empty list rather than a guess.
+        page yields an empty list rather than a guess. That is the safe answer
+        for DISABLING and the dangerous one for creating, which is why creation
+        is gated separately on ROUTE_LIST_MARKUP_VERIFIED.
         """
         html = await self.open_marketplace(village_id)
         from ..parsers.html_parser import parse_trade_routes
@@ -210,6 +248,19 @@ class TradeRouteService:
             "routes": [{"enabled": active, "id": route_id} for route_id in route_ids],
         }
 
+    def _require_reconciler(self) -> None:
+        """Refuse to create when we cannot read what already exists."""
+        if not self.reconciler_verified:
+            raise TradeRouteReconcilerUnverified(
+                "Refusing to create trade routes: the marketplace route-list markup "
+                "has not been confirmed, so an unreadable page is indistinguishable "
+                "from a village with no routes. Creating on that basis re-creates "
+                "the whole plan every run and accumulates duplicates in-game. "
+                "Capture /build.php?gid=17&t=3 with a route present, confirm "
+                "parse_trade_routes reads it, then set ROUTE_LIST_MARKUP_VERIFIED. "
+                "Disabling and previewing are unaffected."
+            )
+
     def _require_live(self) -> None:
         if not self.live_enabled:
             raise TradeRoutePayloadUnverified(
@@ -235,6 +286,7 @@ class TradeRouteService:
         human delay cannot let the write through (issues #62/#64).
         """
         self._require_live()
+        self._require_reconciler()
         await self.http_client.human_delay.wait(ActionType.BETWEEN_ROUTES, "creating trade route")
         if stop_check is not None and (reason := stop_check()):
             return RouteActionResult(

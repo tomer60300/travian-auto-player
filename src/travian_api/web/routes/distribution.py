@@ -1522,6 +1522,24 @@ async def post_execute(
             ).strip(),
         )
 
+    # One clear refusal before the loop, rather than N identical per-route
+    # failures once inside it. The service guards create_route too, as defence
+    # in depth for any other caller.
+    if not getattr(svc, "reconciler_verified", False):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Live execution is blocked: the marketplace route-list markup has "
+                "not been confirmed against a real page, so a page this parser "
+                "cannot read is indistinguishable from a village with no routes. "
+                "Creating on that basis would re-create the whole plan on every "
+                "run and accumulate duplicate routes in-game. Capture "
+                "/build.php?gid=17&t=3 with at least one route present, confirm "
+                "parse_trade_routes reads it, then set ROUTE_LIST_MARKUP_VERIFIED. "
+                "dry_run previews are unaffected."
+            ),
+        )
+
     # Reconcile the desired plan against what is actually on each marketplace,
     # origin by origin, in randomized order (not a predictable village-id sweep):
     #   * create only routes MISSING in-game, so a create sticks and the next run

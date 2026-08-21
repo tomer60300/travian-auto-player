@@ -228,6 +228,10 @@ class _FakeLiveSvc:
         read_raises=None,
     ):
         self.live_enabled = True
+        # This fake DOES model the marketplace it reads, so it can legitimately
+        # claim the route list is readable. The real service defaults to False
+        # until the gid=17&t=3 markup is captured.
+        self.reconciler_verified = True
         self._existing = existing or {}
         self._create_status = create_status
         self._disable_status = disable_status
