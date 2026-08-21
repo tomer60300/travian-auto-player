@@ -421,6 +421,25 @@ def simulate_profile_cycle(
 
     ceilings = ceilings or {}
 
+    # Every per-store lookup :func:`apply` needs, flattened to a single
+    # ``(village_id, resource)`` key, and every production rate to a pre-keyed
+    # triple. The simulation never settles on a real account, so all `max_days`
+    # run: 45 days x ~1,000 ticks x 92 stores is ~4.1M apply() calls, and the
+    # nested ``capacities[vid][resource]`` / ``ceilings[vid]`` chains inside it
+    # cost 14.2M dict lookups -- 70% of the simulation. Nothing here changes
+    # WHAT is looked up, only how many hops each lookup takes. Capacities stay
+    # in whatever numeric type they arrived as, because the clamp compares
+    # ``updated > cap`` and Python compares int to float exactly; pre-converting
+    # would change that comparison rather than merely speed it up.
+    caps: dict[tuple[int, Resource], int | None] = {
+        (vid, resource): cap for vid, per in capacities.items() for resource, cap in per.items()
+    }
+    # Only crop has an alert level, so a crop-only key set replaces the
+    # `resource is CROP` test and the per-village lookup behind it with one get.
+    crop_ceilings: dict[tuple[int, Resource], float] = {
+        (vid, Resource.CROP): ceiling for vid, ceiling in ceilings.items()
+    }
+
     def segment_at(minute: int) -> ProfileSegment | None:
         for segment in segments:
             if segment.covers(minute):
@@ -481,9 +500,19 @@ def simulate_profile_cycle(
     # dispatch still debits the origin: the cargo really does leave.
     simulated = set(stocks) | set(own_rates)
 
+    # Production rates in one flat list, in the exact order the nested
+    # own_rates iteration visited them: apply() records the FIRST breach of each
+    # kind, so the order stores are moved in is part of the output.
+    own_flat: list[tuple[tuple[int, Resource], float, bool]] = [
+        ((vid, resource), own, own < 0)
+        for vid, per in own_rates.items()
+        for resource, own in per.items()
+        if own
+    ]
+
     nominal: dict[tuple[int, Resource], float] = {}
     breaches: list[TrajectoryBreach] = []
-    breached: set[tuple[int, Resource, str]] = set()
+    breached: set[tuple[tuple[int, Resource], str]] = set()
     lows: dict[tuple[int, Resource], float] = {}
     highs: dict[tuple[int, Resource], float] = {}
     in_flight: dict[int, float] = {}
@@ -498,18 +527,23 @@ def simulate_profile_cycle(
         if key in level and level[key] > ceiling:
             breaches.append(TrajectoryBreach(vid, Resource.CROP, "above", 0, 0, segment_name_at(0)))
 
-    # Set per day below; apply() reads it to know whether this day is the one
-    # being reported.
-    measured: dict[str, bool] = {"day": False}
+    # Set per day below; apply() reads it through its closure to know whether
+    # this day is the one being reported.
+    measuring = False
 
     def apply(
-        vid: int, resource: Resource, amount: float, minute: int, day: int, *, draining: bool
+        key: tuple[int, Resource], amount: float, minute: int, day: int, *, draining: bool
     ) -> None:
-        """Move one store by *amount*, clamping as the game does, recording why."""
-        key = (vid, resource)
+        """Move one store by *amount*, clamping as the game does, recording why.
+
+        Takes the ``(village_id, resource)`` key its callers already hold rather
+        than the pair, so the hot production path builds no tuple per call; the
+        pair is unpacked only on the breach branches, which fire at most once
+        per store per kind.
+        """
         previous = level.get(key, 0.0)
         updated = previous + amount
-        if measured["day"]:
+        if measuring:
             # Accumulated on the measured day, not day 0. A dispatch now
             # contributes what the origin could actually FUND, so day 0's figure
             # depends on the snapshot's opening stock -- a route on a
@@ -517,35 +551,37 @@ def simulate_profile_cycle(
             # describe the settled day. Measuring both on the same day makes the
             # three numbers describe one day again.
             nominal[key] = nominal.get(key, 0.0) + amount
-        cap = capacities.get(vid, {}).get(resource)
+        cap = caps.get(key)
         if cap is not None and updated > cap:
-            if (vid, resource, "capacity") not in breached:
-                breached.add((vid, resource, "capacity"))
+            if (key, "capacity") not in breached:
+                breached.add((key, "capacity"))
+                vid, resource = key
                 breaches.append(
                     TrajectoryBreach(
                         vid, resource, "capacity", day, minute, segment_name_at(minute)
                     )
                 )
             updated = float(cap)
-        if resource is Resource.CROP:
-            ceiling = ceilings.get(vid)
-            # A crossing needs a below-side and an above-side: a store already
-            # past the alert (reported as "above" up front) must not fire
-            # "crosses" while it drains. Tested on the post-clamp value, so a
-            # ceiling set above the cap can never fire at a level the store
-            # cannot reach.
-            if (
-                ceiling is not None
-                and previous - CROSSING_TOLERANCE <= ceiling < updated - CROSSING_TOLERANCE
-                and (vid, resource, "ceiling") not in breached
-            ):
-                breached.add((vid, resource, "ceiling"))
-                breaches.append(
-                    TrajectoryBreach(vid, resource, "ceiling", day, minute, segment_name_at(minute))
-                )
+        ceiling = crop_ceilings.get(key)
+        # A crossing needs a below-side and an above-side: a store already
+        # past the alert (reported as "above" up front) must not fire
+        # "crosses" while it drains. Tested on the post-clamp value, so a
+        # ceiling set above the cap can never fire at a level the store
+        # cannot reach.
+        if (
+            ceiling is not None
+            and previous - CROSSING_TOLERANCE <= ceiling < updated - CROSSING_TOLERANCE
+            and (key, "ceiling") not in breached
+        ):
+            breached.add((key, "ceiling"))
+            vid, resource = key
+            breaches.append(
+                TrajectoryBreach(vid, resource, "ceiling", day, minute, segment_name_at(minute))
+            )
         if updated <= 0.0:
-            if draining and (vid, resource, "empty") not in breached:
-                breached.add((vid, resource, "empty"))
+            if draining and (key, "empty") not in breached:
+                breached.add((key, "empty"))
+                vid, resource = key
                 breaches.append(
                     TrajectoryBreach(vid, resource, "empty", day, minute, segment_name_at(minute))
                 )
@@ -555,7 +591,6 @@ def simulate_profile_cycle(
     for day in range(max_days):
         opening = dict(level)
         measuring = settled_day >= 0 or day == max_days - 1
-        measured["day"] = measuring
         if measuring:
             lows = dict(level)
             highs = dict(level)
@@ -565,10 +600,11 @@ def simulate_profile_cycle(
             # profile is running now.
             for index in departures.get(minute, ()):
                 _out, _in, origin, _destination, resource, amount = firings[index]
-                shipped = min(amount, max(0.0, level.get((origin, resource), 0.0)))
+                key = (origin, resource)
+                shipped = min(amount, max(0.0, level.get(key, 0.0)))
                 in_flight[index] = shipped
                 if shipped:
-                    apply(origin, resource, -shipped, minute, day, draining=True)
+                    apply(key, -shipped, minute, day, draining=True)
             # Impact: credited at the minute it lands, in whatever profile owns
             # that minute -- but only what the origin actually funded. A firing
             # whose arrival minute precedes its dispatch minute lands before
@@ -582,15 +618,13 @@ def simulate_profile_cycle(
                     continue
                 shipped = in_flight.get(index)
                 if shipped:
-                    apply(destination, resource, shipped, minute, day, draining=False)
+                    apply((destination, resource), shipped, minute, day, draining=False)
             # Production for the span up to the next tick, always on.
             end = ticks[position + 1] if position + 1 < len(ticks) else MINUTES_PER_DAY
             span_hours = (end - minute) / 60.0
             if span_hours > 0:
-                for vid, per in own_rates.items():
-                    for resource, own in per.items():
-                        if own:
-                            apply(vid, resource, own * span_hours, minute, day, draining=own < 0)
+                for key, own, draining in own_flat:
+                    apply(key, own * span_hours, minute, day, draining=draining)
                 # Hand-shipped obligations: rate-based, and only while the
                 # profile that owns them is the one running.
                 active = segment_at(minute)
@@ -599,8 +633,7 @@ def simulate_profile_cycle(
                         for resource, rate in per.items():
                             if rate:
                                 apply(
-                                    vid,
-                                    resource,
+                                    (vid, resource),
                                     rate * span_hours,
                                     minute,
                                     day,
