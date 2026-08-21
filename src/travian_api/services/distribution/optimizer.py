@@ -555,8 +555,12 @@ def _improve_flows(
     # build_plan call, so nothing leaks between requests or between accounts.
     cost_memo: dict[tuple[int, float, float], int] = {}
 
-    def merchants_for(origin: int, destination: int, cargo: Mapping[Resource, float]) -> int:
-        hourly_total = sum(cargo.values())
+    def merchants_for(origin: int, destination: int, hourly_total: float) -> int:
+        # Takes the already-summed tonnage rather than the cargo mapping: every
+        # caller has just summed it for the objective anyway, and summing twice
+        # is not free at ~4M calls. It must stay the caller's own
+        # `sum(cargo.values())` -- see the key comment below on why the exact
+        # float matters.
         if hourly_total <= EPSILON:
             return 0
         one_way = one_way_cache.get((origin, destination))
@@ -590,8 +594,14 @@ def _improve_flows(
         return cached
 
     pair = _merge_pair_cargo(flows)
+    # Tonnage per pair, kept in sync by _commit_changes rather than re-summed.
+    # The scored candidate's own sum is what gets stored, so the value here is
+    # always bit-identical to `sum(pair[key].values())` -- the pair dicts are
+    # replaced wholesale on commit, never mutated in place, so the summation
+    # order that produced it cannot drift.
+    pair_total: dict[FlowKey, float] = {key: sum(cargo.values()) for key, cargo in pair.items()}
     pair_merch: dict[FlowKey, int] = {
-        key: merchants_for(key[0], key[1], cargo) for key, cargo in pair.items()
+        key: merchants_for(key[0], key[1], total) for key, total in pair_total.items()
     }
     committed: dict[int, int] = {}
     for (origin, _destination), merchants in pair_merch.items():
@@ -655,6 +665,15 @@ def _improve_flows(
         Returns ``(delta, state)`` where delta is the lexicographic objective
         change -- lower is better, negative means an improvement -- and state is
         what :func:`_commit_changes` needs to apply it.
+
+        All four objective terms are accumulated in ONE pass over the touched
+        keys. It used to be six separate generator expressions over the same
+        four keys, which at ~4M calls made this function 98% of the improvement
+        search. The pass walks ``touched_keys`` in its own set order and adds the
+        round-trip term left to right, exactly as the generator expression did:
+        that term is a float sum, so its order decides the last bits, and it is
+        rounded into an objective key that breaks ties between candidate swaps.
+        Reordering it would be a silent re-plan, not a speed-up.
         """
         touched_keys = {key for key, _r, _d in changes}
         new_cargo: dict[FlowKey, dict[Resource, float]] = {
@@ -666,22 +685,12 @@ def _improve_flows(
                 new_cargo[key][resource] = updated
             else:
                 new_cargo[key].pop(resource, None)
-        new_merch = {key: merchants_for(key[0], key[1], cargo) for key, cargo in new_cargo.items()}
 
+        new_merch: dict[FlowKey, int] = {}
+        new_total: dict[FlowKey, float] = {}
         per_origin: dict[int, int] = {}
-        for key in touched_keys:
-            per_origin[key[0]] = per_origin.get(key[0], 0) + (
-                new_merch[key] - pair_merch.get(key, 0)
-            )
-        over_delta = sum(
-            excess(origin, committed.get(origin, 0) + delta)
-            - excess(origin, committed.get(origin, 0))
-            for origin, delta in per_origin.items()
-        )
-        total_delta = sum(new_merch.values()) - sum(pair_merch.get(key, 0) for key in touched_keys)
-        rc_delta = sum(route_weight(key) for key in touched_keys if new_merch[key] > 0) - sum(
-            route_weight(key) for key in touched_keys if pair_merch.get(key, 0) > 0
-        )
+        total_delta = 0
+        rc_delta = 0
         # Cargo-weighted round-trip, the final tie-break. Plans that tie on
         # excess, merchants and route count used to be tie-broken by whatever
         # move happened to be scanned first, which left the search actively
@@ -689,28 +698,45 @@ def _improve_flows(
         # twice as far were interchangeable. Rounded to an integer so the
         # objective stays a strictly-decreasing bounded integer tuple and
         # termination remains guaranteed.
-        rt_delta = round(
-            sum(
-                (sum(new_cargo[key].values()) - sum(pair.get(key, {}).values()))
-                * 2.0
-                * _one_way(key)
-                for key in touched_keys
-            )
+        round_trip = 0.0
+        for key in touched_keys:
+            cargo = new_cargo[key]
+            tonnage = sum(cargo.values())
+            new_total[key] = tonnage
+            merchants = merchants_for(key[0], key[1], tonnage)
+            new_merch[key] = merchants
+            was = pair_merch.get(key, 0)
+            origin = key[0]
+            per_origin[origin] = per_origin.get(origin, 0) + (merchants - was)
+            total_delta += merchants - was
+            if merchants > 0:
+                rc_delta += route_weight(key)
+            if was > 0:
+                rc_delta -= route_weight(key)
+            round_trip += (tonnage - pair_total.get(key, 0.0)) * 2.0 * _one_way(key)
+
+        over_delta = sum(
+            excess(origin, committed.get(origin, 0) + delta)
+            - excess(origin, committed.get(origin, 0))
+            for origin, delta in per_origin.items()
         )
-        return (over_delta, total_delta, rc_delta, rt_delta), (
+        return (over_delta, total_delta, rc_delta, round(round_trip)), (
             touched_keys,
             new_cargo,
             new_merch,
             per_origin,
+            new_total,
         )
 
     def _commit_changes(changes, state) -> None:
-        touched_keys, new_cargo, new_merch, per_origin = state
+        touched_keys, new_cargo, new_merch, per_origin, new_total = state
         for key in touched_keys:
             if new_cargo[key]:
                 pair[key] = new_cargo[key]
+                pair_total[key] = new_total[key]
             else:
                 pair.pop(key, None)
+                pair_total.pop(key, None)
             if new_merch[key] > 0:
                 pair_merch[key] = new_merch[key]
             else:
@@ -843,12 +869,8 @@ def _improve_flows(
         return _crop_shape_ok(prospective)
 
     def _breakpoint_ts(resource, o1, d1, o2, d2, t_full):
-        grows = [
-            (sum(pair.get(key, {}).values()), capacities[key[0]]) for key in ((o1, d2), (o2, d1))
-        ]
-        shrinks = [
-            (sum(pair.get(key, {}).values()), capacities[key[0]]) for key in ((o1, d1), (o2, d2))
-        ]
+        grows = [(pair_total.get(key, 0.0), capacities[key[0]]) for key in ((o1, d2), (o2, d1))]
+        shrinks = [(pair_total.get(key, 0.0), capacities[key[0]]) for key in ((o1, d1), (o2, d2))]
         return breakpoint_candidates(grows, shrinks, t_full, cycles)
 
     def _best_swap(refinement: bool):
