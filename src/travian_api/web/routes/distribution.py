@@ -411,6 +411,10 @@ class ExecuteResponse(BaseModel):
     live_enabled: bool
     actions: list[RouteActionResponse]
     disables: list[str]
+    # Kept apart from `disables` deliberately: re-enabling a route the plan
+    # still wants RESTARTS shipments, which is the opposite of disabling one.
+    # Folding them together reported a resumed route as a stopped one.
+    re_enables: list[str] = []
     created: int
     remaining: int
     # Benign, informational notes computed while planning (coordinate resolution,
@@ -1462,6 +1466,7 @@ async def post_execute(
             live_enabled=live_enabled,
             actions=actions,
             disables=disables,
+            re_enables=[],
             created=0,
             remaining=max(0, len(items) - cap),
             warnings=warnings,
@@ -1480,9 +1485,11 @@ async def post_execute(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "Live trade-route execution is disabled until the "
-                "/api/v1/trade-routes request payload is captured and verified. "
-                "Use dry_run to preview what would be created."
+                "Live trade-route execution is disabled. The request payload is "
+                "verified against a captured client request, so this is an explicit "
+                "opt-in and not a missing capability: set TRAVIAN_TRADE_ROUTE_LIVE="
+                "true on the server to allow it. Use dry_run to preview what would "
+                "be created."
             ),
         )
     # Feasibility is enforced server-side, not just by the disabled UI button: a
@@ -1544,6 +1551,7 @@ async def post_execute(
 
     actions: list[RouteActionResponse] = []
     disables: list[str] = []
+    re_enables: list[str] = []
     problems: list[str] = []  # execution failures (failed disable, Gold Club, …)
     attempts = 0  # create requests fired this run
     visited = 0  # marketplaces read this run
@@ -1701,7 +1709,7 @@ async def post_execute(
                             continue
                         if enabled is not None and enabled.status == "enabled":
                             satisfied.update((e.dest_x, e.dest_y) for e in disabled_desired)
-                            disables.append(
+                            re_enables.append(
                                 f"{village_label(origin, names)}: re-enabled {enabled.detail}"
                             )
                         else:
@@ -1783,6 +1791,7 @@ async def post_execute(
         live_enabled=live_enabled,
         actions=actions,
         disables=disables,
+        re_enables=re_enables,
         # `remaining` = work still outstanding for a later run: routes deferred by
         # the cap PLUS any create that did not complete (failed / Gold Club), so
         # the summary never makes a partially-done run look complete.

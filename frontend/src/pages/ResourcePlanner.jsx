@@ -533,7 +533,22 @@ export default function ResourcePlanner() {
     // its temporal dead zone — a ReferenceError that drops the whole planner
     // into the error boundary. `villages` is `snapshot?.villages ?? []`, so
     // snapshot changing is exactly the signal we want.
-  }, [allocations, tradeOffice, merchantModel, foreignTargets, snapshot])
+    // profileWindows and activeProfile belong here for the same reason: the
+    // payload now carries dispatch_window drawn from the active profile's
+    // hours, so nudging those hours changes every route's send time. The
+    // hours inputs sit in the global bar ABOVE the stage nav, editable while
+    // the sheet is on screen -- so without these the operator reads "Send at
+    // 08:20", moves the window, and the sheet still says 08:20 while a live
+    // run would create the route at a different hour.
+  }, [
+    allocations,
+    tradeOffice,
+    merchantModel,
+    foreignTargets,
+    snapshot,
+    profileWindows,
+    activeProfile,
+  ])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_CROP_CEILING), cropCeilings)
@@ -829,6 +844,9 @@ export default function ResourcePlanner() {
             remaining: res.data.remaining,
             counts,
             disables: res.data.disables || [],
+            // Separate from disables: re-enabling RESTARTS a route, so
+            // reporting it as a disable told the operator the opposite.
+            reEnables: res.data.re_enables || [],
             problems: res.data.problems || [],
             // Per-route outcomes, so an operator can reconstruct the run later.
             routes: res.data.actions.map((a) => ({
@@ -854,6 +872,7 @@ export default function ResourcePlanner() {
               .map(([status, n]) => `${n} ${status}`)
               .join(', ') +
             `${res.data.disables?.length ? `, ${res.data.disables.length} disable action(s)` : ''}` +
+            `${res.data.re_enables?.length ? `, ${res.data.re_enables.length} re-enabled` : ''}` +
             `${res.data.problems?.length ? `, ${res.data.problems.length} problem(s)` : ''}`
           useLogStore
             .getState()
@@ -1218,6 +1237,12 @@ export default function ResourcePlanner() {
         ).size
       )
     : 0
+  // Every other action on this page states its cost; the only irreversible one
+  // did not. A live run reads each origin's marketplace, then disables, creates
+  // and possibly re-enables on it -- so it is the visited origins plus the
+  // creates, and it is an upper bound for the same reason plannedOriginCount is.
+  const liveRequestEstimate = plannedOriginCount + plannedCreateCount
+
   const liveConfirmMessage = [
     'Execute this plan against Travian now?',
     '',
@@ -1225,7 +1250,8 @@ export default function ResourcePlanner() {
     `• Create up to ${plannedCreateCount} new route(s)`,
     execResult?.remaining ? `• Defer ${execResult.remaining} route(s) to a later run` : null,
     '',
-    'Already-active routes that the plan still wants are left untouched.',
+    'Already-active routes that the plan still wants are left untouched, and a',
+    'route the plan wants that is currently DISABLED is switched back on.',
     '',
     'This sends live requests to Travian. If a create fails after a disable, old',
     'routes can remain disabled without their replacements — re-run to reconcile.',
@@ -2521,14 +2547,16 @@ export default function ResourcePlanner() {
                           >
                             {executing
                               ? 'Working…'
-                              : `Disable old routes & create ${plannedCreateCount}`}
+                              : `Disable old routes & create ${plannedCreateCount} (~${liveRequestEstimate} requests)`}
                           </button>
                         </>
                       ) : (
                         <p className="text-warning text-xs mt-3">
-                          Live creation is turned off on the server until Travian’s trade-route
-                          request format is captured and verified. Preview works today; the create
-                          step switches on once that’s confirmed.
+                          Live creation is turned off on this server. The trade-route request
+                          format is verified against a real captured request — this is a
+                          deliberate opt-in, because creating routes changes your real account.
+                          Set <code>TRAVIAN_TRADE_ROUTE_LIVE=true</code> on the server to enable
+                          it. Preview works today and never touches the game.
                         </p>
                       ))}
                   </>
