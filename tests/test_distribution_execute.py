@@ -12,6 +12,7 @@ guard.
 
 import asyncio
 import contextlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -501,37 +502,90 @@ class TestServiceGuards:
 
 
 class TestTradeRouteParser:
-    def test_hidden_routes_are_flagged_not_visible(self):
-        html = """
-        <div data-route-id="1" data-x="40" data-y="40"></div>
-        <div data-route-id="2" data-x="12" data-y="99" style="display:none"></div>
-        <div data-route-id="3" data-x="5" data-y="5" hidden></div>
-        <div data-route-id="4" data-x="6" data-y="6" class="row hidden"></div>
-        """
-        routes = {r["route_id"]: r for r in parse_trade_routes(html)}
-        assert routes[1]["visible"] is True
-        assert routes[2]["visible"] is False
-        assert routes[3]["visible"] is False
-        # A stylesheet-hidden honeypot (class, not inline style) is caught too.
-        assert routes[4]["visible"] is False
+    """These pinned a DOM scraper that, measured against a real marketplace
+    page, found ZERO routes: the attribute is `data-trade-route-id`, not
+    `data-route-id`, and coordinates appear nowhere on the page. The properties
+    worth keeping are re-pinned here against the model the page actually
+    carries; the full real-page coverage lives in
+    tests/test_marketplace_route_parsing.py.
+    """
+
+    @staticmethod
+    def _page(routes: list[dict], dest_id: int = 20010) -> str:
+        """A marketplace page carrying the model React is handed."""
+        view = {
+            "ownPlayer": {
+                "id": 1,
+                "currentVillageId": 20002,
+                "village": {
+                    "marketplace": {
+                        "tradeRoutes": [
+                            {
+                                "objectId": f"20002_{dest_id}",
+                                "from": {"id": 20002, "name": "02"},
+                                "to": {
+                                    "id": dest_id,
+                                    "mapId": 50001,
+                                    "name": "V01",
+                                    "player": {"id": 1},
+                                },
+                                "routes": routes,
+                            }
+                        ]
+                    }
+                },
+            }
+        }
+        return (
+            "<script>window.Travian.React.TradeRoutes.render("
+            f"{{viewData: {json.dumps(view)}}})</script>"
+        )
+
+    @staticmethod
+    def _route(route_id: int | None = None, enabled: bool = True) -> dict:
+        route = {
+            "enabled": enabled,
+            "sendOnce": False,
+            "carriedResources": {"lumber": 0, "clay": 0, "iron": 0, "crop": 100},
+            "departureAt": 1700000000,
+            "arrivalAt": 1700003600,
+            "repeat": 1,
+            "merchants": 1,
+            "ships": 0,
+            "useTradeShips": False,
+        }
+        if route_id is not None:
+            route["id"] = route_id
+        return route
 
     def test_unknown_markup_yields_nothing(self):
-        # Safe default: no recognizable routes → nothing to disable.
+        # Safe default for disabling: no recognisable routes -> nothing to
+        # disable. NOT safe for creating, which is why creation is gated.
         assert parse_trade_routes("<html><body>marketplace</body></html>") == []
 
-    def test_row_without_coordinates_is_skipped_not_guessed(self):
-        assert parse_trade_routes('<div data-route-id="7">no coords</div>') == []
+    def test_the_old_dom_markup_is_not_mistaken_for_routes(self):
+        # The shape the previous parser looked for. It never existed on a real
+        # page, and must not be resurrected as a fallback that invents routes.
+        assert parse_trade_routes('<div data-route-id="7" data-x="1" data-y="2"></div>') == []
 
     def test_disabled_route_is_flagged_inactive(self):
-        html = """
-        <div data-route-id="1" data-x="40" data-y="40"></div>
-        <div data-route-id="2" data-x="5" data-y="5" data-active="false"></div>
-        <div data-route-id="3" data-x="6" data-y="6" class="route disabled"></div>
-        """
-        routes = {r["route_id"]: r for r in parse_trade_routes(html)}
+        # Read from the model's own `enabled`, which is what decides whether a
+        # route the plan still wants is re-enabled rather than created again.
+        page = self._page([self._route(1), self._route(2, enabled=False)])
+        routes = {r["route_id"]: r for r in parse_trade_routes(page)}
         assert routes[1]["active"] is True
         assert routes[2]["active"] is False
-        assert routes[3]["active"] is False
+
+    def test_every_route_is_visible(self):
+        # The real model has no hidden-entry mechanism, so the honeypot concern
+        # the DOM scraper carried does not arise here. It was a property of
+        # assumed markup, not of the page.
+        page = self._page([self._route(1)])
+        assert all(r["visible"] is True for r in parse_trade_routes(page))
+
+    def test_a_route_without_an_id_is_skipped_not_guessed(self):
+        page = self._page([self._route(route_id=None)])
+        assert parse_trade_routes(page) == []
 
 
 def _two_origin_account():

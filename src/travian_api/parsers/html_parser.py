@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from bs4 import BeautifulSoup
 
@@ -614,96 +614,147 @@ def parse_rally_point_troops(html: str) -> Dict[str, int]:
 _HIDDEN_CLASS_TOKENS = frozenset({"hidden", "invisible", "d-none"})
 
 
-def _element_is_visible(el) -> bool:
-    """Whether an element (and its chain) is visible to a real user.
+_JSON_BACKSLASH = chr(92)
 
-    Honeypot guard: a route present in the markup but hidden — display:none,
-    visibility:hidden, a `hidden` attribute, aria-hidden, or a conventional
-    hiding class — is one a human could never see or act on, so acting on it
-    (disabling it) is a pure bot signal. Checks the element and its ancestors.
+# The marketplace page hands React a complete model of the village's trade
+# routes, which is what we read. Anchor on the render call rather than on any
+# markup: classes and table layout are cosmetic and change with a gpack, while
+# this payload is the data the page itself runs on.
+_TRADE_ROUTE_VIEW_MARKER = "TradeRoutes.render"
+
+
+def _balanced_object(text: str, start: int) -> str | None:
+    """The complete ``{...}`` beginning at *start*, respecting strings."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == _JSON_BACKSLASH:
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
+
+
+def _trade_route_view_data(html: str) -> Optional[Dict[str, Any]]:
+    """The ``viewData`` model the marketplace page passes to React, or None."""
+    marker = html.find(_TRADE_ROUTE_VIEW_MARKER)
+    if marker < 0:
+        return None
+    match = re.compile(r"\{\s*viewData\s*:\s*").search(html, marker)
+    if match is None:
+        return None
+    blob = _balanced_object(html, html.index("{", match.end() - 1))
+    if blob is None:
+        return None
+    try:
+        parsed = json.loads(blob)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def trade_route_page_recognised(html: str) -> bool:
+    """Did this page actually carry a trade-route model?
+
+    The distinction that matters: a village with no routes and a page we could
+    not read both produce an empty route list, but only the first means "nothing
+    to create". Callers that create routes must check this, or an unreadable
+    page reads as an empty village and the whole plan gets created again.
     """
-    node = el
-    while node is not None and getattr(node, "attrs", None) is not None:
-        if node.get("hidden") is not None:
-            return False
-        if str(node.get("aria-hidden", "")).lower() == "true":
-            return False
-        style = str(node.get("style", "")).replace(" ", "").lower()
-        if "display:none" in style or "visibility:hidden" in style:
-            return False
-        classes = node.get("class") or []
-        if isinstance(classes, str):
-            classes = classes.split()
-        if any(c.lower() in _HIDDEN_CLASS_TOKENS for c in classes):
-            return False
-        node = node.parent
-    return True
-
-
-_INACTIVE_CLASS_TOKENS = frozenset({"inactive", "disabled", "paused", "off"})
-
-
-def _route_is_active(el) -> bool:
-    """Whether a marketplace route row is ENABLED (best-effort).
-
-    Travian keeps DISABLED routes in the list so they can be re-enabled, so a row
-    being present does not mean it is active. Reads an explicit
-    ``data-active``/``data-enabled`` flag when present, else looks for a
-    conventional inactive/disabled class; defaults to True (assume active) when
-    nothing says otherwise, so an unparseable flag errs toward leaving the route
-    alone rather than churning it.
-    """
-    for attr in ("data-active", "data-enabled"):
-        val = el.get(attr)
-        if val is not None:
-            return str(val).strip().lower() not in ("false", "0", "no", "off")
-    classes = el.get("class") or []
-    if isinstance(classes, str):
-        classes = classes.split()
-    return not any(c.lower() in _INACTIVE_CLASS_TOKENS for c in classes)
+    return _trade_route_view_data(html) is not None
 
 
 def parse_trade_routes(html: str) -> List[Dict[str, Any]]:
-    """Existing trade routes from a marketplace (gid=17) page.
+    """Existing trade routes on a village's marketplace (gid=17, tab t=3).
 
-    Returns dicts ``{route_id, dest_x, dest_y, visible, active}``. BEST-EFFORT:
-    the exact gid=17 markup has not been captured, so this recognizes the common
-    Travian shape (a route row exposing a numeric route id plus destination
-    coordinates) and returns an EMPTY list for markup it does not recognize —
-    never a guess. An empty list means "nothing to disable", which is the safe
-    default. Hidden rows are flagged ``visible=False`` so callers can ignore
-    honeypot entries; disabled rows are flagged ``active=False`` so a
-    still-desired-but-disabled route is re-enabled rather than mistaken for one
-    that already satisfies the plan.
+    Read from the JSON model the page hands React, verified against a real
+    Europe 2 page (gpack 597.6). Travian groups routes into one *collection*
+    per destination village, each collection holding the individual scheduled
+    departures; this flattens them, one dict per departure, because that is what
+    a route id addresses and what the enable/disable call takes.
+
+    Returns ``{route_id, dest_village_id, dest_name, dest_map_id, dest_x,
+    dest_y, visible, active, merchants, repeat_hours, cargo}``.
+
+    ``dest_x``/``dest_y`` are always None: the page identifies a destination by
+    village id and map id, and carries no coordinates at all. Reconciling
+    against a plan therefore has to go through the village id -- matching on
+    coordinates cannot work from this source.
+
+    An unrecognised page yields an empty list. That is the safe answer for
+    disabling and the dangerous one for creating, so use
+    :func:`trade_route_page_recognised` to tell the two cases apart.
     """
-    soup = BeautifulSoup(html, "html.parser")
+    view = _trade_route_view_data(html)
+    if view is None:
+        return []
+
+    try:
+        collections = view["ownPlayer"]["village"]["marketplace"]["tradeRoutes"]
+    except (KeyError, TypeError):
+        return []
+    if not isinstance(collections, list):
+        return []
+
     routes: List[Dict[str, Any]] = []
     seen: set[int] = set()
-
-    for el in soup.find_all(attrs={"data-route-id": True}):
+    for collection in collections:
+        if not isinstance(collection, dict):
+            continue
+        destination = collection.get("to") or {}
         try:
-            route_id = int(el.get("data-route-id"))
-        except (TypeError, ValueError):
-            continue
-        if route_id in seen:
-            continue
-        x = el.get("data-x")
-        y = el.get("data-y")
-        try:
-            dest_x, dest_y = int(x), int(y)
-        except (TypeError, ValueError):
-            # Coordinates not on the same element — skip rather than guess.
-            continue
-        seen.add(route_id)
-        routes.append(
-            {
-                "route_id": route_id,
-                "dest_x": dest_x,
-                "dest_y": dest_y,
-                "visible": _element_is_visible(el),
-                "active": _route_is_active(el),
-            }
-        )
+            dest_village_id = int(destination["id"])
+        except (KeyError, TypeError, ValueError):
+            continue  # a destination we cannot address is not actionable
+        dest_name = destination.get("name") or ""
+        dest_map_id = destination.get("mapId")
+        for entry in collection.get("routes") or []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                route_id = int(entry["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if route_id in seen:
+                continue
+            seen.add(route_id)
+            cargo = entry.get("carriedResources") or {}
+            routes.append(
+                {
+                    "route_id": route_id,
+                    "dest_village_id": dest_village_id,
+                    "dest_name": dest_name,
+                    "dest_map_id": int(dest_map_id) if isinstance(dest_map_id, int) else None,
+                    # Not on the page in any form; see the docstring.
+                    "dest_x": None,
+                    "dest_y": None,
+                    # Every route in the model is a real row a human can see.
+                    # There is no hidden-entry mechanism here, so the honeypot
+                    # question the DOM scraper worried about does not arise.
+                    "visible": True,
+                    "active": bool(entry.get("enabled", True)),
+                    "merchants": entry.get("merchants"),
+                    "repeat_hours": entry.get("repeat"),
+                    "cargo": {
+                        resource: int(cargo.get(resource, 0) or 0)
+                        for resource in ("lumber", "clay", "iron", "crop")
+                    },
+                }
+            )
     return routes
 
 
