@@ -31,6 +31,7 @@ from travian_api.services.distribution.allocation import Resource
 from travian_api.services.trade_route_service import (
     ExistingRoute,
     PlannedRoute,
+    TradeRoutePayloadUnverified,
     TradeRouteService,
 )
 
@@ -62,8 +63,15 @@ class _RecordingClient:
                 return None
 
         self.human_delay = _Delay()
-        # open_marketplace reads base_url to pin the write's Referer.
         self.settings = SimpleNamespace(base_url="https://ts2.x1.europe.travian.com")
+        # Every write feeds the seconds it consumed into the daily activity
+        # ceiling. Without this attribute _log_activity raises AttributeError
+        # into its own broad catch, so the accounting silently does nothing --
+        # and no test notices, because the write itself still succeeds.
+        self.logged_activity: list[float] = []
+        self.activity_scheduler = SimpleNamespace(
+            log_activity=self.logged_activity.append
+        )
 
     async def post_json(self, url: str, payload: dict, **_kwargs):
         self.sent.append(("POST", url, payload))
@@ -85,6 +93,7 @@ def _service() -> tuple[TradeRouteService, _RecordingClient]:
 def _route(*, dispatch_minute: int = 15 * 60 + 27, cycle_hours: int = 1) -> PlannedRoute:
     return PlannedRoute(
         origin_village_id=20031,
+        dest_village_id=20044,
         dest_x=23,
         dest_y=88,
         dest_name="capital",
@@ -150,6 +159,7 @@ class TestCreateBody:
         route = _route()
         route = PlannedRoute(
             origin_village_id=route.origin_village_id,
+            dest_village_id=route.dest_village_id,
             dest_x=route.dest_x,
             dest_y=route.dest_y,
             dest_name=route.dest_name,
@@ -189,13 +199,16 @@ class TestToggleBody:
         # The earlier guess was POST /api/v1/trade-routes/toggle-group. Both
         # the verb and the path were wrong.
         service, client = _service()
-        routes = [ExistingRoute(route_id=1, dest_x=5, dest_y=6)]
+        routes = [ExistingRoute(route_id=1, dest_village_id=20044, dest_x=5, dest_y=6)]
         asyncio.run(service.disable_routes(20031, routes))
         assert [(verb, url) for verb, url, _ in client.sent] == [("PUT", "/api/v1/trade-routes")]
 
     def test_every_route_goes_in_one_request(self):
         service, client = _service()
-        routes = [ExistingRoute(route_id=i, dest_x=0, dest_y=0) for i in range(24)]
+        routes = [
+            ExistingRoute(route_id=i, dest_village_id=20044, dest_x=0, dest_y=0)
+            for i in range(24)
+        ]
         asyncio.run(service.disable_routes(20031, routes))
         assert len(client.sent) == 1, "the capture toggled 24 routes in a single request"
         assert len(client.sent[0][2]["routes"]) == 24
@@ -204,3 +217,38 @@ class TestToggleBody:
         service, client = _service()
         assert asyncio.run(service.disable_routes(20031, [])) is None
         assert client.sent == []
+
+
+class TestWritesConsumeActivityBudget:
+    """A trade-route write costs time against the daily activity ceiling.
+
+    The ceiling is what keeps the account's total daily traffic inside a human
+    range. A whole execute run that reported zero seconds would let the rest of
+    the day's automation spend a budget it had already used -- and because
+    _log_activity swallows its own failures by design (accounting must never
+    break a request that already went out), nothing surfaces when it silently
+    stops working. Hence an explicit assertion.
+    """
+
+    def test_a_create_reports_the_time_it_took(self):
+        service, client = _service()
+        asyncio.run(service.create_route(_route()))
+
+        assert len(client.logged_activity) == 1, "the create must be accounted for"
+        assert client.logged_activity[0] >= 0.0
+
+    def test_a_toggle_reports_the_time_it_took(self):
+        service, client = _service()
+        routes = [ExistingRoute(route_id=1, dest_village_id=20044, dest_x=5, dest_y=6)]
+        asyncio.run(service.disable_routes(20031, routes))
+
+        assert len(client.logged_activity) == 1
+
+    def test_a_refused_write_costs_nothing(self):
+        # Nothing was sent, so nothing was consumed.
+        client = _RecordingClient()
+        service = TradeRouteService(client, live_enabled=False, reconciler_verified=True)
+        with pytest.raises(TradeRoutePayloadUnverified):
+            asyncio.run(service.create_route(_route()))
+
+        assert client.logged_activity == []

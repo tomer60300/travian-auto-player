@@ -1,9 +1,9 @@
 """Creating a route requires being able to read the routes that already exist.
 
-`parse_trade_routes` returns [] for markup it does not recognise. That is the
-SAFE answer for disabling -- an empty list disables nothing -- and the dangerous
-answer for creating, because the reconciler reads [] as "this village has no
-routes" and creates the whole plan again. Every run. Duplicates accumulate
+A page we cannot read yields no routes. That is the SAFE answer for disabling --
+nothing gets disabled -- and the dangerous answer for creating, because "no
+routes" reads as "this village has no routes" and the whole plan gets created
+again. Every run. Duplicates accumulate
 in-game, and the repeated identical creates are exactly the daily
 rebuild-the-same-routes pattern the executor's own comments say it avoids.
 
@@ -57,6 +57,7 @@ class _RecordingClient:
 def _route() -> PlannedRoute:
     return PlannedRoute(
         origin_village_id=20031,
+        dest_village_id=20044,
         dest_x=23,
         dest_y=88,
         dest_name="capital",
@@ -106,7 +107,7 @@ def test_disabling_is_still_allowed():
     # wrong action -- there is nothing unsafe to gate here.
     client = _RecordingClient()
     service = TradeRouteService(client, live_enabled=True)
-    routes = [ExistingRoute(route_id=1, dest_x=5, dest_y=6)]
+    routes = [ExistingRoute(route_id=1, dest_village_id=20044, dest_x=5, dest_y=6)]
     result = asyncio.run(service.disable_routes(20031, routes))
     assert result is not None
     assert [verb for verb, _ in client.sent] == ["PUT"]

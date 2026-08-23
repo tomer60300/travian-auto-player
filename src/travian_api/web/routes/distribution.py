@@ -59,6 +59,7 @@ from travian_api.services.distribution.storage import (
     store_status,
 )
 from travian_api.services.trade_route_service import (
+    ExistingRoute,
     MarketplaceUnreadable,
     PlannedRoute,
 )
@@ -221,8 +222,19 @@ class PlanRequest(BaseModel):
     merchant_reserve: int = Field(default=2, ge=0)
     max_latency_hours: float | None = 2.0
     min_arrival_gap_minutes: int = Field(default=3, ge=0)
+    # Odd only. A Travian world is centred on 0|0, so its width is always odd;
+    # an even span shifts every tile index by half a field, which silently
+    # skews every distance MapGeometry computes from it.
     map_span: int = Field(default=DEFAULT_MAP_SPAN, gt=0)
     speed_fields_per_hour: float = Field(default=DEFAULT_SPEED_FIELDS_PER_HOUR, gt=0)
+
+    @field_validator("map_span")
+    @classmethod
+    def _span_is_odd(cls, value: int) -> int:
+        if value % 2 == 0:
+            raise ValueError("map_span must be odd: a world is centred on 0|0")
+        return value
+
     min_send_fill: float = Field(
         default=MIN_SEND_FILL,
         ge=0,
@@ -879,20 +891,19 @@ async def post_day_check(
 
     # Foreign tributes drain crop in every profile, exactly as POST /plan ships
     # them (absolute targets on negative sink ids, margin included). The sinks
-    # get no trajectory of their own -- the drain lives in whoever funds them.
-    foreign_ids: dict[int, ForeignTarget] = {}
+    # get no trajectory of their own -- the drain lives in whoever funds them,
+    # so all this pass needs is a label to report them under. The simulation runs
+    # on `own_rates`, which is built from the snapshot above and never includes a
+    # sink; registering a sink's zero rate here would land in `productions`,
+    # which nothing downstream reads.
     if body.foreign_targets and Resource.CROP not in productions:
         warnings.append(
             "crop: no rate could be read for any village, so the foreign tribute "
             "cannot be simulated -- the day picture is missing that drain"
         )
     elif body.foreign_targets:
-        crop_rates = productions[Resource.CROP]
         for index, target in enumerate(body.foreign_targets):
-            target_id = -(index + 1)
-            foreign_ids[target_id] = target
-            names[target_id] = target.name
-            crop_rates[target_id] = 0.0  # a tribute grows nothing, it only consumes
+            names[-(index + 1)] = target.name
 
     segments: list[ProfileSegment] = []
     for segment in body.segments:
@@ -1436,6 +1447,7 @@ async def post_execute(
                 row,
                 PlannedRoute(
                     origin_village_id=row.origin,
+                    dest_village_id=row.destination,
                     dest_x=dest_xy[0],
                     dest_y=dest_xy[1],
                     dest_name=village_label(row.destination, names),
@@ -1528,7 +1540,10 @@ async def post_execute(
     # One clear refusal before the loop, rather than N identical per-route
     # failures once inside it. The service guards create_route too, as defence
     # in depth for any other caller.
-    if not getattr(svc, "reconciler_verified", False):
+    # Not reachable while ROUTE_LIST_MARKUP_VERIFIED is True, which is the
+    # service default. Kept as the refusal path for a caller that constructs the
+    # service with the flag off, and for the day a gpack moves the model.
+    if not svc.reconciler_verified:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -1538,8 +1553,8 @@ async def post_execute(
                 "Creating on that basis would re-create the whole plan on every "
                 "run and accumulate duplicate routes in-game. Capture "
                 "/build.php?gid=17&t=3 with at least one route present, confirm "
-                "parse_trade_routes reads it, then set ROUTE_LIST_MARKUP_VERIFIED. "
-                "dry_run previews are unaffected."
+                "read_trade_routes finds the page's route model, then set "
+                "ROUTE_LIST_MARKUP_VERIFIED. dry_run previews are unaffected."
             ),
         )
 
@@ -1552,15 +1567,20 @@ async def post_execute(
     #     destination the plan no longer wants). We NEVER disable a destination we
     #     are about to create, so a failed disable can never leave a duplicate,
     #     and an origin is never stripped of routes we cannot immediately replace;
-    #   * a destination that already has a visible route is left untouched. Its
-    #     parameters are NOT updated: the marketplace parser does not expose a
-    #     route's cargo/cycle, so we cannot tell a changed route from an unchanged
-    #     one, and blindly rebuilding would churn every route every run. Updating
-    #     an existing route's parameters is therefore deferred to the same gate
-    #     that finalizes the create payload (operator disables it in-game to
-    #     force a rebuild until then);
-    #   * hidden entries are honeypots: invisible to a human, so we neither act on
-    #     them (never disabled) nor let them influence us (never deduped against).
+    #   * a destination that already has a route is left untouched, and its
+    #     parameters are NOT updated. The parser does now report cargo, repeat
+    #     and merchants, so a changed route COULD be told from an unchanged one
+    #     -- what is missing is an update call: Travian has no "edit route"
+    #     endpoint we have captured, so applying a change means delete-then-
+    #     create, and doing that whenever the plan's arithmetic shifts by a few
+    #     crop would churn every route every run. The operator disables a route
+    #     in-game to force a rebuild;
+    #   * hidden entries would be honeypots: invisible to a human, so we would
+    #     neither act on them (never disabled) nor let them influence us (never
+    #     deduped against). VESTIGIAL today -- the page's React model has no
+    #     hidden-entry concept, so the parser marks every route visible and this
+    #     branch never fires. Kept because it is the right shape if a gpack ever
+    #     grows one; do not read it as an active defence.
     #
     # The run is bounded by `cap` in BOTH dimensions: it reads at most `cap`
     # marketplaces AND fires at most `cap` creates. The origins-visited bound is
@@ -1658,7 +1678,7 @@ async def post_execute(
                     # committed writes; keep those in the structured response and
                     # stop rather than 500 out and lose the record (issue #65).
                     try:
-                        existing = await svc.list_existing_routes(origin)
+                        existing = await svc.list_existing_routes(origin, map_span=body.map_span)
                     except (NetworkError, MarketplaceUnreadable) as exc:
                         problems.append(
                             f"{village_label(origin, names)}: marketplace read failed "
@@ -1672,19 +1692,61 @@ async def post_execute(
                         continue
                     visited += 1
                     desired = desired_by_origin[origin]
-                    desired_coords = {(route.dest_x, route.dest_y) for _, route in desired}
-                    # Honeypots (hidden) are ignored entirely — neither acted on
-                    # nor treated as occupying a destination.
+                    # How a desired route is recognised in what is already
+                    # there. Own villages match on village id, which the page
+                    # states outright. A FOREIGN target has no id in the plan --
+                    # it is an operator-supplied coordinate with a synthetic
+                    # negative id -- so it can only match on coordinates, which
+                    # are back-derived from the page's map id. Mixing the two is
+                    # deliberate: keying everything on coordinates churns every
+                    # own-village route whenever the world span is wrong, and
+                    # keying everything on ids churns every foreign one always.
+                    desired_ids = {
+                        route.dest_village_id for _, route in desired if route.dest_village_id > 0
+                    }
+                    desired_foreign = {
+                        (route.dest_x, route.dest_y)
+                        for _, route in desired
+                        if route.dest_village_id < 0
+                    }
+
+                    def _desired_key(route: PlannedRoute) -> int | tuple[int, int]:
+                        if route.dest_village_id > 0:
+                            return route.dest_village_id
+                        return (route.dest_x, route.dest_y)
+
+                    def _existing_keys(e: ExistingRoute) -> set[int | tuple[int, int]]:
+                        """Every key this live route could be recognised by.
+
+                        Both kinds, because the route itself does not say which
+                        kind of plan entry (if any) wanted it. An int key and a
+                        tuple key cannot collide, and a route whose coordinates
+                        could not be derived contributes no coordinate key --
+                        which is why an unplaceable map id no longer reads as a
+                        route to nowhere that the plan does not want.
+                        """
+                        keys: set[int | tuple[int, int]] = {e.dest_village_id}
+                        if e.dest_x is not None and e.dest_y is not None:
+                            keys.add((e.dest_x, e.dest_y))
+                        return keys
+
+                    def _is_wanted(
+                        e: ExistingRoute,
+                        ids: set[int] = desired_ids,
+                        foreign: set[tuple[int, int]] = desired_foreign,
+                    ) -> bool:
+                        return bool({e.dest_village_id} & ids or _existing_keys(e) & foreign)
+
+                    # Honeypots (hidden) would be ignored entirely — neither
+                    # acted on nor treated as occupying a destination. A no-op
+                    # as things stand: nothing produces visible=False, because
+                    # the page model has no hidden rows to read.
                     visible = [e for e in existing if e.visible]
 
                     if body.disable_existing:
                         # Disable only ACTIVE visible routes the plan no longer
                         # wants; a route already disabled needs no action.
-                        stale = [
-                            e
-                            for e in visible
-                            if e.active and (e.dest_x, e.dest_y) not in desired_coords
-                        ]
+                        stale = [e for e in visible if e.active and not _is_wanted(e)]
                         if stale:
                             # Gate the disable mutation itself (issues #62/#64):
                             # check before, and again inside the service after its
@@ -1724,13 +1786,12 @@ async def post_execute(
                     # Only ENABLED routes satisfy the plan. A desired destination
                     # whose route exists but is DISABLED is re-enabled rather than
                     # duplicated; a desired destination with no route is created.
-                    satisfied = {(e.dest_x, e.dest_y) for e in visible if e.active}
-                    disabled_desired = [
-                        e
-                        for e in visible
-                        if not e.active and (e.dest_x, e.dest_y) in desired_coords
-                    ]
-                    blocked: set[tuple[int, int]] = set()
+                    satisfied: set[int | tuple[int, int]] = set()
+                    for e in visible:
+                        if e.active:
+                            satisfied |= _existing_keys(e)
+                    disabled_desired = [e for e in visible if not e.active and _is_wanted(e)]
+                    blocked: set[int | tuple[int, int]] = set()
                     if disabled_desired:
                         # Gate the re-enable mutation too (issues #62/#64).
                         reason = _stop_reason()
@@ -1748,25 +1809,28 @@ async def post_execute(
                             deferred.extend(desired)
                             continue
                         if enabled is not None and enabled.status == "enabled":
-                            satisfied.update((e.dest_x, e.dest_y) for e in disabled_desired)
+                            for e in disabled_desired:
+                                satisfied |= _existing_keys(e)
                             re_enables.append(
                                 f"{village_label(origin, names)}: re-enabled {enabled.detail}"
                             )
                         else:
                             # Couldn't re-enable — don't create a duplicate on top;
                             # report blocked so it isn't mistaken for satisfied.
-                            blocked = {(e.dest_x, e.dest_y) for e in disabled_desired}
+                            blocked = set()
+                            for e in disabled_desired:
+                                blocked |= _existing_keys(e)
                             problems.append(
                                 f"{village_label(origin, names)}: could not re-enable a "
                                 "disabled route the plan still wants"
                             )
 
                     for i, (row, route) in enumerate(desired):
-                        coord = (route.dest_x, route.dest_y)
-                        if coord in satisfied:
+                        destination = _desired_key(route)
+                        if destination in satisfied:
                             actions.append(_action(row, route, "skipped", "route already active"))
                             continue
-                        if coord in blocked:
+                        if destination in blocked:
                             actions.append(
                                 _action(row, route, "blocked", "route disabled; re-enable failed")
                             )
@@ -1798,7 +1862,7 @@ async def post_execute(
                             break
                         if result.status == "created":
                             actions.append(_action(row, route, "created", result.detail))
-                            satisfied.add(coord)
+                            satisfied.add(destination)
                             continue
                         outstanding += 1
                         if result.status == "skipped":

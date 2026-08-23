@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from ..clients.http_client import HttpClient
 from ..concurrency import KeyedLock
 from ..exceptions import NetworkError, TravianError
+from ..parsers.html_parser import DEFAULT_MAP_SPAN
 from ..services.distribution.allocation import Resource
 from ..stealth.human_delay import ActionType
 
@@ -52,7 +53,12 @@ _GOLDCLUB_MARKERS = ("goldclub", "gold club", "plus.error")
 
 
 class TradeRoutePayloadUnverified(TravianError):
-    """Raised when live creation is attempted before the wire payload is confirmed."""
+    """Raised when live creation is attempted without the live opt-in.
+
+    The wire payload IS verified against a real capture; this is the operator's
+    explicit switch for letting the app write to the game, not a
+    "we do not know the format yet" guard.
+    """
 
 
 class TradeRouteReconcilerUnverified(TravianError):
@@ -72,21 +78,23 @@ class MarketplaceUnreadable(TravianError):
     """
 
 
-# Whether parse_trade_routes has been confirmed against real gid=17&t=3 markup.
+# Whether the existing-route read has been confirmed against a real
+# /build.php?gid=17&t=3 page. It has: tests/fixtures/marketplace_trade_routes.html
+# is a real Europe 2 page (gpack 597.6), and the parser reads the JSON model the
+# page hands React rather than scraping row markup.
 #
-# This gates CREATION specifically, and the asymmetry is the point. The parser
-# returns [] for markup it does not recognise, which is the safe answer for
-# disabling -- an empty list disables nothing. It is the DANGEROUS answer for
-# creating, because the reconciler reads [] as "this village has no routes" and
-# creates the whole plan again. Every run. Duplicates accumulate in-game and the
-# repeated identical creates are exactly the daily rebuild-the-same-routes
-# pattern the code elsewhere says it avoids.
+# Kept as an explicit gate because it guards CREATION specifically, and the
+# asymmetry is the point. A page we cannot read yields no routes, which is the
+# safe answer for disabling -- nothing gets disabled -- and the DANGEROUS answer
+# for creating, because "no routes" reads as "this village is empty" and the
+# whole plan gets created again. Every run. Duplicates accumulate in-game and
+# the repeated identical creates are exactly the daily rebuild-the-same-routes
+# pattern the rest of this code goes to some trouble to avoid.
 #
-# The 2026-08-20 capture recorded the POST and PUT bodies but not the page HTML,
-# so the row markup (`data-route-id`, `data-x`, `data-y`) is still a guess.
-# To lift this: save the HTML of /build.php?gid=17&t=3 with at least one route
-# present, confirm parse_trade_routes finds it, add that page as a fixture, and
-# set this True.
+# read_trade_routes now distinguishes the two cases outright (None vs []), and
+# list_existing_routes raises MarketplaceUnreadable rather than reporting an
+# empty village. This flag stays as the switch a caller can flip if a future
+# gpack moves the model and the distinction stops holding.
 ROUTE_LIST_MARKUP_VERIFIED = True
 
 
@@ -95,6 +103,8 @@ class PlannedRoute:
     """One route to create: origin village → destination coordinates."""
 
     origin_village_id: int
+    # Reconciliation key -- see ExistingRoute.dest_village_id.
+    dest_village_id: int
     dest_x: int
     dest_y: int
     dest_name: str
@@ -125,8 +135,16 @@ class ExistingRoute:
     """A trade route already present on a village's marketplace page."""
 
     route_id: int
-    dest_x: int
-    dest_y: int
+    # The destination the page itself states. Reconciliation keys on THIS, not on
+    # coordinates: the page carries no coordinates, so those are back-derived from
+    # the map id through the world's span, and a wrong span (or a map id the span
+    # cannot place) silently mismatches every route -- which reads as "the plan
+    # wants none of these", disables them all, and creates the plan again on top.
+    dest_village_id: int
+    # Derived from the map id for display and reporting only. None when the map id
+    # was missing or impossible for this span.
+    dest_x: int | None = None
+    dest_y: int | None = None
     visible: bool = True  # UI-visible; hidden entries are treated as honeypots
     # Whether the route is currently ENABLED. Travian keeps disabled routes in
     # the list (they can be re-enabled), so a visible row at a desired coordinate
@@ -146,9 +164,10 @@ class TradeRouteService:
         reconciler_verified: bool = ROUTE_LIST_MARKUP_VERIFIED,
     ) -> None:
         self.http_client = http_client
-        # Live creation stays OFF until the real payload is captured and this is
-        # flipped on deliberately. Guessing the wire shape and firing it at a
-        # production account is exactly what this guard prevents.
+        # Live creation stays OFF until the operator turns it on deliberately.
+        # The wire format is verified, so this is not a "do we know the shape"
+        # guard -- it is the line between previewing a plan and writing to a
+        # real account.
         self.live_enabled = live_enabled
         # An instance attribute rather than a module lookup so the gate can be
         # exercised: a caller that genuinely can read route state says so here,
@@ -203,24 +222,29 @@ class TradeRouteService:
         self._marketplace_referer[village_id] = f"{base}{path}"
         return html
 
-    async def list_existing_routes(self, village_id: int) -> list[ExistingRoute]:
+    async def list_existing_routes(
+        self, village_id: int, *, map_span: int = DEFAULT_MAP_SPAN
+    ) -> list[ExistingRoute]:
         """Existing trade routes on a village's marketplace, visibility preserved.
 
-        Both visible and hidden entries are returned, each tagged with
-        ``visible``, so the caller can tell them apart. Hidden entries are
-        honeypots — a human can't see them — and the reconciler ignores them
-        entirely: it never disables one (acting on an invisible route is a pure
-        bot signal) and never lets one influence a create decision (conditioning
-        behavior on invisible data is the same tell in reverse). Parsing is
-        best-effort until a real marketplace page is captured; an unparseable
-        page yields an empty list rather than a guess. That is the safe answer
-        for DISABLING and the dangerous one for creating, which is why creation
-        is gated separately on ROUTE_LIST_MARKUP_VERIFIED.
+        Every entry is tagged with ``visible`` so a caller can ignore honeypots
+        a human could not see. Always True in practice: the page's React model
+        lists only real rows and has no hidden-entry concept, so the tag is
+        vestigial rather than a live signal.
+
+        The page's own React model is the source, so a route always carries the
+        destination *village id*; ``dest_x``/``dest_y`` are derived from the map
+        id through *map_span* for reporting only and may be None.
+
+        Raises :class:`MarketplaceUnreadable` if the page carried no model at all,
+        rather than reporting an empty village -- the difference decides whether
+        the reconciler creates the whole plan again.
         """
         html = await self.open_marketplace(village_id)
-        from ..parsers.html_parser import parse_trade_routes, trade_route_page_recognised
+        from ..parsers.html_parser import read_trade_routes
 
-        if not trade_route_page_recognised(html):
+        parsed = read_trade_routes(html, map_span)
+        if parsed is None:
             # A soft block page, a login redirect or a gpack that moved the
             # model all land here. Any of them would otherwise read as "this
             # village has no routes".
@@ -233,12 +257,13 @@ class TradeRouteService:
         return [
             ExistingRoute(
                 route_id=r["route_id"],
+                dest_village_id=r["dest_village_id"],
                 dest_x=r["dest_x"],
                 dest_y=r["dest_y"],
                 visible=r["visible"],
                 active=r.get("active", True),
             )
-            for r in parse_trade_routes(html)
+            for r in parsed
         ]
 
     # ── Write (gated: live opt-in; payload verified) ────────────────────────────

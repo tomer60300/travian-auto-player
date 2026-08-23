@@ -208,6 +208,13 @@ class TestLiveGate:
         assert asyncio.run(_run()) == 409
 
 
+# A real village id no plan row targets, and no plan coordinate resolves to.
+_UNWANTED_DEST = 909090
+# The id a marketplace page would report for a FOREIGN destination: real, and
+# absent from the plan, which only ever knows that target by its coordinates.
+_FOREIGN_REAL_ID = 555001
+
+
 def _desired_routes():
     """The routes the plan wants — discovered via a zero-request dry-run — so
     the live tests can seed marketplaces without hard-coding optimizer output."""
@@ -267,7 +274,7 @@ class _FakeLiveSvc:
 
         return _cm()
 
-    async def list_existing_routes(self, vid):
+    async def list_existing_routes(self, vid, *, map_span=None):
         self.listed.append(vid)
         if self.on_read is not None:
             self.on_read()  # e.g. signal captcha / exhaust budget DURING the read
@@ -330,7 +337,9 @@ class TestLiveExecution:
         desired = _desired_routes()
         existing = {}
         for a in desired:
-            existing.setdefault(a.origin, []).append(ExistingRoute(1, a.dest_x, a.dest_y))
+            existing.setdefault(a.origin, []).append(
+                ExistingRoute(1, a.destination, a.dest_x, a.dest_y)
+            )
         svc = _FakeLiveSvc(existing=existing)
         res = self._run(svc, disable_existing=False, max_routes_per_run=50)
         assert svc.created == [], "incremental mode must not recreate active routes"
@@ -346,7 +355,7 @@ class TestLiveExecution:
         assert len(svc.created) > 0
         for r in svc.created:  # marketplace now reflects run 1's creations
             svc._existing.setdefault(r.origin_village_id, []).append(
-                ExistingRoute(1, r.dest_x, r.dest_y)
+                ExistingRoute(1, r.dest_village_id, r.dest_x, r.dest_y)
             )
         svc.created.clear()
         self._run(svc, disable_existing=False, max_routes_per_run=50)
@@ -361,8 +370,10 @@ class TestLiveExecution:
         plan_dest = (a.dest_x, a.dest_y)
         existing = {
             a.origin: [
-                ExistingRoute(1, *plan_dest),  # the plan still wants this dest
-                ExistingRoute(2, 99, 98),  # stale — plan no longer wants it
+                # the plan still wants this dest
+                ExistingRoute(1, a.destination, *plan_dest),
+                # stale — plan wants neither this village nor this coordinate
+                ExistingRoute(2, _UNWANTED_DEST, 99, 98),
             ]
         }
         svc = _FakeLiveSvc(existing=existing)
@@ -382,8 +393,10 @@ class TestLiveExecution:
         a = desired[0]
         existing = {
             a.origin: [
-                ExistingRoute(1, a.dest_x, a.dest_y, visible=False),  # honeypot at a plan dest
-                ExistingRoute(2, 97, 96, visible=False),  # honeypot at a non-plan dest
+                # honeypot at a plan dest
+                ExistingRoute(1, a.destination, a.dest_x, a.dest_y, visible=False),
+                # honeypot at a non-plan dest
+                ExistingRoute(2, _UNWANTED_DEST, 97, 96, visible=False),
             ]
         }
         svc = _FakeLiveSvc(existing=existing)
@@ -445,7 +458,9 @@ class TestLiveExecution:
         desired = _desired_routes()
         existing = {}
         for a in desired:
-            existing.setdefault(a.origin, []).append(ExistingRoute(1, a.dest_x, a.dest_y))
+            existing.setdefault(a.origin, []).append(
+                ExistingRoute(1, a.destination, a.dest_x, a.dest_y)
+            )
         svc = _FakeLiveSvc(existing=existing)
         self._run(svc, disable_existing=False, max_routes_per_run=1)
         assert svc.created == []
@@ -471,7 +486,7 @@ class TestLiveExecution:
         # read as a clean success.
         desired = _desired_routes()
         a = desired[0]
-        existing = {a.origin: [ExistingRoute(1, 99, 98)]}  # stale, plan doesn't want it
+        existing = {a.origin: [ExistingRoute(1, _UNWANTED_DEST, 99, 98)]}  # stale
         svc = _FakeLiveSvc(existing=existing, disable_status="failed")
         res = self._run(svc, disable_existing=True, max_routes_per_run=50)
         assert any("disable" in p.lower() for p in res.problems), (
@@ -486,7 +501,7 @@ class TestServiceGuards:
 
     def test_create_route_refuses_until_payload_verified(self):
         svc = self._svc(live_enabled=False)
-        route = PlannedRoute(20003, 40, 40, "Ally-Keep", {Resource.CROP: 500}, 3, 2)
+        route = PlannedRoute(20003, -1, 40, 40, "Ally-Keep", {Resource.CROP: 500}, 3, 2)
         with pytest.raises(TradeRoutePayloadUnverified):
             asyncio.run(svc.create_route(route))
 
@@ -498,7 +513,7 @@ class TestServiceGuards:
     def test_disable_with_routes_refuses_until_verified(self):
         svc = self._svc(live_enabled=False)
         with pytest.raises(TradeRoutePayloadUnverified):
-            asyncio.run(svc.disable_routes(20003, [ExistingRoute(1, 40, 40)]))
+            asyncio.run(svc.disable_routes(20003, [ExistingRoute(1, _UNWANTED_DEST, 40, 40)]))
 
 
 class TestTradeRouteParser:
@@ -581,6 +596,9 @@ class TestTradeRouteParser:
         # the DOM scraper carried does not arise here. It was a property of
         # assumed markup, not of the page.
         page = self._page([self._route(1)])
+        # Pins the CONTRACT, not a computation: every route the parser reports
+        # is one a human can see. It cannot fail while the model has no hidden
+        # rows, which is the point being recorded.
         assert all(r["visible"] is True for r in parse_trade_routes(page))
 
     def test_a_route_without_an_id_is_skipped_not_guessed(self):
@@ -669,6 +687,75 @@ def _run_live(svc, account, **body_kw):
         return _execute(_exec_body(dry_run=False, **body_kw), svc=svc)
 
 
+def _own_village_account():
+    """A plan whose destination is one of the account's OWN villages, so the
+    reconciler can match it by village id rather than by coordinates."""
+    rows = (
+        SheetRow(
+            origin=20003,
+            destination=20011,
+            cargo={Resource.CROP: 100},
+            cycle_hours=6,
+            dispatch_minute=100,
+            arrival_minute=0,
+            merchants=2,
+        ),
+    )
+    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=rows)
+    return SimpleNamespace(
+        plan=plan,
+        names={20003: "03", 20011: "11"},
+        coords={20003: (0, 0), 20011: (10, 0)},
+        warnings=[],
+    )
+
+
+class TestOwnVillageRoutesSurviveABadWorldSpan:
+    """The marketplace page carries no coordinates -- only a village id and a map
+    id -- so any coordinate we hold for a live route is back-derived through the
+    world's span. On a world that is not 401 wide (or for a map id that span
+    cannot place) that derivation is wrong or absent, and a reconciler keyed on
+    coordinates then matches nothing: it disables every live route as stale and
+    creates the entire plan on top, every single run. That is the daily
+    rebuild-the-same-routes signature the whole reconciler exists to avoid."""
+
+    def test_a_wrong_span_does_not_churn_a_route_the_plan_still_wants(self):
+        account = _own_village_account()
+        # The route that is really there, as the page reports it: the right
+        # village, with coordinates that came out wrong for this world.
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(1, 20011, dest_x=-137, dest_y=42, active=True)]}
+        )
+        res = _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
+
+        assert svc.disabled == [], "a route the plan still wants must never be disabled"
+        assert svc.created == [], "and must never be recreated on top of itself"
+        assert [a.status for a in res.actions] == ["skipped"]
+
+    def test_an_unplaceable_map_id_does_not_churn_it_either(self):
+        # dest_x/dest_y are None when the map id could not be placed at all.
+        account = _own_village_account()
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(1, 20011, dest_x=None, dest_y=None, active=True)]}
+        )
+        res = _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
+
+        assert svc.disabled == [], "an unplaceable route the plan wants is not stale"
+        assert svc.created == []
+        assert [a.status for a in res.actions] == ["skipped"]
+
+    def test_a_route_to_a_village_the_plan_dropped_is_still_disabled(self):
+        # The other half: village-id matching must not make everything look
+        # wanted, or disable_existing would stop working entirely.
+        account = _own_village_account()
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(1, _UNWANTED_DEST, dest_x=None, dest_y=None)]}
+        )
+        _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
+
+        assert [vid for vid, _ in svc.disabled] == [20003], "a dropped destination is stale"
+
+
 class TestExecutionHardening:
     def test_dispatch_minute_survives_into_created_routes(self):  # #58
         svc = _FakeLiveSvc()  # empty marketplaces → both created
@@ -681,20 +768,25 @@ class TestExecutionHardening:
         # Was pinning the guessed startMinute/startTime pair. The captured
         # client request splits the send time into two integers instead; the
         # full wire format lives in tests/test_trade_route_payload.py.
-        route = PlannedRoute(20003, 40, 40, "A", {Resource.CROP: 100}, 6, 2, dispatch_minute=615)
+        route = PlannedRoute(
+            20003, -1, 40, 40, "A", {Resource.CROP: 100}, 6, 2, dispatch_minute=615
+        )
         payload = TradeRouteService(http_client=SimpleNamespace())._build_create_payload(route)
         assert payload["hour"] == 10
         assert payload["minute"] == 15
 
     def test_disabled_desired_route_is_re_enabled_not_duplicated(self):  # #60
-        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(1, 40, 40, active=False)]})
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(1, _FOREIGN_REAL_ID, 40, 40, active=False)]}
+        )
         _run_live(svc, _two_origin_account(), max_routes_per_run=50)
         assert (20003, ((40, 40),)) in svc.enabled, "a disabled desired route must be re-enabled"
         assert (40, 40) not in {(r.dest_x, r.dest_y) for r in svc.created}, "no duplicate create"
 
     def test_a_disabled_route_does_not_count_as_active(self):  # #60
         svc = _FakeLiveSvc(
-            existing={20003: [ExistingRoute(1, 40, 40, active=False)]}, enable_status="failed"
+            existing={20003: [ExistingRoute(1, _FOREIGN_REAL_ID, 40, 40, active=False)]},
+            enable_status="failed",
         )
         res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
         assert any(
@@ -704,7 +796,8 @@ class TestExecutionHardening:
 
     def test_failed_disable_defers_new_routes_for_that_origin(self):  # #61
         svc = _FakeLiveSvc(
-            existing={20003: [ExistingRoute(9, 99, 98, active=True)]}, disable_status="failed"
+            existing={20003: [ExistingRoute(9, _UNWANTED_DEST, 99, 98, active=True)]},
+            disable_status="failed",
         )
         res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
         assert (40, 40) not in {(r.dest_x, r.dest_y) for r in svc.created}, (
@@ -815,7 +908,7 @@ class TestExecutionHardening:
         # One stale ACTIVE route to disable + missing desired routes to create;
         # the captcha is signalled DURING the marketplace read, so NEITHER the
         # disable nor the create mutation may fire.
-        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(9, 99, 99, active=True)]})
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(9, _UNWANTED_DEST, 99, 99, active=True)]})
         svc.on_read = lambda: captcha_stop.signal(_USER.id)
         clock = itertools.count(1)
         try:
@@ -830,7 +923,7 @@ class TestExecutionHardening:
     def test_budget_exhausted_during_read_blocks_disable_and_create(self):  # #64 round 3
         # Budget runs out DURING the read; the disable and create that follow in
         # the same origin must not fire.
-        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(9, 99, 99, active=True)]})
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(9, _UNWANTED_DEST, 99, 99, active=True)]})
 
         def _exhaust():
             svc.budget_ok = False

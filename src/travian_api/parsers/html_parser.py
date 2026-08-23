@@ -329,36 +329,43 @@ def parse_build_page(html: str, slot_id: int = 0) -> BuildingDetail:
     upgrade_url = ""
     gold_upgrade_url = ""
 
-    # Look for buttons with checksum in onclick — prefer non-gold (no buildmaster)
+    # Record BOTH buttons the page offers. They are separate links with separate
+    # checksums, and one cannot be derived from the other, so the caller has to
+    # be able to choose between them -- scan every button rather than stopping at
+    # the first (which used to hide the gold link whenever the page listed the
+    # free one first).
     for button in soup.find_all(["button", "a"], onclick=True):
         onclick = button.get("onclick", "")
         checksum_match = re.search(r"checksum=([a-f0-9]{6})", onclick)
-        if checksum_match:
-            found_checksum = checksum_match.group(1)
+        if not checksum_match:
+            continue
+        found_checksum = checksum_match.group(1)
 
-            # Extract full URL
-            url_match = re.search(r"window\.location\.href = '([^']+)'", onclick)
-            found_url = ""
-            if url_match:
-                found_url = url_match.group(1).replace("&amp;", "&")
+        # Extract full URL
+        url_match = re.search(r"window\.location\.href = '([^']+)'", onclick)
+        found_url = ""
+        if url_match:
+            found_url = url_match.group(1).replace("&amp;", "&")
 
-            if "buildmaster" not in found_url:
-                # This is the free upgrade button — preferred
-                checksum = found_checksum
-                upgrade_url = found_url
-                break
-            # Gold button — store as fallback, keep looking for free one
-            if not checksum:
-                checksum = found_checksum
+        if "buildmaster" in found_url:
+            if not gold_upgrade_url:
                 gold_upgrade_url = found_url
+        elif not upgrade_url:
+            upgrade_url = found_url
+            # The free button's checksum is the one `checksum` reports, since
+            # that is the upgrade callers mean by default.
+            checksum = found_checksum
+        if not checksum:
+            checksum = found_checksum
 
-    # If we only found the gold button, construct the free URL from it
-    if not upgrade_url and gold_upgrade_url:
-        upgrade_url = gold_upgrade_url.replace("&buildmaster", "")
+    # Deliberately NOT synthesising the free URL from the gold one by stripping
+    # "&buildmaster": the checksum covers the exact query string the server
+    # emitted, so an edited URL is one the server never issued. If the page
+    # offers only the gold button, then only the gold upgrade is on offer.
 
     # Extract gid from the upgrade URL (most reliable source)
-    if upgrade_url:
-        gid_from_url = re.search(r"gid=(\d+)", upgrade_url)
+    if upgrade_url or gold_upgrade_url:
+        gid_from_url = re.search(r"gid=(\d+)", upgrade_url or gold_upgrade_url)
         if gid_from_url:
             gid = int(gid_from_url.group(1))
 
@@ -402,6 +409,7 @@ def parse_build_page(html: str, slot_id: int = 0) -> BuildingDetail:
         construction_time=construction_time,
         checksum=checksum,
         upgrade_url=upgrade_url,
+        gold_upgrade_url=gold_upgrade_url,
     )
 
 
@@ -605,15 +613,6 @@ def parse_rally_point_troops(html: str) -> Dict[str, int]:
     return troops
 
 
-# Class tokens that unambiguously hide an element via a stylesheet rule
-# (e.g. `.hidden{display:none}`). Best-effort: the real gid=17 markup is
-# uncaptured, so we cannot resolve computed CSS. Kept to the few universal
-# framework hiding classes only — a broader set (e.g. "none"/"hide") risks
-# misreading a legitimately visible row (or ancestor) as hidden, which would
-# create a duplicate route.
-_HIDDEN_CLASS_TOKENS = frozenset({"hidden", "invisible", "d-none"})
-
-
 # A map tile's linear index, as Travian numbers them. Verified against ground
 # truth: a captured create request targeted (23|88), the formula below gives it
 # mapId 45136, and 45136 is exactly the destination the marketplace page then
@@ -714,30 +713,8 @@ def trade_route_page_recognised(html: str) -> bool:
     return _trade_route_view_data(html) is not None
 
 
-def parse_trade_routes(html: str, map_span: int = DEFAULT_MAP_SPAN) -> List[Dict[str, Any]]:
-    """Existing trade routes on a village's marketplace (gid=17, tab t=3).
-
-    Read from the JSON model the page hands React, verified against a real
-    Europe 2 page (gpack 597.6). Travian groups routes into one *collection*
-    per destination village, each collection holding the individual scheduled
-    departures; this flattens them, one dict per departure, because that is what
-    a route id addresses and what the enable/disable call takes.
-
-    Returns ``{route_id, dest_village_id, dest_name, dest_map_id, dest_x,
-    dest_y, visible, active, merchants, repeat_hours, cargo}``.
-
-    ``dest_x``/``dest_y`` are always None: the page identifies a destination by
-    village id and map id, and carries no coordinates at all. Reconciling
-    against a plan therefore has to go through the village id -- matching on
-    coordinates cannot work from this source.
-
-    An unrecognised page yields an empty list. That is the safe answer for
-    disabling and the dangerous one for creating, so use
-    :func:`trade_route_page_recognised` to tell the two cases apart.
-    """
-    view = _trade_route_view_data(html)
-    if view is None:
-        return []
+def _routes_from_view(view: Dict[str, Any], map_span: int) -> List[Dict[str, Any]]:
+    """The route list inside an already-located marketplace view model."""
 
     try:
         collections = view["ownPlayer"]["village"]["marketplace"]["tradeRoutes"]
@@ -796,6 +773,56 @@ def parse_trade_routes(html: str, map_span: int = DEFAULT_MAP_SPAN) -> List[Dict
                 }
             )
     return routes
+
+
+def parse_trade_routes(html: str, map_span: int = DEFAULT_MAP_SPAN) -> List[Dict[str, Any]]:
+    """Existing trade routes on a village's marketplace (gid=17, tab t=3).
+
+    Read from the JSON model the page hands React, verified against a real
+    Europe 2 page (gpack 597.6). Travian groups routes into one *collection*
+    per destination village, each collection holding the individual scheduled
+    departures; this flattens them, one dict per departure, because that is what
+    a route id addresses and what the enable/disable call takes.
+
+    Returns ``{route_id, dest_village_id, dest_name, dest_map_id, dest_x,
+    dest_y, visible, active, merchants, repeat_hours, cargo}``.
+
+    The page identifies a destination by village id and map id, and carries no
+    coordinates. ``dest_x``/``dest_y`` are back-derived from the map id through
+    *map_span* for display, and are None when the map id is missing or impossible
+    for that span. They are lossy by construction and must not be used to decide
+    whether a route matches a plan -- key on ``dest_village_id``, which the page
+    states outright.
+
+    An unrecognised page yields an empty list, which is the safe answer for
+    disabling and the dangerous one for creating. Prefer :func:`read_trade_routes`,
+    which distinguishes the two in one pass.
+    """
+    view = _trade_route_view_data(html)
+    if view is None:
+        return []
+    return _routes_from_view(view, map_span)
+
+
+def read_trade_routes(
+    html: str, map_span: int = DEFAULT_MAP_SPAN
+) -> Optional[List[Dict[str, Any]]]:
+    """Routes on a marketplace page, or None if the page carried no model.
+
+    The distinction :func:`parse_trade_routes` cannot express: a village with
+    no routes and a page we failed to read both look like an empty list, but
+    only the first means "nothing is there". A caller that creates routes must
+    tell them apart or an unreadable page reads as an empty village and the
+    whole plan gets created on top of what is already running.
+
+    One pass: locating and JSON-parsing the model is the expensive part, and
+    this is why callers should not ask "recognised?" and "which routes?"
+    separately.
+    """
+    view = _trade_route_view_data(html)
+    if view is None:
+        return None
+    return _routes_from_view(view, map_span)
 
 
 def parse_troop_confirm_page(html: str) -> Dict[str, Any]:

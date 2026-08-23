@@ -100,6 +100,9 @@ const usableForeignTargets = (targets) =>
       route_eligible: Boolean(t.route_eligible),
     }))
 
+// Trade Office building id, as the game reports it in a village's slot list.
+const TRADE_OFFICE_GID = 28
+
 const RESOURCES = ['lumber', 'clay', 'iron', 'crop']
 const RESOURCE_LABEL = { lumber: 'Lumber', clay: 'Clay', iron: 'Iron', crop: 'Crop' }
 
@@ -415,6 +418,7 @@ export default function ResourcePlanner() {
   const [hydratedKey, setHydratedKey] = useState(null)
   const [plan, setPlan] = useState(null)
   const [fetching, setFetching] = useState(false)
+  const [scanningTradeOffices, setScanningTradeOffices] = useState(false)
   const [planning, setPlanning] = useState(false)
   const [execResult, setExecResult] = useState(null)
   const [executing, setExecuting] = useState(false)
@@ -614,6 +618,64 @@ export default function ResourcePlanner() {
       toast.error(errorDetail(err, 'Could not read account state'))
     } finally {
       setFetching(false)
+    }
+  }
+
+  // Read the Trade Office level of every village from the game instead of
+  // asking the operator to type 23 of them. The levels were always available:
+  // /status/export?include_buildings=true parses each village's dorf2, and the
+  // Trade Office is gid 28. Without this the operator switches village in
+  // Travian 23 times just to read a number the app can fetch.
+  //
+  // Deliberately its own action rather than part of Fetch state: it costs two
+  // requests PER VILLAGE where the snapshot costs three or four in total, so it
+  // must be priced separately and chosen, not paid by surprise.
+  const scanTradeOffices = async () => {
+    if (!villages.length) {
+      toast.error('Fetch account state first')
+      return
+    }
+    const requestedFor = accountKey
+    setScanningTradeOffices(true)
+    try {
+      const res = await api.get('/status/export', {
+        // Two pages per village through the stealth throttler runs minutes past
+        // the client's default timeout, same reasoning as the Buildings page.
+        params: { include_buildings: true },
+        timeout: 0,
+      })
+      if (requestedFor !== currentAccountKey()) return
+
+      const levels = {}
+      let missing = 0
+      for (const village of res.data?.villages ?? []) {
+        const buildings = village.buildings
+        if (!Array.isArray(buildings)) {
+          missing += 1
+          continue
+        }
+        // A village with no Trade Office has no gid-28 slot, and that is a
+        // CONFIRMED zero, not an unknown -- which is the whole point of reading
+        // it rather than guessing. Levels default to 0 only when the village's
+        // buildings could not be read at all, and those are reported instead.
+        const slot = buildings.find((b) => Number(b.gid) === TRADE_OFFICE_GID)
+        levels[village.id] = slot ? Number(slot.level) || 0 : 0
+      }
+
+      const known = new Set(villages.map((v) => v.village_id))
+      const applied = Object.fromEntries(
+        Object.entries(levels).filter(([vid]) => known.has(Number(vid)))
+      )
+      setTradeOffice((prev) => ({ ...prev, ...applied }))
+      const count = Object.keys(applied).length
+      toast.success(
+        `Read the Trade Office level of ${count} village(s) from the game` +
+          (missing ? ` · ${missing} village(s) could not be read` : '')
+      )
+    } catch (err) {
+      toast.error(errorDetail(err, 'Could not read Trade Office levels'))
+    } finally {
+      setScanningTradeOffices(false)
     }
   }
 
@@ -1460,6 +1522,16 @@ export default function ResourcePlanner() {
               address or Tailscale. Save them once and reload them instead. */}
           <div className="flex items-center gap-2 flex-wrap mb-3">
             <span className="text-secondary text-xs">Typed columns:</span>
+            <button
+              className="btn-secondary btn-sm"
+              onClick={scanTradeOffices}
+              disabled={scanningTradeOffices || fetching}
+              title="Reads each village's Trade Office level from the game instead of you typing it. Two page reads per village, paced by the stealth throttler, so it takes a few minutes."
+            >
+              {scanningTradeOffices
+                ? 'Reading…'
+                : `Read Trade Office from game (~${villages.length * 2} requests)`}
+            </button>
             <button className="btn-secondary btn-sm" onClick={exportSetup}>
               Save setup to file
             </button>
@@ -2145,9 +2217,10 @@ export default function ResourcePlanner() {
                 </p>
               )}
               <p className="text-secondary text-[11px] mt-2">
-                Approximation, stated plainly: each profile contributes its plan’s net rates, not
-                discrete batches — route phases don’t survive a profile switch. The per-profile
-                batch-level overflow check still runs when you build each plan.
+                Cargo is counted when it <em>lands</em>, not when it leaves: a batch a day-profile
+                route dispatches at 22:00 is credited to whichever profile owns the hour it
+                actually arrives in. Each profile’s routes fire on their own schedule inside its
+                hours, so an overflow caused by a hand-off between profiles shows up here.
               </p>
             </div>
           )}

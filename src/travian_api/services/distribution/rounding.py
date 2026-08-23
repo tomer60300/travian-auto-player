@@ -46,7 +46,18 @@ def round_preserving_total(
     floors = {key: math.floor(value) for key, value in values.items()}
     shortfall = total - sum(floors.values())
 
-    if shortfall <= 0:
+    if shortfall < 0:
+        # The documented guarantee is that the result sums to `total`, and with
+        # a negative shortfall `floors` already exceeds it -- handing back
+        # `floors` would quietly ship more than the merchants were budgeted for.
+        # No caller can reach this today (target_total is a ceil of a value at
+        # or above the floor sum), so it is an invariant violation, not a case
+        # to absorb.
+        raise ValueError(
+            f"target_total {total} is below the floor sum {sum(floors.values())}; "
+            f"it cannot be met without reducing an amount below its floor"
+        )
+    if shortfall == 0:
         return floors
 
     # Hand out the leftover units to the largest fractional parts first.

@@ -33,6 +33,7 @@ FLAG = "TRAVIAN_TRADE_ROUTE_LIVE"
 def _route() -> PlannedRoute:
     return PlannedRoute(
         origin_village_id=20031,
+        dest_village_id=20044,
         dest_x=10,
         dest_y=-20,
         dest_name="capital",

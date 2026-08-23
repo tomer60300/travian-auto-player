@@ -88,8 +88,9 @@ class Settings(BaseSettings):
     trade_route_live: bool = Field(
         default=False,
         description=(
-            "Allow live trade-route creation. Only enable once the "
-            "/api/v1/trade-routes payload is captured and verified."
+            "Allow live trade-route creation. Off by default because turning it "
+            "on writes real routes to the account; the /api/v1/trade-routes "
+            "payload itself is verified against a real capture."
         ),
     )
 

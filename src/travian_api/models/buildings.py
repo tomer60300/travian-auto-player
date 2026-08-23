@@ -44,7 +44,13 @@ class BuildingDetail(BaseModel):
     )
     construction_time: str = Field(default="", description="Construction time string")
     checksum: str = Field(default="", description="Upgrade checksum")
-    upgrade_url: str = Field(default="", description="Full upgrade URL")
+    upgrade_url: str = Field(
+        default="", description="Free upgrade URL, exactly as the page emitted it"
+    )
+    # The Master Builder ("buildmaster") link is a SEPARATE button with its own
+    # checksum. Kept verbatim and separate because the checksum covers the exact
+    # query string: you cannot turn one of these URLs into the other.
+    gold_upgrade_url: str = Field(default="", description="Master Builder upgrade URL, verbatim")
 
     @field_validator("costs")
     @classmethod

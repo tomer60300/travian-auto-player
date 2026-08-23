@@ -306,8 +306,9 @@ def cheapest_cycle(
     # building a RouteCost for every candidate only to discard all but one was
     # measurably the largest single cost in generating a plan. The arithmetic
     # below is exactly route_cost's, kept in step with it, and only the winner
-    # is materialised. cycle_sweep still exists for the UI, which wants the
-    # whole curve.
+    # is materialised. cycle_sweep still exists because the optimizer's
+    # idle-merchant latency pass wants the whole curve, not just the winner --
+    # nothing in the web layer or the frontend reads it.
     best: tuple[int, int, int, int, int] | None = None  # committed, cycle, batch, send, sets
     for cycle_hours in cycles:
         # Same checks in the same order as route_cost, so an invalid argument
