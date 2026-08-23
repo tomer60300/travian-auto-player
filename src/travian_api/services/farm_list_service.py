@@ -240,6 +240,7 @@ class FarmListService:
         self,
         list_id: int,
         target_slot_ids: Optional[List[int]] = None,
+        known_list: Optional[FarmList] = None,
     ) -> FarmListSendResult:
         """
         Send raids for a farm list using round-robin batched ordering.
@@ -259,22 +260,31 @@ class FarmListService:
             list_id: Farm list ID
             target_slot_ids: Specific slot IDs to send (skips round-robin).
                 If None, fetches all active slots and applies batched rotation.
+            known_list: A copy of this list the caller already holds. Supplying
+                it skips a re-read of data we just fetched -- `get_all_farm_lists`
+                and `get_farm_list` issue the *same* GraphQL fragment with the
+                same arguments, so a cycle over N lists re-requested each one
+                seconds after receiving it. Identical repeated queries are both
+                wasted budget and a pattern no client produces. Deliberately a
+                separate argument from `target_slot_ids`, which selects bulk
+                mode instead of round-robin and must keep meaning only that.
         """
         async with self._list_lock(list_id):
-            return await self._send_farm_list_unlocked(list_id, target_slot_ids)
+            return await self._send_farm_list_unlocked(list_id, target_slot_ids, known_list)
 
     async def _send_farm_list_unlocked(
         self,
         list_id: int,
         target_slot_ids: Optional[List[int]],
+        known_list: Optional[FarmList] = None,
     ) -> FarmListSendResult:
         use_round_robin = target_slot_ids is None
 
         if target_slot_ids is None:
-            farm_list = await self.get_farm_list(list_id)
+            farm_list = known_list if known_list is not None else await self.get_farm_list(list_id)
             target_slot_ids = [s.id for s in farm_list.active_slots]
         else:
-            farm_list = None
+            farm_list = known_list
 
         if not target_slot_ids:
             return FarmListSendResult(targets=[])
@@ -456,7 +466,7 @@ class FarmListService:
                 except Exception:
                     pass
 
-                results[lid] = await self.send_farm_list(lid)
+                results[lid] = await self.send_farm_list(lid, known_list=by_id.get(lid))
                 sent_count += 1
 
                 # Stealth: noise injection between farm list sends

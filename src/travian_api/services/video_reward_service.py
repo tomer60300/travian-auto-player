@@ -80,8 +80,42 @@ class VideoRewardService:
         self._atg_client: Optional[httpx.AsyncClient] = None
 
     async def _get_atg_client(self) -> httpx.AsyncClient:
+        """The ad-network client: no Travian cookies, but the same browser.
+
+        This client exists to keep Travian's session cookies off the ad host, and
+        that part was right. What it also did was leave headers to httpx, which
+        means every one of these requests announced ``User-Agent:
+        python-httpx/<version>`` -- a plaintext "not a browser" string on a host
+        that Travian's own reward flow validates against. The rest of the stack
+        spends real effort on TLS and header shape; this endpoint gave it away in
+        cleartext.
+
+        The ad frame is a page inside the game's own browser, so it carries that
+        browser's identity: same UA, same language, same client hints.
+        """
         if not self._atg_client:
-            self._atg_client = httpx.AsyncClient(timeout=30, follow_redirects=True)
+            headers = self.http_client._browser_headers.for_page_load()
+            self._atg_client = httpx.AsyncClient(
+                timeout=30,
+                follow_redirects=True,
+                headers={
+                    key: value
+                    for key, value in headers.items()
+                    # The ad host is a different origin: Travian's Referer and
+                    # its same-origin Sec-Fetch-Site would both be lies, and a
+                    # detectable one. The identity headers are what carry over.
+                    if key
+                    in (
+                        "User-Agent",
+                        "Accept-Language",
+                        "Accept-Encoding",
+                        "sec-ch-ua",
+                        "sec-ch-ua-mobile",
+                        "sec-ch-ua-platform",
+                    )
+                    and value is not None
+                },
+            )
         return self._atg_client
 
     async def close(self):
@@ -212,6 +246,13 @@ class VideoRewardService:
             atg_headers = {
                 "Content-Type": "application/x-www-form-urlencoded",
                 "X-Requested-With": "XMLHttpRequest",
+                # jQuery's default for $.post with no dataType.
+                "Accept": "*/*",
+                # An ad frame calling its own host is a cross-site subresource,
+                # and saying so is what the browser would do.
+                "Sec-Fetch-Site": "cross-site",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Dest": "empty",
             }
 
             logger.info(
@@ -318,7 +359,22 @@ class VideoRewardService:
         try:
             full_url = iframe_url if iframe_url.startswith("http") else f"https:{iframe_url}"
             atg = await self._get_atg_client()
-            resp = await atg.get(full_url)
+            # This is the browser loading the ad iframe's document, and its
+            # headers say so -- a document request that looked like a bare API
+            # call would not match what the game's page actually does.
+            resp = await atg.get(
+                full_url,
+                headers={
+                    "Accept": (
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                        "image/avif,image/webp,image/apng,*/*;q=0.8"
+                    ),
+                    "Sec-Fetch-Site": "cross-site",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-Dest": "iframe",
+                    "Upgrade-Insecure-Requests": "1",
+                },
+            )
 
             if resp.status_code != 200:
                 logger.warning(f"Iframe fetch returned {resp.status_code}")

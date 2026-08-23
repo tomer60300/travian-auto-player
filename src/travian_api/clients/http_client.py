@@ -297,6 +297,24 @@ class HttpClient:
         self._resolved_x_version = self.settings.x_version
         return self._resolved_x_version
 
+    def adopt_x_version(self, html: str) -> bool:
+        """Take X-Version from a page we have already loaded.
+
+        Same job as :meth:`try_resolve_x_version` without the request. The
+        warm-up walk lands on /dorf1.php and hands back its HTML; fetching
+        /dorf1.php again immediately afterwards to read a version string out of
+        it is a duplicate no browser would issue.
+
+        Returns whether a version was found; the caller decides whether to fall
+        back to a real request.
+        """
+        version = extract_x_version(html)
+        if version is None:
+            return False
+        self._resolved_x_version = version
+        logger.info("Resolved X-Version from the warm-up landing page: %s", version)
+        return True
+
     async def try_resolve_x_version(self) -> None:
         """Attempt to resolve X-Version from a live game page.
 
@@ -954,18 +972,29 @@ class HttpClient:
         """Make a POST request with JSON data.
 
         Args:
-            request_type: "json" (default, generic API client) or "xhr" — use
-                "xhr" for endpoints that the Travian frontend JavaScript calls
-                via fetch/XMLHttpRequest (map/position, tile-details,
-                /api/v1/farm-list/*). The XHR shape adds X-Requested-With and
-                Sec-Fetch-Mode: cors so browser-frontend traffic is not
-                fingerprinted as a generic JSON client.
+            request_type: which browser shape to send.
+
+                * ``"xhr"`` — XMLHttpRequest, which is the one shape that
+                  carries ``X-Requested-With``. Used where the game's own code
+                  goes through XHR (map/position, tile-details,
+                  /api/v1/farm-list/*).
+                * ``"fetch"`` — a ``fetch()`` call: no ``X-Requested-With``,
+                  ``Accept: */*``, no ``X-Version``. Matches the captured
+                  /api/v1/trade-routes traffic.
+                * ``"json"`` (default) — a generic JSON client.
+
+                Which one is right is a per-endpoint fact to be captured, not
+                deduced: an endpoint sent with the wrong shape (or, worse, the
+                same endpoint sent with two shapes across runs) is a
+                fingerprint in itself.
         """
         if not url.startswith("http"):
             url = urljoin(self.base_url, url.lstrip("/"))
 
-        # XHR requests still send a JSON body; merge in JSON Content-Type on top
-        # of the XHR header shape so the request stays a valid fetch+json POST.
+        # An XHR still sends a JSON body, and the XHR shape leaves Content-Type
+        # to the caller, so merge it in below. The "fetch" shape deliberately
+        # does not get one here: the transport sets it for a `json=` body, and
+        # for_fetch's contract is that the caller owns that header.
         rt = request_type if request_type in ("xhr", "fetch") else "json"
         headers = await self._stealth_pre_request(url, rt, referer=referer)
         # The non-stealth header path returns Content-Type="" which would

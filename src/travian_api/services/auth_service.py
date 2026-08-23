@@ -167,16 +167,20 @@ class AuthService:
                 await self._cache_jwt(self._auth_state)
 
             # Stealth: post-login warm-up sequence (loads pages a human would visit)
+            landing_html: str | None = None
             if self.settings.stealth:
                 try:
                     village_id = self._auth_state.village_id or None
-                    await self.http_client.navigator.warm_up(village_id=village_id)
+                    landing_html = await self.http_client.navigator.warm_up(village_id=village_id)
                 except Exception:
                     pass  # Warm-up failure shouldn't block login
 
-            # Resolve dynamic X-Version now that we're authenticated
+            # Resolve dynamic X-Version now that we're authenticated. The
+            # warm-up already loaded a real game page, so read the version out
+            # of that rather than fetching /dorf1.php a second time in a row.
             try:
-                await self.http_client.try_resolve_x_version()
+                if landing_html is None or not self.http_client.adopt_x_version(landing_html):
+                    await self.http_client.try_resolve_x_version()
             except Exception as exc:
                 logger.warning(
                     "X-Version resolution failed, using configured %s: %s",

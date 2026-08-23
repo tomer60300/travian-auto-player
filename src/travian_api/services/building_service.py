@@ -454,22 +454,31 @@ class BuildingService:
             if not building_detail.checksum:
                 raise TravianError(f"No upgrade available for building in slot {slot_id}")
 
-            # Construct upgrade URL — use the section1 (normal) upgrade button URL.
-            # Do NOT add &buildmaster unless allow_gold is True (master builder costs gold
-            # when queue is occupied, and may silently fail on non-Plus accounts).
-            upgrade_url = building_detail.upgrade_url
+            # Use the link the page actually rendered, byte for byte.
+            #
+            # The checksum in these URLs is computed by the server over the exact
+            # query string it emitted, so ANY edit -- appending &buildmaster,
+            # stripping it, appending &newdid -- produces a URL the server never
+            # issued and can trivially recognise as not having come from its own
+            # page. A browser cannot do that: it can only follow the link. The
+            # free upgrade and the Master Builder upgrade are two separate
+            # buttons with two separate checksums, so "gold" is a choice between
+            # the page's links, never a parameter we add to one.
+            #
+            # Village context needs no parameter here: get_building_detail
+            # already fetched this page with newdid=<village>, which switched the
+            # session's active village server-side, and the link below was
+            # rendered by that same page.
+            upgrade_url = (
+                building_detail.gold_upgrade_url if allow_gold else building_detail.upgrade_url
+            )
             if not upgrade_url:
-                dorf_page = "dorf1" if slot_id <= 18 else "dorf2"
-                upgrade_url = f"/{dorf_page}.php?id={slot_id}&gid={building_detail.gid}&action=build&checksum={building_detail.checksum}"
-
-            # Only add &buildmaster when explicitly allowed (master builder / gold usage)
-            if allow_gold and "&buildmaster" not in upgrade_url:
-                upgrade_url += "&buildmaster"
-
-            # Add village context if needed
-            if village_id and f"newdid={village_id}" not in upgrade_url:
-                sep = "&" if "?" in upgrade_url else "?"
-                upgrade_url += f"{sep}newdid={village_id}"
+                which = "Master Builder" if allow_gold else "free"
+                raise TravianError(
+                    f"slot {slot_id}: the build page offered no {which} upgrade link, "
+                    f"and one cannot be constructed -- the server checksums the exact "
+                    f"URL it emitted"
+                )
 
             # Perform upgrade by GET request to the URL
             response_html = await self.http_client.get_html(
@@ -636,10 +645,11 @@ class BuildingService:
                 except Exception as exc:
                     logger.debug("pre_construct_flow noise failed (non-critical): %s", exc)
 
+            # Verbatim, for the same reason as upgrade_build: the checksum in a
+            # scraped action URL covers the exact query string the server sent.
+            # The village is already active -- the page this link came from was
+            # fetched with newdid=<village>.
             build_url = target["build_url"]
-            if village_id and f"newdid={village_id}" not in build_url:
-                sep = "&" if "?" in build_url else "?"
-                build_url += f"{sep}newdid={village_id}"
 
             response_html = await self.http_client.get_html(
                 build_url, skip_reauth=True, safe_to_retry=False

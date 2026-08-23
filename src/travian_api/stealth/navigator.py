@@ -178,14 +178,18 @@ class PageNavigator:
         self._current_page = path
         return html
 
-    async def warm_up(self, village_id: Optional[int] = None) -> None:
+    async def warm_up(self, village_id: Optional[int] = None) -> Optional[str]:
         """Post-login warm-up sequence. Loads pages a real player would visit.
 
         Simulates: login -> resource overview -> village center -> maybe stats -> back
         This prevents "login -> immediate API blast" detection patterns.
+
+        Returns the landing page's HTML so the caller does not have to fetch a
+        page we have already loaded. Loading /dorf1.php twice in a row, back to
+        back, is not something a browser does.
         """
         if not self.enabled:
-            return
+            return None
 
         logger.debug("Running post-login warm-up sequence")
         newdid = f"?newdid={village_id}" if village_id else ""
@@ -198,7 +202,7 @@ class PageNavigator:
         # specific and vary per call — no single n-gram / Markov signature is
         # shared across accounts. All pages are coherent navigation targets, so
         # the Referer chain stays truthful, and the walk is bounded.
-        await self._visit(f"/dorf1.php{newdid}", "checking resource overview after login")
+        landing = await self._visit(f"/dorf1.php{newdid}", "checking resource overview after login")
 
         current = "dorf1"
         for _ in range(self._route_max_steps):
@@ -208,6 +212,7 @@ class PageNavigator:
             await self._visit(self._warmup_page_path(nxt, newdid), _WARMUP_PAGE_DESC[nxt])
             current = nxt
         logger.debug("Warm-up sequence complete")
+        return landing
 
     async def navigate_to_resource_field(
         self, slot_id: int, village_id: Optional[int] = None
@@ -268,6 +273,12 @@ class PageNavigator:
         newdid = f"?newdid={village_id}" if village_id else ""
         newdid_amp = f"&newdid={village_id}" if village_id else ""
 
+        # Already here: nothing to navigate. Checked before the dorf2 hop, or
+        # "go to the rally point" would walk away from the rally point and back.
+        rally_url = f"/build.php?gid=16&tt=2{newdid_amp}"
+        if self._current_page == rally_url:
+            return
+
         # Visit dorf2 first
         if self._current_page != f"/dorf2.php{newdid}":
             await self._visit(f"/dorf2.php{newdid}", "viewing village")
@@ -275,7 +286,6 @@ class PageNavigator:
         await self._delay.wait(ActionType.CLICK, "clicking rally point")
 
         # Actually fetch the rally point page so referer chain is truthful
-        rally_url = f"/build.php?gid=16&tt=2{newdid_amp}"
         await self._visit(rally_url, "opening rally point")
 
     async def navigate_to_map(self, village_id: Optional[int] = None) -> None:
@@ -306,10 +316,20 @@ class PageNavigator:
         if not self.enabled:
             return
 
-        await self.navigate_to_rally_point(village_id)
-        await self._delay.wait(ActionType.CLICK, "opening farm list tab")
         newdid_amp = f"&newdid={village_id}" if village_id else ""
         farm_url = f"/build.php?gid=16&tt=99{newdid_amp}"
+
+        # Already looking at this village's farm-list tab: a player sending
+        # their second list does not reload dorf2, the rally point and the tab
+        # to get back to the page they are already on. Re-walking it made a
+        # farm cycle issue the same three GETs once per list -- both wasted
+        # budget and a repetition no session produces. The caller groups lists
+        # by owner village precisely so this context holds.
+        if self._current_page == farm_url:
+            return
+
+        await self.navigate_to_rally_point(village_id)
+        await self._delay.wait(ActionType.CLICK, "opening farm list tab")
         await self._visit(farm_url, "opening farm-list tab")
 
     async def pre_construct_flow(self, slot_id: int, village_id: Optional[int] = None) -> None:
