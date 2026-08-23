@@ -138,12 +138,42 @@ Notes, all of which corrected an earlier assumption:
     acting on all `24/N` of its rows. This is why the captured toggle carried 24
     route ids in a single PUT.
 
-- **`deliveries` (1x / 2x / 3x) is read back as `repeat`, and it is merchant
-  loads per firing -- not a repeat count.** Confirmed against a single route on a
-  real page: the JSON says `repeat: 2, merchants: 7`, and that same route in the
-  Edit dialog shows `Deliveries: 2x` with `Merchants: 7/20` for 75,000 crop at
-  02:00. Every other route on the page reads `repeat: 1, merchants: 1`. The app
-  sends 1, the minimum.
+- **`deliveries` (1x / 2x / 3x) is read back as `repeat`, and it means N
+  CONSECUTIVE round trips by the SAME merchant set** -- automatically resent the
+  moment those merchants arrive home, without needing another route or a manual
+  resend. It is not N parallel loads.
+
+  For `2x` with 75,000 crop and 7 merchants:
+
+  ```
+  dispatch 75k  -> 7 merchants outbound, occupied
+  75k lands     -> the same 7 on the return leg, still occupied
+  they get home -> resent immediately, automatically
+  dispatch 75k  -> the same 7 outbound again
+  75k lands     -> returning
+  they get home -> 2x complete
+  ```
+
+  So for `deliveries: N` against a route of *m* merchants:
+
+  | quantity | value |
+  |---|---|
+  | delivered per firing | N x cargo |
+  | PEAK merchants occupied | m -- unchanged by N |
+  | merchants held for | N x round_trip |
+
+  The trade-off is peak occupancy against latency: `2x` with 7 merchants moves
+  the same total as one go with 14, holding half as many merchants for twice as
+  long. Sending 14 at once is faster and occupies more of the fleet at once.
+
+  Consistent with the captured page: 75,000 / 12,000 per merchant = 6.25 -> 7
+  merchants for ONE load, and `repeat: 2` on that row. Every other route on the
+  page reads `repeat: 1, merchants: 1`.
+
+  The app sends `1`, which is why none of this is load-bearing yet. Were it ever
+  raised, the planner would have to hold `N x round_trip <= cycle_hours` or
+  account for the extra in-flight sets -- `deliveries` is a lever on peak
+  merchant occupancy, which is precisely the budget the optimizer allocates.
 
 - **No merchant count is sent.** The game derives it from the cargo, so a planner's merchant figures are for budgeting and warnings only, never wire data.
 - **All four resources are always present**, zeros included.
@@ -206,7 +236,8 @@ route cap and the delete path are all settled against real captures.
   trash icon in the Edit dialog. So a created route is reversible, not permanent
   -- which is what makes a controlled live test safe to run. Deleting a
   fanned-out route means selecting all `24/N` of its rows.
-- **`deliveries` is merchant loads per firing**, read back as `repeat`.
+- **`deliveries` is N sequential round trips by the same merchant set**, read
+  back as `repeat`; it trades peak merchant occupancy for latency.
 
 
 ---

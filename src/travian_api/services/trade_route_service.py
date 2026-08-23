@@ -283,8 +283,18 @@ class TradeRouteService:
         extra field the client never sends is a fingerprint.
 
         ``hour``/``minute`` are the send time, which is why the planner's beat
-        survives into the game. ``deliveries`` was 1 in the capture and is left
-        at 1 -- a route sends one load per cycle. ``mode`` is "send" (the
+        survives into the game.
+
+        ``deliveries`` stays at 1 deliberately. The game allows 1, 2 or 3, and
+        N means N consecutive round trips by the SAME merchant set, auto-resent
+        the moment they arrive home -- so it holds `merchants` merchants for
+        N x round_trip instead of holding N x merchants for one. That is a lever
+        on peak merchant occupancy, which is exactly the budget the optimizer
+        allocates, so raising it here without teaching the optimizer about it
+        would spend merchants the plan believes are free.
+
+        ``repeatEvery`` is the cycle in hours, and the game fans one request out
+        into 24/N daily rows -- so this single call can become up to 24 routes. ``mode`` is "send" (the
         marketplace also has a fetch direction we never use), and
         ``useTradeShips`` is false because this server has no boats.
         """
