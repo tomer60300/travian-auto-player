@@ -1109,3 +1109,154 @@ class TestTheGameRowFanOutIsReported:
             "BEFORE anything is written"
         )
         assert events[-1]["created_game_rows"] == 8
+
+
+class _ExplodingSvc(_FakeLiveSvc):
+    """A game that fails in a way nobody anticipated, part-way through."""
+
+    def __init__(self, blow_on: int = 2, **kw):
+        super().__init__(**kw)
+        self._blow_on = blow_on
+        self._calls = 0
+
+    async def create_route(self, route, *, stop_check=None):
+        self._calls += 1
+        if self._calls == self._blow_on:
+            raise RuntimeError("the game returned something nobody expected")
+        return await super().create_route(route, stop_check=stop_check)
+
+
+class TestAnUnexpectedFailureStillAccountsForWhatItWrote:
+    """The failure mode that matters most: writes commit, then something breaks.
+
+    Issue #65 handled the read failures we anticipated. Anything else propagated
+    as a bare 500, so a run that had already created routes in a real account
+    told the operator nothing whatsoever about them -- the worst possible
+    combination of a real side effect and no record of it.
+    """
+
+    def test_it_still_fails_rather_than_pretending_the_run_succeeded(self):
+        svc = _ExplodingSvc(blow_on=2)
+        with pytest.raises(HTTPException) as caught:
+            _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        assert caught.value.status_code == 500
+
+    def test_the_error_says_how_many_routes_it_had_already_created(self):
+        svc = _ExplodingSvc(blow_on=2)
+        with pytest.raises(HTTPException) as caught:
+            _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        detail = str(caught.value.detail)
+        assert len(svc.created) == 1, "the fixture is meant to commit one write first"
+        assert "creating 1 route(s)" in detail
+        assert "Nothing further was attempted" in detail
+
+    def test_the_error_points_at_the_trace_and_the_way_to_undo_it(self):
+        svc = _ExplodingSvc(blow_on=2)
+        with pytest.raises(HTTPException) as caught:
+            _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        detail = str(caught.value.detail)
+        assert "trace" in detail
+        assert "revert-plan" in detail, "an operator mid-incident needs the next step"
+
+    def test_the_trace_records_the_committed_write_and_the_failure(self):
+        import json
+        from pathlib import Path
+
+        from travian_api.services.distribution import execution_trace
+
+        svc = _ExplodingSvc(blow_on=2)
+        with pytest.raises(HTTPException):
+            _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        # The newest trace in the (test-isolated) directory is this run's.
+        newest = max(
+            Path(execution_trace.TRACE_DIR).glob("exec-*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        events = [json.loads(line) for line in newest.read_text(encoding="utf-8").splitlines()]
+        kinds = [e["kind"] for e in events]
+
+        assert "run_failed" in kinds, "the failure itself must be in the record"
+        failure = next(e for e in events if e["kind"] == "run_failed")
+        assert failure["error_type"] == "RuntimeError"
+        assert failure["created_before_failure"] == 1
+        assert events[-1]["kind"] == "run_end", "and the trace must still terminate"
+
+
+class TestTheFanOutDoesNotCauseAReRun:
+    """One create becomes 24/N rows in the game. The next run must skip them all.
+
+    This is the interaction most likely to cause silent duplication: the run
+    creates ONE route, the game turns it into 24, and a reconciler that expected
+    to find one thing could conclude its route is missing and create it again --
+    every run, forever.
+    """
+
+    def _fan_out(self, svc, cycle_hours: int):
+        """Rewrite the fake marketplace the way the game would after a create."""
+        rows = {}
+        for created in svc.created:
+            origin = created.origin_village_id
+            for i in range(24 // cycle_hours):
+                rows.setdefault(origin, []).append(
+                    ExistingRoute(
+                        route_id=700000 + len(rows.get(origin, [])) + i,
+                        dest_village_id=created.dest_village_id,
+                        dest_x=created.dest_x,
+                        dest_y=created.dest_y,
+                        active=True,
+                    )
+                )
+        return rows
+
+    def test_a_second_run_creates_nothing_after_the_game_fans_out(self):
+        svc = _FakeLiveSvc()
+        _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        assert len(svc.created) == 2
+
+        # _two_origin_account plans 6-hour cycles -> 4 rows each.
+        svc._existing = self._fan_out(svc, cycle_hours=6)
+        assert sum(len(v) for v in svc._existing.values()) == 8
+        svc.created.clear()
+
+        res = _run_live(svc, _two_origin_account(), disable_existing=True, max_routes_per_run=50)
+
+        assert svc.created == [], "the fanned-out rows already satisfy the plan"
+        assert svc.disabled == [], "and none of them is stale"
+        assert all(a.status == "skipped" for a in res.actions)
+
+    def test_disabling_a_dropped_destination_disables_every_row_of_it(self):
+        # The other direction: dropping a destination must switch off all 24/N
+        # of its rows, not just one, or the route keeps running at reduced rate.
+        account = _own_village_account()
+        rows = [
+            ExistingRoute(route_id=700000 + i, dest_village_id=_UNWANTED_DEST, active=True)
+            for i in range(24)
+        ]
+        svc = _FakeLiveSvc(existing={20003: rows})
+
+        _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
+
+        assert len(svc.disabled) == 1, "one PUT carries them all, as the capture showed"
+        _, coords = svc.disabled[0]
+        assert len(coords) == 24, "every row of the dropped destination is disabled"
+
+    def test_a_partly_disabled_destination_is_restored_not_duplicated(self):
+        # Half the rows off means half the cadence. The plan still wants this
+        # destination, so the fix is to re-enable -- never to create more rows
+        # on top of the ones already there.
+        account = _own_village_account()
+        rows = [
+            ExistingRoute(route_id=700000 + i, dest_village_id=20011, active=(i % 2 == 0))
+            for i in range(8)
+        ]
+        svc = _FakeLiveSvc(existing={20003: rows})
+
+        _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
+
+        assert svc.created == [], "a partly-live destination must never be duplicated"
+        assert svc.enabled, "the disabled half is switched back on"
+        _, enabled_coords = svc.enabled[0]
+        assert len(enabled_coords) == 4, "exactly the four that were off"

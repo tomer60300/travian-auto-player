@@ -2188,6 +2188,34 @@ async def post_execute(
             stopped_early=stopped_early,
             gold_club_blocked=gold_club_blocked,
         )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # An unexpected failure must not throw away the fact that writes already
+        # committed. Issue #65 handled the read failures we anticipated
+        # (NetworkError, MarketplaceUnreadable); anything else propagated as a
+        # bare 500, so a run that had already created routes told the operator
+        # nothing about them. Re-raise -- this IS a failure and must not be
+        # dressed up as a successful run -- but say what landed and where the
+        # evidence is.
+        logger.exception("live trade-route execution failed unexpectedly")
+        committed = sum(1 for a in actions if a.status == "created")
+        trace.event(
+            "run_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            created_before_failure=committed,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"Execution failed unexpectedly ({type(exc).__name__}: {exc}) after "
+                f"creating {committed} route(s). Nothing further was attempted. Every "
+                f"write this run made is recorded in trace {trace.run_id}; use "
+                f"POST /api/distribution/routes/revert-plan with that trace_id to see "
+                f"exactly what is now in the game and how to undo it."
+            ),
+        ) from exc
     finally:
         # close() is idempotent, so this only writes when the block above did
         # not reach its own close -- i.e. the run raised. A crashed run must
