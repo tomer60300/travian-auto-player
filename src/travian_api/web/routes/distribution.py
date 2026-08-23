@@ -465,7 +465,15 @@ class RouteActionResponse(BaseModel):
     # a row -- and an operator who authorised "3 routes" on a 1-hour cycle has
     # authorised 72 rows. Reported so that is never a surprise.
     game_rows: int = 1
-    status: str  # would_create | deferred | created | skipped | blocked | failed
+    # would_create | deferred | created | created_unverified | not_created |
+    # skipped | blocked | failed
+    #
+    # `created` means VERIFIED: the marketplace was read back and the route is
+    # there. `created_unverified` means the write was accepted but the read-back
+    # failed -- probably fine, not confirmed. `not_created` means the game
+    # accepted the write and produced no route, which a 200 with an empty body
+    # cannot distinguish from success on its own.
+    status: str
     detail: str = ""
 
 
@@ -2170,6 +2178,9 @@ async def post_execute(
                                 "disabled route the plan still wants"
                             )
 
+                    # Routes this origin claims to have created, paired with
+                    # their action so the verdict can be corrected below.
+                    created_here: list[tuple[RouteActionResponse, PlannedRoute]] = []
                     for i, (row, route) in enumerate(desired):
                         destination = _desired_key(route)
                         if destination in satisfied:
@@ -2227,7 +2238,9 @@ async def post_execute(
                             deferred.extend(desired[i:])
                             break
                         if result.status == "created":
-                            actions.append(_action(row, route, "created", result.detail))
+                            action = _action(row, route, "created", result.detail)
+                            actions.append(action)
+                            created_here.append((action, route))
                             satisfied.add(destination)
                             continue
                         outstanding += 1
@@ -2242,11 +2255,81 @@ async def post_execute(
                             break
                         actions.append(_action(row, route, "failed", result.detail))
 
+                    # ── Did the game actually make them? ────────────────────
+                    #
+                    # Everything above trusted a 200 with an EMPTY body. That is
+                    # not evidence of creation: the same empty 200 is what
+                    # "accepted and silently did nothing" looks like. Reporting
+                    # those routes as created would be a false result that also
+                    # poisons the next run, which would see them missing and
+                    # create them again.
+                    #
+                    # One request settles it, and it is the request the game's
+                    # own UI makes after a create: refresh the list and look.
+                    if created_here:
+                        try:
+                            after = await svc.confirm_routes(origin, map_span=body.map_span)
+                        except (NetworkError, MarketplaceUnreadable) as exc:
+                            # "I could not check" is NOT "it failed". Say exactly
+                            # that, and leave the routes reported as created --
+                            # they probably were -- but flag them as unverified
+                            # so nobody reads this run as confirmed.
+                            trace.event(
+                                "verify_failed",
+                                origin=origin,
+                                error=str(exc),
+                                unverified=len(created_here),
+                            )
+                            for action, _route in created_here:
+                                action.status = "created_unverified"
+                                action.detail = (
+                                    "created, but the read-back failed so this is unconfirmed"
+                                )
+                            problems.append(
+                                f"{village_label(origin, names)}: created "
+                                f"{len(created_here)} route(s) but could not re-read the "
+                                f"marketplace to confirm them ({exc}). Check this village "
+                                f"before the next run."
+                            )
+                        else:
+                            before_ids = {e.route_id for e in existing}
+                            fresh = [e for e in after if e.route_id not in before_ids]
+                            fresh_keys: set[int | tuple[int, int]] = set()
+                            for e in fresh:
+                                fresh_keys |= _existing_keys(e)
+                            trace.event(
+                                "verified",
+                                origin=origin,
+                                claimed=len(created_here),
+                                new_rows_found=len(fresh),
+                                new_route_ids=[e.route_id for e in fresh],
+                            )
+                            for action, route in created_here:
+                                key = _desired_key(route)
+                                if key in fresh_keys:
+                                    continue
+                                # The POST said yes and the page says no. Trust
+                                # the page: it is the state that matters.
+                                action.status = "not_created"
+                                action.detail = (
+                                    "the create was accepted but no matching route "
+                                    "appeared on the marketplace"
+                                )
+                                outstanding += 1
+                                problems.append(
+                                    f"{village_label(origin, names)} -> "
+                                    f"{action.destination_name}: the game accepted the "
+                                    f"create but no route appeared. Nothing was created "
+                                    f"here; do not assume otherwise."
+                                )
+
         # Inside the try, so it beats the fallback close in `finally`. The
         # counts below are the run's actual outcome; the fallback can only say
         # that the run ended.
         trace.close(
             created=sum(1 for a in actions if a.status == "created"),
+            created_unverified=sum(1 for a in actions if a.status == "created_unverified"),
+            not_created=sum(1 for a in actions if a.status == "not_created"),
             created_game_rows=sum(a.game_rows for a in actions if a.status == "created"),
             disabled=len(disables),
             re_enabled=len(re_enables),

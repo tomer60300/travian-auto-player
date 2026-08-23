@@ -230,6 +230,64 @@ class TradeRouteService:
         self._marketplace_referer[village_id] = f"{base}{path}"
         return html
 
+    async def refresh_marketplace(self, village_id: int) -> str:
+        """Re-read the trade-route tab we are already looking at. ONE request.
+
+        Deliberately a separate method rather than a flag on open_marketplace:
+        this is a different act. open_marketplace *navigates* to the page from
+        the village view; this *refreshes* the page already open, which is what
+        the game's own UI does after a route is created -- it re-renders the
+        list. The dorf2 hop would therefore be wrong here as well as wasteful: a
+        browser does not visit the village view to refresh a page it is sitting
+        on.
+        """
+        newdid_amp = f"&newdid={village_id}" if village_id else ""
+        path = f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}"
+        html = await self.http_client.get_html(path)
+        base = self.http_client.settings.base_url.rstrip("/")
+        self._marketplace_referer[village_id] = f"{base}{path}"
+        return html
+
+    async def confirm_routes(
+        self, village_id: int, *, map_span: int = DEFAULT_MAP_SPAN
+    ) -> list[ExistingRoute]:
+        """What is REALLY on the marketplace now, read back after writing to it.
+
+        ``POST /api/v1/trade-routes`` answers with an empty body: no route id, no
+        confirmation, nothing that distinguishes "created" from "accepted and
+        silently did nothing". Treating a 200 as proof of creation is an
+        assumption presented as a result, and the failure it hides is the
+        expensive kind -- a run reporting routes it never made, whose next run
+        reports them again, forever.
+
+        So the only honest answer comes from looking. One request, and it is the
+        same request the game's own UI makes after a create.
+
+        Raises :class:`MarketplaceUnreadable` if the page cannot be read, because
+        "I could not check" and "nothing was created" are different answers and
+        must not collapse into one.
+        """
+        html = await self.refresh_marketplace(village_id)
+        from ..parsers.html_parser import read_trade_routes
+
+        parsed = read_trade_routes(html, map_span)
+        if parsed is None:
+            raise MarketplaceUnreadable(
+                f"village {village_id}: could not re-read the marketplace after "
+                f"writing to it, so what was actually created is unknown"
+            )
+        return [
+            ExistingRoute(
+                route_id=r["route_id"],
+                dest_village_id=r["dest_village_id"],
+                dest_x=r["dest_x"],
+                dest_y=r["dest_y"],
+                visible=r["visible"],
+                active=r.get("active", True),
+            )
+            for r in parsed
+        ]
+
     async def list_existing_routes(
         self, village_id: int, *, map_span: int = DEFAULT_MAP_SPAN
     ) -> list[ExistingRoute]:

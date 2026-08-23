@@ -236,7 +236,14 @@ class _FakeLiveSvc:
         enable_status="enabled",
         budget_ok=True,
         read_raises=None,
+        phantom_creates=False,
+        confirm_raises=None,
     ):
+        # phantom_creates models the failure a 200 with an empty body cannot
+        # rule out: the game accepts the create and produces no route.
+        self._phantom = phantom_creates
+        self._confirm_raises = set(confirm_raises or ())
+        self._next_route_id = 900000
         self.live_enabled = True
         # This fake DOES model the marketplace it reads, so it can legitimately
         # claim the route list is readable. The real service defaults to False
@@ -286,6 +293,13 @@ class _FakeLiveSvc:
             raise NetworkError("marketplace read failed (test)")
         return list(self._existing.get(vid, []))
 
+    async def confirm_routes(self, vid, *, map_span=None):
+        if vid in self._confirm_raises:
+            from travian_api.exceptions import NetworkError
+
+            raise NetworkError("read-back failed (test)")
+        return list(self._existing.get(vid, []))
+
     async def disable_routes(self, vid, routes, *, stop_check=None):
         from travian_api.services.trade_route_service import RouteActionResult
 
@@ -316,6 +330,19 @@ class _FakeLiveSvc:
                 route.origin_village_id, route.dest_x, route.dest_y, "stopped", reason
             )
         self.created.append(route)
+        if not self._phantom:
+            # The real game makes the route appear on the marketplace, which is
+            # the only evidence the empty response does not give.
+            self._next_route_id += 1
+            self._existing.setdefault(route.origin_village_id, []).append(
+                ExistingRoute(
+                    route_id=self._next_route_id,
+                    dest_village_id=route.dest_village_id,
+                    dest_x=route.dest_x,
+                    dest_y=route.dest_y,
+                    active=True,
+                )
+            )
         if self.on_create is not None:
             self.on_create()
         return RouteActionResult(
@@ -1390,3 +1417,96 @@ class TestTheWriteEndpointRejectsWhatItDoesNotUnderstand:
         res = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
         assert res.actions
         assert res.filtered_to is None
+
+
+class TestCreatedMeansVerifiedNotAccepted:
+    """`POST /trade-routes` answers 200 with an EMPTY body.
+
+    That is not evidence of creation. The identical response is what "accepted
+    and silently did nothing" looks like, so trusting it reports routes that do
+    not exist -- and poisons the next run, which finds them missing and creates
+    them again. The only honest answer is to read the marketplace back, which is
+    also exactly what the game's own UI does after a create.
+    """
+
+    def test_a_normal_create_is_confirmed_against_the_page(self):
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert [a.status for a in res.actions] == ["created", "created"]
+        assert res.problems == []
+
+    def test_a_create_that_produces_no_route_is_reported_as_not_created(self):
+        # The whole point: the game says yes, the page says nothing is there.
+        svc = _FakeLiveSvc(phantom_creates=True)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert svc.created, "the writes were still sent"
+        assert [a.status for a in res.actions] == ["not_created", "not_created"]
+        assert res.created == 0, "a run that created nothing must not claim otherwise"
+
+    def test_it_says_plainly_that_nothing_was_created(self):
+        svc = _FakeLiveSvc(phantom_creates=True)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert res.problems, "silence here would be a false success"
+        joined = " ".join(res.problems)
+        assert "accepted the create but no route appeared" in joined
+        assert "do not assume otherwise" in joined
+
+    def test_a_phantom_create_still_counts_as_outstanding_work(self):
+        # It must come back on a later run, not be written off as done.
+        svc = _FakeLiveSvc(phantom_creates=True)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        assert res.remaining >= 2
+
+    def test_a_failed_read_back_is_unverified_not_failed(self):
+        # "I could not check" and "it did not work" are different answers.
+        # Collapsing them would have the operator delete routes that exist.
+        svc = _FakeLiveSvc(confirm_raises={20003})
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        by_origin = {a.origin: a.status for a in res.actions}
+        assert by_origin[20003] == "created_unverified"
+        assert by_origin[20011] == "created", "the other village verified fine"
+        joined = " ".join(res.problems)
+        assert "could not re-read the marketplace to confirm" in joined
+
+    def test_the_verification_is_recorded_in_the_trace(self):
+        import json
+        from pathlib import Path
+
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        events = [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+
+        verified = [e for e in events if e["kind"] == "verified"]
+        assert verified, "the read-back must be in the audit record"
+        assert verified[0]["claimed"] == 1
+        assert verified[0]["new_rows_found"] == 1
+        assert verified[0]["new_route_ids"]
+
+    def test_a_run_that_creates_nothing_does_not_read_back(self):
+        # No write, no verification: it would be a request for nothing.
+        existing = {}
+        for a in _desired_routes():
+            existing.setdefault(a.origin, []).append(
+                ExistingRoute(1, a.destination, a.dest_x, a.dest_y)
+            )
+        svc = _FakeLiveSvc(existing=existing)
+        res = _execute(
+            _exec_body(dry_run=False, disable_existing=False, max_routes_per_run=50), svc=svc
+        )
+
+        assert svc.created == []
+        import json
+        from pathlib import Path
+
+        events = [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+        assert [e for e in events if e["kind"] == "verified"] == []
