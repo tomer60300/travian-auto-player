@@ -27,11 +27,8 @@ curl_requests = pytest.importorskip("curl_cffi.requests", reason="curl_cffi is o
 NAVIGATION_ONLY = ("upgrade-insecure-requests", "sec-fetch-user")
 
 
-def _capture_one_request(port: int, out: list[str]) -> None:
-    server = socket.socket()
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("127.0.0.1", port))
-    server.listen(1)
+def _accept_one_request(server: socket.socket, out: list[str]) -> None:
+    """Accept a single connection on an ALREADY-LISTENING socket."""
     try:
         conn, _ = server.accept()
         data = b""
@@ -47,10 +44,32 @@ def _capture_one_request(port: int, out: list[str]) -> None:
         server.close()
 
 
-def _wire_headers(shape: str, port: int) -> dict[str, str]:
+# One capture per header shape, reused across the assertions below. Each capture
+# costs a socket server, a thread, an event loop and a fresh curl session, and
+# nothing here mutates what came back -- so capturing once per shape rather than
+# once per assertion is identical coverage for a quarter of the work.
+_CAPTURE_CACHE: dict[str, dict[str, str]] = {}
+
+
+def _wire_headers(shape: str) -> dict[str, str]:
     """Send one request through curl_cffi and return what the socket received."""
+    if shape in _CAPTURE_CACHE:
+        return _CAPTURE_CACHE[shape]
+
+    # Bind and listen HERE, before the client exists, and let the OS pick the
+    # port. Binding inside the listener thread raced the request: when curl won,
+    # the connection was refused, `send` swallowed the error, and the assertion
+    # below reported "nothing reached the socket" -- an empty capture that looks
+    # exactly like a real failure to send. A hardcoded port could also simply be
+    # in use by something else.
+    server = socket.socket()
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
     captured: list[str] = []
-    listener = threading.Thread(target=_capture_one_request, args=(port, captured), daemon=True)
+    listener = threading.Thread(target=_accept_one_request, args=(server, captured), daemon=True)
     listener.start()
 
     headers = getattr(BrowserHeaders(UserAgentRotator(), base_url="http://127.0.0.1"), shape)()
@@ -68,8 +87,8 @@ def _wire_headers(shape: str, port: int) -> dict[str, str]:
                 pass  # the stub server is not a full HTTP implementation
 
     asyncio.run(send())
-    listener.join(timeout=5)
-    assert captured, "nothing reached the socket"
+    listener.join(timeout=10)
+    assert captured, f"{shape}: nothing reached the socket"
 
     on_wire: dict[str, str] = {}
     for line in captured[0].splitlines()[1:]:
@@ -77,35 +96,34 @@ def _wire_headers(shape: str, port: int) -> dict[str, str]:
             break
         name, _, value = line.partition(":")
         on_wire[name.strip().lower()] = value.strip()
+    _CAPTURE_CACHE[shape] = on_wire
     return on_wire
 
 
 # for_form_post is deliberately absent: a form POST is a document navigation
 # (Travian answers it with a PRG redirect), so the navigation headers belong on
 # it. TestFormPostStaysANavigation below pins that distinction.
-@pytest.mark.parametrize(
-    "shape,port", [("for_xhr", 8931), ("for_json_post", 8932), ("for_fetch", 8935)]
-)
+@pytest.mark.parametrize("shape", ["for_xhr", "for_json_post", "for_fetch"])
 class TestNoNavigationHeadersOnSubresources:
-    def test_navigation_only_headers_never_reach_the_wire(self, shape, port):
-        on_wire = _wire_headers(shape, port)
+    def test_navigation_only_headers_never_reach_the_wire(self, shape):
+        on_wire = _wire_headers(shape)
         leaked = [h for h in NAVIGATION_ONLY if h in on_wire]
         assert not leaked, (
             f"{shape} put {leaked} on the wire; Chrome cannot send these on a "
             f"fetch/XHR, and each alone identifies the client as not a browser"
         )
 
-    def test_the_priority_is_the_subresource_one(self, shape, port):
-        on_wire = _wire_headers(shape, port)
+    def test_the_priority_is_the_subresource_one(self, shape):
+        on_wire = _wire_headers(shape)
         # curl-impersonate's default is the DOCUMENT priority u=0; a captured
         # real client request carried u=1.
         assert on_wire.get("priority") == "u=1, i", (
             f"{shape} sent priority {on_wire.get('priority')!r}; a real client sent 'u=1, i'"
         )
 
-    def test_the_fetch_metadata_still_says_subresource(self, shape, port):
+    def test_the_fetch_metadata_still_says_subresource(self, shape):
         # The suppression must not take the legitimate Sec-Fetch-* with it.
-        on_wire = _wire_headers(shape, port)
+        on_wire = _wire_headers(shape)
         assert on_wire.get("sec-fetch-dest") == "empty"
         assert on_wire.get("sec-fetch-mode") in {"cors", "same-origin"}
 
@@ -114,7 +132,7 @@ class TestFormPostStaysANavigation:
     """The suppression must not be applied to a request that really is one."""
 
     def test_a_form_post_keeps_its_navigation_shape(self):
-        on_wire = _wire_headers("for_form_post", 8934)
+        on_wire = _wire_headers("for_form_post")
         assert on_wire.get("sec-fetch-dest") == "document", (
             "a form POST answers with a PRG redirect to a page; stripping its "
             "navigation headers would make a real navigation look like a fetch"
@@ -133,16 +151,16 @@ class TestTheFetchShapeMatchesTheCapture:
     """
 
     def test_it_sends_no_x_requested_with(self):
-        on_wire = _wire_headers("for_fetch", 8936)
+        on_wire = _wire_headers("for_fetch")
         assert "x-requested-with" not in on_wire, (
             "fetch never adds this; the captured request did not carry it"
         )
 
     def test_the_accept_is_the_fetch_default(self):
-        assert _wire_headers("for_fetch", 8937).get("accept") == "*/*"
+        assert _wire_headers("for_fetch").get("accept") == "*/*"
 
     def test_it_still_looks_like_a_subresource(self):
-        on_wire = _wire_headers("for_fetch", 8938)
+        on_wire = _wire_headers("for_fetch")
         assert on_wire.get("sec-fetch-mode") == "cors"
         assert on_wire.get("sec-fetch-dest") == "empty"
         assert on_wire.get("priority") == "u=1, i"
@@ -152,4 +170,4 @@ class TestTheFetchShapeMatchesTheCapture:
     def test_it_carries_an_origin(self):
         # Chrome adds Origin to any same-origin non-GET; dropping it would be as
         # visible as adding something extra.
-        assert "origin" in _wire_headers("for_fetch", 8939)
+        assert "origin" in _wire_headers("for_fetch")
