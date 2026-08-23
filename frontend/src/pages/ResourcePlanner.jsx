@@ -1384,7 +1384,12 @@ export default function ResourcePlanner() {
   const liveConfirmMessage = [
     'Execute this plan against Travian now?',
     '',
-    `• Disable existing routes this plan no longer wants, on up to ${plannedOriginCount} origin village(s)`,
+    // Only claimed when it is actually going to happen: the checkbox can make
+    // this a create-only run, and a dialog listing a disable that will not
+    // occur is worse than no dialog.
+    disableExisting
+      ? `• Disable existing routes this plan no longer wants, on up to ${plannedOriginCount} origin village(s)`
+      : '• Create ONLY — no existing route will be disabled',
     `• Create up to ${plannedCreateCount} new route(s)`,
     execResult?.remaining ? `• Defer ${execResult.remaining} route(s) to a later run` : null,
     '',
@@ -2826,8 +2831,10 @@ export default function ResourcePlanner() {
                             {execResult.remaining
                               ? `, leaving ${execResult.remaining} deferred to a later run`
                               : ''}
-                            . If creation fails after a disable, old routes can stay off without
-                            their replacements — re-run to reconcile.
+                            .{' '}
+                            {disableExisting
+                              ? 'If creation fails after a disable, old routes can stay off without their replacements — re-run to reconcile.'
+                              : 'Create-only: nothing existing is switched off, so a failed create leaves the game exactly as it was.'}
                           </p>
                           {/* The gate Preview no longer carries lands here, where
                               it belongs: this is the irreversible branch, and the
@@ -2848,7 +2855,9 @@ export default function ResourcePlanner() {
                           >
                             {executing
                               ? 'Working…'
-                              : `Disable old routes & create ${plannedCreateCount} (~${liveRequestEstimate} requests)`}
+                              : disableExisting
+                                ? `Disable old routes & create ${plannedCreateCount} (~${liveRequestEstimate} requests)`
+                                : `Create ${plannedCreateCount} route${plannedCreateCount === 1 ? '' : 's'}, disable nothing (~${liveRequestEstimate} requests)`}
                           </button>
                         </>
                       ) : (
