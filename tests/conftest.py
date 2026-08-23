@@ -231,8 +231,26 @@ def _isolate_the_database() -> None:
     atexit.register(shutil.rmtree, directory, True)
 
 
+def _isolate_the_execution_traces() -> None:
+    """Send execution traces to a throwaway directory, never ~/.travian/traces.
+
+    Same reasoning as the database: the trace directory is the operator's, it
+    accumulates one file per live run, and a suite that scatters hundreds of
+    fake-run traces through it makes the real ones impossible to find. Traces
+    also hold real village ids in production, so the two must never mix.
+    """
+    # Imported here rather than at module scope: this file is deliberate about
+    # what has been imported before the database path is fixed.
+    from travian_api.services.distribution import execution_trace
+
+    directory = tempfile.mkdtemp(prefix="travian-test-traces-")
+    execution_trace.TRACE_DIR = Path(directory)
+    atexit.register(shutil.rmtree, directory, True)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     _isolate_the_database()
+    _isolate_the_execution_traces()
     _scrub_travian_credentials()
     _install_network_block()
 

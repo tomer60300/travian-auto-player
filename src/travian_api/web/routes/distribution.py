@@ -32,6 +32,7 @@ from travian_api.services.distribution.allocation import (
     Resource,
     village_label,
 )
+from travian_api.services.distribution.execution_trace import ExecutionTrace
 from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import (
     DAILY_BEAT_CYCLES,
@@ -443,6 +444,11 @@ class ExecuteResponse(BaseModel):
     # Gold-Club block). Kept separate from `warnings` so a benign planner note
     # never makes a successful run look failed.
     problems: list[str] = []
+    # Where this run's full decision-and-request trace was written. A live run is
+    # the one operation here that changes a real account, and the response alone
+    # cannot say WHY each route was skipped or disabled -- the trace can.
+    trace_id: str | None = None
+    trace_path: str | None = None
 
 
 @router.get("/snapshot", response_model=SnapshotResponse)
@@ -1613,6 +1619,25 @@ async def post_execute(
     disables: list[str] = []
     re_enables: list[str] = []
     problems: list[str] = []  # execution failures (failed disable, Gold Club, …)
+    # Every live run gets a trace. This is the only endpoint here that mutates a
+    # real account, and it does so through a chain of classification decisions
+    # that the response can only summarise; a run that disabled the wrong route
+    # would look identical in the response to one that disabled the right one.
+    trace = ExecutionTrace()
+    svc.trace = trace
+    trace.event(
+        "run_start",
+        user=user.id,
+        dry_run=False,
+        live_enabled=live_enabled,
+        reconciler_verified=svc.reconciler_verified,
+        disable_existing=body.disable_existing,
+        max_routes_per_run=cap,
+        map_span=body.map_span,
+        origins=len(origins),
+        desired_routes=len(items),
+    )
+
     attempts = 0  # create requests fired this run
     visited = 0  # marketplaces read this run
     outstanding = 0  # creates attempted but not completed (failed / Gold Club)
@@ -1661,6 +1686,19 @@ async def post_execute(
                     # origin WITHOUT reading its marketplace, so reads and writes
                     # stay bounded and no later origin's routes are silently lost
                     # from the response (issue #65).
+                    trace.event(
+                        "origin_deferred",
+                        origin=origin,
+                        routes=len(desired_by_origin[origin]),
+                        reason=(
+                            "run stopped early"
+                            if stopped_early
+                            else "gold club blocked"
+                            if gold_club_blocked
+                            else f"per-run cap of {cap} reached "
+                            f"(creates={attempts}, marketplaces read={visited})"
+                        ),
+                    )
                     deferred.extend(desired_by_origin[origin])
                     continue
                 # Don't even read a marketplace if the run is already stopped
@@ -1670,6 +1708,12 @@ async def post_execute(
                 if reason:
                     stopped_early = True
                     problems.append(reason)
+                    trace.event(
+                        "origin_deferred",
+                        origin=origin,
+                        routes=len(desired_by_origin[origin]),
+                        reason=reason,
+                    )
                     deferred.extend(desired_by_origin[origin])
                     continue
 
@@ -1679,7 +1723,26 @@ async def post_execute(
                     # stop rather than 500 out and lose the record (issue #65).
                     try:
                         existing = await svc.list_existing_routes(origin, map_span=body.map_span)
+                        trace.event(
+                            "origin_read",
+                            origin=origin,
+                            existing=len(existing),
+                            active=sum(1 for e in existing if e.active),
+                            placeable=sum(1 for e in existing if e.dest_x is not None),
+                            destinations=sorted({e.dest_village_id for e in existing}),
+                        )
                     except (NetworkError, MarketplaceUnreadable) as exc:
+                        # The distinction that matters most in a trace: we do NOT
+                        # know what this village already has, so nothing was
+                        # created here. An unreadable page must never read as an
+                        # empty village.
+                        trace.event(
+                            "origin_read_failed",
+                            origin=origin,
+                            error=str(exc),
+                            error_type=type(exc).__name__,
+                            routes_deferred=len(desired_by_origin[origin]),
+                        )
                         problems.append(
                             f"{village_label(origin, names)}: marketplace read failed "
                             f"({exc}); remaining routes deferred"
@@ -1747,6 +1810,14 @@ async def post_execute(
                         # Disable only ACTIVE visible routes the plan no longer
                         # wants; a route already disabled needs no action.
                         stale = [e for e in visible if e.active and not _is_wanted(e)]
+                        trace.event(
+                            "stale_classified",
+                            origin=origin,
+                            stale_route_ids=[e.route_id for e in stale],
+                            stale_destinations=[e.dest_village_id for e in stale],
+                            wanted_village_ids=sorted(desired_ids),
+                            wanted_coords=sorted(str(c) for c in desired_foreign),
+                        )
                         if stale:
                             # Gate the disable mutation itself (issues #62/#64):
                             # check before, and again inside the service after its
@@ -1828,15 +1899,36 @@ async def post_execute(
                     for i, (row, route) in enumerate(desired):
                         destination = _desired_key(route)
                         if destination in satisfied:
+                            trace.decision(
+                                origin=origin,
+                                destination=destination,
+                                decision="skipped",
+                                reason="a route to this destination is already active",
+                                matched_by=(
+                                    "village_id" if isinstance(destination, int) else "coords"
+                                ),
+                            )
                             actions.append(_action(row, route, "skipped", "route already active"))
                             continue
                         if destination in blocked:
+                            trace.decision(
+                                origin=origin,
+                                destination=destination,
+                                decision="blocked",
+                                reason="a disabled route exists here and re-enabling it failed",
+                            )
                             actions.append(
                                 _action(row, route, "blocked", "route disabled; re-enable failed")
                             )
                             outstanding += 1
                             continue
                         if attempts >= cap:
+                            trace.decision(
+                                origin=origin,
+                                destination=destination,
+                                decision="deferred",
+                                reason=f"per-run cap of {cap} create(s) already spent",
+                            )
                             deferred.append((row, route))
                             continue
                         # Re-check before EVERY create, not once per origin: a
@@ -1875,7 +1967,25 @@ async def post_execute(
                             deferred.extend(desired[i + 1 :])
                             break
                         actions.append(_action(row, route, "failed", result.detail))
+
+        # Inside the try, so it beats the fallback close in `finally`. The
+        # counts below are the run's actual outcome; the fallback can only say
+        # that the run ended.
+        trace.close(
+            created=sum(1 for a in actions if a.status == "created"),
+            disabled=len(disables),
+            re_enabled=len(re_enables),
+            deferred=len(deferred),
+            outstanding=outstanding,
+            problems=len(problems),
+            stopped_early=stopped_early,
+            gold_club_blocked=gold_club_blocked,
+        )
     finally:
+        # close() is idempotent, so this only writes when the block above did
+        # not reach its own close -- i.e. the run raised. A crashed run must
+        # still leave a terminated trace rather than one that simply stops.
+        trace.close(ended="raised before the run could summarise itself")
         active_ops.unregister(user.id, _EXECUTE_OP_LABEL)
 
     actions += [_action(row, route, "deferred") for row, route in deferred]
@@ -1896,6 +2006,8 @@ async def post_execute(
         actions=actions,
         disables=disables,
         re_enables=re_enables,
+        trace_id=trace.run_id,
+        trace_path=str(trace.path) if trace.path else None,
         # `remaining` = work still outstanding for a later run: routes deferred by
         # the cap PLUS any create that did not complete (failed / Gold Club), so
         # the summary never makes a partially-done run look complete.

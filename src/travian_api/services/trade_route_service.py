@@ -35,6 +35,7 @@ import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from typing import Any
 
 from ..clients.http_client import HttpClient
 from ..concurrency import KeyedLock
@@ -42,6 +43,7 @@ from ..exceptions import NetworkError, TravianError
 from ..parsers.html_parser import DEFAULT_MAP_SPAN
 from ..services.distribution.allocation import Resource
 from ..stealth.human_delay import ActionType
+from .distribution.execution_trace import ExecutionTrace
 
 logger = logging.getLogger(__name__)
 
@@ -162,8 +164,14 @@ class TradeRouteService:
         *,
         live_enabled: bool = False,
         reconciler_verified: bool = ROUTE_LIST_MARKUP_VERIFIED,
+        trace: ExecutionTrace | None = None,
     ) -> None:
         self.http_client = http_client
+        # Records every write with its payload and the game's latency. Optional
+        # so nothing here depends on being traced, but a live run should always
+        # pass one: without it a route that appears in-game with the wrong cargo
+        # cannot be traced back to either the planner or the serialiser.
+        self.trace = trace
         # Live creation stays OFF until the operator turns it on deliberately.
         # The wire format is verified, so this is not a "do we know the shape"
         # guard -- it is the line between previewing a plan and writing to a
@@ -307,6 +315,27 @@ class TradeRouteService:
             "routes": [{"enabled": active, "id": route_id} for route_id in route_ids],
         }
 
+    def _trace_write(
+        self,
+        kind: str,
+        origin: int,
+        status: str,
+        started: float,
+        payload: Any,
+        detail: str = "",
+    ) -> None:
+        """Record a write that reached the game. No-op when untraced."""
+        if self.trace is None:
+            return
+        self.trace.wrote(
+            kind=kind,
+            origin=origin,
+            status=status,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            payload=payload,
+            detail=detail,
+        )
+
     def _log_activity(self, started: float) -> None:
         """Feed the seconds this write consumed into the daily activity ceiling.
 
@@ -364,6 +393,7 @@ class TradeRouteService:
         # under-counted real activity. Same pattern as farm_list_service and
         # scout_ws -- the service that owns the operation reports its seconds.
         started = time.monotonic()
+        payload = self._build_create_payload(route)
         await self.http_client.human_delay.wait(ActionType.BETWEEN_ROUTES, "creating trade route")
         if stop_check is not None and (reason := stop_check()):
             return RouteActionResult(
@@ -372,13 +402,16 @@ class TradeRouteService:
         try:
             await self.http_client.post_json(
                 "/api/v1/trade-routes",
-                self._build_create_payload(route),
+                payload,
                 request_type="fetch",
                 safe_to_retry=False,
                 referer=self._marketplace_referer.get(route.origin_village_id),
             )
         except NetworkError as exc:
             if any(m in str(exc).lower() for m in _GOLDCLUB_MARKERS):
+                self._trace_write(
+                    "create", route.origin_village_id, "skipped", started, payload, str(exc)
+                )
                 return RouteActionResult(
                     route.origin_village_id,
                     route.dest_x,
@@ -386,10 +419,14 @@ class TradeRouteService:
                     "skipped",
                     "Gold Club required for trade routes (plus.error_goldclub)",
                 )
+            self._trace_write(
+                "create", route.origin_village_id, "failed", started, payload, str(exc)
+            )
             return RouteActionResult(
                 route.origin_village_id, route.dest_x, route.dest_y, "failed", str(exc)
             )
         self._log_activity(started)
+        self._trace_write("create", route.origin_village_id, "created", started, payload)
         return RouteActionResult(route.origin_village_id, route.dest_x, route.dest_y, "created")
 
     async def _toggle_routes(
@@ -412,22 +449,26 @@ class TradeRouteService:
             return None
         self._require_live()
         verb = "enabling" if active else "disabling"
+        kind = "enable" if active else "disable"
         started = time.monotonic()
         await self.http_client.human_delay.wait(ActionType.BETWEEN_ROUTES, f"{verb} trade routes")
         if stop_check is not None and (reason := stop_check()):
             return RouteActionResult(origin_village_id, 0, 0, "stopped", reason)
+        payload = self._build_toggle_payload([r.route_id for r in routes], active=active)
         try:
             await self.http_client.put_json(
                 "/api/v1/trade-routes",
-                self._build_toggle_payload([r.route_id for r in routes], active=active),
+                payload,
                 request_type="fetch",
                 safe_to_retry=False,
                 referer=self._marketplace_referer.get(origin_village_id),
             )
         except NetworkError as exc:
+            self._trace_write(kind, origin_village_id, "failed", started, payload, str(exc))
             return RouteActionResult(origin_village_id, 0, 0, "failed", f"{verb} failed: {exc}")
         self._log_activity(started)
         status = "enabled" if active else "disabled"
+        self._trace_write(kind, origin_village_id, status, started, payload)
         return RouteActionResult(origin_village_id, 0, 0, status, f"{len(routes)} route(s)")
 
     async def disable_routes(

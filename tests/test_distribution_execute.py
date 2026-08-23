@@ -955,3 +955,99 @@ class TestExecutionHardening:
             captcha_stop.clear(_USER.id)
         assert svc.created == [], "a stop during the pacing wait must prevent the POST"
         assert any(a.status == "deferred" for a in res.actions)
+
+
+class TestALiveRunLeavesAnAuditableTrace:
+    """End-to-end: the endpoint must actually emit the trace, not just be able to.
+
+    A tracer with no call sites is worse than none -- it reads as observability
+    that exists. These run the real endpoint against the fake game and read the
+    trace file back.
+    """
+
+    def _trace_events(self, res):
+        import json
+        from pathlib import Path
+
+        assert res.trace_path, "a live run must report where its trace went"
+        return [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+
+    def test_the_run_is_bracketed_by_a_start_and_an_end(self):
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        events = self._trace_events(res)
+
+        assert events[0]["kind"] == "run_start"
+        assert events[0]["live_enabled"] is True
+        assert events[-1]["kind"] == "run_end"
+        assert events[-1]["created"] == 2
+
+    def test_every_marketplace_read_is_recorded_with_what_it_found(self):
+        existing = {20003: [ExistingRoute(1, _UNWANTED_DEST, 99, 98, active=True)]}
+        svc = _FakeLiveSvc(existing=existing)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        reads = [e for e in self._trace_events(res) if e["kind"] == "origin_read"]
+        assert {r["origin"] for r in reads} == {20003, 20011}
+        read = next(r for r in reads if r["origin"] == 20003)
+        assert read["existing"] == 1
+        assert read["destinations"] == [_UNWANTED_DEST]
+
+    def test_a_skip_records_why_and_which_key_matched(self):
+        # The whole point of the village-id reconciliation fix: a run must be
+        # able to say whether it matched on the id or fell back to coordinates.
+        account = _own_village_account()
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(1, 20011, 10, 0, active=True)]})
+        res = _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
+
+        decisions = [e for e in self._trace_events(res) if e["kind"] == "decision"]
+        assert len(decisions) == 1
+        assert decisions[0]["decision"] == "skipped"
+        assert decisions[0]["matched_by"] == "village_id"
+        assert decisions[0]["reason"]
+
+    def test_a_disable_records_the_route_ids_and_what_the_plan_wanted(self):
+        # So a wrong disable can be reconstructed afterwards: these two fields
+        # together are the entire argument for calling a route stale.
+        account = _own_village_account()
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(7, _UNWANTED_DEST, None, None)]})
+        res = _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
+
+        stale = [e for e in self._trace_events(res) if e["kind"] == "stale_classified"]
+        assert stale[0]["stale_route_ids"] == [7]
+        assert stale[0]["wanted_village_ids"] == [20011]
+
+    def test_a_whole_origin_deferred_by_the_cap_says_so(self):
+        # With a cap of 1 the second origin is deferred at the top of the loop,
+        # WITHOUT its marketplace being read -- so the trace has to record the
+        # deferral itself, or that origin's routes would vanish from the record.
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=1)
+        events = self._trace_events(res)
+
+        deferred = [e for e in events if e["kind"] == "origin_deferred"]
+        assert deferred, "a run that deferred a whole origin must say so"
+        assert "cap" in deferred[0]["reason"]
+        assert deferred[0]["routes"] == 1
+        read_origins = {e["origin"] for e in events if e["kind"] == "origin_read"}
+        assert deferred[0]["origin"] not in read_origins, (
+            "the deferred origin was correctly never read"
+        )
+
+    def test_an_unreadable_marketplace_is_recorded_as_unknown_not_empty(self):
+        # The most dangerous state in the whole path: not knowing what a village
+        # already has. It must be unmistakable in the trace.
+        svc = _FakeLiveSvc(read_raises={20003})
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        events = self._trace_events(res)
+
+        failures = [e for e in events if e["kind"] == "origin_read_failed"]
+        assert failures, "a failed read must be traced, not just counted"
+        assert failures[0]["origin"] == 20003
+        assert failures[0]["error_type"]
+        assert not [e for e in events if e["kind"] == "wrote" and e["origin"] == 20003], (
+            "nothing may be written to a village whose state could not be read"
+        )
