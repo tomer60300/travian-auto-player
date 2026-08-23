@@ -32,7 +32,7 @@ from travian_api.web.routes import distribution as dist_module
 from travian_api.web.routes.distribution import ExecuteRequest, ForeignTarget, post_execute
 
 
-def _exec_body(dry_run=True, disable_existing=True, max_routes_per_run=3, margin=0.0):
+def _exec_body(dry_run=True, disable_existing=True, max_routes_per_run=3, margin=0.0, **extra):
     body = ExecuteRequest.model_validate(
         {
             "snapshot": [
@@ -67,6 +67,8 @@ def _exec_body(dry_run=True, disable_existing=True, max_routes_per_run=3, margin
             "dry_run": dry_run,
             "disable_existing": disable_existing,
             "max_routes_per_run": max_routes_per_run,
+            # Anything else the caller wants to set (only_origins, ...).
+            **extra,
         }
     )
     body.foreign_targets = [
@@ -1260,3 +1262,98 @@ class TestTheFanOutDoesNotCauseAReRun:
         assert svc.enabled, "the disabled half is switched back on"
         _, enabled_coords = svc.enabled[0]
         assert len(enabled_coords) == 4, "exactly the four that were off"
+
+
+class TestAControlledRunCanTargetOnePair:
+    """The first live run against a real account must be exactly one chosen route.
+
+    Without this, "one route" meant "whichever route the cap happened to reach
+    first", which is not a controlled test -- it is an uncontrolled one with a
+    small blast radius. And a filtered run has to announce that it was filtered,
+    because a partial run read as a complete one is how an operator stops
+    checking the thing that still needs checking.
+    """
+
+    def test_only_origins_runs_just_that_village(self):
+        res = _execute(
+            _exec_body(dry_run=True, max_routes_per_run=50, only_origins=[20003]),
+            connected=False,
+        )
+        assert res.actions, "the filter must not empty the run"
+        assert {a.origin for a in res.actions} == {20003}
+
+    def test_only_destinations_runs_just_that_target(self):
+        full = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
+        target = full.actions[0].destination
+
+        res = _execute(
+            _exec_body(dry_run=True, max_routes_per_run=50, only_destinations=[target]),
+            connected=False,
+        )
+        assert {a.destination for a in res.actions} == {target}
+        assert len(res.actions) < len(full.actions), "the filter must actually narrow it"
+
+    def test_both_filters_together_isolate_one_pair(self):
+        full = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
+        first = full.actions[0]
+
+        res = _execute(
+            _exec_body(
+                dry_run=True,
+                max_routes_per_run=50,
+                only_origins=[first.origin],
+                only_destinations=[first.destination],
+            ),
+            connected=False,
+        )
+        assert len(res.actions) == 1
+        assert res.actions[0].origin == first.origin
+        assert res.actions[0].destination == first.destination
+
+    def test_a_filtered_run_says_it_was_filtered_and_what_it_skipped(self):
+        full = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
+        res = _execute(
+            _exec_body(dry_run=True, max_routes_per_run=50, only_origins=[20003]),
+            connected=False,
+        )
+        skipped = len(full.actions) - len(res.actions)
+
+        assert res.filtered_to, "a narrowed run must not look like a complete one"
+        assert "origins" in res.filtered_to
+        assert f"{skipped} other planned route(s) were NOT considered" in res.filtered_to
+
+    def test_an_unfiltered_run_reports_no_filter(self):
+        res = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
+        assert res.filtered_to is None
+
+    def test_a_filter_matching_nothing_creates_nothing_rather_than_everything(self):
+        # Fail closed: a typo in a village id must produce an empty run, never a
+        # full one. This is the difference between a no-op and a live account
+        # getting the entire plan.
+        res = _execute(
+            _exec_body(dry_run=True, max_routes_per_run=50, only_origins=[99999999]),
+            connected=False,
+        )
+        assert [a for a in res.actions if a.status == "would_create"] == []
+        assert res.created_game_rows == 0
+
+    def test_the_filter_is_recorded_in_the_trace(self):
+        import json
+        from pathlib import Path
+
+        svc = _FakeLiveSvc()
+        res = _run_live(
+            svc,
+            _two_origin_account(),
+            max_routes_per_run=50,
+            only_origins=[20003],
+        )
+        events = [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+
+        assert events[0]["filtered_to"], "the trace must never read as a full run"
+        assert events[0]["planned_routes_excluded_by_filter"] == 1
+        assert {e["origin"] for e in events if e["kind"] == "origin_read"} == {20003}
+        assert len(svc.created) == 1, "only the targeted village was written to"

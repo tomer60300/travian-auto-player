@@ -422,6 +422,12 @@ export default function ResourcePlanner() {
   const [planning, setPlanning] = useState(false)
   const [execResult, setExecResult] = useState(null)
   const [executing, setExecuting] = useState(false)
+  // Controlled-run knobs. Deliberately not persisted with the rest of the setup:
+  // narrowing a run is a decision about THIS run, and a saved filter silently
+  // shrinking a later full run is exactly the surprise worth avoiding.
+  const [routesPerRun, setRoutesPerRun] = useState(MAX_ROUTES_PER_RUN)
+  const [onlyOrigin, setOnlyOrigin] = useState('')
+  const [onlyDestination, setOnlyDestination] = useState('')
   // Durable audit of the last LIVE run (see LS_LAST_RUN): survives the input
   // edits that clear execResult, and page reloads.
   const [lastRun, setLastRun] = useState(null)
@@ -895,7 +901,13 @@ export default function ResourcePlanner() {
           ...buildPlanPayload(),
           dry_run: dryRun,
           disable_existing: true,
-          max_routes_per_run: MAX_ROUTES_PER_RUN,
+          max_routes_per_run: Number(routesPerRun) || MAX_ROUTES_PER_RUN,
+          // Targeting a single pair is how a first live run against a real
+          // account becomes a controlled test rather than an uncontrolled one
+          // with a small blast radius. Omitted entirely when unset, so an
+          // ordinary run is byte-identical to what it was before.
+          ...(onlyOrigin ? { only_origins: [Number(onlyOrigin)] } : {}),
+          ...(onlyDestination ? { only_destinations: [Number(onlyDestination)] } : {}),
         })
         if (
           dryRun &&
@@ -985,7 +997,17 @@ export default function ResourcePlanner() {
         setExecuting(false)
       }
     },
-    [accountKey, currentAccountKey, buildPlanPayload, toast, snapshotFetchedAt, useStaleSnapshot],
+    [
+      accountKey,
+      currentAccountKey,
+      buildPlanPayload,
+      toast,
+      snapshotFetchedAt,
+      useStaleSnapshot,
+      routesPerRun,
+      onlyOrigin,
+      onlyDestination,
+    ],
   )
 
   // Live unallocated counter, so slack is visible while typing rather than
@@ -2598,6 +2620,49 @@ export default function ResourcePlanner() {
                   </button>
                 </div>
 
+                {/* Controlled run. A first live run against a real account should
+                    be one chosen route, not whichever one the cap reached first. */}
+                <div className="mb-3 rounded border border-gray-800 p-2">
+                  <p className="text-secondary mb-2 text-[11px]">
+                    <strong>Controlled run.</strong> Narrow this run to specific villages — for a
+                    first live test, or to retry one village after a failure. Leave the village
+                    boxes empty to run the whole plan. A narrowed run is labelled as narrowed in
+                    the result.
+                  </p>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <label className="text-xs">
+                      <span className="text-secondary block">Routes this run</span>
+                      <input
+                        type="number"
+                        min="1"
+                        className="input-sm w-24"
+                        value={routesPerRun}
+                        onChange={(e) => setRoutesPerRun(e.target.value)}
+                      />
+                    </label>
+                    <label className="text-xs">
+                      <span className="text-secondary block">Only origin (village id)</span>
+                      <input
+                        type="number"
+                        className="input-sm w-32"
+                        placeholder="any"
+                        value={onlyOrigin}
+                        onChange={(e) => setOnlyOrigin(e.target.value)}
+                      />
+                    </label>
+                    <label className="text-xs">
+                      <span className="text-secondary block">Only destination (village id)</span>
+                      <input
+                        type="number"
+                        className="input-sm w-32"
+                        placeholder="any"
+                        value={onlyDestination}
+                        onChange={(e) => setOnlyDestination(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                </div>
+
                 {!plan.feasible && (
                   <p className="text-warning text-xs mb-2">
                     Over budget / unroutable — <strong>going live is blocked</strong> until that is
@@ -2622,6 +2687,22 @@ export default function ResourcePlanner() {
                             ? `, ${execResult.remaining} deferred to a later run.`
                             : '.')}
                     </p>
+                    {execResult.filtered_to && (
+                      <p className="text-warning text-xs mb-2">
+                        <strong>Narrowed run:</strong> {execResult.filtered_to}
+                      </p>
+                    )}
+                    {execResult.created_game_rows > 0 && (
+                      <p className="text-xs mb-2">
+                        <strong>
+                          {execResult.dry_run ? 'Would put' : 'Put'}{' '}
+                          {execResult.created_game_rows} route row(s) in the game
+                        </strong>{' '}
+                        — Travian turns one “repeat every N hours” request into 24/N separate
+                        daily rows, so a request is not a row. Removing them later means deleting
+                        every row.
+                      </p>
+                    )}
                     {execResult.dry_run && (
                       <p className="text-xs text-secondary mb-2">
                         Preview assumes an empty marketplace. The live run reads each village

@@ -394,6 +394,24 @@ class PlanResponse(BaseModel):
 
 
 class ExecuteRequest(PlanRequest):
+    # Narrow a live run to specific villages. Built for controlled testing: the
+    # first live run against a real account should be able to be exactly one
+    # route between two chosen villages, not "whichever one the cap happened to
+    # reach first". Also useful for re-running a single village after a failure
+    # without touching the rest.
+    #
+    # A filtered run is reported as filtered (see ExecuteResponse.filtered_to),
+    # because a partial run mistaken for a complete one is precisely the kind of
+    # false confidence that makes an operator stop checking.
+    only_origins: list[int] | None = Field(
+        default=None,
+        description="Run only routes leaving these origin village ids.",
+    )
+    only_destinations: list[int] | None = Field(
+        default=None,
+        description="Run only routes arriving at these destination village ids.",
+    )
+
     """Same inputs as /plan (the server recomputes the exact plan rather than
     trust client-sent rows) plus execution controls."""
 
@@ -453,6 +471,10 @@ class ExecuteResponse(BaseModel):
     # Gold-Club block). Kept separate from `warnings` so a benign planner note
     # never makes a successful run look failed.
     problems: list[str] = []
+    # Set when only_origins/only_destinations narrowed the run. A partial run
+    # mistaken for a complete one is worse than no run, so this is stated rather
+    # than left to be inferred from a short action list.
+    filtered_to: str | None = None
     # Rows the game will hold as a result of this run's creates, which is not the
     # same number as the creates: see RouteActionResponse.game_rows.
     created_game_rows: int = 0
@@ -1600,6 +1622,7 @@ async def post_execute(
     # Each plan row is one route from a real origin village's marketplace to a
     # destination (a real village or a foreign sink — coords cover both).
     items: list[tuple[SheetRow, PlannedRoute]] = []
+    filtered_out = 0
     for row in plan.rows:
         # Fail-closed execution-boundary guard: a live route may only originate
         # at a real, positive account village. The optimizer already excludes
@@ -1620,6 +1643,14 @@ async def post_execute(
                 f"{village_label(row.destination, names)}: destination coordinates "
                 f"unknown, route skipped"
             )
+            continue
+        # Applied here, after the boundary guards, so a filtered-out route is
+        # never confused with one that was rejected as unexecutable.
+        if body.only_origins is not None and row.origin not in body.only_origins:
+            filtered_out += 1
+            continue
+        if body.only_destinations is not None and row.destination not in body.only_destinations:
+            filtered_out += 1
             continue
         items.append(
             (
@@ -1673,6 +1704,23 @@ async def post_execute(
             detail=detail,
         )
 
+    def _filter_description() -> str | None:
+        if body.only_origins is None and body.only_destinations is None:
+            return None
+        parts = []
+        if body.only_origins is not None:
+            parts.append("origins " + ", ".join(village_label(v, names) for v in body.only_origins))
+        if body.only_destinations is not None:
+            parts.append(
+                "destinations " + ", ".join(village_label(v, names) for v in body.only_destinations)
+            )
+        return (
+            f"{' and '.join(parts)} — {filtered_out} other planned route(s) were NOT "
+            f"considered by this run"
+        )
+
+    filtered_to = _filter_description()
+
     cap = body.max_routes_per_run
 
     if body.dry_run:
@@ -1697,6 +1745,7 @@ async def post_execute(
             re_enables=[],
             created=0,
             created_game_rows=sum(a.game_rows for a in actions if a.status == "would_create"),
+            filtered_to=filtered_to,
             remaining=max(0, len(items) - cap),
             warnings=warnings,
         )
@@ -1827,6 +1876,9 @@ async def post_execute(
         desired_routes=len(items),
         # What this run is authorised to put in the game at worst, in ROWS.
         max_game_rows_this_run=sum(_game_rows(row.cycle_hours) for row, _ in items[:cap]),
+        # Recorded so a trace can never be read as a full run when it was not.
+        filtered_to=filtered_to,
+        planned_routes_excluded_by_filter=filtered_out,
     )
 
     attempts = 0  # create requests fired this run
@@ -2248,6 +2300,7 @@ async def post_execute(
         # the summary never makes a partially-done run look complete.
         created=sum(1 for a in actions if a.status == "created"),
         created_game_rows=sum(a.game_rows for a in actions if a.status == "created"),
+        filtered_to=filtered_to,
         remaining=len(deferred) + outstanding,
         warnings=warnings,
         problems=problems,
