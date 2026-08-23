@@ -85,9 +85,22 @@ route map/farm-list/tile-detail traffic through it.
 
 Before: every JSON POST got the generic JSON-client header set
 (`Accept: application/json`, no `X-Requested-With`). Travian's frontend
-JS calls these endpoints via fetch — they should carry
-`X-Requested-With: XMLHttpRequest` and `Sec-Fetch-Mode: cors`. Generic
-JSON shape was a fingerprint mismatch.
+JS calls these endpoints via fetch, so they should carry
+`Sec-Fetch-Mode: cors`. Generic JSON shape was a fingerprint mismatch.
+
+**Corrected 2026-08-22 by a captured request.** The reasoning above then
+added `X-Requested-With: XMLHttpRequest` — which contradicts its own
+premise, because `fetch` never sets that header; only XMLHttpRequest does.
+A real `POST /api/v1/trade-routes` from Europe 2 (gpack 597.6) carried
+`accept: */*`, `sec-fetch-mode: cors`, `sec-fetch-dest: empty`,
+`priority: u=1, i` — and **no `X-Requested-With` and no `X-Version`**.
+
+Neither existing shape matched: `for_xhr` adds `X-Requested-With`, and
+`for_json_post` sends axios's `application/json, text/plain, */*`. Hence
+`BrowserHeaders.for_fetch`, pinned to that capture by
+`tests/test_wire_headers.py`. The `/api/v1` writes use it. Whether the
+other endpoints routed through `for_xhr` on this same reasoning are really
+XHR remains unverified — each needs its own capture before being moved.
 
 Cost: 0 (header strings are free).
 Benefit: removes a structural tell on the most-frequent endpoints.

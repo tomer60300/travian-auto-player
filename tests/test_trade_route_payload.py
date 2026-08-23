@@ -23,6 +23,7 @@ and more useful property than "at least these keys".
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -61,6 +62,8 @@ class _RecordingClient:
                 return None
 
         self.human_delay = _Delay()
+        # open_marketplace reads base_url to pin the write's Referer.
+        self.settings = SimpleNamespace(base_url="https://ts2.x1.europe.travian.com")
 
     async def post_json(self, url: str, payload: dict, **_kwargs):
         self.sent.append(("POST", url, payload))

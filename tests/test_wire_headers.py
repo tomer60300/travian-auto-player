@@ -83,7 +83,9 @@ def _wire_headers(shape: str, port: int) -> dict[str, str]:
 # for_form_post is deliberately absent: a form POST is a document navigation
 # (Travian answers it with a PRG redirect), so the navigation headers belong on
 # it. TestFormPostStaysANavigation below pins that distinction.
-@pytest.mark.parametrize("shape,port", [("for_xhr", 8931), ("for_json_post", 8932)])
+@pytest.mark.parametrize(
+    "shape,port", [("for_xhr", 8931), ("for_json_post", 8932), ("for_fetch", 8935)]
+)
 class TestNoNavigationHeadersOnSubresources:
     def test_navigation_only_headers_never_reach_the_wire(self, shape, port):
         on_wire = _wire_headers(shape, port)
@@ -118,3 +120,36 @@ class TestFormPostStaysANavigation:
             "navigation headers would make a real navigation look like a fetch"
         )
         assert "upgrade-insecure-requests" in on_wire
+
+
+class TestTheFetchShapeMatchesTheCapture:
+    """`for_fetch` exists because neither other shape matched a real request.
+
+    Captured from Europe 2 (gpack 597.6), POST /api/v1/trade-routes sent
+    `accept: */*` with NO `x-requested-with` and NO `x-version`. `for_xhr` adds
+    X-Requested-With, and `for_json_post` sends axios's
+    `application/json, text/plain, */*` accept -- so both differ from the client
+    in a header a single rule can reject on.
+    """
+
+    def test_it_sends_no_x_requested_with(self):
+        on_wire = _wire_headers("for_fetch", 8936)
+        assert "x-requested-with" not in on_wire, (
+            "fetch never adds this; the captured request did not carry it"
+        )
+
+    def test_the_accept_is_the_fetch_default(self):
+        assert _wire_headers("for_fetch", 8937).get("accept") == "*/*"
+
+    def test_it_still_looks_like_a_subresource(self):
+        on_wire = _wire_headers("for_fetch", 8938)
+        assert on_wire.get("sec-fetch-mode") == "cors"
+        assert on_wire.get("sec-fetch-dest") == "empty"
+        assert on_wire.get("priority") == "u=1, i"
+        for navigation_only in NAVIGATION_ONLY:
+            assert navigation_only not in on_wire
+
+    def test_it_carries_an_origin(self):
+        # Chrome adds Origin to any same-origin non-GET; dropping it would be as
+        # visible as adding something extra.
+        assert "origin" in _wire_headers("for_fetch", 8939)

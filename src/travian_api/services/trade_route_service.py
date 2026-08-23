@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -153,6 +154,12 @@ class TradeRouteService:
         # exercised: a caller that genuinely can read route state says so here,
         # and the production default stays False until the markup is captured.
         self.reconciler_verified = reconciler_verified
+        # The marketplace URL last opened for each village, used to pin the
+        # Referer on that village's writes. BrowserHeaders tracks only ONE "last
+        # page visited" for the whole account, so a farm loop or queue poll
+        # doing a single GET during a write's 3-20s pacing delay would otherwise
+        # leave the write referred from a page that has no trade-route form.
+        self._marketplace_referer: dict[int, str] = {}
         self._origin_lock = KeyedLock()
         # Serializes whole execute runs for this account so a double-click or a
         # second tab can't fire two concurrent reconciliations (which would
@@ -190,7 +197,11 @@ class TradeRouteService:
         # routes live on -- so the reconciler read a page that cannot contain
         # them, and a server-side "did this session render the trade-route tab
         # before POSTing to it?" check would fail outright.
-        return await self.http_client.get_html(f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}")
+        path = f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}"
+        html = await self.http_client.get_html(path)
+        base = self.http_client.settings.base_url.rstrip("/")
+        self._marketplace_referer[village_id] = f"{base}{path}"
+        return html
 
     async def list_existing_routes(self, village_id: int) -> list[ExistingRoute]:
         """Existing trade routes on a village's marketplace, visibility preserved.
@@ -271,6 +282,18 @@ class TradeRouteService:
             "routes": [{"enabled": active, "id": route_id} for route_id in route_ids],
         }
 
+    def _log_activity(self, started: float) -> None:
+        """Feed the seconds this write consumed into the daily activity ceiling.
+
+        Accounting must never break a write that already went out, hence the
+        broad catch -- the ceiling exists to keep the account looking human, not
+        to become a new way for a committed request to fail.
+        """
+        try:
+            self.http_client.activity_scheduler.log_activity(time.monotonic() - started)
+        except Exception:  # noqa: BLE001 - accounting must not break traffic
+            logger.debug("activity accounting failed for a trade-route write", exc_info=True)
+
     def _require_reconciler(self) -> None:
         """Refuse to create when we cannot read what already exists."""
         if not self.reconciler_verified:
@@ -310,6 +333,12 @@ class TradeRouteService:
         """
         self._require_live()
         self._require_reconciler()
+        # An execute run is a burst of paced writes, and until now it spent them
+        # entirely invisibly to the daily activity ceiling: check_activity_budget
+        # was consulted but never fed, so mixing route execution with farm loops
+        # under-counted real activity. Same pattern as farm_list_service and
+        # scout_ws -- the service that owns the operation reports its seconds.
+        started = time.monotonic()
         await self.http_client.human_delay.wait(ActionType.BETWEEN_ROUTES, "creating trade route")
         if stop_check is not None and (reason := stop_check()):
             return RouteActionResult(
@@ -319,8 +348,9 @@ class TradeRouteService:
             await self.http_client.post_json(
                 "/api/v1/trade-routes",
                 self._build_create_payload(route),
-                request_type="xhr",
+                request_type="fetch",
                 safe_to_retry=False,
+                referer=self._marketplace_referer.get(route.origin_village_id),
             )
         except NetworkError as exc:
             if any(m in str(exc).lower() for m in _GOLDCLUB_MARKERS):
@@ -334,6 +364,7 @@ class TradeRouteService:
             return RouteActionResult(
                 route.origin_village_id, route.dest_x, route.dest_y, "failed", str(exc)
             )
+        self._log_activity(started)
         return RouteActionResult(route.origin_village_id, route.dest_x, route.dest_y, "created")
 
     async def _toggle_routes(
@@ -356,6 +387,7 @@ class TradeRouteService:
             return None
         self._require_live()
         verb = "enabling" if active else "disabling"
+        started = time.monotonic()
         await self.http_client.human_delay.wait(ActionType.BETWEEN_ROUTES, f"{verb} trade routes")
         if stop_check is not None and (reason := stop_check()):
             return RouteActionResult(origin_village_id, 0, 0, "stopped", reason)
@@ -363,11 +395,13 @@ class TradeRouteService:
             await self.http_client.put_json(
                 "/api/v1/trade-routes",
                 self._build_toggle_payload([r.route_id for r in routes], active=active),
-                request_type="xhr",
+                request_type="fetch",
                 safe_to_retry=False,
+                referer=self._marketplace_referer.get(origin_village_id),
             )
         except NetworkError as exc:
             return RouteActionResult(origin_village_id, 0, 0, "failed", f"{verb} failed: {exc}")
+        self._log_activity(started)
         status = "enabled" if active else "disabled"
         return RouteActionResult(origin_village_id, 0, 0, status, f"{len(routes)} route(s)")
 

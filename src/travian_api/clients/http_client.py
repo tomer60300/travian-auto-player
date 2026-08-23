@@ -493,12 +493,15 @@ class HttpClient:
             except Exception:
                 pass
 
-    async def _stealth_pre_request(self, url: str, request_type: str = "page") -> Dict[str, str]:
+    async def _stealth_pre_request(
+        self, url: str, request_type: str = "page", *, referer: str | None = None
+    ) -> Dict[str, str]:
         """Run stealth pre-request checks and return appropriate headers.
 
         Args:
             url: Request URL (for context)
-            request_type: "page", "json", "form", or "xhr"
+            request_type: "page", "json", "form", "xhr", or "fetch"
+            referer: pin the Referer instead of using the client-wide last page
 
         Returns:
             Headers dict to use for the request
@@ -524,7 +527,9 @@ class HttpClient:
         await self._throttler.wait(context=url)
 
         # Get browser-appropriate headers
-        if request_type == "json":
+        if request_type == "fetch":
+            headers = self._browser_headers.for_fetch(url)
+        elif request_type == "json":
             headers = self._browser_headers.for_json_post(url)
         elif request_type == "form":
             headers = self._browser_headers.for_form_post(url)
@@ -539,8 +544,20 @@ class HttpClient:
         # (page load, or the form POST + its PRG redirect GET). Emitting it on
         # those — the highest-volume request class — is a custom header showing
         # up exactly where the frontend cannot produce one.
+        # Deliberately NOT "fetch": the captured /api/v1 request carried no
+        # X-Version at all, and a custom header the real client does not send is
+        # a fingerprint wherever it appears.
         if request_type in ("json", "xhr"):
             headers["X-Version"] = x_version
+
+        # A caller that knows which page it is acting from pins the Referer
+        # rather than trusting the client-wide "last page visited". That field is
+        # one per account and shared by every concurrent operation, so a farm
+        # loop or queue poll doing a single GET during a write's pacing delay
+        # (3-20s, mode 7s) would otherwise rewrite it -- producing a write whose
+        # Referer is a page that has no such form on it.
+        if referer is not None:
+            headers["Referer"] = referer
 
         # A None value is the suppression sentinel for curl_cffi: it emits
         # "name:" on the wire, deleting a header curl-impersonate would
@@ -931,6 +948,7 @@ class HttpClient:
         skip_reauth: bool = False,
         safe_to_retry: bool = True,
         request_type: str = "json",
+        referer: str | None = None,
         _retry: int = 0,
     ) -> Dict[str, Any]:
         """Make a POST request with JSON data.
@@ -948,8 +966,8 @@ class HttpClient:
 
         # XHR requests still send a JSON body; merge in JSON Content-Type on top
         # of the XHR header shape so the request stays a valid fetch+json POST.
-        rt = "xhr" if request_type == "xhr" else "json"
-        headers = await self._stealth_pre_request(url, rt)
+        rt = request_type if request_type in ("xhr", "fetch") else "json"
+        headers = await self._stealth_pre_request(url, rt, referer=referer)
         # The non-stealth header path returns Content-Type="" which would
         # bypass the `not in` form of this guard. `not headers.get(...)`
         # treats both "missing" and "empty string" identically.
@@ -1030,6 +1048,9 @@ class HttpClient:
                     skip_reauth=skip_reauth,
                     safe_to_retry=safe_to_retry,
                     request_type=request_type,
+                    # Forwarded, or the retry would fall back to the shared
+                    # "last page visited" and reintroduce the race this pins.
+                    referer=referer,
                     _retry=_retry + 1,
                 )
             raise NetworkError(f"Connection reset: {e}")
@@ -1051,6 +1072,7 @@ class HttpClient:
         skip_reauth: bool = False,
         safe_to_retry: bool = True,
         request_type: str = "json",
+        referer: str | None = None,
     ) -> Dict[str, Any]:
         """Make a DELETE request (JSON response expected).
 
@@ -1061,8 +1083,8 @@ class HttpClient:
         if not url.startswith("http"):
             url = urljoin(self.base_url, url.lstrip("/"))
 
-        rt = "xhr" if request_type == "xhr" else "json"
-        headers = await self._stealth_pre_request(url, rt)
+        rt = request_type if request_type in ("xhr", "fetch") else "json"
+        headers = await self._stealth_pre_request(url, rt, referer=referer)
         if rt == "xhr" and data is not None and not headers.get("Content-Type"):
             headers["Content-Type"] = JSON_CONTENT_TYPE
 
@@ -1145,6 +1167,7 @@ class HttpClient:
         skip_reauth: bool = False,
         safe_to_retry: bool = True,
         request_type: str = "json",
+        referer: str | None = None,
     ) -> Dict[str, Any]:
         """Make a PUT request with a JSON body (JSON response expected).
 
@@ -1165,8 +1188,8 @@ class HttpClient:
         if not url.startswith("http"):
             url = urljoin(self.base_url, url.lstrip("/"))
 
-        rt = "xhr" if request_type == "xhr" else "json"
-        headers = await self._stealth_pre_request(url, rt)
+        rt = request_type if request_type in ("xhr", "fetch") else "json"
+        headers = await self._stealth_pre_request(url, rt, referer=referer)
         if rt == "xhr" and not headers.get("Content-Type"):
             headers["Content-Type"] = JSON_CONTENT_TYPE
 

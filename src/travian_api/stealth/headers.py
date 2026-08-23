@@ -171,6 +171,44 @@ class BrowserHeaders:
         # the wire test tells the two classes apart.
         return headers
 
+    def for_fetch(self, path: str = "") -> Dict[str, Optional[str]]:
+        """Headers for a plain ``fetch()`` call, matching a captured request.
+
+        This is the shape a real client sends to ``/api/v1/*``, verified against
+        a Europe 2 capture (gpack 597.6). It differs from :meth:`for_xhr` by
+        exactly one header -- no ``X-Requested-With``, because ``fetch`` never
+        adds it -- and from :meth:`for_json_post` by its ``Accept``, which is
+        the ``*/*`` fetch default rather than axios's
+        ``application/json, text/plain, */*``. Neither existing shape matched,
+        which is why this one exists.
+
+        It also carries no ``X-Version``. The capture's header list has none,
+        and a custom header the real request does not send is a fingerprint
+        wherever it appears -- so the caller decides, and for this traffic the
+        answer is no. ``Content-Type`` is likewise the caller's to set, since
+        only it knows the body.
+        """
+        headers = {
+            "User-Agent": self._ua.ua,
+            # The fetch default. axios would send
+            # "application/json, text/plain, */*"; the captured client did not.
+            "Accept": "*/*",
+            "Accept-Language": self._persona.accept_language,
+            "Accept-Encoding": self._accept_encoding(),
+            "Origin": self._base_url,
+        }
+
+        if not self._ua.is_firefox:
+            headers["Sec-Fetch-Site"] = "same-origin"
+            headers["Sec-Fetch-Mode"] = "cors"
+            headers["Sec-Fetch-Dest"] = "empty"
+            headers.update(self._sec_ch_headers())
+
+        if self._last_page:
+            headers["Referer"] = self._last_page
+
+        return _as_subresource(headers)
+
     def for_xhr(self, path: str = "") -> Dict[str, Optional[str]]:
         """Headers for a legacy-XHR request (the endpoints Travian's client
         drives via XMLHttpRequest, which set ``X-Requested-With``).
