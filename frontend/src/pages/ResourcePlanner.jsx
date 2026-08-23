@@ -428,6 +428,11 @@ export default function ResourcePlanner() {
   const [routesPerRun, setRoutesPerRun] = useState(MAX_ROUTES_PER_RUN)
   const [onlyOrigin, setOnlyOrigin] = useState('')
   const [onlyDestination, setOnlyDestination] = useState('')
+  // Was hardcoded true, which made every run a create AND a disable. For a
+  // first live test that is the wrong shape: turning it off makes the run
+  // create-only, so the single thing it changes is the single thing being
+  // tested. Defaults to on, which is the behaviour for ordinary runs.
+  const [disableExisting, setDisableExisting] = useState(true)
   // Durable audit of the last LIVE run (see LS_LAST_RUN): survives the input
   // edits that clear execResult, and page reloads.
   const [lastRun, setLastRun] = useState(null)
@@ -900,7 +905,7 @@ export default function ResourcePlanner() {
         const res = await api.post('/distribution/execute', {
           ...buildPlanPayload(),
           dry_run: dryRun,
-          disable_existing: true,
+          disable_existing: disableExisting,
           max_routes_per_run: Number(routesPerRun) || MAX_ROUTES_PER_RUN,
           // Targeting a single pair is how a first live run against a real
           // account becomes a controlled test rather than an uncontrolled one
@@ -1007,6 +1012,7 @@ export default function ResourcePlanner() {
       routesPerRun,
       onlyOrigin,
       onlyDestination,
+      disableExisting,
     ],
   )
 
@@ -2661,6 +2667,21 @@ export default function ResourcePlanner() {
                       />
                     </label>
                   </div>
+                  <label className="mt-2 flex items-center gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={disableExisting}
+                      onChange={(e) => setDisableExisting(e.target.checked)}
+                    />
+                    <span>
+                      Also disable routes the plan no longer wants.{' '}
+                      <span className="text-secondary">
+                        Untick for a create-only run — then the only thing it changes in the game
+                        is the route it creates. Leave ticked for normal use, or old routes pile
+                        up alongside new ones.
+                      </span>
+                    </span>
+                  </label>
                 </div>
 
                 {!plan.feasible && (
