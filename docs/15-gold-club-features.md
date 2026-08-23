@@ -106,7 +106,31 @@ Notes, all of which corrected an earlier assumption:
 
 - **`hour` + `minute` set the send time**, so a route's phase is chosen at creation rather than being fixed to the moment of the click. This resolves review R6 in `docs/25-resource-distribution-planner.md`: a planned beat is realisable exactly as scheduled.
 - **The destination is nested** under `targetCoordinates`, not flat `x`/`y`.
-- **`repeatEvery`** is the cycle length in hours.
+- **`repeatEvery`** — unit UNVERIFIED, and the earlier claim that it is "the
+  cycle length in hours" does not survive the marketplace page. The capture
+  observed the value `1`, which is precisely the one value that cannot tell
+  hours from days apart. `tests/fixtures/marketplace_trade_routes.html` (a real
+  page, one village, 83 routes) reads the same field back as `repeat`, and there
+  it cannot be a spacing:
+
+  | destination | routes | departure spacing | `repeat` |
+  |---|---|---|---|
+  | A | 24 | every 1 h at :13 | 1 |
+  | B | 12 | every 2 h at :13 | 1 |
+  | C | 8 | every 3 h at :20 | 1 |
+  | D | 2 | every 12 h at :13 | 1 |
+
+  Four different cadences, all `repeat: 1`. If `repeat` were an hour interval,
+  one route would produce each of these instead of 24, 12, 8 and 2. So a route
+  is **one daily departure at a fixed `hour`/`minute`**, `repeat` is the period
+  in days (one route on the page has `repeat: 2`), and an N-hour cadence is
+  built from `24/N` separate routes.
+
+  Consequence for the planner, which currently emits ONE route per
+  origin-destination pair with `repeatEvery: cycle_hours`: a 6-hour cycle would
+  become a route firing every 6 *days*. Live creation is off by default
+  (`trade_route_live`), so nothing has been sent at an account on this
+  assumption — but it must be settled before the flag is turned on.
 - **No merchant count is sent.** The game derives it from the cargo, so a planner's merchant figures are for budgeting and warnings only, never wire data.
 - **All four resources are always present**, zeros included.
 - `mode` was `"send"`; `deliveries` was `1`; `useTradeShips` was `false` (no boats on this server).
@@ -138,8 +162,19 @@ Without Gold Club, `POST /api/v1/trade-routes` returns `api.unexpectedError`. Wi
 
 ### Still open
 
-- Whether Gold Club caps the number of routes per village.
-- What `deliveries` controls beyond the observed value of `1`.
+- **`repeatEvery`'s unit** — days or hours; see the note above. Settling it also
+  decides whether the planner emits one route or `24/cycle_hours` routes per
+  destination.
+- What `deliveries` controls beyond the observed value of `1`. The route model
+  read back from the page has no `deliveries` field at all -- it carries
+  `sendOnce: false` (on all 83 routes) and `repeat`, so the create field either
+  maps onto `sendOnce` or is not persisted per route.
+
+### Answered by the captured page
+
+- **Routes per village is not capped anywhere near the planner's needs.** One
+  village's marketplace holds **83** routes across 6 destinations, so the cap is
+  at least that. No probing needed.
 - Whether `mode` accepts a fetch/receive direction as well as `"send"`.
 
 ---
