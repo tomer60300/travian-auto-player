@@ -58,7 +58,10 @@ from travian_api.services.distribution.storage import (
     storage_warnings,
     store_status,
 )
-from travian_api.services.trade_route_service import PlannedRoute
+from travian_api.services.trade_route_service import (
+    MarketplaceUnreadable,
+    PlannedRoute,
+)
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User
 from travian_api.web.operation_gate import active_ops, captcha_stop
@@ -1656,7 +1659,7 @@ async def post_execute(
                     # stop rather than 500 out and lose the record (issue #65).
                     try:
                         existing = await svc.list_existing_routes(origin)
-                    except NetworkError as exc:
+                    except (NetworkError, MarketplaceUnreadable) as exc:
                         problems.append(
                             f"{village_label(origin, names)}: marketplace read failed "
                             f"({exc}); remaining routes deferred"

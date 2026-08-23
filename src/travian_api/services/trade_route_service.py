@@ -58,6 +58,19 @@ class TradeRouteReconcilerUnverified(TravianError):
     """Raised when a route would be CREATED without being able to read existing ones."""
 
 
+class MarketplaceUnreadable(TravianError):
+    """A marketplace page carried no trade-route model we could read.
+
+    Raised instead of returning an empty list, because the two are not the same
+    answer: a village with no routes means "nothing to disable, create the
+    plan", while a page we could not read means "we have no idea what is there".
+    Treating the second as the first re-creates the whole plan every run and
+    accumulates duplicates in-game. The executor already has the right
+    behaviour for a failed read -- defer this origin and everything after it --
+    so this rides that path rather than inventing a second one.
+    """
+
+
 # Whether parse_trade_routes has been confirmed against real gid=17&t=3 markup.
 #
 # This gates CREATION specifically, and the asymmetry is the point. The parser
@@ -73,7 +86,7 @@ class TradeRouteReconcilerUnverified(TravianError):
 # To lift this: save the HTML of /build.php?gid=17&t=3 with at least one route
 # present, confirm parse_trade_routes finds it, add that page as a fixture, and
 # set this True.
-ROUTE_LIST_MARKUP_VERIFIED = False
+ROUTE_LIST_MARKUP_VERIFIED = True
 
 
 @dataclass(frozen=True)
@@ -194,7 +207,17 @@ class TradeRouteService:
         is gated separately on ROUTE_LIST_MARKUP_VERIFIED.
         """
         html = await self.open_marketplace(village_id)
-        from ..parsers.html_parser import parse_trade_routes
+        from ..parsers.html_parser import parse_trade_routes, trade_route_page_recognised
+
+        if not trade_route_page_recognised(html):
+            # A soft block page, a login redirect or a gpack that moved the
+            # model all land here. Any of them would otherwise read as "this
+            # village has no routes".
+            raise MarketplaceUnreadable(
+                f"village {village_id}: the marketplace page carried no trade-route "
+                f"model, so what is already there is unknown; refusing to treat it "
+                f"as an empty village"
+            )
 
         return [
             ExistingRoute(

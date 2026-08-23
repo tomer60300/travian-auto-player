@@ -20,6 +20,7 @@ from travian_api.services.distribution.allocation import Resource
 from travian_api.services.trade_route_service import (
     ROUTE_LIST_MARKUP_VERIFIED,
     ExistingRoute,
+    MarketplaceUnreadable,
     PlannedRoute,
     TradeRouteReconcilerUnverified,
     TradeRouteService,
@@ -63,18 +64,38 @@ def _route() -> PlannedRoute:
     )
 
 
-def test_the_production_default_is_unverified():
-    # The whole gate rests on this staying False until someone captures the page.
-    assert ROUTE_LIST_MARKUP_VERIFIED is False
-    assert TradeRouteService(_RecordingClient()).reconciler_verified is False
+def test_the_markup_is_verified_now():
+    # Flipped once the real gid=17&t=3 page was captured, its JSON model read,
+    # and tests/fixtures/marketplace_trade_routes.html pinned against it.
+    # Protection did not go away -- it moved from "we have never seen this
+    # markup" to "this particular page did not parse", which is per-page and
+    # therefore catches a block page or a future gpack change too.
+    assert ROUTE_LIST_MARKUP_VERIFIED is True
+    assert TradeRouteService(_RecordingClient()).reconciler_verified is True
 
 
-def test_a_create_is_refused_and_sends_nothing():
+def test_the_gate_still_bites_if_it_is_ever_turned_off_again():
+    service = TradeRouteService(_RecordingClient(), live_enabled=True, reconciler_verified=False)
+    with pytest.raises(TradeRouteReconcilerUnverified):
+        asyncio.run(service.create_route(_route()))
+
+
+def test_a_create_is_allowed_now_that_the_page_can_be_read():
     client = _RecordingClient()
     service = TradeRouteService(client, live_enabled=True)
-    with pytest.raises(TradeRouteReconcilerUnverified, match="gid=17&t=3"):
-        asyncio.run(service.create_route(_route()))
-    assert client.sent == [], "a refused create must not touch the game"
+    asyncio.run(service.create_route(_route()))
+    assert [verb for verb, _ in client.sent] == ["POST"]
+
+
+def test_an_unreadable_marketplace_raises_instead_of_reading_as_empty():
+    # THE original hazard, now caught per page rather than blanket-blocked. The
+    # recording client returns markup with no route model, which is what a soft
+    # block page or a login redirect looks like. Returning [] here would tell
+    # the reconciler "this village has no routes" and re-create the whole plan.
+    client = _RecordingClient()
+    service = TradeRouteService(client, live_enabled=True)
+    with pytest.raises(MarketplaceUnreadable, match="no trade-route model"):
+        asyncio.run(service.list_existing_routes(20031))
 
 
 def test_disabling_is_still_allowed():

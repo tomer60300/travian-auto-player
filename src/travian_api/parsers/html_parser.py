@@ -614,6 +614,42 @@ def parse_rally_point_troops(html: str) -> Dict[str, int]:
 _HIDDEN_CLASS_TOKENS = frozenset({"hidden", "invisible", "d-none"})
 
 
+# A map tile's linear index, as Travian numbers them. Verified against ground
+# truth: a captured create request targeted (23|88), the formula below gives it
+# mapId 45136, and 45136 is exactly the destination the marketplace page then
+# listed for that route.
+#
+#     mapId = (S - y) * span + (x + S) + 1        where S = (span - 1) // 2
+#
+# The span belongs to the server (Europe 2 runs -200..+200, so 401) and is
+# passed in rather than assumed, because it differs between worlds.
+DEFAULT_MAP_SPAN = 401
+
+
+def map_id_to_coords(map_id: int, map_span: int = DEFAULT_MAP_SPAN) -> Optional[tuple[int, int]]:
+    """Coordinates of a map tile index, or None if it cannot be one.
+
+    The marketplace page names a route's destination by village id and map id
+    and carries no coordinates at all, so this is how a route read off the page
+    is matched against a plan, which works in coordinates.
+    """
+    if map_span <= 0 or map_span % 2 == 0:
+        return None  # a Travian map is symmetric about 0, so the span is odd
+    if not isinstance(map_id, int) or map_id < 1 or map_id > map_span * map_span:
+        return None
+    half = (map_span - 1) // 2
+    zero_based = map_id - 1
+    y = half - (zero_based // map_span)
+    x = (zero_based % map_span) - half
+    return x, y
+
+
+def coords_to_map_id(x: int, y: int, map_span: int = DEFAULT_MAP_SPAN) -> int:
+    """Inverse of :func:`map_id_to_coords`. Kept for round-trip testing."""
+    half = (map_span - 1) // 2
+    return (half - y) * map_span + (x + half) + 1
+
+
 _JSON_BACKSLASH = chr(92)
 
 # The marketplace page hands React a complete model of the village's trade
@@ -678,7 +714,7 @@ def trade_route_page_recognised(html: str) -> bool:
     return _trade_route_view_data(html) is not None
 
 
-def parse_trade_routes(html: str) -> List[Dict[str, Any]]:
+def parse_trade_routes(html: str, map_span: int = DEFAULT_MAP_SPAN) -> List[Dict[str, Any]]:
     """Existing trade routes on a village's marketplace (gid=17, tab t=3).
 
     Read from the JSON model the page hands React, verified against a real
@@ -733,15 +769,19 @@ def parse_trade_routes(html: str) -> List[Dict[str, Any]]:
                 continue
             seen.add(route_id)
             cargo = entry.get("carriedResources") or {}
+            coords = map_id_to_coords(dest_map_id, map_span) if dest_map_id is not None else None
             routes.append(
                 {
                     "route_id": route_id,
                     "dest_village_id": dest_village_id,
                     "dest_name": dest_name,
                     "dest_map_id": int(dest_map_id) if isinstance(dest_map_id, int) else None,
-                    # Not on the page in any form; see the docstring.
-                    "dest_x": None,
-                    "dest_y": None,
+                    # Derived from the map id: the page has no coordinates, and
+                    # a plan is expressed in them. None when the map id is
+                    # missing or impossible, which keeps a bad value out of a
+                    # match rather than guessing one in.
+                    "dest_x": coords[0] if coords else None,
+                    "dest_y": coords[1] if coords else None,
                     # Every route in the model is a real row a human can see.
                     # There is no hidden-entry mechanism here, so the honeypot
                     # question the DOM scraper worried about does not arise.

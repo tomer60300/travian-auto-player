@@ -17,6 +17,8 @@ from pathlib import Path
 import pytest
 
 from travian_api.parsers.html_parser import (
+    coords_to_map_id,
+    map_id_to_coords,
     parse_trade_routes,
     trade_route_page_recognised,
 )
@@ -46,14 +48,32 @@ class TestTheRealPage:
         # creating. The old parser guessed this from CSS classes.
         assert all(r["active"] is True for r in parse_trade_routes(page))
 
-    def test_the_destination_is_a_village_id_never_coordinates(self, page):
-        # The page carries no coordinates at all, so reconciling against a plan
-        # has to go through the village id. Anything that matches on x/y cannot
-        # work from this source, and silently matching nothing is how every run
-        # re-creates the whole plan.
+    def test_the_destination_carries_both_a_village_id_and_coordinates(self, page):
+        # The page itself has no coordinates -- it names a destination by
+        # village id and map id. The coordinates are DERIVED from the map id,
+        # which is what lets a route read off the page be matched against a plan
+        # expressed in coordinates.
         for route in parse_trade_routes(page):
-            assert route["dest_x"] is None and route["dest_y"] is None
             assert isinstance(route["dest_village_id"], int)
+            assert isinstance(route["dest_x"], int) and isinstance(route["dest_y"], int)
+
+    def test_the_map_id_conversion_matches_captured_ground_truth(self):
+        # A captured create request targeted (23|88). The marketplace page then
+        # listed that destination with mapId 45136, and the formula agrees --
+        # so this is checked against the game, not against itself.
+        assert coords_to_map_id(23, 88) == 45136
+        assert map_id_to_coords(45136) == (23, 88)
+
+    @pytest.mark.parametrize("x", [-200, -37, 0, 23, 200])
+    @pytest.mark.parametrize("y", [-200, -41, 0, 88, 200])
+    def test_the_conversion_round_trips_across_the_map(self, x, y):
+        assert map_id_to_coords(coords_to_map_id(x, y)) == (x, y)
+
+    @pytest.mark.parametrize("bad", [0, -1, 401 * 401 + 1])
+    def test_an_impossible_map_id_yields_no_coordinates(self, bad):
+        # None rather than a wrong pair: a bogus coordinate would match the
+        # wrong destination, which is worse than matching nothing.
+        assert map_id_to_coords(bad) is None
 
     def test_cargo_carries_all_four_resources(self, page):
         for route in parse_trade_routes(page):
