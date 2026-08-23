@@ -224,3 +224,36 @@ class ExecutionTrace:
             except OSError:
                 pass
             self._handle = None
+
+
+def read_inventories(run_id: str) -> dict[int, list[dict[str, Any]]]:
+    """The pre-write route inventory each origin had, from a finished run's trace.
+
+    This is what makes a revert possible at all: the game returns no id when it
+    creates a route, so "what did that run add?" can only be answered by diffing
+    a later read against exactly what was there first. The run already read every
+    marketplace it touched, so that state is on disk and costs nothing to recover.
+
+    Raises FileNotFoundError if there is no such trace, because silently
+    returning "nothing was there" would make every existing route look created.
+    """
+    path = TRACE_DIR / f"exec-{run_id}.jsonl"
+    inventories: dict[int, list[dict[str, Any]]] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue  # a torn final line from a killed process
+            if event.get("kind") != "origin_read":
+                continue
+            origin = event.get("origin")
+            inventory = event.get("inventory")
+            if isinstance(origin, int) and isinstance(inventory, list):
+                # First read wins: a re-read within one run would be a later
+                # state, not the one the run started from.
+                inventories.setdefault(origin, inventory)
+    return inventories

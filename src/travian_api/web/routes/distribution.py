@@ -32,7 +32,10 @@ from travian_api.services.distribution.allocation import (
     Resource,
     village_label,
 )
-from travian_api.services.distribution.execution_trace import ExecutionTrace
+from travian_api.services.distribution.execution_trace import (
+    ExecutionTrace,
+    read_inventories,
+)
 from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import (
     DAILY_BEAT_CYCLES,
@@ -51,6 +54,7 @@ from travian_api.services.distribution.planner import (
     SheetRow,
     craft_plan,
 )
+from travian_api.services.distribution.route_revert import describe, plan_revert
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY
 from travian_api.services.distribution.storage import (
     ProfileSegment,
@@ -1400,6 +1404,167 @@ async def post_plan(
     )
 
 
+class RevertPlanRequest(BaseModel):
+    """Ask what it would take to undo a previous live run."""
+
+    trace_id: str = Field(
+        min_length=1,
+        description=(
+            "The trace_id an /execute response returned. Its recorded pre-write "
+            "inventory is the only record of what each village looked like before "
+            "the run, because the game returns no id when it creates a route."
+        ),
+    )
+    origins: list[int] | None = Field(
+        default=None,
+        description=(
+            "Limit the check to these origin villages. Each one costs two game "
+            "requests to re-read, so a one-village canary should say so rather "
+            "than re-reading every village the run touched."
+        ),
+    )
+    apply_disable: bool = Field(
+        default=False,
+        description=(
+            "Actually disable the routes the run created. This is the only half of "
+            "a revert the app can perform: deleting a route has never been captured "
+            "as a request, so removal stays a manual step in the UI."
+        ),
+    )
+    map_span: int = Field(default=DEFAULT_MAP_SPAN, gt=0)
+
+
+class RevertPlanResponse(BaseModel):
+    trace_id: str
+    # Ordered operator instructions, disable-before-delete.
+    steps: list[str]
+    # Route ids per origin, so a caller can act without parsing prose.
+    created: dict[int, list[int]] = {}
+    disabled_now: dict[int, list[int]] = {}
+    must_delete_by_hand: dict[int, list[int]] = {}
+    restore_state: dict[int, list[str]] = {}
+    clean: bool
+    requests_used: int
+    problems: list[str] = []
+
+
+@router.post("/routes/revert-plan", response_model=RevertPlanResponse)
+async def post_revert_plan(
+    body: RevertPlanRequest,
+    user: User = Depends(get_current_user),
+    session: TravianSession | None = Depends(get_live_travian_session),
+):
+    """What it would take to put things back as they were before a live run.
+
+    Reverting is deliberately not a single button. The app can disable what it
+    created; it cannot delete, because that request has never been captured, and
+    a revert that claimed to have undone a run while leaving live routes behind
+    would be worse than one that names the rows a person still has to remove.
+
+    So this reports both halves, disable first: a created route left enabled
+    while someone gets round to deleting it keeps shipping resources.
+    """
+    try:
+        before = read_inventories(body.trace_id)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"No trace for run {body.trace_id}. Without the pre-run inventory "
+                f"every existing route would look newly created, so this refuses "
+                f"rather than guess."
+            ),
+        ) from None
+    if not before:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Run {body.trace_id} read no marketplace, so it created nothing "
+                f"and there is nothing to revert."
+            ),
+        )
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not connected. Comparing against the game needs a live session.",
+        )
+
+    svc = session.trade_route_service
+    origins = [o for o in (body.origins or sorted(before)) if o in before]
+    if not origins:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"None of those origins appear in run {body.trace_id}.",
+        )
+
+    steps: list[str] = []
+    problems: list[str] = []
+    created: dict[int, list[int]] = {}
+    disabled_now: dict[int, list[int]] = {}
+    must_delete: dict[int, list[int]] = {}
+    restore: dict[int, list[str]] = {}
+    requests_used = 0
+    clean = True
+
+    for origin in origins:
+        try:
+            now = await svc.list_existing_routes(origin, map_span=body.map_span)
+            requests_used += 2  # dorf2 + the marketplace tab
+        except (NetworkError, MarketplaceUnreadable) as exc:
+            # Conclude nothing about a village we could not read: an unreadable
+            # page would otherwise look like "every route vanished".
+            problems.append(
+                f"village {origin}: could not re-read the marketplace ({exc}); "
+                f"nothing concluded or changed for this village"
+            )
+            clean = False
+            continue
+
+        after = [
+            {"route_id": e.route_id, "dest": e.dest_village_id, "active": e.active} for e in now
+        ]
+        plan = plan_revert(origin, before[origin], after)
+        steps.extend(describe(plan))
+        if plan.is_clean:
+            continue
+        clean = False
+        created[origin] = plan.manual_delete_ids
+        must_delete[origin] = plan.manual_delete_ids
+        if plan.to_restore:
+            restore[origin] = [
+                f"route {rid} -> {'enabled' if was else 'disabled'}" for rid, was in plan.to_restore
+            ]
+
+        if body.apply_disable and plan.disable_ids:
+            live = [e for e in now if e.route_id in set(plan.disable_ids)]
+            result = await svc.disable_routes(origin, live)
+            requests_used += 1
+            if result is not None and result.status == "disabled":
+                disabled_now[origin] = plan.disable_ids
+                steps.append(
+                    f"village {origin}: disabled {len(plan.disable_ids)} created "
+                    f"route(s) - they are inert now, but still need deleting"
+                )
+            else:
+                detail = result.detail if result is not None else "no request was made"
+                problems.append(
+                    f"village {origin}: could not disable created routes "
+                    f"{plan.disable_ids} ({detail}); they are STILL RUNNING"
+                )
+
+    return RevertPlanResponse(
+        trace_id=body.trace_id,
+        steps=steps or [f"run {body.trace_id}: nothing to revert"],
+        created=created,
+        disabled_now=disabled_now,
+        must_delete_by_hand=must_delete,
+        restore_state=restore,
+        clean=clean,
+        requests_used=requests_used,
+        problems=problems,
+    )
+
+
 @router.post("/execute", response_model=ExecuteResponse)
 async def post_execute(
     body: ExecuteRequest,
@@ -1756,6 +1921,21 @@ async def post_execute(
                             active=sum(1 for e in existing if e.active),
                             placeable=sum(1 for e in existing if e.dest_x is not None),
                             destinations=sorted({e.dest_village_id for e in existing}),
+                            # The FULL pre-write inventory, not just counts. This
+                            # is the "old state" a revert needs: the game returns
+                            # no id when it creates a route, so the only way to
+                            # identify what a run added is to diff a later read
+                            # against exactly what was there beforehand. Captured
+                            # here because this read already happened -- deriving
+                            # it later would cost another request per village.
+                            inventory=[
+                                {
+                                    "route_id": e.route_id,
+                                    "dest": e.dest_village_id,
+                                    "active": e.active,
+                                }
+                                for e in existing
+                            ],
                         )
                     except (NetworkError, MarketplaceUnreadable) as exc:
                         # The distinction that matters most in a trace: we do NOT
