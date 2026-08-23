@@ -39,6 +39,9 @@ dependencies = [
 [project.optional-dependencies]
 web = [
     "fastapi>=0.115.0",
+    # status.HTTP_422_UNPROCESSABLE_CONTENT is used directly in the route layer and
+    # only exists from 0.48.0; fastapi itself only requires starlette>=0.46.0.
+    "starlette>=0.48.0",
     "uvicorn[standard]>=0.30.0",
     "sqlalchemy[asyncio]>=2.0.0",
     "aiosqlite>=0.20.0",
