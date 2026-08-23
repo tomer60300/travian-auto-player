@@ -422,6 +422,11 @@ class RouteActionResponse(BaseModel):
     cargo: dict[Resource, int]
     cycle_hours: int
     merchants: int
+    # How many rows this ONE create request becomes in the game. Travian fans a
+    # "repeat every N hours" route out into 24/N daily rows, so a request is not
+    # a row -- and an operator who authorised "3 routes" on a 1-hour cycle has
+    # authorised 72 rows. Reported so that is never a surprise.
+    game_rows: int = 1
     status: str  # would_create | deferred | created | skipped | blocked | failed
     detail: str = ""
 
@@ -444,6 +449,9 @@ class ExecuteResponse(BaseModel):
     # Gold-Club block). Kept separate from `warnings` so a benign planner note
     # never makes a successful run look failed.
     problems: list[str] = []
+    # Rows the game will hold as a result of this run's creates, which is not the
+    # same number as the creates: see RouteActionResponse.game_rows.
+    created_game_rows: int = 0
     # Where this run's full decision-and-request trace was written. A live run is
     # the one operation here that changes a real account, and the response alone
     # cannot say WHY each route was skipped or disabled -- the trace can.
@@ -1468,6 +1476,20 @@ async def post_execute(
             )
         )
 
+    def _game_rows(cycle_hours: int) -> int:
+        """Rows one create request becomes in the game.
+
+        Travian implements "repeat every N hours" by generating 24/N separate
+        daily route rows, each departing at its own time -- measured against a
+        real marketplace page, where every destination's row count was exactly
+        24 divided by its departure spacing. A cycle the day does not divide
+        evenly cannot arise here (DAILY_BEAT_CYCLES is the divisors of 24), but
+        round up rather than silently under-report if one ever does.
+        """
+        if cycle_hours <= 0:
+            return 1
+        return max(1, -(-24 // cycle_hours))
+
     def _action(
         row: SheetRow, route: PlannedRoute, status_: str, detail: str = ""
     ) -> RouteActionResponse:
@@ -1481,6 +1503,7 @@ async def post_execute(
             cargo={r: amount for r, amount in row.cargo.items() if amount},
             cycle_hours=row.cycle_hours,
             merchants=row.merchants,
+            game_rows=_game_rows(row.cycle_hours),
             status=status_,
             detail=detail,
         )
@@ -1508,6 +1531,7 @@ async def post_execute(
             disables=disables,
             re_enables=[],
             created=0,
+            created_game_rows=sum(a.game_rows for a in actions if a.status == "would_create"),
             remaining=max(0, len(items) - cap),
             warnings=warnings,
         )
@@ -1636,6 +1660,8 @@ async def post_execute(
         map_span=body.map_span,
         origins=len(origins),
         desired_routes=len(items),
+        # What this run is authorised to put in the game at worst, in ROWS.
+        max_game_rows_this_run=sum(_game_rows(row.cycle_hours) for row, _ in items[:cap]),
     )
 
     attempts = 0  # create requests fired this run
@@ -1973,6 +1999,7 @@ async def post_execute(
         # that the run ended.
         trace.close(
             created=sum(1 for a in actions if a.status == "created"),
+            created_game_rows=sum(a.game_rows for a in actions if a.status == "created"),
             disabled=len(disables),
             re_enabled=len(re_enables),
             deferred=len(deferred),
@@ -2012,6 +2039,7 @@ async def post_execute(
         # the cap PLUS any create that did not complete (failed / Gold Club), so
         # the summary never makes a partially-done run look complete.
         created=sum(1 for a in actions if a.status == "created"),
+        created_game_rows=sum(a.game_rows for a in actions if a.status == "created"),
         remaining=len(deferred) + outstanding,
         warnings=warnings,
         problems=problems,

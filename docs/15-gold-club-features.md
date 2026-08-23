@@ -106,24 +106,44 @@ Notes, all of which corrected an earlier assumption:
 
 - **`hour` + `minute` set the send time**, so a route's phase is chosen at creation rather than being fixed to the moment of the click. This resolves review R6 in `docs/25-resource-distribution-planner.md`: a planned beat is realisable exactly as scheduled.
 - **The destination is nested** under `targetCoordinates`, not flat `x`/`y`.
-- **`repeatEvery` is the cycle length in HOURS**, and it is a closed set, not a
-  free integer. The dialog renders it as
-  `<select name="repeatEvery">` offering exactly:
+- **`repeatEvery` is a cycle length in HOURS, and ONE create request fans out
+  into `24 / repeatEvery` separate route rows.** The dialog renders it as
+  `<select name="repeatEvery">` offering exactly `24, 12, 8, 6, 4, 3, 2, 1`
+  hour(s) plus `0` = "Send only once" -- the divisors of 24, which is precisely
+  `DAILY_BEAT_CYCLES` in `services/distribution/merchants.py`.
 
-  `24, 12, 8, 6, 4, 3, 2, 1` hour(s), plus `0` = "Send only once".
+  The fan-out is measured, not assumed. On a real page, every destination's row
+  count equals 24 divided by the spacing between its departures:
 
-  Those are the divisors of 24, which is precisely
-  :data:`DAILY_BEAT_CYCLES` in `services/distribution/merchants.py`
-  (`(1, 2, 3, 4, 6, 8, 12, 24)`). The planner already emits only legal values, so
-  one route per origin-destination pair is correct -- a cycle the game cannot
-  express is unreachable by construction.
+  | rows | departure spacing | 24 / spacing |
+  |---|---|---|
+  | 24 | 1 h | 24 |
+  | 12 | 2 h | 12 |
+  | 8 | 3 h | 8 |
+  | 2 | 12 h | 2 |
 
-  **Do not compare this against the `repeat` field the marketplace page reads
-  back: they are different units.** Measured on a real page, 83 routes all
-  reporting `repeat: 1` had their next departures spread over 23.6 hours. A
-  one-hour repeat would put every next departure inside the coming 60 minutes,
-  so `repeat: 1` is one DAY. Anything reconciling a plan's `cycle_hours` against
-  a live route's `repeat` would be comparing hours to days.
+  Each row is then **one daily departure at a fixed time**. That is why the Edit
+  dialog for an existing route has no "Repeat every" field at all: an individual
+  row has no period. "Repeat every 2 hours" is a creation-time instruction that
+  produces twelve daily rows, not a property any row carries afterwards.
+
+  Consequences for this app:
+
+  * The planner emitting one create request per origin-destination pair is
+    correct, and `repeatEvery: cycle_hours` means what it says: cargo arrives
+    every `cycle_hours`, delivered as `24/cycle_hours` daily rows of that cargo.
+  * `max_routes_per_run` bounds create REQUESTS, not rows. A cap of 3 with
+    1-hour cycles authorises up to 72 rows in the game.
+  * Disabling or deleting a "route" the operator thinks of as one thing means
+    acting on all `24/N` of its rows. This is why the captured toggle carried 24
+    route ids in a single PUT.
+
+- **`deliveries` (1x / 2x / 3x) is read back as `repeat`, and it is merchant
+  loads per firing -- not a repeat count.** Confirmed against a single route on a
+  real page: the JSON says `repeat: 2, merchants: 7`, and that same route in the
+  Edit dialog shows `Deliveries: 2x` with `Merchants: 7/20` for 75,000 crop at
+  02:00. Every other route on the page reads `repeat: 1, merchants: 1`. The app
+  sends 1, the minimum.
 
 - **No merchant count is sent.** The game derives it from the cargo, so a planner's merchant figures are for budgeting and warnings only, never wire data.
 - **All four resources are always present**, zeros included.
@@ -165,16 +185,14 @@ pins the payload field by field:
 | four resource inputs | `resources` | dialog states the per-merchant capacity and shows `Total: n / <fleet capacity>` plus a live `Merchants: n / <fleet>` |
 | **Send** / **Deliver** radio | `mode` | `"send"` is one of TWO directions; the other is a fetch/deliver mode this app never uses |
 | time field (`HH:MM`) | `hour` + `minute` | a single time of day, matching the split payload fields |
-| **Deliveries**: `1x` / `2x` / `3x` radio | `deliveries` | a three-way radio, NOT a free integer. Valid values are 1, 2 and 3 only; the app sends 1, the minimum |
-| **Repeat every** (dropdown) | `repeatEvery` | hours, and a closed set: 24/12/8/6/4/3/2/1, plus 0 = send only once |
+| **Deliveries**: `1x` / `2x` / `3x` radio | `deliveries` | a three-way radio, NOT a free integer: 1, 2 or 3. Read back as `repeat`. The app sends 1 |
+| **Repeat every** (dropdown) | `repeatEvery` | hours, a closed set (24/12/8/6/4/3/2/1, plus 0 = send once), and it FANS OUT into 24/N rows. Absent from the Edit dialog: a row has no period |
 | **Deactivate trade route** checkbox | `enabled` | inverted: checked means `enabled: false` |
 
 ### Still open
 
-- Whether `deliveries` multiplies the load or the number of trips. The dialog
-  offers 1x/2x/3x against a fixed fleet capacity, and the route model read back
-  from the page carries no `deliveries` field at all. Moot while the app sends 1,
-  the minimum.
+Nothing blocking. The wire format, both field units, the fan-out behaviour, the
+route cap and the delete path are all settled against real captures.
 
 ### Answered by the captured page
 
@@ -184,6 +202,11 @@ pins the payload field by field:
 - **`repeatEvery`'s unit and its legal values** — hours, from the divisors of 24;
   see above.
 - **`mode` has a second direction** — the dialog's Send / Deliver radio.
+- **A route CAN be deleted.** Select the row(s), press *Edit selected*, then the
+  trash icon in the Edit dialog. So a created route is reversible, not permanent
+  -- which is what makes a controlled live test safe to run. Deleting a
+  fanned-out route means selecting all `24/N` of its rows.
+- **`deliveries` is merchant loads per firing**, read back as `repeat`.
 
 
 ---

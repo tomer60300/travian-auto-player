@@ -1051,3 +1051,61 @@ class TestALiveRunLeavesAnAuditableTrace:
         assert not [e for e in events if e["kind"] == "wrote" and e["origin"] == 20003], (
             "nothing may be written to a village whose state could not be read"
         )
+
+
+class TestTheGameRowFanOutIsReported:
+    """One create request is not one route in the game.
+
+    Travian implements "repeat every N hours" by generating 24/N separate daily
+    rows. Measured on a real marketplace page: every destination's row count was
+    exactly 24 divided by its departure spacing (24@1h, 12@2h, 8@3h, 2@12h).
+
+    So an operator who caps a run at 3 routes and plans 1-hour cycles has
+    authorised 72 rows. Reporting only "3 created" would be true and misleading
+    at the same time, which is the worst kind of number to print.
+    """
+
+    def test_the_row_count_is_twenty_four_over_the_cycle(self):
+        res = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
+        for action in res.actions:
+            if action.cycle_hours > 0:
+                assert action.game_rows == 24 // action.cycle_hours, (
+                    f"a {action.cycle_hours}h cycle becomes {24 // action.cycle_hours} rows"
+                )
+
+    def test_a_dry_run_totals_the_rows_it_would_create(self):
+        res = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
+        expected = sum(a.game_rows for a in res.actions if a.status == "would_create")
+        assert res.created_game_rows == expected
+        assert res.created_game_rows >= len(
+            [a for a in res.actions if a.status == "would_create"]
+        ), "rows can never be fewer than requests"
+
+    def test_a_live_run_reports_the_rows_it_actually_created(self):
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        created = [a for a in res.actions if a.status == "created"]
+        assert created, "the fixture is meant to create routes"
+        # _two_origin_account plans 6-hour cycles: 24/6 = 4 rows each.
+        assert all(a.game_rows == 4 for a in created)
+        assert res.created_game_rows == 4 * len(created)
+
+    def test_the_authorised_row_footprint_is_stated_at_run_start(self):
+        import json
+        from pathlib import Path
+
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        events = [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+
+        start = events[0]
+        assert start["kind"] == "run_start"
+        assert start["max_game_rows_this_run"] == 8, (
+            "two 6-hour routes authorise 2 x 4 = 8 rows, and the trace must say so "
+            "BEFORE anything is written"
+        )
+        assert events[-1]["created_game_rows"] == 8
