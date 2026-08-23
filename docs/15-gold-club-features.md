@@ -106,31 +106,25 @@ Notes, all of which corrected an earlier assumption:
 
 - **`hour` + `minute` set the send time**, so a route's phase is chosen at creation rather than being fixed to the moment of the click. This resolves review R6 in `docs/25-resource-distribution-planner.md`: a planned beat is realisable exactly as scheduled.
 - **The destination is nested** under `targetCoordinates`, not flat `x`/`y`.
-- **`repeatEvery`** — unit UNVERIFIED, and the earlier claim that it is "the
-  cycle length in hours" does not survive the marketplace page. The capture
-  observed the value `1`, which is precisely the one value that cannot tell
-  hours from days apart. `tests/fixtures/marketplace_trade_routes.html` (a real
-  page, one village, 83 routes) reads the same field back as `repeat`, and there
-  it cannot be a spacing:
+- **`repeatEvery` is the cycle length in HOURS**, and it is a closed set, not a
+  free integer. The dialog renders it as
+  `<select name="repeatEvery">` offering exactly:
 
-  | destination | routes | departure spacing | `repeat` |
-  |---|---|---|---|
-  | A | 24 | every 1 h at :13 | 1 |
-  | B | 12 | every 2 h at :13 | 1 |
-  | C | 8 | every 3 h at :20 | 1 |
-  | D | 2 | every 12 h at :13 | 1 |
+  `24, 12, 8, 6, 4, 3, 2, 1` hour(s), plus `0` = "Send only once".
 
-  Four different cadences, all `repeat: 1`. If `repeat` were an hour interval,
-  one route would produce each of these instead of 24, 12, 8 and 2. So a route
-  is **one daily departure at a fixed `hour`/`minute`**, `repeat` is the period
-  in days (one route on the page has `repeat: 2`), and an N-hour cadence is
-  built from `24/N` separate routes.
+  Those are the divisors of 24, which is precisely
+  :data:`DAILY_BEAT_CYCLES` in `services/distribution/merchants.py`
+  (`(1, 2, 3, 4, 6, 8, 12, 24)`). The planner already emits only legal values, so
+  one route per origin-destination pair is correct -- a cycle the game cannot
+  express is unreachable by construction.
 
-  Consequence for the planner, which currently emits ONE route per
-  origin-destination pair with `repeatEvery: cycle_hours`: a 6-hour cycle would
-  become a route firing every 6 *days*. Live creation is off by default
-  (`trade_route_live`), so nothing has been sent at an account on this
-  assumption — but it must be settled before the flag is turned on.
+  **Do not compare this against the `repeat` field the marketplace page reads
+  back: they are different units.** Measured on a real page, 83 routes all
+  reporting `repeat: 1` had their next departures spread over 23.6 hours. A
+  one-hour repeat would put every next departure inside the coming 60 minutes,
+  so `repeat: 1` is one DAY. Anything reconciling a plan's `cycle_hours` against
+  a live route's `repeat` would be comparing hours to days.
+
 - **No merchant count is sent.** The game derives it from the cargo, so a planner's merchant figures are for budgeting and warnings only, never wire data.
 - **All four resources are always present**, zeros included.
 - `mode` was `"send"`; `deliveries` was `1`; `useTradeShips` was `false` (no boats on this server).
@@ -172,28 +166,24 @@ pins the payload field by field:
 | **Send** / **Deliver** radio | `mode` | `"send"` is one of TWO directions; the other is a fetch/deliver mode this app never uses |
 | time field (`HH:MM`) | `hour` + `minute` | a single time of day, matching the split payload fields |
 | **Deliveries**: `1x` / `2x` / `3x` radio | `deliveries` | a three-way radio, NOT a free integer. Valid values are 1, 2 and 3 only; the app sends 1, the minimum |
-| **Repeat every** (dropdown) | `repeatEvery` | option labels still unread -- the only field whose unit is unconfirmed |
+| **Repeat every** (dropdown) | `repeatEvery` | hours, and a closed set: 24/12/8/6/4/3/2/1, plus 0 = send only once |
 | **Deactivate trade route** checkbox | `enabled` | inverted: checked means `enabled: false` |
 
 ### Still open
 
-- **`repeatEvery`'s unit** — the dropdown's option labels. Everything else points
-  at days: the operator's own capital runs ~24 routes to a single destination at
-  one-hour spacing (and another group at two-hour spacing), every one of them
-  reading back as `repeat: 1`. A one-hour repeat would need one route, not 24.
-  Settling it decides whether the planner emits one route per destination or
-  `24/cycle_hours` of them -- a 24x change in route count and Gold Club budget,
-  so it is not being changed on inference.
 - Whether `deliveries` multiplies the load or the number of trips. The dialog
   offers 1x/2x/3x against a fixed fleet capacity, and the route model read back
-  from the page has no `deliveries` field at all -- it carries `sendOnce: false`
-  (on all 83 routes) and `merchants`. Moot while the app sends 1.
+  from the page carries no `deliveries` field at all. Moot while the app sends 1,
+  the minimum.
 
 ### Answered by the captured page
 
 - **Routes per village is not capped anywhere near the planner's needs.** One
   village's marketplace holds **83** routes across 6 destinations, so the cap is
   at least that. No probing needed.
+- **`repeatEvery`'s unit and its legal values** — hours, from the divisors of 24;
+  see above.
+- **`mode` has a second direction** — the dialog's Send / Deliver radio.
 
 
 ---

@@ -249,3 +249,36 @@ class TestWritesConsumeActivityBudget:
             asyncio.run(service.create_route(_route()))
 
         assert client.logged_activity == []
+
+
+class TestEveryPlannableCycleIsLegalInGame:
+    """`repeatEvery` is a dropdown, not a free integer.
+
+    Read off the live create dialog:
+
+        <select name="repeatEvery">
+          <option value="24">24 hour(s)</option> ... <option value="1">1 hour(s)</option>
+          <option value="0">Send only once</option>
+
+    So the game accepts only the divisors of 24. A plan built on a cycle outside
+    that set could never be created, and the failure would arrive one route at a
+    time against a live account rather than at planning time -- so the planner's
+    own cycle set has to stay a subset of this one.
+    """
+
+    # Verbatim from the dialog, excluding 0 ("Send only once"), which is not a cycle.
+    GAME_CYCLES = frozenset({1, 2, 3, 4, 6, 8, 12, 24})
+
+    def test_the_planner_cannot_choose_a_cycle_the_game_rejects(self):
+        from travian_api.services.distribution.merchants import DAILY_BEAT_CYCLES
+
+        illegal = set(DAILY_BEAT_CYCLES) - self.GAME_CYCLES
+        assert not illegal, (
+            f"the planner would emit repeatEvery values the dialog has no option for: {sorted(illegal)}"
+        )
+
+    def test_the_payload_carries_the_cycle_as_repeat_every(self):
+        service, _ = _service()
+        for cycle in sorted(self.GAME_CYCLES):
+            payload = service._build_create_payload(_route(cycle_hours=cycle))
+            assert payload["repeatEvery"] == cycle
