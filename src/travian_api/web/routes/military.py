@@ -125,7 +125,7 @@ async def send_scouts(
         ) from exc
     except MilitaryError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=exc.message,
         ) from exc
     except TravianError as exc:
@@ -217,7 +217,7 @@ async def send_raid(
         ) from exc
     except MilitaryError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=exc.message,
         ) from exc
     except TravianError as exc:

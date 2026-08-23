@@ -1493,7 +1493,7 @@ async def post_revert_plan(
     origins = [o for o in (body.origins or sorted(before)) if o in before]
     if not origins:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"None of those origins appear in run {body.trace_id}.",
         )
 
@@ -1726,7 +1726,7 @@ async def post_execute(
     # still previews it, warnings and all).
     if not plan.is_feasible:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 "Plan is not feasible; refusing to execute in-game. " + " ".join(plan.warnings)
             ).strip(),
