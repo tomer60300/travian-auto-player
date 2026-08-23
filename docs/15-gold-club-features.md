@@ -160,22 +160,41 @@ Trade routes are managed from the Marketplace building (`/build.php?gid=17`), ta
 
 Without Gold Club, `POST /api/v1/trade-routes` returns `api.unexpectedError`. With Gold Club active the same request returns `201`, which confirms the error was the Gold Club lock rather than a malformed payload.
 
+### The create dialog, read off the live UI
+
+The Gold Club "Create trade route" dialog carries exactly these controls, which
+pins the payload field by field:
+
+| control | payload field | notes |
+|---|---|---|
+| Target village (dropdown, with all / only mine / others) | `targetCoordinates` | the filter confirms routes may target villages other than your own |
+| four resource inputs | `resources` | dialog states the per-merchant capacity and shows `Total: n / <fleet capacity>` plus a live `Merchants: n / <fleet>` |
+| **Send** / **Deliver** radio | `mode` | `"send"` is one of TWO directions; the other is a fetch/deliver mode this app never uses |
+| time field (`HH:MM`) | `hour` + `minute` | a single time of day, matching the split payload fields |
+| **Deliveries**: `1x` / `2x` / `3x` radio | `deliveries` | a three-way radio, NOT a free integer. Valid values are 1, 2 and 3 only; the app sends 1, the minimum |
+| **Repeat every** (dropdown) | `repeatEvery` | option labels still unread -- the only field whose unit is unconfirmed |
+| **Deactivate trade route** checkbox | `enabled` | inverted: checked means `enabled: false` |
+
 ### Still open
 
-- **`repeatEvery`'s unit** — days or hours; see the note above. Settling it also
-  decides whether the planner emits one route or `24/cycle_hours` routes per
-  destination.
-- What `deliveries` controls beyond the observed value of `1`. The route model
-  read back from the page has no `deliveries` field at all -- it carries
-  `sendOnce: false` (on all 83 routes) and `repeat`, so the create field either
-  maps onto `sendOnce` or is not persisted per route.
+- **`repeatEvery`'s unit** — the dropdown's option labels. Everything else points
+  at days: the operator's own capital runs ~24 routes to a single destination at
+  one-hour spacing (and another group at two-hour spacing), every one of them
+  reading back as `repeat: 1`. A one-hour repeat would need one route, not 24.
+  Settling it decides whether the planner emits one route per destination or
+  `24/cycle_hours` of them -- a 24x change in route count and Gold Club budget,
+  so it is not being changed on inference.
+- Whether `deliveries` multiplies the load or the number of trips. The dialog
+  offers 1x/2x/3x against a fixed fleet capacity, and the route model read back
+  from the page has no `deliveries` field at all -- it carries `sendOnce: false`
+  (on all 83 routes) and `merchants`. Moot while the app sends 1.
 
 ### Answered by the captured page
 
 - **Routes per village is not capped anywhere near the planner's needs.** One
   village's marketplace holds **83** routes across 6 destinations, so the cap is
   at least that. No probing needed.
-- Whether `mode` accepts a fetch/receive direction as well as `"send"`.
+
 
 ---
 

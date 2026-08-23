@@ -44,8 +44,17 @@ jobs:
       - name: Run tests
         run: uv run pytest -x -v --tb=short
       - name: Dependency audit
-        run: uv run pip-audit
-        continue-on-error: true  # advisory, don't block PRs
+        # Blocking. It was advisory-only, which is how 41 advisories across 13
+        # packages accumulated inside runs that reported green.
+        #
+        # PYSEC-2026-2447 (diskcache) is accepted, not ignored by accident: no
+        # fix version exists -- the advisory covers "through 5.6.3", which is
+        # the latest release, and it describes pickle being diskcache's default
+        # serializer rather than a patchable bug. The only use here is
+        # services/defense_cache.py with a hardcoded path that no request can
+        # influence, so reaching it needs local write access as the server user.
+        # Drop this flag the moment an upstream fix ships.
+        run: uv run pip-audit --ignore-vuln PYSEC-2026-2447
 
   frontend:
     name: Lint & Build (Frontend)
