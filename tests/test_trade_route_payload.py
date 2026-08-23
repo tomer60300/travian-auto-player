@@ -69,9 +69,7 @@ class _RecordingClient:
         # into its own broad catch, so the accounting silently does nothing --
         # and no test notices, because the write itself still succeeds.
         self.logged_activity: list[float] = []
-        self.activity_scheduler = SimpleNamespace(
-            log_activity=self.logged_activity.append
-        )
+        self.activity_scheduler = SimpleNamespace(log_activity=self.logged_activity.append)
 
     async def post_json(self, url: str, payload: dict, **_kwargs):
         self.sent.append(("POST", url, payload))
@@ -206,8 +204,7 @@ class TestToggleBody:
     def test_every_route_goes_in_one_request(self):
         service, client = _service()
         routes = [
-            ExistingRoute(route_id=i, dest_village_id=20044, dest_x=0, dest_y=0)
-            for i in range(24)
+            ExistingRoute(route_id=i, dest_village_id=20044, dest_x=0, dest_y=0) for i in range(24)
         ]
         asyncio.run(service.disable_routes(20031, routes))
         assert len(client.sent) == 1, "the capture toggled 24 routes in a single request"

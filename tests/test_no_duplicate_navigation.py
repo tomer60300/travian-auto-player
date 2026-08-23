@@ -31,9 +31,7 @@ class _RecordingHttp:
 def _navigator():
     http = _RecordingHttp()
     # Delays are behaviour under test elsewhere; here they only slow the suite.
-    nav = PageNavigator(
-        http_client=http, human_delay=SimpleNamespace(wait=_no_wait), enabled=True
-    )
+    nav = PageNavigator(http_client=http, human_delay=SimpleNamespace(wait=_no_wait), enabled=True)
     return nav, http
 
 

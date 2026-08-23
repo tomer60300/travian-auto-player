@@ -908,7 +908,9 @@ class TestExecutionHardening:
         # One stale ACTIVE route to disable + missing desired routes to create;
         # the captcha is signalled DURING the marketplace read, so NEITHER the
         # disable nor the create mutation may fire.
-        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(9, _UNWANTED_DEST, 99, 99, active=True)]})
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(9, _UNWANTED_DEST, 99, 99, active=True)]}
+        )
         svc.on_read = lambda: captcha_stop.signal(_USER.id)
         clock = itertools.count(1)
         try:
@@ -923,7 +925,9 @@ class TestExecutionHardening:
     def test_budget_exhausted_during_read_blocks_disable_and_create(self):  # #64 round 3
         # Budget runs out DURING the read; the disable and create that follow in
         # the same origin must not fire.
-        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(9, _UNWANTED_DEST, 99, 99, active=True)]})
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(9, _UNWANTED_DEST, 99, 99, active=True)]}
+        )
 
         def _exhaust():
             svc.budget_ok = False
