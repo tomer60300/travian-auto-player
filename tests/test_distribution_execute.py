@@ -1357,3 +1357,36 @@ class TestAControlledRunCanTargetOnePair:
         assert events[0]["planned_routes_excluded_by_filter"] == 1
         assert {e["origin"] for e in events if e["kind"] == "origin_read"} == {20003}
         assert len(svc.created) == 1, "only the targeted village was written to"
+
+
+class TestTheWriteEndpointRejectsWhatItDoesNotUnderstand:
+    """A discarded safety filter is worse than a rejected request.
+
+    A browser holding a newer bundle sent only_origins/only_destinations to a
+    backend that predated them. Pydantic ignores unknown fields by default, so
+    the filter vanished silently: the run considered the whole plan, picked a
+    different village pair than the one asked for, on a 1-hour cycle (24 game
+    rows instead of the intended 1), and nothing in the response said so. The
+    operator would have authorised that believing it was one route.
+    """
+
+    def test_an_unknown_field_is_a_422_not_a_full_run(self):
+        import pytest as _pytest
+        from pydantic import ValidationError
+
+        with _pytest.raises(ValidationError):
+            _exec_body(dry_run=True, some_filter_this_server_never_heard_of=[41212])
+
+    def test_the_filters_this_server_does_know_still_work(self):
+        # The other half of the contract: forbidding extras must not break the
+        # fields that exist, or every ordinary run would 422.
+        res = _execute(
+            _exec_body(dry_run=True, max_routes_per_run=50, only_origins=[20003]),
+            connected=False,
+        )
+        assert {a.origin for a in res.actions} == {20003}
+
+    def test_an_ordinary_run_with_no_filters_is_unaffected(self):
+        res = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
+        assert res.actions
+        assert res.filtered_to is None

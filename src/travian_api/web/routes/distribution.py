@@ -394,6 +394,22 @@ class PlanResponse(BaseModel):
 
 
 class ExecuteRequest(PlanRequest):
+    # Unknown fields are REJECTED here, unlike everywhere else in this module.
+    #
+    # This is the only endpoint that writes to a real account, and its request
+    # carries the safety controls: max_routes_per_run and the only_* filters. A
+    # server that silently discarded one of those would run the FULL plan while
+    # the operator believed they had narrowed it to a single route.
+    #
+    # That is not hypothetical. A browser holding a newer bundle sent
+    # only_origins/only_destinations to a backend that predated them; Pydantic's
+    # default is to ignore unknown fields, so the filter vanished, the run
+    # selected a different village pair on a 1-hour cycle (24 game rows rather
+    # than the intended 1), and nothing in the response said the filter had been
+    # dropped. A 422 is the only safe answer to a parameter this endpoint does
+    # not understand.
+    model_config = {"extra": "forbid"}
+
     # Narrow a live run to specific villages. Built for controlled testing: the
     # first live run against a real account should be able to be exactly one
     # route between two chosen villages, not "whichever one the cap happened to
