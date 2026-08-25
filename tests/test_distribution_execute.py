@@ -238,10 +238,16 @@ class _FakeLiveSvc:
         read_raises=None,
         phantom_creates=False,
         confirm_raises=None,
+        rows_per_create=None,
     ):
         # phantom_creates models the failure a 200 with an empty body cannot
         # rule out: the game accepts the create and produces no route.
         self._phantom = phantom_creates
+        # Rows one create makes appear. Default: the game's own 24/N fan-out.
+        # An int here models a game that accepted the request and produced a
+        # different number of rows than "repeat every N hours" implies -- the
+        # case where reporting the forecast as the outcome is a false claim.
+        self._rows_per_create = rows_per_create
         self._confirm_raises = set(confirm_raises or ())
         self._next_route_id = 900000
         self.updated: list[tuple] = []
@@ -348,6 +354,19 @@ class _FakeLiveSvc:
                     row.active = True
         return RouteActionResult(vid, 0, 0, self._enable_status, f"{len(routes)} route(s)")
 
+    def rows_a_create_makes(self, route):
+        """How many rows this double lets one create produce.
+
+        The game's answer is 24/N -- "repeat every 6 hours" is four separate
+        daily rows, not one. A double that produced a single row could not tell
+        a measured 4 apart from a forecast 4, which is the whole question here.
+        """
+        if self._rows_per_create is not None:
+            return self._rows_per_create
+        if route.cycle_hours <= 0:
+            return 1
+        return max(1, -(-24 // route.cycle_hours))
+
     async def create_route(self, route, *, stop_check=None):
         from travian_api.services.trade_route_service import RouteActionResult
 
@@ -360,17 +379,19 @@ class _FakeLiveSvc:
         self.created.append(route)
         if not self._phantom:
             # The real game makes the route appear on the marketplace, which is
-            # the only evidence the empty response does not give.
-            self._next_route_id += 1
-            self._existing.setdefault(route.origin_village_id, []).append(
-                ExistingRoute(
-                    route_id=self._next_route_id,
-                    dest_village_id=route.dest_village_id,
-                    dest_x=route.dest_x,
-                    dest_y=route.dest_y,
-                    active=True,
+            # the only evidence the empty response does not give -- and it makes
+            # one row per daily departure, so a 6-hour cycle appears as four.
+            for _ in range(self.rows_a_create_makes(route)):
+                self._next_route_id += 1
+                self._existing.setdefault(route.origin_village_id, []).append(
+                    ExistingRoute(
+                        route_id=self._next_route_id,
+                        dest_village_id=route.dest_village_id,
+                        dest_x=route.dest_x,
+                        dest_y=route.dest_y,
+                        active=True,
+                    )
                 )
-            )
         if self.on_create is not None:
             self.on_create()
         return RouteActionResult(
@@ -1146,6 +1167,10 @@ class TestTheGameRowFanOutIsReported:
         assert created, "the fixture is meant to create routes"
         # _two_origin_account plans 6-hour cycles: 24/6 = 4 rows each.
         assert all(a.game_rows == 4 for a in created)
+        # And the four are what the read-back COUNTED, not what the cycle
+        # implies. Without observed_game_rows this assertion held for a game
+        # that produced no rows at all.
+        assert all(a.observed_game_rows == 4 for a in created)
         assert res.created_game_rows == 4 * len(created)
 
     def test_the_authorised_row_footprint_is_stated_at_run_start(self):
@@ -1166,6 +1191,195 @@ class TestTheGameRowFanOutIsReported:
             "BEFORE anything is written"
         )
         assert events[-1]["created_game_rows"] == 8
+
+
+class _UnevenFanOut(_FakeLiveSvc):
+    """A game that fans one create out by a different amount per destination.
+
+    A symmetric fixture cannot catch an attribution bug: if both destinations
+    make four rows, handing each action the origin's flat total of eight is
+    wrong in a way that a "== 4" assertion still fails on, but handing each the
+    other's rows as well would look identical to correct for any fixture where
+    the two happen to agree. Different counts pin which rows went where.
+    """
+
+    def __init__(self, rows_by_dest, **kw):
+        super().__init__(**kw)
+        self._rows_by_dest = rows_by_dest
+
+    def rows_a_create_makes(self, route):
+        return self._rows_by_dest[(route.dest_x, route.dest_y)]
+
+
+class TestTheRowCountIsMeasuredNotPredicted:
+    """`created_game_rows` on a LIVE run must be evidence, not arithmetic.
+
+    24/cycle is a model of the game, and the model is what the run set out to
+    check. Printing "Put 24 route row(s) in the game" because the cycle was one
+    hour states a fact about the account that nobody looked at -- and the run
+    already looked: the reconciler re-reads every origin it wrote to, precisely
+    because an empty 200 proves nothing. The rows it found are right there.
+    """
+
+    def test_the_measured_count_replaces_the_arithmetic_one(self):
+        # The game accepts both creates and makes ONE row each, where the
+        # 6-hour cycle predicts four.
+        svc = _FakeLiveSvc(rows_per_create=1)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        created = [a for a in res.actions if a.status == "created"]
+        assert len(created) == 2, "both routes exist -- they are just smaller than planned"
+        assert all(a.game_rows == 4 for a in created), "the forecast is still reported as such"
+        assert all(a.observed_game_rows == 1 for a in created)
+        assert res.created_game_rows == 2, (
+            "two rows is what the marketplace showed; 8 is what the cycle implied"
+        )
+
+    def test_the_trace_summary_records_the_measurement_too(self):
+        import json
+        from pathlib import Path
+
+        svc = _FakeLiveSvc(rows_per_create=1)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        events = [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+
+        assert events[0]["max_game_rows_this_run"] == 8, "the forecast, before anything was written"
+        assert events[-1]["created_game_rows"] == 2, "the measurement, after"
+        verified = [e for e in events if e["kind"] == "verified"]
+        assert verified, "the read-back is what produced the measurement"
+        assert verified[0]["rows_forecast"] == 4
+        assert verified[0]["new_rows_found"] == 1
+
+    def test_a_shortfall_against_the_forecast_is_reported_as_a_problem(self):
+        # A route that made 1 row where 4 were expected ships a quarter of what
+        # the plan believes it ships. Nothing else in the response says so: the
+        # status is "created" and the count is honest but silent about the rate.
+        svc = _FakeLiveSvc(rows_per_create=1)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert res.problems, "a quarter-rate route is a finding, not a rounding difference"
+        joined = " ".join(res.problems)
+        assert "the game made 1 route row(s), not the 4" in joined
+        assert "does not ship at the rate the plan assumes" in joined
+
+    def test_a_matching_count_is_not_a_problem(self):
+        # The check must be silent when the model holds, or it is noise.
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert [a.status for a in res.actions] == ["created", "created"]
+        assert res.problems == []
+
+    def test_rows_are_attributed_to_the_destination_that_made_them(self):
+        # Both creates leave the SAME origin, so the origin's fresh rows are a
+        # pooled six. Each action must get its own share, matched by the same
+        # key the reconciler recognises routes by.
+        svc = _UnevenFanOut({(40, 40): 4, (50, 50): 2})
+        res = _run_live(svc, _same_origin_account(), max_routes_per_run=50)
+
+        by_dest = {(a.dest_x, a.dest_y): a for a in res.actions if a.status == "created"}
+        assert len(by_dest) == 2, "one create each, from one origin"
+        assert by_dest[(40, 40)].observed_game_rows == 4
+        assert by_dest[(50, 50)].observed_game_rows == 2, (
+            "not 6 -- the other destination's rows are not this route's rows"
+        )
+        assert res.created_game_rows == 6
+
+        # And only the destination that fell short is flagged.
+        joined = " ".join(res.problems)
+        assert "the game made 2 route row(s), not the 4" in joined
+        assert "the game made 4 route row(s)" not in joined
+
+    def test_a_dry_run_measures_nothing_and_never_pretends_to(self):
+        res = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
+
+        assert all(a.observed_game_rows is None for a in res.actions), (
+            "a preview issues zero game requests, so there is nothing it could have observed"
+        )
+        assert res.created_game_rows == sum(
+            a.game_rows for a in res.actions if a.status == "would_create"
+        ), "the forecast stays the forecast on the path that has nothing else to offer"
+
+    def test_a_phantom_create_measures_zero_rather_than_nothing(self):
+        # Zero rows found is a MEASUREMENT, and a different answer from "the
+        # read-back failed so there is no measurement".
+        svc = _FakeLiveSvc(phantom_creates=True)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert [a.status for a in res.actions] == ["not_created", "not_created"]
+        assert all(a.observed_game_rows == 0 for a in res.actions)
+        assert res.created_game_rows == 0
+
+    def test_an_unconfirmed_create_has_no_row_count_at_all(self):
+        # The rows are almost certainly there; this run simply did not see them.
+        # Substituting the forecast would be the original defect with extra
+        # steps, so the honest answer is "unmeasured".
+        svc = _FakeLiveSvc(confirm_raises={20003})
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        by_origin = {a.origin: a for a in res.actions}
+        assert by_origin[20003].status == "created_unverified"
+        assert by_origin[20003].observed_game_rows is None
+        assert by_origin[20011].observed_game_rows == 4
+        assert res.created_game_rows == 4, "only the village that was re-read contributes rows"
+
+
+class TestTheHeadlineCannotContradictTheProblems:
+    """`created` counts VERIFIED creates only, which is correct and incomplete.
+
+    A run whose every read-back failed reported `created=0` while `problems`
+    said three routes had just been written and could not be confirmed. Both
+    statements were true; together they were a summary refuting its own detail,
+    and resolving that was left to the operator reading prose under a headline
+    number that said nothing happened.
+    """
+
+    def test_a_run_where_every_read_back_failed_does_not_report_zero_alone(self):
+        svc = _FakeLiveSvc(confirm_raises={20003, 20011})
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert res.created == 0, "nothing was CONFIRMED, and that stays true"
+        assert res.created_unverified == 2, (
+            "but two routes were written, and the headline has to be able to say so"
+        )
+        assert res.not_created == 0
+        assert res.problems, "and the detail still explains why they are unconfirmed"
+
+    def test_creates_the_game_swallowed_are_counted_on_the_response(self):
+        svc = _FakeLiveSvc(phantom_creates=True)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert res.created == 0
+        assert res.created_unverified == 0, "these were checked -- and found absent"
+        assert res.not_created == 2
+
+    def test_a_clean_run_reports_neither(self):
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert res.created == 2
+        assert res.created_unverified == 0
+        assert res.not_created == 0
+
+    def test_the_three_counts_agree_with_the_action_list(self):
+        # The response summary and the per-route detail are the same run; a
+        # summary derived from anything but the actions could drift from them.
+        svc = _FakeLiveSvc(confirm_raises={20003})
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert res.created == sum(1 for a in res.actions if a.status == "created")
+        assert res.created_unverified == sum(
+            1 for a in res.actions if a.status == "created_unverified"
+        )
+        assert res.not_created == sum(1 for a in res.actions if a.status == "not_created")
+
+    def test_a_dry_run_claims_neither(self):
+        res = _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
+        assert res.created_unverified == 0
+        assert res.not_created == 0
 
 
 class _ExplodingSvc(_FakeLiveSvc):
@@ -1513,8 +1727,12 @@ class TestCreatedMeansVerifiedNotAccepted:
 
         verified = [e for e in events if e["kind"] == "verified"]
         assert verified, "the read-back must be in the audit record"
-        assert verified[0]["claimed"] == 1
-        assert verified[0]["new_rows_found"] == 1
+        assert verified[0]["claimed"] == 1, "one create request per origin here"
+        # ROWS, not requests: one 6-hour create is four daily rows in the game,
+        # which is what the double now makes appear. The old expectation of 1
+        # was a property of a double that under-modelled the fan-out, not of the
+        # field -- `new_rows_found` has always been len(fresh).
+        assert verified[0]["new_rows_found"] == 4
         assert verified[0]["new_route_ids"]
 
     def test_a_run_that_creates_nothing_does_not_read_back(self):

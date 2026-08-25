@@ -568,11 +568,18 @@ class RouteActionResponse(BaseModel):
     cargo: dict[Resource, int]
     cycle_hours: int
     merchants: int
-    # How many rows this ONE create request becomes in the game. Travian fans a
-    # "repeat every N hours" route out into 24/N daily rows, so a request is not
-    # a row -- and an operator who authorised "3 routes" on a 1-hour cycle has
-    # authorised 72 rows. Reported so that is never a surprise.
+    # How many rows this ONE create request is EXPECTED to become in the game.
+    # Travian fans a "repeat every N hours" route out into 24/N daily rows, so a
+    # request is not a row -- and an operator who authorised "3 routes" on a
+    # 1-hour cycle has authorised 72 rows. Reported so that is never a surprise.
+    # This is arithmetic, not observation: see observed_game_rows.
     game_rows: int = 1
+    # Rows the marketplace read-back actually attributed to THIS action, matched
+    # to it by destination the same way the reconciler matches routes. `None`
+    # means no measurement exists and none is invented: a dry run observes
+    # nothing, and a create whose read-back failed is unconfirmed rather than
+    # counted. A `not_created` action carries 0, which IS a measurement.
+    observed_game_rows: int | None = None
     # would_create | deferred | created | created_unverified | not_created |
     # re_enabled | updated | skipped | blocked | failed
     #
@@ -599,6 +606,13 @@ class ExecuteResponse(BaseModel):
     # and reads wrongly folded into either.
     updates: list[str] = []
     created: int
+    # Creates the game accepted but this run could NOT confirm, and creates it
+    # accepted while producing nothing. `created` counts only the VERIFIED ones,
+    # so without these two a run whose every read-back failed reported
+    # "Created 0 route(s)" as its headline above a problem list saying three
+    # routes had just been written -- the summary contradicting the detail.
+    created_unverified: int = 0
+    not_created: int = 0
     remaining: int
     # Benign, informational notes computed while planning (coordinate resolution,
     # tribute timing, storage/merchant hints). NOT failures.
@@ -611,8 +625,17 @@ class ExecuteResponse(BaseModel):
     # mistaken for a complete one is worse than no run, so this is stated rather
     # than left to be inferred from a short action list.
     filtered_to: str | None = None
-    # Rows the game will hold as a result of this run's creates, which is not the
-    # same number as the creates: see RouteActionResponse.game_rows.
+    # Rows in the game as a result of this run's creates, which is not the same
+    # number as the creates: see RouteActionResponse.game_rows.
+    #
+    # On a DRY RUN this is the forecast -- 24/cycle per request -- because
+    # nothing has happened yet and a prediction is the only thing available.
+    # On a LIVE RUN it is MEASURED: the rows the marketplace read-back
+    # attributed to each verified create. Reporting the forecast for a live run
+    # printed "put 24 route row(s) in the game" for a create the game had turned
+    # into one row, which is a claim about the account nobody had checked.
+    # Unconfirmed creates contribute nothing here; they are reported as
+    # created_unverified instead of having a row count guessed for them.
     created_game_rows: int = 0
     # Where this run's full decision-and-request trace was written. A live run is
     # the one operation here that changes a real account, and the response alone
@@ -1984,7 +2007,7 @@ async def post_execute(
         items.append((row, planned))
 
     def _game_rows(cycle_hours: int) -> int:
-        """Rows one create request becomes in the game.
+        """Rows one create request is EXPECTED to become in the game.
 
         Travian implements "repeat every N hours" by generating 24/N separate
         daily route rows, each departing at its own time -- measured against a
@@ -2014,6 +2037,17 @@ async def post_execute(
             status=status_,
             detail=detail,
         )
+
+    def _observed_rows(reported: list[RouteActionResponse]) -> int:
+        """Rows this run MEASURED, summed. Never a forecast.
+
+        Only an action a read-back actually attributed rows to contributes, so
+        an unconfirmed create adds nothing rather than adding its prediction --
+        folding `game_rows` in here is precisely the arithmetic-as-fact this
+        replaced. A run that wrote three routes and could not re-read any of
+        them reports 0 rows plus created_unverified=3, which is the truth.
+        """
+        return sum(a.observed_game_rows for a in reported if a.observed_game_rows is not None)
 
     def _filter_description() -> str | None:
         if body.only_origins is None and body.only_destinations is None:
@@ -2055,6 +2089,9 @@ async def post_execute(
             disables=disables,
             re_enables=[],
             created=0,
+            # A forecast, and the only honest number here: this path issues zero
+            # game requests, so there is nothing to have measured. The live path
+            # reports what the marketplace actually showed instead.
             created_game_rows=sum(a.game_rows for a in actions if a.status == "would_create"),
             filtered_to=filtered_to,
             remaining=max(0, len(items) - cap),
@@ -2775,14 +2812,27 @@ async def post_execute(
                         else:
                             before_ids = {e.route_id for e in existing}
                             fresh = [e for e in after if e.route_id not in before_ids]
-                            fresh_keys: set[int | tuple[int, int]] = set()
+                            # New rows counted PER DESTINATION, not as one flat
+                            # total. `fresh` is everything new at this origin,
+                            # while an action is one destination -- an origin
+                            # that created two routes would otherwise hand each
+                            # action the other's rows as well. Keyed exactly as
+                            # the reconciler matches routes (village id for own
+                            # villages, coordinates for foreign targets), so
+                            # attribution and recognition cannot drift apart.
+                            fresh_rows: dict[int | tuple[int, int], int] = {}
                             for e in fresh:
-                                fresh_keys |= _existing_keys(e)
+                                for key in _existing_keys(e):
+                                    fresh_rows[key] = fresh_rows.get(key, 0) + 1
                             trace.event(
                                 "verified",
                                 origin=origin,
                                 claimed=len(created_here),
                                 new_rows_found=len(fresh),
+                                # The prediction, recorded next to the
+                                # measurement so the record shows whether the
+                                # 24/N fan-out model held on this account.
+                                rows_forecast=sum(a.game_rows for a, _ in created_here),
                                 new_route_ids=[e.route_id for e in fresh],
                             )
                             # A stale route we believe we switched off must
@@ -2861,7 +2911,30 @@ async def post_execute(
                                 )
                             for action, route in created_here:
                                 key = _desired_key(route)
-                                if key in fresh_keys:
+                                observed = fresh_rows.get(key, 0)
+                                # Recorded whether it is what was predicted or
+                                # not, and recorded even when it is zero: zero
+                                # measured is a result, unlike "not measured".
+                                action.observed_game_rows = observed
+                                if observed:
+                                    if observed != action.game_rows:
+                                        # The fan-out model is what every other
+                                        # number rests on -- merchants tied up,
+                                        # shipments per day, the row footprint
+                                        # the operator authorised at run start.
+                                        # A create that produced 1 row where 24
+                                        # were predicted moves a twenty-fourth
+                                        # of what the plan believes it moves,
+                                        # and no other line of this response
+                                        # would say so.
+                                        problems.append(
+                                            f"{village_label(origin, names)} -> "
+                                            f"{action.destination_name}: the game made "
+                                            f"{observed} route row(s), not the "
+                                            f"{action.game_rows} a {action.cycle_hours}h cycle "
+                                            f"predicts. This route does not ship at the rate "
+                                            f"the plan assumes — check its schedule in game."
+                                        )
                                     continue
                                 # The POST said yes and the page says no. Trust
                                 # the page: it is the state that matters.
@@ -2885,7 +2958,11 @@ async def post_execute(
             created=sum(1 for a in actions if a.status == "created"),
             created_unverified=sum(1 for a in actions if a.status == "created_unverified"),
             not_created=sum(1 for a in actions if a.status == "not_created"),
-            created_game_rows=sum(a.game_rows for a in actions if a.status == "created"),
+            # Measured, not predicted. run_start already recorded the forecast
+            # as max_game_rows_this_run; recording the forecast again here as
+            # the outcome would make the record agree with itself by
+            # construction and prove nothing about the account.
+            created_game_rows=_observed_rows(actions),
             disabled=len(disables),
             re_enabled=len(re_enables),
             cargo_updated=len(updates),
@@ -2960,7 +3037,14 @@ async def post_execute(
         # the cap PLUS any create that did not complete (failed / Gold Club), so
         # the summary never makes a partially-done run look complete.
         created=sum(1 for a in actions if a.status == "created"),
-        created_game_rows=sum(a.game_rows for a in actions if a.status == "created"),
+        # Reported alongside `created` rather than left to the action list: a
+        # headline of "0 created" over three unconfirmed writes is a summary
+        # that contradicts its own detail, and the operator should not have to
+        # read prose to resolve it.
+        created_unverified=sum(1 for a in actions if a.status == "created_unverified"),
+        not_created=sum(1 for a in actions if a.status == "not_created"),
+        # What the marketplace showed, not what the cycle length implies.
+        created_game_rows=_observed_rows(actions),
         filtered_to=filtered_to,
         remaining=len(deferred) + outstanding,
         warnings=warnings,
