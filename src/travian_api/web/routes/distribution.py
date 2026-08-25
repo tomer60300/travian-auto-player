@@ -73,6 +73,7 @@ from travian_api.services.trade_route_service import (
     ExistingRoute,
     MarketplaceUnreadable,
     PlannedRoute,
+    cargo_has_drifted,
 )
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User
@@ -522,6 +523,18 @@ class ExecuteRequest(PlanRequest):
         default=None,
         description="Run only routes arriving at these destination village ids.",
     )
+    # Correcting a live route's cargo is a WRITE against a route the operator may
+    # have tuned by hand, so it is opt-in rather than a silent side effect of
+    # every run. Without it a route keeps the cargo it was created with forever
+    # while the plan moves on, and nothing detects the divergence.
+    update_drifted: bool = Field(
+        default=False,
+        description=(
+            "Rewrite the cargo of live routes whose amounts have drifted from the "
+            "plan. Off by default: a route created earlier may have been adjusted "
+            "in-game deliberately, and this overwrites that."
+        ),
+    )
 
     """Same inputs as /plan (the server recomputes the exact plan rather than
     trust client-sent rows) plus execution controls."""
@@ -581,6 +594,10 @@ class ExecuteResponse(BaseModel):
     # still wants RESTARTS shipments, which is the opposite of disabling one.
     # Folding them together reported a resumed route as a stopped one.
     re_enables: list[str] = []
+    # Kept apart from disables and re_enables: an update changes what a running
+    # route ships without starting or stopping anything, which is a third thing
+    # and reads wrongly folded into either.
+    updates: list[str] = []
     created: int
     remaining: int
     # Benign, informational notes computed while planning (coordinate resolution,
@@ -2037,6 +2054,7 @@ async def post_execute(
     actions: list[RouteActionResponse] = []
     disables: list[str] = []
     re_enables: list[str] = []
+    updates: list[str] = []  # cargo corrected on a route that already existed
     problems: list[str] = []  # execution failures (failed disable, Gold Club, …)
     # Every live run gets a trace. This is the only endpoint here that mutates a
     # real account, and it does so through a chain of classification decisions
@@ -2347,16 +2365,99 @@ async def post_execute(
                     for i, (row, route) in enumerate(desired):
                         destination = _desired_key(route)
                         if destination in satisfied:
+                            # The destination is served, but is it served with
+                            # the RIGHT cargo? A route is created once and the
+                            # plan moves every time production or stocks do, so
+                            # without this check the live routes keep the cargo
+                            # they were born with and slowly come to describe a
+                            # different account than the sheet does, with
+                            # nothing detecting the divergence.
+                            live = [
+                                e for e in visible if e.active and destination in _existing_keys(e)
+                            ]
+                            drifted = [e for e in live if cargo_has_drifted(e.cargo, route.cargo)]
+                            if drifted and body.update_drifted:
+                                reason = _stop_reason()
+                                if reason:
+                                    stopped_early = True
+                                    problems.append(reason)
+                                    deferred.extend(desired[i:])
+                                    break
+                                updated = await svc.update_cargo(
+                                    origin, drifted, route.cargo, stop_check=_stop_reason
+                                )
+                                if updated is not None and updated.status == "updated":
+                                    # Every row of a fanned-out route shares one
+                                    # cargo, so this corrects all of them in one
+                                    # request without touching their staggered
+                                    # departure times.
+                                    trace.decision(
+                                        origin=origin,
+                                        destination=destination,
+                                        decision="updated",
+                                        reason=(
+                                            f"cargo drifted on {len(drifted)} row(s); "
+                                            f"reset to the plan's amounts"
+                                        ),
+                                        route_ids=[e.route_id for e in drifted],
+                                    )
+                                    actions.append(
+                                        _action(
+                                            row,
+                                            route,
+                                            "updated",
+                                            f"cargo reset on {len(drifted)} row(s)",
+                                        )
+                                    )
+                                    updates.append(
+                                        f"{village_label(origin, names)} -> "
+                                        f"{village_label(row.destination, names)}: "
+                                        f"cargo reset on {len(drifted)} row(s)"
+                                    )
+                                    continue
+                                detail = (
+                                    updated.detail if updated is not None else "no request made"
+                                )
+                                if updated is not None and updated.status == "stopped":
+                                    stopped_early = True
+                                    problems.append(updated.detail)
+                                    deferred.extend(desired[i:])
+                                    break
+                                problems.append(
+                                    f"{village_label(origin, names)} -> "
+                                    f"{village_label(row.destination, names)}: cargo has "
+                                    f"drifted from the plan and could not be corrected "
+                                    f"({detail}); the live route is still shipping the old "
+                                    f"amounts"
+                                )
+                                actions.append(
+                                    _action(row, route, "skipped", "route active, cargo stale")
+                                )
+                                continue
                             trace.decision(
                                 origin=origin,
                                 destination=destination,
                                 decision="skipped",
-                                reason="a route to this destination is already active",
+                                reason=(
+                                    "a route to this destination is already active"
+                                    if not drifted
+                                    else f"active, and cargo drift on {len(drifted)} row(s) "
+                                    f"was left alone (updates are off for this run)"
+                                ),
                                 matched_by=(
                                     "village_id" if isinstance(destination, int) else "coords"
                                 ),
                             )
-                            actions.append(_action(row, route, "skipped", "route already active"))
+                            actions.append(
+                                _action(
+                                    row,
+                                    route,
+                                    "skipped",
+                                    "route already active"
+                                    if not drifted
+                                    else "route active, cargo stale (updates off)",
+                                )
+                            )
                             continue
                         if destination in blocked:
                             trace.decision(
@@ -2524,6 +2625,7 @@ async def post_execute(
             created_game_rows=sum(a.game_rows for a in actions if a.status == "created"),
             disabled=len(disables),
             re_enabled=len(re_enables),
+            cargo_updated=len(updates),
             deferred=len(deferred),
             outstanding=outstanding,
             problems=len(problems),
@@ -2583,6 +2685,7 @@ async def post_execute(
         actions=actions,
         disables=disables,
         re_enables=re_enables,
+        updates=updates,
         trace_id=trace.run_id,
         trace_path=str(trace.path) if trace.path else None,
         # `remaining` = work still outstanding for a later run: routes deferred by

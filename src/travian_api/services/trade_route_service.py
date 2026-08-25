@@ -153,6 +153,46 @@ class ExistingRoute:
     # is NOT necessarily satisfying the plan — only an enabled one is. Defaults
     # True so a parser that cannot read the flag errs toward "leave it alone".
     active: bool = True
+    # What this row actually ships, as the page reports it. Needed to tell a
+    # route that still matches the plan from one whose cargo has drifted: a
+    # route is created once and the plan moves every time production does, so
+    # without this the live routes and the sheet slowly describe different
+    # accounts with nothing detecting it. None when the page did not say.
+    cargo: dict[Resource, int] | None = None
+
+
+# How far a live route's cargo may drift from the plan before it is rewritten.
+# Both bounds matter: the relative one stops a large route being rewritten for a
+# rounding difference, and the absolute floor stops a small route thrashing on
+# every run because 5% of 200 is 10. An update is a real request against a real
+# account, so the cost of churn is paid in activity budget and in looking busy.
+CARGO_DRIFT_RELATIVE = 0.05
+CARGO_DRIFT_ABSOLUTE = 100
+
+
+def _cargo_of(row: dict) -> dict[Resource, int] | None:
+    """The parsed cargo as a Resource-keyed dict, or None if absent."""
+    raw = row.get("cargo")
+    if not isinstance(raw, dict):
+        return None
+    return {r: int(raw.get(r.value, 0) or 0) for r in Resource}
+
+
+def cargo_has_drifted(live: dict[Resource, int] | None, planned: dict[Resource, int]) -> bool:
+    """Is the live cargo far enough from the plan to be worth a request?
+
+    Unknown live cargo returns False: "the page did not tell us" is not evidence
+    of a difference, and rewriting on no evidence would rewrite everything.
+    """
+    if live is None:
+        return False
+    for resource in Resource:
+        want = int(planned.get(resource, 0))
+        have = int(live.get(resource, 0))
+        tolerance = max(CARGO_DRIFT_ABSOLUTE, abs(want) * CARGO_DRIFT_RELATIVE)
+        if abs(have - want) > tolerance:
+            return True
+    return False
 
 
 class TradeRouteService:
@@ -284,6 +324,7 @@ class TradeRouteService:
                 dest_y=r["dest_y"],
                 visible=r["visible"],
                 active=r.get("active", True),
+                cargo=_cargo_of(r),
             )
             for r in parsed
         ]
@@ -328,6 +369,7 @@ class TradeRouteService:
                 dest_y=r["dest_y"],
                 visible=r["visible"],
                 active=r.get("active", True),
+                cargo=_cargo_of(r),
             )
             for r in parsed
         ]
@@ -574,6 +616,90 @@ class TradeRouteService:
                 except (KeyError, TypeError, ValueError):
                     continue
         return sorted(rejected)
+
+    def _build_update_payload(self, route_ids: list[int], cargo: dict[Resource, int]) -> dict:
+        """``PUT /api/v1/trade-routes`` body for a CARGO change. From the client.
+
+        The bulk-edit branch of the game's own bundle builds one partial object
+        and stamps each id onto it::
+
+            s = {}; u && (s.targetCoordinates = u)
+                    t && (s.resources = {lumber, clay, iron, crop})
+                    P !== null && (s.deliveries = P)
+                    ...
+            k.forEach(e => i.push({...s, id: e}))
+            d = {routes: i}
+
+        Only the fields being changed are sent. Note what is NOT in that list:
+        ``hour`` and ``minute``. The bulk form cannot move a route's departure
+        time -- only the single-route ``PUT trade-routes/{id}`` can. That is a
+        gift here rather than a limitation: a "route" the operator thinks of as
+        one thing is 24/N rows at staggered times, and changing their cargo must
+        not collapse them onto one clock.
+        """
+        return {
+            "action": "traderoute",
+            "routes": [
+                {
+                    "resources": {r.value: int(cargo.get(r, 0)) for r in Resource},
+                    "id": route_id,
+                }
+                for route_id in sorted(route_ids)
+            ],
+        }
+
+    async def update_cargo(
+        self,
+        origin_village_id: int,
+        routes: list[ExistingRoute],
+        cargo: dict[Resource, int],
+        *,
+        stop_check: Callable[[], str | None] | None = None,
+    ) -> RouteActionResult | None:
+        """Reset the cargo on existing routes to what the plan now wants (LIVE).
+
+        Without this, a route was created once and never corrected: the plan
+        drifts every time production or stocks move, and every already-created
+        route keeps the cargo it was born with. Over days the live routes and the
+        sheet describe different accounts.
+
+        Deliberately cargo only. Moving a departure time needs the per-route
+        endpoint and would collapse a fanned-out set onto one clock; changing the
+        destination is not an update at all, it is a different route.
+        """
+        if not routes:
+            return None
+        self._require_live()
+        started = time.monotonic()
+        payload = self._build_update_payload([r.route_id for r in routes], cargo)
+        await self.http_client.human_delay.wait(
+            ActionType.BETWEEN_ROUTES, "updating trade route cargo"
+        )
+        if stop_check is not None and (reason := stop_check()):
+            return RouteActionResult(origin_village_id, 0, 0, "stopped", reason)
+        try:
+            response = await self.http_client.put_json(
+                "/api/v1/trade-routes",
+                payload,
+                request_type="fetch",
+                safe_to_retry=False,
+                referer=self._marketplace_referer.get(origin_village_id),
+            )
+        except NetworkError as exc:
+            self._trace_write("update", origin_village_id, "failed", started, payload, str(exc))
+            return RouteActionResult(
+                origin_village_id, 0, 0, "failed", f"cargo update failed: {exc}"
+            )
+        self._log_activity(started)
+
+        rejected = self._rejected_routes(response)
+        if rejected:
+            detail = f"{len(rejected)} of {len(routes)} route(s) rejected: {rejected}"
+            self._trace_write("update", origin_village_id, "partial", started, payload, detail)
+            return RouteActionResult(origin_village_id, 0, 0, "failed", detail)
+
+        self._trace_write("update", origin_village_id, "updated", started, payload)
+        return RouteActionResult(origin_village_id, 0, 0, "updated", f"{len(routes)} route(s)")
 
     def _build_delete_payload(self, route_ids: list[int]) -> dict:
         """``DELETE /api/v1/trade-routes`` body. Taken from the client's own code.

@@ -404,3 +404,89 @@ class TestTheBulkToggleReadsItsOwnResponse:
         )
         result = asyncio.run(service.disable_routes(20031, self._routes()))
         assert result.status == "disabled", "unnameable rejections cannot be acted on"
+
+
+class TestTheUpdateBodyMatchesTheClient:
+    """The bulk-edit branch of the game's own bundle, verbatim:
+
+        s = {}; t && (s.resources = {lumber, clay, iron, crop})
+        k.forEach(e => i.push({...s, id: e}))
+        d = {routes: i}
+
+    Only changed fields are sent, and note what is absent from that list:
+    ``hour`` and ``minute``. The bulk form CANNOT move a departure time -- only
+    ``PUT trade-routes/{id}`` can. That is load-bearing here rather than a
+    limitation: what the operator calls one route is 24/N rows at staggered
+    times, and correcting their cargo must not collapse them onto one clock.
+    """
+
+    def test_each_route_carries_its_id_and_the_new_resources(self):
+        service, _ = _service()
+        payload = service._build_update_payload([9, 7], {Resource.CROP: 1440})
+
+        assert payload["action"] == "traderoute"
+        assert payload["routes"] == [
+            {"resources": {"lumber": 0, "clay": 0, "iron": 0, "crop": 1440}, "id": 7},
+            {"resources": {"lumber": 0, "clay": 0, "iron": 0, "crop": 1440}, "id": 9},
+        ]
+
+    def test_it_never_sends_a_departure_time(self):
+        # Sending hour/minute here would be both unsupported by the bulk form and
+        # actively destructive: every row of a fanned-out route would collapse
+        # onto one clock.
+        service, _ = _service()
+        payload = service._build_update_payload([1, 2, 3], {Resource.CROP: 5})
+        for entry in payload["routes"]:
+            assert set(entry) == {"resources", "id"}
+        assert "hour" not in payload and "minute" not in payload
+
+    def test_all_four_resources_are_always_present(self):
+        service, _ = _service()
+        entry = service._build_update_payload([1], {Resource.IRON: 10})["routes"][0]
+        assert entry["resources"] == {"lumber": 0, "clay": 0, "iron": 10, "crop": 0}
+
+    def test_every_row_is_corrected_in_one_request(self):
+        service, client = _service()
+        routes = [
+            ExistingRoute(route_id=800 + i, dest_village_id=20044, dest_x=0, dest_y=0)
+            for i in range(24)
+        ]
+        asyncio.run(service.update_cargo(20031, routes, {Resource.CROP: 60}))
+
+        assert len(client.sent) == 1, "a fanned-out route is corrected in one call"
+        verb, url, payload = client.sent[0]
+        assert (verb, url) == ("PUT", "/api/v1/trade-routes")
+        assert len(payload["routes"]) == 24
+
+    def test_updating_nothing_sends_nothing(self):
+        service, client = _service()
+        assert asyncio.run(service.update_cargo(20031, [], {Resource.CROP: 1})) is None
+        assert client.sent == []
+
+    def test_an_update_is_refused_without_the_live_opt_in(self):
+        client = _RecordingClient()
+        service = TradeRouteService(client, live_enabled=False, reconciler_verified=True)
+        routes = [ExistingRoute(route_id=1, dest_village_id=20044, dest_x=0, dest_y=0)]
+
+        with pytest.raises(TradeRoutePayloadUnverified):
+            asyncio.run(service.update_cargo(20031, routes, {Resource.CROP: 1}))
+        assert client.sent == []
+
+    def test_a_rejected_row_makes_the_whole_update_a_failure(self):
+        # Same reasoning as the toggle: the caller must not believe the live
+        # routes now match the plan when some of them still do not.
+        client = _RecordingClient()
+
+        async def _put(url, payload, **kw):
+            client.sent.append(("PUT", url, payload))
+            return {"routes": [{"id": 1}, {"id": 2, "error": "nope"}]}
+
+        client.put_json = _put
+        service = TradeRouteService(client, live_enabled=True, reconciler_verified=True)
+        routes = [
+            ExistingRoute(route_id=i, dest_village_id=20044, dest_x=0, dest_y=0) for i in (1, 2)
+        ]
+
+        result = asyncio.run(service.update_cargo(20031, routes, {Resource.CROP: 1}))
+        assert result.status == "failed"
+        assert "[2]" in result.detail

@@ -434,6 +434,9 @@ export default function ResourcePlanner() {
   // create-only, so the single thing it changes is the single thing being
   // tested. Defaults to on, which is the behaviour for ordinary runs.
   const [disableExisting, setDisableExisting] = useState(true)
+  // Off by default, and deliberately: correcting cargo overwrites a route that
+  // may have been tuned in-game on purpose.
+  const [updateDrifted, setUpdateDrifted] = useState(false)
   // Durable audit of the last LIVE run (see LS_LAST_RUN): survives the input
   // edits that clear execResult, and page reloads.
   const [lastRun, setLastRun] = useState(null)
@@ -914,6 +917,7 @@ export default function ResourcePlanner() {
           // ordinary run is byte-identical to what it was before.
           ...(onlyOrigin ? { only_origins: [Number(onlyOrigin)] } : {}),
           ...(onlyDestination ? { only_destinations: [Number(onlyDestination)] } : {}),
+          update_drifted: updateDrifted,
         })
         if (
           dryRun &&
@@ -1014,6 +1018,7 @@ export default function ResourcePlanner() {
       onlyOrigin,
       onlyDestination,
       disableExisting,
+      updateDrifted,
     ],
   )
 
@@ -2688,6 +2693,22 @@ export default function ResourcePlanner() {
                       </span>
                     </span>
                   </label>
+                  <label className="mt-2 flex items-center gap-2 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={updateDrifted}
+                      onChange={(e) => setUpdateDrifted(e.target.checked)}
+                    />
+                    <span>
+                      Correct cargo on routes that have drifted.{' '}
+                      <span className="text-secondary">
+                        A route is created once, but the plan moves every time production does.
+                        Without this, live routes keep the amounts they were created with and
+                        slowly stop matching the sheet. Off by default because it overwrites a
+                        route you may have tuned in-game on purpose.
+                      </span>
+                    </span>
+                  </label>
                 </div>
 
                 {!plan.feasible && (
@@ -2714,6 +2735,16 @@ export default function ResourcePlanner() {
                             ? `, ${execResult.remaining} deferred to a later run.`
                             : '.')}
                     </p>
+                    {execResult.updates?.length > 0 && (
+                      <div className="text-xs mb-2">
+                        <strong>Cargo corrected on {execResult.updates.length} route(s):</strong>
+                        <ul className="list-disc ml-5 mt-1">
+                          {execResult.updates.map((u) => (
+                            <li key={u}>{u}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                     {execResult.filtered_to && (
                       <p className="text-warning text-xs mb-2">
                         <strong>Narrowed run:</strong> {execResult.filtered_to}

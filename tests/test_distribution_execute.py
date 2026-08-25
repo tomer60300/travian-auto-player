@@ -244,6 +244,7 @@ class _FakeLiveSvc:
         self._phantom = phantom_creates
         self._confirm_raises = set(confirm_raises or ())
         self._next_route_id = 900000
+        self.updated: list[tuple] = []
         self.live_enabled = True
         # This fake DOES model the marketplace it reads, so it can legitimately
         # claim the route list is readable. The real service defaults to False
@@ -292,6 +293,21 @@ class _FakeLiveSvc:
 
             raise NetworkError("marketplace read failed (test)")
         return list(self._existing.get(vid, []))
+
+    async def update_cargo(self, vid, routes, cargo, *, stop_check=None):
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        if not routes:
+            return None
+        if stop_check is not None and (reason := stop_check()):
+            return RouteActionResult(vid, 0, 0, "stopped", reason)
+        self.updated.append((vid, tuple(sorted(r.route_id for r in routes)), dict(cargo)))
+        # The real game rewrites the rows, which is what a later read would show.
+        targets = {r.route_id for r in routes}
+        for row in self._existing.get(vid, []):
+            if row.route_id in targets:
+                row.cargo = dict(cargo)
+        return RouteActionResult(vid, 0, 0, "updated", f"{len(routes)} route(s)")
 
     async def confirm_routes(self, vid, *, map_span=None):
         if vid in self._confirm_raises:
@@ -1752,3 +1768,104 @@ class TestADisableIsAlsoVerified:
         assert [e for e in events if e["kind"] == "verified_disables"], (
             "a run that only disabled must still confirm it"
         )
+
+
+class TestCargoDriftIsCorrected:
+    """A route is created once; the plan moves every time production does.
+
+    Without this the live routes keep the cargo they were born with and slowly
+    come to describe a different account than the sheet does, with nothing
+    detecting the divergence. That is the failure mode of a planner nobody
+    revisits: it silently stops being true.
+    """
+
+    def _account(self):
+        return _own_village_account()
+
+    def _existing(self, crop):
+        from travian_api.services.distribution.allocation import Resource
+
+        return {
+            20003: [
+                ExistingRoute(
+                    route_id=800 + i,
+                    dest_village_id=20011,
+                    active=True,
+                    cargo={Resource.CROP: crop},
+                )
+                for i in range(4)
+            ]
+        }
+
+    def test_matching_cargo_is_left_alone(self):
+        # The plan ships 100 crop (see _own_village_account).
+        svc = _FakeLiveSvc(existing=self._existing(100))
+        res = _run_live(svc, self._account(), max_routes_per_run=50, update_drifted=True)
+
+        assert res.updates == [], "an unchanged route must not be rewritten"
+        assert [a.status for a in res.actions] == ["skipped"]
+
+    def test_a_small_difference_is_not_worth_a_request(self):
+        # Within tolerance: rewriting for this would churn every run and spend
+        # activity budget to change nothing that matters.
+        svc = _FakeLiveSvc(existing=self._existing(150))
+        res = _run_live(svc, self._account(), max_routes_per_run=50, update_drifted=True)
+
+        assert res.updates == []
+
+    def test_real_drift_is_corrected_in_one_request(self):
+        svc = _FakeLiveSvc(existing=self._existing(9000))
+        res = _run_live(svc, self._account(), max_routes_per_run=50, update_drifted=True)
+
+        assert len(res.updates) == 1
+        assert "cargo reset on 4 row(s)" in res.updates[0]
+        assert [a.status for a in res.actions] == ["updated"]
+        assert svc.created == [], "correcting a route is not creating one"
+
+    def test_it_is_off_unless_asked_for(self):
+        # Correcting cargo overwrites a route the operator may have tuned by
+        # hand, so it cannot be a silent side effect of an ordinary run.
+        svc = _FakeLiveSvc(existing=self._existing(9000))
+        res = _run_live(svc, self._account(), max_routes_per_run=50)
+
+        assert res.updates == []
+        assert [a.status for a in res.actions] == ["skipped"]
+        assert "cargo stale" in res.actions[0].detail, "but the operator is told"
+
+    def test_unknown_live_cargo_is_never_treated_as_drift(self):
+        # The page did not say. Absence of evidence must not rewrite every route.
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(800, 20011, active=True, cargo=None)]})
+        res = _run_live(svc, self._account(), max_routes_per_run=50, update_drifted=True)
+
+        assert res.updates == []
+
+    def test_a_failed_update_says_the_route_is_still_shipping_the_old_amounts(self):
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        class _RefusesUpdates(_FakeLiveSvc):
+            async def update_cargo(self, vid, routes, cargo, *, stop_check=None):
+                return RouteActionResult(vid, 0, 0, "failed", "rejected (test)")
+
+        svc = _RefusesUpdates(existing=self._existing(9000))
+        res = _run_live(svc, self._account(), max_routes_per_run=50, update_drifted=True)
+
+        assert res.updates == []
+        joined = " ".join(res.problems)
+        assert "could not be corrected" in joined
+        assert "still shipping the old amounts" in joined
+
+    def test_the_update_is_recorded_in_the_trace(self):
+        import json
+        from pathlib import Path
+
+        svc = _FakeLiveSvc(existing=self._existing(9000))
+        res = _run_live(svc, self._account(), max_routes_per_run=50, update_drifted=True)
+        events = [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+
+        updated = [e for e in events if e["kind"] == "decision" and e["decision"] == "updated"]
+        assert updated, "a write must always be in the audit record"
+        assert updated[0]["route_ids"] == [800, 801, 802, 803]
+        assert events[-1]["cargo_updated"] == 1
