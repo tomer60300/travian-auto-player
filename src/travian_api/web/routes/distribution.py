@@ -2073,7 +2073,7 @@ async def post_execute(
     #     branch never fires. Kept because it is the right shape if a gpack ever
     #     grows one; do not read it as an active defence.
     #
-    # The run is bounded by `cap` in BOTH dimensions: it reads at most `cap`
+    # The run is bounded by `cap` in three dimensions: it reads at most `cap`
     # marketplaces AND fires at most `cap` creates. The origins-visited bound is
     # what keeps a fully-provisioned account from re-reading every village every
     # run (in steady state every route is skipped and no create fires, so a
@@ -2135,6 +2135,7 @@ async def post_execute(
     )
 
     attempts = 0  # create requests fired this run
+    updates_done = 0  # cargo-correction PUTs fired this run, bounded by `cap`
     visited = 0  # marketplaces read this run
     outstanding = 0  # creates attempted but not completed (failed / Gold Club)
     deferred: list[tuple[SheetRow, PlannedRoute]] = []
@@ -2166,8 +2167,10 @@ async def post_execute(
         async with svc.execute_lock:
             # Refuse to start if the activity budget is already exhausted, and
             # recheck before each origin so exhaustion mid-run stops the rest
-            # (issue #64). check_activity_budget raises; per-request activity is
-            # accounted by the HttpClient, as for the farm/oasis loops.
+            # (issue #64). check_activity_budget raises; the seconds each
+            # request consumed are billed by the SERVICE, as farm_list_service
+            # does -- the HttpClient bills nothing, and believing otherwise is
+            # how the reads went uncounted for a while.
             try:
                 svc.http_client.check_activity_budget()
             except ActivityBudgetExhausted as exc:
@@ -2481,6 +2484,29 @@ async def post_execute(
                                 e for e in visible if e.active and destination in _existing_keys(e)
                             ]
                             drifted = [e for e in live if cargo_has_drifted(e.cargo, route.cargo)]
+                            if drifted and body.update_drifted and updates_done >= cap:
+                                # Bounded like every other write. These fired one
+                                # paced PUT per desired route with no cap, so a
+                                # drifted account turned a run the operator capped
+                                # at three into a long burst of writes.
+                                trace.decision(
+                                    origin=origin,
+                                    destination=destination,
+                                    decision="deferred",
+                                    reason=(
+                                        f"cargo has drifted but the per-run cap of "
+                                        f"{cap} update(s) is spent"
+                                    ),
+                                )
+                                actions.append(
+                                    _action(
+                                        row,
+                                        route,
+                                        "skipped",
+                                        "route active, cargo stale (update cap reached)",
+                                    )
+                                )
+                                continue
                             if drifted and body.update_drifted:
                                 reason = _stop_reason()
                                 if reason:
@@ -2491,6 +2517,7 @@ async def post_execute(
                                 updated = await svc.update_cargo(
                                     origin, drifted, route.cargo, stop_check=_stop_reason
                                 )
+                                updates_done += 1
                                 if updated is not None and updated.status == "updated":
                                     updated_here.extend((e, dict(route.cargo)) for e in drifted)
                                     # Every row of a fanned-out route shares one

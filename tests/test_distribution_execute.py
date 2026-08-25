@@ -1951,3 +1951,118 @@ class TestEveryKindOfWriteIsVerified:
         joined = " ".join(res.problems)
         assert "still shows the old amounts" in joined
         assert "shipping something the plan did not ask for" in joined
+
+
+class TestTheUpdateBurstIsBounded:
+    """Cargo corrections were the one write with no cap at all.
+
+    `max_routes_per_run` bounds creates and marketplace reads. Cargo updates
+    fired one PACED PUT per desired route outside that accounting, so a drifted
+    account turned a run the operator capped at three into a long burst of writes
+    — each with its own human delay, from a run they believed was small.
+    """
+
+    def _drifted(self, n):
+        from travian_api.services.distribution.allocation import Resource
+
+        return {
+            20003: [
+                ExistingRoute(900 + i, 20011, active=True, cargo={Resource.CROP: 9000})
+                for i in range(n)
+            ]
+        }
+
+    def _two_destinations(self):
+        """One origin, two destinations, both already served."""
+        rows = (
+            SheetRow(
+                origin=20003,
+                destination=20011,
+                cargo={Resource.CROP: 100},
+                cycle_hours=6,
+                dispatch_minute=100,
+                arrival_minute=0,
+                merchants=1,
+            ),
+            SheetRow(
+                origin=20003,
+                destination=20012,
+                cargo={Resource.CROP: 100},
+                cycle_hours=6,
+                dispatch_minute=400,
+                arrival_minute=0,
+                merchants=1,
+            ),
+        )
+        return SimpleNamespace(
+            plan=SimpleNamespace(is_feasible=True, warnings=(), rows=rows),
+            names={20003: "03", 20011: "11", 20012: "12"},
+            coords={20003: (0, 0), 20011: (10, 0), 20012: (0, 10)},
+            warnings=[],
+        )
+
+    def test_updates_stop_at_the_cap(self):
+        # Two drifted destinations, cap of one: the second must be left alone AND
+        # the operator told, or a stale route reads as a clean skip.
+        existing = {
+            20003: [
+                ExistingRoute(901, 20011, active=True, cargo={Resource.CROP: 9000}),
+                ExistingRoute(902, 20012, active=True, cargo={Resource.CROP: 9000}),
+            ]
+        }
+        svc = _FakeLiveSvc(existing=existing)
+
+        res = _run_live(svc, self._two_destinations(), max_routes_per_run=1, update_drifted=True)
+
+        assert len(svc.updated) == 1, f"cap was 1, fired {len(svc.updated)}"
+        assert any("update cap reached" in a.detail for a in res.actions), (
+            "and the operator is told the rest were left alone"
+        )
+
+    def test_within_the_cap_it_still_corrects(self):
+        svc = _FakeLiveSvc(existing=self._drifted(1))
+        res = _run_live(svc, _own_village_account(), max_routes_per_run=5, update_drifted=True)
+        assert len(res.updates) == 1
+
+
+class TestMarketplaceReadsBillTheActivityCeiling:
+    """The reads were free, so a run reported roughly half the traffic it spent.
+
+    The ceiling is shared with the farm and oasis loops, so under-reporting here
+    does not just understate this feature — it lets the OTHER loops overspend the
+    account's daily total.
+    """
+
+    def _service(self):
+        from travian_api.services.trade_route_service import TradeRouteService
+
+        logged: list[float] = []
+        client = SimpleNamespace(
+            settings=SimpleNamespace(base_url="https://example.invalid"),
+            human_delay=SimpleNamespace(wait=_noop),
+            activity_scheduler=SimpleNamespace(log_activity=logged.append),
+            get_html=_empty_marketplace,
+        )
+        return TradeRouteService(client, live_enabled=True, reconciler_verified=True), logged
+
+    def test_opening_the_marketplace_is_billed(self):
+        service, logged = self._service()
+        asyncio.run(service.open_marketplace(20003))
+        assert len(logged) == 1, "two GETs, billed as one page visit"
+
+    def test_refreshing_it_is_billed(self):
+        service, logged = self._service()
+        asyncio.run(service.refresh_marketplace(20003))
+        assert len(logged) == 1
+
+
+async def _noop(*a, **k):
+    return None
+
+
+async def _empty_marketplace(path, **kw):
+    return (
+        "<html><body><script>window.Travian.React.TradeRoutes.render("
+        '{viewData: {"ownPlayer":{"village":{"marketplace":{"tradeRoutes":[]}}}}}'
+        ");</script></body></html>"
+    )

@@ -257,6 +257,7 @@ class TradeRouteService:
         active village between the two GETs cannot make us read — and disable —
         the wrong village's routes.
         """
+        started = time.monotonic()
         newdid_q = f"?newdid={village_id}" if village_id else ""
         newdid_amp = f"&newdid={village_id}" if village_id else ""
         await self.http_client.get_html(f"/dorf2.php{newdid_q}")
@@ -268,6 +269,11 @@ class TradeRouteService:
         html = await self.http_client.get_html(path)
         base = self.http_client.settings.base_url.rstrip("/")
         self._marketplace_referer[village_id] = f"{base}{path}"
+        # Reads bill the ceiling too. They were free, so an execute run reported
+        # roughly half the traffic it actually spent -- and the daily ceiling is
+        # shared with the farm and oasis loops, so under-reporting here lets
+        # THOSE overspend. Each of these consumed a real throttler gap.
+        self._log_activity(started)
         return html
 
     async def refresh_marketplace(self, village_id: int) -> str:
@@ -281,11 +287,13 @@ class TradeRouteService:
         browser does not visit the village view to refresh a page it is sitting
         on.
         """
+        started = time.monotonic()
         newdid_amp = f"&newdid={village_id}" if village_id else ""
         path = f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}"
         html = await self.http_client.get_html(path)
         base = self.http_client.settings.base_url.rstrip("/")
         self._marketplace_referer[village_id] = f"{base}{path}"
+        self._log_activity(started)
         return html
 
     async def confirm_routes(
