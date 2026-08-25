@@ -1628,7 +1628,13 @@ class RevertPlanRequest(BaseModel):
     """Ask what it would take to undo a previous live run."""
 
     trace_id: str = Field(
-        min_length=1,
+        # Interpolated into a filename, so it is constrained to exactly the shape
+        # ExecutionTrace generates (uuid4().hex[:12]). Unvalidated it was an
+        # authenticated arbitrary-.jsonl read via `../`, and worse than a read:
+        # a wrong file becomes the "before" inventory, so every currently-live
+        # route looks newly created -- and with apply_disable that disables all
+        # of them.
+        pattern=r"^[0-9a-f]{12}$",
         description=(
             "The trace_id an /execute response returned. Its recorded pre-write "
             "inventory is the only record of what each village looked like before "
@@ -1820,6 +1826,8 @@ async def post_execute(
     # Each plan row is one route from a real origin village's marketplace to a
     # destination (a real village or a foreign sink — coords cover both).
     items: list[tuple[SheetRow, PlannedRoute]] = []
+    # origin -> every route the FULL plan wants from it, filter or no filter.
+    wanted_by_origin: dict[int, list[PlannedRoute]] = {}
     filtered_out = 0
     for row in plan.rows:
         # Fail-closed execution-boundary guard: a live route may only originate
@@ -1842,6 +1850,29 @@ async def post_execute(
                 f"unknown, route skipped"
             )
             continue
+        planned = PlannedRoute(
+            origin_village_id=row.origin,
+            dest_village_id=row.destination,
+            dest_x=dest_xy[0],
+            dest_y=dest_xy[1],
+            dest_name=village_label(row.destination, names),
+            cargo=dict(row.cargo),
+            cycle_hours=row.cycle_hours,
+            merchants=row.merchants,
+            # Carry the planner's scheduled send time through to live
+            # execution -- without it the beat that spaces arrivals and
+            # orders relay hubs is lost.
+            dispatch_minute=row.dispatch_minute,
+        )
+        # Recorded BEFORE the filter, and used only to decide what counts as
+        # wanted. Judging staleness against the narrowed slice instead was
+        # actively destructive: `only_destinations` made every other destination
+        # of a visited origin look stale, so the documented "safe first live
+        # test" quietly switched off the rest of the plan and reported a clean
+        # success. The filter narrows what a run CREATES; it must never change
+        # what the plan wants.
+        wanted_by_origin.setdefault(row.origin, []).append(planned)
+
         # Applied here, after the boundary guards, so a filtered-out route is
         # never confused with one that was rejected as unexecutable.
         if body.only_origins is not None and row.origin not in body.only_origins:
@@ -1850,25 +1881,7 @@ async def post_execute(
         if body.only_destinations is not None and row.destination not in body.only_destinations:
             filtered_out += 1
             continue
-        items.append(
-            (
-                row,
-                PlannedRoute(
-                    origin_village_id=row.origin,
-                    dest_village_id=row.destination,
-                    dest_x=dest_xy[0],
-                    dest_y=dest_xy[1],
-                    dest_name=village_label(row.destination, names),
-                    cargo=dict(row.cargo),
-                    cycle_hours=row.cycle_hours,
-                    merchants=row.merchants,
-                    # Carry the planner's scheduled send time through to live
-                    # execution — without it the beat that spaces arrivals and
-                    # orders relay hubs is lost.
-                    dispatch_minute=row.dispatch_minute,
-                ),
-            )
-        )
+        items.append((row, planned))
 
     def _game_rows(cycle_hours: int) -> int:
         """Rows one create request becomes in the game.
@@ -2074,7 +2087,12 @@ async def post_execute(
         origins=len(origins),
         desired_routes=len(items),
         # What this run is authorised to put in the game at worst, in ROWS.
-        max_game_rows_this_run=sum(_game_rows(row.cycle_hours) for row, _ in items[:cap]),
+        # The cap-largest values, not the first `cap` in plan order. Origins are
+        # visited in SHUFFLED order, so slicing plan order was not an upper
+        # bound at all: a run capped at "1 row" could legitimately create 24.
+        max_game_rows_this_run=sum(
+            sorted((_game_rows(row.cycle_hours) for row, _ in items), reverse=True)[:cap]
+        ),
         # Recorded so a trace can never be read as a full run when it was not.
         filtered_to=filtered_to,
         planned_routes_excluded_by_filter=filtered_out,
@@ -2221,12 +2239,13 @@ async def post_execute(
                     # deliberate: keying everything on coordinates churns every
                     # own-village route whenever the world span is wrong, and
                     # keying everything on ids churns every foreign one always.
+                    wanted_here = wanted_by_origin.get(origin, [])
                     desired_ids = {
-                        route.dest_village_id for _, route in desired if route.dest_village_id > 0
+                        route.dest_village_id for route in wanted_here if route.dest_village_id > 0
                     }
                     desired_foreign = {
                         (route.dest_x, route.dest_y)
-                        for _, route in desired
+                        for route in wanted_here
                         if route.dest_village_id < 0
                     }
 
@@ -2250,6 +2269,28 @@ async def post_execute(
                             keys.add((e.dest_x, e.dest_y))
                         return keys
 
+                    def _identifiable(
+                        e: ExistingRoute,
+                        ids: set[int] = desired_ids,
+                        foreign: set[tuple[int, int]] = desired_foreign,
+                    ) -> bool:
+                        """Can this route be matched against the plan at all?
+
+                        A FOREIGN target is known only by coordinates -- the plan
+                        has no real village id for one -- so a live route whose
+                        map id could not be placed has no key the foreign set can
+                        ever match. Judging it "not wanted" disabled it and then
+                        created a replacement, every single run. When the plan
+                        wants foreign destinations and the route cannot be
+                        placed, the honest answer is "I do not know", and the
+                        safe action for "I do not know" is to leave it alone.
+                        """
+                        if e.dest_village_id in ids:
+                            return True
+                        if not foreign:
+                            return True  # nothing matches on coordinates anyway
+                        return e.dest_x is not None and e.dest_y is not None
+
                     def _is_wanted(
                         e: ExistingRoute,
                         ids: set[int] = desired_ids,
@@ -2271,7 +2312,24 @@ async def post_execute(
                     if body.disable_existing:
                         # Disable only ACTIVE visible routes the plan no longer
                         # wants; a route already disabled needs no action.
-                        stale = [e for e in visible if e.active and not _is_wanted(e)]
+                        stale = [
+                            e
+                            for e in visible
+                            if e.active and _identifiable(e) and not _is_wanted(e)
+                        ]
+                        unidentifiable = [e for e in visible if e.active and not _identifiable(e)]
+                        if unidentifiable:
+                            # Reported, not acted on. Silence would look like a
+                            # clean run while these routes keep shipping.
+                            problems.append(
+                                f"{village_label(origin, names)}: "
+                                f"{len(unidentifiable)} live route(s) could not be "
+                                f"matched against the plan (their map id would not "
+                                f"place, and this plan has foreign destinations that "
+                                f"are matched by coordinates). Left running rather "
+                                f"than guessed at: "
+                                f"{[e.route_id for e in unidentifiable]}"
+                            )
                         trace.event(
                             "stale_classified",
                             origin=origin,

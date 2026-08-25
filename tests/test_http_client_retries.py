@@ -132,3 +132,80 @@ class TestNonRetryableFailsFast:
             asyncio.run(client.close())
 
         assert attempts["n"] == 1
+
+
+class TestANonRetryableWriteIsNeverReSentAfterReauth:
+    """`safe_to_retry=False` means what it says, including on the reauth path.
+
+    That path re-fired the identical request the moment a response looked like a
+    session redirect -- ignoring `safe_to_retry` entirely. A create whose
+    response merely LOOKED like a redirect was instantly re-POSTed, and if the
+    first had already committed, the account got a duplicate route. It was also
+    the only genuinely un-paced back-to-back pair in the whole write flow.
+
+    "I do not know whether it landed" is the honest outcome. The reconciler is
+    idempotent, so a later run repairs a missed create; nothing repairs a
+    duplicate.
+    """
+
+    def _client_returning_redirect(self):
+        client = _client()
+        sent: list[str] = []
+
+        class _Resp:
+            status_code = 302
+            text = "redirectTo /dorf1.php"
+
+            def json(self):
+                return {}
+
+        async def _fake(url, *a, **kw):
+            sent.append(url)
+            return _Resp()
+
+        client._use_curl = True
+        client._curl_post_json = lambda url, data, headers: _fake(url)
+        client._curl_put_json = lambda url, headers, data: _fake(url)
+        client._curl_delete_json = lambda url, headers, data=None: _fake(url)
+
+        async def _never(*a, **kw):
+            raise AssertionError("reauth must not be attempted for a non-retryable write")
+
+        client._handle_session_expired = _never
+        return client, sent
+
+    def test_a_non_retryable_post_raises_instead_of_re_posting(self):
+        client, sent = self._client_returning_redirect()
+        with pytest.raises(NetworkError, match="may already have taken effect"):
+            asyncio.run(client.post_json("/api/v1/trade-routes", {"a": 1}, safe_to_retry=False))
+        assert len(sent) == 1, "the request must go out exactly once"
+
+    def test_a_non_retryable_put_raises_instead_of_re_putting(self):
+        client, sent = self._client_returning_redirect()
+        with pytest.raises(NetworkError, match="may already have taken effect"):
+            asyncio.run(client.put_json("/api/v1/trade-routes", {"a": 1}, safe_to_retry=False))
+        assert len(sent) == 1
+
+    def test_a_non_retryable_delete_raises_instead_of_re_deleting(self):
+        client, sent = self._client_returning_redirect()
+        with pytest.raises(NetworkError, match="may already have taken effect"):
+            asyncio.run(
+                client.delete_json("/api/v1/trade-routes", data={"a": 1}, safe_to_retry=False)
+            )
+        assert len(sent) == 1
+
+    def test_a_retryable_write_still_reauths_and_retries(self):
+        # The behaviour must survive for the idempotent callers that rely on it.
+        client, sent = self._client_returning_redirect()
+        reauthed = []
+
+        async def _ok(*a, **kw):
+            reauthed.append(True)
+
+        client._handle_session_expired = _ok
+        try:
+            asyncio.run(client.post_json("/api/v1/probe", {"a": 1}, safe_to_retry=True))
+        except NetworkError:
+            pass  # the stub keeps returning 302; the point is the retry happened
+        assert reauthed, "an idempotent write must still recover from an expired session"
+        assert len(sent) == 2, "and it is re-sent exactly once"

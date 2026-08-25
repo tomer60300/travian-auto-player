@@ -1000,7 +1000,14 @@ class HttpClient:
         # The non-stealth header path returns Content-Type="" which would
         # bypass the `not in` form of this guard. `not headers.get(...)`
         # treats both "missing" and "empty string" identically.
-        if rt == "xhr" and not headers.get("Content-Type"):
+        # Set for BOTH shapes, not just xhr. The game's own API helper is a
+        # single fetch() used for every verb, and it always sends
+        # "application/json; charset=UTF-8". Leaving the fetch path to the
+        # transport default emitted a bare "application/json", so one account
+        # sent two different spellings of this header to /api/v1/* where the
+        # real client has exactly one -- and a single-header exact match is the
+        # cheapest rejection rule there is. Proven on a socket.
+        if rt in ("xhr", "fetch") and not headers.get("Content-Type"):
             headers["Content-Type"] = JSON_CONTENT_TYPE
 
         try:
@@ -1017,6 +1024,19 @@ class HttpClient:
                 response.status_code == 302
                 or ("redirectTo" in response.text and "code" not in response.text)
             ):
+                # A non-idempotent write is NEVER re-sent here. `safe_to_retry`
+                # exists to say "do not send this twice", and this path ignored
+                # it: a create whose response merely LOOKED like a redirect was
+                # instantly re-POSTed, and if the first one had already committed
+                # the account got a duplicate route. "I do not know whether it
+                # landed" is the honest answer, and the reconciler is idempotent,
+                # so a later run fixes it up -- a duplicate is not so cheap.
+                if not safe_to_retry:
+                    raise NetworkError(
+                        "the session appears to have expired around a non-retryable "
+                        "request; refusing to re-send it because the original may "
+                        "already have taken effect"
+                    )
                 await self._handle_session_expired()
                 if self._use_curl:
                     response = await self._curl_post_json(url, data, headers)
@@ -1114,7 +1134,14 @@ class HttpClient:
 
         rt = request_type if request_type in ("xhr", "fetch") else "json"
         headers = await self._stealth_pre_request(url, rt, referer=referer)
-        if rt == "xhr" and data is not None and not headers.get("Content-Type"):
+        # Set for BOTH shapes, not just xhr. The game's own API helper is a
+        # single fetch() used for every verb, and it always sends
+        # "application/json; charset=UTF-8". Leaving the fetch path to the
+        # transport default emitted a bare "application/json", so one account
+        # sent two different spellings of this header to /api/v1/* where the
+        # real client has exactly one -- and a single-header exact match is the
+        # cheapest rejection rule there is. Proven on a socket.
+        if rt in ("xhr", "fetch") and data is not None and not headers.get("Content-Type"):
             headers["Content-Type"] = JSON_CONTENT_TYPE
 
         try:
@@ -1133,6 +1160,19 @@ class HttpClient:
                 response.status_code == 302
                 or ("redirectTo" in response.text and "code" not in response.text)
             ):
+                # A non-idempotent write is NEVER re-sent here. `safe_to_retry`
+                # exists to say "do not send this twice", and this path ignored
+                # it: a create whose response merely LOOKED like a redirect was
+                # instantly re-POSTed, and if the first one had already committed
+                # the account got a duplicate route. "I do not know whether it
+                # landed" is the honest answer, and the reconciler is idempotent,
+                # so a later run fixes it up -- a duplicate is not so cheap.
+                if not safe_to_retry:
+                    raise NetworkError(
+                        "the session appears to have expired around a non-retryable "
+                        "request; refusing to re-send it because the original may "
+                        "already have taken effect"
+                    )
                 await self._handle_session_expired()
                 if self._use_curl:
                     response = await self._curl_delete_json(url, headers, data=data)
@@ -1219,7 +1259,14 @@ class HttpClient:
 
         rt = request_type if request_type in ("xhr", "fetch") else "json"
         headers = await self._stealth_pre_request(url, rt, referer=referer)
-        if rt == "xhr" and not headers.get("Content-Type"):
+        # Set for BOTH shapes, not just xhr. The game's own API helper is a
+        # single fetch() used for every verb, and it always sends
+        # "application/json; charset=UTF-8". Leaving the fetch path to the
+        # transport default emitted a bare "application/json", so one account
+        # sent two different spellings of this header to /api/v1/* where the
+        # real client has exactly one -- and a single-header exact match is the
+        # cheapest rejection rule there is. Proven on a socket.
+        if rt in ("xhr", "fetch") and not headers.get("Content-Type"):
             headers["Content-Type"] = JSON_CONTENT_TYPE
 
         try:
@@ -1235,6 +1282,19 @@ class HttpClient:
                 response.status_code == 302
                 or ("redirectTo" in response.text and "code" not in response.text)
             ):
+                # A non-idempotent write is NEVER re-sent here. `safe_to_retry`
+                # exists to say "do not send this twice", and this path ignored
+                # it: a create whose response merely LOOKED like a redirect was
+                # instantly re-POSTed, and if the first one had already committed
+                # the account got a duplicate route. "I do not know whether it
+                # landed" is the honest answer, and the reconciler is idempotent,
+                # so a later run fixes it up -- a duplicate is not so cheap.
+                if not safe_to_retry:
+                    raise NetworkError(
+                        "the session appears to have expired around a non-retryable "
+                        "request; refusing to re-send it because the original may "
+                        "already have taken effect"
+                    )
                 await self._handle_session_expired()
                 if self._use_curl:
                     response = await self._curl_put_json(url, headers, data)
