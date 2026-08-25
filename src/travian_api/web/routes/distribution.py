@@ -2665,6 +2665,11 @@ async def post_execute(
         # not reach its own close -- i.e. the run raised. A crashed run must
         # still leave a terminated trace rather than one that simply stops.
         trace.close(ended="raised before the run could summarise itself")
+        # Root cause of the same bug the tracer now also guards against: the
+        # service outlives the run, so leaving it pointing at a finished trace
+        # means the NEXT direct call to a write method logs into a closed file.
+        # The trace belongs to this run; hand it back when the run ends.
+        svc.trace = None
         active_ops.unregister(user.id, _EXECUTE_OP_LABEL)
 
     actions += [_action(row, route, "deferred") for row, route in deferred]

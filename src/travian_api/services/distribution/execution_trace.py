@@ -63,6 +63,7 @@ class ExecutionTrace:
         self._events = 0
         self._truncated = False
         self._closed = False
+        self._late = False
         self._path: Path | None = None
         self._handle = None
         if not enabled:
@@ -99,7 +100,24 @@ class ExecutionTrace:
         self._write(kind, fields)
 
     def _write(self, kind: str, fields: dict[str, Any]) -> None:
-        """Append one record. Bypasses the event cap; callers apply it."""
+        """Append one record. Bypasses the event cap; callers apply it.
+
+        A missing handle is a no-op, not a crash. The service keeps its reference
+        to a trace after the run that owns it has closed, so a later write --
+        revert-plan disabling a route is exactly one -- arrives here with the file
+        already gone. Raising would break an operation that had ALREADY succeeded
+        against the game, which is the worst possible moment for a logging bug.
+        """
+        if self._handle is None:
+            if not self._late:
+                self._late = True
+                logger.warning(
+                    "execution trace %s received %r after it was closed; the event is "
+                    "counted but not written. A caller is holding a finished trace.",
+                    self.run_id,
+                    kind,
+                )
+            return
         record = {
             "run": self.run_id,
             "t": round(time.monotonic() - self.started, 3),

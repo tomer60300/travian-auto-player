@@ -150,3 +150,53 @@ class TestTracesStayOutOfTheRepository:
         default = Path.home() / ".travian" / "traces"
         assert default.is_absolute()
         assert "travian-auto-player" not in str(default).lower()
+
+
+class TestAWriteAfterCloseCannotCrashTheCaller:
+    """A closed trace must absorb late events, not raise into a game write.
+
+    Found by a live run. The execute endpoint sets `svc.trace = trace` and closes
+    the trace when the run ends, but the SERVICE keeps the reference. Any later
+    direct call to a write method -- and `POST /routes/revert-plan` with
+    `apply_disable=true` makes exactly one -- reached a trace whose file handle
+    was already None and raised AttributeError from inside the logging path,
+    AFTER the request to the game had already succeeded. The write landed and the
+    caller saw a crash.
+
+    Tracing is observability. It is never allowed to be the thing that breaks an
+    operation, least of all one that already happened.
+    """
+
+    def test_an_event_after_close_does_not_raise(self):
+        trace = ExecutionTrace()
+        trace.close(created=1)
+
+        # None of these may raise.
+        trace.event("late", value=1)
+        trace.decision(origin=1, destination=2, decision="skipped", reason="late")
+        trace.wrote(kind="disable", origin=1, status="disabled", elapsed_ms=5)
+        trace.refused(kind="create", origin=1, reason="late")
+
+    def test_late_events_are_still_counted(self):
+        # Silently vanishing would hide the very bug this guards against.
+        trace = ExecutionTrace()
+        trace.close()
+        trace.event("late")
+        assert trace.counts["late"] == 1
+
+    def test_the_file_keeps_its_ending_and_gains_nothing_after_it(self):
+        trace = ExecutionTrace()
+        trace.event("during")
+        trace.close(created=0)
+        trace.event("after")
+
+        events = _events(trace)
+        assert [e["kind"] for e in events] == ["during", "run_end"]
+        assert events[-1]["kind"] == "run_end", "the ending must stay the last line"
+
+    def test_a_trace_that_never_opened_a_file_also_absorbs_events(self):
+        trace = ExecutionTrace(enabled=False)
+        trace.close()
+        trace.event("late")
+        trace.wrote(kind="create", origin=1, status="created", elapsed_ms=1)
+        assert trace.counts["late"] == 1
