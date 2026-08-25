@@ -149,3 +149,6 @@ show_error_codes = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "slow: heavy planner cases; skip while iterating with -m \"not slow\"",
+]
