@@ -67,6 +67,10 @@ class _RecordingClient:
         self.requested: list[str] = []
         self.stealth_enabled = False
         self.settings = SimpleNamespace(base_url="https://example.invalid")
+        # The build flow holds this across scrape-then-act, because the scraped
+        # action url cannot carry `newdid` and so depends on the session still
+        # being on the village it was scraped from.
+        self.village_context_lock = asyncio.Lock()
 
     async def get_html(self, url, **kw):
         self.requested.append(url)
@@ -182,3 +186,76 @@ class TestTheAdClientDoesNotAnnounceItself:
         atg, _ = self._client()
         assert "Referer" not in atg.headers
         assert "Sec-Fetch-Site" not in atg.headers, "set per request, not per client"
+
+
+class TestTheVillageCannotChangeUnderAScrapeThenAct:
+    """A scraped action url cannot carry `newdid`, so it depends on the session
+    still being on the village it was scraped from.
+
+    Removing the appended `newdid` closed a real fingerprint (the server
+    checksums the exact query string it emitted, so editing it is detectable) but
+    moved village selection into shared session state with nothing serialising
+    it. One HttpClient is shared by every service, and several switch villages
+    with a bare `?newdid=` GET. A switch landing between the scrape and the
+    action applies the build to the WRONG village -- a correctness bug, not a
+    tell.
+    """
+
+    def test_the_build_flow_holds_the_account_wide_village_lock(self):
+        client = _RecordingClient()
+        service = BuildingService(http_client=client)
+        held: list[bool] = []
+
+        async def _detail(slot_id, village_id=None):
+            # Observed from inside the sequence: the lock must already be held
+            # here, or another operation could move the village before the
+            # action url below is requested.
+            held.append(client.village_context_lock.locked())
+            return BuildingDetail(
+                slot_id=27,
+                gid=17,
+                name="Marketplace",
+                level=5,
+                checksum=CHECKSUM_FREE,
+                upgrade_url=FREE_URL,
+            )
+
+        service.get_building_detail = _detail
+        asyncio.run(service.upgrade_building(27, village_id=40001))
+
+        assert held == [True], "the scrape and the action must be one atomic step"
+
+    def test_two_builds_cannot_interleave_their_scrape_and_action(self):
+        client = _RecordingClient()
+        service = BuildingService(http_client=client)
+        order: list[str] = []
+
+        async def _detail(slot_id, village_id=None):
+            order.append(f"scrape-{slot_id}")
+            await asyncio.sleep(0)  # a real await, where a switch could land
+            order.append(f"scraped-{slot_id}")
+            return BuildingDetail(
+                slot_id=slot_id,
+                gid=17,
+                name="Marketplace",
+                level=5,
+                checksum=CHECKSUM_FREE,
+                upgrade_url=FREE_URL,
+            )
+
+        service.get_building_detail = _detail
+
+        async def _both():
+            await asyncio.gather(
+                service.upgrade_building(27, village_id=40001),
+                service.upgrade_building(28, village_id=40002),
+            )
+
+        asyncio.run(_both())
+
+        # Different slots AND different villages, so the slot lock does not
+        # serialise them -- only the village lock does.
+        assert order in (
+            ["scrape-27", "scraped-27", "scrape-28", "scraped-28"],
+            ["scrape-28", "scraped-28", "scrape-27", "scraped-27"],
+        ), f"the two sequences interleaved: {order}"

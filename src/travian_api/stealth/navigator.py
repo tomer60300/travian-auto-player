@@ -75,7 +75,6 @@ class PageNavigator:
         self._http = http_client
         self._delay = human_delay
         self.enabled = enabled
-        self._current_page: Optional[str] = None
         # Warm-up navigation is a per-persona first-order Markov chain. Default
         # from the global RNG; bound to the persona via seed_routes() so each
         # account has a stable browsing "personality" rather than one shared
@@ -168,15 +167,34 @@ class PageNavigator:
         return random.choices(pages, weights=weights, k=1)[0]
 
     @property
+    def _current_page(self) -> Optional[str]:
+        """Where this SESSION actually is, derived from the Referer's own field.
+
+        This used to be a field with a single writer (`_visit`), while the field
+        the Referer is built from is written by EVERY page load -- and dozens of
+        call sites go straight to `get_html` without passing through here. So the
+        navigator could believe it was still on the farm-list tab while the wire
+        had moved to /dorf1.php. That was harmless while every chain was walked
+        unconditionally, but once the walk could be SKIPPED on a match, a stale
+        belief meant skipping the navigation and then sending a farm-list POST
+        refered from a page that has no farm-list form -- which is the exact
+        "impossible from a real browser" tell the Referer work exists to avoid.
+
+        Deriving it from the same field makes that divergence impossible rather
+        than unlikely: if the wire moved, this moved.
+        """
+        return self._http.browser_headers.last_page_path
+
+    @property
     def current_page(self) -> Optional[str]:
         return self._current_page
 
     async def _visit(self, path: str, context: str = "") -> str:
         """Visit a page with delay and tracking."""
         await self._delay.wait(ActionType.PAGE_LOAD, context or f"visiting {path}")
-        html = await self._http.get_html(path, skip_reauth=True)
-        self._current_page = path
-        return html
+        # No separate bookkeeping: get_html updates the Referer's page field, and
+        # `_current_page` reads that. One source of truth.
+        return await self._http.get_html(path, skip_reauth=True)
 
     async def warm_up(self, village_id: Optional[int] = None) -> Optional[str]:
         """Post-login warm-up sequence. Loads pages a real player would visit.

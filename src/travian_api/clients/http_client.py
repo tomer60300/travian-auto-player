@@ -224,6 +224,8 @@ class HttpClient:
         self._persona = persona
         self._ua_rotator = UserAgentRotator(persona=persona, server_url=settings.base_url)
         self._browser_headers = BrowserHeaders(self._ua_rotator, settings.base_url)
+        # See the village_context_lock property for why this exists.
+        self._village_context_lock = asyncio.Lock()
         self._captcha_guard = CaptchaGuard()
         self._throttler = RequestThrottler(
             min_gap_s=settings.stealth_min_gap,
@@ -403,6 +405,25 @@ class HttpClient:
     @property
     def browser_headers(self) -> BrowserHeaders:
         return self._browser_headers
+
+    @property
+    def village_context_lock(self) -> asyncio.Lock:
+        """Serialises "switch village, then act on that village" for this account.
+
+        Most requests pin their own village with ``newdid``, so they need nothing
+        from this. The exception is a scraped ACTION url: the server checksums the
+        exact query string it emitted, so a parameter cannot be appended to it,
+        which means such a request depends entirely on the village the session is
+        already on. Between the scrape and the action there is a window in which
+        any other operation issuing ``?newdid=<other>`` moves the session -- and
+        the action then applies to the wrong village. That is a correctness bug,
+        not a fingerprint.
+
+        Anything that switches village and then issues a village-dependent
+        request must hold this. One HttpClient exists per account session, so the
+        lock is account-wide by construction.
+        """
+        return self._village_context_lock
 
     @property
     def captcha_guard(self) -> CaptchaGuard:

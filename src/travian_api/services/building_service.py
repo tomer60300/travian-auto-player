@@ -395,7 +395,16 @@ class BuildingService:
         Raises:
             TravianError: If upgrade fails or would cost gold
         """
-        async with self._slot_lock((village_id, slot_id)):
+        # The slot lock stops two callers racing the SAME slot. It does nothing
+        # about a different operation switching village underneath us, and the
+        # action url this flow scrapes cannot carry `newdid` -- the server
+        # checksums the exact query string it emitted -- so it depends on the
+        # session still being on the village we scraped from. Hold the
+        # account-wide village context for the whole scrape-then-act sequence.
+        async with (
+            self._slot_lock((village_id, slot_id)),
+            self.http_client.village_context_lock,
+        ):
             return await self._upgrade_building_unlocked(slot_id, allow_gold, village_id)
 
     async def _upgrade_building_unlocked(
@@ -562,7 +571,16 @@ class BuildingService:
         Returns:
             UpgradeResult object
         """
-        async with self._slot_lock((village_id, slot_id)):
+        # The slot lock stops two callers racing the SAME slot. It does nothing
+        # about a different operation switching village underneath us, and the
+        # action url this flow scrapes cannot carry `newdid` -- the server
+        # checksums the exact query string it emitted -- so it depends on the
+        # session still being on the village we scraped from. Hold the
+        # account-wide village context for the whole scrape-then-act sequence.
+        async with (
+            self._slot_lock((village_id, slot_id)),
+            self.http_client.village_context_lock,
+        ):
             return await self._construct_building_unlocked(
                 slot_id, building_gid, allow_gold, village_id
             )

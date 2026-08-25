@@ -19,12 +19,30 @@ from types import SimpleNamespace
 from travian_api.stealth.navigator import PageNavigator
 
 
+class _FakePageState:
+    """The ONE page field the real client keeps for the Referer.
+
+    PageNavigator now derives "where am I?" from this rather than keeping its own
+    copy, because the two could disagree: the real field is written by every page
+    load, whoever triggered it, while the navigator's copy had a single writer. A
+    double that omits it makes every chain look un-walked.
+    """
+
+    def __init__(self):
+        self.last_page_path = None
+
+    def update(self, path):
+        self.last_page_path = path
+
+
 class _RecordingHttp:
     def __init__(self):
         self.gets: list[str] = []
+        self.browser_headers = _FakePageState()
 
     async def get_html(self, path, **kw):
         self.gets.append(path)
+        self.browser_headers.update(path)
         return "<html></html>"
 
 
@@ -88,3 +106,56 @@ class TestRallyPointNavigation:
         asyncio.run(nav.navigate_to_rally_point(village_id=40001))
 
         assert http.gets == []
+
+
+class TestTheNavigatorCannotDisagreeWithTheWire:
+    """The skip is only safe if "where am I?" matches what the Referer says.
+
+    The navigator used to keep its own `_current_page`, written only by its own
+    `_visit`. The field the Referer is built from is written by EVERY page load,
+    and dozens of call sites reach `get_html` directly without passing through
+    the navigator. So a concurrent operation could move the session while the
+    navigator still believed it was on the farm-list tab -- and the skip would
+    then send a farm-list POST refered from a page with no farm-list form, which
+    is precisely the "impossible from a real browser" pairing the Referer work
+    exists to prevent.
+
+    The unconditional re-walk used to hide this. Removing it made the divergence
+    matter, so the divergence had to go.
+    """
+
+    def test_a_page_load_from_outside_the_navigator_is_noticed(self):
+        nav, http = _navigator()
+        asyncio.run(nav.navigate_to_farm_list(village_id=40001))
+        assert nav.current_page == "/build.php?gid=16&tt=99&newdid=40001"
+
+        # Something else moves the session -- an oasis raider, a queue poll.
+        asyncio.run(http.get_html("/dorf1.php?newdid=40002"))
+
+        assert nav.current_page == "/dorf1.php?newdid=40002", (
+            "the navigator must follow the wire, not its own last visit"
+        )
+
+    def test_it_re_walks_after_another_operation_moved_the_session(self):
+        nav, http = _navigator()
+        asyncio.run(nav.navigate_to_farm_list(village_id=40001))
+        asyncio.run(http.get_html("/dorf1.php?newdid=40002"))
+        http.gets.clear()
+
+        asyncio.run(nav.navigate_to_farm_list(village_id=40001))
+
+        assert http.gets == [
+            "/dorf2.php?newdid=40001",
+            "/build.php?gid=16&tt=2&newdid=40001",
+            "/build.php?gid=16&tt=99&newdid=40001",
+        ], "a session that moved must be navigated back, not assumed"
+
+    def test_the_rally_point_skip_is_also_wire_derived(self):
+        nav, http = _navigator()
+        asyncio.run(nav.navigate_to_rally_point(village_id=40001))
+        asyncio.run(http.get_html("/karte.php"))
+        http.gets.clear()
+
+        asyncio.run(nav.navigate_to_rally_point(village_id=40001))
+
+        assert http.gets, "the session left the rally point, so it must be re-entered"

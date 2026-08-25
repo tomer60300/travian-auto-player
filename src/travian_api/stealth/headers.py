@@ -55,6 +55,27 @@ class BrowserHeaders:
         self._base_url = base_url.rstrip("/")
         self._last_page: Optional[str] = None  # tracks last visited page for Referer
 
+    @property
+    def last_page(self) -> Optional[str]:
+        """Absolute URL the Referer chain currently points at, or None."""
+        return self._last_page
+
+    @property
+    def last_page_path(self) -> Optional[str]:
+        """:attr:`last_page` as a site-relative path, or None.
+
+        Exposed so a caller can compare "where is this session actually?"
+        against the SAME field the Referer is built from. Anything keeping its
+        own parallel notion of the current page can silently disagree with what
+        goes out on the wire.
+        """
+        if not self._last_page:
+            return None
+        base = self._base_url.rstrip("/")
+        if self._last_page.startswith(base):
+            return self._last_page[len(base) :] or "/"
+        return self._last_page
+
     def update_last_page(self, path: str) -> None:
         """Update the last visited page (for Referer header)."""
         if path.startswith("http"):

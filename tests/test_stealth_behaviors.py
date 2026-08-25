@@ -114,11 +114,15 @@ def test_navigate_to_rally_point_fetches_document():
         def __init__(self) -> None:
             self.urls: list[str] = []
 
+        browser_headers = None  # set below, once the instance exists
+
         async def get_html(self, url: str, skip_reauth: bool = True) -> str:
             self.urls.append(url)
+            self.browser_headers.update(url)
             return "<html></html>"
 
     fake_http = FakeHttpClient()
+    fake_http.browser_headers = _FakePageState()
     navigator = PageNavigator(fake_http, HumanDelay(enabled=False), enabled=True)
 
     asyncio.run(navigator.navigate_to_rally_point(village_id=123))
@@ -306,12 +310,30 @@ def test_scheduler_caps_survive_persistence(tmp_path):
     assert c._effective_daily_hours <= 8.0
 
 
+class _FakePageState:
+    """Models the ONE page field the real client keeps for the Referer.
+
+    PageNavigator derives "where am I?" from this, exactly as production does, so
+    a double that omitted it made every navigation chain look un-walked. Keeping
+    the double faithful here is the point: the field is written by every page
+    load, whoever triggered it.
+    """
+
+    def __init__(self):
+        self.last_page_path = None
+
+    def update(self, path):
+        self.last_page_path = path
+
+
 class _RecordingHttp:
     def __init__(self) -> None:
         self.urls: list[str] = []
+        self.browser_headers = _FakePageState()
 
     async def get_html(self, url: str, skip_reauth: bool = True) -> str:
         self.urls.append(url)
+        self.browser_headers.update(url)
         return "<html></html>"
 
 
