@@ -128,7 +128,10 @@ class RouteActionResult:
     origin_village_id: int
     dest_x: int
     dest_y: int
-    status: str  # "would_create" | "created" | "would_disable" | "disabled" | "failed" | "skipped"
+    # Every status this class actually produces. Kept in step with the code
+    # because a stale list here is worse than none: it invites a caller to
+    # branch on something that never arrives.
+    status: str  # created | disabled | enabled | updated | deleted | failed | skipped | stopped
     detail: str = ""
 
 
@@ -218,8 +221,9 @@ class TradeRouteService:
         # real account.
         self.live_enabled = live_enabled
         # An instance attribute rather than a module lookup so the gate can be
-        # exercised: a caller that genuinely can read route state says so here,
-        # and the production default stays False until the markup is captured.
+        # exercised in tests. The production default is
+        # ROUTE_LIST_MARKUP_VERIFIED, which is True: the page's own React model
+        # is read, and a fixture pins it.
         self.reconciler_verified = reconciler_verified
         # The marketplace URL last opened for each village, used to pin the
         # Referer on that village's writes. BrowserHeaders tracks only ONE "last

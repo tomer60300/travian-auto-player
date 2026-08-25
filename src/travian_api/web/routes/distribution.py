@@ -574,7 +574,7 @@ class RouteActionResponse(BaseModel):
     # authorised 72 rows. Reported so that is never a surprise.
     game_rows: int = 1
     # would_create | deferred | created | created_unverified | not_created |
-    # skipped | blocked | failed
+    # re_enabled | updated | skipped | blocked | failed
     #
     # `created` means VERIFIED: the marketplace was read back and the route is
     # there. `created_unverified` means the write was accepted but the read-back
@@ -2122,14 +2122,12 @@ async def post_execute(
     #     destination the plan no longer wants). We NEVER disable a destination we
     #     are about to create, so a failed disable can never leave a duplicate,
     #     and an origin is never stripped of routes we cannot immediately replace;
-    #   * a destination that already has a route is left untouched, and its
-    #     parameters are NOT updated. The parser does now report cargo, repeat
-    #     and merchants, so a changed route COULD be told from an unchanged one
-    #     -- what is missing is an update call: Travian has no "edit route"
-    #     endpoint we have captured, so applying a change means delete-then-
-    #     create, and doing that whenever the plan's arithmetic shifts by a few
-    #     crop would churn every route every run. The operator disables a route
-    #     in-game to force a rebuild;
+    #   * a destination that already has a route is left untouched unless its
+    #     CARGO has drifted from the plan and `update_drifted` is set, in which
+    #     case the cargo is rewritten in place (the bulk edit cannot move a
+    #     departure time, which is exactly what makes it safe for a fanned-out
+    #     route). The drift threshold exists so the plan's arithmetic shifting by
+    #     a few crop does not rewrite every route every run;
     #   * hidden entries would be honeypots: invisible to a human, so we would
     #     neither act on them (never disabled) nor let them influence us (never
     #     deduped against). VESTIGIAL today -- the page's React model has no
