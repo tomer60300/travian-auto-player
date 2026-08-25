@@ -22,6 +22,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .findings import Category, Finding
+
 # Rates are floats; treat anything under this as zero rather than warning about
 # a rounding artifact of the percentage arithmetic. Conservation scales this by
 # the account total, because summing twenty five-figure rates accumulates more
@@ -120,7 +122,12 @@ class ResourcePlan:
     villages: tuple[VillageAllocation, ...]
     remainder_village_id: int | None
     unallocated: float
-    warnings: tuple[str, ...]
+    findings: tuple[Finding, ...]
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """The findings as the flat prose list every caller has always read."""
+        return tuple(f.message for f in self.findings)
 
     @property
     def is_conserved(self) -> bool:
@@ -196,7 +203,7 @@ def resolve_resource(
     remainder_id = remainder_ids[0] if remainder_ids else None
 
     total = sum(productions.values())
-    warnings: list[str] = []
+    findings: list[Finding] = []
 
     # A percentage of a negative total is meaningless: 30% of an account that is
     # net -4,000 crop/h is a target of -1,200, which reads as an instruction to
@@ -215,9 +222,18 @@ def resolve_resource(
         if allocation.mode is AllocationMode.REMAINDER:
             continue  # settled below, once everything else is known
         if allocation.mode is AllocationMode.SUSTAIN and own >= 0:
-            warnings.append(
-                f"{village_label(vid, names)} is set to sustain but its {resource.value} "
-                f"production is not negative ({own:.0f}/h); nothing to sustain"
+            label = village_label(vid, names)
+            findings.append(
+                Finding(
+                    category=Category.SUSTAIN_NOOP,
+                    message=(
+                        f"{label} is set to sustain but its {resource.value} "
+                        f"production is not negative ({own:.0f}/h); nothing to sustain"
+                    ),
+                    detail=f"{label} — {own:+,.0f}/h",
+                    village=label,
+                    resource=resource,
+                )
             )
         targets[vid] = _explicit_target(allocation, own, total)
 
@@ -232,16 +248,31 @@ def resolve_resource(
         # plan is reported infeasible rather than emitting an impossible rate.
         targets[remainder_id] = unallocated
         if unallocated < -EPSILON:
-            warnings.append(
-                f"{resource.value}: allocations exceed production by "
-                f"{-unallocated:.0f}/h, so the remainder village "
-                f"{village_label(remainder_id, names)} "
-                f"would have to send more than it has"
+            label = village_label(remainder_id, names)
+            findings.append(
+                Finding(
+                    category=Category.OVER_ALLOCATED,
+                    message=(
+                        f"{resource.value}: allocations exceed production by "
+                        f"{-unallocated:.0f}/h, so the remainder village {label} "
+                        f"would have to send more than it has"
+                    ),
+                    detail=f"{label} — short {-unallocated:,.0f}/h",
+                    village=label,
+                    resource=resource,
+                )
             )
     elif abs(unallocated) > EPSILON:
-        warnings.append(
-            f"{resource.value}: {unallocated:.0f}/h is unallocated and no "
-            f"remainder village is set, so it will pile up wherever it is produced"
+        findings.append(
+            Finding(
+                category=Category.UNALLOCATED,
+                message=(
+                    f"{resource.value}: {unallocated:.0f}/h is unallocated and no "
+                    f"remainder village is set, so it will pile up wherever it is produced"
+                ),
+                detail=f"{unallocated:+,.0f}/h unassigned",
+                resource=resource,
+            )
         )
 
     villages = tuple(
@@ -260,5 +291,5 @@ def resolve_resource(
         villages=villages,
         remainder_village_id=remainder_id,
         unallocated=unallocated,
-        warnings=tuple(warnings),
+        findings=tuple(findings),
     )

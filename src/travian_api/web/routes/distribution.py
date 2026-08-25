@@ -36,6 +36,12 @@ from travian_api.services.distribution.execution_trace import (
     ExecutionTrace,
     read_inventories,
 )
+from travian_api.services.distribution.findings import (
+    Category,
+    Diagnostics,
+    Finding,
+    summarise,
+)
 from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import (
     DAILY_BEAT_CYCLES,
@@ -60,7 +66,7 @@ from travian_api.services.distribution.storage import (
     ProfileSegment,
     simulate_day,
     simulate_profile_cycle,
-    storage_warnings,
+    storage_findings,
     store_status,
 )
 from travian_api.services.trade_route_service import (
@@ -383,6 +389,90 @@ class UnallocatedResponse(BaseModel):
     remainder_village_id: int | None = None
 
 
+class FindingResponse(BaseModel):
+    """One planner finding, small enough to be a row in a collapsed group."""
+
+    category: str
+    severity: str
+    message: str
+    detail: str
+    village: str
+    resource: Resource | None
+    loss_per_day: float
+
+
+class FindingGroupResponse(BaseModel):
+    """Every finding of one kind about one resource, as a single readable item."""
+
+    key: str
+    category: str
+    severity: str
+    resource: Resource | None
+    headline: str
+    action: str
+    count: int
+    loss_per_day: float
+    findings: list[FindingResponse]
+
+
+class ResourceLossResponse(BaseModel):
+    resource: Resource
+    per_day: float
+
+
+class DiagnosticsResponse(BaseModel):
+    """The finding list ranked, grouped and totalled.
+
+    `warnings` on the parent still carries every line, in order, for anything
+    that reads prose. This is the same content with the structure a person needs
+    to act on it: what it costs in total, which single finding dominates that
+    total, and one shared action per group instead of the same clause 45 times.
+    """
+
+    headline: str
+    total_loss_per_day: float
+    loss_by_resource: list[ResourceLossResponse]
+    counts: dict[str, int]
+    groups: list[FindingGroupResponse]
+
+
+def _diagnostics_response(diagnostics: Diagnostics) -> DiagnosticsResponse:
+    return DiagnosticsResponse(
+        headline=diagnostics.headline,
+        total_loss_per_day=diagnostics.total_loss_per_day,
+        loss_by_resource=[
+            ResourceLossResponse(resource=loss.resource, per_day=loss.per_day)
+            for loss in diagnostics.loss_by_resource
+        ],
+        counts=dict(diagnostics.counts),
+        groups=[
+            FindingGroupResponse(
+                key=group.key,
+                category=group.category.value,
+                severity=group.severity.value,
+                resource=group.resource,
+                headline=group.headline,
+                action=group.action,
+                count=group.count,
+                loss_per_day=group.loss_per_day,
+                findings=[
+                    FindingResponse(
+                        category=finding.category.value,
+                        severity=finding.severity.value,
+                        message=finding.message,
+                        detail=finding.detail,
+                        village=finding.village,
+                        resource=finding.resource,
+                        loss_per_day=finding.loss_per_day,
+                    )
+                    for finding in group.findings
+                ],
+            )
+            for group in diagnostics.groups
+        ],
+    )
+
+
 class PlanResponse(BaseModel):
     rows: list[SheetRowResponse]
     budgets: list[BudgetResponse]
@@ -390,7 +480,12 @@ class PlanResponse(BaseModel):
     unallocated: list[UnallocatedResponse]
     total_merchants: int
     feasible: bool
+    # Every finding as prose, in producer order. Kept because it is the contract
+    # the UI and the tests were built on -- but a 25-village account put 132
+    # lines in here and the operator stopped reading, so `diagnostics` is what
+    # the page actually renders.
     warnings: list[str]
+    diagnostics: DiagnosticsResponse
 
 
 class ExecuteRequest(PlanRequest):
@@ -628,7 +723,7 @@ _RATE_FIELD = {
 }
 
 
-def _storage_warnings(body: PlanRequest, plan) -> list[str]:
+def _storage_findings(body: PlanRequest, plan) -> list[Finding]:
     """Overflow and starvation checks over the finished plan. Zero requests.
 
     Every input is already in the snapshot the caller handed back, so this costs
@@ -682,7 +777,7 @@ def _storage_warnings(body: PlanRequest, plan) -> list[str]:
 
     overflows = simulate_day(plan.beat, stocks, capacities, own_rates)
     names = {v.village_id: v.name for v in body.snapshot if v.name}
-    return list(storage_warnings(statuses, overflows, names=names))
+    return list(storage_findings(statuses, overflows, names=names))
 
 
 def _budget_legs(
@@ -1131,7 +1226,12 @@ class _PlannedAccount:
     trade_office: dict[int, int]
     foreign_ids: dict[int, ForeignTarget]
     config: PlannerConfig
-    warnings: list[str]
+    findings: list[Finding]
+
+    @property
+    def warnings(self) -> list[str]:
+        """The findings as the flat prose list every caller has always read."""
+        return [f.message for f in self.findings]
 
 
 async def _plan_account(
@@ -1238,15 +1338,23 @@ async def _plan_account(
         max_relay_hops=body.max_relay_hops,
     )
 
-    extra_warnings: list[str] = []
+    extra_findings: list[Finding] = []
     for target in manual_targets:
-        extra_warnings.append(
-            f"{target.name} ({target.x}|{target.y}): Travian only allows Gold Club "
-            f"trade routes to your own, Wonder, or alliance/confederacy artifact "
-            f"villages, so its {target.crop_per_hour:.0f}/h crop obligation is a MANUAL "
-            f"transfer — it is not in the route plan and no merchants are reserved for "
-            f"it. Ship it by hand, or mark it route-eligible if it really is one of "
-            f"those villages."
+        extra_findings.append(
+            Finding(
+                category=Category.MANUAL_TRANSFER,
+                message=(
+                    f"{target.name} ({target.x}|{target.y}): Travian only allows Gold Club "
+                    f"trade routes to your own, Wonder, or alliance/confederacy artifact "
+                    f"villages, so its {target.crop_per_hour:.0f}/h crop obligation is a "
+                    f"MANUAL transfer — it is not in the route plan and no merchants are "
+                    f"reserved for it. Ship it by hand, or mark it route-eligible if it "
+                    f"really is one of those villages."
+                ),
+                detail=f"{target.name} — {target.crop_per_hour:,.0f}/h crop",
+                village=target.name,
+                resource=Resource.CROP,
+            )
         )
     try:
         # Explicit `keep` entries mean exactly what an absent entry means, so
@@ -1270,9 +1378,16 @@ async def _plan_account(
                 crop_allocations[target_id] = Allocation(mode=AllocationMode.ABSOLUTE, value=owed)
         for resource in sorted(set(allocations) - set(productions), key=lambda r: r.value):
             if allocations.pop(resource):
-                extra_warnings.append(
-                    f"{resource.value}: no production rate is known for any village, "
-                    f"so its allocations were ignored"
+                extra_findings.append(
+                    Finding(
+                        category=Category.UNREADABLE_RATE,
+                        message=(
+                            f"{resource.value}: no production rate is known for any village, "
+                            f"so its allocations were ignored"
+                        ),
+                        detail=f"{resource.value} — no rate for any village",
+                        resource=resource,
+                    )
                 )
         # A single village with an unreadable rate (crop_per_hour=None is the
         # normal no-crop-balance snapshot path) must not fail the whole plan:
@@ -1283,10 +1398,18 @@ async def _plan_account(
             for vid in unreadable:
                 del per_village[vid]
             if unreadable:
-                extra_warnings.append(
-                    f"{resource.value}: no rate could be read for "
-                    + ", ".join(village_label(vid, names) for vid in unreadable)
-                    + f", so their {resource.value} allocations were ignored"
+                labels = [village_label(vid, names) for vid in unreadable]
+                extra_findings.append(
+                    Finding(
+                        category=Category.UNREADABLE_RATE,
+                        message=(
+                            f"{resource.value}: no rate could be read for "
+                            + ", ".join(labels)
+                            + f", so their {resource.value} allocations were ignored"
+                        ),
+                        detail=f"{resource.value} — " + ", ".join(labels),
+                        resource=resource,
+                    )
                 )
         # The beat search is pure CPU; off the event loop so it cannot stall
         # WebSocket frames or stealth-timed game requests while the user replans.
@@ -1298,10 +1421,19 @@ async def _plan_account(
     for vid in sorted(plan.merchants_committed):
         committed = plan.merchants_committed[vid]
         if committed > free_now.get(vid, 0):
-            extra_warnings.append(
-                f"{village_label(vid, names)}: the plan commits {committed} merchants but only "
-                f"{free_now.get(vid, 0)} are free right now — existing routes or "
-                f"shipments must release the rest before the sheet is executable"
+            label = village_label(vid, names)
+            free = free_now.get(vid, 0)
+            extra_findings.append(
+                Finding(
+                    category=Category.MERCHANTS_BUSY,
+                    message=(
+                        f"{label}: the plan commits {committed} merchants but only "
+                        f"{free} are free right now — existing routes or "
+                        f"shipments must release the rest before the sheet is executable"
+                    ),
+                    detail=f"{label} — needs {committed}, {free} free",
+                    village=label,
+                )
             )
 
     # Off the loop for the same reason craft_plan is, three lines above: this
@@ -1310,22 +1442,38 @@ async def _plan_account(
     # villages and 566ms at 40 -- and the day check calls this once per profile,
     # so three profiles blocked the loop for ~1.6s while stealth-timed game
     # requests and WebSocket frames waited.
-    extra_warnings.extend(await asyncio.to_thread(_storage_warnings, body, plan))
+    extra_findings.extend(await asyncio.to_thread(_storage_findings, body, plan))
 
     for target_id, target in foreign_ids.items():
         suppliers = sorted({row.origin for row in plan.rows if row.destination == target_id})
         if not suppliers:
-            extra_warnings.append(
-                f"{target.name} ({target.x}|{target.y}) is owed "
-                f"{target.crop_per_hour:,.0f} crop/h but no village could supply it"
+            extra_findings.append(
+                Finding(
+                    category=Category.TRIBUTE_UNFUNDED,
+                    message=(
+                        f"{target.name} ({target.x}|{target.y}) is owed "
+                        f"{target.crop_per_hour:,.0f} crop/h but no village could supply it"
+                    ),
+                    detail=f"{target.name} — {target.crop_per_hour:,.0f}/h unpaid",
+                    village=target.name,
+                    resource=Resource.CROP,
+                )
             )
             continue
         if len(suppliers) > 1:
-            extra_warnings.append(
-                f"{target.name} ({target.x}|{target.y}) is supplied by "
-                + ", ".join(village_label(vid, names) for vid in suppliers)
-                + " — several routes to keep track of; consider raising one "
-                "supplier's share so a single route covers it"
+            extra_findings.append(
+                Finding(
+                    category=Category.TRIBUTE_SPLIT,
+                    message=(
+                        f"{target.name} ({target.x}|{target.y}) is supplied by "
+                        + ", ".join(village_label(vid, names) for vid in suppliers)
+                        + " — several routes to keep track of; consider raising one "
+                        "supplier's share so a single route covers it"
+                    ),
+                    detail=f"{target.name} — {len(suppliers)} suppliers",
+                    village=target.name,
+                    resource=Resource.CROP,
+                )
             )
         # Section 7.3: a tribute must not lapse. A Gold Club route sends at its
         # scheduled "Send at" time, so the first delivery lands at the next
@@ -1345,7 +1493,15 @@ async def _plan_account(
         if full > first + 0.05:
             note += f", and the full tribute up to {full:.1f}h"
         note += ", so cover it by hand until the first scheduled send lands"
-        extra_warnings.append(note)
+        extra_findings.append(
+            Finding(
+                category=Category.TRIBUTE_COLD_START,
+                message=note,
+                detail=f"{target.name} — up to {first:.1f}h",
+                village=target.name,
+                resource=Resource.CROP,
+            )
+        )
 
     coords = {vid: village.coords for vid, village in villages.items()}
     return _PlannedAccount(
@@ -1356,7 +1512,7 @@ async def _plan_account(
         trade_office=trade_office,
         foreign_ids=foreign_ids,
         config=config,
-        warnings=extra_warnings,
+        findings=extra_findings,
     )
 
 
@@ -1379,7 +1535,7 @@ async def post_plan(
     config = account.config
     coords = account.coords
     villages = account.villages
-    extra_warnings = account.warnings
+    findings = [*plan.findings, *account.findings]
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
     over = {o.village_id for o in plan.over_budget}
 
@@ -1446,7 +1602,8 @@ async def post_plan(
         ],
         total_merchants=plan.total_merchants,
         feasible=plan.is_feasible,
-        warnings=[*plan.warnings, *extra_warnings],
+        warnings=[f.message for f in findings],
+        diagnostics=_diagnostics_response(summarise(findings)),
     )
 
 

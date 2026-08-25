@@ -20,6 +20,14 @@ arrival overflows. Rates are averages, but cargo lands in discrete batches, so
 :func:`simulate_day` replays the actual beat against the actual capacity instead
 of trusting the average.
 
+That replay finds two different failures, and until they were told apart both
+were reported in the words of the rarer one ("an arriving batch overflows even
+though the average rate fits"). A *burst* overflow is issue #12 proper: the
+average fits, one delivery does not, and a shorter cycle fixes it. A
+*structural* overflow is a store that gains more every day than it can pass on,
+so it never leaves its cap, no schedule can help, and the surplus needs
+somewhere to go. :attr:`OverflowEvent.structural` is which.
+
 Pure functions over already-fetched state. Nothing here spends a game request.
 """
 
@@ -30,6 +38,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .allocation import Resource, village_label
+from .findings import Category, Finding
 from .schedule import MINUTES_PER_DAY, Beat, ScheduledRoute
 
 # Rates below this are treated as level rather than drifting. Dividing by a rate
@@ -112,7 +121,12 @@ class OverflowEvent:
     village_id: int
     resource: Resource
     minute: int
-    """Minute of the day the cap was first reached."""
+    """Minute of the day the cap was first reached.
+
+    Meaningless for a :attr:`structural` overflow: a store that never leaves its
+    cap is already there when the day starts, so this is always 00:00 and is not
+    the time of any event. Only read it for a burst overflow.
+    """
     wasted_per_day: float
     """Resources lost to the cap on a settled day -- a genuinely recurring rate.
 
@@ -122,6 +136,22 @@ class OverflowEvent:
     and never loses anything again, which is a different problem with a
     different fix and is already covered by the continuous fill-time check.
     """
+    net_gain_per_day: float = 0.0
+    """Own production plus arrivals minus departures over the settled day.
+
+    The whole point of a discrete replay was issue #12: the *average* fits and
+    the batch does not. That claim is only true when this is not positive. When
+    it IS positive the store gains this much every day no matter how the sends
+    are phased, so the average does not fit either and no scheduling change can
+    help -- a completely different problem with a completely different fix. The
+    two were reported with identical wording, and the wording asserted the
+    reason for the case that was in fact the rarer of the two.
+    """
+
+    @property
+    def structural(self) -> bool:
+        """Is the surplus itself too big, rather than one delivery of it?"""
+        return self.net_gain_per_day > MIN_REPORTED_WASTE
 
 
 # Waste below this is float residue from the settling loop, not a loss. A
@@ -210,12 +240,20 @@ def simulate_day(
 
     wasted: dict[tuple[int, Resource], float] = {}
     first_full: dict[tuple[int, Resource], int] = {}
+    # Cargo that arrived minus cargo that left, per store, over the day. Kept
+    # apart from production, which needs no accumulation: the day adds
+    # ``rate * step`` a fixed number of times, so its total is arithmetic. That
+    # matters -- production is added ~28,800 times a day on a 25-village
+    # account, and folding a second dict update into that loop cost 34%.
+    moved: dict[tuple[int, Resource], float] = {}
     in_flight: dict[int, float] = {}
     previous_close: dict[tuple[int, Resource], float] | None = None
+    production_steps = len(range(0, MINUTES_PER_DAY, step_minutes))
 
     for _day in range(MAX_SETTLING_DAYS):
         wasted = {}
         first_full = {}
+        moved = {}
 
         def add(vid: int, resource: Resource, amount: float, minute: int) -> None:
             key = (vid, resource)
@@ -238,12 +276,17 @@ def simulate_day(
                 # the beat's collect-then-ship ordering is arranging for.
                 for index in arrivals_at.get(event_minute, ()):
                     _o, _i, _origin, destination, resource, batch = firings[index]
-                    add(destination, resource, in_flight.get(index, batch), event_minute)
+                    landed = in_flight.get(index, batch)
+                    add(destination, resource, landed, event_minute)
+                    key = (destination, resource)
+                    moved[key] = moved.get(key, 0.0) + landed
                 for index, origin, _dest, resource, batch in departures.get(event_minute, ()):
-                    available = level.get((origin, resource), 0.0)
+                    key = (origin, resource)
+                    available = level.get(key, 0.0)
                     shipped = min(batch, available)
                     in_flight[index] = shipped
-                    level[(origin, resource)] = available - shipped
+                    level[key] = available - shipped
+                    moved[key] = moved.get(key, 0.0) - shipped
 
         closing = dict(level)
         if previous_close is not None and all(
@@ -261,6 +304,13 @@ def simulate_day(
                     resource=resource,
                     minute=first_full[(vid, resource)],
                     wasted_per_day=amount,
+                    net_gain_per_day=(
+                        net_per_hour.get(vid, {}).get(resource, 0.0)
+                        * step_minutes
+                        / 60.0
+                        * production_steps
+                        + moved.get((vid, resource), 0.0)
+                    ),
                 )
                 for (vid, resource), amount in wasted.items()
                 if amount >= MIN_REPORTED_WASTE
@@ -270,43 +320,113 @@ def simulate_day(
     )
 
 
+def _store_name(resource: Resource) -> str:
+    return "granary" if resource is Resource.CROP else "warehouse"
+
+
+def storage_findings(
+    statuses: Sequence[StoreStatus],
+    overflows: Sequence[OverflowEvent],
+    warn_hours: float = DEFAULT_WARN_HOURS,
+    names: Mapping[int, str] | None = None,
+) -> tuple[Finding, ...]:
+    """Structured store findings. Starvation first: it destroys troops, not surplus.
+
+    A store with a reported overflow is *not* also reported as filling up. The
+    two checks look at the same store from different angles -- the continuous
+    one says it will be full in 1.1h, the discrete one says it is full and
+    costing 22,224/day -- and emitting both made half of a 132-line warning list
+    a restatement of the other half. The overflow line strictly dominates: it
+    says the cap is reached AND what that costs.
+    """
+    overflowing = {(event.village_id, event.resource) for event in overflows}
+    findings: list[Finding] = []
+    for status in sorted(
+        (s for s in statuses if s.trend is Trend.DRAINING and s.hours_remaining is not None),
+        key=lambda s: s.hours_remaining or 0.0,
+    ):
+        if (status.hours_remaining or 0.0) < warn_hours:
+            label = village_label(status.village_id, names)
+            findings.append(
+                Finding(
+                    category=Category.STARVATION,
+                    message=(
+                        f"{label}: {status.resource.value} runs out in "
+                        f"{status.hours_remaining:.1f}h at {status.net_per_hour:+.0f}/h "
+                        f"({status.stock:,} in store)"
+                    ),
+                    detail=f"{label} — {status.hours_remaining:.1f}h left",
+                    village=label,
+                    resource=status.resource,
+                )
+            )
+    for status in sorted(
+        (s for s in statuses if s.trend is Trend.FILLING and s.hours_remaining is not None),
+        key=lambda s: s.hours_remaining or 0.0,
+    ):
+        if (status.hours_remaining or 0.0) < warn_hours and (
+            status.village_id,
+            status.resource,
+        ) not in overflowing:
+            label = village_label(status.village_id, names)
+            findings.append(
+                Finding(
+                    category=Category.STORE_FILLING,
+                    message=(
+                        f"{label}: {status.resource.value} fills its store in "
+                        f"{status.hours_remaining:.1f}h at {status.net_per_hour:+.0f}/h; "
+                        f"anything past the cap is lost"
+                    ),
+                    detail=f"{label} — full in {status.hours_remaining:.1f}h",
+                    village=label,
+                    resource=status.resource,
+                )
+            )
+    for event in overflows:
+        label = village_label(event.village_id, names)
+        if event.structural:
+            # No clock: a store that never leaves its cap did not "reach" it at a
+            # minute of the day, and reporting 00:00 as an event time sent the
+            # operator looking for a midnight arrival that does not exist.
+            message = (
+                f"{label}: {event.resource.value} hits the cap and loses about "
+                f"{event.wasted_per_day:,.0f}/day — the {_store_name(event.resource)} never "
+                f"leaves its cap, because {event.net_gain_per_day:,.0f}/day more arrives "
+                f"than leaves"
+            )
+        else:
+            message = (
+                f"{label}: {event.resource.value} hits the cap at "
+                f"{event.minute // 60:02d}:{event.minute % 60:02d} and loses about "
+                f"{event.wasted_per_day:,.0f}/day — an arriving batch overflows even "
+                f"though the average rate fits"
+            )
+        findings.append(
+            Finding(
+                category=(
+                    Category.OVERFLOW_STRUCTURAL if event.structural else Category.OVERFLOW_BURST
+                ),
+                message=message,
+                detail=f"{label} — {event.wasted_per_day:,.0f}/day",
+                village=label,
+                resource=event.resource,
+                loss_per_day=event.wasted_per_day,
+            )
+        )
+    return tuple(findings)
+
+
 def storage_warnings(
     statuses: Sequence[StoreStatus],
     overflows: Sequence[OverflowEvent],
     warn_hours: float = DEFAULT_WARN_HOURS,
     names: Mapping[int, str] | None = None,
 ) -> tuple[str, ...]:
-    """Operator-facing lines. Starvation first: it destroys troops, not surplus."""
-    warnings: list[str] = []
-    for status in sorted(
-        (s for s in statuses if s.trend is Trend.DRAINING and s.hours_remaining is not None),
-        key=lambda s: s.hours_remaining or 0.0,
-    ):
-        if (status.hours_remaining or 0.0) < warn_hours:
-            warnings.append(
-                f"{village_label(status.village_id, names)}: {status.resource.value} runs out in "
-                f"{status.hours_remaining:.1f}h at {status.net_per_hour:+.0f}/h "
-                f"({status.stock:,} in store)"
-            )
-    for status in sorted(
-        (s for s in statuses if s.trend is Trend.FILLING and s.hours_remaining is not None),
-        key=lambda s: s.hours_remaining or 0.0,
-    ):
-        if (status.hours_remaining or 0.0) < warn_hours:
-            warnings.append(
-                f"{village_label(status.village_id, names)}: {status.resource.value} "
-                f"fills its store in "
-                f"{status.hours_remaining:.1f}h at {status.net_per_hour:+.0f}/h; "
-                f"anything past the cap is lost"
-            )
-    for event in overflows:
-        warnings.append(
-            f"{village_label(event.village_id, names)}: {event.resource.value} hits the cap at "
-            f"{event.minute // 60:02d}:{event.minute % 60:02d} and loses about "
-            f"{event.wasted_per_day:,.0f}/day — an arriving batch overflows even "
-            f"though the average rate fits"
-        )
-    return tuple(warnings)
+    """The same findings as the flat prose list callers have always read."""
+    return tuple(
+        finding.message
+        for finding in storage_findings(statuses, overflows, warn_hours=warn_hours, names=names)
+    )
 
 
 @dataclass(frozen=True)
