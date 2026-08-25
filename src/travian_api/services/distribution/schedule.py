@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 from .allocation import Resource, village_label
 from .findings import Category, Finding
-from .optimizer import Route
+from .optimizer import RelayHub, Route
 
 MINUTES_PER_DAY = 24 * 60
 DEFAULT_MIN_ARRIVAL_GAP_MINUTES = 3
@@ -54,8 +54,21 @@ class ScheduledRoute:
 
     @property
     def arrival_minutes(self) -> tuple[int, ...]:
-        """When each send lands."""
+        """When each send lands, on the module's one-minute timeline."""
         travel = round(self.route.one_way_minutes)
+        return tuple((minute + travel) % MINUTES_PER_DAY for minute in self.dispatch_minutes)
+
+    @property
+    def exact_arrival_minutes(self) -> tuple[float, ...]:
+        """When each send lands, unrounded.
+
+        Needed wherever an ordering against a dispatch is being decided rather
+        than a spacing being displayed. A 6.4-minute trip leaving at 00:00 lands
+        at 00:06:24, and a forwarding route sending at 00:06 leaves 24 seconds
+        too early -- which the rounded figure cannot express, and which costs the
+        cargo a whole cycle.
+        """
+        travel = self.route.one_way_minutes
         return tuple((minute + travel) % MINUTES_PER_DAY for minute in self.dispatch_minutes)
 
     @property
@@ -92,7 +105,7 @@ def _circular_gap(a: int, b: int) -> int:
     return min(raw, MINUTES_PER_DAY - raw)
 
 
-def _staleness(dispatches: Sequence[int], inbound_arrivals: Sequence[int]) -> int:
+def _staleness(dispatches: Sequence[int], inbound_arrivals: Sequence[float]) -> float:
     """How long the worst dispatch waits after the freshest inbound cargo.
 
     Both schedules repeat daily, so "after" is measured modulo the day. For each
@@ -101,12 +114,22 @@ def _staleness(dispatches: Sequence[int], inbound_arrivals: Sequence[int]) -> in
     so a relay hub forwards cargo it has just collected rather than cargo it will
     only receive later in the cycle.
 
+    ``inbound_arrivals`` are EXACT float minutes, and a dispatch in the same
+    instant as an arrival scores as a full day rather than as zero. Measuring
+    this against rounded arrivals scored a same-minute departure as perfect, so
+    the search deliberately aimed at it -- and with any fractional travel time
+    the cargo lands seconds after the merchant has left, waiting a whole extra
+    cycle. Every relay the planner built came out phased to just miss.
+
     Zero when there is no inbound to wait for, so ordinary routes are unaffected.
     """
     if not inbound_arrivals:
-        return 0
+        return 0.0
     return max(
-        min((dispatch - arrival) % MINUTES_PER_DAY for arrival in inbound_arrivals)
+        min(
+            wait if (wait := (dispatch - arrival) % MINUTES_PER_DAY) > 0 else MINUTES_PER_DAY
+            for arrival in inbound_arrivals
+        )
         for dispatch in dispatches
     )
 
@@ -187,7 +210,7 @@ def build_beat(
     # Arrivals already claimed, per destination.
     claimed: dict[int, list[int]] = {}
     # Crop arrivals only, per village: what a relay hub is waiting to forward.
-    crop_arrivals: dict[int, list[int]] = {}
+    crop_arrivals: dict[int, list[float]] = {}
 
     # A village that both receives and sends crop is forwarding it -- the crop
     # relay the optimizer builds to lift load off villages that cannot staff
@@ -268,7 +291,7 @@ def build_beat(
         )
 
         best_minute = base
-        best_score: tuple[int, int, int, int, int] | None = None
+        best_score: tuple[int, int, int, float, int] | None = None
         # Sorted once per route rather than inside the offset sweep below.
         taken_sorted = sorted(taken)
         for offset in range(0, span, step_minutes):
@@ -282,24 +305,32 @@ def build_beat(
                 if reserved_window is None
                 else sum(1 for minute in arrivals if _in_window(minute, reserved_window))
             )
-            # Collect-then-ship: how long the stalest dispatch waits after the
-            # freshest crop landed here. Zero for everything that is not a relay
-            # hub, which leaves non-relay scheduling byte-identical.
-            stale = _staleness(candidate.dispatch_minutes, inbound)
-            # Sends that actually happen. A firing outside the profile's hours
+            # Firings that actually happen. A firing outside the profile's hours
             # is not dispatched, so a phase with none inside it ships nothing at
             # all -- which no amount of tidy arrival spacing makes up for, hence
-            # first in the ranking. Constant zero without a window, leaving the
-            # round-the-clock ordering below exactly as it was.
-            sends = (
-                0
+            # `sends` ranks first below. Every minute fires when there is no
+            # window, leaving the round-the-clock ordering exactly as it was.
+            firing = (
+                candidate.dispatch_minutes
                 if dispatch_window is None
-                else sum(
-                    1
+                else tuple(
+                    minute
                     for minute in candidate.dispatch_minutes
                     if _in_window(minute, dispatch_window)
                 )
             )
+            sends = 0 if dispatch_window is None else len(firing)
+            # Collect-then-ship: how long the stalest dispatch waits after the
+            # freshest crop landed here. Zero for everything that is not a relay
+            # hub, which leaves non-relay scheduling byte-identical.
+            #
+            # Scored on the firings that happen, against arrivals from sends that
+            # happen. Passing all of them let a windowed hub be phased just after
+            # a *phantom* inbound -- one whose collecting send is outside the
+            # profile's hours and never leaves -- and therefore before the first
+            # real one. A candidate with no firing at all scores 0 here and loses
+            # on `sends` regardless.
+            stale = _staleness(firing, inbound) if firing else 0.0
             # Order of preference: send at all, then clear the reserved window,
             # then MEET the arrival-gap target, then ship soon after collecting,
             # then widen the spacing further.
@@ -320,7 +351,15 @@ def build_beat(
         scheduled.append(placement)
         taken.extend(placement.arrival_minutes)
         if Resource.CROP in route.cargo_per_hour:
-            crop_arrivals.setdefault(route.destination, []).extend(placement.arrival_minutes)
+            # Only what a send that actually leaves will land: a hub cannot
+            # forward cargo from a firing the profile's hours suppress.
+            crop_arrivals.setdefault(route.destination, []).extend(
+                arrival
+                for minute, arrival in zip(
+                    placement.dispatch_minutes, placement.exact_arrival_minutes
+                )
+                if dispatch_window is None or _in_window(minute, dispatch_window)
+            )
 
         # A cycle shorter than the gap target violates the constraint all by
         # itself — no dispatch offset can space a route's own repeats.
@@ -398,6 +437,113 @@ def build_beat(
         routes=tuple(sorted(scheduled, key=lambda s: (s.dispatch_minute, s.route.origin))),
         findings=tuple(findings),
     )
+
+
+def _longest_gap(sends: Sequence[int]) -> int:
+    """Longest a batch can wait for the next send, production being continuous.
+
+    The largest gap between consecutive sends around the clock. For a route that
+    fires every N hours all day this is exactly N hours -- but inside a profile's
+    dispatch window the firings outside it never happen, so the real gap can be
+    most of a day, and that is the whole reason this is measured rather than
+    taken from ``cycle_hours``.
+    """
+    ordered = sorted(set(sends))
+    if len(ordered) < 2:
+        # One send a day, or (impossibly) none: either way a batch produced just
+        # after it waits until tomorrow.
+        return MINUTES_PER_DAY
+    return max((b - a) % MINUTES_PER_DAY for a, b in zip(ordered, ordered[1:] + ordered[:1]))
+
+
+def _wait_for_next(arrival: float, sends: Sequence[int]) -> float:
+    """Minutes from *arrival* to the next send after it, both repeating daily.
+
+    ``arrival`` is deliberately the EXACT float minute, not the rounded one the
+    timeline elsewhere uses. Rounding it first made a send in the same displayed
+    minute count as catching the cargo: a 6.4-minute trip leaving at 00:00 shows
+    as landing at 00:06, so an onward 00:06 send looked caught when the goods are
+    really 24 seconds behind it. Missing that send costs a whole cycle -- or most
+    of a day inside a profile window -- so the understatement was not small.
+
+    Strictly after, therefore, including the exact tie: nothing establishes that
+    the game lets a merchant leave with cargo landing in the same instant, and
+    over-stating a wait in an advisory warning is the safer of the two errors.
+    """
+    waits = ((send - arrival) % MINUTES_PER_DAY for send in sends)
+    return min(wait if wait > 0 else MINUTES_PER_DAY for wait in waits)
+
+
+def time_relays(
+    beat: Beat,
+    hubs: Sequence[RelayHub],
+    dispatch_window: tuple[int, int] | None = None,
+) -> tuple[RelayHub, ...]:
+    """Re-time each relay hub against the schedule that was actually built.
+
+    :func:`~.optimizer.relay_hubs` can only estimate from cycle lengths, which
+    assumes a route fires all day. Inside a profile window it does not: the beat
+    drops every firing outside the window, so the cargo can land at the hub after
+    that window's last forward send and wait until tomorrow. A figure taken from
+    ``cycle_hours`` understates exactly the case this app is normally used in.
+
+    It cuts the other way too. A cycle-based figure charges the hub a whole
+    forwarding cycle of waiting, while the beat deliberately phases a hub to ship
+    soon after it collects -- so reading the schedule removes false latency
+    warnings as well as exposing the windowed ones.
+
+    Both halves stay worst cases, like every other latency figure on the sheet:
+    the longest wait for a collecting route plus its trip, then the longest any
+    of those arrivals waits for an onward send plus that trip.
+    """
+    fired: dict[tuple[int, int], tuple[int, ...]] = {}
+    landed: dict[tuple[int, int], tuple[float, ...]] = {}
+    travel_of: dict[tuple[int, int], float] = {}
+    for scheduled in beat.routes:
+        key = (scheduled.route.origin, scheduled.route.destination)
+        sends = tuple(
+            minute
+            for minute in scheduled.dispatch_minutes
+            if dispatch_window is None or _in_window(minute, dispatch_window)
+        )
+        travel = scheduled.route.one_way_minutes
+        fired[key] = sends
+        # Exact, not rounded to the timeline: see _wait_for_next.
+        landed[key] = tuple((minute + travel) % MINUTES_PER_DAY for minute in sends)
+        travel_of[key] = travel
+
+    timed: list[RelayHub] = []
+    for relay in hubs:
+        collect_legs = [(origin, relay.hub) for origin in relay.origins]
+        forward_legs = [(relay.hub, dest) for dest in relay.destinations]
+        if not all(fired.get(leg) for leg in collect_legs + forward_legs):
+            # Every hub comes from the routes this beat scheduled, so this is
+            # unreachable -- but keeping the hub with its estimate beats dropping
+            # it, because a relay nobody mentions is the original bug.
+            timed.append(relay)
+            continue
+        collect_hours = max(
+            (_longest_gap(fired[leg]) + travel_of[leg]) / 60.0 for leg in collect_legs
+        )
+        # Worst over every arrival at the hub against every onward leg: the
+        # cargo is pooled in the hub's granary, so any of it can be what waits
+        # longest for any onward send.
+        forward_hours = max(
+            (_wait_for_next(arrival, fired[forward]) + travel_of[forward]) / 60.0
+            for collect in collect_legs
+            for arrival in landed[collect]
+            for forward in forward_legs
+        )
+        timed.append(
+            RelayHub(
+                hub=relay.hub,
+                origins=relay.origins,
+                destinations=relay.destinations,
+                collect_hours=collect_hours,
+                forward_hours=forward_hours,
+            )
+        )
+    return tuple(sorted(timed, key=lambda relay: (-relay.end_to_end_hours, relay.hub)))
 
 
 def _in_window(minute: int, window: tuple[int, int]) -> bool:

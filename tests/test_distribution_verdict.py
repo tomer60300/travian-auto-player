@@ -143,6 +143,40 @@ class TestWhatItDidNotWeigh:
         assert not verdict.clean
 
 
+class TestItRefusesToAnswerFromHalfTheEvidence:
+    """The one mistake that makes ``assess`` assert the opposite of the truth.
+
+    Overflow, starvation and busy merchants are computed in the endpoint, not in
+    ``craft_plan``, and they are exactly what ``unweighed`` reports. Handed only
+    ``plan.findings``, ``assess`` would return ``clean=True`` for a plan that
+    destroys 2.4M resources a day -- the original defect, restored by a plausible
+    call. So the contract is checked rather than documented.
+    """
+
+    def test_a_partial_list_raises_instead_of_reporting_clean(self):
+        plan = DistributionPlan(findings=(_finding(Category.STARVATION),))
+
+        with pytest.raises(ValueError, match="complete finding list"):
+            assess(plan, [], NAMES)
+
+    def test_the_plans_own_findings_are_enough_when_that_is_all_there_is(self):
+        finding = _finding(Category.STARVATION)
+        plan = DistributionPlan(findings=(finding,))
+
+        verdict = assess(plan, [finding], NAMES)
+
+        assert verdict.unweighed == (Category.STARVATION,)
+
+    def test_extra_findings_on_top_are_the_normal_case(self):
+        own = _finding(Category.OVER_ALLOCATED)
+        plan = DistributionPlan(findings=(own,))
+
+        verdict = assess(plan, [own, _finding(Category.OVERFLOW_STRUCTURAL)], NAMES)
+
+        assert verdict.critical_findings == 2
+        assert verdict.unweighed == (Category.OVERFLOW_STRUCTURAL,)
+
+
 class TestTheRefusalAlwaysSaysWhy:
     """``/execute`` gates on ``is_feasible`` and explains itself with
     ``blockers``. If a criterion is ever added to the first without the second,

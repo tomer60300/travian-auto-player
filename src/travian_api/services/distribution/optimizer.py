@@ -143,45 +143,70 @@ class Route:
 
 
 @dataclass(frozen=True)
-class RelayChain:
-    """One crop delivery that travels in two hops instead of one.
+class RelayHub:
+    """A village the plan routes crop THROUGH, and what that costs in time.
+
+    The unit is the hub, not a path. Given two origins shipping crop in and two
+    destinations being forwarded to, the finished flow graph proves that the hub
+    forwards crop -- it does not prove which origin's crop reaches which
+    destination, because the cargo is pooled in the hub's granary. Reporting the
+    four origin->hub->destination combinations as four deliveries invents a
+    provenance the plan never chose, and on one audited account turned 6 real
+    hubs into 41 claimed chains.
 
     Derived from the finished route set rather than recorded while the search
     runs, and deliberately so: a hub can also be created by a swap rewiring an
-    existing leg, so the search's own bookkeeping is not the whole truth. Two
-    crop routes sharing a village -- one arriving, one leaving -- IS the relay,
-    whatever produced it.
+    existing leg, so the search's own bookkeeping is not the whole truth. A
+    village that both receives and sends crop IS a hub, whatever produced it.
+
+    Only two-hop relays are modelled, which is all the optimizer can currently
+    build: ``_crop_shape_ok`` forbids an edge between two hubs, so no
+    A->B->C->D waterfall can form regardless of ``max_relay_hops``. If that ever
+    changes, a deeper chain would surface here as one hub appearing among
+    another's origins, which the tests assert against.
     """
 
-    origin: int
     hub: int
-    destination: int
+    origins: tuple[int, ...]
+    """Villages shipping crop into the hub."""
+
+    destinations: tuple[int, ...]
+    """Villages the hub forwards crop on to."""
+
     collect_hours: float
-    """Worst-case wait from production at the origin to arrival at the hub."""
+    """Longest from production at any origin to arrival at the hub."""
 
     forward_hours: float
-    """Worst-case wait from arrival at the hub to arrival at the destination."""
+    """Longest from arrival at the hub to arrival at any destination."""
 
     @property
     def end_to_end_hours(self) -> float:
-        """What the operator actually waits for a delivery.
+        """Worst case for crop passing through this hub: both waits in turn.
 
-        The sum, because the cargo is subject to both waits in turn: it sits at
-        the origin until that route's dispatch time, travels, then sits at the
-        hub until the forwarding route's own dispatch time, and travels again.
-        Checking the legs separately -- which is all the plan used to do -- can
-        pass two 1.5h legs and never mention the 3h delivery.
+        The cargo sits at its origin until that route's next send, travels, then
+        sits in the hub's granary until the forwarding route's next send, and
+        travels again. Checking the legs separately -- which is all the plan used
+        to do -- can pass two 1.5h legs and never mention the 3h delivery.
+
+        An upper bound over every path through the hub, like every other latency
+        figure on the sheet. It is a real schedule's worst case rather than a
+        phase-independent one, because :func:`~.schedule.time_relays` re-derives
+        both waits from the beat that was actually built.
         """
         return self.collect_hours + self.forward_hours
 
 
-def relay_chains(routes: Iterable[Route]) -> tuple[RelayChain, ...]:
-    """The relays in *routes*, worst end-to-end first.
+def relay_hubs(routes: Iterable[Route]) -> tuple[RelayHub, ...]:
+    """The relay hubs in *routes*, worst end-to-end first.
 
     Crop only. Materials are forbidden from chaining A->B->C (profile section
     3.5), so a material arriving somewhere that also ships that material out is
     two independent flows; reporting it as a relay would invent a dependency the
     plan does not have.
+
+    The hours here are estimated from cycle lengths, which assumes a route fires
+    all day. :func:`~.schedule.time_relays` replaces them with what the finished
+    beat will really do -- and must, because inside a profile window it will not.
     """
     crop = [
         r
@@ -189,35 +214,51 @@ def relay_chains(routes: Iterable[Route]) -> tuple[RelayChain, ...]:
         if r.cargo_per_hour.get(Resource.CROP, 0.0) > EPSILON and r.origin != r.destination
     ]
     inbound: dict[int, list[Route]] = {}
+    outbound: dict[int, list[Route]] = {}
     for route in crop:
         inbound.setdefault(route.destination, []).append(route)
+        outbound.setdefault(route.origin, []).append(route)
 
-    chains = [
-        RelayChain(
-            origin=collect.origin,
-            hub=forward.origin,
-            destination=forward.destination,
-            collect_hours=collect.latency_hours,
-            forward_hours=forward.latency_hours,
+    hubs = []
+    for hub in sorted(set(inbound) & set(outbound)):
+        collecting = inbound[hub]
+        feeders = {route.origin for route in collecting}
+        forwarding = [route for route in outbound[hub] if route.destination not in feeders]
+        if not forwarding:
+            # Every onward leg goes straight back to a village that feeds this
+            # one. That is a two-way pair, not a relay: no schedule can satisfy
+            # "ship after you collect" at both ends at once, and the optimizer
+            # refuses to create one.
+            continue
+        hubs.append(
+            RelayHub(
+                hub=hub,
+                origins=tuple(sorted(feeders)),
+                destinations=tuple(sorted({route.destination for route in forwarding})),
+                collect_hours=max(route.latency_hours for route in collecting),
+                forward_hours=max(route.latency_hours for route in forwarding),
+            )
         )
-        for forward in crop
-        for collect in inbound.get(forward.origin, ())
-        if collect.origin != forward.destination
-    ]
-    # Worst first, as every other finding list is ordered. The village ids only
-    # break exact ties, and only for display: nothing about the plan depends on
+    # Worst first, as every other finding list is ordered. The village id only
+    # breaks exact ties, and only for display: nothing about the plan depends on
     # this order.
-    return tuple(
-        sorted(chains, key=lambda c: (-c.end_to_end_hours, c.origin, c.hub, c.destination))
-    )
+    return tuple(sorted(hubs, key=lambda relay: (-relay.end_to_end_hours, relay.hub)))
+
+
+def _named(village_ids: Iterable[int], names: Mapping[int, str]) -> str:
+    """Village names for a message, abridged once the list stops being readable."""
+    labels = [village_label(vid, names) for vid in village_ids]
+    if len(labels) <= 3:
+        return ", ".join(labels)
+    return ", ".join(labels[:3]) + f" and {len(labels) - 3} more"
 
 
 def relay_findings(
-    routes: Iterable[Route],
+    hubs: Iterable[RelayHub],
     names: Mapping[int, str],
     max_latency_hours: float | None,
 ) -> list[Finding]:
-    """Report every relay: as a warning when the delivery misses the target.
+    """Report every relay hub: as a warning when the delivery misses the target.
 
     A compliant relay is still reported, as a note. Two rows on the sheet that
     are really one delivery is a fact about the plan an operator typing them into
@@ -225,30 +266,32 @@ def relay_findings(
     this, 45 of 66 plans used a relay and not one line of output said so.
     """
     findings: list[Finding] = []
-    for chain in relay_chains(routes):
-        path = " -> ".join(
-            village_label(vid, names) for vid in (chain.origin, chain.hub, chain.destination)
-        )
+    for relay in hubs:
+        hub = village_label(relay.hub, names)
+        origins = _named(relay.origins, names)
+        destinations = _named(relay.destinations, names)
         over_target = (
-            max_latency_hours is not None and chain.end_to_end_hours > max_latency_hours + EPSILON
+            max_latency_hours is not None and relay.end_to_end_hours > max_latency_hours + EPSILON
         )
         if over_target:
             message = (
-                f"relayed crop {path} takes {chain.end_to_end_hours:.1f}h end-to-end against a "
-                f"{max_latency_hours:.0f}h target: {chain.collect_hours:.1f}h to the hub "
-                f"then {chain.forward_hours:.1f}h on, and neither leg alone exceeds it"
+                f"crop relayed through {hub} takes up to {relay.end_to_end_hours:.1f}h "
+                f"end-to-end against a {max_latency_hours:.0f}h target: at worst "
+                f"{relay.collect_hours:.1f}h in from {origins}, then "
+                f"{relay.forward_hours:.1f}h waiting there and travelling on to {destinations}"
             )
         else:
             message = (
-                f"crop {path} is relayed: the hub forwards what it collects, so these "
-                f"are two rows and one {chain.end_to_end_hours:.1f}h delivery"
+                f"{hub} relays crop: it forwards to {destinations} what it collects from "
+                f"{origins}, so those rows are legs of one delivery taking up to "
+                f"{relay.end_to_end_hours:.1f}h"
             )
         findings.append(
             Finding(
                 category=Category.RELAY_LATENCY if over_target else Category.RELAY,
                 message=message,
-                detail=f"{path} — {chain.end_to_end_hours:.1f}h",
-                village=village_label(chain.hub, names),
+                detail=f"via {hub} — {relay.end_to_end_hours:.1f}h",
+                village=hub,
             )
         )
     return findings
@@ -318,9 +361,9 @@ class Plan:
     shortfalls: tuple[Shortfall, ...] = ()
     over_budget: tuple[OverBudget, ...] = ()
     findings: tuple[Finding, ...] = ()
-    # The two-hop crop deliveries hiding in `routes`. Carried explicitly because
-    # a caller rendering the sheet cannot see them: they are ordinary rows.
-    relays: tuple[RelayChain, ...] = ()
+    # The relay hubs hiding in `routes`. Carried explicitly because a caller
+    # rendering the sheet cannot see them: their legs are ordinary rows.
+    relays: tuple[RelayHub, ...] = ()
 
     @property
     def warnings(self) -> tuple[str, ...]:
@@ -757,7 +800,7 @@ def _improve_flows(
     # Villages currently forwarding relayed crop. Relaying a flow whose origin is
     # already a hub would build a chain (o -> h1 -> h2 -> d); one level keeps the
     # collect-then-ship ordering in the beat analysable.
-    relay_hubs: set[int] = set()
+    hub_ids: set[int] = set()
 
     def _crop_shape_ok(edges: set[FlowKey]) -> bool:
         """Would this crop graph still be a set of single hops?
@@ -941,7 +984,7 @@ def _improve_flows(
             # Guarding only the origin let a leg that *ends* at an existing hub
             # extend the chain, producing depth-3 waterfalls like 2 -> 6 -> 1 -> 3
             # that the beat's collect-then-ship ordering was never designed for.
-            if origin in relay_hubs or destination in relay_hubs:
+            if origin in hub_ids or destination in hub_ids:
                 continue
             amount = legs.get((origin, destination), 0.0)
             if amount <= EPSILON:
@@ -991,7 +1034,7 @@ def _improve_flows(
             if best is not None:
                 _, hub, changes, state = best
                 _commit_changes(changes, state)
-                relay_hubs.add(hub)
+                hub_ids.add(hub)
                 return True
         return False
 
@@ -1007,7 +1050,7 @@ def _improve_flows(
         # Swaps are blind to relay: rewiring a hub's legs can lengthen the chain
         # or close a loop, either of which the beat cannot then schedule.
         # Checked on the prospective edge set, never applied-then-undone.
-        if resource is not Resource.CROP or not relay_hubs:
+        if resource is not Resource.CROP or not hub_ids:
             return True
         prospective = _crop_edges() | {(o1, d2), (o2, d1)}
         for key in ((o1, d1), (o2, d2)):
@@ -1262,10 +1305,10 @@ def build_plan(
     # -- and every one of them ends in the same clause, so the only thing that
     # decides whether the operator reads the third one is whether it is worse
     # than the first.
-    # Before the per-leg check, because a relay's end-to-end figure is the one
-    # that can be a surprise: both its legs may sit inside the target.
-    relays = relay_chains(routes)
-    findings.extend(relay_findings(routes, names, max_latency_hours))
+    # The relays are carried, not reported. Their end-to-end figure depends on
+    # when each leg actually fires, which only the beat knows -- so the planner
+    # re-times them and reports them there, once, with the real number.
+    relays = relay_hubs(routes)
 
     if max_latency_hours is not None:
         for route in sorted(

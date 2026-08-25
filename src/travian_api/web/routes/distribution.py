@@ -478,19 +478,26 @@ def _diagnostics_response(diagnostics: Diagnostics) -> DiagnosticsResponse:
 
 
 class RelayResponse(BaseModel):
-    """A crop delivery that arrives in two hops, which the rows cannot show.
+    """A village the plan routes crop THROUGH, which the rows cannot show.
 
     The sheet lists ``V22 -> V02`` and ``V02 -> V17`` as unrelated lines, so
     without this the operator has no way to know the second row is carrying what
     the first one delivered -- or that the delivery takes both legs' waits.
+
+    Keyed on the hub rather than on a path: the cargo is pooled in the hub's
+    granary, so which origin's crop reaches which destination is not something
+    the plan decided, and reporting every combination as a delivery would invent
+    it (6 real hubs became 41 claimed paths on one audited account).
     """
 
-    origin: int
     hub: int
-    destination: int
-    origin_name: str
     hub_name: str
-    destination_name: str
+    # Ids and names in parallel, as every other row here does it: the ids join
+    # this to the sheet's rows, the names are what the operator reads.
+    origins: list[int]
+    origin_names: list[str]
+    destinations: list[int]
+    destination_names: list[str]
     collect_hours: float
     forward_hours: float
     end_to_end_hours: float = Field(
@@ -1185,10 +1192,10 @@ async def post_day_check(
             raise HTTPException(
                 status_code=exc.status_code, detail=f"{segment.name}: {exc.detail}"
             ) from exc
-        # /plan surfaces plan.warnings and account.warnings separately, so a
-        # profile needs both: the allocation-level ones (unallocated slack, a
-        # receiver nothing sources) live on the plan.
-        for warning in (*account.plan.warnings, *account.warnings):
+        # Every finding, both halves: a profile needs the allocation-level ones
+        # (unallocated slack, a receiver nothing sources) that live on the plan
+        # as much as the ones computed here.
+        for warning in account.warnings:
             warnings.append(f"{segment.name}: {warning}")
         # Demand the optimizer could not route is not a rate the day can spend:
         # crediting it would let the composite report a green all-clear over a
@@ -1329,12 +1336,29 @@ class _PlannedAccount:
     trade_office: dict[int, int]
     foreign_ids: dict[int, ForeignTarget]
     config: PlannerConfig
-    findings: list[Finding]
+    extra_findings: list[Finding]
+    """Findings computed HERE rather than by craft_plan: overflow, starvation,
+    busy merchants, unfunded tributes. Named for what it is, because a bare
+    `findings` reads like the whole list and is not."""
+
+    @property
+    def all_findings(self) -> list[Finding]:
+        """Every finding, plan and endpoint alike, in producer order.
+
+        The one list to pass anywhere. Three call sites used to concatenate the
+        halves by hand, and `assess` reports a destructive plan as clean if it is
+        handed only one of them -- so the correct list is the easy one to reach.
+        """
+        return [*self.plan.findings, *self.extra_findings]
 
     @property
     def warnings(self) -> list[str]:
         """The findings as the flat prose list every caller has always read."""
-        return [f.message for f in self.findings]
+        return [f.message for f in self.all_findings]
+
+    def verdict(self) -> Verdict:
+        """What feasibility decided, and what it left to the operator."""
+        return assess(self.plan, self.all_findings, self.names)
 
 
 async def _plan_account(
@@ -1615,7 +1639,7 @@ async def _plan_account(
         trade_office=trade_office,
         foreign_ids=foreign_ids,
         config=config,
-        findings=extra_findings,
+        extra_findings=extra_findings,
     )
 
 
@@ -1638,7 +1662,7 @@ async def post_plan(
     config = account.config
     coords = account.coords
     villages = account.villages
-    findings = [*plan.findings, *account.findings]
+    findings = account.all_findings
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
     over = {o.village_id for o in plan.over_budget}
 
@@ -1708,20 +1732,20 @@ async def post_plan(
         # Built from the COMPLETE finding list, not plan.findings: overflow,
         # starvation and busy merchants are computed here, and they are precisely
         # what feasibility does not weigh.
-        verdict=_verdict_response(assess(plan, findings, names)),
+        verdict=_verdict_response(account.verdict()),
         relays=[
             RelayResponse(
-                origin=chain.origin,
-                hub=chain.hub,
-                destination=chain.destination,
-                origin_name=village_label(chain.origin, names),
-                hub_name=village_label(chain.hub, names),
-                destination_name=village_label(chain.destination, names),
-                collect_hours=chain.collect_hours,
-                forward_hours=chain.forward_hours,
-                end_to_end_hours=chain.end_to_end_hours,
+                hub=relay.hub,
+                hub_name=village_label(relay.hub, names),
+                origins=list(relay.origins),
+                origin_names=[village_label(vid, names) for vid in relay.origins],
+                destinations=list(relay.destinations),
+                destination_names=[village_label(vid, names) for vid in relay.destinations],
+                collect_hours=relay.collect_hours,
+                forward_hours=relay.forward_hours,
+                end_to_end_hours=relay.end_to_end_hours,
             )
-            for chain in plan.relays
+            for relay in plan.relays
         ],
         warnings=[f.message for f in findings],
         # The route count is what lets the headline stop blaming the plan for
@@ -2027,7 +2051,7 @@ async def post_execute(
     live_enabled = bool(svc is not None and svc.live_enabled)
     # Same warning set /plan surfaces (both share _plan_account): the optimizer's
     # own notes plus the account-level ones, so the two endpoints never disagree.
-    warnings = [*plan.warnings, *account.warnings]
+    warnings = list(account.warnings)
 
     # Each plan row is one route from a real origin village's marketplace to a
     # destination (a real village or a foreign sink — coords cover both).

@@ -28,13 +28,14 @@ from .optimizer import (
     MIN_SEND_FILL,
     OverBudget,
     Plan,
-    RelayChain,
+    RelayHub,
     Shortfall,
     VillageState,
     build_plan,
+    relay_findings,
 )
 from .rounding import round_preserving_total
-from .schedule import DEFAULT_MIN_ARRIVAL_GAP_MINUTES, Beat, build_beat
+from .schedule import DEFAULT_MIN_ARRIVAL_GAP_MINUTES, Beat, build_beat, time_relays
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,9 @@ class DistributionPlan:
     routing: Plan = field(default_factory=Plan)
     beat: Beat = field(default_factory=Beat)
     findings: tuple[Finding, ...] = ()
+    relays: tuple[RelayHub, ...] = ()
+    """Villages the plan routes crop THROUGH, which the sheet's rows cannot show.
+    Timed from the beat, so these figures are what the schedule will really do."""
 
     @property
     def warnings(self) -> tuple[str, ...]:
@@ -137,11 +141,6 @@ class DistributionPlan:
         loud both what this weighed and what it did not.
         """
         return self.routing.is_feasible and not self.over_allocated
-
-    @property
-    def relays(self) -> tuple[RelayChain, ...]:
-        """Two-hop crop deliveries, which the sheet's rows cannot show."""
-        return self.routing.relays
 
     @property
     def over_allocated(self) -> tuple[Resource, ...]:
@@ -255,8 +254,17 @@ def assess(
     :func:`craft_plan` -- overflow, starvation, busy merchants. Those are exactly
     the findings the gate does not weigh, so a verdict built from
     ``plan.findings`` alone would report an empty ``unweighed`` and be the same
-    lie in a longer sentence.
+    lie in a longer sentence. Checked rather than trusted, because passing the
+    short list is the one mistake that makes this function assert the opposite of
+    the truth -- a destructive plan reported as clean.
     """
+    absent = sum(1 for finding in plan.findings if finding not in findings)
+    if absent:
+        raise ValueError(
+            f"assess() needs the complete finding list; {absent} of the plan's own "
+            f"findings are missing from it, and the ones computed outside craft_plan "
+            f"(overflow, starvation, busy merchants) are exactly what `unweighed` reports"
+        )
     criticals = [f for f in findings if f.severity is Severity.CRITICAL]
     # dict.fromkeys keeps first-seen order, which is producer order -- the same
     # order summarise() ranks by, so the worst reads first here too.
@@ -331,6 +339,12 @@ def craft_plan(
     )
     findings.extend(beat.findings)
 
+    # Re-timed against the schedule that was actually built: `relay_chains` can
+    # only estimate a leg's wait from its cycle length, which is wrong by up to
+    # most of a day inside a profile window (the beat drops firings outside it).
+    relays = time_relays(beat, routing.relays, config.dispatch_window)
+    findings.extend(relay_findings(relays, names, config.max_latency_hours))
+
     rows = tuple(
         SheetRow(
             origin=scheduled.route.origin,
@@ -367,4 +381,5 @@ def craft_plan(
         routing=routing,
         beat=beat,
         findings=tuple(findings),
+        relays=relays,
     )

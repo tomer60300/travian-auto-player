@@ -207,18 +207,29 @@ describe('planStatus', () => {
 })
 
 describe('relayLegIndex', () => {
-  const chain = { origin: 22, hub: 2, destination: 17, hub_name: 'V02' }
+  const relay = { hub: 2, hub_name: 'V02', origins: [22], destinations: [17] }
 
-  it('indexes both legs of a chain, because either alone misleads', () => {
-    const legs = relayLegIndex([chain])
+  it('indexes both legs, because either alone misleads', () => {
+    const legs = relayLegIndex([relay])
 
     expect(legs.get('22:2').leg).toBe(1)
     expect(legs.get('2:17').leg).toBe(2)
-    expect(legs.get('22:2').chain).toBe(chain)
+    expect(legs.get('22:2').relay).toBe(relay)
+  })
+
+  it('marks every leg of a hub with several feeders and receivers', () => {
+    // One hub, not four deliveries -- but all four ROWS still need marking, or
+    // the operator types an unmarked one and never learns it is half a delivery.
+    const fanned = { hub: 2, hub_name: 'V02', origins: [22, 23], destinations: [17, 18] }
+    const legs = relayLegIndex([fanned])
+
+    expect(legs.size).toBe(4)
+    expect(legs.get('23:2').leg).toBe(1)
+    expect(legs.get('2:18').leg).toBe(2)
   })
 
   it('leaves ordinary rows unmarked', () => {
-    expect(relayLegIndex([chain]).get('5:6')).toBeUndefined()
+    expect(relayLegIndex([relay]).get('5:6')).toBeUndefined()
   })
 
   it('copes with a response that carries no relays', () => {

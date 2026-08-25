@@ -185,9 +185,10 @@ _SPECS: Mapping[Category, _Spec] = {
         subject="relay",
         headline="{count} {subject} miss the latency target end-to-end",
         action=(
-            "Each leg on its own is inside the target; the delivery is not, because the "
-            "cargo waits at the hub for its next dispatch. Shorten the forwarding leg's "
-            "cycle, ship those villages direct (set max_relay_hops to 0), or accept it."
+            "Even where every leg is inside the target, the delivery need not be: the "
+            "cargo also waits at the hub for its next dispatch. Shorten the forwarding "
+            "leg's cycle, ship those villages direct (set max_relay_hops to 0), or "
+            "accept it."
         ),
     ),
     Category.LATENCY: _Spec(

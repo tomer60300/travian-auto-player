@@ -115,14 +115,17 @@ export function planStatus(plan) {
  *
  * A relay is two ordinary rows, so the sheet cannot show it: the operator
  * typing them into the game has no way to know the second is carrying what the
- * first delivered. Both legs of a chain are indexed, because either one alone
- * is the misleading half.
+ * first delivered. Both legs are indexed, because either one alone is the
+ * misleading half.
+ *
+ * Keyed per leg rather than per path: crop pools in the hub granary, so a hub
+ * with two feeders and two destinations is ONE relay, not four deliveries.
  */
 export function relayLegIndex(relays) {
   const legs = new Map()
-  for (const chain of relays ?? []) {
-    legs.set(`${chain.origin}:${chain.hub}`, { leg: 1, chain })
-    legs.set(`${chain.hub}:${chain.destination}`, { leg: 2, chain })
+  for (const relay of relays ?? []) {
+    for (const origin of relay.origins) legs.set(`${origin}:${relay.hub}`, { leg: 1, relay })
+    for (const dest of relay.destinations) legs.set(`${relay.hub}:${dest}`, { leg: 2, relay })
   }
   return legs
 }

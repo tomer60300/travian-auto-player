@@ -2674,8 +2674,8 @@ export default function ResourcePlanner() {
                               // would be wrong on exactly the rows that matter most.
                               <div className="text-warning text-[10px]">
                                 {relay.leg === 1
-                                  ? `relay leg 1 — ${relay.chain.hub_name} forwards this on`
-                                  : `relay leg 2 — forwards what arrives at ${relay.chain.hub_name}`}
+                                  ? `relay leg 1 — ${relay.relay.hub_name} forwards this on`
+                                  : `relay leg 2 — forwards what arrives at ${relay.relay.hub_name}`}
                               </div>
                             )}
                           </td>
@@ -2726,42 +2726,45 @@ export default function ResourcePlanner() {
                 {relays.length > 0 && (
                   <div className="mt-3 border-t border-gray-800 pt-3">
                     <h4 className="font-semibold text-xs">
-                      Relayed crop — {relays.length} deliver
-                      {relays.length === 1 ? 'y' : 'ies'} arriving in two hops
+                      Relayed crop — {relays.length} village
+                      {relays.length === 1 ? '' : 's'} forward{relays.length === 1 ? 's' : ''} crop
+                      it collects
                     </h4>
                     <p className="text-secondary text-xs mt-1">
                       Two rows above, one delivery. The hub ships from its own granary and the
-                      first leg refills it, so creating the second row without the first ships
-                      nothing useful. “Total” is what you actually wait for: each leg's own worst
-                      case in turn, which is why it can exceed a target both legs meet.
+                      inbound leg refills it, so creating the outbound row without the inbound
+                      one ships nothing useful. Crop pools in the granary, so which sender's
+                      crop reaches which receiver is not something the plan decides — the hub is.
+                      “Worst case” is the wait these routes' own send times can produce, which is
+                      why it can exceed a target every individual leg meets.
                     </p>
                     <table className="w-full text-xs mt-2">
                       <thead className="text-secondary uppercase">
                         <tr>
-                          <th className="text-left py-1 px-2">Path</th>
-                          <th className="text-right px-2">To hub</th>
-                          <th className="text-right px-2">Hub on</th>
-                          <th className="text-right px-2">Total</th>
+                          <th className="text-left py-1 px-2">Collects from</th>
+                          <th className="text-left px-2">Hub</th>
+                          <th className="text-left px-2">Forwards to</th>
+                          <th className="text-right px-2">In</th>
+                          <th className="text-right px-2">On</th>
+                          <th className="text-right px-2">Worst case</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {relays.map((chain) => (
-                          <tr
-                            key={`${chain.origin}:${chain.hub}:${chain.destination}`}
-                            className="border-t border-gray-800"
-                          >
-                            <td className="py-1 px-2">
-                              {chain.origin_name} → <strong>{chain.hub_name}</strong> →{' '}
-                              {chain.destination_name}
+                        {relays.map((relay) => (
+                          <tr key={relay.hub} className="border-t border-gray-800">
+                            <td className="py-1 px-2">{relay.origin_names.join(', ')}</td>
+                            <td className="px-2">
+                              <strong>{relay.hub_name}</strong>
+                            </td>
+                            <td className="px-2">{relay.destination_names.join(', ')}</td>
+                            <td className="text-right px-2 font-mono">
+                              {relay.collect_hours.toFixed(1)}h
                             </td>
                             <td className="text-right px-2 font-mono">
-                              {chain.collect_hours.toFixed(1)}h
-                            </td>
-                            <td className="text-right px-2 font-mono">
-                              {chain.forward_hours.toFixed(1)}h
+                              {relay.forward_hours.toFixed(1)}h
                             </td>
                             <td className="text-right px-2 font-mono font-semibold">
-                              {chain.end_to_end_hours.toFixed(1)}h
+                              {relay.end_to_end_hours.toFixed(1)}h
                             </td>
                           </tr>
                         ))}
