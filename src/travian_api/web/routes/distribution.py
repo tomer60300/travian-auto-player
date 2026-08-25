@@ -2384,6 +2384,13 @@ async def post_execute(
                             satisfied |= _existing_keys(e)
                     disabled_desired = [e for e in visible if not e.active and _is_wanted(e)]
                     blocked: set[int | tuple[int, int]] = set()
+                    # Routes this origin switched back ON, and the keys they
+                    # cover. A re-enable is a WRITE, so it needs verifying like
+                    # any other -- and the desired row it satisfies must not
+                    # report "already active" for a route that was disabled
+                    # until moments ago.
+                    reenabled_here: list[ExistingRoute] = []
+                    reenabled_keys: set[int | tuple[int, int]] = set()
                     if disabled_desired:
                         # Gate the re-enable mutation too (issues #62/#64).
                         reason = _stop_reason()
@@ -2403,6 +2410,8 @@ async def post_execute(
                         if enabled is not None and enabled.status == "enabled":
                             for e in disabled_desired:
                                 satisfied |= _existing_keys(e)
+                                reenabled_keys |= _existing_keys(e)
+                            reenabled_here.extend(disabled_desired)
                             re_enables.append(
                                 f"{village_label(origin, names)}: re-enabled {enabled.detail}"
                             )
@@ -2420,6 +2429,8 @@ async def post_execute(
                     # Routes this origin claims to have created, paired with
                     # their action so the verdict can be corrected below.
                     created_here: list[tuple[RouteActionResponse, PlannedRoute]] = []
+                    # Rows whose cargo this run rewrote, with what it asked for.
+                    updated_here: list[tuple[ExistingRoute, dict]] = []
                     for i, (row, route) in enumerate(desired):
                         destination = _desired_key(route)
                         if destination in satisfied:
@@ -2445,6 +2456,7 @@ async def post_execute(
                                     origin, drifted, route.cargo, stop_check=_stop_reason
                                 )
                                 if updated is not None and updated.status == "updated":
+                                    updated_here.extend((e, dict(route.cargo)) for e in drifted)
                                     # Every row of a fanned-out route shares one
                                     # cargo, so this corrects all of them in one
                                     # request without touching their staggered
@@ -2506,6 +2518,19 @@ async def post_execute(
                                     "village_id" if isinstance(destination, int) else "coords"
                                 ),
                             )
+                            if destination in reenabled_keys:
+                                # It was DISABLED when this run started and this
+                                # run switched it on. Reporting "already active"
+                                # contradicted re_enables in the same response.
+                                actions.append(
+                                    _action(
+                                        row,
+                                        route,
+                                        "re_enabled",
+                                        "route was disabled; switched back on",
+                                    )
+                                )
+                                continue
                             actions.append(
                                 _action(
                                     row,
@@ -2588,7 +2613,7 @@ async def post_execute(
                     #
                     # One request settles it, and it is the request the game's
                     # own UI makes after a create: refresh the list and look.
-                    if created_here or disabled_here:
+                    if created_here or disabled_here or reenabled_here or updated_here:
                         try:
                             after = await svc.confirm_routes(origin, map_span=body.map_span)
                         except (NetworkError, MarketplaceUnreadable) as exc:
@@ -2635,6 +2660,56 @@ async def post_execute(
                             # arithmetic is wrong AND resources keep moving, so
                             # this is reported as a problem rather than folded
                             # into the disable count.
+                            # A re-enable is only a claim until the page says
+                            # the row is on. It was previously never checked, so
+                            # a service that reported "enabled" without the row
+                            # changing produced a clean run.
+                            reenable_ids = {e.route_id for e in reenabled_here}
+                            still_off = [
+                                e.route_id
+                                for e in after
+                                if e.route_id in reenable_ids and not e.active
+                            ]
+                            if still_off:
+                                problems.append(
+                                    f"{village_label(origin, names)}: asked the game to "
+                                    f"re-enable route(s) {still_off} and they are STILL "
+                                    f"DISABLED. The plan wants them and nothing is "
+                                    f"shipping."
+                                )
+                            if reenabled_here:
+                                trace.event(
+                                    "verified_reenables",
+                                    origin=origin,
+                                    claimed=sorted(reenable_ids),
+                                    still_off=still_off,
+                                )
+
+                            # Same for a cargo rewrite: the point of correcting
+                            # drift is that the live amounts match the plan, so
+                            # "the PUT was accepted" is not the answer.
+                            by_id = {e.route_id: e for e in after}
+                            stale_after = [
+                                row.route_id
+                                for row, wanted in updated_here
+                                if row.route_id in by_id
+                                and cargo_has_drifted(by_id[row.route_id].cargo, wanted)
+                            ]
+                            if stale_after:
+                                problems.append(
+                                    f"{village_label(origin, names)}: rewrote the cargo of "
+                                    f"route(s) {stale_after} and the page still shows the "
+                                    f"old amounts. They are shipping something the plan "
+                                    f"did not ask for."
+                                )
+                            if updated_here:
+                                trace.event(
+                                    "verified_updates",
+                                    origin=origin,
+                                    claimed=sorted(r.route_id for r, _ in updated_here),
+                                    still_stale=stale_after,
+                                )
+
                             still_active = [
                                 e.route_id
                                 for e in after

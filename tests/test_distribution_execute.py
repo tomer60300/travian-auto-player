@@ -1869,3 +1869,85 @@ class TestCargoDriftIsCorrected:
         assert updated, "a write must always be in the audit record"
         assert updated[0]["route_ids"] == [800, 801, 802, 803]
         assert events[-1]["cargo_updated"] == 1
+
+
+class TestEveryKindOfWriteIsVerified:
+    """Creates and disables were read back; re-enables and cargo updates were not.
+
+    An origin whose only write was a re-enable, or only a cargo correction, got
+    no read-back at all — so a service that reported success without the page
+    changing produced a clean run. The whole argument for verifying a create
+    applies unchanged to the other two: the response says the request was
+    accepted, not that the state changed.
+    """
+
+    def _events(self, res):
+        import json
+        from pathlib import Path
+
+        return [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+
+    def test_a_re_enable_only_run_still_reads_back(self):
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(1, 20011, active=False)]})
+        res = _run_live(svc, _own_village_account(), max_routes_per_run=50)
+
+        assert res.re_enables, "the fixture is meant to re-enable"
+        kinds = [e["kind"] for e in self._events(res)]
+        assert "verified_reenables" in kinds
+
+    def test_a_re_enable_the_game_ignored_is_reported(self):
+        class _IgnoresEnables(_FakeLiveSvc):
+            async def enable_routes(self, vid, routes, *, stop_check=None):
+                result = await super().enable_routes(vid, routes, stop_check=stop_check)
+                for row in self._existing.get(vid, []):
+                    row.active = False  # claim success, change nothing
+                return result
+
+        svc = _IgnoresEnables(existing={20003: [ExistingRoute(1, 20011, active=False)]})
+        res = _run_live(svc, _own_village_account(), max_routes_per_run=50)
+
+        joined = " ".join(res.problems)
+        assert "STILL DISABLED" in joined
+        assert "nothing is shipping" in joined
+
+    def test_a_re_enabled_route_is_not_reported_as_already_active(self):
+        # The response used to contradict itself: re_enables named the route and
+        # actions called it "route already active".
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(1, 20011, active=False)]})
+        res = _run_live(svc, _own_village_account(), max_routes_per_run=50)
+
+        assert [a.status for a in res.actions] == ["re_enabled"]
+        assert "switched back on" in res.actions[0].detail
+
+    def test_a_cargo_update_only_run_still_reads_back(self):
+        from travian_api.services.distribution.allocation import Resource
+
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(1, 20011, active=True, cargo={Resource.CROP: 9000})]}
+        )
+        res = _run_live(svc, _own_village_account(), max_routes_per_run=50, update_drifted=True)
+
+        assert res.updates
+        kinds = [e["kind"] for e in self._events(res)]
+        assert "verified_updates" in kinds
+
+    def test_a_cargo_update_the_game_ignored_is_reported(self):
+        from travian_api.services.distribution.allocation import Resource
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        class _IgnoresUpdates(_FakeLiveSvc):
+            async def update_cargo(self, vid, routes, cargo, *, stop_check=None):
+                # Report success, leave the cargo exactly as it was.
+                return RouteActionResult(vid, 0, 0, "updated", f"{len(routes)} route(s)")
+
+        svc = _IgnoresUpdates(
+            existing={20003: [ExistingRoute(1, 20011, active=True, cargo={Resource.CROP: 9000})]}
+        )
+        res = _run_live(svc, _own_village_account(), max_routes_per_run=50, update_drifted=True)
+
+        joined = " ".join(res.problems)
+        assert "still shows the old amounts" in joined
+        assert "shipping something the plan did not ask for" in joined
