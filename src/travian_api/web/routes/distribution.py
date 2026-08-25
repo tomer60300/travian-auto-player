@@ -1763,13 +1763,49 @@ async def post_revert_plan(
 
         if body.apply_disable and plan.disable_ids:
             live = [e for e in now if e.route_id in set(plan.disable_ids)]
-            result = await svc.disable_routes(origin, live)
-            requests_used += 1
+            try:
+                result = await svc.disable_routes(origin, live)
+                requests_used += 1
+            except TravianError as exc:
+                # Most likely the live opt-in is off. Previously this propagated
+                # as a bare 500 and discarded the whole response -- including
+                # `must_delete_by_hand`, the half only a human can do. Losing the
+                # undo instructions because the automated half was unavailable is
+                # the worst possible trade in this endpoint.
+                problems.append(
+                    f"village {origin}: could not disable the created route(s) "
+                    f"{plan.disable_ids} ({exc}). They are STILL RUNNING; the "
+                    f"manual steps below still apply."
+                )
+                continue
             if result is not None and result.status == "disabled":
+                # Read back, for the same reason every other write is: the PUT
+                # says it was accepted, not that the rows are off. This endpoint
+                # exists to make an undo trustworthy, so claiming an unverified
+                # disable here would defeat its whole purpose.
+                try:
+                    after = await svc.confirm_routes(origin, map_span=body.map_span)
+                    requests_used += 1
+                except (NetworkError, MarketplaceUnreadable) as exc:
+                    problems.append(
+                        f"village {origin}: disabled {len(plan.disable_ids)} route(s) "
+                        f"but could not re-read the page to confirm ({exc}); treat "
+                        f"them as still running until you have looked"
+                    )
+                    continue
+                still_on = [
+                    e.route_id for e in after if e.route_id in set(plan.disable_ids) and e.active
+                ]
+                if still_on:
+                    problems.append(
+                        f"village {origin}: asked the game to disable {plan.disable_ids} "
+                        f"and {still_on} are STILL RUNNING"
+                    )
+                    continue
                 disabled_now[origin] = plan.disable_ids
                 steps.append(
                     f"village {origin}: disabled {len(plan.disable_ids)} created "
-                    f"route(s) - they are inert now, but still need deleting"
+                    f"route(s) - confirmed inert, but they still need deleting"
                 )
             else:
                 detail = result.detail if result is not None else "no request was made"
