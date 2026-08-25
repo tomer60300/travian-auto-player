@@ -1510,3 +1510,148 @@ class TestCreatedMeansVerifiedNotAccepted:
             for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
         ]
         assert [e for e in events if e["kind"] == "verified"] == []
+
+
+class TestASessionThatDiesMidRun:
+    """The HttpClient can go away underneath a run: a disconnect, a worker
+    reload, a captcha-driven teardown. What must never happen is a run that
+    reports success for writes it could not make, or loses the record of writes
+    it did make before the session went."""
+
+    def test_a_network_failure_mid_run_keeps_the_earlier_writes_in_the_response(self):
+        # The real service catches NetworkError around its own POST and returns a
+        # "failed" result rather than raising, so this is the shape production
+        # actually produces: one write landed, the next did not, and the run has
+        # to report both truthfully.
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        class _DyingSvc(_FakeLiveSvc):
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._n = 0
+
+            async def create_route(self, route, *, stop_check=None):
+                self._n += 1
+                if self._n == 2:
+                    return RouteActionResult(
+                        route.origin_village_id,
+                        route.dest_x,
+                        route.dest_y,
+                        "failed",
+                        "session closed underneath the run",
+                    )
+                return await super().create_route(route, stop_check=stop_check)
+
+        svc = _DyingSvc()
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        statuses = [a.status for a in res.actions]
+        assert "created" in statuses, "the write that landed must still be reported"
+        assert "failed" in statuses, "and the one that did not must be reported as failed"
+        assert res.created == 1
+        assert res.remaining >= 1, "the failed route is still outstanding work"
+
+    def test_an_error_that_escapes_the_service_still_names_what_committed(self):
+        # The other half: if anything DOES escape (a bug, a teardown mid-await),
+        # the 500 must carry the committed count and the trace id rather than
+        # discarding the record. Pinned here as a session-death scenario too,
+        # because that is the realistic way it happens.
+        from travian_api.exceptions import NetworkError
+
+        class _HardDyingSvc(_FakeLiveSvc):
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._n = 0
+
+            async def create_route(self, route, *, stop_check=None):
+                self._n += 1
+                if self._n == 2:
+                    raise NetworkError("session closed underneath the run")
+                return await super().create_route(route, stop_check=stop_check)
+
+        svc = _HardDyingSvc()
+        with pytest.raises(HTTPException) as caught:
+            _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        detail = str(caught.value.detail)
+        assert caught.value.status_code == 500
+        assert "creating 1 route(s)" in detail, "the committed write must be named"
+        assert "trace" in detail and "revert-plan" in detail
+
+    def test_a_dead_session_during_the_confirmation_does_not_claim_success(self):
+        # The write went out; the read-back could not. That is unverified, not
+        # created -- and definitely not failed.
+        svc = _FakeLiveSvc(confirm_raises={20003, 20011})
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert {a.status for a in res.actions} == {"created_unverified"}
+        assert res.created == 0, "nothing may be counted as confirmed"
+        assert res.problems, "and the operator must be told to check"
+
+
+class TestTwoRunsCannotRaceTheSameVillage:
+    """Two reconciliations of one village in parallel would each read a state the
+    other is about to change, and both would create the same route."""
+
+    def test_the_account_lock_serialises_whole_runs(self):
+        # Already covered for the 409 path; this pins that the lock is what does
+        # it, by holding it and observing the second run refuse rather than read.
+        svc = _FakeLiveSvc()
+
+        async def _drive():
+            await svc.execute_lock.acquire()
+            try:
+                with (
+                    _patch(dist_module, "session_manager", _SessMgr(svc, True)),
+                    _patch(dist_module.random, "shuffle", lambda seq: None),
+                    pytest.raises(HTTPException) as caught,
+                ):
+                    await post_execute(_exec_body(dry_run=False), _USER)
+                return caught.value.status_code
+            finally:
+                svc.execute_lock.release()
+
+        assert asyncio.run(_drive()) == 409
+        assert svc.listed == [], "a refused run must not even read a marketplace"
+
+    def test_the_per_origin_lock_exists_and_is_keyed_by_village(self):
+        # Defence in depth under the account lock: two callers of the SERVICE
+        # (not the endpoint) must still not interleave on one village.
+        from travian_api.services.trade_route_service import TradeRouteService
+
+        svc = TradeRouteService(SimpleNamespace())
+        order = []
+
+        async def _hold(tag, vid):
+            async with svc.origin_lock(vid):
+                order.append(f"{tag}-in")
+                await asyncio.sleep(0)
+                order.append(f"{tag}-out")
+
+        async def _both_same_village():
+            await asyncio.gather(_hold("a", 20003), _hold("b", 20003))
+
+        asyncio.run(_both_same_village())
+        assert order == ["a-in", "a-out", "b-in", "b-out"], (
+            "one village's reconciliation must not interleave with another's"
+        )
+
+    def test_two_different_villages_are_not_serialised_against_each_other(self):
+        # The lock must be per village, or a 25-village run would be needlessly
+        # sequential in a way that also lengthens the burst window.
+        from travian_api.services.trade_route_service import TradeRouteService
+
+        svc = TradeRouteService(SimpleNamespace())
+        order = []
+
+        async def _hold(tag, vid):
+            async with svc.origin_lock(vid):
+                order.append(f"{tag}-in")
+                await asyncio.sleep(0)
+                order.append(f"{tag}-out")
+
+        async def _two_villages():
+            await asyncio.gather(_hold("a", 20003), _hold("b", 20011))
+
+        asyncio.run(_two_villages())
+        assert order == ["a-in", "b-in", "a-out", "b-out"], "different villages may overlap"
