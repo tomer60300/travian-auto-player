@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .allocation import EPSILON, Allocation, Resource, ResourcePlan, resolve_resource
+from .findings import Finding
 from .geometry import MapGeometry
 from .merchants import CEIL_DUST_TOLERANCE, DAILY_BEAT_CYCLES, MerchantModel
 from .optimizer import (
@@ -111,7 +112,12 @@ class DistributionPlan:
     resource_plans: Mapping[Resource, ResourcePlan] = field(default_factory=dict)
     routing: Plan = field(default_factory=Plan)
     beat: Beat = field(default_factory=Beat)
-    warnings: tuple[str, ...] = ()
+    findings: tuple[Finding, ...] = ()
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """The findings as the flat prose list every caller has always read."""
+        return tuple(f.message for f in self.findings)
 
     @property
     def is_feasible(self) -> bool:
@@ -171,7 +177,7 @@ def craft_plan(
         raised along the way. Nothing is dropped to make the plan look clean.
     """
     resource_plans: dict[Resource, ResourcePlan] = {}
-    warnings: list[str] = []
+    findings: list[Finding] = []
     # Warnings are read by a person, so they name villages the way that person
     # does. Derived here rather than passed in: the caller already gave us the
     # villages, and a second source of names could disagree with the first.
@@ -182,7 +188,7 @@ def craft_plan(
             resource, productions[resource], allocations.get(resource, {}), names
         )
         resource_plans[resource] = plan
-        warnings.extend(plan.warnings)
+        findings.extend(plan.findings)
 
     routing = build_plan(
         villages,
@@ -196,7 +202,7 @@ def craft_plan(
         max_improve_passes=config.max_improve_passes,
         max_relay_hops=config.max_relay_hops,
     )
-    warnings.extend(routing.warnings)
+    findings.extend(routing.findings)
 
     beat = build_beat(
         routing.routes,
@@ -205,7 +211,7 @@ def craft_plan(
         names=names,
         dispatch_window=config.dispatch_window,
     )
-    warnings.extend(beat.warnings)
+    findings.extend(beat.findings)
 
     rows = tuple(
         SheetRow(
@@ -242,5 +248,5 @@ def craft_plan(
         resource_plans=resource_plans,
         routing=routing,
         beat=beat,
-        warnings=tuple(warnings),
+        findings=tuple(findings),
     )

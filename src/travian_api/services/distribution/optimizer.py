@@ -65,6 +65,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .allocation import EPSILON, Resource, ResourcePlan, village_label
+from .findings import Category, Finding
 from .geometry import MapGeometry
 from .merchants import DAILY_BEAT_CYCLES, MerchantModel, cheapest_cycle, cycle_sweep
 
@@ -204,7 +205,12 @@ class Plan:
     merchants_committed: Mapping[int, int] = field(default_factory=dict)
     shortfalls: tuple[Shortfall, ...] = ()
     over_budget: tuple[OverBudget, ...] = ()
-    warnings: tuple[str, ...] = ()
+    findings: tuple[Finding, ...] = ()
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """The findings as the flat prose list every caller has always read."""
+        return tuple(f.message for f in self.findings)
 
     @property
     def is_feasible(self) -> bool:
@@ -986,7 +992,7 @@ def build_plan(
         A :class:`Plan`. Over-budget villages and unroutable demand are reported
         in the plan, never silently dropped or quietly trimmed to fit.
     """
-    warnings: list[str] = []
+    findings: list[Finding] = []
     # Every message below names villages the way the operator does.
     names = {vid: village.name for vid, village in villages.items() if village.name}
     assignment: Assignment = {}
@@ -996,10 +1002,18 @@ def build_plan(
         plan = resource_plans[resource]
         missing = {v.village_id for v in plan.villages} - set(villages)
         if missing:
-            warnings.append(
-                f"{resource.value}: no fetched state for "
-                + ", ".join(village_label(vid, names) for vid in sorted(missing))
-                + "; excluded from routing"
+            labels = [village_label(vid, names) for vid in sorted(missing)]
+            findings.append(
+                Finding(
+                    category=Category.UNREADABLE_RATE,
+                    message=(
+                        f"{resource.value}: no fetched state for "
+                        + ", ".join(labels)
+                        + "; excluded from routing"
+                    ),
+                    detail=f"{resource.value}: " + ", ".join(labels),
+                    resource=resource,
+                )
             )
         flows, resource_shortfalls = _flows_for_resource(plan, villages, geometry)
         shortfalls.extend(resource_shortfalls)
@@ -1026,10 +1040,17 @@ def build_plan(
         # Never let a truncated search masquerade as a converged one: it inflates
         # over_budget_excess, so villages get reported over budget -- and handed
         # Trade Office upgrade advice -- that a finished search would not flag.
-        warnings.append(
-            f"route search stopped after {max_improve_passes} improvement passes with "
-            f"better assignments still available; the over-budget figures below may "
-            f"overstate the real shortfall. Raise max_improve_passes to finish the search."
+        findings.append(
+            Finding(
+                category=Category.SEARCH_TRUNCATED,
+                message=(
+                    f"route search stopped after {max_improve_passes} improvement passes "
+                    f"with better assignments still available; the over-budget figures "
+                    f"below may overstate the real shortfall. Raise max_improve_passes to "
+                    f"finish the search."
+                ),
+                detail=f"stopped after {max_improve_passes} passes",
+            )
         )
     pair_cargo = _merge_pair_cargo(assignment)
 
@@ -1070,12 +1091,31 @@ def build_plan(
     committed: dict[int, int] = {vid: 0 for vid in villages}
     for route in routes:
         committed[route.origin] += route.merchants_committed
-        if max_latency_hours is not None and route.latency_hours > max_latency_hours:
-            warnings.append(
-                f"route {village_label(route.origin, names)} -> "
-                f"{village_label(route.destination, names)} has "
-                f"{route.latency_hours:.1f}h latency against a {max_latency_hours:.0f}h "
-                f"target; geometry or the merchant budget may forbid better"
+
+    # Worst first. On a spread-out account this is the single largest block of
+    # warnings -- 23 of 132 on the account that motivated the finding structure
+    # -- and every one of them ends in the same clause, so the only thing that
+    # decides whether the operator reads the third one is whether it is worse
+    # than the first.
+    if max_latency_hours is not None:
+        for route in sorted(
+            (r for r in routes if r.latency_hours > max_latency_hours),
+            key=lambda r: -r.latency_hours,
+        ):
+            leg = (
+                f"{village_label(route.origin, names)} -> {village_label(route.destination, names)}"
+            )
+            findings.append(
+                Finding(
+                    category=Category.LATENCY,
+                    message=(
+                        f"route {leg} has {route.latency_hours:.1f}h latency against a "
+                        f"{max_latency_hours:.0f}h target; geometry or the merchant "
+                        f"budget may forbid better"
+                    ),
+                    detail=f"{leg} — {route.latency_hours:.1f}h",
+                    village=village_label(route.origin, names),
+                )
             )
 
     routes_by_origin: dict[int, list[Route]] = {}
@@ -1104,5 +1144,5 @@ def build_plan(
         merchants_committed=committed,
         shortfalls=tuple(shortfalls),
         over_budget=over_budget,
-        warnings=tuple(warnings),
+        findings=tuple(findings),
     )

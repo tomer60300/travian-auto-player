@@ -28,6 +28,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .allocation import Resource, village_label
+from .findings import Category, Finding
 from .optimizer import Route
 
 MINUTES_PER_DAY = 24 * 60
@@ -67,7 +68,12 @@ class Beat:
     """The daily schedule, plus anything that could not be honoured."""
 
     routes: tuple[ScheduledRoute, ...] = ()
-    warnings: tuple[str, ...] = ()
+    findings: tuple[Finding, ...] = ()
+
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """The findings as the flat prose list every caller has always read."""
+        return tuple(f.message for f in self.findings)
 
     def arrivals_at(self, village_id: int) -> tuple[tuple[int, ScheduledRoute], ...]:
         """Every arrival at *village_id* through the day, in time order."""
@@ -177,7 +183,7 @@ def build_beat(
         raise ValueError("dispatch_window is zero-width: no minute of the day is inside it")
 
     scheduled: list[ScheduledRoute] = []
-    warnings: list[str] = []
+    findings: list[Finding] = []
     # Arrivals already claimed, per destination.
     claimed: dict[int, list[int]] = {}
     # Crop arrivals only, per village: what a relay hub is waiting to forward.
@@ -318,13 +324,19 @@ def build_beat(
 
         # A cycle shorter than the gap target violates the constraint all by
         # itself — no dispatch offset can space a route's own repeats.
+        leg = f"{village_label(route.origin, names)} -> {village_label(route.destination, names)}"
         if cycle_minutes < min_arrival_gap_minutes:
-            warnings.append(
-                f"route {village_label(route.origin, names)} -> "
-                f"{village_label(route.destination, names)} fires every "
-                f"{cycle_minutes} min, closer than the {min_arrival_gap_minutes} "
-                f"min arrival-gap target; its own arrivals cannot be spaced by "
-                f"choosing a dispatch offset"
+            findings.append(
+                Finding(
+                    category=Category.CYCLE_TOO_SHORT,
+                    message=(
+                        f"route {leg} fires every {cycle_minutes} min, closer than the "
+                        f"{min_arrival_gap_minutes} min arrival-gap target; its own "
+                        f"arrivals cannot be spaced by choosing a dispatch offset"
+                    ),
+                    detail=f"{leg} — every {cycle_minutes} min",
+                    village=village_label(route.origin, names),
+                )
             )
 
         # A cycle the profile's hours cannot contain fires at most once inside
@@ -336,37 +348,55 @@ def build_beat(
         if dispatch_window is not None:
             window_minutes = _window_length(dispatch_window)
             if window_minutes < cycle_minutes < MINUTES_PER_DAY:
-                warnings.append(
-                    f"route {village_label(route.origin, names)} -> "
-                    f"{village_label(route.destination, names)} repeats every "
-                    f"{route.cycle_hours}h but its profile runs only {window_minutes} min, "
-                    f"so it sends once a day instead of "
-                    f"{MINUTES_PER_DAY // cycle_minutes} times and cannot deliver its "
-                    f"planned {route.hourly_total:,.0f}/h; shorten the cycle or widen "
-                    f"the profile"
+                findings.append(
+                    Finding(
+                        category=Category.CYCLE_VS_WINDOW,
+                        message=(
+                            f"route {leg} repeats every {route.cycle_hours}h but its "
+                            f"profile runs only {window_minutes} min, so it sends once a "
+                            f"day instead of {MINUTES_PER_DAY // cycle_minutes} times and "
+                            f"cannot deliver its planned {route.hourly_total:,.0f}/h; "
+                            f"shorten the cycle or widen the profile"
+                        ),
+                        detail=(
+                            f"{leg} — every {route.cycle_hours}h in a {window_minutes} min window"
+                        ),
+                        village=village_label(route.origin, names),
+                    )
                 )
 
         # score is (sends, -clear, saturated_gap, -stale, gap); spacing is last.
         achieved = best_score[4] if best_score else MINUTES_PER_DAY
         if achieved < min_arrival_gap_minutes:
-            warnings.append(
-                f"route {village_label(route.origin, names)} -> "
-                f"{village_label(route.destination, names)} lands within "
-                f"{achieved} min of another arrival there, against a "
-                f"{min_arrival_gap_minutes} min target; {village_label(route.destination, names)} "
-                f"has {inbound_count[route.destination]} inbound routes and may be "
-                f"too busy to space them"
+            destination = village_label(route.destination, names)
+            findings.append(
+                Finding(
+                    category=Category.ARRIVAL_GAP,
+                    message=(
+                        f"route {leg} lands within {achieved} min of another arrival "
+                        f"there, against a {min_arrival_gap_minutes} min target; "
+                        f"{destination} has {inbound_count[route.destination]} inbound "
+                        f"routes and may be too busy to space them"
+                    ),
+                    detail=f"{leg} — {achieved} min apart",
+                    village=destination,
+                )
             )
         if reserved_window is not None and best_score and best_score[1] < 0:
-            warnings.append(
-                f"route {village_label(route.origin, names)} -> "
-                f"{village_label(route.destination, names)} unavoidably lands in "
-                f"the reserved window {reserved_window}"
+            findings.append(
+                Finding(
+                    category=Category.RESERVED_WINDOW,
+                    message=(
+                        f"route {leg} unavoidably lands in the reserved window {reserved_window}"
+                    ),
+                    detail=leg,
+                    village=village_label(route.destination, names),
+                )
             )
 
     return Beat(
         routes=tuple(sorted(scheduled, key=lambda s: (s.dispatch_minute, s.route.origin))),
-        warnings=tuple(warnings),
+        findings=tuple(findings),
     )
 
 

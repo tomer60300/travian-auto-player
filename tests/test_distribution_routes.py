@@ -707,3 +707,184 @@ class TestPlanRespectsTheProfileWindow:
             PlanRequest.model_validate(
                 {**base.model_dump(mode="json"), "dispatch_window": (0, 1440)}
             )
+
+
+class TestPlanDiagnostics:
+    """/plan must answer "should I care?" before it answers "about what?".
+
+    The live 25-village account returned 153 warnings in one flat list and the
+    operator refused to read it, which made every one of them worthless -- the
+    1.9M/day crop loss included. These tests are about the whole response
+    staying honest while it gets shorter: nothing may be dropped from
+    ``warnings``, and ``diagnostics`` must be derived from exactly that content.
+    """
+
+    # Ids are stand-ins in the same 5-digit shape a real world uses, so a
+    # message that leaks one is distinguishable from a message that formats a
+    # number -- "1" would appear inside every thousands separator.
+    HUB = 20001
+    SINK = 20002
+
+    def _village(self, vid, **overrides):
+        index = vid - self.HUB + 1
+        base = dict(
+            village_id=vid,
+            name=f"{index:02d}",
+            x=(index % 9) * 7 - 30,
+            y=(index // 9) * 11 + 6,
+            merchants_total=20,
+            merchants_free=20,
+            lumber_per_hour=827,
+            clay_per_hour=926,
+            iron_per_hour=891,
+            crop_per_hour=3200,
+            lumber_stock=799_000,
+            clay_stock=799_000,
+            iron_stock=799_000,
+            crop_stock=200_000,
+            warehouse_capacity=800_000,
+            granary_capacity=800_000,
+        )
+        base.update(overrides)
+        return base
+
+    def _crowded_account(self, village_count: int = 19) -> PlanRequest:
+        """Many identical villages keeping everything, all crop into one hub.
+
+        The shape that produced the flood: every village's warehouse is full and
+        nothing ships materials, while the whole account's crop is aimed at one
+        granary that cannot hold a fraction of it.
+        """
+        snapshot = [
+            self._village(
+                self.HUB, x=0, y=0, warehouse_capacity=2_000_000, granary_capacity=2_000_000
+            ),
+            self._village(self.SINK, x=8, y=0, crop_per_hour=-2000),
+            *[self._village(self.HUB + offset) for offset in range(2, village_count)],
+        ]
+        allocations = {"crop": {self.SINK: {"mode": "remainder"}}}
+        for village in snapshot:
+            if village["village_id"] != self.SINK:
+                allocations["crop"][village["village_id"]] = {"mode": "absolute", "value": 0}
+        return PlanRequest(snapshot=snapshot, allocations=allocations)
+
+    def test_every_warning_is_a_finding_and_every_finding_is_a_warning(self):
+        """The page renders `diagnostics` and nothing else, so a warning missing
+        from it would be invisible -- silently dropped rather than triaged."""
+        res = asyncio.run(post_plan(self._crowded_account(), SimpleNamespace(id=1)))
+
+        grouped = [f.message for g in res.diagnostics.groups for f in g.findings]
+        assert sorted(grouped) == sorted(res.warnings)
+        assert res.warnings, "the fixture produced no warnings; the test proves nothing"
+
+    def test_the_flood_collapses_to_a_handful_of_groups(self):
+        res = asyncio.run(post_plan(self._crowded_account(), SimpleNamespace(id=1)))
+
+        assert len(res.warnings) > 50, "the fixture must reproduce the flood"
+        assert len(res.diagnostics.groups) <= 10, (
+            f"{len(res.warnings)} warnings still read as "
+            f"{len(res.diagnostics.groups)} things to look at"
+        )
+
+    def test_villages_losing_the_same_resource_are_one_group_with_a_total(self):
+        res = asyncio.run(post_plan(self._crowded_account(), SimpleNamespace(id=1)))
+
+        clay = next(
+            g
+            for g in res.diagnostics.groups
+            if g.resource is Resource.CLAY and g.category == "overflow_structural"
+        )
+        assert clay.count > 5, "one line per village is the bug, not the fix"
+        assert clay.loss_per_day == pytest.approx(sum(f.loss_per_day for f in clay.findings))
+        assert str(clay.count) in clay.headline
+
+    def test_the_headline_leads_with_the_total_and_the_worst_offender(self):
+        res = asyncio.run(post_plan(self._crowded_account(), SimpleNamespace(id=1)))
+        diagnostics = res.diagnostics
+
+        assert diagnostics.total_loss_per_day > 0
+        assert f"{diagnostics.total_loss_per_day:,.0f}" in diagnostics.headline
+        # Crop into a granary that cannot hold it dwarfs everything else, and it
+        # is the line that used to be invisible in the middle of the list.
+        assert diagnostics.loss_by_resource[0].resource is Resource.CROP
+        assert "crop" in diagnostics.headline
+
+    def test_the_biggest_loss_is_the_first_group(self):
+        res = asyncio.run(post_plan(self._crowded_account(), SimpleNamespace(id=1)))
+        groups = res.diagnostics.groups
+
+        assert groups[0].loss_per_day == max(g.loss_per_day for g in groups)
+
+    def test_every_group_says_what_to_do(self):
+        res = asyncio.run(post_plan(self._crowded_account(), SimpleNamespace(id=1)))
+
+        for group in res.diagnostics.groups:
+            assert group.action.strip(), f"{group.category} implies no action"
+
+    def test_the_same_store_is_not_described_twice(self):
+        """Both storage checks look at the same store from different angles --
+        "full in 1.1h" and "full, costing 22,224/day". Emitting both made half
+        the real list a restatement of the other half, so the priced line wins
+        and the fill-time note for that store is dropped."""
+        res = asyncio.run(post_plan(self._crowded_account(), SimpleNamespace(id=1)))
+
+        capped = {
+            (f.village, f.resource)
+            for g in res.diagnostics.groups
+            if g.category.startswith("overflow_")
+            for f in g.findings
+        }
+        filling = {
+            (f.village, f.resource)
+            for g in res.diagnostics.groups
+            if g.category == "store_filling"
+            for f in g.findings
+        }
+        assert capped, "the fixture must produce overflows"
+        assert not capped & filling
+
+    def test_a_timing_note_is_a_note_not_a_warning(self):
+        """A tribute's cold-start window is a fact about how Gold Club routes
+        fire, not a problem to fix. Mixed in with real losses it dilutes them."""
+        body = self._crowded_account(village_count=4)
+        body.foreign_targets = [
+            ForeignTarget(name="Ally-Keep", x=12, y=9, crop_per_hour=500, route_eligible=True)
+        ]
+
+        res = asyncio.run(post_plan(body, SimpleNamespace(id=1)))
+
+        notes = [g for g in res.diagnostics.groups if g.category == "tribute_cold_start"]
+        assert notes, f"no cold-start note in {res.warnings}"
+        assert all(g.severity == "note" for g in notes)
+        assert all(g.loss_per_day == 0 for g in notes)
+
+    def test_a_clean_plan_reports_no_loss_rather_than_an_empty_panel(self):
+        """No capacity was fetched, so no store can be judged, and there is
+        nothing else to report. The panel still answers the question."""
+        body = PlanRequest(
+            snapshot=[
+                self._village(self.HUB, x=0, y=0, warehouse_capacity=None, granary_capacity=None),
+                self._village(self.SINK, x=3, y=0, warehouse_capacity=None, granary_capacity=None),
+            ],
+            max_latency_hours=None,
+        )
+
+        res = asyncio.run(post_plan(body, SimpleNamespace(id=1)))
+
+        assert res.warnings == []
+        assert res.diagnostics.total_loss_per_day == 0
+        assert res.diagnostics.loss_by_resource == []
+        assert res.diagnostics.headline == "No problems found."
+
+    def test_no_finding_leaks_a_village_id(self):
+        """Same rule as the prose warnings: an id nobody can act on is worse
+        than no message. The structured fields must obey it too."""
+        body = self._crowded_account()
+        res = asyncio.run(post_plan(body, SimpleNamespace(id=1)))
+
+        for group in res.diagnostics.groups:
+            for finding in group.findings:
+                for village in body.snapshot:
+                    assert str(village.village_id) not in finding.detail, (
+                        f"detail identifies a village by id: {finding.detail}"
+                    )

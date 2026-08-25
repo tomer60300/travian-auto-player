@@ -11,12 +11,15 @@ heading the other way?
 import pytest
 
 from travian_api.services.distribution.allocation import Resource
+from travian_api.services.distribution.findings import Category
 from travian_api.services.distribution.optimizer import Route
 from travian_api.services.distribution.schedule import build_beat
 from travian_api.services.distribution.storage import (
     DEFAULT_WARN_HOURS,
+    OverflowEvent,
     Trend,
     simulate_day,
+    storage_findings,
     storage_warnings,
     store_status,
 )
@@ -203,3 +206,113 @@ class TestDiscreteArrivals:
         )
 
         assert overflows == ()
+
+
+class TestWhyItOverflowed:
+    """The reason given in the warning has to be the actual reason.
+
+    Every overflow line said "an arriving batch overflows even though the average
+    rate fits". On the account that motivated this work, all 52 of them were
+    wrong: the average did not fit in a single one of those villages. The two
+    failures have opposite fixes -- shorten the cycle, versus give the surplus
+    somewhere to go -- so telling them apart is not cosmetic.
+    """
+
+    def _daily_route(self, origin: int, destination: int, per_hour: float) -> Route:
+        return Route(
+            origin=origin,
+            destination=destination,
+            cargo_per_hour={Resource.LUMBER: per_hour},
+            cycle_hours=24,
+            merchants_per_send=1,
+            sets_in_flight=1,
+            one_way_minutes=60.0,
+        )
+
+    def _full_warehouse(self) -> tuple[OverflowEvent, ...]:
+        """A village that keeps everything it makes, already at its cap."""
+        return simulate_day(
+            build_beat(()),
+            stocks={1: {Resource.CLAY: 799_000}},
+            capacities={1: {Resource.CLAY: 800_000}},
+            net_per_hour={1: {Resource.CLAY: 926}},
+        )
+
+    def test_a_surplus_with_nowhere_to_go_is_structural(self):
+        """Such a village loses its whole production every day, forever, and no
+        schedule can change that."""
+        overflows = self._full_warehouse()
+
+        assert len(overflows) == 1
+        event = overflows[0]
+        assert event.structural, "926/h into a full store is not a batch problem"
+        assert event.net_gain_per_day == pytest.approx(926 * 24)
+        assert event.wasted_per_day == pytest.approx(926 * 24)
+
+    def test_a_batch_too_big_for_the_store_is_not_structural(self):
+        """Issue #12's own case: the average fits exactly, the lump does not."""
+        overflows = simulate_day(
+            build_beat((self._daily_route(1, 2, 5_000),)),
+            stocks={1: {Resource.LUMBER: 120_000}, 2: {Resource.LUMBER: 40_000}},
+            capacities={1: {Resource.LUMBER: 1_000_000}, 2: {Resource.LUMBER: 80_000}},
+            net_per_hour={1: {Resource.LUMBER: 5_000}, 2: {Resource.LUMBER: -5_000}},
+        )
+
+        event = next(e for e in overflows if e.village_id == 2)
+        assert not event.structural, "120,000 in and 120,000 out is a batch problem"
+        assert event.net_gain_per_day == pytest.approx(0.0, abs=1.0)
+
+    def test_a_structural_overflow_is_not_dated_to_a_minute(self):
+        """A store that never leaves its cap is already there at 00:00, so the
+        clock was an artifact of the grid rather than the time of any event --
+        and it sent the operator looking for a midnight arrival."""
+        status = store_status(1, Resource.CLAY, 799_000, 800_000, 926)
+
+        warnings = storage_warnings([status], self._full_warehouse(), names={1: "19"})
+
+        overflow_line = next(w for w in warnings if "hits the cap" in w)
+        assert "00:00" not in overflow_line
+        assert "never leaves its cap" in overflow_line
+        assert "average rate fits" not in overflow_line
+
+    def test_a_store_reported_as_overflowing_is_not_also_reported_as_filling(self):
+        """The same store, twice, from two angles. On the real account this was
+        half the warning list: 51 "fills its store in 1.1h" lines describing the
+        same 51 stores the overflow lines had already priced."""
+        status = store_status(1, Resource.CLAY, 799_000, 800_000, 926)
+        assert status.is_urgent, "the fixture must trip the continuous check too"
+
+        warnings = storage_warnings([status], self._full_warehouse(), names={1: "19"})
+
+        assert len(warnings) == 1
+        assert "hits the cap" in warnings[0]
+
+    def test_a_store_filling_without_an_overflow_is_still_reported(self):
+        """The dedupe must not swallow the fill-time note in general -- only
+        where the overflow line has already said the cap is reached."""
+        status = store_status(1, Resource.CLAY, 700_000, 800_000, 20_000)
+
+        warnings = storage_warnings([status], [], names={1: "19"})
+
+        assert len(warnings) == 1
+        assert "fills its store" in warnings[0]
+
+    def test_the_two_kinds_of_overflow_are_different_findings(self):
+        """Grouped together they would be handed one action, and one of the two
+        halves would be told to do the wrong thing."""
+        structural = storage_findings([], self._full_warehouse(), names={1: "19"})
+        burst = storage_findings(
+            [],
+            simulate_day(
+                build_beat((self._daily_route(1, 2, 5_000),)),
+                stocks={1: {Resource.LUMBER: 120_000}, 2: {Resource.LUMBER: 40_000}},
+                capacities={1: {Resource.LUMBER: 1_000_000}, 2: {Resource.LUMBER: 80_000}},
+                net_per_hour={1: {Resource.LUMBER: 5_000}, 2: {Resource.LUMBER: -5_000}},
+            ),
+            names={2: "02"},
+        )
+
+        assert structural[0].category is Category.OVERFLOW_STRUCTURAL
+        assert burst[0].category is Category.OVERFLOW_BURST
+        assert structural[0].action != burst[0].action
+        assert structural[0].loss_per_day > 0, "the cost is carried, not just described"

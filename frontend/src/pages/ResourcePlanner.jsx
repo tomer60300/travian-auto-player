@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import PlanDiagnostics from '../components/PlanDiagnostics'
 import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
 import useLogStore from '../stores/logStore'
@@ -2891,17 +2892,8 @@ export default function ResourcePlanner() {
                 </div>
               )}
 
-              {plan.warnings.length > 0 && (
-                <div className="card p-4">
-                  <h3 className="font-semibold mb-2 text-warning">
-                    Warnings ({plan.warnings.length})
-                  </h3>
-                  <ul className="text-xs list-disc list-inside space-y-0.5 max-h-64 overflow-y-auto">
-                    {plan.warnings.map((w, i) => (
-                      <li key={i}>{w}</li>
-                    ))}
-                  </ul>
-                </div>
+              {plan.diagnostics && plan.warnings.length > 0 && (
+                <PlanDiagnostics diagnostics={plan.diagnostics} lineCount={plan.warnings.length} />
               )}
             </>
           )}
