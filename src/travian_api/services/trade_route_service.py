@@ -524,7 +524,7 @@ class TradeRouteService:
             return RouteActionResult(origin_village_id, 0, 0, "stopped", reason)
         payload = self._build_toggle_payload([r.route_id for r in routes], active=active)
         try:
-            await self.http_client.put_json(
+            response = await self.http_client.put_json(
                 "/api/v1/trade-routes",
                 payload,
                 request_type="fetch",
@@ -535,9 +535,104 @@ class TradeRouteService:
             self._trace_write(kind, origin_village_id, "failed", started, payload, str(exc))
             return RouteActionResult(origin_village_id, 0, 0, "failed", f"{verb} failed: {exc}")
         self._log_activity(started)
+
+        # Unlike the create, the bulk toggle DOES answer with a body, and the
+        # game's own client reads it: it counts `response.routes` entries with an
+        # `error` field and reports the failures. Ignoring it meant a request
+        # where the game accepted some routes and rejected others reported a
+        # clean success for all of them -- a per-route failure hidden behind an
+        # overall 200.
+        rejected = self._rejected_routes(response)
+        if rejected:
+            detail = f"{len(rejected)} of {len(routes)} route(s) rejected: {rejected}"
+            self._trace_write(kind, origin_village_id, "partial", started, payload, detail)
+            return RouteActionResult(origin_village_id, 0, 0, "failed", detail)
+
         status = "enabled" if active else "disabled"
         self._trace_write(kind, origin_village_id, status, started, payload)
         return RouteActionResult(origin_village_id, 0, 0, status, f"{len(routes)} route(s)")
+
+    @staticmethod
+    def _rejected_routes(response: Any) -> list[int]:
+        """Route ids the game refused inside an otherwise-successful bulk toggle.
+
+        Shape from the client's own handler:
+        ``response.routes[].error`` marks the ones that failed. Absent or
+        unrecognised means nothing was rejected -- an unparseable body must not
+        invent failures, only report the ones the game actually named.
+        """
+        if not isinstance(response, dict):
+            return []
+        entries = response.get("routes")
+        if not isinstance(entries, list):
+            return []
+        rejected: list[int] = []
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("error"):
+                try:
+                    rejected.append(int(entry["id"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        return sorted(rejected)
+
+    def _build_delete_payload(self, route_ids: list[int]) -> dict:
+        """``DELETE /api/v1/trade-routes`` body. Taken from the client's own code.
+
+        The game's marketplace bundle does this, verbatim::
+
+            Travian.api("trade-routes", {data: {action: "traderoute", routes: k}},
+                        "DELETE")
+
+        where ``k = e.routes ?? []`` is a flat array of route IDS.
+
+        Note the shape difference from the toggle, which is easy to get wrong and
+        impossible to detect from a 200: the bulk PUT sends
+        ``routes: [{enabled: bool, id: int}, ...]`` -- objects -- while DELETE
+        sends ``routes: [int, ...]`` -- bare ids. Same key, different element
+        type, on the same endpoint.
+        """
+        return {"action": "traderoute", "routes": sorted(route_ids)}
+
+    async def delete_routes(
+        self,
+        origin_village_id: int,
+        routes: list[ExistingRoute],
+        *,
+        stop_check: Callable[[], str | None] | None = None,
+    ) -> RouteActionResult | None:
+        """Remove routes from a village's marketplace for good (LIVE).
+
+        The one destructive operation here. Disabling leaves a row that can be
+        switched back on; this does not, so it is deliberately never called by
+        the reconciler -- a plan that no longer wants a route disables it. This
+        exists so a run can be undone, which is the only reason to remove a route
+        the operator did not create by hand.
+
+        One request for all of them, matching the UI: it deletes the whole
+        selection at once.
+        """
+        if not routes:
+            return None
+        self._require_live()
+        started = time.monotonic()
+        payload = self._build_delete_payload([r.route_id for r in routes])
+        await self.http_client.human_delay.wait(ActionType.BETWEEN_ROUTES, "deleting trade routes")
+        if stop_check is not None and (reason := stop_check()):
+            return RouteActionResult(origin_village_id, 0, 0, "stopped", reason)
+        try:
+            await self.http_client.delete_json(
+                "/api/v1/trade-routes",
+                data=payload,
+                request_type="fetch",
+                safe_to_retry=False,
+                referer=self._marketplace_referer.get(origin_village_id),
+            )
+        except NetworkError as exc:
+            self._trace_write("delete", origin_village_id, "failed", started, payload, str(exc))
+            return RouteActionResult(origin_village_id, 0, 0, "failed", f"delete failed: {exc}")
+        self._log_activity(started)
+        self._trace_write("delete", origin_village_id, "deleted", started, payload)
+        return RouteActionResult(origin_village_id, 0, 0, "deleted", f"{len(routes)} route(s)")
 
     async def disable_routes(
         self,

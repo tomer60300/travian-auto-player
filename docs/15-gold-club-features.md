@@ -180,6 +180,33 @@ Notes, all of which corrected an earlier assumption:
 - `mode` was `"send"`; `deliveries` was `1`; `useTradeShips` was `false` (no boats on this server).
 - The response body is **empty**, so the new route's id is not returned — reconciliation has to re-read the marketplace page.
 
+#### The complete API surface, read from the client's own bundle
+
+Taken out of the marketplace page's own JavaScript (`main.js`), so these are the
+requests the game's client makes rather than shapes we inferred:
+
+| Operation | Verb + path | Body |
+|---|---|---|
+| create | `POST trade-routes` | `sourceVillageId, targetCoordinates, resources, mode, hour, minute, deliveries, repeatEvery, enabled, useTradeShips` |
+| edit one | `PUT trade-routes/{id}` | same minus `sourceVillageId` and `repeatEvery` |
+| edit/toggle many | `PUT trade-routes` | `routes: [{<changed fields>, id}, ...]` |
+| **delete** | `DELETE trade-routes` | `routes: [id, id, ...]` |
+
+Every one also carries `action: "traderoute"`.
+
+**The shape trap.** The bulk PUT's `routes` holds OBJECTS (`{enabled, id}`) and
+DELETE's `routes` holds BARE IDS. Same endpoint, same key, different element
+type -- and an empty 200 could not tell you which the server wanted.
+
+`repeatEvery` is absent from both edit forms, which is the same fact the Edit
+dialog shows by having no "Repeat every" field: the fan-out happens once, at
+creation, and an individual row has no period.
+
+**The bulk PUT answers with a body**, and the client reads it: entries in
+`response.routes` carrying an `error` are the routes the game refused. A request
+can therefore succeed overall while rejecting individual routes, so the response
+has to be inspected -- an overall 200 is not per-route success.
+
 #### Enable / disable — `PUT /api/v1/trade-routes`
 
 ```json
@@ -223,6 +250,24 @@ pins the payload field by field:
 
 Nothing blocking. The wire format, both field units, the fan-out behaviour, the
 route cap and the delete path are all settled against real captures.
+
+### Confirmed against the live game (2026-08-25)
+
+A single controlled route was created, read back, disabled and deleted on a real
+account, and the village returned to its exact prior state (36 rows, same ids).
+What that settled:
+
+- **create** works, and the payload lands verbatim: 1,440 crop, `hour: 0`,
+  `repeatEvery: 12` produced departures at 00:00 and 12:00 server time.
+- **the 24/N fan-out is real.** One create with `repeatEvery: 12` produced
+  exactly 2 rows, spaced 12.00 hours apart. The same village independently
+  showed 24 rows at 1h gaps and 12 rows at 2h gaps for its existing routes.
+- **`deliveries` reads back as `repeat`**: sent `deliveries: 1`, read `repeat: 1`.
+- **disable** works: both rows went to `enabled: false`, confirmed by re-reading.
+- **delete** works with the bare-id body above: both rows vanished, 38 rows back
+  to 36.
+- **the read-back is what makes any of this trustworthy.** The create's response
+  body is empty; every claim above came from re-reading the marketplace.
 
 ### Answered by the captured page
 

@@ -79,6 +79,10 @@ class _RecordingClient:
         self.sent.append(("PUT", url, payload))
         return {}
 
+    async def delete_json(self, url: str, *, data: dict | None = None, **_kwargs):
+        self.sent.append(("DELETE", url, data))
+        return {}
+
 
 def _service() -> tuple[TradeRouteService, _RecordingClient]:
     client = _RecordingClient()
@@ -282,3 +286,121 @@ class TestEveryPlannableCycleIsLegalInGame:
         for cycle in sorted(self.GAME_CYCLES):
             payload = service._build_create_payload(_route(cycle_hours=cycle))
             assert payload["repeatEvery"] == cycle
+
+
+class TestTheDeleteBodyMatchesTheClient:
+    """Read out of the game's own marketplace bundle, not guessed.
+
+        Travian.api("trade-routes", {data: {action: "traderoute", routes: k}},
+                    "DELETE")
+        // k = e.routes ?? []   -- a flat array of route IDS
+
+    The shape difference from the toggle is the trap: the bulk PUT sends
+    ``routes: [{enabled, id}]`` -- objects -- and DELETE sends ``routes: [id]``
+    -- bare ints. Same endpoint, same key, different element type, and a 200
+    cannot tell you which one the server wanted.
+    """
+
+    def test_the_routes_are_bare_ids_not_objects(self):
+        service, _ = _service()
+        payload = service._build_delete_payload([671232, 671231])
+
+        assert payload["routes"] == [671231, 671232]
+        assert all(isinstance(r, int) for r in payload["routes"])
+
+    def test_it_carries_the_traderoute_action_like_every_other_call(self):
+        service, _ = _service()
+        assert service._build_delete_payload([1])["action"] == "traderoute"
+
+    def test_it_sends_exactly_two_keys(self):
+        service, _ = _service()
+        assert set(service._build_delete_payload([1])) == {"action", "routes"}
+
+    def test_every_route_goes_in_one_request(self):
+        service, client = _service()
+        routes = [
+            ExistingRoute(route_id=i, dest_village_id=20044, dest_x=0, dest_y=0) for i in range(12)
+        ]
+        asyncio.run(service.delete_routes(20031, routes))
+
+        assert len(client.sent) == 1, "the UI deletes the whole selection at once"
+        verb, url, payload = client.sent[0]
+        assert verb == "DELETE"
+        assert url == "/api/v1/trade-routes"
+        assert payload["routes"] == list(range(12))
+
+    def test_deleting_nothing_sends_nothing(self):
+        service, client = _service()
+        assert asyncio.run(service.delete_routes(20031, [])) is None
+        assert client.sent == []
+
+    def test_a_delete_is_refused_without_the_live_opt_in(self):
+        client = _RecordingClient()
+        service = TradeRouteService(client, live_enabled=False, reconciler_verified=True)
+        routes = [ExistingRoute(route_id=1, dest_village_id=20044, dest_x=0, dest_y=0)]
+
+        with pytest.raises(TradeRoutePayloadUnverified):
+            asyncio.run(service.delete_routes(20031, routes))
+        assert client.sent == [], "the one destructive call must not slip the gate"
+
+    def test_a_delete_consumes_activity_budget(self):
+        service, client = _service()
+        routes = [ExistingRoute(route_id=1, dest_village_id=20044, dest_x=0, dest_y=0)]
+        asyncio.run(service.delete_routes(20031, routes))
+
+        assert len(client.logged_activity) == 1
+
+
+class TestTheBulkToggleReadsItsOwnResponse:
+    """The toggle, unlike the create, answers with a body -- and the game's own
+    client reads it, counting entries with an `error`. Ignoring it meant a
+    request where some routes were accepted and others rejected reported a clean
+    success for all of them: a per-route failure hidden behind an overall 200."""
+
+    def _service_returning(self, body):
+        client = _RecordingClient()
+
+        async def _put(url, payload, **kw):
+            client.sent.append(("PUT", url, payload))
+            return body
+
+        client.put_json = _put
+        return TradeRouteService(client, live_enabled=True, reconciler_verified=True), client
+
+    def _routes(self, n=3):
+        return [
+            ExistingRoute(route_id=i, dest_village_id=20044, dest_x=0, dest_y=0)
+            for i in range(1, n + 1)
+        ]
+
+    def test_a_clean_response_is_a_clean_disable(self):
+        service, _ = self._service_returning({"routes": [{"id": 1}, {"id": 2}, {"id": 3}]})
+        result = asyncio.run(service.disable_routes(20031, self._routes()))
+        assert result.status == "disabled"
+
+    def test_a_rejected_route_makes_the_whole_toggle_a_failure(self):
+        # Reported as failed, not partially-done: the caller's next decision
+        # (do NOT create new routes on top of a bad disable) depends on it.
+        service, _ = self._service_returning(
+            {"routes": [{"id": 1}, {"id": 2, "error": "nope"}, {"id": 3}]}
+        )
+        result = asyncio.run(service.disable_routes(20031, self._routes()))
+
+        assert result.status == "failed"
+        assert "1 of 3" in result.detail
+        assert "[2]" in result.detail
+
+    def test_an_empty_body_is_not_treated_as_a_rejection(self):
+        # Absence of evidence must not become evidence of failure, or every
+        # successful toggle against a terser response would report a problem.
+        for body in ({}, None, {"routes": []}, {"other": 1}, "not json at all"):
+            service, _ = self._service_returning(body)
+            result = asyncio.run(service.disable_routes(20031, self._routes()))
+            assert result.status == "disabled", f"body {body!r} must read as success"
+
+    def test_a_rejection_without_a_usable_id_does_not_crash_the_run(self):
+        service, _ = self._service_returning(
+            {"routes": [{"error": "no id here"}, {"id": "x", "error": "bad id"}]}
+        )
+        result = asyncio.run(service.disable_routes(20031, self._routes()))
+        assert result.status == "disabled", "unnameable rejections cannot be acted on"
