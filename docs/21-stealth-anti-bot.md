@@ -167,6 +167,14 @@ Real browsers issue redirected GETs as fresh document navigations.
 `Referer` header on subsequent requests, simulating natural browsing flow. API
 and XHR responses do not advance page context (only document-like requests do).
 
+**Pinned Referer:** that tracked page is ONE field per account, shared by every
+concurrent operation, and each request waits out a throttler gap before its
+headers are built — so a caller that knows which page it is acting from pins the
+value instead. `get_html`, `post_json`, `put_json` and `delete_json` all take
+`referer=`. Pinning on a page load also forces `Sec-Fetch-Site: same-origin`,
+since the `none` that header defaults to means "no referring context" and cannot
+coexist with a `Referer`.
+
 **Firefox awareness:** Sec-Fetch-* and sec-ch-ua headers are omitted when the
 selected User-Agent is Firefox, matching real Firefox behavior.
 

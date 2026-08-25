@@ -825,6 +825,34 @@ def read_trade_routes(
     return _routes_from_view(view, map_span)
 
 
+def read_trade_routes_from_view(
+    view: Any, map_span: int = DEFAULT_MAP_SPAN
+) -> Optional[List[Dict[str, Any]]]:
+    """Routes from a GraphQL ``data`` payload, or None if it carried no model.
+
+    The marketplace query the game's own client fires after a create asks for
+    ``ownPlayer{...village{marketplace{tradeRoutes{...}}}}`` -- the SAME path the
+    marketplace page's React model uses, so the row reader is shared verbatim
+    with :func:`read_trade_routes` and there is exactly one place that knows how
+    a route row is shaped.
+
+    Only the None-vs-empty test differs, and it has to: on a page the question is
+    "did this HTML carry a model at all?", here it is "did the marketplace object
+    come back?". A null ``marketplace`` (wrong village, error payload, a village
+    with no marketplace) must read as "unknown", never as "no routes" -- the
+    caller decides whether to create the whole plan on that answer.
+    """
+    if not isinstance(view, dict):
+        return None
+    try:
+        collections = view["ownPlayer"]["village"]["marketplace"]["tradeRoutes"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(collections, list):
+        return None
+    return _routes_from_view(view, map_span)
+
+
 def parse_troop_confirm_page(html: str) -> Dict[str, Any]:
     """
     Parse troop sending confirmation page for hidden fields.
