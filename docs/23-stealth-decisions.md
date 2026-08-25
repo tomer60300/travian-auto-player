@@ -808,3 +808,39 @@ Roughly, on a typical session:
 Net: a single farm loop adds a few seconds per cycle. A build queue
 adds 1-5 minutes per build. The biggest cost is the build wakeup
 reaction; it's also the highest-stealth-value change.
+
+## The trade-route read-back stays a document GET, not GraphQL
+
+**Decision: keep it. Recorded because the evidence points the other way and the
+reasoning is not obvious.**
+
+Every write to `/api/v1/trade-routes` is followed by a read, because the create's
+response body is empty and "the request was accepted" is not "the state changed".
+Ours reads the marketplace tab: `GET /build.php?gid=17&t=3&newdid=<v>`.
+
+The game's own client does not do that. Its `main.js` success handlers call
+`E(); T();`, and `T` is a GraphQL refetch — `Travian.graphQL(...)` resolves to
+`POST /api/v1/graphql`. So a real create is followed by GraphQL, never a document
+navigation.
+
+Switching was considered and rejected, on three grounds:
+
+1. **A hand-built GraphQL query is a worse fingerprint than a plausible page
+   load.** The document GET is something a browser genuinely produces — a
+   Chromium check confirms a self-link click and a reload both emit exactly the
+   header set we send. A query that differs from the client's by one field or one
+   byte of whitespace is a request *no* client sends, which is more distinctive
+   than a page refresh, not less.
+2. **It would reintroduce a village-context race.** The marketplace query reads
+   `ownPlayer.village.marketplace` — the ACTIVE village, with no argument to pin
+   it. Our GET carries `newdid`, so it names the village it wants. Swapping to
+   GraphQL makes a read depend on shared session state, which is the same class
+   of bug as the build flow's (see `village_context_lock`).
+3. **The read-back is not itself the anomaly.** The real client reads the list
+   back after *every* write; ours reads once per origin. The frequency is lower
+   than a human's client, not higher.
+
+What would change this: a capture of the real GraphQL request, so the query and
+envelope could be matched byte-for-byte rather than reconstructed, plus a village
+argument (or an explicit switch under the lock) so the read still names its
+village. Until both exist, a plausible request beats an invented one.

@@ -629,7 +629,14 @@ class TradeRouteService:
                     continue
         return sorted(rejected)
 
-    def _build_update_payload(self, route_ids: list[int], cargo: dict[Resource, int]) -> dict:
+    def _build_update_payload(
+        self,
+        route_ids: list[int],
+        cargo: dict[Resource, int],
+        *,
+        dest_x: int,
+        dest_y: int,
+    ) -> dict:
         """``PUT /api/v1/trade-routes`` body for a CARGO change. From the client.
 
         The bulk-edit branch of the game's own bundle builds one partial object
@@ -642,22 +649,41 @@ class TradeRouteService:
             k.forEach(e => i.push({...s, id: e}))
             d = {routes: i}
 
-        Only the fields being changed are sent. Note what is NOT in that list:
-        ``hour`` and ``minute``. The bulk form cannot move a route's departure
-        time -- only the single-route ``PUT trade-routes/{id}`` can. That is a
-        gift here rather than a limitation: a "route" the operator thinks of as
-        one thing is 24/N rows at staggered times, and changing their cargo must
-        not collapse them onto one clock.
+        "Only the fields being changed" was a misreading of that code. The
+        dialog never diffs against the original: it seeds itself with every field
+        the SELECTED ROWS AGREE on, and then includes each one that is non-null::
+
+            e = x.filter(r => r.carriedResources.lumber !== a.carriedResources.lumber || ...)
+            0 === e.length && (s.resources = {...})            // agreed -> sent
+            e = x.filter(r => r.repeat !== a.repeat);   0===e.length && (s.repeat = ...)
+            e = x.filter(r => r.enabled !== a.enabled); 0===e.length && (s.enabled = ...)
+            ...
+
+        Every row this app updates belongs to ONE destination and came from ONE
+        create, so they are homogeneous on destination, deliveries, enabled and
+        useTradeShips by construction -- exactly the case where a real client
+        sends all of them. Sending only ``resources`` was four fields short of
+        what the game's own dialog produces in the same situation.
+
+        Note what is still absent, and must stay absent: ``hour`` and ``minute``.
+        The bulk form cannot move a departure time -- only the single-route
+        ``PUT trade-routes/{id}`` can. That is a gift here rather than a
+        limitation: a "route" the operator thinks of as one thing is 24/N rows at
+        staggered times, and changing their cargo must not collapse them onto one
+        clock.
         """
+        fields = {
+            "targetCoordinates": {"x": dest_x, "y": dest_y},
+            "resources": {r.value: int(cargo.get(r, 0)) for r in Resource},
+            # The values every row of a fanned-out route shares, because this app
+            # is the thing that created them: see _build_create_payload.
+            "deliveries": 1,
+            "enabled": True,
+            "useTradeShips": False,
+        }
         return {
             "action": "traderoute",
-            "routes": [
-                {
-                    "resources": {r.value: int(cargo.get(r, 0)) for r in Resource},
-                    "id": route_id,
-                }
-                for route_id in sorted(route_ids)
-            ],
+            "routes": [{**fields, "id": route_id} for route_id in sorted(route_ids)],
         }
 
     async def update_cargo(
@@ -666,6 +692,8 @@ class TradeRouteService:
         routes: list[ExistingRoute],
         cargo: dict[Resource, int],
         *,
+        dest_x: int,
+        dest_y: int,
         stop_check: Callable[[], str | None] | None = None,
     ) -> RouteActionResult | None:
         """Reset the cargo on existing routes to what the plan now wants (LIVE).
@@ -683,7 +711,9 @@ class TradeRouteService:
             return None
         self._require_live()
         started = time.monotonic()
-        payload = self._build_update_payload([r.route_id for r in routes], cargo)
+        payload = self._build_update_payload(
+            [r.route_id for r in routes], cargo, dest_x=dest_x, dest_y=dest_y
+        )
         await self.http_client.human_delay.wait(
             ActionType.BETWEEN_ROUTES, "updating trade route cargo"
         )

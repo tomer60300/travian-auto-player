@@ -180,6 +180,29 @@ class TestTheAdClientDoesNotAnnounceItself:
         assert atg.headers["User-Agent"] == expected["User-Agent"]
         assert atg.headers["Accept-Language"] == expected["Accept-Language"]
 
+    def test_it_impersonates_chrome_at_the_tls_layer_too(self):
+        """Chrome headers over Python TLS is the one combination HttpClient
+        refuses to run at all -- it raises RuntimeError rather than send a Chrome
+        User-Agent behind a non-Chrome JA3, because the mismatch is a stronger
+        tell than sending no Chrome headers. This client had the full Chrome
+        persona bolted onto a bare httpx session, so the ad host saw a
+        fingerprint no browser produces, while the game path two files away
+        impersonated properly."""
+        atg, http = self._client()
+
+        assert type(atg).__module__.startswith("curl_cffi"), (
+            f"the ad client is {type(atg).__module__}, so its TLS does not match "
+            f"the Chrome headers it sends"
+        )
+
+    def test_it_uses_the_same_impersonation_target_as_the_game_client(self):
+        # Two different Chrome fingerprints from one account would be its own
+        # tell, so the ad client borrows the persona rather than picking.
+        atg, http = self._client()
+        persona = http._persona
+        assert persona.impersonate, "the persona must name a target"
+        assert getattr(atg, "impersonate", None) == persona.impersonate
+
     def test_it_does_not_claim_travian_as_the_referer(self):
         # A cross-origin ad host is not same-origin with the game, and saying it
         # is would be a worse tell than saying nothing.

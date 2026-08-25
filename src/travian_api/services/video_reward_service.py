@@ -12,6 +12,14 @@ from urllib.parse import urlencode
 
 import httpx
 
+try:  # curl_cffi is optional; HttpClient refuses stealth without it
+    from curl_cffi.requests import AsyncSession as _CurlAsyncSession
+
+    _HAS_CURL = True
+except ImportError:  # pragma: no cover - mirrors http_client's own guard
+    _CurlAsyncSession = None
+    _HAS_CURL = False
+
 from ..clients.http_client import HttpClient
 
 logger = logging.getLogger(__name__)
@@ -79,7 +87,7 @@ class VideoRewardService:
         # Separate httpx client for ATG requests (no Travian cookies/headers)
         self._atg_client: Optional[httpx.AsyncClient] = None
 
-    async def _get_atg_client(self) -> httpx.AsyncClient:
+    async def _get_atg_client(self):
         """The ad-network client: no Travian cookies, but the same browser.
 
         This client exists to keep Travian's session cookies off the ad host, and
@@ -95,32 +103,52 @@ class VideoRewardService:
         """
         if not self._atg_client:
             headers = self.http_client._browser_headers.for_page_load()
-            self._atg_client = httpx.AsyncClient(
-                timeout=30,
-                follow_redirects=True,
-                headers={
-                    key: value
-                    for key, value in headers.items()
-                    # The ad host is a different origin: Travian's Referer and
-                    # its same-origin Sec-Fetch-Site would both be lies, and a
-                    # detectable one. The identity headers are what carry over.
-                    if key
-                    in (
-                        "User-Agent",
-                        "Accept-Language",
-                        "Accept-Encoding",
-                        "sec-ch-ua",
-                        "sec-ch-ua-mobile",
-                        "sec-ch-ua-platform",
-                    )
-                    and value is not None
-                },
-            )
+            identity = {
+                key: value
+                for key, value in headers.items()
+                # The ad host is a different origin: Travian's Referer and
+                # its same-origin Sec-Fetch-Site would both be lies, and a
+                # detectable one. The identity headers are what carry over.
+                if key
+                in (
+                    "User-Agent",
+                    "Accept-Language",
+                    "Accept-Encoding",
+                    "sec-ch-ua",
+                    "sec-ch-ua-mobile",
+                    "sec-ch-ua-platform",
+                )
+                and value is not None
+            }
+            # Chrome headers over Python TLS is the exact combination
+            # HttpClient refuses to run (see its RuntimeError): the mismatch
+            # between a Chrome User-Agent and a non-Chrome JA3 is a stronger
+            # tell than sending no Chrome headers at all. This client had the
+            # full Chrome persona bolted onto a bare httpx session, so the ad
+            # host saw a fingerprint no browser produces -- while the game path
+            # two files away impersonated properly. Same impersonation target as
+            # the persona, so the two agree.
+            if _HAS_CURL:
+                persona = getattr(self.http_client, "_persona", None)
+                self._atg_client = _CurlAsyncSession(
+                    impersonate=persona.impersonate if persona else "chrome",
+                    timeout=30,
+                    headers=identity,
+                )
+            else:
+                # Only reachable with stealth off; HttpClient refuses to start
+                # stealthed without curl_cffi.
+                self._atg_client = httpx.AsyncClient(
+                    timeout=30, follow_redirects=True, headers=identity
+                )
         return self._atg_client
 
     async def close(self):
         if self._atg_client:
-            await self._atg_client.aclose()
+            # httpx says aclose(); curl_cffi's AsyncSession says close(). Both
+            # are coroutines, and getting this wrong leaks a session per claim.
+            closer = getattr(self._atg_client, "aclose", None) or self._atg_client.close
+            await closer()
             self._atg_client = None
 
     async def claim_reward(

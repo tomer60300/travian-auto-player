@@ -2577,7 +2577,12 @@ async def post_execute(
                                     deferred.extend(desired[i:])
                                     break
                                 updated = await svc.update_cargo(
-                                    origin, drifted, route.cargo, stop_check=_stop_reason
+                                    origin,
+                                    drifted,
+                                    route.cargo,
+                                    dest_x=route.dest_x,
+                                    dest_y=route.dest_y,
+                                    stop_check=_stop_reason,
                                 )
                                 updates_done += 1
                                 if updated is not None and updated.status == "updated":

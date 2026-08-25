@@ -420,29 +420,38 @@ class TestTheUpdateBodyMatchesTheClient:
     times, and correcting their cargo must not collapse them onto one clock.
     """
 
-    def test_each_route_carries_its_id_and_the_new_resources(self):
+    def test_each_route_carries_every_field_a_real_bulk_edit_sends(self):
+        # The dialog seeds itself with every field the selection AGREES on, and
+        # every row here belongs to one destination and one create -- so they
+        # agree on all of them. Sending only `resources` was four fields short.
         service, _ = _service()
-        payload = service._build_update_payload([9, 7], {Resource.CROP: 1440})
+        payload = service._build_update_payload([9, 7], {Resource.CROP: 1440}, dest_x=23, dest_y=88)
 
+        expected = {
+            "targetCoordinates": {"x": 23, "y": 88},
+            "resources": {"lumber": 0, "clay": 0, "iron": 0, "crop": 1440},
+            "deliveries": 1,
+            "enabled": True,
+            "useTradeShips": False,
+        }
         assert payload["action"] == "traderoute"
-        assert payload["routes"] == [
-            {"resources": {"lumber": 0, "clay": 0, "iron": 0, "crop": 1440}, "id": 7},
-            {"resources": {"lumber": 0, "clay": 0, "iron": 0, "crop": 1440}, "id": 9},
-        ]
+        assert payload["routes"] == [{**expected, "id": 7}, {**expected, "id": 9}]
 
     def test_it_never_sends_a_departure_time(self):
         # Sending hour/minute here would be both unsupported by the bulk form and
         # actively destructive: every row of a fanned-out route would collapse
         # onto one clock.
         service, _ = _service()
-        payload = service._build_update_payload([1, 2, 3], {Resource.CROP: 5})
+        payload = service._build_update_payload([1, 2, 3], {Resource.CROP: 5}, dest_x=23, dest_y=88)
         for entry in payload["routes"]:
-            assert set(entry) == {"resources", "id"}
+            assert "hour" not in entry and "minute" not in entry
         assert "hour" not in payload and "minute" not in payload
 
     def test_all_four_resources_are_always_present(self):
         service, _ = _service()
-        entry = service._build_update_payload([1], {Resource.IRON: 10})["routes"][0]
+        entry = service._build_update_payload([1], {Resource.IRON: 10}, dest_x=23, dest_y=88)[
+            "routes"
+        ][0]
         assert entry["resources"] == {"lumber": 0, "clay": 0, "iron": 10, "crop": 0}
 
     def test_every_row_is_corrected_in_one_request(self):
@@ -451,7 +460,7 @@ class TestTheUpdateBodyMatchesTheClient:
             ExistingRoute(route_id=800 + i, dest_village_id=20044, dest_x=0, dest_y=0)
             for i in range(24)
         ]
-        asyncio.run(service.update_cargo(20031, routes, {Resource.CROP: 60}))
+        asyncio.run(service.update_cargo(20031, routes, {Resource.CROP: 60}, dest_x=23, dest_y=88))
 
         assert len(client.sent) == 1, "a fanned-out route is corrected in one call"
         verb, url, payload = client.sent[0]
@@ -460,7 +469,10 @@ class TestTheUpdateBodyMatchesTheClient:
 
     def test_updating_nothing_sends_nothing(self):
         service, client = _service()
-        assert asyncio.run(service.update_cargo(20031, [], {Resource.CROP: 1})) is None
+        assert (
+            asyncio.run(service.update_cargo(20031, [], {Resource.CROP: 1}, dest_x=23, dest_y=88))
+            is None
+        )
         assert client.sent == []
 
     def test_an_update_is_refused_without_the_live_opt_in(self):
@@ -469,7 +481,9 @@ class TestTheUpdateBodyMatchesTheClient:
         routes = [ExistingRoute(route_id=1, dest_village_id=20044, dest_x=0, dest_y=0)]
 
         with pytest.raises(TradeRoutePayloadUnverified):
-            asyncio.run(service.update_cargo(20031, routes, {Resource.CROP: 1}))
+            asyncio.run(
+                service.update_cargo(20031, routes, {Resource.CROP: 1}, dest_x=23, dest_y=88)
+            )
         assert client.sent == []
 
     def test_a_rejected_row_makes_the_whole_update_a_failure(self):
@@ -487,6 +501,8 @@ class TestTheUpdateBodyMatchesTheClient:
             ExistingRoute(route_id=i, dest_village_id=20044, dest_x=0, dest_y=0) for i in (1, 2)
         ]
 
-        result = asyncio.run(service.update_cargo(20031, routes, {Resource.CROP: 1}))
+        result = asyncio.run(
+            service.update_cargo(20031, routes, {Resource.CROP: 1}, dest_x=23, dest_y=88)
+        )
         assert result.status == "failed"
         assert "[2]" in result.detail

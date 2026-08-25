@@ -294,7 +294,7 @@ class _FakeLiveSvc:
             raise NetworkError("marketplace read failed (test)")
         return list(self._existing.get(vid, []))
 
-    async def update_cargo(self, vid, routes, cargo, *, stop_check=None):
+    async def update_cargo(self, vid, routes, cargo, *, dest_x=None, dest_y=None, stop_check=None):
         from travian_api.services.trade_route_service import RouteActionResult
 
         if not routes:
@@ -1843,7 +1843,9 @@ class TestCargoDriftIsCorrected:
         from travian_api.services.trade_route_service import RouteActionResult
 
         class _RefusesUpdates(_FakeLiveSvc):
-            async def update_cargo(self, vid, routes, cargo, *, stop_check=None):
+            async def update_cargo(
+                self, vid, routes, cargo, *, dest_x=None, dest_y=None, stop_check=None
+            ):
                 return RouteActionResult(vid, 0, 0, "failed", "rejected (test)")
 
         svc = _RefusesUpdates(existing=self._existing(9000))
@@ -1939,7 +1941,9 @@ class TestEveryKindOfWriteIsVerified:
         from travian_api.services.trade_route_service import RouteActionResult
 
         class _IgnoresUpdates(_FakeLiveSvc):
-            async def update_cargo(self, vid, routes, cargo, *, stop_check=None):
+            async def update_cargo(
+                self, vid, routes, cargo, *, dest_x=None, dest_y=None, stop_check=None
+            ):
                 # Report success, leave the cargo exactly as it was.
                 return RouteActionResult(vid, 0, 0, "updated", f"{len(routes)} route(s)")
 
