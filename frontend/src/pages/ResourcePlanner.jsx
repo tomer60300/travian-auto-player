@@ -2730,7 +2730,19 @@ export default function ResourcePlanner() {
                           (execResult.remaining
                             ? `, ${execResult.remaining} deferred to a later run.`
                             : '.')
-                        : `Created ${execResult.created} route(s)` +
+                        : // `created` counts only CONFIRMED creates, so on its own
+                          // it read "Created 0 route(s)" above a problem list
+                          // saying three routes had just been written — a
+                          // headline refuting its own detail. The other two
+                          // outcomes the server distinguishes are stated here
+                          // instead of left to be inferred from the prose.
+                          `Created ${execResult.created} route(s)` +
+                          (execResult.created_unverified
+                            ? `, ${execResult.created_unverified} written but UNCONFIRMED`
+                            : '') +
+                          (execResult.not_created
+                            ? `, ${execResult.not_created} accepted by the game but never appeared`
+                            : '') +
                           (execResult.remaining
                             ? `, ${execResult.remaining} deferred to a later run.`
                             : '.')}
@@ -2750,7 +2762,12 @@ export default function ResourcePlanner() {
                         <strong>Narrowed run:</strong> {execResult.filtered_to}
                       </p>
                     )}
-                    {execResult.created_game_rows > 0 && (
+                    {/* Also shown when the measured count is zero but routes were
+                        written unconfirmed: the old `created_game_rows > 0` gate
+                        hid this line entirely on exactly the run where the row
+                        footprint is least certain. */}
+                    {(execResult.created_game_rows > 0 ||
+                      execResult.created_unverified > 0) && (
                       <p className="text-xs mb-2">
                         <strong>
                           {execResult.dry_run ? 'Would put' : 'Put'}{' '}
@@ -2758,7 +2775,20 @@ export default function ResourcePlanner() {
                         </strong>{' '}
                         — Travian turns one “repeat every N hours” request into 24/N separate
                         daily rows, so a request is not a row. Removing them later means deleting
-                        every row.
+                        every row.{' '}
+                        {execResult.dry_run
+                          ? 'This number is a forecast — 24/N per request, before anything is written.'
+                          : 'This number was measured: the marketplace was re-read and these are the rows that actually appeared.'}
+                        {!execResult.dry_run && execResult.created_unverified > 0 && (
+                          <>
+                            {' '}
+                            <strong className="text-warning">
+                              {execResult.created_unverified} further route(s) were written but
+                              could not be re-read, so their rows are unmeasured and are NOT
+                              included above.
+                            </strong>
+                          </>
+                        )}
                       </p>
                     )}
                     {execResult.dry_run && (
