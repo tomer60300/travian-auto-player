@@ -10,6 +10,11 @@ Europe 2 on 2026-08-20 (gpack 597.6): ``POST /api/v1/trade-routes`` to create
 (201, empty body) and ``PUT /api/v1/trade-routes`` to enable/disable in bulk
 (200). ``tests/test_trade_route_payload.py`` pins both shapes to that capture.
 
+The read-back after a write is likewise the game's own: ``POST /api/v1/graphql``
+carrying :data:`MARKETPLACE_READBACK_QUERY`, which is read verbatim out of the
+client bundle rather than reconstructed. See that constant, and
+``docs/23-stealth-decisions.md`` for why this used to be a page load.
+
 Live writes remain OFF by default behind ``TradeRouteService.live_enabled``
 (``TRAVIAN_TRADE_ROUTE_LIVE``), because the payload being correct is necessary
 but not sufficient: creating routes mutates a real account. The dry-run path
@@ -49,6 +54,43 @@ logger = logging.getLogger(__name__)
 
 # Marketplace building id (gid=17); its page lists a village's trade routes.
 MARKETPLACE_GID = 17
+
+# ── The read-back query, taken from the game's own bundle ──────────────────
+#
+# Europe 2, gpack 22.03, main.js. The list page builds it from three sources:
+#
+#   Zb = j("fragment RouteFields on TradeRoute{...}")
+#   qb = j("fragment TradeRouteFields on TradeRoutesSet{...}", [Zb])
+#   Kb = j("query{ownPlayer{id currentVillageId village{marketplace{tradeRoutes{...TradeRouteFields}}}}}", [qb])
+#
+# and a create's success handler calls `e.onSuccess()`, which on this page is
+# `T = () => { N(Kb).then(...) }`. `N` is
+#   (e, t) => Travian.Promises.graphQL({query: stripIgnoredCharacters(print(e)), variables: t})
+# over `fetch("/api/v1/" + "graphql", {method: "POST", body: JSON.stringify(...)})`.
+#
+# So the string below is what leaves the browser: graphql-js `print` composes the
+# operation followed by its fragments in the order the tag collected them
+# (TradeRouteFields, then RouteFields), drops the `query` keyword because an
+# anonymous operation with no variables or directives prints in short form, and
+# `stripIgnoredCharacters` removes every separator that is not needed to keep two
+# names apart. `variables` is undefined here, and JSON.stringify omits it -- so
+# the body carries `query` and nothing else.
+_ROUTE_FIELDS_FRAGMENT = (
+    "fragment RouteFields on TradeRoute{id enabled sendOnce"
+    " carriedResources{lumber clay iron crop}departureAt arrivalAt repeat"
+    " merchants ships useTradeShips}"
+)
+_TRADE_ROUTE_FIELDS_FRAGMENT = (
+    "fragment TradeRouteFields on TradeRoutesSet{objectId expanded"
+    " from{id name tribeId}to{id mapId name travelTime player{id}}"
+    "routes{...RouteFields}nextDelivery{departureAt merchants ships useTradeShips}}"
+)
+_MARKETPLACE_OPERATION = (
+    "{ownPlayer{id currentVillageId village{marketplace{tradeRoutes{...TradeRouteFields}}}}}"
+)
+MARKETPLACE_READBACK_QUERY = (
+    _MARKETPLACE_OPERATION + _TRADE_ROUTE_FIELDS_FRAGMENT + _ROUTE_FIELDS_FRAGMENT
+)
 
 # Gold Club rejection marker, matched case-insensitively (as FarmListService does).
 _GOLDCLUB_MARKERS = ("goldclub", "gold club", "plus.error")
@@ -250,9 +292,10 @@ class TradeRouteService:
         Two GETs, matching how a human reaches the marketplace: the village
         view (dorf2) first, then the marketplace — so the marketplace request
         carries a truthful Referer (the village page), not whatever page the
-        loop last touched (a bare gid=17 with a stale Referer is a tell). The
-        stealth layer advances the Referer chain across the two page GETs
-        automatically. The marketplace GET doubles as the read of existing
+        loop last touched (a bare gid=17 with a stale Referer is a tell). That
+        Referer is PINNED rather than left to the stealth layer's account-wide
+        "last page visited", which any concurrent request can move -- see the
+        second GET below. The marketplace GET doubles as the read of existing
         routes, so "disable old routes if needed" needs no further request.
 
         ``newdid`` rides on BOTH GETs, matching the codebase convention
@@ -264,14 +307,23 @@ class TradeRouteService:
         started = time.monotonic()
         newdid_q = f"?newdid={village_id}" if village_id else ""
         newdid_amp = f"&newdid={village_id}" if village_id else ""
-        await self.http_client.get_html(f"/dorf2.php{newdid_q}")
+        base = self.http_client.settings.base_url.rstrip("/")
+        village_view = f"/dorf2.php{newdid_q}"
+        await self.http_client.get_html(village_view)
         # `t=3` is the trade-route tab. Without it we never load the tab the
         # routes live on -- so the reconciler read a page that cannot contain
         # them, and a server-side "did this session render the trade-route tab
         # before POSTing to it?" check would fail outright.
         path = f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}"
-        html = await self.http_client.get_html(path)
-        base = self.http_client.settings.base_url.rstrip("/")
+        # Pin the second GET to the village view we just loaded, rather than
+        # letting BrowserHeaders supply it. The two are the same value only in a
+        # quiet session: this GET waits out a throttler gap BEFORE its headers
+        # are built, and the account-wide "last page" is one field shared with
+        # every concurrent operation -- so a farm loop or queue poll landing in
+        # that window sends this navigation out referred from /dorf1.php. The
+        # same hazard `_marketplace_referer` closes on the writes, closed on the
+        # read that establishes them.
+        html = await self.http_client.get_html(path, referer=f"{base}{village_view}")
         self._marketplace_referer[village_id] = f"{base}{path}"
         # Reads bill the ceiling too. They were free, so an execute run reported
         # roughly half the traffic it actually spent -- and the daily ceiling is
@@ -280,25 +332,64 @@ class TradeRouteService:
         self._log_activity(started)
         return html
 
-    async def refresh_marketplace(self, village_id: int) -> str:
-        """Re-read the trade-route tab we are already looking at. ONE request.
+    async def refresh_marketplace(self, village_id: int) -> dict[str, Any]:
+        """Re-read the route list the way the game's own client does. ONE request.
 
         Deliberately a separate method rather than a flag on open_marketplace:
-        this is a different act. open_marketplace *navigates* to the page from
-        the village view; this *refreshes* the page already open, which is what
-        the game's own UI does after a route is created -- it re-renders the
-        list. The dorf2 hop would therefore be wrong here as well as wasteful: a
-        browser does not visit the village view to refresh a page it is sitting
-        on.
+        this is a different act, and a different REQUEST. open_marketplace
+        *navigates* to the page from the village view; this refetches the model
+        the open page runs on, and the game does that with GraphQL, not a page
+        load: the create's success handler calls ``e.onSuccess()``, which on the
+        list page is ``T = () => { N(Kb).then(...) }`` -- a
+        ``POST /api/v1/graphql`` carrying :data:`MARKETPLACE_READBACK_QUERY`.
+        There is no navigation here at all, so the dorf2 hop would be wrong as
+        well as wasteful.
+
+        The query takes no village argument -- it reads whichever village the
+        session is on -- so it asks for ``currentVillageId`` and we check it. A
+        pinned village would be better; a read that can say which village it
+        actually described is the next best thing, and it is what stops a
+        concurrent ``?newdid=`` from making us attribute one village's routes to
+        another.
+
+        Returns the GraphQL ``data`` payload, whose
+        ``ownPlayer.village.marketplace.tradeRoutes`` path is identical to the
+        page model's.
         """
         started = time.monotonic()
-        newdid_amp = f"&newdid={village_id}" if village_id else ""
-        path = f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}"
-        html = await self.http_client.get_html(path)
-        base = self.http_client.settings.base_url.rstrip("/")
-        self._marketplace_referer[village_id] = f"{base}{path}"
+        response = await self.http_client.post_json(
+            "/api/v1/graphql",
+            # `variables` is absent on purpose: the client's call passes none, and
+            # JSON.stringify drops an undefined value, so the real body has this
+            # one key. An extra key is a fingerprint like any other.
+            {"query": MARKETPLACE_READBACK_QUERY},
+            # An API request never advances page context, so this one must state
+            # where it is issued from: the marketplace tab, which is the only
+            # page whose script fires this query. Falling back to the
+            # account-wide last page would send it referred from whatever a
+            # concurrent loop touched during the write's 3-20s pacing delay.
+            referer=self._marketplace_referer.get(village_id),
+        )
+        # Reads bill the ceiling too -- this one consumed a real throttler gap.
         self._log_activity(started)
-        return html
+        view = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(view, dict):
+            raise MarketplaceUnreadable(
+                f"village {village_id}: the marketplace query returned no data, so "
+                f"what is on the marketplace is unknown"
+            )
+        own_player = view.get("ownPlayer")
+        current = own_player.get("currentVillageId") if isinstance(own_player, dict) else None
+        if village_id and current != village_id:
+            # The session moved between the write and the read-back. The routes
+            # in this payload are some OTHER village's; treating them as this
+            # one's would report routes that were never created here and hide
+            # ones that were.
+            raise MarketplaceUnreadable(
+                f"village {village_id}: the marketplace query answered for village "
+                f"{current!r}, so this village's routes are unknown"
+            )
+        return view
 
     async def confirm_routes(
         self, village_id: int, *, map_span: int = DEFAULT_MAP_SPAN
@@ -313,16 +404,17 @@ class TradeRouteService:
         reports them again, forever.
 
         So the only honest answer comes from looking. One request, and it is the
-        same request the game's own UI makes after a create.
+        same request the game's own UI makes after a create -- byte for byte the
+        query its create handler fires (see :func:`refresh_marketplace`).
 
-        Raises :class:`MarketplaceUnreadable` if the page cannot be read, because
-        "I could not check" and "nothing was created" are different answers and
-        must not collapse into one.
+        Raises :class:`MarketplaceUnreadable` if the answer cannot be read,
+        because "I could not check" and "nothing was created" are different
+        answers and must not collapse into one.
         """
-        html = await self.refresh_marketplace(village_id)
-        from ..parsers.html_parser import read_trade_routes
+        view = await self.refresh_marketplace(village_id)
+        from ..parsers.html_parser import read_trade_routes_from_view
 
-        parsed = read_trade_routes(html, map_span)
+        parsed = read_trade_routes_from_view(view, map_span)
         if parsed is None:
             raise MarketplaceUnreadable(
                 f"village {village_id}: could not re-read the marketplace after "

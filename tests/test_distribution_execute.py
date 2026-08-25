@@ -2046,6 +2046,7 @@ class TestMarketplaceReadsBillTheActivityCeiling:
             human_delay=SimpleNamespace(wait=_noop),
             activity_scheduler=SimpleNamespace(log_activity=logged.append),
             get_html=_empty_marketplace,
+            post_json=_empty_readback,
         )
         return TradeRouteService(client, live_enabled=True, reconciler_verified=True), logged
 
@@ -2055,6 +2056,8 @@ class TestMarketplaceReadsBillTheActivityCeiling:
         assert len(logged) == 1, "two GETs, billed as one page visit"
 
     def test_refreshing_it_is_billed(self):
+        # Still billed after moving to GraphQL: the request class changed, the
+        # throttler gap it consumed did not.
         service, logged = self._service()
         asyncio.run(service.refresh_marketplace(20003))
         assert len(logged) == 1
@@ -2070,3 +2073,16 @@ async def _empty_marketplace(path, **kw):
         '{viewData: {"ownPlayer":{"village":{"marketplace":{"tradeRoutes":[]}}}}}'
         ");</script></body></html>"
     )
+
+
+async def _empty_readback(path, payload, **kw):
+    # What the marketplace query answers for a village with no routes.
+    return {
+        "data": {
+            "ownPlayer": {
+                "id": 1,
+                "currentVillageId": 20003,
+                "village": {"marketplace": {"tradeRoutes": []}},
+            }
+        }
+    }

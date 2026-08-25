@@ -809,38 +809,104 @@ Net: a single farm loop adds a few seconds per cycle. A build queue
 adds 1-5 minutes per build. The biggest cost is the build wakeup
 reaction; it's also the highest-stealth-value change.
 
-## The trade-route read-back stays a document GET, not GraphQL
+## The trade-route read-back is GraphQL, not a document GET
 
-**Decision: keep it. Recorded because the evidence points the other way and the
-reasoning is not obvious.**
+**Decision reversed.** The section this replaces argued for keeping the read-back
+as `GET /build.php?gid=17&t=3&newdid=<v>`, and named exactly what would change
+it: the real query byte-for-byte, and a way for the read to still say which
+village it described. Both now exist, so the read-back is
+`POST /api/v1/graphql`.
 
 Every write to `/api/v1/trade-routes` is followed by a read, because the create's
 response body is empty and "the request was accepted" is not "the state changed".
-Ours reads the marketplace tab: `GET /build.php?gid=17&t=3&newdid=<v>`.
+The game's own client reads it back too — but not with a page load. From the
+Europe 2 bundle (gpack 22.03, `main.js`), the create's success handler runs
+`Q(); ... e.onSuccess()`, and on the list page `onSuccess` is
+`T = () => { N(Kb).then(...) }`, over:
 
-The game's own client does not do that. Its `main.js` success handlers call
-`E(); T();`, and `T` is a GraphQL refetch — `Travian.graphQL(...)` resolves to
-`POST /api/v1/graphql`. So a real create is followed by GraphQL, never a document
-navigation.
+```js
+N = (e, t) => Travian.Promises.graphQL({query: stripIgnoredCharacters(print(e)), variables: t})
+Travian.Promises.graphQL = t => fetch("/api/v1/graphql", {method: "POST", ...})
+```
 
-Switching was considered and rejected, on three grounds:
+So a real create is followed by GraphQL, never a document navigation.
 
-1. **A hand-built GraphQL query is a worse fingerprint than a plausible page
-   load.** The document GET is something a browser genuinely produces — a
-   Chromium check confirms a self-link click and a reload both emit exactly the
-   header set we send. A query that differs from the client's by one field or one
-   byte of whitespace is a request *no* client sends, which is more distinctive
-   than a page refresh, not less.
-2. **It would reintroduce a village-context race.** The marketplace query reads
-   `ownPlayer.village.marketplace` — the ACTIVE village, with no argument to pin
-   it. Our GET carries `newdid`, so it names the village it wants. Swapping to
-   GraphQL makes a read depend on shared session state, which is the same class
-   of bug as the build flow's (see `village_context_lock`).
-3. **The read-back is not itself the anomaly.** The real client reads the list
-   back after *every* write; ours reads once per origin. The frequency is lower
-   than a human's client, not higher.
+What the three original objections look like now:
 
-What would change this: a capture of the real GraphQL request, so the query and
-envelope could be matched byte-for-byte rather than reconstructed, plus a village
-argument (or an explicit switch under the lock) so the read still names its
-village. Until both exist, a plausible request beats an invented one.
+1. **"A hand-built query is a worse fingerprint than a plausible page load."**
+   Still true, and still the reason this took a second pass — which is why the
+   query is not hand-built. `Kb` and its two fragments are verbatim from the
+   bundle, and `MARKETPLACE_READBACK_QUERY` is the string the client's own
+   `print` + `stripIgnoredCharacters` pipeline produces from them. The `query`
+   keyword drops out: graphql-js prints an anonymous operation with no variables
+   or directives in short form. `variables` is absent because the client passes
+   none and `JSON.stringify` omits an undefined value.
+2. **"It would reintroduce a village-context race."** The query still takes no
+   village argument — but it asks for `ownPlayer.currentVillageId`, and
+   `refresh_marketplace` checks it. A pinned village would be better; a read that
+   states which village it answered about is the next best thing, and it turns a
+   silent mis-attribution into `MarketplaceUnreadable`, which the executor already
+   handles by deferring the origin. Reading one village's routes as another's was
+   the actual hazard, and it is closed.
+3. **"The read-back is not itself the anomaly."** Unchanged, and still on the
+   safe side: the real client fires this query after every write, ours once per
+   origin.
+
+**The navigation stays a document GET.** `open_marketplace` is a real
+navigation — dorf2, then the marketplace tab — and must remain one: it is the
+page a human opens, and it is what makes the subsequent write's `Referer`
+truthful. Only the read-back moved.
+
+**Two GraphQL calls in the bundle, one implemented.** The create's handler fires
+`Q()` as well as `e.onSuccess()`, but they are not two reads of the same thing.
+`Q()` runs a *different* query (`Fb`: `merchantsInfo`, `tradeShipCapacity`,
+`tradeShipsInfo`, `destinations`, `isShore`/`hasHarbour`) which re-arms the
+create dialog — it stays open after a successful create so the operator can add
+another route. We have no dialog, read none of those fields, and do not create
+one-at-a-time from a form; replaying that call would spend a throttler gap and a
+slice of the daily ceiling fetching data we discard, in service of a UI story
+that is not ours. Only `T()`/`Kb` — the route-list refetch — is implemented.
+
+**Request count unchanged.** The canary run is still four requests (dorf2,
+marketplace tab, create, read-back); the fourth changed method and endpoint, not
+existence. `tests/test_trade_route_footprint.py` pins it, and
+`tests/test_wire_referer.py` pins the query bytes on a socket.
+
+**Still open.** Every other `/api/v1/graphql` caller in this app
+(`auth_service`, `farm_list_service`, `reports_service`, `raid_analyzer_service`,
+`video_reward_service`) sends the generic JSON-client shape: axios's
+`Accept: application/json, text/plain, */*` plus an `X-Version` header. The
+bundle carries no `X-Version` anywhere and reaches this endpoint through plain
+`fetch`, so the correct shape is `for_fetch`. The read-back deliberately uses the
+same shape as its neighbours rather than being the one request on that endpoint
+that looks different — one endpoint sent with two shapes is a fingerprint in
+itself, and it is the low-volume request that would stand out. Moving all of them
+is a separate pass.
+
+## Marketplace reads pin their own Referer
+
+**Decision:** `get_html` takes `referer=`, the way `post_json` / `put_json` /
+`delete_json` already do, and the marketplace navigation uses it.
+
+`BrowserHeaders` tracks ONE "last page visited" per account, and every page GET
+in the app overwrites it. Each request also waits out a throttler gap *before*
+its headers are built, so the window is not theoretical: a farm loop or queue
+poll firing during the 1.5-3s gap ahead of the marketplace GET sends that
+navigation out referred from `/dorf1.php`. This is the hazard
+`_marketplace_referer` was introduced to close on the writes, and it was left
+open on the reads.
+
+`open_marketplace` now pins its second GET to the village view it just loaded.
+The read-back needs no new mechanism: as a `post_json` it already pins
+`_marketplace_referer`.
+
+One coupling this exposed: `for_page_load` derives `Sec-Fetch-Site` from the last
+page, so pinning a Referer on a client that has never navigated would emit
+`Sec-Fetch-Site: none` next to a `Referer`. `none` means "there was no referring
+context", so the pair is one Chrome cannot produce. `_stealth_pre_request`
+corrects it to `same-origin` whenever a Referer is pinned (every referer this app
+pins is built from `settings.base_url`, hence same-origin by construction). The
+subresource shapes already hardcode `same-origin`, so this only ever touches the
+page shape. Proven on a socket in `tests/test_wire_referer.py`.
+
+Cost: 0 (header strings are free).

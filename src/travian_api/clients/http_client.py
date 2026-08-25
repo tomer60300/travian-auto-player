@@ -597,6 +597,15 @@ class HttpClient:
         # Referer is a page that has no such form on it.
         if referer is not None:
             headers["Referer"] = referer
+            # A page load derives Sec-Fetch-Site from the client-wide last page,
+            # so pinning a Referer on one that has never navigated would emit
+            # `Sec-Fetch-Site: none` next to a Referer -- a pair Chrome cannot
+            # produce, since `none` means "there was no referring context". The
+            # subresource shapes already hardcode same-origin, so this only ever
+            # corrects the page shape. Every referer this app pins is built from
+            # settings.base_url, hence same-origin by construction.
+            if "Sec-Fetch-Site" in headers:
+                headers["Sec-Fetch-Site"] = "same-origin"
 
         # A None value is the suppression sentinel for curl_cffi: it emits
         # "name:" on the wire, deleting a header curl-impersonate would
@@ -1503,12 +1512,23 @@ class HttpClient:
         *,
         skip_reauth: bool = False,
         safe_to_retry: bool = True,
+        referer: str | None = None,
     ) -> str:
-        """Make a GET request and return HTML."""
+        """Make a GET request and return HTML.
+
+        Args:
+            referer: pin the Referer instead of using the client-wide last page.
+                Same reason ``post_json``/``put_json``/``delete_json`` take it:
+                ``BrowserHeaders`` tracks ONE last page per account, and this
+                request waits out a throttler gap (1.5-3s, longer on the tail)
+                before its headers are built -- so any concurrent page GET in
+                that window rewrites the Referer this one was going to send. A
+                caller that knows which page it is navigating from says so.
+        """
         if not url.startswith("http"):
             url = urljoin(self.base_url, url.lstrip("/"))
 
-        headers = await self._stealth_pre_request(url, "page")
+        headers = await self._stealth_pre_request(url, "page", referer=referer)
 
         try:
             logger.debug(f"GET {url}")
