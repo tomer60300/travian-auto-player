@@ -61,7 +61,7 @@ never hidden.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .allocation import EPSILON, Resource, ResourcePlan, village_label
@@ -143,6 +143,118 @@ class Route:
 
 
 @dataclass(frozen=True)
+class RelayChain:
+    """One crop delivery that travels in two hops instead of one.
+
+    Derived from the finished route set rather than recorded while the search
+    runs, and deliberately so: a hub can also be created by a swap rewiring an
+    existing leg, so the search's own bookkeeping is not the whole truth. Two
+    crop routes sharing a village -- one arriving, one leaving -- IS the relay,
+    whatever produced it.
+    """
+
+    origin: int
+    hub: int
+    destination: int
+    collect_hours: float
+    """Worst-case wait from production at the origin to arrival at the hub."""
+
+    forward_hours: float
+    """Worst-case wait from arrival at the hub to arrival at the destination."""
+
+    @property
+    def end_to_end_hours(self) -> float:
+        """What the operator actually waits for a delivery.
+
+        The sum, because the cargo is subject to both waits in turn: it sits at
+        the origin until that route's dispatch time, travels, then sits at the
+        hub until the forwarding route's own dispatch time, and travels again.
+        Checking the legs separately -- which is all the plan used to do -- can
+        pass two 1.5h legs and never mention the 3h delivery.
+        """
+        return self.collect_hours + self.forward_hours
+
+
+def relay_chains(routes: Iterable[Route]) -> tuple[RelayChain, ...]:
+    """The relays in *routes*, worst end-to-end first.
+
+    Crop only. Materials are forbidden from chaining A->B->C (profile section
+    3.5), so a material arriving somewhere that also ships that material out is
+    two independent flows; reporting it as a relay would invent a dependency the
+    plan does not have.
+    """
+    crop = [
+        r
+        for r in routes
+        if r.cargo_per_hour.get(Resource.CROP, 0.0) > EPSILON and r.origin != r.destination
+    ]
+    inbound: dict[int, list[Route]] = {}
+    for route in crop:
+        inbound.setdefault(route.destination, []).append(route)
+
+    chains = [
+        RelayChain(
+            origin=collect.origin,
+            hub=forward.origin,
+            destination=forward.destination,
+            collect_hours=collect.latency_hours,
+            forward_hours=forward.latency_hours,
+        )
+        for forward in crop
+        for collect in inbound.get(forward.origin, ())
+        if collect.origin != forward.destination
+    ]
+    # Worst first, as every other finding list is ordered. The village ids only
+    # break exact ties, and only for display: nothing about the plan depends on
+    # this order.
+    return tuple(
+        sorted(chains, key=lambda c: (-c.end_to_end_hours, c.origin, c.hub, c.destination))
+    )
+
+
+def relay_findings(
+    routes: Iterable[Route],
+    names: Mapping[int, str],
+    max_latency_hours: float | None,
+) -> list[Finding]:
+    """Report every relay: as a warning when the delivery misses the target.
+
+    A compliant relay is still reported, as a note. Two rows on the sheet that
+    are really one delivery is a fact about the plan an operator typing them into
+    the game needs, target or no target -- and on the account that motivated
+    this, 45 of 66 plans used a relay and not one line of output said so.
+    """
+    findings: list[Finding] = []
+    for chain in relay_chains(routes):
+        path = " -> ".join(
+            village_label(vid, names) for vid in (chain.origin, chain.hub, chain.destination)
+        )
+        over_target = (
+            max_latency_hours is not None and chain.end_to_end_hours > max_latency_hours + EPSILON
+        )
+        if over_target:
+            message = (
+                f"relayed crop {path} takes {chain.end_to_end_hours:.1f}h end-to-end against a "
+                f"{max_latency_hours:.0f}h target: {chain.collect_hours:.1f}h to the hub "
+                f"then {chain.forward_hours:.1f}h on, and neither leg alone exceeds it"
+            )
+        else:
+            message = (
+                f"crop {path} is relayed: the hub forwards what it collects, so these "
+                f"are two rows and one {chain.end_to_end_hours:.1f}h delivery"
+            )
+        findings.append(
+            Finding(
+                category=Category.RELAY_LATENCY if over_target else Category.RELAY,
+                message=message,
+                detail=f"{path} — {chain.end_to_end_hours:.1f}h",
+                village=village_label(chain.hub, names),
+            )
+        )
+    return findings
+
+
+@dataclass(frozen=True)
 class Shortfall:
     """Demand that could not be routed, and why."""
 
@@ -206,6 +318,9 @@ class Plan:
     shortfalls: tuple[Shortfall, ...] = ()
     over_budget: tuple[OverBudget, ...] = ()
     findings: tuple[Finding, ...] = ()
+    # The two-hop crop deliveries hiding in `routes`. Carried explicitly because
+    # a caller rendering the sheet cannot see them: they are ordinary rows.
+    relays: tuple[RelayChain, ...] = ()
 
     @property
     def warnings(self) -> tuple[str, ...]:
@@ -1147,6 +1262,11 @@ def build_plan(
     # -- and every one of them ends in the same clause, so the only thing that
     # decides whether the operator reads the third one is whether it is worse
     # than the first.
+    # Before the per-leg check, because a relay's end-to-end figure is the one
+    # that can be a surprise: both its legs may sit inside the target.
+    relays = relay_chains(routes)
+    findings.extend(relay_findings(routes, names, max_latency_hours))
+
     if max_latency_hours is not None:
         for route in sorted(
             (r for r in routes if r.latency_hours > max_latency_hours),
@@ -1195,4 +1315,5 @@ def build_plan(
         shortfalls=tuple(shortfalls),
         over_budget=over_budget,
         findings=tuple(findings),
+        relays=relays,
     )

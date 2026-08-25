@@ -58,6 +58,9 @@ from travian_api.services.distribution.planner import (
     DistributionPlan,
     PlannerConfig,
     SheetRow,
+    Verdict,
+    assess,
+    blockers,
     craft_plan,
 )
 from travian_api.services.distribution.route_revert import describe, plan_revert
@@ -474,13 +477,73 @@ def _diagnostics_response(diagnostics: Diagnostics) -> DiagnosticsResponse:
     )
 
 
+class RelayResponse(BaseModel):
+    """A crop delivery that arrives in two hops, which the rows cannot show.
+
+    The sheet lists ``V22 -> V02`` and ``V02 -> V17`` as unrelated lines, so
+    without this the operator has no way to know the second row is carrying what
+    the first one delivered -- or that the delivery takes both legs' waits.
+    """
+
+    origin: int
+    hub: int
+    destination: int
+    origin_name: str
+    hub_name: str
+    destination_name: str
+    collect_hours: float
+    forward_hours: float
+    end_to_end_hours: float = Field(
+        description=(
+            "What the operator waits for a delivery: both legs' worst cases in "
+            "turn. The per-route latency target is checked per leg, so two "
+            "compliant legs can compose into a delivery that misses it."
+        )
+    )
+
+
+class VerdictResponse(BaseModel):
+    """``feasible``, with what it weighed and what it did not.
+
+    ``feasible`` alone was rendered as a green badge, so a plan losing 2.4M
+    resources a day looked approved. ``clean`` is the question that badge was
+    actually being asked.
+    """
+
+    executable: bool
+    clean: bool
+    blockers: list[str]
+    covers: list[str]
+    unweighed: list[str]
+    critical_findings: int
+
+
+def _verdict_response(verdict: Verdict) -> VerdictResponse:
+    return VerdictResponse(
+        executable=verdict.executable,
+        clean=verdict.clean,
+        blockers=list(verdict.blockers),
+        covers=list(verdict.covers),
+        unweighed=[category.value for category in verdict.unweighed],
+        critical_findings=verdict.critical_findings,
+    )
+
+
 class PlanResponse(BaseModel):
     rows: list[SheetRowResponse]
     budgets: list[BudgetResponse]
     shortfalls: list[ShortfallResponse]
     unallocated: list[UnallocatedResponse]
     total_merchants: int
-    feasible: bool
+    feasible: bool = Field(
+        description=(
+            "Whether the sheet can be carried out. Kept as the field every caller "
+            "reads, and still what /execute gates on; see `verdict` for what that "
+            "word does and does not cover."
+        )
+    )
+    verdict: VerdictResponse
+    relays: list[RelayResponse]
     # Every finding as prose, in producer order. Kept because it is the contract
     # the UI and the tests were built on -- but a 25-village account put 132
     # lines in here and the operator stopped reading, so `diagnostics` is what
@@ -1642,6 +1705,24 @@ async def post_plan(
         ],
         total_merchants=plan.total_merchants,
         feasible=plan.is_feasible,
+        # Built from the COMPLETE finding list, not plan.findings: overflow,
+        # starvation and busy merchants are computed here, and they are precisely
+        # what feasibility does not weigh.
+        verdict=_verdict_response(assess(plan, findings, names)),
+        relays=[
+            RelayResponse(
+                origin=chain.origin,
+                hub=chain.hub,
+                destination=chain.destination,
+                origin_name=village_label(chain.origin, names),
+                hub_name=village_label(chain.hub, names),
+                destination_name=village_label(chain.destination, names),
+                collect_hours=chain.collect_hours,
+                forward_hours=chain.forward_hours,
+                end_to_end_hours=chain.end_to_end_hours,
+            )
+            for chain in plan.relays
+        ],
         warnings=[f.message for f in findings],
         # The route count is what lets the headline stop blaming the plan for
         # losses it did not cause -- see _account_headline.
@@ -2123,11 +2204,17 @@ async def post_execute(
     # Feasibility is enforced server-side, not just by the disabled UI button: a
     # direct API call must not commit an over-budget/unroutable plan (dry_run
     # still previews it, warnings and all).
+    # Still gated on is_feasible itself, never on the message helper: if the two
+    # ever disagree the authoritative one must be the one that refuses.
     if not plan.is_feasible:
+        # The blockers, not every warning. This used to concatenate plan.warnings
+        # -- on a 25-village account that is 132 lines in a 422 body, and the two
+        # that explain the refusal are indistinguishable from the 130 that do not.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
-                "Plan is not feasible; refusing to execute in-game. " + " ".join(plan.warnings)
+                "Plan is not executable; refusing to write to the account. "
+                + " ".join(f"{reason}." for reason in blockers(plan, names))
             ).strip(),
         )
 

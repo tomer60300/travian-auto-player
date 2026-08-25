@@ -82,3 +82,47 @@ export function groupDetails(group) {
   if (!group || group.count <= 1) return []
   return group.findings.filter((finding) => finding.detail)
 }
+
+/** The plan's one-line status, and what colour it earns.
+ *
+ * "Feasible" was one word answering two questions — can this sheet be carried
+ * out, and is it worth carrying out — and it rendered green either way, so a
+ * plan losing 2.4M resources a day looked approved. That badge is the only
+ * thing between a bad plan and 53 real routes, so it now distinguishes:
+ *
+ * * `Cannot run` — a merchant budget, an unroutable receiver or an
+ *   over-claimed allocation makes the sheet impossible. Going live is blocked.
+ * * `Runs, not clean` — executable, with critical findings the check does not
+ *   weigh (overflow, starvation, an unpaid tribute). Going live is allowed:
+ *   those are facts about the account, and a stockpile is deliberate.
+ * * `Ready to run` — executable, nothing critical outstanding.
+ *
+ * `verdict` is absent when an older backend answered: the app on :80 is a
+ * long-running process only restarted with permission, so a freshly built
+ * bundle can briefly meet an API that predates it. Then this degrades to the
+ * bare boolean that API does send rather than inventing the second answer.
+ */
+export function planStatus(plan) {
+  if (!plan) return null
+  const verdict = plan.verdict ?? null
+  const executable = verdict ? verdict.executable : Boolean(plan.feasible)
+  if (!executable) return { label: 'Cannot run', tone: 'text-danger', verdict }
+  if (verdict && !verdict.clean) return { label: 'Runs, not clean', tone: 'text-warning', verdict }
+  return { label: verdict ? 'Ready to run' : 'Feasible', tone: 'text-success', verdict }
+}
+
+/** Sheet rows that are legs of a relayed crop delivery, keyed `origin:destination`.
+ *
+ * A relay is two ordinary rows, so the sheet cannot show it: the operator
+ * typing them into the game has no way to know the second is carrying what the
+ * first delivered. Both legs of a chain are indexed, because either one alone
+ * is the misleading half.
+ */
+export function relayLegIndex(relays) {
+  const legs = new Map()
+  for (const chain of relays ?? []) {
+    legs.set(`${chain.origin}:${chain.hub}`, { leg: 1, chain })
+    legs.set(`${chain.hub}:${chain.destination}`, { leg: 2, chain })
+  }
+  return legs
+}

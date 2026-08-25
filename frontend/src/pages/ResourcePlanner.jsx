@@ -13,6 +13,7 @@ import {
   setupMatchesAccount,
 } from '../utils/plannerSetup'
 import { METER_TONE, allocationMeterSeverity } from '../utils/plannerAllocation'
+import { planStatus, relayLegIndex } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
 import { copyToClipboard } from '../utils/clipboard'
 
@@ -711,8 +712,9 @@ export default function ResourcePlanner() {
     const typed = villages.filter(
       (v) => tradeOffice[v.village_id] != null || cropCeilings[v.village_id] != null
     ).length
-    if (!typed) {
-      toast.error('Nothing typed yet — fill in a Trade Office level or crop alert first')
+    const named = Object.entries(profiles).filter(([, a]) => Object.keys(a ?? {}).length)
+    if (!typed && !named.length) {
+      toast.error('Nothing typed yet — fill in a Trade Office level, crop alert or allocation first')
       return
     }
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
@@ -723,11 +725,27 @@ export default function ResourcePlanner() {
         villages,
         tradeOffice,
         cropCeilings,
+        profiles,
+        profileWindows,
+        merchantModel,
         exportedAt: new Date().toISOString(),
       })
     )
-    toast.success(`Saved ${typed} village(s) — keep the file, load it after a rebuild`)
-  }, [villages, tradeOffice, cropCeilings, accountKey, playerName, toast])
+    const parts = []
+    if (typed) parts.push(`${typed} village(s)`)
+    if (named.length) parts.push(`${named.length} profile(s)`)
+    toast.success(`Saved ${parts.join(' and ')} — keep the file, load it after a rebuild`)
+  }, [
+    villages,
+    tradeOffice,
+    cropCeilings,
+    profiles,
+    profileWindows,
+    merchantModel,
+    accountKey,
+    playerName,
+    toast,
+  ])
 
   const applySetupText = useCallback(
     (text) => {
@@ -754,18 +772,39 @@ export default function ResourcePlanner() {
         )
         if (!proceed) return
       }
-      const merged = mergeSetup({ setup, villages, tradeOffice, cropCeilings })
+      const merged = mergeSetup({
+        setup,
+        villages,
+        tradeOffice,
+        cropCeilings,
+        profiles,
+        profileWindows,
+      })
       setTradeOffice(merged.tradeOffice)
       setCropCeilings(merged.cropCeilings)
+      setProfiles(merged.profiles)
+      setProfileWindows(merged.profileWindows)
+      // Capacity is server-calibrated, so a file that carries a calibration is
+      // more trustworthy than this build's default. Absent, the default stands.
+      if (merged.merchantModel) setMerchantModel(merged.merchantModel)
+      // Land on a profile the file actually brought, so its numbers are what the
+      // operator sees rather than whichever profile happened to be selected.
+      const [first] = merged.report.profilesLoaded
+      if (first) setActiveProfile(first)
       setSetupReport(merged.report)
       setPasteOpen(false)
       setPasteText('')
       // The plan was built from the old values, so it no longer describes the
       // inputs on screen.
       setPlan(null)
-      toast.success(`Loaded ${merged.report.loaded} village(s) from the setup file`)
+      const parts = []
+      if (merged.report.loaded) parts.push(`${merged.report.loaded} village(s)`)
+      if (merged.report.profilesLoaded.length) {
+        parts.push(`profile(s) ${merged.report.profilesLoaded.join(', ')}`)
+      }
+      toast.success(`Loaded ${parts.join(' and ') || 'nothing'} from the setup file`)
     },
-    [villages, tradeOffice, cropCeilings, accountKey, toast]
+    [villages, tradeOffice, cropCeilings, profiles, profileWindows, accountKey, toast]
   )
 
   const onSetupFileChosen = useCallback(
@@ -1358,6 +1397,11 @@ export default function ResourcePlanner() {
   const setupStillUnknown = setupReport
     ? setupReport.stillUnknown.filter((v) => tradeOffice[v.village_id] == null)
     : []
+
+  const planState = planStatus(plan)
+  const verdict = planState?.verdict ?? null
+  const relays = plan?.relays ?? []
+  const relayLegs = relayLegIndex(relays)
 
   // What going live will actually do, derived from the PREVIEW the operator is
   // looking at, so the confirmation states real numbers rather than a vague
@@ -2508,11 +2552,62 @@ export default function ResourcePlanner() {
                 </div>
                 <div>
                   <div className="text-secondary text-xs uppercase">Status</div>
-                  <div className={plan.feasible ? 'text-success' : 'text-danger'}>
-                    {plan.feasible ? 'Feasible' : 'Not feasible'}
-                  </div>
+                  <div className={planState.tone}>{planState.label}</div>
+                  {verdict && !verdict.clean && (
+                    <div className="text-secondary text-xs">
+                      {verdict.executable
+                        ? `${verdict.critical_findings} critical finding${
+                            verdict.critical_findings === 1 ? '' : 's'
+                          } this check does not weigh`
+                        : `${verdict.blockers.length} blocker${
+                            verdict.blockers.length === 1 ? '' : 's'
+                          }`}
+                    </div>
+                  )}
                 </div>
               </div>
+
+              {verdict && (
+                <details className="card p-4 text-xs">
+                  <summary className="cursor-pointer font-semibold">
+                    What “{planState.label}” checked
+                  </summary>
+                  <p className="text-secondary mt-2">
+                    It asks one question — <em>can this sheet be carried out</em> — and it weighs
+                    exactly three things:
+                  </p>
+                  <ul className="list-disc list-inside mt-1">
+                    {verdict.covers.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                  {verdict.blockers.length > 0 && (
+                    <>
+                      <p className="text-danger mt-2 font-semibold">
+                        Why it cannot run, in full:
+                      </p>
+                      <ul className="list-disc list-inside text-danger">
+                        {verdict.blockers.map((line) => (
+                          <li key={line}>{line}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                  <p className="text-secondary mt-2">
+                    It deliberately does <strong>not</strong> weigh what the plan leaves behind —
+                    stores overflowing, a granary running dry, a tribute unpaid. Those are facts
+                    about the account, and a plan that leaves them in place still runs perfectly
+                    well; blocking on overflow would refuse a stockpile you meant to build.
+                    {verdict.unweighed.length > 0 && (
+                      <>
+                        {' '}
+                        Outstanding here: <strong>{verdict.unweighed.join(', ')}</strong> — read the
+                        findings below before going live.
+                      </>
+                    )}
+                  </p>
+                </details>
+              )}
 
               <div className="card p-4">
                 <h3 className="font-semibold mb-2">Merchant budget</h3>
@@ -2566,10 +2661,24 @@ export default function ResourcePlanner() {
                   <tbody>
                     {plan.rows.map((row, i) => {
                       const sheet = sheetRow(row)
+                      const relay = relayLegs.get(`${row.origin}:${row.destination}`)
                       return (
                         <tr key={i} className="border-t border-gray-800">
                           <td className="py-1 px-2">{sheet.from}</td>
-                          <td className="px-2">{sheet.to}</td>
+                          <td className="px-2">
+                            {sheet.to}
+                            {relay && (
+                              // Neither wording names a single partner village: one
+                              // hub can collect from several origins and forward to
+                              // several destinations, so "carries crop from V22"
+                              // would be wrong on exactly the rows that matter most.
+                              <div className="text-warning text-[10px]">
+                                {relay.leg === 1
+                                  ? `relay leg 1 — ${relay.chain.hub_name} forwards this on`
+                                  : `relay leg 2 — forwards what arrives at ${relay.chain.hub_name}`}
+                              </div>
+                            )}
+                          </td>
                           <td className="px-2 font-mono">
                             {/* Always all four, in the marketplace's order, zeros
                                 included -- the sheet is copied into the game's
@@ -2614,6 +2723,52 @@ export default function ResourcePlanner() {
                   <span className="whitespace-nowrap"> Send at</span> field; the repeat interval is
                   set separately. It is not the wall-clock instant you must press create.
                 </p>
+                {relays.length > 0 && (
+                  <div className="mt-3 border-t border-gray-800 pt-3">
+                    <h4 className="font-semibold text-xs">
+                      Relayed crop — {relays.length} deliver
+                      {relays.length === 1 ? 'y' : 'ies'} arriving in two hops
+                    </h4>
+                    <p className="text-secondary text-xs mt-1">
+                      Two rows above, one delivery. The hub ships from its own granary and the
+                      first leg refills it, so creating the second row without the first ships
+                      nothing useful. “Total” is what you actually wait for: each leg's own worst
+                      case in turn, which is why it can exceed a target both legs meet.
+                    </p>
+                    <table className="w-full text-xs mt-2">
+                      <thead className="text-secondary uppercase">
+                        <tr>
+                          <th className="text-left py-1 px-2">Path</th>
+                          <th className="text-right px-2">To hub</th>
+                          <th className="text-right px-2">Hub on</th>
+                          <th className="text-right px-2">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {relays.map((chain) => (
+                          <tr
+                            key={`${chain.origin}:${chain.hub}:${chain.destination}`}
+                            className="border-t border-gray-800"
+                          >
+                            <td className="py-1 px-2">
+                              {chain.origin_name} → <strong>{chain.hub_name}</strong> →{' '}
+                              {chain.destination_name}
+                            </td>
+                            <td className="text-right px-2 font-mono">
+                              {chain.collect_hours.toFixed(1)}h
+                            </td>
+                            <td className="text-right px-2 font-mono">
+                              {chain.forward_hours.toFixed(1)}h
+                            </td>
+                            <td className="text-right px-2 font-mono font-semibold">
+                              {chain.end_to_end_hours.toFixed(1)}h
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
 
               <div className="card p-4">
@@ -2712,12 +2867,23 @@ export default function ResourcePlanner() {
                 </div>
 
                 {!plan.feasible && (
-                  <p className="text-warning text-xs mb-2">
-                    Over budget / unroutable — <strong>going live is blocked</strong> until that is
-                    resolved, and the server refuses it too. Preview is not blocked: it changes
-                    nothing, costs no requests, and naming the routes that break is how you
-                    resolve it.
-                  </p>
+                  <div className="text-warning text-xs mb-2">
+                    <p>
+                      <strong>Going live is blocked</strong> until this is resolved, and the server
+                      refuses it too. Preview is not blocked: it changes nothing, costs no
+                      requests, and naming the routes that break is how you resolve it.
+                    </p>
+                    {/* The reasons, not a category. "Over budget / unroutable" told the
+                        operator which of two shapes the problem had and nothing about
+                        which village caused it. */}
+                    {verdict && verdict.blockers.length > 0 && (
+                      <ul className="list-disc list-inside mt-1">
+                        {verdict.blockers.map((line) => (
+                          <li key={line}>{line}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 )}
 
                 {execResult && (

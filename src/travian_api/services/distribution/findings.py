@@ -69,6 +69,7 @@ class Category(StrEnum):
     TRIBUTE_UNFUNDED = "tribute_unfunded"
     UNALLOCATED = "unallocated"
     MERCHANTS_BUSY = "merchants_busy"
+    RELAY_LATENCY = "relay_latency"
     LATENCY = "latency"
     ARRIVAL_GAP = "arrival_gap"
     CYCLE_TOO_SHORT = "cycle_too_short"
@@ -81,6 +82,7 @@ class Category(StrEnum):
     TRIBUTE_COLD_START = "tribute_cold_start"
     TRIBUTE_SPLIT = "tribute_split"
     SUSTAIN_NOOP = "sustain_noop"
+    RELAY = "relay"
 
 
 @dataclass(frozen=True)
@@ -177,8 +179,19 @@ _SPECS: Mapping[Category, _Spec] = {
             "(the live run does that for you), or run again once the merchants are home."
         ),
     ),
-    Category.LATENCY: _Spec(
+    Category.RELAY_LATENCY: _Spec(
         order=12,
+        severity=Severity.WARNING,
+        subject="relay",
+        headline="{count} {subject} miss the latency target end-to-end",
+        action=(
+            "Each leg on its own is inside the target; the delivery is not, because the "
+            "cargo waits at the hub for its next dispatch. Shorten the forwarding leg's "
+            "cycle, ship those villages direct (set max_relay_hops to 0), or accept it."
+        ),
+    ),
+    Category.LATENCY: _Spec(
+        order=13,
         severity=Severity.WARNING,
         subject="route",
         headline="{count} {subject} miss the latency target",
@@ -189,7 +202,7 @@ _SPECS: Mapping[Category, _Spec] = {
         ),
     ),
     Category.ARRIVAL_GAP: _Spec(
-        order=13,
+        order=14,
         severity=Severity.WARNING,
         subject="route",
         headline="{count} {subject} land too close to another arrival",
@@ -199,7 +212,7 @@ _SPECS: Mapping[Category, _Spec] = {
         ),
     ),
     Category.CYCLE_TOO_SHORT: _Spec(
-        order=14,
+        order=15,
         severity=Severity.WARNING,
         subject="route",
         headline="{count} {subject} fire faster than the arrival-gap target",
@@ -209,7 +222,7 @@ _SPECS: Mapping[Category, _Spec] = {
         ),
     ),
     Category.CYCLE_VS_WINDOW: _Spec(
-        order=15,
+        order=16,
         severity=Severity.WARNING,
         subject="route",
         headline="{count} {subject} cannot fit their cycle into the profile's hours",
@@ -219,14 +232,14 @@ _SPECS: Mapping[Category, _Spec] = {
         ),
     ),
     Category.RESERVED_WINDOW: _Spec(
-        order=16,
+        order=17,
         severity=Severity.WARNING,
         subject="route",
         headline="{count} {subject} land inside the reserved window",
         action="Nothing else fits. Widen the window's slack, or accept the arrivals in it.",
     ),
     Category.MANUAL_TRANSFER: _Spec(
-        order=17,
+        order=18,
         severity=Severity.WARNING,
         subject="tribute",
         headline="{count} {subject} must be shipped by hand",
@@ -237,7 +250,7 @@ _SPECS: Mapping[Category, _Spec] = {
         ),
     ),
     Category.UNREADABLE_RATE: _Spec(
-        order=18,
+        order=19,
         severity=Severity.WARNING,
         subject="allocation",
         headline="{count} {subject} were ignored: no production rate could be read",
@@ -247,7 +260,7 @@ _SPECS: Mapping[Category, _Spec] = {
         ),
     ),
     Category.SEARCH_TRUNCATED: _Spec(
-        order=19,
+        order=20,
         severity=Severity.WARNING,
         subject="search",
         headline="the route search stopped before it converged",
@@ -295,6 +308,17 @@ _SPECS: Mapping[Category, _Spec] = {
         action=(
             "Sustain covers a negative production deficit; these villages are not losing "
             "{resource}, so the mode does nothing. Harmless, but not what was intended."
+        ),
+    ),
+    Category.RELAY: _Spec(
+        order=34,
+        severity=Severity.NOTE,
+        subject="relay",
+        headline="{count} {subject} carry crop through a hub instead of direct",
+        action=(
+            "Two rows on the sheet, one delivery: the hub forwards what it collects. The "
+            "second leg is only as full as the first one made it, so creating one without "
+            "the other ships nothing useful."
         ),
     ),
 }

@@ -17,8 +17,8 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .allocation import EPSILON, Allocation, Resource, ResourcePlan, resolve_resource
-from .findings import Finding
+from .allocation import EPSILON, Allocation, Resource, ResourcePlan, resolve_resource, village_label
+from .findings import Category, Finding, Severity
 from .geometry import MapGeometry
 from .merchants import CEIL_DUST_TOLERANCE, DAILY_BEAT_CYCLES, MerchantModel
 from .optimizer import (
@@ -28,6 +28,7 @@ from .optimizer import (
     MIN_SEND_FILL,
     OverBudget,
     Plan,
+    RelayChain,
     Shortfall,
     VillageState,
     build_plan,
@@ -121,11 +122,26 @@ class DistributionPlan:
 
     @property
     def is_feasible(self) -> bool:
-        # Routing feasibility is not enough: an allocation that over-claims the
-        # account drives the remainder village's target negative, which the
-        # optimizer will faithfully route as if the village could ship more than
-        # it produces. That sheet is unsustainable and must not read as feasible.
+        """Whether this sheet can be carried out. NOT whether it is a good idea.
+
+        Routing feasibility is not enough: an allocation that over-claims the
+        account drives the remainder village's target negative, which the
+        optimizer will faithfully route as if the village could ship more than
+        it produces. That sheet is unsustainable and must not read as feasible.
+
+        What this deliberately does NOT weigh is anything about the *outcome* --
+        stores overflowing, granaries running dry, a tribute going unpaid. Those
+        are facts about the account the plan is being asked to run on, and a plan
+        that leaves them in place is still perfectly executable. Vetoing on them
+        would break a deliberate stockpile. See :func:`assess`, which says out
+        loud both what this weighed and what it did not.
+        """
         return self.routing.is_feasible and not self.over_allocated
+
+    @property
+    def relays(self) -> tuple[RelayChain, ...]:
+        """Two-hop crop deliveries, which the sheet's rows cannot show."""
+        return self.routing.relays
 
     @property
     def over_allocated(self) -> tuple[Resource, ...]:
@@ -152,6 +168,108 @@ class DistributionPlan:
 
     def free_merchants(self, village_id: int) -> int:
         return self.spare_merchants.get(village_id, 0) - self.merchants_committed.get(village_id, 0)
+
+
+# What ``is_feasible`` weighs, in the operator's words. Carried on every verdict
+# so a green light cannot be read as "and nothing else is wrong": these three
+# things, and only these three.
+FEASIBILITY_COVERS: tuple[str, ...] = (
+    "every origin stays inside its merchant budget",
+    "every receiver's demand can be supplied by some village",
+    "no resource is allocated beyond what the account produces",
+)
+
+# The one critical category ``is_feasible`` has an opinion about. Every other
+# critical finding is real AND unweighed: a plan can destroy resources all day
+# and still be perfectly executable, so those belong in `unweighed` rather than
+# in a veto.
+_WEIGHED_CRITICALS: frozenset[Category] = frozenset({Category.OVER_ALLOCATED})
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """``is_feasible``, with its own limits stated.
+
+    ``executable`` is the old boolean unchanged -- and it is still what
+    ``/execute`` gates on, because everything it weighs genuinely prevents the
+    sheet from working. ``clean`` is the separate question the page was silently
+    answering with it: nothing critical is outstanding either.
+    """
+
+    executable: bool
+    blockers: tuple[str, ...] = ()
+    """Why not, in full. Empty when ``executable``."""
+
+    covers: tuple[str, ...] = FEASIBILITY_COVERS
+    unweighed: tuple[Category, ...] = ()
+    """Critical findings this answer did not consider, worst-ranked first."""
+
+    critical_findings: int = 0
+    """How many, not how many kinds: ``unweighed`` is deduplicated, this is not."""
+
+    @property
+    def clean(self) -> bool:
+        """Executable, and nothing critical left outside what was weighed.
+
+        The only condition that earns a green light. A plan losing 2.4M/day is
+        executable and not clean, which is exactly the distinction the single
+        boolean could not draw.
+        """
+        return self.executable and not self.unweighed
+
+
+def blockers(plan: DistributionPlan, names: Mapping[int, str] | None = None) -> tuple[str, ...]:
+    """Every reason this plan cannot be carried out, named. Empty when it can.
+
+    Separate from :func:`assess` because ``/execute`` needs exactly this and
+    nothing else: it has no reason to build a verdict whose `unweighed` and
+    `critical_findings` it cannot populate honestly.
+    """
+    reasons: list[str] = []
+    for over in plan.over_budget:
+        reasons.append(
+            f"{village_label(over.village_id, names)} commits {over.committed} merchants "
+            f"but its budget allows {over.available}"
+        )
+    for short in plan.shortfalls:
+        reasons.append(
+            f"{village_label(short.village_id, names)} needs {short.per_hour:,.0f} "
+            f"{short.resource.value}/h that no village has spare"
+        )
+    for resource in plan.over_allocated:
+        reasons.append(
+            f"{resource.value} allocations claim more than the account produces, so the "
+            f"remainder village would have to ship what it does not have"
+        )
+    return tuple(reasons)
+
+
+def assess(
+    plan: DistributionPlan,
+    findings: Sequence[Finding],
+    names: Mapping[int, str] | None = None,
+) -> Verdict:
+    """Say what feasibility decided, and what it left to the operator.
+
+    ``findings`` is the COMPLETE list, including the ones computed outside
+    :func:`craft_plan` -- overflow, starvation, busy merchants. Those are exactly
+    the findings the gate does not weigh, so a verdict built from
+    ``plan.findings`` alone would report an empty ``unweighed`` and be the same
+    lie in a longer sentence.
+    """
+    criticals = [f for f in findings if f.severity is Severity.CRITICAL]
+    # dict.fromkeys keeps first-seen order, which is producer order -- the same
+    # order summarise() ranks by, so the worst reads first here too.
+    unweighed = tuple(
+        dict.fromkeys(f.category for f in criticals if f.category not in _WEIGHED_CRITICALS)
+    )
+
+    return Verdict(
+        executable=plan.is_feasible,
+        blockers=blockers(plan, names),
+        unweighed=unweighed,
+        critical_findings=len(criticals),
+    )
 
 
 def craft_plan(

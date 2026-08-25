@@ -20,7 +20,8 @@ from fastapi import HTTPException
 
 from travian_api.parsers.html_parser import parse_trade_routes
 from travian_api.services.distribution.allocation import Resource
-from travian_api.services.distribution.planner import SheetRow
+from travian_api.services.distribution.optimizer import OverBudget, Plan
+from travian_api.services.distribution.planner import DistributionPlan, SheetRow
 from travian_api.services.trade_route_service import (
     ExistingRoute,
     PlannedRoute,
@@ -180,9 +181,16 @@ class TestLiveGate:
     def test_live_refuses_an_infeasible_plan(self):
         # The UI disables the button on !feasible; the server must refuse too, so
         # a direct API call can't commit an over-budget plan.
+        #
+        # A real DistributionPlan, not a stand-in with an is_feasible attribute:
+        # the refusal now explains itself from the plan's own over_budget rows, so
+        # a double that only carries the boolean would pass while telling the
+        # operator nothing.
         async def _fake_plan(_body):
-            plan = SimpleNamespace(is_feasible=False, warnings=("merchants over budget",), rows=())
-            return SimpleNamespace(plan=plan, names={}, coords={}, warnings=[])
+            plan = DistributionPlan(
+                routing=Plan(over_budget=(OverBudget(village_id=20003, committed=9, available=4),))
+            )
+            return SimpleNamespace(plan=plan, names={20003: "Capital"}, coords={}, warnings=[])
 
         with (
             _patch(dist_module, "_plan_account", _fake_plan),
@@ -190,7 +198,12 @@ class TestLiveGate:
         ):
             _execute(_exec_body(dry_run=False), svc=_dry_svc(live_enabled=True))
         assert exc.value.status_code == 422
-        assert "feasible" in exc.value.detail.lower()
+        detail = exc.value.detail
+        assert "not executable" in detail.lower()
+        # And it says WHICH village and by how much, rather than pasting every
+        # warning the plan produced.
+        assert "Capital" in detail
+        assert "9" in detail and "4" in detail
 
     def test_concurrent_execute_is_rejected(self):
         # A second live run for the same account while one is in flight is a 409,

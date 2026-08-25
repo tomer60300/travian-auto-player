@@ -7,6 +7,8 @@ import {
   groupDetails,
   initialExpanded,
   lossChip,
+  planStatus,
+  relayLegIndex,
 } from './plannerFindings'
 
 /** One critical group and one warning group, in the order the backend ranks
@@ -141,5 +143,86 @@ describe('groupDetails', () => {
     const blank = group({ count: 2, findings: [{ detail: '', village: '' }, { detail: 'x' }] })
 
     expect(groupDetails(blank)).toHaveLength(1)
+  })
+})
+
+describe('planStatus', () => {
+  const verdict = (over) => ({
+    executable: true,
+    clean: true,
+    blockers: [],
+    covers: ['a'],
+    unweighed: [],
+    critical_findings: 0,
+    ...over,
+  })
+
+  it('has nothing to say before a plan exists', () => {
+    expect(planStatus(null)).toBeNull()
+  })
+
+  it('is green only when the plan is executable AND clean', () => {
+    const status = planStatus({ feasible: true, verdict: verdict() })
+
+    expect(status.label).toBe('Ready to run')
+    expect(status.tone).toBe('text-success')
+  })
+
+  it('does not go green on a plan that destroys resources', () => {
+    // The defect this exists for: feasible=true with 2.4M/day of overflow used
+    // to render the same green badge as a clean plan.
+    const status = planStatus({
+      feasible: true,
+      verdict: verdict({ clean: false, unweighed: ['overflow_structural'], critical_findings: 3 }),
+    })
+
+    expect(status.label).toBe('Runs, not clean')
+    expect(status.tone).toBe('text-warning')
+  })
+
+  it('is red when the sheet cannot be carried out', () => {
+    const status = planStatus({
+      feasible: false,
+      verdict: verdict({ executable: false, clean: false, blockers: ['Capital is over budget'] }),
+    })
+
+    expect(status.label).toBe('Cannot run')
+    expect(status.tone).toBe('text-danger')
+  })
+
+  it('follows the verdict, not the legacy boolean, when they disagree', () => {
+    const status = planStatus({ feasible: true, verdict: verdict({ executable: false }) })
+
+    expect(status.label).toBe('Cannot run')
+  })
+
+  it('degrades to the bare boolean against a backend with no verdict', () => {
+    // A freshly built bundle can meet the older API on :80 for as long as that
+    // process has not been restarted. Two states are the honest answer then --
+    // inventing "Ready to run" would claim something that API never said.
+    expect(planStatus({ feasible: true }).label).toBe('Feasible')
+    expect(planStatus({ feasible: false }).label).toBe('Cannot run')
+    expect(planStatus({ feasible: true }).verdict).toBeNull()
+  })
+})
+
+describe('relayLegIndex', () => {
+  const chain = { origin: 22, hub: 2, destination: 17, hub_name: 'V02' }
+
+  it('indexes both legs of a chain, because either alone misleads', () => {
+    const legs = relayLegIndex([chain])
+
+    expect(legs.get('22:2').leg).toBe(1)
+    expect(legs.get('2:17').leg).toBe(2)
+    expect(legs.get('22:2').chain).toBe(chain)
+  })
+
+  it('leaves ordinary rows unmarked', () => {
+    expect(relayLegIndex([chain]).get('5:6')).toBeUndefined()
+  })
+
+  it('copes with a response that carries no relays', () => {
+    expect(relayLegIndex(undefined).size).toBe(0)
+    expect(relayLegIndex([]).size).toBe(0)
   })
 })
