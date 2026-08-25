@@ -1649,12 +1649,22 @@ class RevertPlanRequest(BaseModel):
             "than re-reading every village the run touched."
         ),
     )
+    apply_delete: bool = Field(
+        default=False,
+        description=(
+            "Actually DELETE the routes the run created, removing them for good. "
+            "Separate from apply_disable and off by default because it is the one "
+            "irreversible action here: a disabled route can be switched back on, "
+            "a deleted one cannot. Disabling happens first regardless, so the "
+            "routes stop shipping even if the delete then fails."
+        ),
+    )
     apply_disable: bool = Field(
         default=False,
         description=(
-            "Actually disable the routes the run created. This is the only half of "
-            "a revert the app can perform: deleting a route has never been captured "
-            "as a request, so removal stays a manual step in the UI."
+            "Actually disable the routes the run created, stopping them shipping. "
+            "Reversible, and applied before any delete, so the resources stop "
+            "moving even if the removal then fails."
         ),
     )
     map_span: int = Field(default=DEFAULT_MAP_SPAN, gt=0)
@@ -1667,6 +1677,7 @@ class RevertPlanResponse(BaseModel):
     # Route ids per origin, so a caller can act without parsing prose.
     created: dict[int, list[int]] = {}
     disabled_now: dict[int, list[int]] = {}
+    deleted_now: dict[int, list[int]] = {}
     must_delete_by_hand: dict[int, list[int]] = {}
     restore_state: dict[int, list[str]] = {}
     clean: bool
@@ -1682,13 +1693,15 @@ async def post_revert_plan(
 ):
     """What it would take to put things back as they were before a live run.
 
-    Reverting is deliberately not a single button. The app can disable what it
-    created; it cannot delete, because that request has never been captured, and
-    a revert that claimed to have undone a run while leaving live routes behind
-    would be worse than one that names the rows a person still has to remove.
+    Reverting is deliberately not a single button. Disabling and deleting are
+    both available and both verified, but they differ in kind -- a disabled route
+    can be switched back on, a deleted one cannot -- so each is its own opt-in and
+    disabling always happens first: a created route left enabled while someone
+    gets round to removing it keeps shipping resources.
 
-    So this reports both halves, disable first: a created route left enabled
-    while someone gets round to deleting it keeps shipping resources.
+    Every step is confirmed by re-reading the page. A revert that claimed to have
+    undone a run while leaving live routes behind would be worse than one that
+    names the rows still outstanding.
     """
     try:
         before = read_inventories(body.trace_id)
@@ -1727,6 +1740,7 @@ async def post_revert_plan(
     problems: list[str] = []
     created: dict[int, list[int]] = {}
     disabled_now: dict[int, list[int]] = {}
+    deleted_now: dict[int, list[int]] = {}
     must_delete: dict[int, list[int]] = {}
     restore: dict[int, list[str]] = {}
     requests_used = 0
@@ -1814,11 +1828,61 @@ async def post_revert_plan(
                     f"{plan.disable_ids} ({detail}); they are STILL RUNNING"
                 )
 
+        if body.apply_delete and plan.manual_delete_ids:
+            # Deliberately after the disable. Disabling stops the resources
+            # moving and is reversible; deleting is neither. If the delete fails
+            # the routes are at least already inert.
+            targets = [e for e in now if e.route_id in set(plan.manual_delete_ids)]
+            try:
+                removed = await svc.delete_routes(origin, targets)
+                requests_used += 1
+            except TravianError as exc:
+                problems.append(
+                    f"village {origin}: could not delete the created route(s) "
+                    f"{plan.manual_delete_ids} ({exc}); they must be removed by hand"
+                )
+                continue
+            if removed is None or removed.status != "deleted":
+                detail = removed.detail if removed is not None else "no request was made"
+                problems.append(
+                    f"village {origin}: delete failed ({detail}); the route(s) "
+                    f"{plan.manual_delete_ids} must be removed by hand"
+                )
+                continue
+            # Read back. A delete that reports success and leaves the rows there
+            # is the same class of false outcome as an unverified create, and
+            # this endpoint exists to make an undo trustworthy.
+            try:
+                left = await svc.confirm_routes(origin, map_span=body.map_span)
+                requests_used += 1
+            except (NetworkError, MarketplaceUnreadable) as exc:
+                problems.append(
+                    f"village {origin}: deleted the route(s) but could not re-read "
+                    f"the page to confirm ({exc}); check before assuming they are gone"
+                )
+                continue
+            survivors = sorted(
+                e.route_id for e in left if e.route_id in set(plan.manual_delete_ids)
+            )
+            if survivors:
+                problems.append(
+                    f"village {origin}: asked the game to delete "
+                    f"{plan.manual_delete_ids} and {survivors} are STILL THERE"
+                )
+                continue
+            deleted_now[origin] = plan.manual_delete_ids
+            must_delete.pop(origin, None)
+            steps.append(
+                f"village {origin}: deleted {len(plan.manual_delete_ids)} created "
+                f"route(s) - confirmed gone, nothing left to do by hand"
+            )
+
     return RevertPlanResponse(
         trace_id=body.trace_id,
         steps=steps or [f"run {body.trace_id}: nothing to revert"],
         created=created,
         disabled_now=disabled_now,
+        deleted_now=deleted_now,
         must_delete_by_hand=must_delete,
         restore_state=restore,
         clean=clean,

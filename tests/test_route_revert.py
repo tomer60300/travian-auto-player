@@ -2,10 +2,13 @@
 
 The game returns no id when it creates a route, so "what did this run add?" can
 only be answered by diffing a fresh read against the inventory the trace recorded
-before the run started. And because this app has no verified delete request, a
-revert is genuinely two things: the part it can perform, and the part a person
-has to perform in the UI. Conflating those would let a "reverted" run leave live
-routes shipping resources.
+before the run started.
+
+A revert is still genuinely two things -- switching routes off and removing them
+-- because they differ in kind: a disabled route can be switched back on, a
+deleted one cannot. Conflating them would let a "reverted" run leave live routes
+shipping resources, so the ordering and the leftover list are both part of the
+contract.
 """
 
 from travian_api.services.distribution.route_revert import describe, plan_revert
@@ -65,15 +68,17 @@ class TestRoutesTheRunCreated:
         assert len(plan.manual_delete_ids) == 24
         assert plan.disable_ids == sorted(600 + i for i in range(24))
 
-    def test_the_delete_instructions_name_the_actual_ui_path(self):
-        # An operator reading this is about to click things; vagueness costs them
-        # a wrong click on a real account.
+    def test_the_delete_instructions_offer_both_routes_out(self):
+        # An operator reading this is about to click things, so the manual path
+        # still has to be spelled out. But the app can delete now, so refusing to
+        # mention that would send them clicking for no reason.
         plan = plan_revert(20003, [], [_row(99)])
         text = " ".join(describe(plan))
 
-        assert "Edit selected" in text
+        assert "Edit selected" in text, "the manual path stays, as the fallback"
         assert "trash" in text
-        assert "no verified delete" in text, "and it must not imply the app can do it"
+        assert "apply_delete" in text, "and the option the app actually has"
+        assert "no verified delete" not in text, "that stopped being true"
 
 
 class TestStateTheRunChanged:
@@ -97,9 +102,9 @@ class TestStateTheRunChanged:
 
 class TestTheDiffAdmitsWhenItCannotBeTrusted:
     def test_a_route_that_vanished_is_flagged_loudly(self):
-        # The app never deletes. So a row disappearing means something else
-        # changed this village, and the rest of the comparison is suspect --
-        # reporting a tidy revert plan here would be false confidence.
+        # Nothing in an ordinary run deletes, so a row disappearing means
+        # something else changed this village, and the rest of the comparison is
+        # suspect -- reporting a tidy revert plan here would be false confidence.
         plan = plan_revert(20003, [_row(1), _row(2)], [_row(1)])
 
         assert [r.route_id for r in plan.vanished] == [2]

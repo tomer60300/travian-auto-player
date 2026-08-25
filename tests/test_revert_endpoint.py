@@ -175,3 +175,75 @@ class TestItRefusesRatherThanGuesses:
         assert res.clean is True
         assert res.must_delete_by_hand == {}
         assert "nothing to revert" in " ".join(res.steps)
+
+
+class TestItCanFinishTheUndoItself:
+    """`delete_routes` was verified, tested — and had no production caller, while
+    this endpoint told the operator to go and delete by hand. Deletion is now
+    available here, still as its own opt-in, because it is the one irreversible
+    step: a disabled route can be switched back on, a deleted one cannot."""
+
+    def _svc(self, *, after_delete):
+        created = ExistingRoute(555, 30540, active=True)
+        svc = _Svc([created], disable=RouteActionResult(20003, 0, 0, "disabled", "1"))
+        svc._confirm_after = [ExistingRoute(555, 30540, active=False)]
+        svc._after_delete = after_delete
+
+        async def _delete(vid, routes, *, stop_check=None):
+            svc.calls.append("delete")
+            svc._confirm_after = svc._after_delete
+            return RouteActionResult(vid, 0, 0, "deleted", f"{len(routes)} route(s)")
+
+        svc.delete_routes = _delete
+        return svc
+
+    def test_it_deletes_and_confirms_the_rows_are_gone(self):
+        trace = _trace_with(20003, [])
+        svc = self._svc(after_delete=[])  # the page comes back empty
+
+        res = _call(trace, svc, apply_disable=True, apply_delete=True)
+
+        assert res.deleted_now == {20003: [555]}
+        assert res.must_delete_by_hand == {}, "nothing left for a person to do"
+        assert any("confirmed gone" in s for s in res.steps)
+        assert res.problems == []
+
+    def test_the_disable_runs_before_the_delete(self):
+        # Ordering is the contract: stop the resources moving first, because that
+        # part is reversible and the removal is not.
+        trace = _trace_with(20003, [])
+        svc = self._svc(after_delete=[])
+        _call(trace, svc, apply_disable=True, apply_delete=True)
+
+        assert svc.calls.index("disable") < svc.calls.index("delete")
+
+    def test_a_delete_the_game_ignored_is_not_claimed(self):
+        trace = _trace_with(20003, [])
+        # The rows survive the delete.
+        svc = self._svc(after_delete=[ExistingRoute(555, 30540, active=False)])
+
+        res = _call(trace, svc, apply_disable=True, apply_delete=True)
+
+        assert res.deleted_now == {}
+        assert any("STILL THERE" in p for p in res.problems)
+        assert res.must_delete_by_hand == {20003: [555]}, "so it stays on the manual list"
+
+    def test_without_the_opt_in_nothing_is_deleted(self):
+        trace = _trace_with(20003, [])
+        svc = self._svc(after_delete=[])
+
+        res = _call(trace, svc, apply_disable=True)
+
+        assert "delete" not in svc.calls
+        assert res.deleted_now == {}
+        assert res.must_delete_by_hand == {20003: [555]}
+
+    def test_the_manual_instructions_no_longer_claim_the_app_cannot_delete(self):
+        trace = _trace_with(20003, [])
+        svc = _Svc([ExistingRoute(555, 30540, active=True)])
+
+        res = _call(trace, svc)
+
+        text = " ".join(res.steps)
+        assert "no verified delete request" not in text
+        assert "apply_delete" in text, "it should offer the option it now has"

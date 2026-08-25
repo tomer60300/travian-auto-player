@@ -7,18 +7,16 @@ The only way to identify what a run actually added is to diff a fresh read of th
 marketplace against exactly what was there before it started, which is why the
 execution trace records the full pre-write inventory per origin.
 
-The asymmetry that shapes everything here: **disabling is something this app can
-do, and deleting is not.** The UI deletes a route (select rows, "Edit selected",
-the trash icon) but that request has never been captured, so there is no verified
-call to make. A revert therefore comes in two halves:
+The app can now perform both halves -- disable and delete are each verified
+against the game's own client code and each covered by tests -- but they are kept
+as separate opt-ins because they differ in kind: a disabled route can be switched
+back on, a deleted one cannot. Disabling always runs first, so the resources stop
+moving even if a delete then fails.
 
-* what the app can do itself -- disable what it created, restore the enabled or
-  disabled state of everything it touched;
-* what only a human can do -- delete the created rows, in the UI.
-
-Reporting those separately is the point. A revert that claims to have undone a
-run while leaving live routes behind would be far worse than one that says
-plainly which two rows a person still has to remove.
+Reporting the halves separately is the point. A revert that claims to have undone
+a run while leaving live routes behind would be far worse than one that says
+plainly which rows are still outstanding -- so when deletion was not requested,
+or did not work, this names the exact rows a person has to remove by hand.
 
 Everything here is a pure function over two inventories. No requests, no clock.
 """
@@ -50,9 +48,10 @@ class RevertPlan:
     origin: int
     # Rows that exist now and did not before: what the run added.
     created: list[RouteState] = field(default_factory=list)
-    # Rows that existed before and are gone now. The app never deletes, so this
-    # means something outside this run removed them -- worth surfacing rather
-    # than quietly ignoring, because it makes the rest of the diff unreliable.
+    # Rows that existed before and are gone now. Nothing in a normal execute run
+    # deletes -- only an explicit revert does -- so outside that case this means
+    # something else changed the village, which makes the rest of the diff
+    # unreliable. Worth surfacing rather than quietly ignoring.
     vanished: list[RouteState] = field(default_factory=list)
     # Pre-existing rows whose enabled flag the run moved: (route_id, was_active).
     to_restore: list[tuple[int, bool]] = field(default_factory=list)
@@ -69,7 +68,12 @@ class RevertPlan:
 
     @property
     def manual_delete_ids(self) -> list[int]:
-        """Created rows a human has to delete in the UI. See the module docstring."""
+        """Created rows that still need removing.
+
+        Named "manual" for the fallback it describes: the app can delete these
+        now, but only when explicitly asked, so this is what is left for a person
+        when deletion was not requested or did not work.
+        """
         return sorted(r.route_id for r in self.created)
 
     @property
@@ -152,9 +156,9 @@ def describe(plan: RevertPlan) -> list[str]:
     if plan.manual_delete_ids:
         lines.append(
             f"village {plan.origin}: then DELETE {len(plan.manual_delete_ids)} route(s) "
-            f"by hand: {plan.manual_delete_ids} — select the row(s), press "
-            f"'Edit selected', then the trash icon. The app has no verified "
-            f"delete request, so it will not pretend to do this."
+            f"{plan.manual_delete_ids} — either re-run with apply_delete and the "
+            f"app will remove them, or do it by hand: select the row(s), press "
+            f"'Edit selected', then the trash icon."
         )
     for route_id, was_active in plan.to_restore:
         lines.append(
@@ -165,7 +169,7 @@ def describe(plan: RevertPlan) -> list[str]:
         lines.append(
             f"village {plan.origin}: WARNING — {len(plan.vanished)} route(s) that "
             f"existed before are gone: {[r.route_id for r in plan.vanished]}. This "
-            f"app never deletes, so something else changed this village and the "
-            f"rest of this comparison may not reflect what the run did."
+            f"run did not delete them, so something else changed this village "
+            f"and the rest of this comparison may not reflect what the run did."
         )
     return lines
