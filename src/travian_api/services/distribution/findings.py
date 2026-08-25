@@ -414,18 +414,42 @@ def _group_headline(
 
 
 def _account_headline(
-    total_loss: float, groups: Sequence[FindingGroup], counts: Mapping[str, int]
+    total_loss: float,
+    groups: Sequence[FindingGroup],
+    counts: Mapping[str, int],
+    routes_planned: int | None = None,
 ) -> str:
-    """The five-second read: what this plan costs, and where most of it is."""
+    """The five-second read: what is being lost, and where most of it is.
+
+    Says "this ACCOUNT loses", not "this plan destroys". The distinction is not
+    pedantry -- the earlier wording was measurably false. Every overflow figure
+    here comes from replaying production against capacity, so a plan with no
+    routes at all still totalled a loss and announced that the plan had caused
+    it: a one-village account, where no route is even possible, reported
+    480,000/day destroyed "by this plan".
+
+    The losses are real; the causation was invented. What cannot be separated
+    from the findings alone is how much of it the plan could have prevented --
+    that needs the route set, which lives in the caller. ``routes_planned`` is
+    the one piece worth stating outright: when the plan ships nothing, the loss
+    is entirely the account's own production with nowhere to go, and saying so
+    stops an operator hunting for a planning mistake that is not there.
+    """
     if total_loss > 0:
         worst = max(
             (f for group in groups for f in group.findings),
             key=lambda f: f.loss_per_day,
         )
-        sentence = f"This plan destroys {total_loss:,.0f} resources a day"
+        sentence = f"This account loses {total_loss:,.0f} resources a day at its store caps"
         if worst.loss_per_day >= total_loss * DOMINANT_SHARE and worst.village:
             sentence += f" — {worst.loss_per_day:,.0f} of it {worst.resource} in {worst.village}"
-        return sentence + "."
+        sentence += "."
+        if routes_planned == 0:
+            sentence += (
+                " This plan ships nothing, so none of that is the plan's doing:"
+                " it is production with nowhere to go."
+            )
+        return sentence
     critical = counts.get(Severity.CRITICAL.value, 0)
     if critical:
         return (
@@ -442,7 +466,7 @@ def _account_headline(
     return "No problems found."
 
 
-def summarise(findings: Sequence[Finding]) -> Diagnostics:
+def summarise(findings: Sequence[Finding], *, routes_planned: int | None = None) -> Diagnostics:
     """Fold a flat finding list into ranked groups, counts and totals.
 
     Groups are keyed by (category, resource) and ordered by severity, then by
@@ -492,7 +516,7 @@ def summarise(findings: Sequence[Finding]) -> Diagnostics:
 
     total_loss = sum(per_resource.values())
     return Diagnostics(
-        headline=_account_headline(total_loss, groups, counts),
+        headline=_account_headline(total_loss, groups, counts, routes_planned),
         total_loss_per_day=total_loss,
         loss_by_resource=tuple(
             ResourceLoss(resource=resource, per_day=per_day)

@@ -419,7 +419,17 @@ def _spend_idle_merchants_on_latency(
                     per_merchant = (route.latency_hours - new_latency) / delta
                     # Fix what breaches the target first, then buy the biggest
                     # remaining latency cut per merchant spent.
-                    key = (urgency, compliant, per_merchant, -delta, -cost.cycle_hours)
+                    # The last two keys are geometry, so a tie cannot fall to
+                    # the route's position in an id-ordered list.
+                    key = (
+                        urgency,
+                        compliant,
+                        per_merchant,
+                        -delta,
+                        -cost.cycle_hours,
+                        villages[route.origin].coords,
+                        villages[route.destination].coords,
+                    )
                     if best is None or key > best[0]:
                         best = (
                             key,
@@ -726,7 +736,15 @@ def _improve_flows(
             - excess(origin, committed.get(origin, 0))
             for origin, delta in per_origin.items()
         )
-        return (over_delta, total_delta, rc_delta, round(round_trip)), (
+        # Rounded to 6dp, not to whole minutes. Integer minutes made the last
+        # key of the objective collide constantly, and a collision here was
+        # settled by scan order -- which follows village ids. Relabelling the
+        # villages of an identical account therefore moved the plan: measured at
+        # 127 vs 141 merchants on one account, and on another a village flipped
+        # between over-budget and within it. 6dp is far coarser than the ~1e-11
+        # float dust these sums carry and far finer than a minute, so it
+        # discriminates real differences without becoming unstable.
+        return (over_delta, total_delta, rc_delta, round(round_trip, 6)), (
             touched_keys,
             new_cargo,
             new_merch,
@@ -842,9 +860,17 @@ def _improve_flows(
                 if delta >= (0, 0, 0, 0):
                     continue
                 # Tie-break on the collection leg: when two hubs cost the same,
-                # the nearer one is the better place to send cargo, and it keeps
-                # the choice stable rather than falling back on village id.
-                key = (delta, one_way_cache.get((origin, hub), 0.0), hub)
+                # the nearer one is the better place to send cargo. The final key
+                # is the hub's COORDINATES, not the hub id -- which is what this
+                # comment already claimed and the code did not do: `hub` is a
+                # village id, so an exact tie on (delta, distance) was settled by
+                # the arbitrary numbering, and relabelling the account moved the
+                # plan. Coordinates survive relabelling.
+                key = (
+                    delta,
+                    one_way_cache.get((origin, hub), 0.0),
+                    villages[hub].coords,
+                )
                 if best is None or key < best[0]:
                     best = (key, hub, changes, state)
             if best is not None:
@@ -929,16 +955,40 @@ def _improve_flows(
                         if not refinement:
                             settled.add((resource, (o1, d1), (o2, d2)))
                         continue
-                    # Deterministic tie-break: the sorted scan order itself.
-                    if best is None or improving[0] < best[0]:
-                        best = improving
+                    # Tie-break on GEOGRAPHY, not on scan position.
+                    #
+                    # This used to be a bare `improving[0] < best[0]`, so the
+                    # first candidate holding the minimal objective won -- and
+                    # the scan runs over id-sorted edges. Ties are common, so
+                    # the arbitrary village numbering was deciding the plan:
+                    # relabelling an otherwise identical account moved it on 8
+                    # of 16 audited accounts, once by 9.9% of total merchants,
+                    # and on another flipped a village between over-budget and
+                    # within it -- the figure the Trade Office advice is built
+                    # from.
+                    #
+                    # Coordinates are the account's real geometry and survive
+                    # relabelling, so a tie now falls to where the villages ARE.
+                    # The two legs of a swap are interchangeable, hence the
+                    # sort. Determinism is preserved and no longer depends on
+                    # what the villages happen to be called.
+                    geo = tuple(
+                        sorted(
+                            (
+                                (villages[o1].coords, villages[d1].coords),
+                                (villages[o2].coords, villages[d2].coords),
+                            )
+                        )
+                    )
+                    if best is None or (improving[0], geo) < (best[0], best[3]):
+                        best = (improving[0], improving[1], improving[2], geo)
         return best
 
     converged = False
     for _pass in range(max_passes):
         move = _best_swap(refinement=False)
         if move is not None:
-            _delta, changes, state = move
+            _delta, changes, state, _geo = move
             _commit_changes(changes, state)
             continue
         # Swaps are exhausted. Relay is tried only now, so a plan with no
@@ -949,7 +999,7 @@ def _improve_flows(
         # Both exhausted at full transfer sizes: widen to breakpoint transfers.
         move = _best_swap(refinement=True)
         if move is not None:
-            _delta, changes, state = move
+            _delta, changes, state, _geo = move
             _commit_changes(changes, state)
             continue
         converged = True

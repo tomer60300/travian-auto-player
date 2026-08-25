@@ -1643,7 +1643,9 @@ async def post_plan(
         total_merchants=plan.total_merchants,
         feasible=plan.is_feasible,
         warnings=[f.message for f in findings],
-        diagnostics=_diagnostics_response(summarise(findings)),
+        # The route count is what lets the headline stop blaming the plan for
+        # losses it did not cause -- see _account_headline.
+        diagnostics=_diagnostics_response(summarise(findings, routes_planned=len(plan.rows))),
     )
 
 

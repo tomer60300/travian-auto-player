@@ -246,3 +246,51 @@ class TestHeadline:
         assert result.total_loss_per_day == 0
         assert "destroys" not in result.headline
         assert "2 targets are missed" in result.headline
+
+
+class TestTheHeadlineDoesNotBlameThePlanForTheAccount:
+    """Every overflow figure comes from replaying production against capacity,
+    not from what the plan ships. The old wording -- "This plan destroys N
+    resources a day" -- was therefore measurably false: a one-village account,
+    where no route is even possible, reported 480,000/day destroyed *by the
+    plan*. The losses were real; the causation was invented.
+    """
+
+    def _overflow(self, loss: float = 480_000.0) -> Finding:
+        return Finding(
+            category=Category.OVERFLOW_STRUCTURAL,
+            message="01: crop hits the cap",
+            detail="01 — 480,000/day",
+            village="01",
+            resource=Resource.CROP,
+            loss_per_day=loss,
+        )
+
+    def test_it_attributes_the_loss_to_the_account_not_the_plan(self):
+        result = summarise([self._overflow()])
+        assert "This account loses" in result.headline
+        assert "plan destroys" not in result.headline
+
+    def test_a_plan_that_ships_nothing_says_so_outright(self):
+        # The decisive case. Without this the operator hunts for a planning
+        # mistake that cannot exist, because there is no plan to be wrong.
+        result = summarise([self._overflow()], routes_planned=0)
+        assert "ships nothing" in result.headline
+        assert "none of that is the plan's doing" in result.headline
+
+    def test_a_plan_with_routes_does_not_claim_it_ships_nothing(self):
+        result = summarise([self._overflow()], routes_planned=8)
+        assert "ships nothing" not in result.headline
+        assert "This account loses" in result.headline
+
+    def test_an_unknown_route_count_stays_silent_about_the_plan(self):
+        # Callers that do not know the route set must not have a claim invented
+        # for them either way.
+        result = summarise([self._overflow()])
+        assert "ships nothing" not in result.headline
+
+    def test_the_total_and_the_worst_offender_are_unchanged(self):
+        # Only the attribution moved. The numbers were never the problem.
+        result = summarise([self._overflow()], routes_planned=0)
+        assert "480,000" in result.headline
+        assert result.total_loss_per_day == 480_000.0
