@@ -2087,6 +2087,11 @@ async def post_execute(
                     # as things stand: nothing produces visible=False, because
                     # the page model has no hidden rows to read.
                     visible = [e for e in existing if e.visible]
+                    # Route ids this origin asked the game to switch off. Like a
+                    # create, a disable is only CLAIMED until the page is read
+                    # back -- and an undisabled stale route is worse than an
+                    # uncreated one, because it keeps shipping resources.
+                    disabled_here: list[int] = []
 
                     if body.disable_existing:
                         # Disable only ACTIVE visible routes the plan no longer
@@ -2134,6 +2139,7 @@ async def post_execute(
                                 )
                                 deferred.extend(desired)
                                 continue
+                            disabled_here.extend(e.route_id for e in stale)
                             disables.append(line)
 
                     # Only ENABLED routes satisfy the plan. A desired destination
@@ -2266,7 +2272,7 @@ async def post_execute(
                     #
                     # One request settles it, and it is the request the game's
                     # own UI makes after a create: refresh the list and look.
-                    if created_here:
+                    if created_here or disabled_here:
                         try:
                             after = await svc.confirm_routes(origin, map_span=body.map_span)
                         except (NetworkError, MarketplaceUnreadable) as exc:
@@ -2285,11 +2291,15 @@ async def post_execute(
                                 action.detail = (
                                     "created, but the read-back failed so this is unconfirmed"
                                 )
+                            wrote = []
+                            if created_here:
+                                wrote.append(f"created {len(created_here)} route(s)")
+                            if disabled_here:
+                                wrote.append(f"disabled {len(disabled_here)} route(s)")
                             problems.append(
-                                f"{village_label(origin, names)}: created "
-                                f"{len(created_here)} route(s) but could not re-read the "
-                                f"marketplace to confirm them ({exc}). Check this village "
-                                f"before the next run."
+                                f"{village_label(origin, names)}: "
+                                f"{' and '.join(wrote)} but could not re-read the marketplace "
+                                f"to confirm ({exc}). Check this village before the next run."
                             )
                         else:
                             before_ids = {e.route_id for e in existing}
@@ -2304,6 +2314,30 @@ async def post_execute(
                                 new_rows_found=len(fresh),
                                 new_route_ids=[e.route_id for e in fresh],
                             )
+                            # A stale route we believe we switched off must
+                            # actually be off. If it is still active the plan's
+                            # arithmetic is wrong AND resources keep moving, so
+                            # this is reported as a problem rather than folded
+                            # into the disable count.
+                            still_active = [
+                                e.route_id
+                                for e in after
+                                if e.route_id in set(disabled_here) and e.active
+                            ]
+                            if still_active:
+                                problems.append(
+                                    f"{village_label(origin, names)}: asked the game to "
+                                    f"disable route(s) {still_active} and they are STILL "
+                                    f"ACTIVE. They are shipping resources the plan does "
+                                    f"not account for."
+                                )
+                            if disabled_here:
+                                trace.event(
+                                    "verified_disables",
+                                    origin=origin,
+                                    claimed=sorted(set(disabled_here)),
+                                    still_active=still_active,
+                                )
                             for action, route in created_here:
                                 key = _desired_key(route)
                                 if key in fresh_keys:

@@ -308,6 +308,13 @@ class _FakeLiveSvc:
         if stop_check is not None and (reason := stop_check()):
             return RouteActionResult(vid, 0, 0, "stopped", reason)
         self.disabled.append((vid, tuple(sorted((r.dest_x, r.dest_y) for r in routes))))
+        if self._disable_status == "disabled":
+            # The real game switches the rows off, which is the only evidence
+            # the PUT's response does not provide.
+            targets = {r.route_id for r in routes}
+            for row in self._existing.get(vid, []):
+                if row.route_id in targets:
+                    row.active = False
         return RouteActionResult(vid, 0, 0, self._disable_status, f"{len(routes)} route(s)")
 
     async def enable_routes(self, vid, routes, *, stop_check=None):
@@ -318,6 +325,11 @@ class _FakeLiveSvc:
         if stop_check is not None and (reason := stop_check()):
             return RouteActionResult(vid, 0, 0, "stopped", reason)
         self.enabled.append((vid, tuple(sorted((r.dest_x, r.dest_y) for r in routes))))
+        if self._enable_status == "enabled":
+            targets = {r.route_id for r in routes}
+            for row in self._existing.get(vid, []):
+                if row.route_id in targets:
+                    row.active = True
         return RouteActionResult(vid, 0, 0, self._enable_status, f"{len(routes)} route(s)")
 
     async def create_route(self, route, *, stop_check=None):
@@ -1655,3 +1667,88 @@ class TestTwoRunsCannotRaceTheSameVillage:
 
         asyncio.run(_two_villages())
         assert order == ["a-in", "b-in", "a-out", "b-out"], "different villages may overlap"
+
+
+class TestADisableIsAlsoVerified:
+    """A disable is a claim until the page is read back, exactly like a create.
+
+    And an undisabled stale route is the worse of the two failures: an uncreated
+    route means resources that did not move, while a route the app believes it
+    switched off keeps shipping cargo the plan has already spent elsewhere.
+    """
+
+    def _account_with_a_stale_route(self):
+        return _own_village_account()
+
+    def test_a_disable_that_took_effect_is_reported_cleanly(self):
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(9, _UNWANTED_DEST, active=True)]})
+        res = _run_live(
+            svc, self._account_with_a_stale_route(), disable_existing=True, max_routes_per_run=50
+        )
+
+        assert svc.disabled, "the stale route was disabled"
+        assert not [p for p in res.problems if "STILL ACTIVE" in p]
+
+    def test_a_disable_that_did_not_take_effect_is_reported_loudly(self):
+        # The game accepted the PUT and the row is still enabled.
+        class _IgnoresDisables(_FakeLiveSvc):
+            async def disable_routes(self, vid, routes, *, stop_check=None):
+                result = await super().disable_routes(vid, routes, stop_check=stop_check)
+                # Report success but leave the rows exactly as they were.
+                for row in self._existing.get(vid, []):
+                    row.active = True
+                return result
+
+        svc = _IgnoresDisables(existing={20003: [ExistingRoute(9, _UNWANTED_DEST, active=True)]})
+        res = _run_live(
+            svc, self._account_with_a_stale_route(), disable_existing=True, max_routes_per_run=50
+        )
+
+        joined = " ".join(res.problems)
+        assert "STILL ACTIVE" in joined, "a disable that did nothing must not read as done"
+        assert "shipping resources the plan does not account for" in joined
+
+    def test_the_disable_verification_is_in_the_trace(self):
+        import json
+        from pathlib import Path
+
+        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(9, _UNWANTED_DEST, active=True)]})
+        res = _run_live(
+            svc, self._account_with_a_stale_route(), disable_existing=True, max_routes_per_run=50
+        )
+        events = [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+
+        verified = [e for e in events if e["kind"] == "verified_disables"]
+        assert verified, "the audit record must show the disable was checked"
+        assert verified[0]["claimed"] == [9]
+        assert verified[0]["still_active"] == []
+
+    def test_a_disable_only_run_still_reads_back(self):
+        # No creates at all: the verification must not be skipped just because
+        # nothing was created. It was gated on creates alone before.
+        account = _own_village_account()
+        svc = _FakeLiveSvc(
+            existing={
+                20003: [
+                    ExistingRoute(9, _UNWANTED_DEST, active=True),
+                    ExistingRoute(10, 20011, active=True),
+                ]
+            }
+        )
+        res = _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
+
+        assert svc.created == [], "the plan's route already exists"
+        assert svc.disabled, "the stale one was disabled"
+        import json
+        from pathlib import Path
+
+        events = [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+        assert [e for e in events if e["kind"] == "verified_disables"], (
+            "a run that only disabled must still confirm it"
+        )
