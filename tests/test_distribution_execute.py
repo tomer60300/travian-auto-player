@@ -30,7 +30,12 @@ from travian_api.services.trade_route_service import (
 )
 from travian_api.web.operation_gate import active_ops, captcha_stop
 from travian_api.web.routes import distribution as dist_module
-from travian_api.web.routes.distribution import ExecuteRequest, ForeignTarget, post_execute
+from travian_api.web.routes.distribution import (
+    _CONSECUTIVE_FAILURE_LIMIT,
+    ExecuteRequest,
+    ForeignTarget,
+    post_execute,
+)
 
 
 def _exec_body(dry_run=True, disable_existing=True, max_routes_per_run=3, margin=0.0, **extra):
@@ -2568,3 +2573,227 @@ class TestASweepDoesNotReadAsASweep:
 
         assert res.unswept_origins == []
         assert res.next_chunk_wait_seconds is None, "nothing left to come back for"
+
+
+def _row_with_cycle(origin, destination, cycle, dispatch_minute=0):
+    return SheetRow(
+        origin=origin,
+        destination=destination,
+        cargo={Resource.CROP: 100},
+        cycle_hours=cycle,
+        dispatch_minute=dispatch_minute,
+        arrival_minute=0,
+        merchants=2,
+    )
+
+
+class TestTheRowFootprintCanBeCappedNotJustTheRequestCount:
+    """The operator authorises a footprint, not a request count.
+
+    A "route" is not what lands in the game. Travian turns one "repeat every N
+    hours" request into 24/N separate daily rows, so a run capped at three routes
+    on a one-hour cycle writes SEVENTY-TWO rows -- and removing them later means
+    deleting every one. The run already REPORTS this (max_game_rows_this_run) but
+    nothing bounded it, so the number the operator agreed to and the number they
+    got were different units.
+
+    Measured on a real plan: 36 route requests came to 442 rows, 104 of them on a
+    single village.
+    """
+
+    def _one_route(self, cycle):
+        return _account(
+            [_row_with_cycle(20003, -1, cycle, 100)],
+            {20003: (0, 0), -1: (40, 40)},
+            {20003: "03", -1: "A"},
+        )
+
+    def test_a_route_whose_fan_out_exceeds_the_budget_is_deferred(self):
+        # A 1h cycle is 24 rows. Ten is not enough for it, and a route cannot be
+        # created "partly" -- so it waits rather than overshooting the budget.
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, self._one_route(1), max_routes_per_run=50, max_game_rows_per_run=10)
+
+        assert svc.created == [], "24 rows do not fit in a 10-row budget"
+        assert res.remaining == 1, "and it is reported as still to do"
+
+    def test_the_same_route_is_created_once_the_budget_covers_it(self):
+        svc = _FakeLiveSvc()
+        _run_live(svc, self._one_route(1), max_routes_per_run=50, max_game_rows_per_run=24)
+
+        assert len(svc.created) == 1, "exactly 24 fits in 24"
+
+    def test_the_budget_is_spent_across_routes_not_per_route(self):
+        account = _account(
+            [_row_with_cycle(20003, -1, 2, 100), _row_with_cycle(20011, -2, 2, 700)],
+            {20003: (0, 0), 20011: (10, 0), -1: (40, 40), -2: (50, 50)},
+            {20003: "03", 20011: "11", -1: "A", -2: "B"},
+        )
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, account, max_routes_per_run=50, max_game_rows_per_run=12)
+
+        assert len(svc.created) == 1, "each 2h route is 12 rows; only one fits"
+        assert res.remaining == 1
+
+    def test_zero_is_unbounded_so_every_existing_run_is_unchanged(self):
+        account = _account(
+            [_row_with_cycle(20003, -1, 1, 100), _row_with_cycle(20011, -2, 1, 700)],
+            {20003: (0, 0), 20011: (10, 0), -1: (40, 40), -2: (50, 50)},
+            {20003: "03", 20011: "11", -1: "A", -2: "B"},
+        )
+        svc = _FakeLiveSvc()
+        _run_live(svc, account, max_routes_per_run=50, max_game_rows_per_run=0)
+
+        assert len(svc.created) == 2, "no row budget means the old behaviour exactly"
+
+
+class TestRoutesTheOperatorWantsLeftAlone:
+    """The plan is authoritative, but not everything in the game came from a plan.
+
+    The reconciler's rule is "active, identifiable, and not wanted by the plan =>
+    stale", which is right for routes a previous plan created and wrong for a
+    route the operator made by hand. Without an exemption the app switches such a
+    route off, the operator switches it back on, and the next run switches it off
+    again -- the two fight, and the app always wins.
+
+    So a destination can be declared off-limits. Off by default: silently
+    protecting things would make `disable_existing` quietly stop working, which
+    is the failure mode the reconciler exists to prevent.
+    """
+
+    def test_a_stale_route_to_a_protected_village_is_left_running(self):
+        account = _own_village_account()
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(1, _UNWANTED_DEST, dest_x=None, dest_y=None)]}
+        )
+        res = _run_live(
+            svc,
+            account,
+            disable_existing=True,
+            max_routes_per_run=50,
+            protect_destinations=[str(_UNWANTED_DEST)],
+        )
+
+        assert svc.disabled == [], "a protected destination is never switched off"
+        # Silence here would look like a clean reconciliation while the route
+        # keeps shipping resources the plan does not account for.
+        assert any("protected" in w.lower() for w in res.disables + res.warnings), (
+            "the run must say it left something running on purpose"
+        )
+
+    def test_the_same_route_is_disabled_without_the_exemption(self):
+        # The control. If this ever passes with the protection applied, the
+        # exemption has stopped being an exemption and become a bug.
+        account = _own_village_account()
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(1, _UNWANTED_DEST, dest_x=None, dest_y=None)]}
+        )
+        _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
+
+        assert [vid for vid, _ in svc.disabled] == [20003]
+
+    def test_a_foreign_destination_is_protected_by_its_coordinates(self):
+        # A foreign target has no usable village id -- the plan knows it only by
+        # coordinates -- so an id-only exemption could not protect one at all.
+        account = _own_village_account()
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(1, _UNWANTED_DEST, dest_x=77, dest_y=88)]}
+        )
+        _run_live(
+            svc,
+            account,
+            disable_existing=True,
+            max_routes_per_run=50,
+            protect_destinations=["77|88"],
+        )
+
+        assert svc.disabled == [], "coordinates identify a hand-made foreign route"
+
+    def test_protection_does_not_stop_the_plan_creating_its_own_routes(self):
+        # An exemption narrows what is DISABLED. It must not also narrow what is
+        # created, or protecting one destination would quietly stall the plan.
+        account = _two_origin_account()
+        svc = _FakeLiveSvc()
+        _run_live(
+            svc,
+            account,
+            disable_existing=True,
+            max_routes_per_run=50,
+            protect_destinations=["999999"],
+        )
+
+        assert len(svc.created) == 2, "creates are untouched by a disable exemption"
+
+    def test_a_malformed_entry_is_rejected_rather_than_ignored(self):
+        # Silently dropping "4688" (a typo for 46|88) would leave the operator
+        # believing a route was protected when it was not -- and the next run
+        # would switch it off.
+        import pytest as _pytest
+        from pydantic import ValidationError
+
+        with _pytest.raises(ValidationError):
+            _exec_body(dry_run=True, protect_destinations=["not-a-place"])
+
+
+class TestTheRunStopsFiringWhenTheGameKeepsRefusing:
+    """Repeated rejects are both wasted writes and a loud signal.
+
+    A missing Gold Club stops the run immediately — the code says outright that a
+    human would not keep firing rejects. But an ordinary `failed` create did not
+    stop anything: the loop moved to the next route and tried again. The Gold Club
+    per-village route limit has never been probed on this account (deliberately),
+    so "the game refuses this create" is a real and expected outcome, and firing
+    twenty more after the first is exactly what a person would not do.
+    """
+
+    def test_a_run_of_failures_stops_the_run(self):
+        svc = _FakeLiveSvc(create_status="failed")
+        res = _run_live(svc, _three_origin_account(), max_routes_per_run=50)
+
+        assert len(svc.created) <= _CONSECUTIVE_FAILURE_LIMIT, (
+            "the run must give up, not work through every route"
+        )
+        assert any("refus" in p.lower() or "fail" in p.lower() for p in res.problems), (
+            "and say why it stopped"
+        )
+
+    def test_one_failure_among_successes_does_not_stop_anything(self):
+        # The counter must be CONSECUTIVE. A single transient reject between two
+        # good creates is not the game refusing everything.
+        calls = {"n": 0}
+
+        class _OneBadApple(_FakeLiveSvc):
+            async def create_route(self, route, stop_check=None):
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    return SimpleNamespace(status="failed", detail="transient")
+                return await super().create_route(route, stop_check=stop_check)
+
+        svc = _OneBadApple()
+        _run_live(svc, _three_origin_account(), max_routes_per_run=50)
+
+        assert calls["n"] == 3, "all three routes are still attempted"
+
+    def test_a_stopped_create_does_not_consume_row_budget(self):
+        # `attempts` is rolled back when a create is stopped before the POST, so
+        # the row budget must be too -- otherwise a stopped run silently spends
+        # the footprint it never wrote, and the next route is deferred for rows
+        # that do not exist in the game.
+        class _StopsBeforeWriting(_FakeLiveSvc):
+            async def create_route(self, route, stop_check=None):
+                return SimpleNamespace(status="stopped", detail="captcha (test)")
+
+        svc = _StopsBeforeWriting()
+        res = _run_live(
+            svc,
+            _account(
+                [_row_with_cycle(20003, -1, 1, 100)],
+                {20003: (0, 0), -1: (40, 40)},
+                {20003: "03", -1: "A"},
+            ),
+            max_routes_per_run=50,
+            max_game_rows_per_run=24,
+        )
+
+        assert res.created_game_rows == 0, "nothing was written, so no rows exist"
+        assert res.remaining == 1, "and the route is still outstanding"

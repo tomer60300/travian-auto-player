@@ -92,6 +92,13 @@ router = APIRouter(prefix="/api/distribution", tags=["distribution"])
 # guards (disconnect/reconnect) see the work and don't close the HttpClient
 # underneath it, and the captcha-stop signal can halt it.
 _EXECUTE_OP_LABEL = "trade-route-execute"
+# Consecutive create refusals before a run gives up. A missing Gold Club
+# already stops the run outright on the reasoning that a human would not keep
+# firing rejects; the same is true of any repeated refusal. The Gold Club
+# per-village ROUTE LIMIT has deliberately never been probed on this account,
+# so 'the game refuses this create' is an expected outcome, not an anomaly --
+# and firing twenty more after the first is both wasted writes and a signal.
+_CONSECUTIVE_FAILURE_LIMIT = 2
 
 # Europe 2 is x1 with coordinates running -200..+200. Exposed in the response so
 # the UI can show what the distances were computed against.
@@ -642,6 +649,57 @@ class ExecuteRequest(PlanRequest):
             "never visits. A distribution plan is a conservation system, so one "
             "surviving route makes the receiver overflow AND the sender drain: "
             "the account ends up in neither plan."
+        ),
+    )
+    protect_destinations: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Destinations whose live routes are never disabled, however the plan "
+            'sees them. Each entry is a village id ("53629") or coordinates '
+            '("46|133") — coordinates because a hand-made route to a foreign '
+            "target has no usable village id, so an id-only list could not "
+            "protect one at all. Exists because the reconciler's rule (active, "
+            "identifiable, not wanted by the plan => stale) is right for routes a "
+            "previous plan created and wrong for one made by hand: without this, "
+            "the app switches such a route off, the operator switches it on, and "
+            "the next run switches it off again. Narrows only what is DISABLED, "
+            "never what is created."
+        ),
+    )
+
+    @field_validator("protect_destinations")
+    @classmethod
+    def _protected_entries_are_parseable(cls, value: list[str]) -> list[str]:
+        # Rejected, not dropped. A typo ("4688" for "46|88") that is silently
+        # ignored leaves the operator believing a route is protected when it is
+        # not, and the very next run switches it off.
+        for entry in value:
+            text = entry.strip()
+            if text.isdigit() and int(text) > 0:
+                continue
+            if "|" in text:
+                left, _, right = text.partition("|")
+                if left.strip().lstrip("-").isdigit() and right.strip().lstrip("-").isdigit():
+                    continue
+            raise ValueError(
+                f"protect_destinations entry {entry!r} is neither a village id "
+                f'nor coordinates like "46|133"'
+            )
+        return value
+
+    max_game_rows_per_run: int = Field(
+        default=0,
+        ge=0,
+        le=2000,
+        description=(
+            "Route ROWS this run may put in the game. 0 is unbounded. This is the "
+            "unit the operator actually authorises: Travian turns one 'repeat "
+            "every N hours' request into 24/N separate daily rows, so three "
+            "routes on a one-hour cycle is seventy-two rows, and removing them "
+            "later means deleting every one. The run already reported this "
+            "number; nothing bounded it, so what was agreed to and what was "
+            "written were different units. A route cannot be created partly, so "
+            "one that does not fit is deferred whole."
         ),
     )
     max_origins_per_run: int = Field(
@@ -2266,6 +2324,16 @@ async def post_execute(
     filtered_to = _filter_description()
 
     cap = body.max_routes_per_run
+    row_cap = body.max_game_rows_per_run  # 0 = unbounded
+    protected_ids: set[int] = set()
+    protected_coords: set[tuple[int, int]] = set()
+    for _entry in body.protect_destinations:
+        _text = _entry.strip()
+        if "|" in _text:
+            _x, _, _y = _text.partition("|")
+            protected_coords.add((int(_x.strip()), int(_y.strip())))
+        else:
+            protected_ids.add(int(_text))
 
     if body.dry_run:
         # Zero game requests: the exact routes already on each marketplace are
@@ -2459,6 +2527,8 @@ async def post_execute(
     attempts = 0  # create requests fired this run
     updates_done = 0  # cargo-correction PUTs fired this run, bounded by `cap`
     visited = 0  # marketplaces read this run
+    rows_written = 0  # route ROWS this run has put in the game
+    consecutive_failures = 0  # create refusals in a row, across origins
     swept: list[int] = []  # villages actually reconciled (read) this run
     unswept: list[int] = []  # villages a reconcile sweep did not reach
     outstanding = 0  # creates attempted but not completed (failed / Gold Club)
@@ -2694,6 +2764,20 @@ async def post_execute(
                     ) -> bool:
                         return bool({e.dest_village_id} & ids or _existing_keys(e) & foreign)
 
+                    def _is_protected(
+                        e: ExistingRoute,
+                        ids: set[int] = protected_ids,
+                        coords: set[tuple[int, int]] = protected_coords,
+                    ) -> bool:
+                        """Declared off-limits by the operator, whatever the plan thinks.
+
+                        Matched on the same two keys the reconciler already uses,
+                        for the same reason: a hand-made route to a foreign target
+                        has no usable village id and can only be named by where it
+                        goes on the map.
+                        """
+                        return bool({e.dest_village_id} & ids or _existing_keys(e) & coords)
+
                     # Honeypots (hidden) would be ignored entirely — neither
                     # acted on nor treated as occupying a destination. A no-op
                     # as things stand: nothing produces visible=False, because
@@ -2711,8 +2795,35 @@ async def post_execute(
                         stale = [
                             e
                             for e in visible
-                            if e.active and _identifiable(e) and not _is_wanted(e)
+                            if e.active
+                            and _identifiable(e)
+                            and not _is_wanted(e)
+                            and not _is_protected(e)
                         ]
+                        # Named separately from `stale`: these ARE unwanted by the
+                        # plan and are being left running on purpose, which is a
+                        # different fact from "the plan wants this". Silence would
+                        # read as a clean reconciliation while they keep shipping.
+                        protected_here = [
+                            e
+                            for e in visible
+                            if e.active
+                            and _identifiable(e)
+                            and not _is_wanted(e)
+                            and _is_protected(e)
+                        ]
+                        if protected_here:
+                            disables.append(
+                                f"{village_label(origin, names)}: left "
+                                f"{len(protected_here)} protected route(s) running "
+                                f"that this plan does not want: "
+                                f"{[e.route_id for e in protected_here]}"
+                            )
+                            trace.event(
+                                "protected_kept",
+                                origin=origin,
+                                route_ids=[e.route_id for e in protected_here],
+                            )
                         unidentifiable = [e for e in visible if e.active and not _identifiable(e)]
                         if unidentifiable:
                             # Reported, not acted on. Silence would look like a
@@ -2988,6 +3099,24 @@ async def post_execute(
                             )
                             deferred.append((row, route))
                             continue
+                        # The footprint budget, in the unit that actually lands in
+                        # the game. Checked against the FAN-OUT, not the request:
+                        # a route cannot be created partly, so one that does not
+                        # fit waits for a later run rather than overshooting what
+                        # the operator agreed to.
+                        would_add = _game_rows(row.cycle_hours)
+                        if row_cap and rows_written + would_add > row_cap:
+                            trace.decision(
+                                origin=origin,
+                                destination=destination,
+                                decision="deferred",
+                                reason=(
+                                    f"row budget: {rows_written}/{row_cap} rows used, "
+                                    f"this {row.cycle_hours}h route needs {would_add} more"
+                                ),
+                            )
+                            deferred.append((row, route))
+                            continue
                         # Re-check before EVERY create, not once per origin: a
                         # captcha resolved (#62) or the budget exhausted (#64)
                         # during an earlier route of THIS origin must stop the
@@ -3000,11 +3129,13 @@ async def post_execute(
                             deferred.extend(desired[i:])
                             break
                         attempts += 1
+                        rows_written += would_add
                         result = await svc.create_route(route, stop_check=_stop_reason)
                         if result.status == "stopped":
                             # Stopped after the pacing wait, before the POST —
                             # nothing was created; defer the remainder.
                             attempts -= 1
+                            rows_written -= would_add
                             stopped_early = True
                             problems.append(result.detail)
                             deferred.extend(desired[i:])
@@ -3014,6 +3145,7 @@ async def post_execute(
                             actions.append(action)
                             created_here.append((action, route))
                             satisfied.add(destination)
+                            consecutive_failures = 0
                             continue
                         outstanding += 1
                         if result.status == "skipped":
@@ -3026,6 +3158,27 @@ async def post_execute(
                             deferred.extend(desired[i + 1 :])
                             break
                         actions.append(_action(row, route, "failed", result.detail))
+                        consecutive_failures += 1
+                        if consecutive_failures >= _CONSECUTIVE_FAILURE_LIMIT:
+                            # Whatever is refusing these is not going to stop
+                            # refusing within this run. Give up here rather than
+                            # working through the rest of the sheet against it.
+                            stopped_early = True
+                            problems.append(
+                                f"{village_label(origin, names)}: the game refused "
+                                f"{consecutive_failures} create(s) in a row "
+                                f"({result.detail}). Stopping rather than firing more "
+                                f"— check the village's route limit in game before "
+                                f"re-running."
+                            )
+                            trace.event(
+                                "consecutive_failures",
+                                origin=origin,
+                                count=consecutive_failures,
+                                detail=result.detail,
+                            )
+                            deferred.extend(desired[i + 1 :])
+                            break
 
                     # ── Did the game actually make them? ────────────────────
                     #

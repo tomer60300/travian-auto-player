@@ -43,6 +43,11 @@ const MAX_ROUTES_PER_RUN = 3
 // chunk of five at roughly 40-70 seconds — comfortably inside one request, which
 // is the whole reason the sweep is chunked at all.
 const SWEEP_VILLAGES_PER_CHUNK = 5
+const splitProtected = (text) =>
+  text
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
 const SNAPSHOT_TTL_MS = 30 * 60 * 1000 // 30 minutes
 const LS_MERCHANT = 'planner_merchant_model'
 // Named allocation profiles (e.g. Day / Night). Trade Office and the merchant
@@ -434,6 +439,15 @@ export default function ResourcePlanner() {
   // shrinking a later full run is exactly the surprise worth avoiding.
   const [routesPerRun, setRoutesPerRun] = useState(MAX_ROUTES_PER_RUN)
   const [onlyOrigin, setOnlyOrigin] = useState('')
+  // Rows, not routes: the unit that actually lands in the game. A route is a
+  // request; Travian turns it into 24/cycle daily rows, so three routes on
+  // one-hour cycles is seventy-two rows. Blank = no limit, so an existing run
+  // is unchanged until the operator sets one.
+  const [maxGameRows, setMaxGameRows] = useState('')
+  // Destinations the reconciler must leave alone. Its rule -- active,
+  // identifiable, not wanted by the plan => stale -- is right for routes a
+  // previous plan made and wrong for one made by hand.
+  const [protectDestinations, setProtectDestinations] = useState('')
   const [onlyDestination, setOnlyDestination] = useState('')
   // Was hardcoded true, which made every run a create AND a disable. For a
   // first live test that is the wrong shape: turning it off makes the run
@@ -966,6 +980,10 @@ export default function ResourcePlanner() {
           // ordinary run is byte-identical to what it was before.
           ...(onlyOrigin ? { only_origins: [Number(onlyOrigin)] } : {}),
           ...(onlyDestination ? { only_destinations: [Number(onlyDestination)] } : {}),
+          ...(Number(maxGameRows) > 0 ? { max_game_rows_per_run: Number(maxGameRows) } : {}),
+          ...(protectDestinations.trim()
+            ? { protect_destinations: splitProtected(protectDestinations) }
+            : {}),
           update_drifted: updateDrifted,
         })
         if (
@@ -1066,6 +1084,8 @@ export default function ResourcePlanner() {
       routesPerRun,
       onlyOrigin,
       onlyDestination,
+      maxGameRows,
+      protectDestinations,
       disableExisting,
       updateDrifted,
     ],
@@ -1113,6 +1133,11 @@ export default function ResourcePlanner() {
             max_routes_per_run: 0,
             reconcile_all_origins: true,
             max_origins_per_run: SWEEP_VILLAGES_PER_CHUNK,
+            // The sweep honours the exemption too, or it would switch off by
+            // hand exactly what the ordinary run is told to leave alone.
+            ...(protectDestinations.trim()
+              ? { protect_destinations: splitProtected(protectDestinations) }
+              : {}),
             ...(outstanding ? { only_origins: outstanding } : {}),
           },
           // Generous but finite. A chunk of five villages is ~40-70s of paced
@@ -1173,7 +1198,7 @@ export default function ResourcePlanner() {
     } finally {
       setSweeping(false)
     }
-  }, [plan, buildPlanPayload, toast])
+  }, [plan, buildPlanPayload, protectDestinations, toast])
 
   // Live unallocated counter, so slack is visible while typing rather than
   // discovered later (profile known issue #9).
@@ -2983,10 +3008,37 @@ export default function ResourcePlanner() {
                       <span className="text-secondary block">Routes this run</span>
                       <input
                         type="number"
-                        min="1"
+                        min="0"
                         className="input-sm w-24"
                         value={routesPerRun}
                         onChange={(e) => setRoutesPerRun(e.target.value)}
+                      />
+                    </label>
+                    {/* The unit that actually lands in the game. A "route" is a
+                        request; Travian turns it into 24/cycle daily rows, so a
+                        cap of 3 routes on 1-hour cycles is 72 rows. */}
+                    <label className="text-xs">
+                      <span className="text-secondary block">
+                        Max rows this run <span className="text-secondary">(0 = no limit)</span>
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        className="input-sm w-28"
+                        value={maxGameRows}
+                        onChange={(e) => setMaxGameRows(e.target.value)}
+                      />
+                    </label>
+                    <label className="text-xs">
+                      <span className="text-secondary block">
+                        Never disable (ids or x|y, comma-separated)
+                      </span>
+                      <input
+                        type="text"
+                        className="input-sm w-56"
+                        placeholder="none"
+                        value={protectDestinations}
+                        onChange={(e) => setProtectDestinations(e.target.value)}
                       />
                     </label>
                     <label className="text-xs">
