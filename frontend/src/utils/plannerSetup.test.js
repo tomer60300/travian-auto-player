@@ -183,3 +183,159 @@ describe('setupFilename', () => {
     expect(setupFilename('', STAMP)).toBe(`travian-planner-account-${STAMP}.json`)
   })
 })
+
+// ── Profiles (format version 2) ────────────────────────────────────────
+// The Day/Night pair is the largest body of typed state in the planner, and
+// before v2 the setup file did not carry it: a cleared origin meant retyping a
+// hundred numbers derived from store capacities. These pin the parts that make
+// carrying them safe rather than merely possible.
+
+const NIGHT = {
+  crop: {
+    20030: { mode: 'absolute', value: -8694 },
+    20031: { mode: 'absolute', value: 11499 },
+    20032: { mode: 'remainder', value: 0 },
+  },
+  clay: { 20031: { mode: 'absolute', value: -4000 } },
+}
+
+describe('profiles in the setup file', () => {
+  it('carries profiles, windows and the calibrated merchant model', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      profiles: { Night: NIGHT },
+      profileWindows: { Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] },
+      merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
+      exportedAt: STAMP,
+    })
+    expect(setup.version).toBe(2)
+    expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
+    expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
+    expect(setup.merchant_model.base_capacity).toBe(2500)
+  })
+
+  it('omits the profile fields entirely when there are none', () => {
+    // An empty object would import as "replace everything with nothing", which
+    // is the opposite of what loading a file is for.
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      profiles: {},
+      profileWindows: {},
+      exportedAt: STAMP,
+    })
+    expect('profiles' in setup).toBe(false)
+    expect('profile_windows' in setup).toBe(false)
+  })
+
+  it('survives the round trip with negative retentions intact', () => {
+    // A negative absolute is how a store already past its ceiling gets drained
+    // instead of merely frozen. Losing the sign would silently change the plan.
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, profiles: { Night: NIGHT }, exportedAt: STAMP })
+    )
+    expect(setup.profiles.Night.crop[20030]).toEqual({ mode: 'absolute', value: -8694 })
+    expect(setup.profiles.Night.clay[20031].value).toBe(-4000)
+  })
+
+  it('still reads a version 1 file, which simply has no profiles', () => {
+    const legacy = {
+      format: SETUP_FORMAT,
+      version: 1,
+      account: null,
+      villages: [{ village_id: 20030, name: 'Capital', trade_office_level: 13 }],
+    }
+    const setup = roundTrip(legacy)
+    expect(setup.villages[0].trade_office_level).toBe(13)
+    expect(setup.profiles).toEqual({})
+    expect(setup.merchantModel).toBeNull()
+  })
+
+  it('rejects an allocation mode the backend does not have', () => {
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.profiles = { Night: { crop: { 20030: { mode: 'hoard', value: 1 } } } }
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+  })
+
+  it('rejects an unknown resource rather than dropping it', () => {
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.profiles = { Night: { gold: { 20030: { mode: 'absolute', value: 1 } } } }
+    expect(() => roundTrip(doc)).toThrow(/unknown resource "gold"/)
+  })
+
+  it('rejects a window that is not HH:MM', () => {
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.profile_windows = { Night: ['23:00', '7pm'] }
+    expect(() => roundTrip(doc)).toThrow(/not HH:MM/)
+  })
+
+  it('rejects a merchant model that would divide by nothing', () => {
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.merchant_model = { base_capacity: 0, bonus_per_to_level: 0.2 }
+    expect(() => roundTrip(doc)).toThrow(/positive number/)
+  })
+})
+
+describe('mergeSetup with profiles', () => {
+  it('replaces a named profile wholesale and leaves the others alone', () => {
+    // Half of an old Night profile merged into a new one is a distribution
+    // nobody designed, so the file replaces rather than merges within a profile.
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, profiles: { Night: NIGHT }, exportedAt: STAMP })
+    )
+    const merged = mergeSetup({
+      setup,
+      villages: VILLAGES,
+      profiles: {
+        Day: { crop: { 20030: { mode: 'remainder', value: 0 } } },
+        Night: { iron: { 20030: { mode: 'absolute', value: 999 } } },
+      },
+    })
+    expect(merged.profiles.Day.crop[20030].mode).toBe('remainder')
+    expect(merged.profiles.Night.iron).toBeUndefined()
+    expect(merged.profiles.Night.crop[20030].value).toBe(-8694)
+    expect(merged.report.profilesLoaded).toEqual(['Night'])
+  })
+
+  it('drops allocations for villages the account no longer has, and says so', () => {
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.profiles = {
+      Night: {
+        crop: {
+          20030: { mode: 'absolute', value: 100 },
+          99999: { mode: 'absolute', value: 200 },
+        },
+      },
+    }
+    const merged = mergeSetup({ setup: roundTrip(doc), villages: VILLAGES })
+    expect(Object.keys(merged.profiles.Night.crop)).toEqual(['20030'])
+    expect(merged.report.profileVillagesDropped).toEqual([99999])
+  })
+
+  it('drops a resource whose every village vanished, rather than keeping it empty', () => {
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.profiles = { Night: { crop: { 99999: { mode: 'absolute', value: 1 } } } }
+    const merged = mergeSetup({ setup: roundTrip(doc), villages: VILLAGES })
+    expect(merged.profiles.Night).toEqual({})
+  })
+
+  it('carries the windows and the merchant model through', () => {
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        profiles: { Night: NIGHT },
+        profileWindows: { Night: ['23:00', '07:00'] },
+        merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
+        exportedAt: STAMP,
+      })
+    )
+    const merged = mergeSetup({
+      setup,
+      villages: VILLAGES,
+      profileWindows: { Day: ['07:00', '23:00'] },
+    })
+    expect(merged.profileWindows).toEqual({ Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] })
+    expect(merged.merchantModel).toEqual({ base_capacity: 2500, bonus_per_to_level: 0.2 })
+  })
+})

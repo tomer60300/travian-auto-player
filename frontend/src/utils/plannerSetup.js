@@ -6,20 +6,49 @@
  * on :8001, on the LAN address and over Tailscale keeps four independent copies.
  * Retyping them per origin is the problem this file exists to remove.
  *
+ * Version 2 carries the allocation PROFILES too. They were the largest body of
+ * typed state the file did not cover: a Day/Night pair is a hundred numbers
+ * derived from store capacities, and losing them to a cleared origin meant
+ * retyping the whole distribution. Profiles ride the same account guard as the
+ * per-village rows, because an allocation keyed by village id is just as wrong
+ * under the wrong account.
+ *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
  */
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 1
+export const SETUP_VERSION = 2
+/** Versions this build can read. A v1 file simply carries no profiles, so
+ * refusing it would strand every export written before profiles travelled. */
+export const READABLE_VERSIONS = Object.freeze([1, 2])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
 
+/** The backend's AllocationMode, which the file must not outrun. */
+export const ALLOCATION_MODES = Object.freeze([
+  'keep',
+  'absolute',
+  'percentage',
+  'sustain',
+  'remainder',
+])
+export const SETUP_RESOURCES = Object.freeze(['lumber', 'clay', 'iron', 'crop'])
+
 export class SetupFileError extends Error {}
 
 /** Build the exportable document. Villages with nothing typed are left out. */
-export function buildSetup({ account, villages, tradeOffice, cropCeilings, exportedAt }) {
+export function buildSetup({
+  account,
+  villages,
+  tradeOffice,
+  cropCeilings,
+  profiles,
+  profileWindows,
+  merchantModel,
+  exportedAt,
+}) {
   const rows = []
   for (const village of villages ?? []) {
     const level = tradeOffice?.[village.village_id]
@@ -30,7 +59,7 @@ export function buildSetup({ account, villages, tradeOffice, cropCeilings, expor
     if (ceiling != null) row.crop_ceiling = Number(ceiling)
     rows.push(row)
   }
-  return {
+  const doc = {
     format: SETUP_FORMAT,
     version: SETUP_VERSION,
     exported_at: exportedAt,
@@ -39,6 +68,80 @@ export function buildSetup({ account, villages, tradeOffice, cropCeilings, expor
     account: account ?? null,
     villages: rows,
   }
+  // Omitted rather than written empty, so a file says plainly whether it has
+  // profiles to give. An empty object would import as "replace everything with
+  // nothing", which is the opposite of what an operator loading a file wants.
+  if (profiles && Object.keys(profiles).length) doc.profiles = profiles
+  if (profileWindows && Object.keys(profileWindows).length) {
+    doc.profile_windows = profileWindows
+  }
+  if (merchantModel) doc.merchant_model = merchantModel
+  return doc
+}
+
+/** Validate one profile's allocation map, resource by resource.
+ *
+ * Negative values are deliberately allowed. An `absolute` retention below a
+ * village's own production is how a store that is already past its ceiling gets
+ * drained rather than merely frozen, and the night profile is built on exactly
+ * that — so rejecting the sign here would reject the plan it exists to carry.
+ */
+function parseProfile(raw, where) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new SetupFileError(`${where} is not an allocation map.`)
+  }
+  const out = {}
+  for (const [resource, per] of Object.entries(raw)) {
+    if (!SETUP_RESOURCES.includes(resource)) {
+      throw new SetupFileError(`${where} has unknown resource "${resource}".`)
+    }
+    if (!per || typeof per !== 'object' || Array.isArray(per)) {
+      throw new SetupFileError(`${where}.${resource} is not an object.`)
+    }
+    const kept = {}
+    for (const [vid, alloc] of Object.entries(per)) {
+      const id = Number(vid)
+      if (!Number.isInteger(id) || id <= 0) {
+        throw new SetupFileError(`${where}.${resource} has no usable village id "${vid}".`)
+      }
+      if (!alloc || typeof alloc !== 'object') {
+        throw new SetupFileError(`${where}.${resource}[${vid}] is not an allocation.`)
+      }
+      if (!ALLOCATION_MODES.includes(alloc.mode)) {
+        throw new SetupFileError(
+          `${where}.${resource}[${vid}] has mode "${alloc.mode ?? 'nothing'}"; ` +
+            `it must be one of ${ALLOCATION_MODES.join(', ')}.`
+        )
+      }
+      const value = alloc.value == null ? 0 : Number(alloc.value)
+      if (!Number.isFinite(value)) {
+        throw new SetupFileError(`${where}.${resource}[${vid}] has a non-numeric value.`)
+      }
+      kept[id] = { mode: alloc.mode, value }
+    }
+    out[resource] = kept
+  }
+  return out
+}
+
+/** Validate a `{ profile: ['HH:MM', 'HH:MM'] }` window map. */
+function parseWindows(raw, where) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new SetupFileError(`${where} is not a window map.`)
+  }
+  const out = {}
+  for (const [name, pair] of Object.entries(raw)) {
+    if (!Array.isArray(pair) || pair.length !== 2) {
+      throw new SetupFileError(`${where}["${name}"] must be a [start, end] pair.`)
+    }
+    for (const t of pair) {
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(t))) {
+        throw new SetupFileError(`${where}["${name}"] has "${t}", which is not HH:MM.`)
+      }
+    }
+    out[name] = [String(pair[0]), String(pair[1])]
+  }
+  return out
 }
 
 /** Parse and validate a setup document. Throws rather than half-loading.
@@ -63,9 +166,10 @@ export function parseSetup(text) {
       `Not a planner setup file (expected format "${SETUP_FORMAT}", got "${raw.format ?? 'nothing'}").`
     )
   }
-  if (raw.version !== SETUP_VERSION) {
+  if (!READABLE_VERSIONS.includes(raw.version)) {
     throw new SetupFileError(
-      `This file is version ${raw.version}, and this build reads version ${SETUP_VERSION}. ` +
+      `This file is version ${raw.version}, and this build reads ` +
+        `version ${READABLE_VERSIONS.join(' or ')}. ` +
         `Re-export it from the build that wrote it.`
     )
   }
@@ -101,7 +205,34 @@ export function parseSetup(text) {
     return parsed
   })
 
-  return { ...raw, villages }
+  const profiles = {}
+  if (raw.profiles != null) {
+    if (typeof raw.profiles !== 'object' || Array.isArray(raw.profiles)) {
+      throw new SetupFileError('The file has a profiles field that is not a map of profiles.')
+    }
+    for (const [name, alloc] of Object.entries(raw.profiles)) {
+      if (!name.trim()) throw new SetupFileError('A profile in the file has an empty name.')
+      profiles[name] = parseProfile(alloc, `profiles["${name}"]`)
+    }
+  }
+  const profileWindows =
+    raw.profile_windows == null ? {} : parseWindows(raw.profile_windows, 'profile_windows')
+
+  let merchantModel = null
+  if (raw.merchant_model != null) {
+    const m = raw.merchant_model
+    const base = Number(m?.base_capacity)
+    const bonus = Number(m?.bonus_per_to_level)
+    if (!Number.isFinite(base) || base <= 0) {
+      throw new SetupFileError('merchant_model.base_capacity must be a positive number.')
+    }
+    if (!Number.isFinite(bonus) || bonus < 0) {
+      throw new SetupFileError('merchant_model.bonus_per_to_level must be zero or more.')
+    }
+    merchantModel = { base_capacity: base, bonus_per_to_level: bonus }
+  }
+
+  return { ...raw, villages, profiles, profileWindows, merchantModel }
 }
 
 /** Apply a parsed setup over the current maps, and say exactly what happened.
@@ -112,7 +243,14 @@ export function parseSetup(text) {
  * levels to 0 when it plans, but recording that guess as if the operator had
  * confirmed it is how an over-provisioned village becomes invisible.
  */
-export function mergeSetup({ setup, villages, tradeOffice, cropCeilings }) {
+export function mergeSetup({
+  setup,
+  villages,
+  tradeOffice,
+  cropCeilings,
+  profiles,
+  profileWindows,
+}) {
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
   const nextTradeOffice = { ...(tradeOffice ?? {}) }
   const nextCropCeilings = { ...(cropCeilings ?? {}) }
@@ -139,10 +277,45 @@ export function mergeSetup({ setup, villages, tradeOffice, cropCeilings }) {
     }
   }
 
+  // A profile the file names replaces the one on screen wholesale, because half
+  // of an old Day profile merged into a new one is a distribution nobody
+  // designed. Profiles the file does not mention are left exactly as they are.
+  const nextProfiles = { ...(profiles ?? {}) }
+  const nextWindows = { ...(profileWindows ?? {}) }
+  const profilesLoaded = []
+  const droppedVillages = new Set()
+  for (const [name, alloc] of Object.entries(setup.profiles ?? {})) {
+    const pruned = {}
+    for (const [resource, per] of Object.entries(alloc)) {
+      const kept = {}
+      for (const [vid, a] of Object.entries(per)) {
+        // Same rule as the per-village rows: an id the account no longer has
+        // would 400 every plan call, so it is dropped and counted, not kept.
+        if (known.has(Number(vid))) kept[vid] = a
+        else droppedVillages.add(Number(vid))
+      }
+      if (Object.keys(kept).length) pruned[resource] = kept
+    }
+    nextProfiles[name] = pruned
+    profilesLoaded.push(name)
+  }
+  for (const [name, pair] of Object.entries(setup.profileWindows ?? {})) {
+    nextWindows[name] = pair
+  }
+
   return {
     tradeOffice: nextTradeOffice,
     cropCeilings: nextCropCeilings,
-    report: { loaded, missingFromAccount, stillUnknown },
+    profiles: nextProfiles,
+    profileWindows: nextWindows,
+    merchantModel: setup.merchantModel ?? null,
+    report: {
+      loaded,
+      missingFromAccount,
+      stillUnknown,
+      profilesLoaded,
+      profileVillagesDropped: [...droppedVillages].sort((a, b) => a - b),
+    },
   }
 }
 
