@@ -80,13 +80,40 @@ def round_preserving_total(
     for key in ranked[:shortfall]:
         floors[key] += 1
     if min_each:
-        # Applied last, deliberately. Raising a key here can push the sum past
-        # `target_total`, and that is the intended trade: a resource the plan
-        # asked to ship must actually travel. Only keys with a nonzero input are
-        # floored -- a route asked to carry lumber must not start carrying crop.
-        for key, value in values.items():
-            if value > 0 and floors[key] < min_each:
-                floors[key] = min_each
+        # Satisfied by REDISTRIBUTION, not addition. Adding after the total is
+        # fixed can push the send past a merchant boundary that route_cost already
+        # budgeted for -- 23,999.49 + 0.3 + 0.2 targets 24,000, fits two 12,000
+        # merchants, and shipping 24,002 needs three. The sheet would then
+        # understate its own cost and breach the village's budget invisibly.
+        #
+        # So take from the largest entries and give to the starved ones: the sum
+        # is untouched, every requested resource travels, and the donor loses a
+        # unit or two out of thousands. Only keys with a nonzero input are floored
+        # -- a route asked to carry lumber must not start carrying crop.
+        wanted = [key for key, value in values.items() if value > 0]
+        starved = [key for key in wanted if floors[key] < min_each]
+        for key in starved:
+            need = min_each - floors[key]
+            # Largest first, and never below its own floor of min_each: robbing a
+            # donor down to zero would recreate the bug in the other direction.
+            donors = sorted(
+                (k for k in wanted if k not in starved and floors[k] > min_each),
+                key=lambda k: (-floors[k], _sort_key(k)),
+            )
+            for donor in donors:
+                if need <= 0:
+                    break
+                spare = floors[donor] - min_each
+                moved = min(spare, need)
+                floors[donor] -= moved
+                floors[key] += moved
+                need -= moved
+            if need > 0:
+                # Nothing to redistribute: the total is smaller than the number of
+                # resources asking for a unit, so no arrangement can give each one.
+                # Exceeding the target is the only option left, and the route is
+                # carrying almost nothing for it to matter.
+                floors[key] += need
     return floors
 
 

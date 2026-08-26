@@ -101,3 +101,65 @@ class TestTheOvershootStaysBounded:
         batch = {Resource.LUMBER: 4000.4, Resource.CLAY: 3000.3, Resource.CROP: 2000.3}
         out = _round(batch)
         assert sum(out.values()) == math.ceil(sum(batch.values()) - CEIL_DUST_TOLERANCE)
+
+
+class TestTheFloorMustNotBreachTheMerchantBudget:
+    """Found by self-review, and it is the dangerous direction.
+
+    `route_cost` sizes a route's merchants from `ceil(sum)` -- the same target the
+    rounding is given. Adding a unit AFTER that total is fixed can push the send
+    past a merchant boundary the budget never accounted for: a cargo of 23,999.49
+    + 0.3 + 0.2 targets 24,000, fits two 12,000 merchants, and shipped 24,002 --
+    which needs three. The sheet would then understate its own cost, and the
+    village's budget is breached invisibly, which is exactly the failure the
+    codebase warns about elsewhere.
+
+    So the floor is satisfied by REDISTRIBUTION wherever the total allows it:
+    take from the largest entries, give to the starved ones, and the sum is
+    untouched. Only a total smaller than the number of resources cannot go round,
+    and there the excess is at most a few units on a route already carrying
+    almost nothing.
+    """
+
+    CAP = 12_000
+
+    def _merchants(self, units):
+        return math.ceil(units / self.CAP)
+
+    def test_a_cargo_on_a_merchant_boundary_stays_within_its_budget(self):
+        batch = {Resource.LUMBER: 23_999.49, Resource.CROP: 0.3, Resource.IRON: 0.2}
+        target = math.ceil(sum(batch.values()) - CEIL_DUST_TOLERANCE)
+        out = _round(batch)
+
+        assert sum(out.values()) == target, "redistribution must not change the total"
+        assert self._merchants(sum(out.values())) == self._merchants(target)
+
+    def test_and_every_resource_still_travels(self):
+        # The original fix must survive the correction to it.
+        out = _round({Resource.LUMBER: 23_999.49, Resource.CROP: 0.3, Resource.IRON: 0.2})
+        assert out[Resource.CROP] >= 1
+        assert out[Resource.IRON] >= 1
+        assert out[Resource.LUMBER] >= 23_990, "the donor keeps almost all of it"
+
+    def test_it_holds_across_the_boundaries_that_triggered_it(self):
+        for base in (self.CAP - 1, 2 * self.CAP - 1, 3 * self.CAP - 1):
+            for frac in (0.4, 0.49):
+                batch = {
+                    Resource.LUMBER: base + frac,
+                    Resource.CROP: 0.3,
+                    Resource.IRON: 0.2,
+                }
+                target = math.ceil(sum(batch.values()) - CEIL_DUST_TOLERANCE)
+                out = _round(batch)
+                assert self._merchants(sum(out.values())) == self._merchants(target), (
+                    f"base {base} +{frac}: {sum(out.values())} needs more merchants "
+                    f"than the {target} budgeted"
+                )
+
+    def test_a_total_too_small_to_go_round_still_ships_everything(self):
+        # Two resources and a total of one: no redistribution can give both a
+        # unit, so this is the one case that must exceed the target. The route is
+        # carrying two units, so the cost of that is a rounding artefact at worst.
+        out = _round({Resource.LUMBER: 0.6, Resource.CROP: 0.4})
+        assert out[Resource.LUMBER] >= 1 and out[Resource.CROP] >= 1
+        assert sum(out.values()) == 2
