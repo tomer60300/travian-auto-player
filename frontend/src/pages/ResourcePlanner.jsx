@@ -444,6 +444,12 @@ export default function ResourcePlanner() {
   // one-hour cycles is seventy-two rows. Blank = no limit, so an existing run
   // is unchanged until the operator sets one.
   const [maxGameRows, setMaxGameRows] = useState('')
+  // Travian cannot confine a route to part of the day, but its fan-out can be
+  // trimmed: repeat-every-N-hours is 24/N individually deletable rows, so the
+  // ones departing outside the profile get removed after creation. On by
+  // default because OFF is the broken case -- the window is a fiction the game
+  // ignores, and the destination receives every firing.
+  const [pruneToWindow, setPruneToWindow] = useState(true)
   // Destinations the reconciler must leave alone. Its rule -- active,
   // identifiable, not wanted by the plan => stale -- is right for routes a
   // previous plan made and wrong for one made by hand.
@@ -981,6 +987,7 @@ export default function ResourcePlanner() {
           ...(onlyOrigin ? { only_origins: [Number(onlyOrigin)] } : {}),
           ...(onlyDestination ? { only_destinations: [Number(onlyDestination)] } : {}),
           ...(Number(maxGameRows) > 0 ? { max_game_rows_per_run: Number(maxGameRows) } : {}),
+          ...(pruneToWindow && profileHasWindow ? { prune_to_window: true } : {}),
           ...(protectDestinations.trim()
             ? { protect_destinations: splitProtected(protectDestinations) }
             : {}),
@@ -1085,11 +1092,24 @@ export default function ResourcePlanner() {
       onlyOrigin,
       onlyDestination,
       maxGameRows,
+      pruneToWindow,
+      profileHasWindow,
       protectDestinations,
       disableExisting,
       updateDrifted,
     ],
   )
+
+  // Does the active profile actually own part of the day? Derived the same way
+  // buildPlanPayload derives the window it sends, because trimming the fan-out is
+  // only meaningful when there are hours to trim to.
+  const profileHasWindow = useMemo(() => {
+    const hours = profileWindows[activeProfile] ?? DEFAULT_WINDOWS[activeProfile] ?? null
+    if (!hours) return false
+    const from = hhmmToMinutes(hours[0])
+    const to = hhmmToMinutes(hours[1])
+    return from != null && to != null && from !== to
+  }, [profileWindows, activeProfile])
 
   // ── Reconciliation sweep ────────────────────────────────────────────────
   // Switching profiles drops some villages as origins entirely, and those are
@@ -3028,6 +3048,24 @@ export default function ResourcePlanner() {
                         value={maxGameRows}
                         onChange={(e) => setMaxGameRows(e.target.value)}
                       />
+                    </label>
+                    <label className="text-xs flex items-start gap-2 max-w-md">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={pruneToWindow}
+                        onChange={(e) => setPruneToWindow(e.target.checked)}
+                      />
+                      <span className="text-secondary">
+                        <span className="text-primary">Trim the fan-out to the profile hours.</span>{' '}
+                        Travian has no setting that confines a route to part of the
+                        day: &ldquo;repeat every N hours&rdquo; becomes 24/N daily rows
+                        and every one of them fires. This deletes the rows departing
+                        outside the profile hours after
+                        the route is created, which is what makes the window real —
+                        and cuts the row footprint to the share of the day it covers.
+                        Untick only for a round-the-clock profile.
+                      </span>
                     </label>
                     <label className="text-xs">
                       <span className="text-secondary block">

@@ -204,6 +204,11 @@ class ExistingRoute:
     # without this the live routes and the sheet slowly describe different
     # accounts with nothing detecting it. None when the page did not say.
     cargo: dict[Resource, int] | None = None
+    # When this ROW departs, as a unix timestamp. A "repeat every N hours" route
+    # is 24/N separate rows sharing a destination and a cargo; their departures
+    # are the only thing that tells them apart, and therefore the only way to say
+    # which of them fall inside a profile's hours. None when the page did not say.
+    departure_at: int | None = None
 
 
 # How far a live route's cargo may drift from the plan before it is rewritten.
@@ -429,6 +434,7 @@ class TradeRouteService:
                 visible=r["visible"],
                 active=r.get("active", True),
                 cargo=_cargo_of(r),
+                departure_at=r.get("departure_at"),
             )
             for r in parsed
         ]
@@ -474,6 +480,7 @@ class TradeRouteService:
                 visible=r["visible"],
                 active=r.get("active", True),
                 cargo=_cargo_of(r),
+                departure_at=r.get("departure_at"),
             )
             for r in parsed
         ]

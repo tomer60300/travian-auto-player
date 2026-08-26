@@ -766,6 +766,19 @@ def _routes_from_view(view: Dict[str, Any], map_span: int) -> List[Dict[str, Any
                     "active": bool(entry.get("enabled", True)),
                     "merchants": entry.get("merchants"),
                     "repeat_hours": entry.get("repeat"),
+                    # When this row departs, as the page states it: a unix
+                    # timestamp per ROW, not per route. A "repeat every N hours"
+                    # route is 24/N separate rows each with its own id and its
+                    # own departure, so this is the only thing that distinguishes
+                    # them -- and therefore the only way to tell which rows fall
+                    # inside a profile's hours and which do not. None when the
+                    # page did not say, which must read as "unknown" rather than
+                    # as midnight.
+                    "departure_at": (
+                        int(entry["departureAt"])
+                        if isinstance(entry.get("departureAt"), (int, float))
+                        else None
+                    ),
                     "cargo": {
                         resource: int(cargo.get(resource, 0) or 0)
                         for resource in ("lumber", "clay", "iron", "crop")

@@ -72,6 +72,7 @@ from travian_api.services.distribution.storage import (
     storage_findings,
     store_status,
 )
+from travian_api.services.distribution.window_pruning import rows_outside_window
 from travian_api.services.trade_route_service import (
     ExistingRoute,
     MarketplaceUnreadable,
@@ -687,6 +688,20 @@ class ExecuteRequest(PlanRequest):
             )
         return value
 
+    prune_to_window: bool = Field(
+        default=False,
+        description=(
+            "After creating a route, delete the rows that depart outside "
+            "`dispatch_window`. Travian offers no setting that confines a route to "
+            "part of the day, but it does not need one: repeat-every-N-hours is "
+            "24/N separate rows, each with its own id and each individually "
+            "deletable (measured -- a 1h route made 24 rows, deleting one left 23). "
+            "So a windowed profile is enforced by subtraction. Without this the "
+            "window is a fiction the game ignores and the destination receives "
+            "every firing, about three times the modelled cargo for an 8-hour "
+            "profile. Requires dispatch_window; does nothing without one."
+        ),
+    )
     max_game_rows_per_run: int = Field(
         default=0,
         ge=0,
@@ -3235,6 +3250,80 @@ async def post_execute(
                             for e in fresh:
                                 for key in _existing_keys(e):
                                     fresh_rows[key] = fresh_rows.get(key, 0) + 1
+                            # Confine the fan-out to the profile hours, by
+                            # subtraction. Done here because `fresh` is already the
+                            # set of rows these creates are CONFIRMED to have made:
+                            # pruning against an unverified read would be deleting
+                            # rows on a guess. One delete for the whole origin
+                            # rather than one per route.
+                            if body.prune_to_window and body.dispatch_window and created_here:
+                                doomed: list[ExistingRoute] = []
+                                for _action, _route in created_here:
+                                    _key = _desired_key(_route)
+                                    _mine = [e for e in fresh if _key in _existing_keys(e)]
+                                    try:
+                                        doomed.extend(
+                                            rows_outside_window(_mine, tuple(body.dispatch_window))
+                                        )
+                                    except ValueError as exc:
+                                        # Refusing to prune leaves the route running
+                                        # round the clock, which the plan reports.
+                                        # Pruning every row would destroy the route
+                                        # this run just created.
+                                        problems.append(
+                                            f"{village_label(origin, names)} -> "
+                                            f"{_action.destination_name}: {exc}"
+                                        )
+                                if doomed:
+                                    _ids = sorted(e.route_id for e in doomed)
+                                    _res = None
+                                    try:
+                                        _res = await svc.delete_routes(
+                                            origin, doomed, stop_check=_stop_reason
+                                        )
+                                    except TravianError as exc:
+                                        problems.append(
+                                            f"{village_label(origin, names)}: could not "
+                                            f"prune {len(_ids)} out-of-window row(s) "
+                                            f"({exc}); the route ships round the clock"
+                                        )
+                                    if _res is not None and _res.status == "deleted":
+                                        # Verified like every other write here: a
+                                        # delete that reports success and leaves the
+                                        # rows behind is the same class of false
+                                        # outcome as an unverified create.
+                                        _survivors: list[int] = []
+                                        try:
+                                            _left = await svc.confirm_routes(
+                                                origin, map_span=body.map_span
+                                            )
+                                            _survivors = sorted(
+                                                e.route_id for e in _left if e.route_id in set(_ids)
+                                            )
+                                        except (NetworkError, MarketplaceUnreadable) as exc:
+                                            problems.append(
+                                                f"{village_label(origin, names)}: pruned "
+                                                f"{len(_ids)} row(s) but could not confirm "
+                                                f"({exc})"
+                                            )
+                                        if _survivors:
+                                            problems.append(
+                                                f"{village_label(origin, names)}: asked to "
+                                                f"prune {_ids} and {_survivors} are STILL "
+                                                f"THERE, shipping outside the profile"
+                                            )
+                                        else:
+                                            disables.append(
+                                                f"{village_label(origin, names)}: pruned "
+                                                f"{len(_ids)} row(s) departing outside the "
+                                                f"profile hours"
+                                            )
+                                    trace.event(
+                                        "window_pruned",
+                                        origin=origin,
+                                        route_ids=_ids,
+                                        status=getattr(_res, "status", None),
+                                    )
                             trace.event(
                                 "verified",
                                 origin=origin,

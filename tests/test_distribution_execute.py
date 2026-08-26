@@ -230,6 +230,11 @@ class TestLiveGate:
 
 # A real village id no plan row targets, and no plan coordinate resolves to.
 _UNWANTED_DEST = 909090
+
+_MINUTES_PER_DAY = 1440
+# Midnight of a fixed day, so a fabricated departure carries no clock: `% 86400`
+# on these values yields exactly the minute of the day that was asked for.
+_EPOCH_DAY = 1787616000
 # The id a marketplace page would report for a FOREIGN destination: real, and
 # absent from the plan, which only ever knows that target by its coordinates.
 _FOREIGN_REAL_ID = 555001
@@ -281,6 +286,7 @@ class _FakeLiveSvc:
         self._read_raises = read_raises or set()  # origin ids whose read raises
         self.created = []  # PlannedRoute objects a create was ATTEMPTED for
         self.disabled = []  # (origin, sorted tuple of disabled dest coords)
+        self.deleted = []  # (origin, sorted tuple of route ids removed for good)
         self.enabled = []  # (origin, sorted tuple of re-enabled dest coords)
         self.listed = []  # origin ids whose marketplace was READ
         self.execute_lock = asyncio.Lock()
@@ -332,6 +338,19 @@ class _FakeLiveSvc:
             if row.route_id in targets:
                 row.cargo = dict(cargo)
         return RouteActionResult(vid, 0, 0, "updated", f"{len(routes)} route(s)")
+
+    async def delete_routes(self, vid, routes, *, stop_check=None):
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        if stop_check is not None and (reason := stop_check()):
+            return RouteActionResult(vid, 0, 0, "stopped", reason)
+        ids = {r.route_id for r in routes}
+        self.deleted.append((vid, tuple(sorted(ids))))
+        # Actually gone. The read-back is what the production code trusts, so a
+        # double that recorded the call and left the rows in place would let a
+        # broken delete pass.
+        self._existing[vid] = [e for e in self._existing.get(vid, []) if e.route_id not in ids]
+        return RouteActionResult(vid, 0, 0, "deleted")
 
     async def confirm_routes(self, vid, *, map_span=None):
         if vid in self._confirm_raises:
@@ -399,8 +418,17 @@ class _FakeLiveSvc:
             # The real game makes the route appear on the marketplace, which is
             # the only evidence the empty response does not give -- and it makes
             # one row per daily departure, so a 6-hour cycle appears as four.
-            for _ in range(self.rows_a_create_makes(route)):
+            for offset in range(self.rows_a_create_makes(route)):
                 self._next_route_id += 1
+                # Each row departs `offset * cycle` after the requested time, and
+                # `departure_at % 86400` is that minute of the day -- measured
+                # against the real game, which returned 1410 for a 23:30 request.
+                # A row with no departure would read as "time unknown", which is
+                # never pruned, so omitting this would silently disable the whole
+                # window question.
+                minute = (
+                    route.dispatch_minute + offset * max(1, route.cycle_hours) * 60
+                ) % _MINUTES_PER_DAY
                 self._existing.setdefault(route.origin_village_id, []).append(
                     ExistingRoute(
                         route_id=self._next_route_id,
@@ -408,6 +436,7 @@ class _FakeLiveSvc:
                         dest_x=route.dest_x,
                         dest_y=route.dest_y,
                         active=True,
+                        departure_at=_EPOCH_DAY + minute * 60,
                     )
                 )
         if self.on_create is not None:
@@ -2797,3 +2826,55 @@ class TestTheRunStopsFiringWhenTheGameKeepsRefusing:
 
         assert res.created_game_rows == 0, "nothing was written, so no rows exist"
         assert res.remaining == 1, "and the route is still outstanding"
+
+
+class TestPruningTheFanOutToTheProfilesHours:
+    """The window is enforced by subtraction, and only on confirmed rows.
+
+    Travian has no setting that confines a route to part of the day, so the beat's
+    window was a fiction: it counted the in-window firings and the game performed
+    all of them. But "repeat every N hours" is 24/N individually deletable rows,
+    proven on the live account -- so deleting the ones that depart outside the
+    window makes the window real.
+
+    Pruned against `fresh`, the rows the creates are CONFIRMED to have produced.
+    Pruning against an unverified read would be deleting rows on a guess.
+    """
+
+    def _account(self):
+        return _account(
+            [_row_with_cycle(20003, -1, 1, 23 * 60 + 30)],
+            {20003: (0, 0), -1: (40, 40)},
+            {20003: "03", -1: "A"},
+        )
+
+    def test_rows_departing_outside_the_window_are_deleted(self):
+        svc = _FakeLiveSvc()
+        _run_live(
+            svc,
+            self._account(),
+            max_routes_per_run=50,
+            dispatch_window=[23 * 60, 7 * 60],
+            prune_to_window=True,
+        )
+
+        assert svc.deleted, "the out-of-window rows must actually be removed"
+
+    def test_nothing_is_pruned_without_a_window(self):
+        # A round-the-clock profile wants every firing; pruning would delete the
+        # route set the operator asked for.
+        svc = _FakeLiveSvc()
+        _run_live(svc, self._account(), max_routes_per_run=50, prune_to_window=True)
+
+        assert not getattr(svc, "deleted", []), "no window means no pruning"
+
+    def test_nothing_is_pruned_unless_asked(self):
+        svc = _FakeLiveSvc()
+        _run_live(
+            svc,
+            self._account(),
+            max_routes_per_run=50,
+            dispatch_window=[23 * 60, 7 * 60],
+        )
+
+        assert not getattr(svc, "deleted", []), "off by default: it deletes rows"
