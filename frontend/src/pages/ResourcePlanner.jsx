@@ -461,6 +461,13 @@ export default function ResourcePlanner() {
   // default because OFF is the broken case -- the window is a fiction the game
   // ignores, and the destination receives every firing.
   const [pruneToWindow, setPruneToWindow] = useState(true)
+  // The two numbers the account cannot supply: how empty the stores actually
+  // are at bedtime, and how full they may be at dawn. Everything else the
+  // derivation needs it works out for itself.
+  const [baselineFill, setBaselineFill] = useState(30)
+  const [targetFill, setTargetFill] = useState(80)
+  const [deriving, setDeriving] = useState(false)
+  const [derived, setDerived] = useState(null)
   // Destinations the reconciler must leave alone. Its rule -- active,
   // identifiable, not wanted by the plan => stale -- is right for routes a
   // previous plan made and wrong for one made by hand.
@@ -929,7 +936,17 @@ export default function ResourcePlanner() {
         ? Number(merchantModel.bonus_per_to_level)
         : undefined,
     }
-  }, [villages, tradeOffice, allocations, foreignTargets, merchantModel, snapshot, profileWindows, activeProfile])
+  }, [
+    villages,
+    tradeOffice,
+    allocations,
+    foreignTargets,
+    merchantModel,
+    snapshot,
+    profileWindows,
+    activeProfile,
+    pruneToWindow,
+  ])
 
   const buildPlan = useCallback(async () => {
     if (!villages.length) {
@@ -1128,6 +1145,54 @@ export default function ResourcePlanner() {
       updateDrifted,
     ],
   )
+
+  // ── Night profile ───────────────────────────────────────────────────────
+  // At night nothing is spent, so everything that arrives stays and the store
+  // becomes the binding constraint. The most a village may take per hour is
+  //
+  //     (target - baseline) x capacity / window hours
+  //
+  // measured from the baseline the operator RE-ESTABLISHES each night rather
+  // than from whatever a snapshot caught -- which is what lets one profile hold
+  // for weeks instead of going stale within the hour.
+  //
+  // Writes into the ACTIVE profile, so the operator picks Night first and sees
+  // the numbers land in the table they are already looking at. Costs nothing, so
+  // it can be redone freely while they settle on a baseline.
+  const buildNightProfile = useCallback(async () => {
+    setDeriving(true)
+    try {
+      const res = await api.post('/distribution/night-profile', {
+        ...buildPlanPayload(),
+        baseline_fill: Number(baselineFill) / 100,
+        target_fill: Number(targetFill) / 100,
+      })
+      const incoming = res.data.allocations || {}
+      setAllocations((prev) => {
+        const next = { ...prev }
+        for (const [resource, per] of Object.entries(incoming)) {
+          next[resource] = { ...per }
+        }
+        return next
+      })
+      setDerived(res.data)
+      // The plan on screen was built from the old numbers, so it no longer
+      // describes the inputs.
+      setPlan(null)
+      const short = Object.keys(res.data.unmet || {}).length
+      if (short) {
+        toast.error(
+          `Built, but ${short} resource(s) have demand no village can cover — see the notes`
+        )
+      } else {
+        toast.success(`Night profile built for a ${baselineFill}% → ${targetFill}% night`)
+      }
+    } catch (err) {
+      toast.error(errorDetail(err, 'Could not build the night profile'))
+    } finally {
+      setDeriving(false)
+    }
+  }, [buildPlanPayload, baselineFill, targetFill, setAllocations, toast])
 
   // ── Reconciliation sweep ────────────────────────────────────────────────
   // Switching profiles drops some villages as origins entirely, and those are
@@ -2268,6 +2333,124 @@ export default function ResourcePlanner() {
 
       {stage === 'allocate' && villages.length > 0 && (
         <div className="space-y-4">
+          {/* Build the night profile from the stores.
+
+              Deliberately at the TOP of the allocation stage and not buried in a
+              menu: it fills in the table below, so it belongs where the operator
+              is about to start typing the hundred numbers it saves them. */}
+          <div className="card p-4 border-l-2 border-l-indigo-400/60">
+            <div className="flex items-start justify-between gap-4 flex-wrap">
+              <div className="min-w-[18rem] flex-1">
+                <h3 className="font-semibold">Build this profile from your stores</h3>
+                <p className="text-secondary text-xs mt-1">
+                  At night nothing is spent, so everything that arrives stays and the
+                  store becomes the limit — not the plan. The most a village may take
+                  per hour is the room it has, divided by the hours it has to fill it:
+                </p>
+                <p className="text-xs mt-2 font-mono text-info">
+                  (full% − empty%) × capacity ÷ hours
+                </p>
+                <p className="text-secondary text-xs mt-2">
+                  Measured from the state <span className="text-primary">you leave behind</span>,
+                  not from the snapshot. That is the difference between a profile that
+                  holds for weeks and one that is stale within the hour.
+                </p>
+              </div>
+
+              <div className="flex items-end gap-3">
+                <label className="text-xs">
+                  <span className="text-secondary block mb-1">Emptied to</span>
+                  <span className="flex items-baseline gap-1">
+                    <input
+                      type="number"
+                      min="0"
+                      max="90"
+                      className="input-sm w-16 text-right"
+                      value={baselineFill}
+                      onChange={(e) => setBaselineFill(e.target.value)}
+                    />
+                    <span className="text-secondary">%</span>
+                  </span>
+                </label>
+                <span className="text-secondary text-xs pb-2">→</span>
+                <label className="text-xs">
+                  <span className="text-secondary block mb-1">Full to</span>
+                  <span className="flex items-baseline gap-1">
+                    <input
+                      type="number"
+                      min="10"
+                      max="100"
+                      className="input-sm w-16 text-right"
+                      value={targetFill}
+                      onChange={(e) => setTargetFill(e.target.value)}
+                    />
+                    <span className="text-secondary">%</span>
+                  </span>
+                </label>
+                <button
+                  type="button"
+                  className="btn-primary text-xs py-1.5 whitespace-nowrap"
+                  disabled={deriving || !villages.length}
+                  onClick={buildNightProfile}
+                >
+                  {deriving ? 'Building…' : `Build ${activeProfile} · 0 requests`}
+                </button>
+              </div>
+            </div>
+
+            {/* What it worked out for itself. A derivation whose inputs are
+                invisible is one nobody can check, so the reasoning is shown
+                rather than left to be trusted. */}
+            {derived ? (
+              <div className="mt-3 pt-3 border-t border-gray-800 text-xs space-y-1">
+                <p className="text-secondary">
+                  <span className="text-primary">It worked out:</span> window{' '}
+                  <span className="font-mono text-info">{derived.window_hours}h</span>
+                  {' · '}hub <span className="font-mono text-info">{derived.hub_name}</span>
+                  {derived.consumers?.length ? (
+                    <>
+                      {' · '}fed{' '}
+                      <span className="font-mono text-info">
+                        {derived.consumers.join(', ')}
+                      </span>
+                    </>
+                  ) : null}
+                  {derived.tribute_per_hour > 0 ? (
+                    <>
+                      {' · '}tribute{' '}
+                      <span className="font-mono text-info">
+                        {fmt(derived.tribute_per_hour)}/h
+                      </span>
+                    </>
+                  ) : null}
+                </p>
+                {Object.entries(derived.drawn_in || {}).some(([, v]) => v.length) ? (
+                  <p className="text-secondary">
+                    <span className="text-primary">Drawn on, nearest first:</span>{' '}
+                    {Object.entries(derived.drawn_in)
+                      .filter(([, v]) => v.length)
+                      .map(([r, v]) => `${r} ${v.join(', ')}`)
+                      .join('  ·  ')}
+                  </p>
+                ) : null}
+                {Object.entries(derived.forced_senders || {}).some(([, v]) => v.length) ? (
+                  <p className="text-secondary">
+                    <span className="text-warning">Already past {targetFill}%, so they give:</span>{' '}
+                    {Object.entries(derived.forced_senders)
+                      .filter(([, v]) => v.length)
+                      .map(([r, v]) => `${r} ${v.join(', ')}`)
+                      .join('  ·  ')}
+                  </p>
+                ) : null}
+                {derived.warnings?.map((w) => (
+                  <p key={w} className="text-warning">
+                    {w}
+                  </p>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
           <div className="flex items-center gap-2">
             {[
               ['village', 'Result by village'],

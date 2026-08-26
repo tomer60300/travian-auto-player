@@ -48,6 +48,12 @@ from travian_api.services.distribution.merchants import (
     EUROPE2_TEUTON,
     MerchantModel,
 )
+from travian_api.services.distribution.night_profile import (
+    DEFAULT_BASELINE_FILL,
+    DEFAULT_TARGET_FILL,
+    NightVillage,
+    derive_night_profile,
+)
 from travian_api.services.distribution.optimizer import (
     MAX_IMPROVE_PASSES,
     MAX_RELAY_HOPS,
@@ -1230,6 +1236,213 @@ class DayCheckResponse(BaseModel):
 
 def _clock(minute: int) -> str:
     return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+class NightProfileRequest(PlanRequest):
+    """Derive a night profile from the account's own shape. Zero game requests.
+
+    Almost everything the derivation needs is already here or inferable, and
+    asking for it again would be asking the operator to restate their own account.
+    The two things it cannot know are how empty they actually get the stores before
+    sleeping, and how full they are willing to wake up to.
+
+    `allocations` is read as the DAY profile: the army villages' shares come from
+    what the day already gives them, so the night is the day's plan bounded by the
+    stores rather than a second set of numbers to keep in step.
+    """
+
+    baseline_fill: float = Field(
+        default=DEFAULT_BASELINE_FILL,
+        ge=0.0,
+        le=0.95,
+        description=(
+            "How full each store is when the operator goes to bed, as a fraction. "
+            "The one number the account cannot supply, and the one everything else "
+            "rests on: measured from the baseline the operator RE-ESTABLISHES each "
+            "night, a profile holds for weeks, while one measured from whatever a "
+            "snapshot caught goes stale within the hour."
+        ),
+    )
+    target_fill: float = Field(
+        default=DEFAULT_TARGET_FILL,
+        gt=0.0,
+        le=1.0,
+        description="How full a store may be at dawn, as a fraction.",
+    )
+
+    @field_validator("target_fill")
+    @classmethod
+    def _target_is_above_baseline(cls, value: float, info: ValidationInfo) -> float:
+        baseline = (info.data or {}).get("baseline_fill", DEFAULT_BASELINE_FILL)
+        if value <= baseline:
+            raise ValueError(
+                f"target_fill {value} is not above baseline_fill {baseline}; there "
+                f"would be no room for anything to arrive in"
+            )
+        return value
+
+
+class NightProfileResponse(BaseModel):
+    allocations: dict[Resource, dict[int, AllocationInput]]
+    # What was inferred rather than asked for, so the operator can see the
+    # reasoning instead of trusting it. A derivation whose inputs are invisible is
+    # one nobody can check.
+    hub: int | None = None
+    hub_name: str = ""
+    consumers: list[str] = []
+    window_hours: float = 0.0
+    tribute_per_hour: float = 0.0
+    forced_senders: dict[Resource, list[str]] = {}
+    drawn_in: dict[Resource, list[str]] = {}
+    unmet: dict[Resource, float] = {}
+    warnings: list[str] = []
+
+
+@router.post("/night-profile", response_model=NightProfileResponse)
+async def post_night_profile(
+    body: NightProfileRequest,
+    _user: User = Depends(get_current_user),
+):
+    """Build a night profile from stores and production. Costs **zero** requests.
+
+    Pure arithmetic over the snapshot the caller already has, so it can be redone
+    as often as the operator likes while they settle on a baseline.
+    """
+    names = {v.village_id: v.name for v in body.snapshot}
+    if not body.snapshot:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No villages in the snapshot; fetch account state first.",
+        )
+    trade_office = {c.village_id: c.trade_office_level for c in body.config}
+
+    villages = [
+        NightVillage(
+            village_id=v.village_id,
+            name=v.name,
+            x=v.x,
+            y=v.y,
+            merchants_total=v.merchants_total,
+            trade_office_level=trade_office.get(v.village_id, 0),
+            warehouse_capacity=v.warehouse_capacity,
+            granary_capacity=v.granary_capacity,
+            production={
+                Resource.LUMBER: v.lumber_per_hour or 0.0,
+                Resource.CLAY: v.clay_per_hour or 0.0,
+                Resource.IRON: v.iron_per_hour or 0.0,
+                Resource.CROP: v.crop_per_hour or 0.0,
+            },
+        )
+        for v in body.snapshot
+    ]
+
+    warnings: list[str] = []
+
+    # The hub is the village the DAY profile already sends its surplus to. Asking
+    # for it again would be asking the operator to restate a decision the
+    # allocations already record.
+    hub = None
+    for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
+        for vid, alloc in (body.allocations.get(resource) or {}).items():
+            if alloc.mode is AllocationMode.REMAINDER:
+                hub = vid
+                break
+        if hub is not None:
+            break
+    if hub is None:
+        # Fall back to the largest producer, and say so: a silently chosen hub
+        # would move every material route without the operator knowing why.
+        hub = max(
+            villages,
+            key=lambda v: sum(
+                v.production[r] for r in (Resource.LUMBER, Resource.CLAY, Resource.IRON)
+            ),
+        ).village_id
+        warnings.append(
+            f"No remainder village is set for materials, so "
+            f"{village_label(hub, names)} was used as the hub because it produces "
+            f"the most. Set a remainder village to choose deliberately."
+        )
+
+    consumers = [v.village_id for v in villages if v.production[Resource.CROP] < 0]
+
+    tribute = 0.0
+    tribute_at: tuple[int, int] | None = None
+    for target in body.foreign_targets:
+        if target.route_eligible:
+            tribute += target.crop_per_hour
+            if tribute_at is None:
+                tribute_at = (target.x, target.y)
+
+    if body.dispatch_window is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "This profile has no hours. A night profile is derived FROM its "
+                "window -- the ceiling is the room a store has divided by the hours "
+                "it has to fill -- so give the profile a window first."
+            ),
+        )
+    start, end = body.dispatch_window
+    window_minutes = (end - start) % MINUTES_PER_DAY or MINUTES_PER_DAY
+    window_hours = window_minutes / 60.0
+
+    day_retention: dict[Resource, dict[int, float]] = {}
+    for resource, per in body.allocations.items():
+        day_retention[resource] = {
+            vid: alloc.value for vid, alloc in per.items() if alloc.mode is AllocationMode.ABSOLUTE
+        }
+
+    profile = derive_night_profile(
+        villages,
+        window_hours=window_hours,
+        speed_fields_per_hour=body.speed_fields_per_hour,
+        day_retention=day_retention,
+        hub_id=hub,
+        consumer_ids=consumers,
+        tribute_per_hour=tribute,
+        tribute_at=tribute_at,
+        baseline_fill=body.baseline_fill,
+        target_fill=body.target_fill,
+        merchant_base_capacity=body.merchant_base_capacity,
+        trade_office_bonus_per_level=body.trade_office_bonus_per_level,
+        merchant_reserve=body.merchant_reserve,
+    )
+
+    for resource, short in profile.unmet.items():
+        if short > 1.0:
+            warnings.append(
+                f"{short:,.0f} {resource.value}/h of demand no village could "
+                f"cover. The plan will report it as a shortfall rather than "
+                f"quietly leaving a receiver unfed."
+            )
+    if profile.residual_trimmed:
+        warnings.append(
+            f"Trimmed {profile.residual_trimmed:,.0f} crop/h from the largest "
+            f"share to absorb integer rounding, so the allocation cannot read as "
+            f"claiming more than the account produces."
+        )
+
+    return NightProfileResponse(
+        allocations={
+            resource: {
+                vid: AllocationInput(mode=alloc.mode, value=alloc.value)
+                for vid, alloc in per.items()
+            }
+            for resource, per in profile.allocations.items()
+        },
+        hub=hub,
+        hub_name=village_label(hub, names),
+        consumers=[village_label(vid, names) for vid in consumers],
+        window_hours=window_hours,
+        tribute_per_hour=tribute,
+        forced_senders={
+            r: [village_label(v, names) for v in ids] for r, ids in profile.forced_senders.items()
+        },
+        drawn_in={r: [village_label(v, names) for v in ids] for r, ids in profile.drawn_in.items()},
+        unmet={r: v for r, v in profile.unmet.items() if v > 1.0},
+        warnings=warnings,
+    )
 
 
 @router.post("/day-check", response_model=DayCheckResponse)
