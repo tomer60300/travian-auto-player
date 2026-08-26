@@ -47,6 +47,7 @@ export function buildSetup({
   profiles,
   profileWindows,
   merchantModel,
+  foreignTargets,
   exportedAt,
 }) {
   const rows = []
@@ -76,6 +77,10 @@ export function buildSetup({
     doc.profile_windows = profileWindows
   }
   if (merchantModel) doc.merchant_model = merchantModel
+  // A tribute is entirely operator-supplied -- the game will not say that an ally
+  // needs 25,700 crop an hour -- and it drives real routes. Losing it to a cleared
+  // origin means the obligation silently stops being planned for.
+  if (foreignTargets && foreignTargets.length) doc.foreign_targets = foreignTargets
   return doc
 }
 
@@ -122,6 +127,46 @@ function parseProfile(raw, where) {
     out[resource] = kept
   }
   return out
+}
+
+/** Validate the foreign-target (tribute) list.
+ *
+ * Rejects rather than repairs. An anonymous target cannot be reported to the
+ * operator, and a negative rate would plan as a SOURCE -- the opposite of an
+ * obligation. Both are more useful as an error than as a silently altered plan.
+ */
+function parseForeignTargets(raw, where) {
+  if (!Array.isArray(raw)) throw new SetupFileError(`${where} is not a list.`)
+  return raw.map((entry, i) => {
+    const at = `${where}[${i}]`
+    if (!entry || typeof entry !== 'object') throw new SetupFileError(`${at} is not an object.`)
+    const name = String(entry.name ?? '').trim()
+    if (!name) throw new SetupFileError(`${at} has no name.`)
+    const x = Number(entry.x)
+    const y = Number(entry.y)
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      throw new SetupFileError(`${at} ("${name}") has coordinates that are not numbers.`)
+    }
+    const rate = Number(entry.crop_per_hour)
+    if (!Number.isFinite(rate) || rate < 0) {
+      throw new SetupFileError(
+        `${at} ("${name}") has crop_per_hour ${entry.crop_per_hour}; a tribute is owed, ` +
+          `so it cannot be negative.`
+      )
+    }
+    const margin = entry.safety_margin_pct == null ? 0 : Number(entry.safety_margin_pct)
+    if (!Number.isFinite(margin) || margin < 0 || margin > 100) {
+      throw new SetupFileError(`${at} ("${name}") has a safety margin outside 0-100.`)
+    }
+    return {
+      name,
+      x,
+      y,
+      crop_per_hour: rate,
+      safety_margin_pct: margin,
+      route_eligible: Boolean(entry.route_eligible),
+    }
+  })
 }
 
 /** Validate a `{ profile: ['HH:MM', 'HH:MM'] }` window map. */
@@ -232,7 +277,12 @@ export function parseSetup(text) {
     merchantModel = { base_capacity: base, bonus_per_to_level: bonus }
   }
 
-  return { ...raw, villages, profiles, profileWindows, merchantModel }
+  const foreignTargets =
+    raw.foreign_targets == null
+      ? null
+      : parseForeignTargets(raw.foreign_targets, "foreign_targets")
+
+  return { ...raw, villages, profiles, profileWindows, merchantModel, foreignTargets }
 }
 
 /** Apply a parsed setup over the current maps, and say exactly what happened.
@@ -250,6 +300,7 @@ export function mergeSetup({
   cropCeilings,
   profiles,
   profileWindows,
+  foreignTargets,
 }) {
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
   const nextTradeOffice = { ...(tradeOffice ?? {}) }
@@ -309,6 +360,10 @@ export function mergeSetup({
     profiles: nextProfiles,
     profileWindows: nextWindows,
     merchantModel: setup.merchantModel ?? null,
+    // Replaced wholesale, not merged. Merging two tribute lists would either
+    // double an obligation or leave a target the operator deleted still being
+    // shipped to. A file with no targets leaves what is on screen alone.
+    foreignTargets: setup.foreignTargets ?? foreignTargets ?? [],
     report: {
       loaded,
       missingFromAccount,

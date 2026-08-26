@@ -53,6 +53,28 @@ class PlannerConfig:
     """Hours of the day this route set actually runs, when it is one allocation
     profile's rather than the whole day's. Sends are phased into it; left None
     the beat may use any minute, which is what a round-the-clock set wants."""
+    excluded_origins_by_destination: Mapping[int, set[int]] = field(default_factory=dict)
+    """Villages that must not supply a given destination, by destination id.
+
+    A denylist rather than a distance rule, because any distance threshold would
+    be arbitrary and the villages worth excluding are the ones whose merchants are
+    wanted elsewhere -- which distance cannot tell you. Needed once a destination
+    has a cadence: an hourly cycle commits one merchant per send in flight, so a
+    supplier eight hours away spends nine merchants on that route however little
+    it carries, and the optimiser has no way to know that is a bad trade."""
+    max_cycle_by_destination: Mapping[int, int] = field(default_factory=dict)
+    """Longest cycle a route to this destination may use, by destination id.
+
+    The optimiser satisfies a RATE: 47,167 crop an hour is met by 47,167 hourly
+    and equally by 377,336 every eight hours, and it prefers the latter because
+    it commits fewer merchants. For a store those are the same; for an ally being
+    fed they are not, and nothing else could say so.
+
+    Bounding the candidate cycles is enough, because every piece of cycle
+    machinery reads its candidates from one sequence. Cadence is bought with
+    merchants -- a one-hour cycle over a seven-hour round trip keeps seven sends
+    in the air where an eight-hour cycle keeps one -- so this makes that trade
+    explicit rather than hiding it."""
     prune_to_window: bool = False
     """Whether the executor will delete the rows that depart outside the window.
 
@@ -336,6 +358,8 @@ def craft_plan(
         min_send_fill=config.min_send_fill,
         max_improve_passes=config.max_improve_passes,
         max_relay_hops=config.max_relay_hops,
+        max_cycle_by_destination=config.max_cycle_by_destination,
+        excluded_origins_by_destination=config.excluded_origins_by_destination,
     )
     findings.extend(routing.findings)
 

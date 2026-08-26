@@ -209,6 +209,47 @@ class ForeignTarget(BaseModel):
     x: int
     y: int
     crop_per_hour: float = Field(gt=0)
+    max_cycle_hours: int | None = Field(
+        default=None,
+        description=(
+            "Longest cycle a route to this target may use, when the obligation is "
+            "about CADENCE and not only volume. The optimiser satisfies a rate: "
+            "47,167 crop an hour is met by 47,167 hourly and equally by 377,336 "
+            "every eight hours, and it prefers the latter because it commits fewer "
+            "merchants. For a store those are the same; for an ally being fed they "
+            "are not. Set 1 for hourly deliveries. Cadence is bought with "
+            "merchants -- an hourly cycle over a seven-hour round trip keeps seven "
+            "sends in the air where an eight-hourly one keeps one -- so the cost "
+            "lands in the merchant budget where it can be seen."
+        ),
+    )
+
+    exclude_origins: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Village ids that must not supply this target. Needed once the target "
+            "has a cadence: an hourly cycle commits one merchant per send in "
+            "flight, so a supplier eight hours away spends nine merchants on that "
+            "route however little it carries. The optimiser minimises merchants "
+            "across the whole plan and has no way to know those nine are wanted "
+            "elsewhere -- that is a judgement about the account. A denylist rather "
+            "than a distance rule, because any threshold would be arbitrary."
+        ),
+    )
+
+    @field_validator("max_cycle_hours")
+    @classmethod
+    def _cycle_is_one_travian_allows(cls, value: int | None) -> int | None:
+        # Travian's repeat interval is a closed set. Accepting 5 here would plan a
+        # cadence the create payload cannot express, and the route would come back
+        # from the game on some other interval entirely.
+        if value is not None and value not in DAILY_BEAT_CYCLES:
+            raise ValueError(
+                f"max_cycle_hours {value} is not a Travian repeat interval; "
+                f"choose one of {sorted(DAILY_BEAT_CYCLES)}"
+            )
+        return value
+
     safety_margin_pct: float = Field(
         default=0.0,
         ge=0,
@@ -1529,6 +1570,8 @@ async def _plan_account(
     # also reserves merchants and crop the operator cannot actually use that way.
     # Ineligible targets are reported as manual transfers instead.
     foreign_ids: dict[int, ForeignTarget] = {}
+    cadence_caps: dict[int, int] = {}
+    excluded_origins: dict[int, set[int]] = {}
     manual_targets: list[ForeignTarget] = []
     for index, target in enumerate(body.foreign_targets):
         if not target.route_eligible:
@@ -1536,6 +1579,12 @@ async def _plan_account(
             continue
         target_id = -(index + 1)
         foreign_ids[target_id] = target
+        if target.exclude_origins:
+            excluded_origins[target_id] = set(target.exclude_origins)
+        if target.max_cycle_hours is not None:
+            # Keyed by the SYNTHETIC id, because that is what the optimizer knows
+            # this destination as -- a foreign target has no village id of its own.
+            cadence_caps[target_id] = target.max_cycle_hours
         names[target_id] = target.name
         villages[target_id] = VillageState(
             village_id=target_id,
@@ -1588,6 +1637,8 @@ async def _plan_account(
         # window is genuinely enforced and the escaping firings become a note
         # about a dependency, without it they are a critical over-delivery.
         prune_to_window=body.prune_to_window,
+        max_cycle_by_destination=cadence_caps,
+        excluded_origins_by_destination=excluded_origins,
         min_send_fill=body.min_send_fill,
         max_improve_passes=body.max_improve_passes,
         max_relay_hops=body.max_relay_hops,

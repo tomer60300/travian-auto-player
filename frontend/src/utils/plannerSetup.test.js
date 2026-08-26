@@ -339,3 +339,80 @@ describe('mergeSetup with profiles', () => {
     expect(merged.merchantModel).toEqual({ base_capacity: 2500, bonus_per_to_level: 0.2 })
   })
 })
+
+// ── Foreign targets (tributes) ─────────────────────────────────────────────
+// The last piece of typed state the file did not carry. A tribute is entirely
+// operator-supplied -- the game will not tell us an ally needs 25,700 crop an
+// hour -- and it drives real routes, so losing it to a cleared origin means the
+// obligation silently stops being planned for.
+
+const TRIBUTE = [
+  { name: '01Arb', x: 46, y: 133, crop_per_hour: 25700, safety_margin_pct: 0, route_eligible: true },
+]
+
+describe('foreign targets in the setup file', () => {
+  it('carries them', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      foreignTargets: TRIBUTE,
+      exportedAt: STAMP,
+    })
+
+    expect(setup.foreign_targets).toEqual(TRIBUTE)
+  })
+
+  it('omits the field when there are none', () => {
+    const setup = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 5 }, exportedAt: STAMP })
+    expect('foreign_targets' in setup).toBe(false)
+  })
+
+  it('survives the round trip with its rate intact', () => {
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, foreignTargets: TRIBUTE, exportedAt: STAMP })
+    )
+    expect(setup.foreignTargets[0].crop_per_hour).toBe(25700)
+    expect(setup.foreignTargets[0].name).toBe('01Arb')
+  })
+
+  it('rejects a target with no name, rather than planning an anonymous obligation', () => {
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.foreign_targets = [{ name: '  ', x: 1, y: 2, crop_per_hour: 100 }]
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+  })
+
+  it('rejects a negative rate', () => {
+    // A tribute is something owed. A negative one would plan as a source.
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.foreign_targets = [{ name: 'X', x: 1, y: 2, crop_per_hour: -5 }]
+    expect(() => roundTrip(doc)).toThrow(/crop_per_hour/)
+  })
+
+  it('rejects coordinates that are not numbers', () => {
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.foreign_targets = [{ name: 'X', x: 'somewhere', y: 2, crop_per_hour: 100 }]
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+  })
+
+  it('lets the file replace the targets on screen wholesale', () => {
+    // Merging two tribute lists would silently double an obligation, or leave a
+    // target the operator deleted still being shipped to.
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, foreignTargets: TRIBUTE, exportedAt: STAMP })
+    )
+    const merged = mergeSetup({
+      setup,
+      villages: VILLAGES,
+      foreignTargets: [{ name: 'Old', x: 9, y: 9, crop_per_hour: 999 }],
+    })
+
+    expect(merged.foreignTargets).toEqual(TRIBUTE)
+  })
+
+  it('leaves the targets alone when the file carries none', () => {
+    const setup = roundTrip(buildSetup({ villages: VILLAGES, exportedAt: STAMP }))
+    const existing = [{ name: 'Keep', x: 1, y: 1, crop_per_hour: 10 }]
+    const merged = mergeSetup({ setup, villages: VILLAGES, foreignTargets: existing })
+
+    expect(merged.foreignTargets).toEqual(existing)
+  })
+})

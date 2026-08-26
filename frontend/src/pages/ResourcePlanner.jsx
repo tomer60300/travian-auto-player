@@ -759,6 +759,7 @@ export default function ResourcePlanner() {
         profiles,
         profileWindows,
         merchantModel,
+        foreignTargets,
         exportedAt: new Date().toISOString(),
       })
     )
@@ -773,6 +774,7 @@ export default function ResourcePlanner() {
     profiles,
     profileWindows,
     merchantModel,
+    foreignTargets,
     accountKey,
     playerName,
     toast,
@@ -810,8 +812,10 @@ export default function ResourcePlanner() {
         cropCeilings,
         profiles,
         profileWindows,
+        foreignTargets,
       })
       setTradeOffice(merged.tradeOffice)
+      setForeignTargets(merged.foreignTargets)
       setCropCeilings(merged.cropCeilings)
       setProfiles(merged.profiles)
       setProfileWindows(merged.profileWindows)
@@ -835,7 +839,7 @@ export default function ResourcePlanner() {
       }
       toast.success(`Loaded ${parts.join(' and ') || 'nothing'} from the setup file`)
     },
-    [villages, tradeOffice, cropCeilings, profiles, profileWindows, accountKey, toast]
+    [villages, tradeOffice, cropCeilings, profiles, profileWindows, foreignTargets, accountKey, toast]
   )
 
   const onSetupFileChosen = useCallback(

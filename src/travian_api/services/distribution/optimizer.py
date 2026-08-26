@@ -196,6 +196,32 @@ class RelayHub:
         return self.collect_hours + self.forward_hours
 
 
+def _cycles_for(
+    destination: int,
+    cycles: Sequence[int],
+    max_cycle: Mapping[int, int] | None,
+) -> Sequence[int]:
+    """Candidate cycles for a route to *destination*, honouring its cadence cap.
+
+    Filtering here rather than at every decision point is deliberate: both the
+    initial choice and the idle-merchant latency pass read their candidates from
+    one sequence, so bounding the sequence bounds every cycle this destination can
+    ever be given.
+
+    A cap that excludes everything is ignored rather than obeyed. Returning an
+    empty sequence would make cheapest_cycle raise mid-plan, and a cadence
+    preference is not worth failing a whole plan for -- the route simply keeps the
+    shortest cycle available.
+    """
+    if not max_cycle:
+        return cycles
+    cap = max_cycle.get(destination)
+    if cap is None:
+        return cycles
+    allowed = [c for c in cycles if c <= cap]
+    return allowed or [min(cycles)]
+
+
 def relay_hubs(routes: Iterable[Route]) -> tuple[RelayHub, ...]:
     """The relay hubs in *routes*, worst end-to-end first.
 
@@ -383,6 +409,7 @@ def _flows_for_resource(
     plan: ResourcePlan,
     villages: Mapping[int, VillageState],
     geometry: MapGeometry,
+    excluded: Mapping[int, set[int]] | None = None,
 ) -> tuple[dict[tuple[int, int], float], list[Shortfall]]:
     """Match receivers to their nearest senders, largest demand first.
 
@@ -413,8 +440,18 @@ def _flows_for_resource(
 
     for receiver in demand:
         remaining = receiver.ship_per_hour
+        # Suppliers the operator ruled out for THIS destination. Nothing here can
+        # work out that nine merchants in flight to move 3,930 crop an hour is a
+        # bad trade -- it is minimising merchants across the whole plan and has no
+        # way to know those nine are wanted elsewhere. That judgement belongs to
+        # whoever runs the account.
+        banned = (excluded or {}).get(receiver.village_id, frozenset())
         candidates = sorted(
-            (vid for vid, left in surplus.items() if left > EPSILON and vid != receiver.village_id),
+            (
+                vid
+                for vid, left in surplus.items()
+                if left > EPSILON and vid != receiver.village_id and vid not in banned
+            ),
             key=lambda vid: (
                 geometry.distance(villages[vid].coords, villages[receiver.village_id].coords),
                 vid,
@@ -508,12 +545,15 @@ def _route_for_pair(
     geometry: MapGeometry,
     merchant_model: MerchantModel,
     cycles: Sequence[int],
+    max_cycle: Mapping[int, int] | None = None,
 ) -> Route:
     """Build the concrete :class:`Route` for one merged pair."""
     hourly_total = sum(cargo.values())
     one_way = geometry.one_way_minutes(villages[origin].coords, villages[destination].coords)
     capacity = merchant_model.capacity(villages[origin].trade_office_level)
-    cost = cheapest_cycle(hourly_total, 2.0 * one_way, capacity, cycles)
+    cost = cheapest_cycle(
+        hourly_total, 2.0 * one_way, capacity, _cycles_for(destination, cycles, max_cycle)
+    )
     return Route(
         origin=origin,
         destination=destination,
@@ -533,6 +573,7 @@ def _spend_idle_merchants_on_latency(
     budgets: Mapping[int, int],
     latency_target: float,
     min_send_fill: float = MIN_SEND_FILL,
+    max_cycle: Mapping[int, int] | None = None,
 ) -> list[Route]:
     """Shorten over-target routes by spending each village's idle merchants.
 
@@ -570,7 +611,12 @@ def _spend_idle_merchants_on_latency(
                 # comply are simply ranked last, via `urgency` below.
                 urgency = int(route.latency_hours > latency_target)
                 one_way = route.one_way_minutes
-                for cost in cycle_sweep(route.hourly_total, 2.0 * one_way, capacity, cycles):
+                for cost in cycle_sweep(
+                    route.hourly_total,
+                    2.0 * one_way,
+                    capacity,
+                    _cycles_for(route.destination, cycles, max_cycle),
+                ):
                     if cost.cycle_hours >= route.cycle_hours:
                         continue  # only a shorter cycle lowers latency
                     delta = cost.merchants_committed - route.merchants_committed
@@ -1186,6 +1232,12 @@ def build_plan(
     min_send_fill: float = MIN_SEND_FILL,
     max_improve_passes: int = MAX_IMPROVE_PASSES,
     max_relay_hops: int = MAX_RELAY_HOPS,
+    # Cadence, by destination. Empty by default, so a plan that does not care
+    # about WHEN cargo lands is byte-identical to what it was.
+    max_cycle_by_destination: Mapping[int, int] | None = None,
+    # Suppliers ruled out per destination. Empty by default, so a plan that does
+    # not care who supplies what is byte-identical to what it was.
+    excluded_origins_by_destination: Mapping[int, set[int]] | None = None,
 ) -> Plan:
     """Build a route set from fetched state. Works for any village count.
 
@@ -1232,7 +1284,9 @@ def build_plan(
                     resource=resource,
                 )
             )
-        flows, resource_shortfalls = _flows_for_resource(plan, villages, geometry)
+        flows, resource_shortfalls = _flows_for_resource(
+            plan, villages, geometry, excluded_origins_by_destination
+        )
         shortfalls.extend(resource_shortfalls)
         assignment[resource] = {key: amount for key, amount in flows.items() if amount > EPSILON}
 
@@ -1292,6 +1346,7 @@ def build_plan(
             geometry,
             merchant_model,
             cycles,
+            max_cycle_by_destination,
         )
         for origin, destination in sorted(pair_cargo)
         if sum(pair_cargo[(origin, destination)].values()) > EPSILON
@@ -1302,7 +1357,14 @@ def build_plan(
     # leaving the plan purely merchant-minimal.
     if max_latency_hours is not None:
         routes = _spend_idle_merchants_on_latency(
-            routes, villages, merchant_model, cycles, budgets, max_latency_hours, min_send_fill
+            routes,
+            villages,
+            merchant_model,
+            cycles,
+            budgets,
+            max_latency_hours,
+            min_send_fill,
+            max_cycle_by_destination,
         )
 
     committed: dict[int, int] = {vid: 0 for vid in villages}
