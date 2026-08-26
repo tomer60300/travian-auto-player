@@ -108,7 +108,19 @@ export function planStatus(plan) {
   const executable = verdict ? verdict.executable : Boolean(plan.feasible)
   if (!executable) return { label: 'Cannot run', tone: 'text-danger', verdict }
   if (verdict && !verdict.clean) return { label: 'Runs, not clean', tone: 'text-warning', verdict }
-  return { label: verdict ? 'Ready to run' : 'Feasible', tone: 'text-success', verdict }
+  if (!verdict) {
+    // No verdict means an older backend answered, so the second question — is
+    // anything critical outstanding — went unanswered. Green would be inventing
+    // that answer. The diagnostics an old backend DOES send are checked first,
+    // and absent those this says plainly that safety is unknown rather than
+    // implying it was checked.
+    const critical = plan.diagnostics?.counts?.critical ?? 0
+    if (critical > 0) {
+      return { label: 'Runs, not clean', tone: 'text-warning', verdict }
+    }
+    return { label: 'Executable; safety unknown', tone: 'text-secondary', verdict }
+  }
+  return { label: 'Ready to run', tone: 'text-success', verdict }
 }
 
 /** Sheet rows that are legs of a relayed crop delivery, keyed `origin:destination`.

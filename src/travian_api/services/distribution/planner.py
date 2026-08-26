@@ -358,6 +358,10 @@ def craft_plan(
                 target_total=math.ceil(
                     sum(scheduled.route.batch_per_resource.values()) - CEIL_DUST_TOLERANCE
                 ),
+                # Resources are not interchangeable and this cargo repeats
+                # unchanged on every departure, so a share lost to rounding is
+                # lost forever rather than averaged away. See round_preserving_total.
+                min_each=1,
             ),
             cycle_hours=scheduled.route.cycle_hours,
             dispatch_minute=scheduled.dispatch_minute,

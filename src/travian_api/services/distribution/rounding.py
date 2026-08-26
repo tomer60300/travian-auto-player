@@ -20,7 +20,7 @@ K = TypeVar("K", bound=Hashable)
 
 
 def round_preserving_total(
-    values: Mapping[K, float], *, target_total: int | None = None
+    values: Mapping[K, float], *, target_total: int | None = None, min_each: int = 0
 ) -> dict[K, int]:
     """Round *values* to integers whose sum is *target_total*.
 
@@ -32,6 +32,18 @@ def round_preserving_total(
     Ties in the fractional part are broken by the key's sorted order, so the
     result is deterministic -- a re-plan on unchanged input must produce an
     identical setup sheet or the diff against the live routes is noise.
+
+    ``min_each`` floors every NONZERO input at that many units, and then the sum
+    may exceed ``target_total`` by up to ``min_each`` per floored key. Off by
+    default, because largest-remainder rounding is otherwise exactly right.
+
+    The planner passes ``min_each=1`` for cargo, where the quantities are not
+    interchangeable and the rounded result is not a per-send approximation but
+    the cargo of every send, forever: preserving only the aggregate let a 0.6
+    lumber + 0.4 crop mix ship as one lumber and no crop, so the crop was never
+    delivered at all while the lumber was permanently overdrawn. One unit is the
+    smallest thing a route can carry, so a sub-unit rate is necessarily
+    overshot -- but it is overshot by less than a unit, and it arrives.
 
     Raises:
         ValueError: if any value is negative. Cargo is never negative, and the
@@ -67,6 +79,14 @@ def round_preserving_total(
     )
     for key in ranked[:shortfall]:
         floors[key] += 1
+    if min_each:
+        # Applied last, deliberately. Raising a key here can push the sum past
+        # `target_total`, and that is the intended trade: a resource the plan
+        # asked to ship must actually travel. Only keys with a nonzero input are
+        # floored -- a route asked to carry lumber must not start carrying crop.
+        for key, value in values.items():
+            if value > 0 and floors[key] < min_each:
+                floors[key] = min_each
     return floors
 
 

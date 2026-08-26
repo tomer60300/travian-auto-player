@@ -342,7 +342,19 @@ def storage_findings(
     overflowing = {(event.village_id, event.resource) for event in overflows}
     findings: list[Finding] = []
     for status in sorted(
-        (s for s in statuses if s.trend is Trend.DRAINING and s.hours_remaining is not None),
+        (
+            s
+            for s in statuses
+            # CROP only. Starvation is a troop mechanic and troops eat crop: an
+            # empty warehouse stops construction, it does not kill an army. Emitting
+            # STARVATION for lumber, clay or iron put a CRITICAL finding under a name
+            # that misdescribes it, and a critical signal that cries wolf is worse
+            # than none. Non-crop depletion is already covered as a shortfall against
+            # the allocation.
+            if s.resource is Resource.CROP
+            and s.trend is Trend.DRAINING
+            and s.hours_remaining is not None
+        ),
         key=lambda s: s.hours_remaining or 0.0,
     ):
         if (status.hours_remaining or 0.0) < warn_hours:

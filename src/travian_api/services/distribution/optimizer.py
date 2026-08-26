@@ -391,8 +391,17 @@ def _flows_for_resource(
     a re-plan on unchanged input must produce an identical route set, or the
     diff against the live configuration is meaningless.
     """
+    # Merchant-capable only. A route needs merchants at its origin, and Travian
+    # grants those through the Marketplace -- so a freshly settled village, or one
+    # whose Marketplace is not built, has a real surplus and no way to move any of
+    # it. Excluding it here is what keeps the invariant asserted before the plan
+    # is emitted actually true; without this filter such a village reached route
+    # construction and raised, which is a 500 to the operator instead of a plan
+    # that reports the receiver as short.
     surplus: dict[int, float] = {
-        v.village_id: -v.ship_per_hour for v in plan.senders if v.village_id in villages
+        v.village_id: -v.ship_per_hour
+        for v in plan.senders
+        if v.village_id in villages and villages[v.village_id].merchant_count > 0
     }
     demand = sorted(
         (v for v in plan.receivers if v.village_id in villages),

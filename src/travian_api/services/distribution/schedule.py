@@ -386,6 +386,40 @@ def build_beat(
         # once a day it was planned to.
         if dispatch_window is not None:
             window_minutes = _window_length(dispatch_window)
+            # The honest accounting. `firing` above counts only the departures
+            # inside the profile's hours, on the reasoning that the rest "is not
+            # dispatched" -- but a Gold Club route carries `repeatEvery` and
+            # nothing else, and Travian fans that across the whole day. There is
+            # no field in the create payload that could confine it. So every
+            # firing outside the window happens too, carrying cargo that was
+            # sized for the ones inside: the receiver gets 24/N deliveries where
+            # the plan modelled `sends` of them.
+            #
+            # Reported for the SHORTER cycles as well as the longer ones. The
+            # long-cycle case below (CYCLE_VS_WINDOW) under-delivers, which is
+            # merely disappointing; this one over-delivers into a store that was
+            # sized for less, which is what an operator wakes up to.
+            firings_per_day = MINUTES_PER_DAY // cycle_minutes
+            escaping = firings_per_day - len(
+                [m for m in candidate.dispatch_minutes if _in_window(m, dispatch_window)]
+            )
+            if escaping > 0 and cycle_minutes < MINUTES_PER_DAY:
+                findings.append(
+                    Finding(
+                        category=Category.WINDOW_NOT_ENFORCEABLE,
+                        message=(
+                            f"route {leg} repeats every {route.cycle_hours}h, so the game "
+                            f"fires it {firings_per_day} times a day; only "
+                            f"{firings_per_day - escaping} land in this profile's "
+                            f"{window_minutes} min, and the other {escaping} ship the same "
+                            f"cargo outside it. The plan sized the cargo for the firings "
+                            f"inside, so the destination receives about "
+                            f"{firings_per_day / max(1, firings_per_day - escaping):.1f}x "
+                            f"what was modelled"
+                        ),
+                        detail=f"{leg} — {escaping} of {firings_per_day} firings escape",
+                    )
+                )
             if window_minutes < cycle_minutes < MINUTES_PER_DAY:
                 findings.append(
                     Finding(

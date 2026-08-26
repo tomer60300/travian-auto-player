@@ -547,10 +547,15 @@ class TestNarrowProfileWindow:
     def test_a_cycle_longer_than_the_profile_warns_under_its_name(self):
         res = asyncio.run(post_day_check(self._body(), SimpleNamespace(id=1)))
 
-        unachievable = [w for w in res.warnings if "repeats every 6h" in w]
+        # Two findings now describe a 6h cycle in a 2h profile, and they say
+        # different things: this one is the UNDER-delivery (it fires at most once
+        # inside the hours), while WINDOW_NOT_ENFORCEABLE is the over-delivery the
+        # game performs outside them. Select on the wording that distinguishes
+        # them, or this asserts against whichever happens to sort first.
+        unachievable = [w for w in res.warnings if "once a day" in w]
         assert unachievable, f"warnings: {res.warnings}"
         assert unachievable[0].startswith("Burst:"), "the warning must name the profile"
-        assert "once a day" in unachievable[0]
+        assert "repeats every 6h" in unachievable[0]
 
 
 class TestCargoConservationAndSinks:

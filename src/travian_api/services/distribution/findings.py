@@ -74,6 +74,7 @@ class Category(StrEnum):
     ARRIVAL_GAP = "arrival_gap"
     CYCLE_TOO_SHORT = "cycle_too_short"
     CYCLE_VS_WINDOW = "cycle_vs_window"
+    WINDOW_NOT_ENFORCEABLE = "window_not_enforceable"
     RESERVED_WINDOW = "reserved_window"
     MANUAL_TRANSFER = "manual_transfer"
     UNREADABLE_RATE = "unreadable_rate"
@@ -222,6 +223,20 @@ _SPECS: Mapping[Category, _Spec] = {
             "lower the arrival-gap target."
         ),
     ),
+    Category.WINDOW_NOT_ENFORCEABLE: _Spec(
+        order=15,
+        severity=Severity.CRITICAL,
+        subject="route",
+        headline="{count} {subject} keep firing outside the profile's hours",
+        action=(
+            "A Gold Club route carries only 'repeat every N hours' -- Travian fans that "
+            "across the whole day and there is no setting to confine it to a profile's "
+            "hours. The cargo was sized for the firings inside the window, so the "
+            "village receives every firing outside it as well. Use a 24h cycle, widen "
+            "the profile to the whole day, or switch the route set off at the window's "
+            "end and on again at its start."
+        ),
+    ),
     Category.CYCLE_VS_WINDOW: _Spec(
         order=16,
         severity=Severity.WARNING,
@@ -252,7 +267,15 @@ _SPECS: Mapping[Category, _Spec] = {
     ),
     Category.UNREADABLE_RATE: _Spec(
         order=19,
-        severity=Severity.WARNING,
+        # CRITICAL, not advisory. The operator gave this village an explicit rate
+        # and the plan silently did not honour it -- the village plans as if
+        # untargeted, so part of what was asked for is simply absent from the
+        # sheet. The documented feasibility contract promises every receiver's
+        # demand can be supplied, and a green light over an ignored instruction
+        # contradicts it. Distinct from MANUAL_TRANSFER, which stays a warning:
+        # that one is a real Travian restriction the plan states correctly and
+        # hands to the operator, not an instruction it dropped.
+        severity=Severity.CRITICAL,
         subject="allocation",
         headline="{count} {subject} were ignored: no production rate could be read",
         action=(

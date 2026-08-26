@@ -196,13 +196,30 @@ describe('planStatus', () => {
     expect(status.label).toBe('Cannot run')
   })
 
-  it('degrades to the bare boolean against a backend with no verdict', () => {
+  it('says safety is unknown against a backend with no verdict', () => {
     // A freshly built bundle can meet the older API on :80 for as long as that
-    // process has not been restarted. Two states are the honest answer then --
-    // inventing "Ready to run" would claim something that API never said.
-    expect(planStatus({ feasible: true }).label).toBe('Feasible')
+    // process has not been restarted -- which happened for real during this
+    // work. Inventing "Ready to run" would claim something that API never said,
+    // and so would any green label: without a verdict the second question (is
+    // anything critical outstanding?) went unanswered. Saying so is the only
+    // honest option.
+    expect(planStatus({ feasible: true }).label).toBe('Executable; safety unknown')
+    expect(planStatus({ feasible: true }).tone).not.toContain('success')
     expect(planStatus({ feasible: false }).label).toBe('Cannot run')
     expect(planStatus({ feasible: true }).verdict).toBeNull()
+  })
+
+  it('uses the diagnostics an old backend does send, rather than ignoring them', () => {
+    // The skew window is exactly when a starvation or overflow diagnostic can
+    // exist with no verdict to weigh it. Reading green over the top of one is
+    // the failure this guards.
+    const withCritical = planStatus({
+      feasible: true,
+      diagnostics: { counts: { critical: 3 } },
+    })
+
+    expect(withCritical.label).toBe('Runs, not clean')
+    expect(withCritical.tone).toContain('warning')
   })
 })
 
