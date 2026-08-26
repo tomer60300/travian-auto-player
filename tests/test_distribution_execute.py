@@ -2878,3 +2878,54 @@ class TestPruningTheFanOutToTheProfilesHours:
         )
 
         assert not getattr(svc, "deleted", []), "off by default: it deletes rows"
+
+
+class TestTheRowBudgetCountsWhatSurvives:
+    """With pruning the created count is not the footprint.
+
+    A 1h route creates 24 rows and the prune deletes the 16 outside the profile,
+    so 8 remain. Charging the budget 24 makes it three times too strict for an
+    8-hour window: an operator authorising 24 rows gets one route instead of
+    three, and the number they agreed to is not the number they end up holding.
+
+    Charged against what SURVIVES, because that is what the operator would have to
+    delete and what the plan's arithmetic rests on. The transient 24 still happen;
+    they are writes, not footprint.
+    """
+
+    def _one_hourly_route(self):
+        return _account(
+            [_row_with_cycle(20003, -1, 1, 23 * 60 + 30)],
+            {20003: (0, 0), -1: (40, 40)},
+            {20003: "03", -1: "A"},
+        )
+
+    def test_a_pruned_route_is_charged_for_its_survivors_not_its_creations(self):
+        # 24 created, 8 inside a 480-minute window. A budget of 8 must admit it.
+        svc = _FakeLiveSvc()
+        res = _run_live(
+            svc,
+            self._one_hourly_route(),
+            max_routes_per_run=50,
+            max_game_rows_per_run=8,
+            dispatch_window=[23 * 60, 7 * 60],
+            prune_to_window=True,
+        )
+
+        assert len(svc.created) == 1, "8 surviving rows fit an 8-row budget"
+        assert res.remaining == 0
+
+    def test_without_pruning_the_full_fan_out_is_still_charged(self):
+        # The control. Nothing is deleted, so all 24 rows are the footprint and an
+        # 8-row budget must refuse it.
+        svc = _FakeLiveSvc()
+        res = _run_live(
+            svc,
+            self._one_hourly_route(),
+            max_routes_per_run=50,
+            max_game_rows_per_run=8,
+            dispatch_window=[23 * 60, 7 * 60],
+        )
+
+        assert svc.created == [], "24 rows do not fit an 8-row budget"
+        assert res.remaining == 1

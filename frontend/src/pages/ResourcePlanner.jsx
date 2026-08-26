@@ -44,6 +44,9 @@ const MAX_ROUTES_PER_RUN = 3
 // is the whole reason the sweep is chunked at all.
 const SWEEP_VILLAGES_PER_CHUNK = 5
 const MINUTES_IN_DAY = 1440
+// Travian's repeat interval is a closed set of the divisors of 24. Offering
+// anything else would plan a cadence the create payload cannot express.
+const TRAVIAN_REPEAT_INTERVALS = [1, 2, 3, 4, 6, 8, 12, 24]
 const splitProtected = (text) =>
   text
     .split(',')
@@ -111,6 +114,13 @@ const usableForeignTargets = (targets) =>
       crop_per_hour: Number(t.crop_per_hour),
       safety_margin_pct: Number(t.safety_margin_pct) || 0,
       route_eligible: Boolean(t.route_eligible),
+      // Cadence, and who may meet it. Omitted when unset so an ordinary tribute
+      // is byte-identical: the backend treats absent as "no constraint", and
+      // sending 0 or [] would be a different statement.
+      ...(Number(t.max_cycle_hours) > 0
+        ? { max_cycle_hours: Number(t.max_cycle_hours) }
+        : {}),
+      ...(t.exclude_origins?.length ? { exclude_origins: t.exclude_origins } : {}),
     }))
 
 // Trade Office building id, as the game reports it in a village's slot list.
@@ -2083,6 +2093,18 @@ export default function ResourcePlanner() {
                         >
                           Margin %
                         </th>
+                        <th
+                          className="text-right px-2"
+                          title="How often it must be delivered. The planner satisfies a RATE and prefers the cheapest cycle that meets it, so an hourly obligation arrives as one lump every eight hours unless you say otherwise. Leave on 'any' when only the volume matters."
+                        >
+                          Every
+                        </th>
+                        <th
+                          className="text-right px-2"
+                          title="Village ids that must NOT supply this target, comma-separated. An hourly cycle commits one merchant per send in flight, so a distant village spends a fleet reaching here however little it carries — and the planner cannot know those merchants are wanted elsewhere."
+                        >
+                          Not from
+                        </th>
                         <th className="text-right px-2">Ships/h</th>
                         <th
                           className="text-center px-2"
@@ -2155,6 +2177,49 @@ export default function ResourcePlanner() {
                                 className="input-field w-16 text-right text-xs py-0.5"
                                 value={t.safety_margin_pct}
                                 onChange={(e) => patch('safety_margin_pct', e.target.value)}
+                              />
+                            </td>
+                            {/* Cadence. The planner satisfies a RATE, and prefers
+                                the cheapest cycle that meets it -- so an hourly
+                                obligation arrives as one lump every eight hours
+                                unless it is told otherwise. Blank means it may
+                                choose. */}
+                            <td className="text-right px-2">
+                              <select
+                                aria-label={`Foreign target ${i + 1} max cycle hours`}
+                                className="input-field w-20 text-xs py-0.5"
+                                value={t.max_cycle_hours ?? ''}
+                                onChange={(e) => patch('max_cycle_hours', e.target.value)}
+                              >
+                                <option value="">any</option>
+                                {TRAVIAN_REPEAT_INTERVALS.map((h) => (
+                                  <option key={h} value={h}>
+                                    {h}h
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            {/* Who may NOT supply it. An hourly cycle commits one
+                                merchant per send in flight, so a distant village
+                                spends a fleet reaching this target however little
+                                it carries -- and the planner cannot know those
+                                merchants are wanted elsewhere. */}
+                            <td className="text-right px-2">
+                              <input
+                                type="text"
+                                aria-label={`Foreign target ${i + 1} excluded origins`}
+                                placeholder="none"
+                                className="input-field w-28 text-right text-xs py-0.5"
+                                value={(t.exclude_origins ?? []).join(',')}
+                                onChange={(e) =>
+                                  patch(
+                                    'exclude_origins',
+                                    e.target.value
+                                      .split(',')
+                                      .map((v) => Number(v.trim()))
+                                      .filter((v) => Number.isInteger(v) && v > 0)
+                                  )
+                                }
                               />
                             </td>
                             <td className="text-right px-2 font-mono text-secondary">

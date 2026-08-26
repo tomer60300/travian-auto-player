@@ -2200,6 +2200,50 @@ async def post_revert_plan(
     )
 
 
+def _game_rows(cycle_hours: int) -> int:
+    """Rows one create request is EXPECTED to become in the game.
+
+    Travian implements "repeat every N hours" by generating 24/N separate
+    daily route rows, each departing at its own time -- measured against a
+    real marketplace page, where every destination's row count was exactly
+    24 divided by its departure spacing. A cycle the day does not divide
+    evenly cannot arise here (DAILY_BEAT_CYCLES is the divisors of 24), but
+    round up rather than silently under-report if one ever does.
+    """
+    if cycle_hours <= 0:
+        return 1
+    return max(1, -(-24 // cycle_hours))
+
+
+def _rows_that_survive(
+    cycle_hours: int,
+    dispatch_minute: int,
+    window: tuple[int, int] | None,
+) -> int:
+    """Rows this create leaves in the game once the window prune has run.
+
+    Without a prune that is the whole 24/N fan-out. With one it is only the
+    departures inside the profile's hours, which for an 8-hour window is a third
+    of them -- and the footprint is what the operator authorised and what they
+    would have to delete, not the rows that existed for a minute in between.
+
+    Never returns 0: a route whose every departure falls outside the window would
+    be pruned away entirely, and window_pruning refuses that rather than deleting
+    what the run just made. Charging 0 here would let such a route through a
+    budget of any size.
+    """
+    total = _game_rows(cycle_hours)
+    if window is None:
+        return total
+    start, end = window
+    inside = 0
+    for i in range(total):
+        minute = (dispatch_minute + i * cycle_hours * 60) % MINUTES_PER_DAY
+        if (start <= minute < end) if start <= end else (minute >= start or minute < end):
+            inside += 1
+    return max(1, inside)
+
+
 # How long a caller should wait before asking for the next chunk of a sweep.
 # Drawn per response rather than fixed: a client that comes back on a metronome
 # is its own signature, however long the interval. Wide, because the operation
@@ -2332,20 +2376,6 @@ async def post_execute(
             filtered_out += 1
             continue
         items.append((row, planned))
-
-    def _game_rows(cycle_hours: int) -> int:
-        """Rows one create request is EXPECTED to become in the game.
-
-        Travian implements "repeat every N hours" by generating 24/N separate
-        daily route rows, each departing at its own time -- measured against a
-        real marketplace page, where every destination's row count was exactly
-        24 divided by its departure spacing. A cycle the day does not divide
-        evenly cannot arise here (DAILY_BEAT_CYCLES is the divisors of 24), but
-        round up rather than silently under-report if one ever does.
-        """
-        if cycle_hours <= 0:
-            return 1
-        return max(1, -(-24 // cycle_hours))
 
     def _action(
         row: SheetRow, route: PlannedRoute, status_: str, detail: str = ""
@@ -3174,7 +3204,11 @@ async def post_execute(
                         # a route cannot be created partly, so one that does not
                         # fit waits for a later run rather than overshooting what
                         # the operator agreed to.
-                        would_add = _game_rows(row.cycle_hours)
+                        would_add = _rows_that_survive(
+                            row.cycle_hours,
+                            row.dispatch_minute,
+                            body.dispatch_window if body.prune_to_window else None,
+                        )
                         if row_cap and rows_written + would_add > row_cap:
                             trace.decision(
                                 origin=origin,
@@ -3223,10 +3257,17 @@ async def post_execute(
                             # block. Report it as "blocked" (distinct from an
                             # "already active" skip), then stop the run and defer
                             # the rest — a human would not keep firing rejects.
+                            rows_written -= would_add  # nothing was created
                             actions.append(_action(row, route, "blocked", result.detail))
                             gold_club_blocked = True
                             deferred.extend(desired[i + 1 :])
                             break
+                        # Nothing reached the game, so the footprint budget must
+                        # not stay charged for it. `attempts` deliberately does --
+                        # a refused write is still a write attempted, and pacing
+                        # counts attempts -- but rows only exist if the game made
+                        # them.
+                        rows_written -= would_add
                         actions.append(_action(row, route, "failed", result.detail))
                         consecutive_failures += 1
                         if consecutive_failures >= _CONSECUTIVE_FAILURE_LIMIT:

@@ -1,0 +1,300 @@
+"""Derive a night profile's allocations from the account's own shape.
+
+A night profile is not a preference, it is arithmetic. With the operator asleep
+nothing is spent, so every unit that arrives stays, and the most a village may
+accumulate per hour is fixed by its store:
+
+    ceiling = (target_fill - baseline_fill) * capacity / window_hours
+
+Measured from the BASELINE the operator leaves behind before sleeping, not from
+whatever a snapshot happens to catch. Those are different numbers and only the
+first repeats: a mid-afternoon reading is mid-accumulation, so a profile built
+from one goes stale within the hour -- 34 of 100 allocations moved in a single
+hour on the real account, three of them changing sign. Emptying before sleep is
+what makes the baseline reproducible, and reproducible is what lets one profile
+hold for weeks.
+
+Two rules do the rest.
+
+*Nobody exports what they have room for.* At night a village with space in its
+warehouse gains nothing by shipping: moving 400 clay an hour fifteen hours across
+the map buys nothing and spends merchants the plan needs elsewhere. So only two
+kinds of village send -- one already past the target, and one drawn in to cover
+what the army villages need, nearest first.
+
+*Demand comes before supply.* A ceiling is an upper bound, not a target. The
+stores can absorb far more than the account produces, so letting every village
+claim its ceiling over-claims the account and drives the remainder negative.
+
+Pure: no requests, no clock, no I/O. Everything it needs is passed in.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+
+from .allocation import Allocation, AllocationMode, Resource
+
+MATERIALS = (Resource.LUMBER, Resource.CLAY, Resource.IRON)
+DEFAULT_TARGET_FILL = 0.80
+DEFAULT_BASELINE_FILL = 0.30
+
+
+@dataclass(frozen=True)
+class NightVillage:
+    """What deriving a night profile needs to know about one village."""
+
+    village_id: int
+    name: str
+    x: int
+    y: int
+    merchants_total: int
+    trade_office_level: int
+    warehouse_capacity: int
+    granary_capacity: int
+    production: Mapping[Resource, float]
+    """Own net production per hour. Crop may be negative for an army village."""
+
+    def capacity_for(self, resource: Resource) -> int:
+        return self.granary_capacity if resource is Resource.CROP else self.warehouse_capacity
+
+
+@dataclass
+class NightProfile:
+    """The derived allocations, and what deriving them decided."""
+
+    allocations: dict[Resource, dict[int, Allocation]] = field(default_factory=dict)
+    forced_senders: dict[Resource, list[int]] = field(default_factory=dict)
+    """Villages already past the target, which must give whatever the distance."""
+    drawn_in: dict[Resource, list[int]] = field(default_factory=dict)
+    """Villages pulled in to cover demand, nearest first."""
+    unmet: dict[Resource, float] = field(default_factory=dict)
+    """Demand no village could cover, per hour. Reported, never hidden."""
+    residual_trimmed: float = 0.0
+    """Crop per hour taken back to absorb integer rounding. See below."""
+
+
+def _hours(a: NightVillage, b: NightVillage, speed: float) -> float:
+    return math.hypot(a.x - b.x, a.y - b.y) / speed
+
+
+def derive_night_profile(
+    villages: Sequence[NightVillage],
+    *,
+    window_hours: float,
+    speed_fields_per_hour: float,
+    day_retention: Mapping[Resource, Mapping[int, float]],
+    hub_id: int,
+    consumer_ids: Sequence[int] = (),
+    tribute_per_hour: float = 0.0,
+    tribute_at: tuple[int, int] | None = None,
+    baseline_fill: float = DEFAULT_BASELINE_FILL,
+    target_fill: float = DEFAULT_TARGET_FILL,
+    merchant_base_capacity: int = 2500,
+    trade_office_bonus_per_level: float = 0.2,
+    merchant_reserve: int = 2,
+) -> NightProfile:
+    """Allocations for one night, from capacities and production alone.
+
+    Args:
+        day_retention: what each village retains per hour under the DAY profile,
+            per resource. The army villages' shares come from here rather than
+            being invented, so the night is the day's plan bounded by the stores.
+        hub_id: the village that absorbs surplus materials. At night its
+            consumers fill up while it has room, so the day's direction reverses.
+        consumer_ids: villages that consume crop. They break even -- ending the
+            night at the fill they started -- which is what makes the profile
+            hold rather than drift.
+        tribute_per_hour / tribute_at: a foreign obligation and where it is. Paid
+            by the villages nearest to it, since distance is what makes a tribute
+            expensive in merchants.
+    """
+    by_id = {v.village_id: v for v in villages}
+    if hub_id not in by_id:
+        raise ValueError(f"hub {hub_id} is not among the villages given")
+    consumers = [vid for vid in consumer_ids if vid in by_id]
+
+    def ceiling(v: NightVillage, resource: Resource) -> int:
+        return round((target_fill - baseline_fill) * v.capacity_for(resource) / window_hours)
+
+    def shed_limit(v: NightVillage) -> float:
+        """The most this village can send per hour and still be shippable.
+
+        A retention below production only means something if the merchants exist
+        to carry the difference, and how much a fleet moves in a night depends on
+        how far it goes: a village one field from its neighbour turns round dozens
+        of times, one an hour away twice.
+        """
+        capacity = merchant_base_capacity * (
+            1 + trade_office_bonus_per_level * v.trade_office_level
+        )
+        fleet = max(0, v.merchants_total - merchant_reserve)
+        others = [_hours(v, o, speed_fields_per_hour) for o in villages if o is not v]
+        if not others:
+            return 0.0
+        trips = max(1, int(window_hours // (2 * min(others))))
+        return fleet * capacity * trips / window_hours
+
+    def capped(v: NightVillage, resource: Resource) -> int:
+        """Its ceiling, never asking for more export than it can ship."""
+        own = v.production.get(resource, 0.0)
+        return max(ceiling(v, resource), round(own - shed_limit(v)))
+
+    profile = NightProfile()
+
+    # ── Materials ────────────────────────────────────────────────────────────
+    # The hub absorbs whatever its consumers cannot hold, which at night is most
+    # of it: their stores fill in hours while the hub has room to spare.
+    for resource in MATERIALS:
+        entries: dict[int, Allocation] = {
+            hub_id: Allocation(mode=AllocationMode.REMAINDER, value=0.0)
+        }
+        demand = -by_id[hub_id].production.get(resource, 0.0)
+        day = day_retention.get(resource, {})
+        forced: list[int] = []
+        for vid, village in by_id.items():
+            if vid == hub_id:
+                continue
+            own = village.production.get(resource, 0.0)
+            room = ceiling(village, resource)
+            wanted = day.get(vid)
+            if wanted is not None and wanted > own:
+                # A receiver under the day plan: give it what it can still hold.
+                take = min(wanted, room)
+                entries[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=float(take))
+                demand += take - own
+                continue
+            if room < own:
+                # Already past the target. It gives whatever the distance, because
+                # leaving it to overflow is a certain loss.
+                entries[vid] = Allocation(
+                    mode=AllocationMode.ABSOLUTE, value=float(capped(village, resource))
+                )
+                demand -= own - capped(village, resource)
+                forced.append(vid)
+        drawn: list[int] = []
+        if demand > 0:
+            order = sorted(
+                (vid for vid in by_id if vid != hub_id and vid not in entries),
+                key=lambda vid: _hours(by_id[vid], by_id[hub_id], speed_fields_per_hour),
+            )
+            for vid in order:
+                if demand <= 0:
+                    break
+                own = by_id[vid].production.get(resource, 0.0)
+                keep = day.get(vid, own)
+                give = min(own - keep, demand)
+                if give <= 0:
+                    continue
+                entries[vid] = Allocation(
+                    mode=AllocationMode.ABSOLUTE, value=float(round(own - give))
+                )
+                demand -= give
+                drawn.append(vid)
+        # Everyone untouched keeps exactly what it makes, stated rather than
+        # omitted so it stays inside the conservation sum instead of leaving it.
+        for vid, village in by_id.items():
+            if vid not in entries:
+                entries[vid] = Allocation(
+                    mode=AllocationMode.ABSOLUTE,
+                    value=float(round(village.production.get(resource, 0.0))),
+                )
+        profile.allocations[resource] = entries
+        profile.forced_senders[resource] = sorted(forced)
+        profile.drawn_in[resource] = drawn
+        profile.unmet[resource] = max(0.0, demand)
+
+    # ── Crop ─────────────────────────────────────────────────────────────────
+    crop: dict[int, Allocation] = {}
+    demand = tribute_per_hour
+    for vid in consumers:
+        # Break even: end the night at the fill it started, which is what stops
+        # the profile drifting from night to night.
+        crop[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=0.0)
+        demand += -by_id[vid].production.get(Resource.CROP, 0.0)
+
+    forced_crop: list[int] = []
+    for vid, village in by_id.items():
+        if vid in crop:
+            continue
+        own = village.production.get(Resource.CROP, 0.0)
+        if ceiling(village, Resource.CROP) < own:
+            value = capped(village, Resource.CROP)
+            crop[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=float(value))
+            demand -= own - value
+            forced_crop.append(vid)
+
+    # The tribute is paid from nearest to it: distance is exactly what makes an
+    # obligation expensive, because a short cycle over a long haul keeps many
+    # sends in flight at once.
+    drawn_crop: list[int] = []
+    if demand > 0:
+        if tribute_at is not None:
+            tx, ty = tribute_at
+
+            def _cost(vid: int) -> float:
+                v = by_id[vid]
+                return math.hypot(v.x - tx, v.y - ty)
+        else:
+
+            def _cost(vid: int) -> float:
+                return _hours(by_id[vid], by_id[hub_id], speed_fields_per_hour)
+
+        for vid in sorted((v for v in by_id if v not in crop), key=_cost):
+            if demand <= 0:
+                break
+            own = by_id[vid].production.get(Resource.CROP, 0.0)
+            if own <= 0:
+                continue
+            give = min(own, demand)
+            crop[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=float(round(own - give)))
+            demand -= give
+            drawn_crop.append(vid)
+
+        # A ceiling is an upper bound on what a village may ACCUMULATE, not a
+        # floor under what it may give. A forced sender was set to shed exactly
+        # the excess over its ceiling and then skipped, so a hub making 60,000 an
+        # hour offered 10,000 and the rest of the demand was reported unmet while
+        # its crop sat there. When demand survives the first pass, come back to
+        # them and take more -- down to retaining nothing, never below.
+        for vid in sorted(forced_crop, key=_cost):
+            if demand <= 0:
+                break
+            held = crop[vid].value
+            give = min(held, demand)
+            if give <= 0:
+                continue
+            crop[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=float(held - give))
+            demand -= give
+            if vid not in drawn_crop:
+                drawn_crop.append(vid)
+
+    for vid, village in by_id.items():
+        if vid not in crop:
+            crop[vid] = Allocation(
+                mode=AllocationMode.ABSOLUTE,
+                value=float(round(village.production.get(Resource.CROP, 0.0))),
+            )
+
+    # Every retention above is an integer and production is not, so the rounded
+    # parts miss the fractional whole by a fraction of a unit. The planner treats
+    # ANY negative residual as the allocation over-claiming the account, so 0.29
+    # crop an hour out of 106,558 made a plan that simulates perfectly read as not
+    # executable. Give the rounding somewhere to land, taking it from the largest
+    # entry -- the one least disturbed by losing a unit.
+    produced = sum(v.production.get(Resource.CROP, 0.0) for v in villages)
+    claimed = sum(a.value for a in crop.values())
+    residual = produced - tribute_per_hour - claimed
+    if residual < 0:
+        slack = int(-residual) + 1
+        largest = max(crop, key=lambda vid: crop[vid].value)
+        crop[largest] = Allocation(mode=AllocationMode.ABSOLUTE, value=crop[largest].value - slack)
+        profile.residual_trimmed = float(slack)
+
+    profile.allocations[Resource.CROP] = crop
+    profile.forced_senders[Resource.CROP] = sorted(forced_crop)
+    profile.drawn_in[Resource.CROP] = drawn_crop
+    profile.unmet[Resource.CROP] = max(0.0, demand)
+    return profile

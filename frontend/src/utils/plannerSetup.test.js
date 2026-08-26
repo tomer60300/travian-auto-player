@@ -405,7 +405,11 @@ describe('foreign targets in the setup file', () => {
       foreignTargets: [{ name: 'Old', x: 9, y: 9, crop_per_hour: 999 }],
     })
 
-    expect(merged.foreignTargets).toEqual(TRIBUTE)
+    // Normalised, not echoed: the parser fills the cadence fields in as "unset"
+    // so a consumer never has to distinguish absent from null.
+    expect(merged.foreignTargets).toEqual([
+      { ...TRIBUTE[0], max_cycle_hours: null, exclude_origins: [] },
+    ])
   })
 
   it('leaves the targets alone when the file carries none', () => {
@@ -414,5 +418,65 @@ describe('foreign targets in the setup file', () => {
     const merged = mergeSetup({ setup, villages: VILLAGES, foreignTargets: existing })
 
     expect(merged.foreignTargets).toEqual(existing)
+  })
+})
+
+describe('foreign targets keep their cadence controls', () => {
+  // Found by review: the parser rebuilt each target field by field and simply
+  // omitted these two, so a file carrying "47,167 an hour, hourly, not from the
+  // hub" imported as "47,167 an hour" -- the same volume with the constraint
+  // silently gone, which is the plan the operator was trying to avoid.
+  const CADENCED = [
+    {
+      name: '01Arb',
+      x: 46,
+      y: 133,
+      crop_per_hour: 47167,
+      safety_margin_pct: 0,
+      route_eligible: true,
+      max_cycle_hours: 1,
+      exclude_origins: [53629],
+    },
+  ]
+
+  it('survives the round trip with the cadence and the exclusions', () => {
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, foreignTargets: CADENCED, exportedAt: STAMP })
+    )
+
+    expect(setup.foreignTargets[0].max_cycle_hours).toBe(1)
+    expect(setup.foreignTargets[0].exclude_origins).toEqual([53629])
+  })
+
+  it('leaves them absent when the target has none', () => {
+    // Absent must not become a value: a target with no cadence must not import
+    // as one capped at some default.
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        foreignTargets: [{ name: 'X', x: 1, y: 2, crop_per_hour: 10 }],
+        exportedAt: STAMP,
+      })
+    )
+
+    expect(setup.foreignTargets[0].max_cycle_hours).toBeNull()
+    expect(setup.foreignTargets[0].exclude_origins).toEqual([])
+  })
+
+  it('rejects a cycle Travian cannot express', () => {
+    // The repeat interval is a closed set. A 5 here would plan a cadence the
+    // create payload cannot carry, and the route would come back on some other
+    // interval entirely.
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.foreign_targets = [{ name: 'X', x: 1, y: 2, crop_per_hour: 10, max_cycle_hours: 5 }]
+    expect(() => roundTrip(doc)).toThrow(/repeat interval/)
+  })
+
+  it('rejects an exclusion list that is not village ids', () => {
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.foreign_targets = [
+      { name: 'X', x: 1, y: 2, crop_per_hour: 10, exclude_origins: ['the hub'] },
+    ]
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
   })
 })

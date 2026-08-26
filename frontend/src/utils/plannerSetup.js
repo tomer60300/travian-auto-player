@@ -35,6 +35,8 @@ export const ALLOCATION_MODES = Object.freeze([
   'remainder',
 ])
 export const SETUP_RESOURCES = Object.freeze(['lumber', 'clay', 'iron', 'crop'])
+/** Travian's repeat interval, which is a closed set of the divisors of 24. */
+export const TRAVIAN_REPEAT_INTERVALS = Object.freeze([1, 2, 3, 4, 6, 8, 12, 24])
 
 export class SetupFileError extends Error {}
 
@@ -158,6 +160,33 @@ function parseForeignTargets(raw, where) {
     if (!Number.isFinite(margin) || margin < 0 || margin > 100) {
       throw new SetupFileError(`${at} ("${name}") has a safety margin outside 0-100.`)
     }
+    // Rebuilt field by field, so anything not named here is DROPPED. That is how
+    // the cadence controls went missing: a file saying "47,167 an hour, hourly,
+    // not from the hub" imported as "47,167 an hour" -- the same volume with the
+    // constraint silently gone, which is the plan the operator was avoiding.
+    let maxCycle = null
+    if (entry.max_cycle_hours != null) {
+      const cycle = Number(entry.max_cycle_hours)
+      if (!TRAVIAN_REPEAT_INTERVALS.includes(cycle)) {
+        throw new SetupFileError(
+          `${at} ("${name}") has max_cycle_hours ${entry.max_cycle_hours}; Travian's ` +
+            `repeat interval is a closed set, so choose one of ` +
+            `${TRAVIAN_REPEAT_INTERVALS.join(', ')}.`
+        )
+      }
+      maxCycle = cycle
+    }
+    const excluded = []
+    for (const raw of entry.exclude_origins ?? []) {
+      const id = Number(raw)
+      if (!Number.isInteger(id) || id <= 0) {
+        throw new SetupFileError(
+          `${at} ("${name}") has ${JSON.stringify(raw)} in exclude_origins; ` +
+            `it must be a village id.`
+        )
+      }
+      excluded.push(id)
+    }
     return {
       name,
       x,
@@ -165,6 +194,8 @@ function parseForeignTargets(raw, where) {
       crop_per_hour: rate,
       safety_margin_pct: margin,
       route_eligible: Boolean(entry.route_eligible),
+      max_cycle_hours: maxCycle,
+      exclude_origins: excluded,
     }
   })
 }
