@@ -2317,3 +2317,254 @@ async def _empty_readback(path, payload, **kw):
             }
         }
     }
+
+
+# A destination no plan in these tests ever wants, so a live route to it is
+# unambiguously stale wherever it is found.
+_ORPHAN_DEST = 20099
+
+
+def _one_origin_account():
+    """A plan that uses ONLY 20003 as an origin, on an account that has 20011 too.
+
+    This is the shape that matters and the shape the tests lacked: a village can
+    hold routes from a PREVIOUS plan while playing no part in the current one.
+    """
+    return _account(
+        [_row(20003, -1, 40, 40, 100)],
+        {20003: (0, 0), 20011: (10, 0), -1: (40, 40)},
+        {20003: "03", 20011: "11", -1: "A"},
+    )
+
+
+class TestReconcilingEveryVillageNotJustThePlansOrigins:
+    """A distribution plan is a conservation system, so half of one is worse than
+    either whole.
+
+    Every village's retention is balanced against every other's. One surviving
+    route from a previous plan keeps shipping into a village the new plan sized
+    for less -- so the receiver overflows AND the sender drains, and the account
+    ends up in a state that is neither plan. "Mostly reconciled" is not a weaker
+    version of correct here; it is its own failure.
+
+    Visiting only the origins the CURRENT plan uses cannot find those routes: a
+    village dropped from the plan is exactly the village whose routes are stale,
+    and exactly the one never read. Switching between a day and a night profile
+    does this every time.
+    """
+
+    def test_by_default_a_village_the_plan_dropped_is_never_even_read(self):
+        # Documents the existing bound rather than condemning it: re-reading
+        # every marketplace on every run is real traffic, and in steady state
+        # there is nothing to find.
+        svc = _FakeLiveSvc(existing={20011: [ExistingRoute(7, _ORPHAN_DEST, 60, 60, active=True)]})
+        _run_live(svc, _one_origin_account(), disable_existing=True, max_routes_per_run=50)
+
+        assert svc.listed == [20003], "only the plan's own origin is visited"
+        assert svc.disabled == [], "so 20011's stale route is never found"
+
+    def test_reconcile_all_origins_reads_every_village_in_the_snapshot(self):
+        svc = _FakeLiveSvc(existing={20011: [ExistingRoute(7, _ORPHAN_DEST, 60, 60, active=True)]})
+        _run_live(
+            svc,
+            _one_origin_account(),
+            disable_existing=True,
+            max_routes_per_run=50,
+            reconcile_all_origins=True,
+        )
+
+        assert sorted(svc.listed) == [20003, 20011], "every own village is swept"
+        assert [vid for vid, _ in svc.disabled] == [20011], "and the orphan is switched off"
+
+    def test_a_village_with_no_planned_routes_does_not_crash_the_sweep(self):
+        # 20011 is absent from desired_by_origin entirely. Indexing that map
+        # instead of getting from it would raise KeyError mid-run, after earlier
+        # villages had already been written to.
+        svc = _FakeLiveSvc(existing={20011: []})
+        res = _run_live(
+            svc,
+            _one_origin_account(),
+            disable_existing=True,
+            max_routes_per_run=50,
+            reconcile_all_origins=True,
+        )
+
+        assert sorted(svc.listed) == [20003, 20011]
+        assert res.problems == [], "an empty village is not a problem, just empty"
+
+    def test_a_create_cap_of_zero_is_a_disable_only_sweep(self):
+        # The ordering guarantee, without a two-phase refactor: run once with no
+        # create budget and the game is left holding NOTHING the plan does not
+        # want. Every later capped run then adds a safe subset -- the account is
+        # never in the conflicting state, only ever an incomplete one.
+        svc = _FakeLiveSvc(existing={20011: [ExistingRoute(7, _ORPHAN_DEST, 60, 60, active=True)]})
+        res = _run_live(
+            svc,
+            _one_origin_account(),
+            disable_existing=True,
+            max_routes_per_run=0,
+            reconcile_all_origins=True,
+        )
+
+        assert svc.created == [], "no create budget means nothing is created"
+        assert [vid for vid, _ in svc.disabled] == [20011], "but staleness is still cleared"
+        assert sorted(svc.listed) == [20003, 20011], "and every village is still swept"
+        assert res.remaining, "the plan's own route is reported as still to do"
+
+
+class TestABoundedSweepSaysWhatItDidNotReach:
+    """A sweep is a guarantee only when it is complete, so a short one must say so.
+
+    A full reconciliation cannot fit in one HTTP call: fifty paced reads alone
+    run past the client's two-minute timeout before a single write delay, idle
+    browse or session break is added, and those are the things that make the
+    traffic look human. So the sweep is chunked, and the caller loops.
+
+    That makes the reporting load-bearing. "Swept as far as village nine" read as
+    "swept everything" is precisely the false confidence this whole change exists
+    to remove -- one unvisited village can still hold a route the plan rejected,
+    and one such route breaks the conservation the plan rests on.
+    """
+
+    def test_a_bounded_sweep_reports_the_villages_it_did_not_reach(self):
+        svc = _FakeLiveSvc(existing={20011: [ExistingRoute(7, _ORPHAN_DEST, 60, 60, active=True)]})
+        res = _run_live(
+            svc,
+            _one_origin_account(),
+            disable_existing=True,
+            max_routes_per_run=0,
+            reconcile_all_origins=True,
+            max_origins_per_run=1,
+        )
+
+        assert len(svc.listed) == 1, "the bound must actually bound the reads"
+        assert res.swept_origins == svc.listed, "and report exactly what it read"
+        assert res.unswept_origins == [20011], "and name what is still outstanding"
+        assert svc.disabled == [], "20011's stale route is untouched -- it was not reached"
+
+    def test_the_second_chunk_finishes_what_the_first_left(self):
+        svc = _FakeLiveSvc(existing={20011: [ExistingRoute(7, _ORPHAN_DEST, 60, 60, active=True)]})
+        first = _run_live(
+            svc,
+            _one_origin_account(),
+            disable_existing=True,
+            max_routes_per_run=0,
+            reconcile_all_origins=True,
+            max_origins_per_run=1,
+        )
+        second = _run_live(
+            svc,
+            _one_origin_account(),
+            disable_existing=True,
+            max_routes_per_run=0,
+            reconcile_all_origins=True,
+            only_origins=first.unswept_origins,
+        )
+
+        assert second.swept_origins == [20011]
+        assert second.unswept_origins == [], "nothing outstanding: the sweep is complete"
+        assert [vid for vid, _ in svc.disabled] == [20011], "and the orphan is finally off"
+
+    def test_an_unbounded_sweep_reports_nothing_outstanding(self):
+        svc = _FakeLiveSvc(existing={20011: []})
+        res = _run_live(
+            svc,
+            _one_origin_account(),
+            disable_existing=True,
+            max_routes_per_run=0,
+            reconcile_all_origins=True,
+        )
+
+        assert sorted(res.swept_origins) == [20003, 20011]
+        assert res.unswept_origins == []
+
+    def test_a_plan_origin_sweep_never_claims_to_have_swept_the_account(self):
+        # Without reconcile_all_origins the run is not a sweep at all, so it must
+        # not report swept/unswept lists that could be mistaken for one.
+        svc = _FakeLiveSvc(existing={20011: [ExistingRoute(7, _ORPHAN_DEST, 60, 60, active=True)]})
+        res = _run_live(svc, _one_origin_account(), disable_existing=True, max_routes_per_run=50)
+
+        assert res.swept_origins == [], "this run did not sweep the account"
+        assert res.unswept_origins == []
+
+
+class TestASweepDoesNotReadAsASweep:
+    """The traffic SHAPE is the tell, not the request spacing.
+
+    The throttler spaces requests and SessionTempo drifts the pace, but a run of
+    marketplace visits with nothing else between them is a pattern no player
+    produces however well-spaced it is. The farm-list, scouting and build-queue
+    loops all inject idle browsing for this reason; the trade-route path was the
+    only write path in the app that did not.
+    """
+
+    def test_idle_browsing_is_injected_between_villages(self):
+        seen = []
+
+        class _Injector:
+            async def maybe_inject_noise(self, village_id=None):
+                seen.append(village_id)
+                return True
+
+        svc = _FakeLiveSvc(existing={20011: []})
+        svc.http_client.noise_injector = _Injector()
+        _run_live(
+            svc,
+            _one_origin_account(),
+            max_routes_per_run=0,
+            reconcile_all_origins=True,
+        )
+
+        assert seen == [20003, 20011], "every visited village gets the chance to browse"
+
+    def test_a_failing_idle_browse_never_breaks_the_run(self):
+        # Camouflage is not the operation. A dead navigator must not undo a
+        # disable that already landed in the game.
+        class _Broken:
+            async def maybe_inject_noise(self, village_id=None):
+                raise RuntimeError("navigator died")
+
+        svc = _FakeLiveSvc(existing={20011: [ExistingRoute(7, _ORPHAN_DEST, 60, 60, active=True)]})
+        svc.http_client.noise_injector = _Broken()
+        res = _run_live(
+            svc,
+            _one_origin_account(),
+            disable_existing=True,
+            max_routes_per_run=0,
+            reconcile_all_origins=True,
+        )
+
+        assert [vid for vid, _ in svc.disabled] == [20011], "the write still landed"
+        assert res.problems == [], "a failed browse is not an operation problem"
+
+    def test_an_unfinished_sweep_asks_the_caller_to_wait_a_varying_time(self):
+        svc = _FakeLiveSvc(existing={20011: []})
+        waits = set()
+        for _ in range(6):
+            res = _run_live(
+                svc,
+                _one_origin_account(),
+                max_routes_per_run=0,
+                reconcile_all_origins=True,
+                max_origins_per_run=1,
+            )
+            assert res.unswept_origins == [20011]
+            assert res.next_chunk_wait_seconds is not None
+            assert 45.0 <= res.next_chunk_wait_seconds <= 240.0
+            waits.add(res.next_chunk_wait_seconds)
+
+        # A client that comes back on a metronome is its own signature, however
+        # long the interval, so the suggested gap must actually vary.
+        assert len(waits) > 1, "a fixed gap would just be a slower fingerprint"
+
+    def test_a_finished_sweep_asks_for_no_wait(self):
+        svc = _FakeLiveSvc(existing={20011: []})
+        res = _run_live(
+            svc,
+            _one_origin_account(),
+            max_routes_per_run=0,
+            reconcile_all_origins=True,
+        )
+
+        assert res.unswept_origins == []
+        assert res.next_chunk_wait_seconds is None, "nothing left to come back for"

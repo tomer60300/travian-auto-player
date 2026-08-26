@@ -38,6 +38,11 @@ const LS_LAST_RUN = 'planner_last_live_run'
 // villages a single run VISITS (and therefore may disable stale routes on), so
 // the confirmation copy derives its counts from the same number the request uses.
 const MAX_ROUTES_PER_RUN = 3
+// Villages a single reconciliation chunk visits. Two paced reads each, plus a
+// disable and its verifying re-read where there is something stale, lands a
+// chunk of five at roughly 40-70 seconds — comfortably inside one request, which
+// is the whole reason the sweep is chunked at all.
+const SWEEP_VILLAGES_PER_CHUNK = 5
 const SNAPSHOT_TTL_MS = 30 * 60 * 1000 // 30 minutes
 const LS_MERCHANT = 'planner_merchant_model'
 // Named allocation profiles (e.g. Day / Night). Trade Office and the merchant
@@ -434,6 +439,11 @@ export default function ResourcePlanner() {
   // first live test that is the wrong shape: turning it off makes the run
   // create-only, so the single thing it changes is the single thing being
   // tested. Defaults to on, which is the behaviour for ordinary runs.
+  // A reconciliation sweep is its own operation, not a variation of the run
+  // below: it visits every village, writes only disables, and takes minutes.
+  const [sweeping, setSweeping] = useState(false)
+  const [sweepProgress, setSweepProgress] = useState(null)
+  const sweepCancel = useRef(false)
   const [disableExisting, setDisableExisting] = useState(true)
   // Off by default, and deliberately: correcting cargo overwrites a route that
   // may have been tuned in-game on purpose.
@@ -1060,6 +1070,110 @@ export default function ResourcePlanner() {
       updateDrifted,
     ],
   )
+
+  // ── Reconciliation sweep ────────────────────────────────────────────────
+  // Switching profiles drops some villages as origins entirely, and those are
+  // exactly the ones still holding the other profile's routes — and exactly the
+  // ones an ordinary run never visits, because it only reads the origins the
+  // CURRENT plan uses. One surviving route breaks the whole plan: the plan is a
+  // conservation system, so the receiver overflows AND the sender drains, and
+  // the account ends up in neither profile.
+  //
+  // This sweep visits every village and writes nothing but disables. Doing it
+  // with no create budget is what makes it safe to interrupt: afterwards the
+  // game holds nothing the plan rejects, and every later capped run adds a safe
+  // subset. The account is never in the conflicting state, only an incomplete one.
+  //
+  // It runs in chunks because it cannot fit in one request — fifty paced reads
+  // alone outlast the client timeout before a single write delay or idle browse.
+  // The gap between chunks is the session break a long operation needs, and the
+  // server picks its length so the client is not returning on a metronome.
+  const runReconcileSweep = useCallback(async () => {
+    if (!plan) {
+      toast.error('Build a plan first — the sweep needs to know what the plan wants')
+      return
+    }
+    sweepCancel.current = false
+    setSweeping(true)
+    const sweptAll = []
+    const problems = []
+    let outstanding = null // null = first chunk, visit everything
+    let chunk = 0
+    try {
+      for (;;) {
+        chunk += 1
+        setSweepProgress({ chunk, swept: sweptAll.length, outstanding, waiting: 0, problems })
+        const res = await api.post(
+          '/distribution/execute',
+          {
+            ...buildPlanPayload(),
+            dry_run: false,
+            disable_existing: true,
+            // No create budget: this half only takes routes AWAY.
+            max_routes_per_run: 0,
+            reconcile_all_origins: true,
+            max_origins_per_run: SWEEP_VILLAGES_PER_CHUNK,
+            ...(outstanding ? { only_origins: outstanding } : {}),
+          },
+          // Generous but finite. A chunk of five villages is ~40-70s of paced
+          // traffic; three minutes is headroom, not an invitation to hang.
+          { timeout: 180000 }
+        )
+        sweptAll.push(...(res.data.swept_origins || []))
+        problems.push(...(res.data.problems || []))
+        outstanding = res.data.unswept_origins || []
+        const wait = res.data.next_chunk_wait_seconds
+        if (!outstanding.length || !wait) break
+        if (sweepCancel.current) break
+        // Counted down visibly: a progress bar that sits still for four minutes
+        // reads as a hang, and the operator would reload and lose the loop.
+        for (let left = Math.ceil(wait); left > 0; left -= 1) {
+          if (sweepCancel.current) break
+          setSweepProgress({
+            chunk,
+            swept: sweptAll.length,
+            outstanding,
+            waiting: left,
+            problems,
+          })
+          await new Promise((r) => setTimeout(r, 1000))
+        }
+        if (sweepCancel.current) break
+      }
+      const done = !outstanding || outstanding.length === 0
+      setSweepProgress({
+        chunk,
+        swept: sweptAll.length,
+        outstanding: outstanding || [],
+        waiting: 0,
+        problems,
+        done,
+      })
+      useLogStore
+        .getState()
+        .addLog(problems.length ? 'warning' : 'success', 'planner', done
+          ? `Reconciliation sweep complete: ${sweptAll.length} village(s) swept`
+          : `Reconciliation sweep stopped with ${outstanding.length} village(s) outstanding`,
+        { swept: sweptAll, outstanding, problems })
+      if (!done) {
+        // Never let a partial sweep read as a finished one — that is the exact
+        // false confidence this whole path exists to remove.
+        toast.error(
+          `Sweep incomplete: ${outstanding.length} village(s) not reached. ` +
+            `Run it again — until it finishes, old routes may still be shipping.`
+        )
+      } else if (problems.length) {
+        toast.error(`Swept ${sweptAll.length} village(s), but ${problems[0]}`)
+      } else {
+        toast.success(`Swept ${sweptAll.length} village(s) — nothing stale left`)
+      }
+    } catch (err) {
+      toast.error(errorDetail(err, 'Reconciliation sweep failed'))
+      setSweepProgress((p) => ({ ...(p || {}), failed: true, outstanding: outstanding || [] }))
+    } finally {
+      setSweeping(false)
+    }
+  }, [plan, buildPlanPayload, toast])
 
   // Live unallocated counter, so slack is visible while typing rather than
   // discovered later (profile known issue #9).
@@ -2793,6 +2907,66 @@ export default function ResourcePlanner() {
                   >
                     {executing ? 'Working…' : 'Preview (0 requests)'}
                   </button>
+                </div>
+
+                {/* The safe first half of a profile switch. Kept above the
+                    controlled run because it must happen FIRST: creating the new
+                    routes while the old ones still ship is the one state worse
+                    than either profile. */}
+                <div className="mb-3 rounded border border-amber-700/60 bg-amber-500/5 p-2">
+                  <div className="flex items-start justify-between gap-2 flex-wrap">
+                    <p className="text-secondary text-xs flex-1 min-w-[16rem]">
+                      <span className="text-primary font-medium">
+                        Reconcile every village first.
+                      </span>{' '}
+                      An ordinary run only reads the villages this plan still ships
+                      from, so a village the plan dropped keeps its old routes —
+                      and switching profiles drops several. One surviving route
+                      breaks the plan: its destination overflows while its origin
+                      drains. This visits all {villages.length} villages and only
+                      switches routes OFF, never on, so it is safe to stop and
+                      resume. It runs in chunks of {SWEEP_VILLAGES_PER_CHUNK} with
+                      a pause between them, and takes minutes, not seconds.
+                    </p>
+                    <div className="flex gap-2">
+                      {sweeping ? (
+                        <button
+                          type="button"
+                          className="btn-secondary text-xs py-1.5"
+                          onClick={() => {
+                            sweepCancel.current = true
+                          }}
+                        >
+                          Stop after this chunk
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn-secondary text-xs py-1.5 whitespace-nowrap"
+                          disabled={executing || !plan}
+                          onClick={runReconcileSweep}
+                        >
+                          Reconcile all villages
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {sweepProgress ? (
+                    <p className="text-xs mt-2 font-mono text-secondary">
+                      chunk {sweepProgress.chunk} · {sweepProgress.swept} village(s) swept
+                      {sweepProgress.outstanding?.length
+                        ? ` · ${sweepProgress.outstanding.length} outstanding`
+                        : ''}
+                      {sweepProgress.waiting
+                        ? ` · pausing ${sweepProgress.waiting}s before the next chunk`
+                        : ''}
+                      {sweepProgress.done ? ' · COMPLETE — nothing stale left' : ''}
+                      {sweepProgress.failed ? ' · FAILED — routes may still be live' : ''}
+                      {sweepProgress.problems?.length
+                        ? ` · ${sweepProgress.problems.length} problem(s)`
+                        : ''}
+                    </p>
+                  ) : null}
                 </div>
 
                 {/* Controlled run. A first live run against a real account should

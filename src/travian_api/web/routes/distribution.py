@@ -76,6 +76,7 @@ from travian_api.services.trade_route_service import (
     ExistingRoute,
     MarketplaceUnreadable,
     PlannedRoute,
+    TradeRouteService,
     cargo_has_drifted,
 )
 from travian_api.web.auth import get_current_user
@@ -620,11 +621,42 @@ class ExecuteRequest(PlanRequest):
     )
     max_routes_per_run: int = Field(
         default=3,
-        ge=1,
+        ge=0,
         le=50,
         description="Routes to CREATE in one run. A human sets up a few at a "
         "time over days, not in one sweep; the rest come back as `remaining` "
-        "for a later run.",
+        "for a later run. **0 means reconcile only**: read, disable what the "
+        "plan no longer wants, and create nothing — the safe first half of a "
+        "profile switch.",
+    )
+    reconcile_all_origins: bool = Field(
+        default=False,
+        description=(
+            "Sweep EVERY village in the snapshot, not only the origins this "
+            "plan still uses. Off by default because re-reading every "
+            "marketplace on every run is real traffic for nothing: in steady "
+            "state there is no staleness to find. Turn it on when the PLAN "
+            "changed — switching between a day and a night profile drops some "
+            "villages as origins entirely, and those are precisely the ones "
+            "holding stale routes and precisely the ones a plan-origin sweep "
+            "never visits. A distribution plan is a conservation system, so one "
+            "surviving route makes the receiver overflow AND the sender drain: "
+            "the account ends up in neither plan."
+        ),
+    )
+    max_origins_per_run: int = Field(
+        default=0,
+        ge=0,
+        le=200,
+        description=(
+            "Villages to VISIT in one call, when reconciling all origins. 0 is "
+            "unbounded. A full sweep cannot fit in one HTTP call: fifty paced "
+            "reads already run past a two-minute client timeout before any write "
+            "delay, idle browse or session break — and those are what make the "
+            "traffic look human. So the caller chunks it and loops while "
+            "`unswept_origins` is non-empty, which also puts real gaps between "
+            "sessions instead of one long burst."
+        ),
     )
 
 
@@ -695,6 +727,25 @@ class ExecuteResponse(BaseModel):
     # mistaken for a complete one is worse than no run, so this is stated rather
     # than left to be inferred from a short action list.
     filtered_to: str | None = None
+    # Only populated by a reconcile_all_origins run, and deliberately empty
+    # otherwise: an ordinary run visits only the plan's own origins and must not
+    # report lists that could be mistaken for an account-wide sweep.
+    #
+    # `unswept_origins` is the one that carries a promise. A sweep is a guarantee
+    # only when it is COMPLETE -- a single unvisited village can still hold a
+    # route the plan rejected, and one such route breaks the conservation the
+    # whole plan rests on. So a bounded sweep names what it did not reach, and
+    # the caller loops until this is empty. Reading a short sweep as a finished
+    # one is exactly the false confidence this reports away.
+    swept_origins: list[int] = []
+    unswept_origins: list[int] = []
+    # How long the caller should wait before requesting the next chunk, set only
+    # while a sweep is unfinished. The pause between chunks IS the session break
+    # a long reconciliation needs -- taking it inside the handler would mean
+    # sleeping minutes into an HTTP call no client waits out. Drawn randomly per
+    # response because a client returning on a fixed interval is its own
+    # signature, however long that interval is.
+    next_chunk_wait_seconds: float | None = None
     # Rows in the game as a result of this run's creates, which is not the same
     # number as the creates: see RouteActionResponse.game_rows.
     #
@@ -2021,6 +2072,47 @@ async def post_revert_plan(
     )
 
 
+# How long a caller should wait before asking for the next chunk of a sweep.
+# Drawn per response rather than fixed: a client that comes back on a metronome
+# is its own signature, however long the interval. Wide, because the operation
+# being imitated is a person working through their villages, not a poller.
+_CHUNK_GAP_S = (45.0, 240.0)
+
+
+async def _browse_between_villages(
+    svc: TradeRouteService,
+    origin: int,
+    trace: ExecutionTrace,
+    sweeping: bool,
+) -> None:
+    """Idle browsing between villages, so a sweep does not read as a sweep.
+
+    The throttler already spaces requests and ``SessionTempo`` already drifts the
+    pace, but neither changes the SHAPE of the traffic, and the shape is what a
+    sweep gives away: N marketplaces in a row with nothing else between them is a
+    pattern no player produces. ``NoiseInjector`` exists for exactly this and is
+    already used by the farm-list, scouting and build-queue loops -- the
+    trade-route path was the only write path in the app not calling it.
+
+    Deliberately does NOT take a session break. A break here is a two-to-ten
+    minute sleep inside an HTTP handler, which no client waits out; the pause
+    between CHUNKS is the break, and it is a real one because a person is on the
+    other end of it. See ``next_chunk_wait_seconds``.
+
+    Never raises. This is camouflage, not the operation -- a failed idle browse
+    must not undo writes that already landed, which is the same rule the trace
+    follows.
+    """
+    injector = getattr(getattr(svc, "http_client", None), "noise_injector", None)
+    if injector is None:
+        return
+    try:
+        if await injector.maybe_inject_noise(village_id=origin):
+            trace.event("noise_injected", origin=origin, during_sweep=sweeping)
+    except Exception as exc:  # noqa: BLE001
+        trace.event("noise_failed", origin=origin, error=str(exc))
+
+
 @router.post("/execute", response_model=ExecuteResponse)
 async def post_execute(
     body: ExecuteRequest,
@@ -2300,7 +2392,25 @@ async def post_execute(
     desired_by_origin: dict[int, list[tuple[SheetRow, PlannedRoute]]] = {}
     for row, route in items:
         desired_by_origin.setdefault(route.origin_village_id, []).append((row, route))
-    origins = list(desired_by_origin)
+    if body.reconcile_all_origins:
+        # Every own village, whether the plan still ships from it or not. A
+        # village with no desired routes is not skipped -- it is the case this
+        # exists for: nothing is wanted there, so everything there is stale.
+        # Ordered from the snapshot, then shuffled like any other sweep.
+        origins = [v.village_id for v in body.snapshot]
+        for origin in desired_by_origin:
+            if origin not in origins:
+                origins.append(origin)
+        # `only_origins` narrows the SWEEP too, not just which planned routes are
+        # eligible. That is what makes chunking work with one existing field: a
+        # caller feeds back the previous run's `unswept_origins` and gets exactly
+        # those villages visited. Without this, every chunk would re-read the
+        # whole account and a loop would never terminate.
+        if body.only_origins is not None:
+            allowed = set(body.only_origins)
+            origins = [o for o in origins if o in allowed]
+    else:
+        origins = list(desired_by_origin)
     random.shuffle(origins)
 
     # One execute run per account at a time: a double-click or a second tab must
@@ -2349,6 +2459,8 @@ async def post_execute(
     attempts = 0  # create requests fired this run
     updates_done = 0  # cargo-correction PUTs fired this run, bounded by `cap`
     visited = 0  # marketplaces read this run
+    swept: list[int] = []  # villages actually reconciled (read) this run
+    unswept: list[int] = []  # villages a reconcile sweep did not reach
     outstanding = 0  # creates attempted but not completed (failed / Gold Club)
     deferred: list[tuple[SheetRow, PlannedRoute]] = []
     gold_club_blocked = False  # account-level: no route can be created at all
@@ -2390,8 +2502,27 @@ async def post_execute(
                 deferred.extend(items)
                 origins = []
 
+            # A full reconciliation must not be cut short by the CREATE budget:
+            # the whole point is that no village is left holding a route the plan
+            # rejected, and the create cap is a pacing dial for writes, not a
+            # limit on how much of the account may be inspected. Creates stay
+            # bounded individually further down, so spending the budget defers
+            # the next route while the sweep carries on.
+            sweep_all = body.reconcile_all_origins
+            origin_cap = body.max_origins_per_run  # 0 = unbounded
             for origin in origins:
-                if stopped_early or gold_club_blocked or attempts >= cap or visited >= cap:
+                if sweep_all:
+                    # Bounded only by how many villages this CALL may visit, so
+                    # the sweep survives spending the create budget.
+                    budget_spent = bool(origin_cap) and visited >= origin_cap
+                else:
+                    budget_spent = attempts >= cap or visited >= cap
+                if stopped_early or gold_club_blocked or budget_spent:
+                    if sweep_all:
+                        # Not reconciled, so it must be named. Includes the runs
+                        # that stopped on a captcha or an exhausted budget: those
+                        # villages are no more swept than the ones never reached.
+                        unswept.append(origin)
                     # Budget spent, Gold Club missing, or the run was stopped
                     # (captcha / budget / a read failure): defer EVERY remaining
                     # origin WITHOUT reading its marketplace, so reads and writes
@@ -2400,7 +2531,7 @@ async def post_execute(
                     trace.event(
                         "origin_deferred",
                         origin=origin,
-                        routes=len(desired_by_origin[origin]),
+                        routes=len(desired_by_origin.get(origin, [])),
                         reason=(
                             "run stopped early"
                             if stopped_early
@@ -2410,7 +2541,7 @@ async def post_execute(
                             f"(creates={attempts}, marketplaces read={visited})"
                         ),
                     )
-                    deferred.extend(desired_by_origin[origin])
+                    deferred.extend(desired_by_origin.get(origin, []))
                     continue
                 # Don't even read a marketplace if the run is already stopped
                 # (captcha resolved / budget exhausted). Fires once — later
@@ -2418,14 +2549,16 @@ async def post_execute(
                 reason = _stop_reason()
                 if reason:
                     stopped_early = True
+                    if sweep_all:
+                        unswept.append(origin)
                     problems.append(reason)
                     trace.event(
                         "origin_deferred",
                         origin=origin,
-                        routes=len(desired_by_origin[origin]),
+                        routes=len(desired_by_origin.get(origin, [])),
                         reason=reason,
                     )
-                    deferred.extend(desired_by_origin[origin])
+                    deferred.extend(desired_by_origin.get(origin, []))
                     continue
 
                 async with svc.origin_lock(origin):
@@ -2467,20 +2600,32 @@ async def post_execute(
                             origin=origin,
                             error=str(exc),
                             error_type=type(exc).__name__,
-                            routes_deferred=len(desired_by_origin[origin]),
+                            routes_deferred=len(desired_by_origin.get(origin, [])),
                         )
                         problems.append(
                             f"{village_label(origin, names)}: marketplace read failed "
                             f"({exc}); remaining routes deferred"
                         )
-                        deferred.extend(desired_by_origin[origin])
+                        deferred.extend(desired_by_origin.get(origin, []))
                         # Stop, but do NOT break: `continue` lets the top-of-loop
                         # guard defer every still-unvisited origin too, so they are
                         # counted in `remaining` instead of vanishing (issue #65).
                         stopped_early = True
+                        if sweep_all:
+                            unswept.append(origin)
                         continue
                     visited += 1
-                    desired = desired_by_origin[origin]
+                    # Only a village whose marketplace was actually READ counts
+                    # as reconciled. Everything else -- unreached, unreadable,
+                    # stopped on a captcha -- stays outstanding, because the
+                    # guarantee this list carries is "nothing stale survives here".
+                    if sweep_all:
+                        swept.append(origin)
+                    # A swept village may have no planned routes at all -- that is the
+                    # case reconcile_all_origins exists for, so this GETS rather
+                    # than indexes. Nothing wanted here means everything here is
+                    # stale, which is exactly the right conclusion.
+                    desired = desired_by_origin.get(origin, [])
                     # How a desired route is recognised in what is already
                     # there. Own villages match on village id, which the page
                     # states outright. A FOREIGN target has no id in the plan --
@@ -3064,6 +3209,15 @@ async def post_execute(
                                     f"here; do not assume otherwise."
                                 )
 
+                # Between VILLAGES, not between requests. The throttler already
+                # spaces requests and SessionTempo already drifts the pace, but
+                # neither changes the SHAPE of a sweep, and the shape is the tell:
+                # twenty-five marketplaces visited back to back with nothing else
+                # in between is a pattern no player produces. This was also the
+                # only write path in the app not injecting idle browsing at all --
+                # farm lists, scouting and the build queue all do.
+                await _browse_between_villages(svc, origin, trace, sweep_all)
+
         # Inside the try, so it beats the fallback close in `finally`. The
         # counts below are the run's actual outcome; the fallback can only say
         # that the run ended.
@@ -3160,6 +3314,11 @@ async def post_execute(
         created_game_rows=_observed_rows(actions),
         filtered_to=filtered_to,
         remaining=len(deferred) + outstanding,
+        # Empty unless this run was a reconcile sweep, so an ordinary run can
+        # never be misread as having cleared the account.
+        swept_origins=swept,
+        unswept_origins=unswept,
+        next_chunk_wait_seconds=(round(random.uniform(*_CHUNK_GAP_S), 1) if unswept else None),
         warnings=warnings,
         problems=problems,
     )
