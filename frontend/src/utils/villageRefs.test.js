@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { namesForVillageIds, resolveVillageNames } from './villageRefs'
+import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from './villageRefs'
 
 const VILLAGES = [
   { village_id: 53629, name: '02' },
@@ -74,5 +74,42 @@ describe('namesForVillageIds', () => {
   it('is empty for nothing stored', () => {
     expect(namesForVillageIds([], VILLAGES)).toBe('')
     expect(namesForVillageIds(undefined, VILLAGES)).toBe('')
+  })
+})
+
+describe('excludedOriginIds', () => {
+  const VS = [
+    { village_id: 53629, name: '02' },
+    { village_id: 41212, name: '18' },
+  ]
+
+  it('uses the ids a loaded setup file stored', () => {
+    // The regression this exists for. A file carries ids and no typed text, so
+    // reading only the text dropped the exclusion -- and the operator had every
+    // reason to believe it was still in force.
+    expect(excludedOriginIds({ exclude_origins: [53629] }, VS)).toEqual([53629])
+  })
+
+  it('prefers what the operator typed', () => {
+    expect(
+      excludedOriginIds({ exclude_origins: [53629], exclude_origins_text: '18' }, VS)
+    ).toEqual([41212])
+  })
+
+  it('treats a cleared field as cleared, not as "fall back to the file"', () => {
+    // Emptying the box is a deliberate act. Reverting to the stored ids would
+    // make the exclusion impossible to remove.
+    expect(
+      excludedOriginIds({ exclude_origins: [53629], exclude_origins_text: '' }, VS)
+    ).toEqual([])
+  })
+
+  it('is empty for a target with neither', () => {
+    expect(excludedOriginIds({}, VS)).toEqual([])
+    expect(excludedOriginIds(undefined, VS)).toEqual([])
+  })
+
+  it('drops a stored value that is not a village id', () => {
+    expect(excludedOriginIds({ exclude_origins: [0, -5, 53629] }, VS)).toEqual([53629])
   })
 })

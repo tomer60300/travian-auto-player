@@ -39,3 +39,21 @@ export function namesForVillageIds(ids, villages) {
   )
   return (ids ?? []).map((id) => byId.get(id) ?? String(id)).join(', ')
 }
+
+/** The ids to exclude for one target: what was typed, or what was stored.
+ *
+ * A loaded setup file carries `exclude_origins` as ids and no typed text at all,
+ * so reading only the text drops the exclusion silently -- which is worse than
+ * never having had it, because the operator has every reason to believe it is
+ * still in force. Ids are the stored form because they are stable across renames;
+ * the text exists only so the input can hold a half-finished name.
+ *
+ * The typed text wins when it EXISTS, even empty, because clearing the field is a
+ * deliberate act and must not fall back to what the file said.
+ */
+export function excludedOriginIds(target, villages) {
+  if (target?.exclude_origins_text != null) {
+    return resolveVillageNames(target.exclude_origins_text, villages).ids
+  }
+  return (target?.exclude_origins ?? []).filter((id) => Number.isInteger(id) && id > 0)
+}

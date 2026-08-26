@@ -13,7 +13,7 @@ import {
   setupMatchesAccount,
 } from '../utils/plannerSetup'
 import { METER_TONE, allocationMeterSeverity } from '../utils/plannerAllocation'
-import { namesForVillageIds, resolveVillageNames } from '../utils/villageRefs'
+import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from '../utils/villageRefs'
 import { planStatus, relayLegIndex } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
 import { copyToClipboard } from '../utils/clipboard'
@@ -121,10 +121,11 @@ const usableForeignTargets = (targets, villages = []) =>
       ...(Number(t.max_cycle_hours) > 0
         ? { max_cycle_hours: Number(t.max_cycle_hours) }
         : {}),
-      // Resolved at send time from what was typed, so the field can hold a
-      // half-finished name without the input fighting the operator.
-      ...(resolveVillageNames(t.exclude_origins_text, villages).ids.length
-        ? { exclude_origins: resolveVillageNames(t.exclude_origins_text, villages).ids }
+      // What was typed if anything was, else what a loaded file stored. Reading
+      // only the typed text dropped a file's exclusions entirely -- see
+      // excludedOriginIds.
+      ...(excludedOriginIds(t, villages).length
+        ? { exclude_origins: excludedOriginIds(t, villages) }
         : {}),
     }))
 
