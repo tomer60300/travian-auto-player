@@ -3156,28 +3156,62 @@ export default function ResourcePlanner() {
                 </p>
                 {relays.length > 0 && (
                   <div className="mt-3 border-t border-gray-800 pt-3">
+                    {/* Rewritten after the operator read it and had to ask what
+                        it meant. The old copy opened with the mechanism -- how a
+                        hub's granary refills -- and left the two things they
+                        actually needed buried: that a chain is TWO rows and both
+                        must exist, and that the big number is travel time and not
+                        a gap between deliveries. It also called that number
+                        "worst case", which reads as danger for a figure that is
+                        simply how long the pipe takes to fill. Consequence and
+                        action first; mechanism underneath for whoever wants it. */}
                     <h4 className="font-semibold text-xs">
-                      Relayed crop — {relays.length} village
-                      {relays.length === 1 ? '' : 's'} forward{relays.length === 1 ? 's' : ''} crop
-                      it collects
+                      Relayed crop · {relays.length} chain{relays.length === 1 ? '' : 's'}
                     </h4>
                     <p className="text-secondary text-xs mt-1">
-                      Two rows above, one delivery. The hub ships from its own granary and the
-                      inbound leg refills it, so creating the outbound row without the inbound
-                      one ships nothing useful. Crop pools in the granary, so which sender's
-                      crop reaches which receiver is not something the plan decides — the hub is.
-                      “Worst case” is the wait these routes' own send times can produce, which is
-                      why it can exceed a target every individual leg meets.
+                      These deliver through a middle village, because the source is too far
+                      to reach the target directly.
                     </p>
+
+                    <p className="text-xs mt-2 text-warning">
+                      Each chain is <strong>two rows</strong> in the sheet above. Create both.
+                    </p>
+                    <p className="text-secondary text-xs">
+                      The middle village ships from its own granary, and the other row is what
+                      refills it. Create only the outbound one and it empties and stops.
+                    </p>
+
+                    <p className="text-secondary text-xs mt-2">
+                      The times below are how long crop takes to travel the{' '}
+                      <span className="text-primary">whole chain</span> — not the gap between
+                      deliveries. Each route still fires on its own cycle, so expect{' '}
+                      <span className="text-primary">partial deliveries until the chain fills</span>,
+                      then the full rate.
+                    </p>
+
                     <table className="w-full text-xs mt-2">
                       <thead className="text-secondary uppercase">
                         <tr>
-                          <th className="text-left py-1 px-2">Collects from</th>
-                          <th className="text-left px-2">Hub</th>
-                          <th className="text-left px-2">Forwards to</th>
-                          <th className="text-right px-2">In</th>
-                          <th className="text-right px-2">On</th>
-                          <th className="text-right px-2">Worst case</th>
+                          <th className="text-left py-1 px-2">From</th>
+                          <th
+                            className="text-left px-2"
+                            title="The middle village. Crop pools in its granary, so which sender's crop reaches the target is not something the plan decides — the granary is. The plan sets rates, not which grain goes where."
+                          >
+                            Via
+                          </th>
+                          <th className="text-left px-2">To</th>
+                          <th className="text-right px-2" title="How long the middle village waits to be refilled">
+                            Fills in
+                          </th>
+                          <th className="text-right px-2" title="How long the onward leg takes once it leaves the middle village">
+                            Forwards in
+                          </th>
+                          <th
+                            className="text-right px-2"
+                            title="Source to target, end to end. The two legs added together, which is why it can exceed a latency target that each leg on its own meets."
+                          >
+                            Full journey
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
