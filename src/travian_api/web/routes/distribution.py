@@ -291,6 +291,20 @@ class PlanRequest(BaseModel):
             "the plan warns when geometry forces one into it."
         ),
     )
+    prune_to_window: bool = Field(
+        default=False,
+        description=(
+            "After creating a route, delete the rows that depart outside "
+            "`dispatch_window`. Travian offers no setting that confines a route to "
+            "part of the day, but it does not need one: repeat-every-N-hours is "
+            "24/N separate rows, each with its own id and each individually "
+            "deletable (measured -- a 1h route made 24 rows, deleting one left 23). "
+            "So a windowed profile is enforced by subtraction. Without this the "
+            "window is a fiction the game ignores and the destination receives "
+            "every firing, about three times the modelled cargo for an 8-hour "
+            "profile. Requires dispatch_window; does nothing without one."
+        ),
+    )
     dispatch_window: tuple[int, int] | None = Field(
         default=None,
         description=(
@@ -688,20 +702,6 @@ class ExecuteRequest(PlanRequest):
             )
         return value
 
-    prune_to_window: bool = Field(
-        default=False,
-        description=(
-            "After creating a route, delete the rows that depart outside "
-            "`dispatch_window`. Travian offers no setting that confines a route to "
-            "part of the day, but it does not need one: repeat-every-N-hours is "
-            "24/N separate rows, each with its own id and each individually "
-            "deletable (measured -- a 1h route made 24 rows, deleting one left 23). "
-            "So a windowed profile is enforced by subtraction. Without this the "
-            "window is a fiction the game ignores and the destination receives "
-            "every firing, about three times the modelled cargo for an 8-hour "
-            "profile. Requires dispatch_window; does nothing without one."
-        ),
-    )
     max_game_rows_per_run: int = Field(
         default=0,
         ge=0,
@@ -1584,6 +1584,10 @@ async def _plan_account(
         # hours); otherwise take what the client sent on the request, which is
         # how /plan and /execute learn the active profile's window.
         dispatch_window=dispatch_window if dispatch_window is not None else body.dispatch_window,
+        # Plan-time, because it changes what the plan MEANS: with pruning the
+        # window is genuinely enforced and the escaping firings become a note
+        # about a dependency, without it they are a critical over-delivery.
+        prune_to_window=body.prune_to_window,
         min_send_fill=body.min_send_fill,
         max_improve_passes=body.max_improve_passes,
         max_relay_hops=body.max_relay_hops,

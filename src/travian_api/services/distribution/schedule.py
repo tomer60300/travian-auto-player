@@ -171,6 +171,7 @@ def build_beat(
     step_minutes: int = 1,
     names: Mapping[int, str] | None = None,
     dispatch_window: tuple[int, int] | None = None,
+    prune_to_window: bool = False,
 ) -> Beat:
     """Place every route on the daily beat, spacing arrivals at each destination.
 
@@ -406,7 +407,11 @@ def build_beat(
             if escaping > 0 and cycle_minutes < MINUTES_PER_DAY:
                 findings.append(
                     Finding(
-                        category=Category.WINDOW_NOT_ENFORCEABLE,
+                        category=(
+                            Category.WINDOW_PRUNED
+                            if prune_to_window
+                            else Category.WINDOW_NOT_ENFORCEABLE
+                        ),
                         message=(
                             f"route {leg} repeats every {route.cycle_hours}h, so the game "
                             f"fires it {firings_per_day} times a day; only "

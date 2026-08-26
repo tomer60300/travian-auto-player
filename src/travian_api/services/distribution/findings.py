@@ -75,6 +75,7 @@ class Category(StrEnum):
     CYCLE_TOO_SHORT = "cycle_too_short"
     CYCLE_VS_WINDOW = "cycle_vs_window"
     WINDOW_NOT_ENFORCEABLE = "window_not_enforceable"
+    WINDOW_PRUNED = "window_pruned"
     RESERVED_WINDOW = "reserved_window"
     MANUAL_TRANSFER = "manual_transfer"
     UNREADABLE_RATE = "unreadable_rate"
@@ -221,6 +222,23 @@ _SPECS: Mapping[Category, _Spec] = {
         action=(
             "No dispatch offset can space a route's own repeats. Lengthen the cycle, or "
             "lower the arrival-gap target."
+        ),
+    ),
+    Category.WINDOW_PRUNED: _Spec(
+        order=15,
+        # A NOTE, because the thing that made this critical is being dealt with.
+        # The rows that would fire outside the profile are deleted after the route
+        # is created, so the window really is enforced -- but the plan DEPENDS on
+        # that happening, and a plan whose correctness rests on a later step
+        # should say so rather than look untroubled.
+        severity=Severity.NOTE,
+        subject="route",
+        headline="{count} {subject} rely on the out-of-window rows being pruned",
+        action=(
+            "Travian fans a repeat interval across the whole day, so the rows departing "
+            "outside these hours are deleted after each route is created. That is what "
+            "makes the window real; if the prune fails the run says so, and those routes "
+            "then ship round the clock."
         ),
     ),
     Category.WINDOW_NOT_ENFORCEABLE: _Spec(

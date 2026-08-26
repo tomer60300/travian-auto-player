@@ -130,3 +130,60 @@ class TestWhatTheOperatorsOwnNightProfileWouldHaveDone:
             assert overshoot == pytest.approx(3.0), (
                 f"a {cycle}h cycle in an {window_hours}h window ships {overshoot:.0f}x"
             )
+
+
+class TestDeclaringThePruneMakesThePlanHonestAgain:
+    """The same fact, weighed differently once it is being dealt with.
+
+    Without pruning, the escaping firings are a critical over-delivery: the game
+    ships roughly a day of cargo through an eight-hour window. With pruning those
+    rows are deleted after each route is created, so the window really is enforced
+    and the plan can read as clean.
+
+    It stays reported, as a NOTE, because the plan's correctness now DEPENDS on a
+    later step. Suppressing it entirely would hide that dependency, and a prune
+    that fails is exactly when someone needs to know the plan assumed one.
+    """
+
+    def _plan_pruned(self):
+        villages = {
+            1: VillageState(village_id=1, x=0, y=0, merchant_count=20, name="src"),
+            2: VillageState(village_id=2, x=2, y=0, merchant_count=20, name="dst"),
+        }
+        productions = {Resource.LUMBER: {1: 5000.0, 2: 0.0}}
+        allocations = {
+            Resource.LUMBER: {
+                1: Allocation(mode=AllocationMode.ABSOLUTE, value=0.0),
+                2: Allocation(mode=AllocationMode.ABSOLUTE, value=5000.0),
+            }
+        }
+        config = PlannerConfig(
+            geometry=GEOMETRY,
+            merchant_model=EUROPE2_TEUTON,
+            dispatch_window=NIGHT,
+            cycles=(1,),
+            prune_to_window=True,
+        )
+        return craft_plan(villages, productions, allocations, config)
+
+    def test_the_critical_finding_is_gone(self):
+        assert _window_findings(self._plan_pruned()) == []
+
+    def test_it_is_still_reported_as_a_note(self):
+        plan = self._plan_pruned()
+        pruned = [f for f in plan.findings if f.category is Category.WINDOW_PRUNED]
+        assert pruned, "the dependency must stay visible"
+        assert pruned[0].severity is Severity.NOTE
+
+    def test_the_verdict_can_now_be_clean(self):
+        plan = self._plan_pruned()
+        verdict = assess(plan, plan.findings)
+        assert Category.WINDOW_NOT_ENFORCEABLE not in verdict.unweighed
+        assert Category.WINDOW_PRUNED not in verdict.unweighed, (
+            "a note is not an unweighed critical"
+        )
+
+    def test_without_the_declaration_it_is_critical_again(self):
+        # The control: the severity must follow the intent, not drift.
+        plan = _plan(NIGHT, cycles=(1,))
+        assert _window_findings(plan), "not declaring the prune leaves it critical"

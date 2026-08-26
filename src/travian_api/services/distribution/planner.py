@@ -53,6 +53,15 @@ class PlannerConfig:
     """Hours of the day this route set actually runs, when it is one allocation
     profile's rather than the whole day's. Sends are phased into it; left None
     the beat may use any minute, which is what a round-the-clock set wants."""
+    prune_to_window: bool = False
+    """Whether the executor will delete the rows that depart outside the window.
+
+    A plan-time input because it changes what the plan MEANS. Travian fans a
+    repeat interval across the whole day and offers nothing to confine it, so
+    without pruning a windowed profile ships roughly a day of cargo through an
+    eight-hour window -- a critical finding. With pruning those rows are deleted
+    after creation, the window is genuinely enforced, and the same fact becomes a
+    note about a dependency rather than a defect."""
     min_send_fill: float = MIN_SEND_FILL
     """How full a merchant must stay when idle merchants are spent on speed.
 
@@ -336,6 +345,7 @@ def craft_plan(
         reserved_window=config.reserved_window,
         names=names,
         dispatch_window=config.dispatch_window,
+        prune_to_window=config.prune_to_window,
     )
     findings.extend(beat.findings)
 

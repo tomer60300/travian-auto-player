@@ -880,6 +880,10 @@ export default function ResourcePlanner() {
     return {
       snapshot: villages,
       dispatch_window: dispatchWindow,
+      // Plan-time, not run-time: with pruning the window is genuinely enforced
+      // and the escaping firings are a note about a dependency; without it they
+      // are a critical over-delivery. /plan must see it to weigh them.
+      ...(pruneToWindow && dispatchWindow ? { prune_to_window: true } : {}),
       // A route inside a profile has that profile's hours to deliver in, not the
       // two-hour default the backend falls back to. The default is right for a
       // round-the-clock set, where a late arrival really is late; inside an
@@ -1001,7 +1005,6 @@ export default function ResourcePlanner() {
           ...(onlyOrigin ? { only_origins: [Number(onlyOrigin)] } : {}),
           ...(onlyDestination ? { only_destinations: [Number(onlyDestination)] } : {}),
           ...(Number(maxGameRows) > 0 ? { max_game_rows_per_run: Number(maxGameRows) } : {}),
-          ...(pruneToWindow && profileHasWindow ? { prune_to_window: true } : {}),
           ...(protectDestinations.trim()
             ? { protect_destinations: splitProtected(protectDestinations) }
             : {}),
@@ -1106,24 +1109,11 @@ export default function ResourcePlanner() {
       onlyOrigin,
       onlyDestination,
       maxGameRows,
-      pruneToWindow,
-      profileHasWindow,
       protectDestinations,
       disableExisting,
       updateDrifted,
     ],
   )
-
-  // Does the active profile actually own part of the day? Derived the same way
-  // buildPlanPayload derives the window it sends, because trimming the fan-out is
-  // only meaningful when there are hours to trim to.
-  const profileHasWindow = useMemo(() => {
-    const hours = profileWindows[activeProfile] ?? DEFAULT_WINDOWS[activeProfile] ?? null
-    if (!hours) return false
-    const from = hhmmToMinutes(hours[0])
-    const to = hhmmToMinutes(hours[1])
-    return from != null && to != null && from !== to
-  }, [profileWindows, activeProfile])
 
   // ── Reconciliation sweep ────────────────────────────────────────────────
   // Switching profiles drops some villages as origins entirely, and those are
