@@ -13,6 +13,7 @@ import {
   setupMatchesAccount,
 } from '../utils/plannerSetup'
 import { METER_TONE, allocationMeterSeverity } from '../utils/plannerAllocation'
+import { namesForVillageIds, resolveVillageNames } from '../utils/villageRefs'
 import { planStatus, relayLegIndex } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
 import { copyToClipboard } from '../utils/clipboard'
@@ -104,7 +105,7 @@ const hhmmToMinutes = (t) => {
 // Only complete rows go to the backend: a half-typed target would 422 the
 // whole request, and the operator is mid-edit, not in error. Shared by the
 // plan build and the full-day check so both see the same tributes.
-const usableForeignTargets = (targets) =>
+const usableForeignTargets = (targets, villages = []) =>
   targets
     .filter((t) => t.name.trim() && Number(t.crop_per_hour) > 0)
     .map((t) => ({
@@ -120,7 +121,11 @@ const usableForeignTargets = (targets) =>
       ...(Number(t.max_cycle_hours) > 0
         ? { max_cycle_hours: Number(t.max_cycle_hours) }
         : {}),
-      ...(t.exclude_origins?.length ? { exclude_origins: t.exclude_origins } : {}),
+      // Resolved at send time from what was typed, so the field can hold a
+      // half-finished name without the input fighting the operator.
+      ...(resolveVillageNames(t.exclude_origins_text, villages).ids.length
+        ? { exclude_origins: resolveVillageNames(t.exclude_origins_text, villages).ids }
+        : {}),
     }))
 
 // Trade Office building id, as the game reports it in a village's slot list.
@@ -923,7 +928,7 @@ export default function ResourcePlanner() {
         trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
       })),
       allocations: sendAllocations,
-      foreign_targets: usableForeignTargets(foreignTargets),
+      foreign_targets: usableForeignTargets(foreignTargets, villages),
       // Geometry defaults to the snapshot (map span + tribe-derived x1 merchant
       // speed) but the operator can override both for non-Europe 2 worlds.
       map_span: Number(merchantModel.map_span) || snapshot?.map_span,
@@ -2166,7 +2171,7 @@ export default function ResourcePlanner() {
                         </th>
                         <th
                           className="text-right px-2"
-                          title="Village ids that must NOT supply this target, comma-separated. An hourly cycle commits one merchant per send in flight, so a distant village spends a fleet reaching here however little it carries — and the planner cannot know those merchants are wanted elsewhere."
+                          title="Villages that must NOT supply this target, by NAME, comma-separated (ids are accepted too). An hourly cycle commits one merchant per send in flight, so a distant village spends a fleet reaching here however little it carries — and the planner cannot know those merchants are wanted elsewhere."
                         >
                           Not from
                         </th>
@@ -2275,17 +2280,28 @@ export default function ResourcePlanner() {
                                 aria-label={`Foreign target ${i + 1} excluded origins`}
                                 placeholder="none"
                                 className="input-field w-28 text-right text-xs py-0.5"
-                                value={(t.exclude_origins ?? []).join(',')}
-                                onChange={(e) =>
-                                  patch(
-                                    'exclude_origins',
-                                    e.target.value
-                                      .split(',')
-                                      .map((v) => Number(v.trim()))
-                                      .filter((v) => Number.isInteger(v) && v > 0)
-                                  )
+                                value={
+                                  t.exclude_origins_text ??
+                                  namesForVillageIds(t.exclude_origins, villages)
                                 }
+                                onChange={(e) => patch('exclude_origins_text', e.target.value)}
                               />
+                              {/* Named back, so a typo cannot pass for an exclusion.
+                                  Silently dropping "2" for "02" would leave the
+                                  operator believing a village is excluded while the
+                                  next run draws on it. */}
+                              {(() => {
+                                const { unknown } = resolveVillageNames(
+                                  t.exclude_origins_text ??
+                                    namesForVillageIds(t.exclude_origins, villages),
+                                  villages
+                                )
+                                return unknown.length ? (
+                                  <span className="block text-warning text-xs mt-0.5">
+                                    no village named {unknown.join(', ')}
+                                  </span>
+                                ) : null
+                              })()}
                             </td>
                             <td className="text-right px-2 font-mono text-secondary">
                               {ships > 0 ? fmt(ships) : '—'}
