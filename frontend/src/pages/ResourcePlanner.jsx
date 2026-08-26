@@ -1151,6 +1151,18 @@ export default function ResourcePlanner() {
     ],
   )
 
+  // How much of the day the active profile owns. A profile covering most of it
+  // is one the operator is awake for, which is exactly when "nothing is spent"
+  // stops being true.
+  const profileDayShare = useMemo(() => {
+    const hours = profileWindows[activeProfile] ?? DEFAULT_WINDOWS[activeProfile] ?? null
+    if (!hours) return 1
+    const from = hhmmToMinutes(hours[0])
+    const to = hhmmToMinutes(hours[1])
+    if (from == null || to == null || from === to) return 1
+    return (((to - from) % MINUTES_IN_DAY) + MINUTES_IN_DAY) % MINUTES_IN_DAY / MINUTES_IN_DAY
+  }, [profileWindows, activeProfile])
+
   // ── Night profile ───────────────────────────────────────────────────────
   // At night nothing is spent, so everything that arrives stays and the store
   // becomes the binding constraint. The most a village may take per hour is
@@ -2357,7 +2369,7 @@ export default function ResourcePlanner() {
           <div className="card p-4 border-l-2 border-l-indigo-400/60">
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div className="min-w-[18rem] flex-1">
-                <h3 className="font-semibold">Build this profile from your stores</h3>
+                <h3 className="font-semibold">Derive an idle-window profile from your stores</h3>
                 <p className="text-secondary text-xs mt-1">
                   At night nothing is spent, so everything that arrives stays and the
                   store becomes the limit — not the plan. The most a village may take
@@ -2409,10 +2421,26 @@ export default function ResourcePlanner() {
                   disabled={deriving || !villages.length}
                   onClick={buildNightProfile}
                 >
-                  {deriving ? 'Building…' : `Build ${activeProfile} · 0 requests`}
+                  {deriving ? 'Deriving…' : 'Derive from stores · 0 requests'}
                 </button>
               </div>
             </div>
+
+            {/* The premise, stated where it cannot be missed. This is night
+                arithmetic: it assumes nothing is spent, so everything that
+                arrives stays. On a profile covering most of the day that is
+                false -- the operator is awake and spending -- and it would cap
+                inflows that the spending would have made room for. Judged on the
+                WINDOW rather than the profile's name, which is theirs to rename. */}
+            {profileDayShare > 0.6 ? (
+              <p className="text-warning text-xs mt-2">
+                This profile runs {Math.round(profileDayShare * 24)}h of the day, so you are
+                awake and spending through most of it. This works out what a store can hold
+                when <strong>nothing</strong> is spent — on a daytime profile it will hold
+                back inflow your own spending would have made room for. Build a daytime
+                profile by hand.
+              </p>
+            ) : null}
 
             {/* What it worked out for itself. A derivation whose inputs are
                 invisible is one nobody can check, so the reasoning is shown
