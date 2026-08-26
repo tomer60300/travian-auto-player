@@ -1444,6 +1444,17 @@ export default function ResourcePlanner() {
       else if (a.mode === 'sustain') assigned += own < 0 ? (-own * (Number(a.value) || 0)) / 100 : own
       else assigned += own
     }
+    // A route-eligible foreign target is a RECEIVER the backend plans for -- it
+    // has no production and no stores, and its demand comes out of the same pool.
+    // Leaving it out here overstated the remainder village's share by the whole
+    // obligation: 47,167 crop/h on this account, which made a remainder of -813
+    // read as +46,354 and a consuming village look like it was about to be buried.
+    // The grid must never disagree with the plan about this.
+    if (resource === 'crop') {
+      for (const t of foreignTargets) {
+        if (t.route_eligible) assigned += Number(t.crop_per_hour) || 0
+      }
+    }
     return total - assigned
   }
 
