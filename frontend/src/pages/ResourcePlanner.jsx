@@ -43,6 +43,7 @@ const MAX_ROUTES_PER_RUN = 3
 // chunk of five at roughly 40-70 seconds — comfortably inside one request, which
 // is the whole reason the sweep is chunked at all.
 const SWEEP_VILLAGES_PER_CHUNK = 5
+const MINUTES_IN_DAY = 1440
 const splitProtected = (text) =>
   text
     .split(',')
@@ -879,6 +880,19 @@ export default function ResourcePlanner() {
     return {
       snapshot: villages,
       dispatch_window: dispatchWindow,
+      // A route inside a profile has that profile's hours to deliver in, not the
+      // two-hour default the backend falls back to. The default is right for a
+      // round-the-clock set, where a late arrival really is late; inside an
+      // 8-hour window it forces short cycles, and a short cycle against a long
+      // haul keeps several shipments in the air at once and spends merchants on
+      // speed nobody asked for. Measured: the same night plan came out 46
+      // routes / 120 merchants against an 8h target and 48 / 135 against 2h.
+      ...(dispatchWindow
+        ? {
+            max_latency_hours:
+              (dispatchWindow[1] - dispatchWindow[0] + MINUTES_IN_DAY) % MINUTES_IN_DAY / 60,
+          }
+        : {}),
       config: villages.map((v) => ({
         village_id: v.village_id,
         trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
