@@ -1007,6 +1007,60 @@ export default function ResourcePlanner() {
     useStaleSnapshot,
   ])
 
+  // Every profile with hours, as the segment list the backend plans one by
+  // one. Shared by the day check AND whole-day execution, so the day the
+  // operator simulated and the day they go live with are the same day.
+  const buildSegments = useCallback(() => {
+    // profileNames and windowFor are declared further DOWN the component, so
+    // neither may appear here -- not in the body via closure alone nor in the
+    // dependency array, which React evaluates at render and which has now
+    // crashed this page twice with a temporal-dead-zone error. Everything is
+    // derived from state declared above, and the deps are complete, so there
+    // is no eslint-disable to hide the next mistake behind.
+    const segments = []
+    const skipped = []
+    for (const name of Object.keys(profiles)) {
+      const w = profileWindows[name] ?? DEFAULT_WINDOWS[name] ?? null
+      const start = w && hhmmToMinutes(w[0])
+      const end = w && hhmmToMinutes(w[1])
+      if (start == null || end == null || start === end) {
+        skipped.push(name)
+        continue
+      }
+      const per = profiles[name] ?? {}
+      const sendAllocations = {}
+      for (const resource of RESOURCES) {
+        const usable = {}
+        for (const [vid, a] of Object.entries(per[resource] ?? {})) {
+          if (a.mode !== 'keep') usable[vid] = a
+        }
+        if (Object.keys(usable).length) sendAllocations[resource] = usable
+      }
+      segments.push({ name, window: [start, end], allocations: sendAllocations })
+    }
+    return { segments, skipped }
+  }, [profiles, profileWindows])
+
+  // The execute payload for the chosen mode. Whole-day: segments carry each
+  // profile's allocations and hours, so the top-level pair is stripped -- the
+  // backend rejects them rather than silently ignoring one -- and the prune is
+  // forced on because disjoint row minutes are what make the union attributable.
+  const buildExecutePayload = useCallback(() => {
+    const base = buildPlanPayload()
+    if (!wholeDay) return base
+    const { segments, skipped } = buildSegments()
+    if (!segments.length) {
+      throw new Error('No profile has hours set — give each profile its window first')
+    }
+    if (skipped.length) {
+      throw new Error(
+        `Whole-day execution needs hours on every profile — missing: ${skipped.join(', ')}`
+      )
+    }
+    const { allocations: _a, dispatch_window: _w, ...rest } = base
+    return { ...rest, segments, prune_to_window: true }
+  }, [buildPlanPayload, buildSegments, wholeDay])
+
   // Execute the plan as trade routes. dryRun previews (zero game requests);
   // live requires an explicit confirm and only works once the backend's
   // trade-route payload is verified (execResult.live_enabled).
@@ -1237,60 +1291,6 @@ export default function ResourcePlanner() {
   // alone outlast the client timeout before a single write delay or idle browse.
   // The gap between chunks is the session break a long operation needs, and the
   // server picks its length so the client is not returning on a metronome.
-  // Every profile with hours, as the segment list the backend plans one by
-  // one. Shared by the day check AND whole-day execution, so the day the
-  // operator simulated and the day they go live with are the same day.
-  const buildSegments = useCallback(() => {
-    // profileNames and windowFor are declared further DOWN the component, so
-    // neither may appear here -- not in the body via closure alone nor in the
-    // dependency array, which React evaluates at render and which has now
-    // crashed this page twice with a temporal-dead-zone error. Everything is
-    // derived from state declared above, and the deps are complete, so there
-    // is no eslint-disable to hide the next mistake behind.
-    const segments = []
-    const skipped = []
-    for (const name of Object.keys(profiles)) {
-      const w = profileWindows[name] ?? DEFAULT_WINDOWS[name] ?? null
-      const start = w && hhmmToMinutes(w[0])
-      const end = w && hhmmToMinutes(w[1])
-      if (start == null || end == null || start === end) {
-        skipped.push(name)
-        continue
-      }
-      const per = profiles[name] ?? {}
-      const sendAllocations = {}
-      for (const resource of RESOURCES) {
-        const usable = {}
-        for (const [vid, a] of Object.entries(per[resource] ?? {})) {
-          if (a.mode !== 'keep') usable[vid] = a
-        }
-        if (Object.keys(usable).length) sendAllocations[resource] = usable
-      }
-      segments.push({ name, window: [start, end], allocations: sendAllocations })
-    }
-    return { segments, skipped }
-  }, [profiles, profileWindows])
-
-  // The execute payload for the chosen mode. Whole-day: segments carry each
-  // profile's allocations and hours, so the top-level pair is stripped -- the
-  // backend rejects them rather than silently ignoring one -- and the prune is
-  // forced on because disjoint row minutes are what make the union attributable.
-  const buildExecutePayload = useCallback(() => {
-    const base = buildPlanPayload()
-    if (!wholeDay) return base
-    const { segments, skipped } = buildSegments()
-    if (!segments.length) {
-      throw new Error('No profile has hours set — give each profile its window first')
-    }
-    if (skipped.length) {
-      throw new Error(
-        `Whole-day execution needs hours on every profile — missing: ${skipped.join(', ')}`
-      )
-    }
-    const { allocations: _a, dispatch_window: _w, ...rest } = base
-    return { ...rest, segments, prune_to_window: true }
-  }, [buildPlanPayload, buildSegments, wholeDay])
-
   const runReconcileSweep = useCallback(async () => {
     if (!plan) {
       toast.error('Build a plan first — the sweep needs to know what the plan wants')
