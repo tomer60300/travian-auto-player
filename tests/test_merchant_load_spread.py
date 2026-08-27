@@ -226,6 +226,51 @@ class TestTheSoftCapSpreadsLoad:
             f"headroom raised peak utilisation from {tight_peak:.0%} to {spread_peak:.0%}"
         )
 
+    @pytest.mark.parametrize("target_hours", [1.0, 2.0, 4.0])
+    def test_the_latency_pass_does_not_spend_the_headroom(self, target_hours: float) -> None:
+        """The latency pass runs AFTER the improvement search, spending idle
+        merchants on shorter cycles. Spending them up to the HARD budget undoes
+        the exact thing the search just paid merchants for: a village the search
+        left under its soft cap was refilled to 100%, the API description
+        ("aims to leave this fraction uncommitted") became false whenever a
+        latency target was set, and MERCHANTS_CROWDED then reported villages the
+        planner's own pass had pushed over. Measured before the fix: peak 78% ->
+        100% and 0 -> 3 over-cap villages on one real payload, purely from the
+        target being present.
+
+        The property: a village under its soft cap without a latency target must
+        still be under it with one. The only thing the target changes is the
+        latency pass, so any breach is that pass spending past the cap.
+        Fixture found by search (scratchpad/find_erosion_fixture.py): 102
+        parameter combinations reproduced; this is the smallest.
+        """
+        villages, plans = _fan_in(villages_count=5, spread=15, budget=10, surplus=7000)
+
+        quiet = build_plan(
+            villages, plans, GEOMETRY, MODEL, max_latency_hours=None, merchant_headroom=0.10
+        )
+        fast = build_plan(
+            villages,
+            plans,
+            GEOMETRY,
+            MODEL,
+            max_latency_hours=target_hours,
+            merchant_headroom=0.10,
+        )
+
+        breaches = []
+        for vid, village in villages.items():
+            budget = village.spare_merchants(2)
+            soft = budget - int(budget * 0.10 + 0.5)
+            was = quiet.merchants_committed.get(vid, 0)
+            now = fast.merchants_committed.get(vid, 0)
+            if was <= soft < now:
+                breaches.append((vid, was, now, soft))
+        assert not breaches, (
+            f"a {target_hours}h latency target lifted villages past the soft cap the "
+            f"improvement search had just protected: {breaches} (village, before, after, cap)"
+        )
+
     @pytest.mark.parametrize("headroom", [0.10, 0.20, 0.35])
     @pytest.mark.parametrize("seed", [0, 1, 3, 8])
     def test_headroom_never_makes_a_feasible_plan_infeasible(

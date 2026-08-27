@@ -27,12 +27,16 @@ Three stages, per profile section 14 (``cluster -> assign -> improve``):
    order-dependent and blind to merchant cost.
 2. **Merchant-aware local search** -- :func:`_improve_flows` reassigns that seed
    with 2x2 swaps, keeping only moves that strictly lower the lexicographic
-   objective ``(over_budget_excess, total_merchants, route_count)``. It never
+   objective ``(over_budget_excess, total_merchants + SOFT_BUDGET_PRICE x
+   soft_excess, route_count)``: hard feasibility first, then the merchant total
+   with crowding past each village's soft cap priced into it, so spreading load
+   is worth a bounded number of merchants and never a feasible plan. It never
    returns a plan worse than the seed, and cross-resource bundling falls out of
    costing the *merged* pair cargo.
 3. **Latency pass** -- :func:`_spend_idle_merchants_on_latency` then hands each
-   village's *idle* merchants (those the budget allows but the merchant-minimal
-   plan left unused) to the routes furthest over the latency target, shortening
+   village's *idle* merchants (those the SOFT budget allows but the
+   merchant-minimal plan left unused -- never the headroom reserve) to the
+   routes furthest over the latency target, shortening
    their cycles while keeping merchants full (:data:`MIN_SEND_FILL`). It spends
    strictly within budget, so feasibility never regresses, and runs only when a
    target is set. Its reach is bounded by geometry: on a spread-out account the
@@ -82,14 +86,16 @@ DEFAULT_MERCHANT_RESERVE = 2
 # infeasible. A village genuinely can be the only one placed to serve a receiver,
 # and refusing that plan outright would be worse than running it hot.
 #
-# 0.10 comes from a sweep over five real payloads (headroom x price, recorded in
-# scratchpad/sweep_headroom.py). Across those accounts it cost +1 merchant in
-# total while halving the number of villages running at 90% or more (11 -> 6),
-# and its worst single account paid +2. Larger settings buy more headroom but
-# stop being reliable: 0.15 and 0.20 each had an account pay +9 merchants
-# (+7.5%), which is the local search landing in a worse optimum rather than a
-# real price. On an 18-merchant budget 0.10 holds back 2, which together with
-# the flat reserve leaves 4 idle -- one ordinary extra route.
+# 0.10 comes from a sweep over five real payloads (headroom x price, recorded
+# in scratchpad/sweep_headroom.py), re-run after the latency pass was confined
+# to the soft budget. Across those accounts it SAVES 6 merchants net while
+# cutting villages at 90%-or-more from 11 to 3, worst single account +2.
+# Headroom saving merchants is not a paradox: the redline villages were the
+# mispriced, over-committed ones, and load moved off them is load costed
+# correctly. Larger settings are not reliably better -- 0.15 had one account pay
+# +9 (+7.5%), the local search landing in a worse optimum rather than a real
+# price. On an 18-merchant budget 0.10 holds back 2, which together with the
+# flat reserve leaves 4 idle -- one ordinary extra route.
 DEFAULT_MERCHANT_HEADROOM = 0.10
 
 # What one merchant of over-the-soft-cap load is worth, in merchants of total
@@ -591,8 +597,13 @@ def _crowding_findings(
     findings: list[Finding] = []
     for vid in sorted(committed):
         used = committed[vid]
-        soft = soft_budgets.get(vid, budgets.get(vid, 0))
-        if soft <= 0 or used <= soft:
+        hard = budgets.get(vid, 0)
+        soft = soft_budgets.get(vid, hard)
+        # An empty band (headroom 0, or a budget too small to hold anything
+        # back) means anything past the cap is already reported by OverBudget --
+        # repeating it here as crowding is the duplication findings.py exists to
+        # prevent.
+        if soft <= 0 or soft >= hard or used <= soft:
             continue
         legs = outbound.get(vid)
         if not legs:
@@ -757,7 +768,9 @@ def _spend_idle_merchants_on_latency(
     that most need speed: for each village it repeatedly picks the affordable
     shorter cycle giving the best latency cut per merchant, spending strictly
     within ``budget - already_committed`` so a village can never be pushed over
-    its cap. Compliant routes (<= target) are left alone rather than
+    its cap. The caller decides which cap: build_plan hands in the SOFT budgets,
+    so speed is bought only with merchants the headroom policy considers
+    spendable -- never with the reserve the plan promised to leave uncommitted. Compliant routes (<= target) are left alone rather than
     over-shortened, and a route whose one-way trip alone exceeds the target is
     still sped up as far as the spare budget reaches.
 
@@ -936,10 +949,12 @@ def _improve_flows(
     falls out for free: cost is measured on the *merged* pair cargo, so a swap
     that lands a resource on a pair another resource already uses is rewarded.
 
-    The objective is lexicographic ``(over_budget_excess, total_merchants,
-    route_count, cargo_weighted_round_trip)`` — feasibility first, then
-    merchants (§8.3 objective 1), then route count (objective 4), then shorter
-    hauls as the tie-break so equal-cost plans prefer nearer assignments. A move
+    The objective is lexicographic ``(over_budget_excess, total_merchants +
+    SOFT_BUDGET_PRICE x soft_excess, route_count, cargo_weighted_round_trip)`` —
+    feasibility first, then merchants (§8.3 objective 1) with crowding past the
+    soft cap priced in at a fixed exchange rate, then route count (objective 4),
+    then shorter hauls as the tie-break so equal-cost plans prefer nearer
+    assignments. A move
     is applied only when it strictly lowers that tuple, so the result is
     deterministic and never worse than the seed.
 
@@ -1542,10 +1557,16 @@ def build_plan(
     # per-phase: excess never rises anywhere; the merchant total is minimal here
     # and may rise later, strictly within per-village budgets (§8.3, §14).
     budgets = {vid: villages[vid].spare_merchants(merchant_reserve) for vid in villages}
-    # Floored, so the soft cap can never exceed the hard one, and a budget too
-    # small to hold back anything (1 or 2 merchants) simply has no soft cap
-    # rather than an impossible one.
-    soft_budgets = {vid: int(budget * (1.0 - merchant_headroom)) for vid, budget in budgets.items()}
+    # The HELD-BACK count is rounded half-up, not the cap truncated. Truncating
+    # the cap quietly did the opposite of what this comment used to claim: a
+    # budget-1 village got a soft cap of 0 (its every merchant billed as
+    # crowding) and a budget-2 village had 50% held back. Rounding what is held
+    # keeps the fraction honest at every size -- 10% of 18 holds 2, of 10 holds
+    # 1, of 4 or fewer holds nothing, so a budget too small to spare anything
+    # simply has no soft cap.
+    soft_budgets = {
+        vid: budget - int(budget * merchant_headroom + 0.5) for vid, budget in budgets.items()
+    }
     assignment, converged = _improve_flows(
         assignment,
         villages,
@@ -1607,12 +1628,20 @@ def build_plan(
     # furthest over the latency target; skipped entirely when no target is set,
     # leaving the plan purely merchant-minimal.
     if max_latency_hours is not None:
+        # Handed the SOFT budgets, deliberately. This pass spends idle merchants
+        # on shorter cycles, and spending up to the hard budget undoes the exact
+        # thing the improvement search just paid merchants for: a village the
+        # search left under its soft cap was refilled to 100%, making the
+        # request field's promise ("aims to leave this fraction uncommitted")
+        # false whenever a latency target was set -- measured at peak 78% -> 100%
+        # and 0 -> 3 over-cap villages on one real payload from the target alone.
+        # At headroom 0 soft equals hard, so the off position is unchanged.
         routes = _spend_idle_merchants_on_latency(
             routes,
             villages,
             merchant_model,
             cycles,
-            budgets,
+            soft_budgets,
             max_latency_hours,
             min_send_fill,
             max_cycle_by_destination,
