@@ -1237,6 +1237,35 @@ export default function ResourcePlanner() {
   // alone outlast the client timeout before a single write delay or idle browse.
   // The gap between chunks is the session break a long operation needs, and the
   // server picks its length so the client is not returning on a metronome.
+  // Every profile with hours, as the segment list the backend plans one by
+  // one. Shared by the day check AND whole-day execution, so the day the
+  // operator simulated and the day they go live with are the same day.
+  const buildSegments = useCallback(() => {
+    const segments = []
+    const skipped = []
+    for (const name of profileNames) {
+      const w = windowFor(name)
+      const start = w && hhmmToMinutes(w[0])
+      const end = w && hhmmToMinutes(w[1])
+      if (start == null || end == null || start === end) {
+        skipped.push(name)
+        continue
+      }
+      const per = profiles[name] ?? {}
+      const sendAllocations = {}
+      for (const resource of RESOURCES) {
+        const usable = {}
+        for (const [vid, a] of Object.entries(per[resource] ?? {})) {
+          if (a.mode !== 'keep') usable[vid] = a
+        }
+        if (Object.keys(usable).length) sendAllocations[resource] = usable
+      }
+      segments.push({ name, window: [start, end], allocations: sendAllocations })
+    }
+    return { segments, skipped }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profiles, profileNames, profileWindows])
+
   // The execute payload for the chosen mode. Whole-day: segments carry each
   // profile's allocations and hours, so the top-level pair is stripped -- the
   // backend rejects them rather than silently ignoring one -- and the prune is
@@ -1268,6 +1297,7 @@ export default function ResourcePlanner() {
     const problems = []
     let outstanding = null // null = first chunk, visit everything
     let chunk = 0
+    let lastCreatesLeft = -1
     try {
       for (;;) {
         chunk += 1
@@ -1292,7 +1322,13 @@ export default function ResourcePlanner() {
             ...(protectDestinations.trim()
               ? { protect_destinations: splitProtected(protectDestinations) }
               : {}),
-            ...(outstanding ? { only_origins: outstanding } : {}),
+            // Narrow to the unswept villages while any remain. Once every
+            // village is swept but whole-day creates are still deferred (the
+            // per-chunk budget caps them), the run goes back UNfiltered so the
+            // deferred creates on already-swept villages get their turn --
+            // without this, "swept" quietly meant "swept but only partly
+            // provisioned" and the loop ended with routes never created.
+            ...(outstanding && outstanding.length ? { only_origins: outstanding } : {}),
           },
           // Generous but finite. A chunk of five villages is ~40-70s of paced
           // traffic; three minutes is headroom, not an invitation to hang.
@@ -1302,7 +1338,19 @@ export default function ResourcePlanner() {
         problems.push(...(res.data.problems || []))
         outstanding = res.data.unswept_origins || []
         const wait = res.data.next_chunk_wait_seconds
-        if (!outstanding.length || !wait) break
+        const createsLeft = wholeDay ? Number(res.data.remaining) || 0 : 0
+        // Stall guard: a blocked account (Gold Club refused, repeated failures)
+        // can leave `remaining` frozen -- looping on it would hammer the game
+        // with identical chunks forever.
+        if (createsLeft && createsLeft === lastCreatesLeft && !outstanding.length) {
+          problems.push(
+            `${createsLeft} route(s) stayed uncreated across two passes — ` +
+              `stopping rather than repeating identical requests; see the problems above`
+          )
+          break
+        }
+        lastCreatesLeft = createsLeft
+        if ((!outstanding.length && !createsLeft) || !wait) break
         if (sweepCancel.current) break
         // Counted down visibly: a progress bar that sits still for four minutes
         // reads as a hang, and the operator would reload and lose the loop.
@@ -1497,35 +1545,6 @@ export default function ResourcePlanner() {
   const profileNames = Object.keys(profiles)
 
   const windowFor = (name) => profileWindows[name] ?? DEFAULT_WINDOWS[name] ?? null
-
-  // Every profile with hours, as the segment list the backend plans one by
-  // one. Shared by the day check AND whole-day execution, so the day the
-  // operator simulated and the day they go live with are the same day.
-  const buildSegments = useCallback(() => {
-    const segments = []
-    const skipped = []
-    for (const name of profileNames) {
-      const w = windowFor(name)
-      const start = w && hhmmToMinutes(w[0])
-      const end = w && hhmmToMinutes(w[1])
-      if (start == null || end == null || start === end) {
-        skipped.push(name)
-        continue
-      }
-      const per = profiles[name] ?? {}
-      const sendAllocations = {}
-      for (const resource of RESOURCES) {
-        const usable = {}
-        for (const [vid, a] of Object.entries(per[resource] ?? {})) {
-          if (a.mode !== 'keep') usable[vid] = a
-        }
-        if (Object.keys(usable).length) sendAllocations[resource] = usable
-      }
-      segments.push({ name, window: [start, end], allocations: sendAllocations })
-    }
-    return { segments, skipped }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profiles, profileNames, profileWindows])
 
   const runDayCheck = async () => {
     const requestedFor = accountKey
