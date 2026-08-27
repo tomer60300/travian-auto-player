@@ -101,6 +101,13 @@ class VillageState:
     merchant_count: int
     trade_office_level: int = 0
     name: str = ""
+    # The village's OWN crop production, before any allocation. Carried solely
+    # so relay can refuse a hub that cannot survive its inbound leg slipping:
+    # a village whose troops eat more than it grows drains while it forwards,
+    # and a relay leg turns a slow loss into a dead village. ``None`` means the
+    # rate could not be read, which is NOT the same as zero -- see
+    # :func:`_may_relay_through`.
+    crop_per_hour: float | None = None
 
     @property
     def coords(self) -> tuple[int, int]:
@@ -497,6 +504,33 @@ Assignment = dict[Resource, dict[FlowKey, float]]
 # measured up to 120 villages; a 22-village account finishes in ~11 passes and
 # never approaches it. Tunable via PlannerConfig.max_improve_passes.
 MAX_IMPROVE_PASSES = 1000
+
+
+def _may_relay_through(village: VillageState) -> bool:
+    """May *village* be made to forward someone else's crop?
+
+    Only if it is not losing crop of its own. The danger is asymmetric, and that
+    asymmetry is the entire rule: a hub with non-negative production cannot be
+    harmed by relaying, because if the leg refilling it is late it simply
+    forwards less. A hub already eating into its granary -- troops consuming more
+    than the fields grow -- funds the relay from a balance that is falling, and a
+    slipped inbound leg becomes an empty granary and starving troops.
+
+    Observed on a live account before this existed: two of seven night chains
+    forwarded through villages at -3,037/h and -874/h. The second held 32,597
+    crop, forwarded 8,410/h, and its refill was a single route on an eight-hour
+    cycle -- one missed send and it ran dry in three and a half hours.
+
+    ``None`` is refused. An unreadable rate is not a zero one; the codebase
+    already treats a rate it could not parse as CRITICAL rather than guessing,
+    and a relay hub is the last place to take the optimistic reading.
+
+    The threshold is ``>= 0`` rather than ``> 0`` deliberately. A village that
+    breaks even holds its own when a refill is late, so excluding it would cost
+    the canonical midway hub for no gain in safety.
+    """
+    return village.crop_per_hour is not None and village.crop_per_hour >= 0.0
+
 
 # Levels of crop relay permitted. 1 allows village -> sub-hub -> destination;
 # 0 disables relay entirely. Chains beyond one level would make the beat's
@@ -1029,10 +1063,13 @@ def _improve_flows(
         # search adopt an impossible sink->sink leg (zero distance between two
         # co-located tributes costs zero merchants), emitting a route whose origin
         # is a negative foreign id.
+        # A hub must also be solvent in crop: see :func:`_may_relay_through`.
+        # Relaying through a village that is already losing crop turns a slow
+        # deficit into a dead village the first time its refill slips.
         hubs = sorted(
             v
             for v in {v for key in legs for v in key}
-            if v in villages and villages[v].merchant_count > 0
+            if v in villages and villages[v].merchant_count > 0 and _may_relay_through(villages[v])
         )
         for origin, destination in sorted(key for key, amount in legs.items() if amount > EPSILON):
             # Both ends must be outside the relay graph, not just the origin.

@@ -104,6 +104,10 @@ def _load_case():
             merchant_count=v["merchants_total"],
             trade_office_level=trade_office.get(v["village_id"], 0),
             name=v["name"],
+            # From the same snapshot the allocations are resolved from, so the
+            # ratchet measures the optimizer rather than a fixture that forgot
+            # to say what its villages grow. Relay refuses an unreadable rate.
+            crop_per_hour=v.get("crop_per_hour"),
         )
         for v in snap
     }

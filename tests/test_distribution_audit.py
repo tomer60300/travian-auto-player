@@ -496,15 +496,18 @@ class TestKnownDefects:
         strict=True,
         reason=(
             "AUDIT: the plan depends on the integer village ids. Relabelling the "
-            "villages of seed 49 -- five villages, nothing else changed -- gives a "
-            "different route set. Measured over 16 accounts x 3 relabellings, 8 "
-            "changed their merchant total, route count or feasibility, and seed 7 "
-            "spanned 127-141 merchants (9.9%) for the same account. The objective's "
-            "last key is an integer, so candidate swaps tie often and the tie is "
-            "broken by the id-sorted scan order."
+            "villages of seed 55 -- six villages, nothing else changed -- gives a "
+            "different route set. 13 of 25 seeds sampled still differ under "
+            "relabelling, and seed 7 spanned 127-141 merchants (9.9%) for the same "
+            "account. The objective's last key is an integer, so candidate swaps "
+            "tie often and the tie is broken by the id-sorted scan order. "
+            "Seed 49 was the original example: the relay-hub solvency guard left "
+            "it invariant by removing ineligible hubs, and with them the ties the "
+            "scan order was breaking. That narrows the defect without fixing it, "
+            "which is why the seed was replaced rather than the test relaxed."
         ),
     )
-    @pytest.mark.parametrize("seed", [49, 0, 3, 5, 8])
+    @pytest.mark.parametrize("seed", [55, 0, 3, 5, 8])
     def test_relabelling_does_not_change_the_plan(self, seed: int) -> None:
         account = random_account(seed, with_profiles=False)
         mapping = id_permutation(account.plan_request, seed + 1_000)

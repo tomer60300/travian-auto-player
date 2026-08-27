@@ -1763,6 +1763,10 @@ async def _plan_account(
             merchant_count=v.merchants_total,
             trade_office_level=trade_office.get(v.village_id, 0),
             name=v.name,
+            # Carried so relay can refuse a hub that is losing crop. Passed
+            # through as-is, None included: an unreadable rate must not be
+            # rounded to a safe-looking zero.
+            crop_per_hour=v.crop_per_hour,
         )
         for v in body.snapshot
     }

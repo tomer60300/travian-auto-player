@@ -9,6 +9,7 @@ the day it was written.
 
 import math
 import random
+from dataclasses import replace
 
 import pytest
 
@@ -56,13 +57,24 @@ def make_account(village_count: int, seed: int) -> dict[int, VillageState]:
 def make_plans(
     villages: dict[int, VillageState], seed: int
 ) -> tuple[dict[Resource, object], dict[Resource, dict[int, float]]]:
-    """Random production plus one remainder village per resource."""
+    """Random production plus one remainder village per resource.
+
+    Also stamps the generated CROP rate onto each village in *villages*, in
+    place. Relay refuses a hub whose crop production is unknown, so a village
+    that never says what it grows can never be a hub -- which would quietly turn
+    every relay property test below into a test of nothing. Stamping it here
+    keeps one source of truth: the figure a village reports and the figure its
+    allocation was resolved from are the same number by construction.
+    """
     rng = random.Random(seed)
     plans = {}
     productions = {}
     ids = sorted(villages)
     for resource in Resource:
         production = {vid: float(rng.randint(200, 9000)) for vid in ids}
+        if resource is Resource.CROP:
+            for vid in ids:
+                villages[vid] = replace(villages[vid], crop_per_hour=production[vid])
         remainder = ids[rng.randrange(len(ids))]
         allocations = {remainder: Allocation(AllocationMode.REMAINDER)}
         for vid in ids:
@@ -511,15 +523,23 @@ class TestCropRelay:
         So this asserts only that relay ON strictly beats relay OFF, not that
         the full theoretical saving is captured."""
         model = MerchantModel(base_capacity=1_000, bonus_per_trade_office_level=0.0)
-        villages = {1: VillageState(1, 0, 0, merchant_count=200, trade_office_level=0)}
+        # Each village states its crop production: relay refuses a hub whose rate
+        # it cannot read, and village 7 below is required to be that hub.
+        villages = {
+            1: VillageState(1, 0, 0, merchant_count=200, trade_office_level=0, crop_per_hour=0.0)
+        }
         prod = {1: 0.0}
         alloc = {1: Allocation(AllocationMode.REMAINDER)}
         for i, vid in enumerate((2, 3, 4, 5, 6)):
-            villages[vid] = VillageState(vid, 120, i, merchant_count=25, trade_office_level=0)
+            villages[vid] = VillageState(
+                vid, 120, i, merchant_count=25, trade_office_level=0, crop_per_hour=900.0
+            )
             prod[vid] = 900.0
             alloc[vid] = Allocation(AllocationMode.ABSOLUTE, 0.0)
         # The hub sits beside the cluster and already carries crop.
-        villages[7] = VillageState(7, 114, 2, merchant_count=200, trade_office_level=0)
+        villages[7] = VillageState(
+            7, 114, 2, merchant_count=200, trade_office_level=0, crop_per_hour=100.0
+        )
         prod[7] = 100.0
         alloc[7] = Allocation(AllocationMode.ABSOLUTE, 0.0)
         plans = {Resource.CROP: resolve_resource(Resource.CROP, prod, alloc)}
@@ -546,9 +566,17 @@ class TestCropRelay:
         cannot silently reshuffle routes it has nothing to do with.
         """
         return {
-            1: VillageState(1, 0, 0, merchant_count=20, trade_office_level=15),  # capital
-            2: VillageState(2, 60, 0, merchant_count=20, trade_office_level=10),  # midpoint
-            3: VillageState(3, 120, 0, merchant_count=6, trade_office_level=10),  # stranded
+            # Production is stated because relay refuses a hub whose crop rate it
+            # cannot read, and the midpoint here is required to be a hub.
+            1: VillageState(
+                1, 0, 0, merchant_count=20, trade_office_level=15, crop_per_hour=0.0
+            ),  # capital
+            2: VillageState(
+                2, 60, 0, merchant_count=20, trade_office_level=10, crop_per_hour=1200.0
+            ),  # midpoint
+            3: VillageState(
+                3, 120, 0, merchant_count=6, trade_office_level=10, crop_per_hour=9000.0
+            ),  # stranded
         }, {
             Resource.CROP: resolve_resource(
                 Resource.CROP,
