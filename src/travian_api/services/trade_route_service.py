@@ -161,6 +161,17 @@ class PlannedRoute:
     # every route around the click instant, collapsing the beat that spaces
     # arrivals and orders relay hubs after their inbound crop.
     dispatch_minute: int = 0
+    # The profile hours this route belongs to, when the run will prune its
+    # fan-out -- (start_minute, end_minute), wrapping past midnight. None means
+    # round the clock. Carried on the route rather than on the request because
+    # a whole-day run executes SEVERAL profiles at once and each route is
+    # trimmed, budgeted and reconciled against its own hours. The service layer
+    # ignores it; the create payload has no field it could map to.
+    window: tuple[int, int] | None = None
+    # The profile's name, for the operator: "Day"/"Night" in previews and
+    # traces. Never used for matching -- the window is the semantics, this is
+    # the label.
+    segment: str = ""
 
 
 @dataclass

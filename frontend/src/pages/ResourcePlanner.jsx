@@ -492,6 +492,10 @@ export default function ResourcePlanner() {
   // Off by default, and deliberately: correcting cargo overwrites a route that
   // may have been tuned in-game on purpose.
   const [updateDrifted, setUpdateDrifted] = useState(false)
+  // Whole-day execution: every profile's routes in one pass, reconciled as a
+  // union, so Day and Night rows coexist in the game (disjoint by departure
+  // minute) and no daily profile switching is ever needed.
+  const [wholeDay, setWholeDay] = useState(false)
   // Durable audit of the last LIVE run (see LS_LAST_RUN): survives the input
   // edits that clear execResult, and page reloads.
   const [lastRun, setLastRun] = useState(null)
@@ -1035,7 +1039,7 @@ export default function ResourcePlanner() {
       setExecuting(true)
       try {
         const res = await api.post('/distribution/execute', {
-          ...buildPlanPayload(),
+          ...buildExecutePayload(),
           dry_run: dryRun,
           disable_existing: disableExisting,
           max_routes_per_run: Number(routesPerRun) || MAX_ROUTES_PER_RUN,
@@ -1142,7 +1146,7 @@ export default function ResourcePlanner() {
     [
       accountKey,
       currentAccountKey,
-      buildPlanPayload,
+      buildExecutePayload,
       toast,
       snapshotFetchedAt,
       useStaleSnapshot,
@@ -1233,6 +1237,26 @@ export default function ResourcePlanner() {
   // alone outlast the client timeout before a single write delay or idle browse.
   // The gap between chunks is the session break a long operation needs, and the
   // server picks its length so the client is not returning on a metronome.
+  // The execute payload for the chosen mode. Whole-day: segments carry each
+  // profile's allocations and hours, so the top-level pair is stripped -- the
+  // backend rejects them rather than silently ignoring one -- and the prune is
+  // forced on because disjoint row minutes are what make the union attributable.
+  const buildExecutePayload = useCallback(() => {
+    const base = buildPlanPayload()
+    if (!wholeDay) return base
+    const { segments, skipped } = buildSegments()
+    if (!segments.length) {
+      throw new Error('No profile has hours set — give each profile its window first')
+    }
+    if (skipped.length) {
+      throw new Error(
+        `Whole-day execution needs hours on every profile — missing: ${skipped.join(', ')}`
+      )
+    }
+    const { allocations: _a, dispatch_window: _w, ...rest } = base
+    return { ...rest, segments, prune_to_window: true }
+  }, [buildPlanPayload, buildSegments, wholeDay])
+
   const runReconcileSweep = useCallback(async () => {
     if (!plan) {
       toast.error('Build a plan first — the sweep needs to know what the plan wants')
@@ -1251,11 +1275,16 @@ export default function ResourcePlanner() {
         const res = await api.post(
           '/distribution/execute',
           {
-            ...buildPlanPayload(),
+            ...buildExecutePayload(),
             dry_run: false,
             disable_existing: true,
-            // No create budget: this half only takes routes AWAY.
-            max_routes_per_run: 0,
+            // Whole-day mode provisions as it sweeps -- one read per village
+            // serves reconcile AND create, which is the entire point of the
+            // single pass. Otherwise the sweep only takes routes away.
+            max_routes_per_run: wholeDay ? Number(routesPerRun) || MAX_ROUTES_PER_RUN : 0,
+            ...(wholeDay && Number(maxGameRows) > 0
+              ? { max_game_rows_per_run: Number(maxGameRows) }
+              : {}),
             reconcile_all_origins: true,
             max_origins_per_run: SWEEP_VILLAGES_PER_CHUNK,
             // The sweep honours the exemption too, or it would switch off by
@@ -1323,7 +1352,7 @@ export default function ResourcePlanner() {
     } finally {
       setSweeping(false)
     }
-  }, [plan, buildPlanPayload, protectDestinations, toast])
+  }, [plan, buildExecutePayload, wholeDay, routesPerRun, maxGameRows, protectDestinations, toast])
 
   // Live unallocated counter, so slack is visible while typing rather than
   // discovered later (profile known issue #9).
@@ -1469,9 +1498,10 @@ export default function ResourcePlanner() {
 
   const windowFor = (name) => profileWindows[name] ?? DEFAULT_WINDOWS[name] ?? null
 
-  const runDayCheck = async () => {
-    const requestedFor = accountKey
-    const requestedRev = dayCheckInputRev.current
+  // Every profile with hours, as the segment list the backend plans one by
+  // one. Shared by the day check AND whole-day execution, so the day the
+  // operator simulated and the day they go live with are the same day.
+  const buildSegments = useCallback(() => {
     const segments = []
     const skipped = []
     for (const name of profileNames) {
@@ -1493,6 +1523,14 @@ export default function ResourcePlanner() {
       }
       segments.push({ name, window: [start, end], allocations: sendAllocations })
     }
+    return { segments, skipped }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profiles, profileNames, profileWindows])
+
+  const runDayCheck = async () => {
+    const requestedFor = accountKey
+    const requestedRev = dayCheckInputRev.current
+    const { segments, skipped } = buildSegments()
     if (!segments.length) {
       toast.error('No profile has hours set — give each profile its window first')
       return
@@ -3403,7 +3441,29 @@ export default function ResourcePlanner() {
                       <input
                         type="checkbox"
                         className="mt-0.5"
-                        checked={pruneToWindow}
+                        checked={wholeDay}
+                        onChange={(e) => setWholeDay(e.target.checked)}
+                      />
+                      <span className="text-secondary">
+                        <span className="text-primary">
+                          Whole day — execute all profiles at once.
+                        </span>{' '}
+                        Plans every profile in its own hours and creates both route
+                        sets in one pass, reconciled together: a Night row is never
+                        &ldquo;stale&rdquo; to a Day-eyed run. Both sets then coexist
+                        in the game — disjoint by departure time — so the account
+                        runs around the clock with <strong>no daily switching</strong>.
+                        The reconcile sweep also <em>creates</em> as it goes in this
+                        mode, so one pass over the villages provisions the whole day.
+                        Needs hours on every profile; the trim below is forced on.
+                      </span>
+                    </label>
+                    <label className="text-xs flex items-start gap-2 max-w-md">
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={pruneToWindow || wholeDay}
+                        disabled={wholeDay}
                         onChange={(e) => setPruneToWindow(e.target.checked)}
                       />
                       <span className="text-secondary">
@@ -3574,6 +3634,21 @@ export default function ResourcePlanner() {
                         )}
                       </p>
                     )}
+                    {execResult.dry_run &&
+                      execResult.requests_forecast?.estimated_total > 0 && (
+                        <p className="text-xs mb-2">
+                          <strong>
+                            Going live spends ~{execResult.requests_forecast.estimated_total}
+                            {'–'}
+                            {execResult.requests_forecast.estimated_total_max} requests
+                          </strong>{' '}
+                          — {execResult.requests_forecast.marketplace_reads} read(s),{' '}
+                          {execResult.requests_forecast.creates} create(s),{' '}
+                          {execResult.requests_forecast.verify_reads} verify read(s),{' '}
+                          {execResult.requests_forecast.trim_deletes} trim(s) — plus up to one
+                          batched disable per village, decided by what the marketplace holds.
+                        </p>
+                      )}
                     {execResult.dry_run && (
                       <p className="text-xs text-secondary mb-2">
                         Preview assumes an empty marketplace. The live run reads each village

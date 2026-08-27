@@ -439,6 +439,9 @@ class _FakeLiveSvc:
                         dest_y=route.dest_y,
                         active=True,
                         departure_at=_EPOCH_DAY + minute * 60,
+                        # The real page shows each row's cargo, and the pooled
+                        # trim breaks same-minute ties with it.
+                        cargo=dict(route.cargo),
                     )
                 )
         if self.on_create is not None:

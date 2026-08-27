@@ -15,10 +15,11 @@ import asyncio
 import logging
 import random
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from travian_api.exceptions import ActivityBudgetExhausted, NetworkError, TravianError
 from travian_api.parsers.html_parser import (
@@ -79,7 +80,6 @@ from travian_api.services.distribution.storage import (
     storage_findings,
     store_status,
 )
-from travian_api.services.distribution.window_pruning import rows_outside_window
 from travian_api.services.trade_route_service import (
     ExistingRoute,
     MarketplaceUnreadable,
@@ -641,6 +641,24 @@ class PlanResponse(BaseModel):
     diagnostics: DiagnosticsResponse
 
 
+class DaySegmentInput(BaseModel):
+    """One allocation profile plus the hours of the day it actually runs."""
+
+    name: str = Field(min_length=1)
+    window: tuple[int, int]
+    """Minutes past midnight (start, end); may wrap past midnight."""
+    allocations: dict[Resource, dict[int, AllocationInput]] = {}
+
+    @field_validator("window")
+    @classmethod
+    def _window_in_day(cls, value: tuple[int, int]) -> tuple[int, int]:
+        if not all(0 <= minute < MINUTES_PER_DAY for minute in value):
+            raise ValueError(f"window minutes must be 0-{MINUTES_PER_DAY - 1}")
+        if value[0] == value[1]:
+            raise ValueError("window is zero-width; give the profile some hours or omit it")
+        return value
+
+
 class ExecuteRequest(PlanRequest):
     # Unknown fields are REJECTED here, unlike everywhere else in this module.
     #
@@ -667,6 +685,60 @@ class ExecuteRequest(PlanRequest):
     # A filtered run is reported as filtered (see ExecuteResponse.filtered_to),
     # because a partial run mistaken for a complete one is precisely the kind of
     # false confidence that makes an operator stop checking.
+    # Whole-day execution: every profile at once. Each segment is planned in its
+    # own hours (same shape /day-check uses -- one model, so the two cannot
+    # drift), the desired routes are the UNION across segments, and each route
+    # is trimmed and reconciled against its own profile window. This is what
+    # lets Day and Night rows coexist in the game -- disjoint by departure
+    # minute -- so the account runs the whole day with no profile switching.
+    segments: list[DaySegmentInput] = Field(
+        default=[],
+        max_length=MAX_DAY_SEGMENTS,
+        description=(
+            "One entry per allocation profile. Empty means single-profile "
+            "execution using the top-level allocations/dispatch_window."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _segments_are_coherent(self) -> "ExecuteRequest":
+        if not self.segments:
+            return self
+        # The union depends on disjoint row minutes: without the prune, both
+        # profiles' fan-outs cover the whole day and per-route attribution --
+        # trim, drift, reconciliation -- has no way to tell whose row is whose.
+        if not self.prune_to_window:
+            raise ValueError(
+                "segments require prune_to_window: without the prune both "
+                "profiles' rows cover the whole day and cannot be told apart"
+            )
+        if self.dispatch_window is not None:
+            raise ValueError(
+                "dispatch_window belongs to each entry in `segments`, not at "
+                "the top level -- every profile runs its own hours"
+            )
+        if self.allocations:
+            raise ValueError(
+                "allocations belong to each entry in `segments` for a "
+                "whole-day run -- a top-level set would silently be ignored"
+            )
+        # Two profiles cannot run at the same time -- an overlap would create
+        # rows this run itself then classifies as someone else's mismatch.
+        covered: set[int] = set()
+        for segment in self.segments:
+            start, end = segment.window
+            span = set(
+                range(start, end) if start < end else [*range(start, MINUTES_PER_DAY), *range(end)]
+            )
+            clash = covered & span
+            if clash:
+                raise ValueError(
+                    f"profile windows overlap around minute {min(clash)}: two "
+                    f"profiles cannot run at the same time"
+                )
+            covered |= span
+        return self
+
     only_origins: list[int] | None = Field(
         default=None,
         description="Run only routes leaving these origin village ids.",
@@ -795,6 +867,10 @@ class ExecuteRequest(PlanRequest):
 class RouteActionResponse(BaseModel):
     origin: int
     origin_name: str
+    # Which profile this route belongs to in a whole-day run ("Day"/"Night");
+    # empty on single-profile runs. A label for the operator, never a key.
+    segment: str = ""
+
     destination: int
     destination_name: str
     dest_x: int
@@ -840,6 +916,12 @@ class ExecuteResponse(BaseModel):
     # and reads wrongly folded into either.
     updates: list[str] = []
     created: int
+    # What a live run of this request would spend against Travian, by kind.
+    # Filled on DRY RUNS only -- a live run reports what actually happened
+    # instead. Estimates: reads/creates/verifies/trims are arithmetic over the
+    # plan, while disables depend on what each marketplace turns out to hold
+    # (bounded by one batched PUT per visited origin, counted in the _max).
+    requests_forecast: dict[str, int] = {}
     # Creates the game accepted but this run could NOT confirm, and creates it
     # accepted while producing nothing. `created` counts only the VERIFIED ones,
     # so without these two a run whose every read-back failed reported
@@ -1162,24 +1244,6 @@ def _explain_over_budget(
             "nearer, or consume the surplus locally."
         )
     return " ".join(parts)
-
-
-class DaySegmentInput(BaseModel):
-    """One allocation profile plus the hours of the day it actually runs."""
-
-    name: str = Field(min_length=1)
-    window: tuple[int, int]
-    """Minutes past midnight (start, end); may wrap past midnight."""
-    allocations: dict[Resource, dict[int, AllocationInput]] = {}
-
-    @field_validator("window")
-    @classmethod
-    def _window_in_day(cls, value: tuple[int, int]) -> tuple[int, int]:
-        if not all(0 <= minute < MINUTES_PER_DAY for minute in value):
-            raise ValueError(f"window minutes must be 0-{MINUTES_PER_DAY - 1}")
-        if value[0] == value[1]:
-            raise ValueError("window is zero-width; give the profile some hours or omit it")
-        return value
 
 
 class DayCheckRequest(PlanRequest):
@@ -2635,8 +2699,36 @@ async def post_execute(
     order. ``dry_run`` (default) previews with ZERO game requests and, like
     /plan, is auth-only — it never resolves a live session so it works offline.
     """
-    account = await _plan_account(body)
-    plan = account.plan
+    if body.segments:
+        # One optimizer pass per profile, each in its own hours -- identical to
+        # how /day-check plans them, so execute and the day picture can never
+        # disagree about what a profile's routes are. The snapshot is shared,
+        # so names/coords/foreign ids are identical across accounts; the first
+        # stands in for all of them everywhere a single account was used.
+        planned_segments: list[tuple[DaySegmentInput, _PlannedAccount]] = []
+        for segment in body.segments:
+            per_segment = body.model_copy(
+                update={
+                    "allocations": segment.allocations,
+                    # Latency is judged against the profile's own hours: an
+                    # 8-hour night cannot be asked to meet a 16-hour day's
+                    # target, nor vice versa.
+                    "max_latency_hours": (
+                        (
+                            (segment.window[1] - segment.window[0]) % MINUTES_PER_DAY
+                            or MINUTES_PER_DAY
+                        )
+                        / 60.0
+                    ),
+                }
+            )
+            planned_segments.append(
+                (segment, await _plan_account(per_segment, dispatch_window=tuple(segment.window)))
+            )
+        account = planned_segments[0][1]
+    else:
+        account = await _plan_account(body)
+        planned_segments = [(None, account)]
     names = account.names
     coords = account.coords
     # Resolve the session lazily (not via a dependency) so dry-run works offline
@@ -2649,7 +2741,15 @@ async def post_execute(
     live_enabled = bool(svc is not None and svc.live_enabled)
     # Same warning set /plan surfaces (both share _plan_account): the optimizer's
     # own notes plus the account-level ones, so the two endpoints never disagree.
-    warnings = list(account.warnings)
+    # Whole-day runs prefix each segment's so the operator can tell whose is whose.
+    if body.segments:
+        warnings = [
+            w if segment is None else f"{segment.name}: {w}"
+            for segment, acc in planned_segments
+            for w in acc.warnings
+        ]
+    else:
+        warnings = list(account.warnings)
 
     # Each plan row is one route from a real origin village's marketplace to a
     # destination (a real village or a foreign sink — coords cover both).
@@ -2657,7 +2757,11 @@ async def post_execute(
     # origin -> every route the FULL plan wants from it, filter or no filter.
     wanted_by_origin: dict[int, list[PlannedRoute]] = {}
     filtered_out = 0
-    for row in plan.rows:
+    # (segment, row) pairs across every planned profile. Single-profile runs are
+    # the one-segment case of the same shape, so there is exactly one code path
+    # from here down -- the union is not a mode, it is the general case.
+    segment_rows = [(segment, row) for segment, acc in planned_segments for row in acc.plan.rows]
+    for segment, row in segment_rows:
         # Fail-closed execution-boundary guard: a live route may only originate
         # at a real, positive account village. The optimizer already excludes
         # non-sender origins, but an impossible negative-id (foreign sink) origin
@@ -2691,6 +2795,20 @@ async def post_execute(
             # execution -- without it the beat that spaces arrivals and
             # orders relay hubs is lost.
             dispatch_minute=row.dispatch_minute,
+            # The hours this route belongs to. Every window consumer downstream
+            # (row budget, planned-minutes reconciliation, the post-verify
+            # trim) reads this rather than a request-global window, which is
+            # what lets two profiles' routes ride in one run.
+            window=(
+                tuple(segment.window)
+                if segment is not None and body.prune_to_window
+                else (
+                    tuple(body.dispatch_window)
+                    if body.prune_to_window and body.dispatch_window
+                    else None
+                )
+            ),
+            segment=segment.name if segment is not None else "",
         )
         # Recorded BEFORE the filter, and used only to decide what counts as
         # wanted. Judging staleness against the narrowed slice instead was
@@ -2721,6 +2839,7 @@ async def post_execute(
             destination_name=village_label(row.destination, names),
             dest_x=route.dest_x,
             dest_y=route.dest_y,
+            segment=route.segment,
             cargo={r: amount for r, amount in row.cargo.items() if amount},
             cycle_hours=row.cycle_hours,
             merchants=row.merchants,
@@ -2778,6 +2897,35 @@ async def post_execute(
         # so it may create/disable fewer than shown.
         actions = [_action(row, route, "would_create") for row, route in items[:cap]]
         actions += [_action(row, route, "deferred") for row, route in items[cap:]]
+        # The bill, before it is spent. Reads: one per visited origin (a sweep
+        # visits every village; an ordinary run only the capped slice). Verify:
+        # one re-read per origin that wrote anything. Trim: one batched delete
+        # plus its own confirming read, per origin whose creates fan out past
+        # their window. Disables cannot be known without reading, so they only
+        # widen the _max by one batched PUT per visited origin.
+        _create_origins = {route.origin_village_id for _row, route in items[:cap]}
+        _reads = (
+            len({v.village_id for v in body.snapshot})
+            if body.reconcile_all_origins
+            else len(_create_origins)
+        )
+        _trim_origins = {
+            route.origin_village_id
+            for _row, route in items[:cap]
+            if route.window is not None
+            and _rows_that_survive(route.cycle_hours, route.dispatch_minute, route.window)
+            < _game_rows(route.cycle_hours)
+        }
+        _known = len(items[:cap]) + _reads + len(_create_origins) + 2 * len(_trim_origins)
+        requests_forecast = {
+            "marketplace_reads": _reads,
+            "creates": len(items[:cap]),
+            "verify_reads": len(_create_origins),
+            "trim_deletes": len(_trim_origins),
+            "trim_verify_reads": len(_trim_origins),
+            "estimated_total": _known,
+            "estimated_total_max": _known + _reads,  # + up to one disable PUT per origin
+        }
         disables = (
             ["Existing routes not in this plan would be disabled first (read at execution)."]
             if body.disable_existing
@@ -2794,6 +2942,7 @@ async def post_execute(
             # game requests, so there is nothing to have measured. The live path
             # reports what the marketplace actually showed instead.
             created_game_rows=sum(a.game_rows for a in actions if a.status == "would_create"),
+            requests_forecast=requests_forecast,
             filtered_to=filtered_to,
             remaining=max(0, len(items) - cap),
             warnings=warnings,
@@ -2824,28 +2973,37 @@ async def post_execute(
     # still previews it, warnings and all).
     # Still gated on is_feasible itself, never on the message helper: if the two
     # ever disagree the authoritative one must be the one that refuses.
-    if not plan.is_feasible:
-        # The blockers, not every warning. This used to concatenate plan.warnings
-        # -- on a 25-village account that is 132 lines in a 422 body, and the two
-        # that explain the refusal are indistinguishable from the 130 that do not.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                "Plan is not executable; refusing to write to the account. "
-                + " ".join(f"{reason}." for reason in blockers(plan, names))
-            ).strip(),
-        )
+    for _segment, _acc in planned_segments:
+        if not _acc.plan.is_feasible:
+            # The blockers, not every warning. This used to concatenate
+            # plan.warnings -- on a 25-village account that is 132 lines in a
+            # 422 body, and the two that explain the refusal are
+            # indistinguishable from the 130 that do not. Whole-day runs name
+            # the profile that blocks, because "the plan" is now several.
+            _who = f"{_segment.name}: " if _segment is not None else ""
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"{_who}plan is not executable; refusing to write to the account. "
+                    + " ".join(f"{reason}." for reason in blockers(_acc.plan, names))
+                ).strip(),
+            )
     # An allocation the operator explicitly wrote that the planner had to IGNORE
     # (its village's rate could not be read) makes the executable plan a
     # different plan than the one they approved. A dry run previews it -- the
     # CRITICAL finding names it -- but going live on it silently would ship a
     # plan nobody wrote. Refused with the exact fix.
-    if account.dropped_allocations:
+    _dropped = [
+        d if _segment is None else f"{_segment.name}: {d}"
+        for _segment, _acc in planned_segments
+        for d in _acc.dropped_allocations
+    ]
+    if _dropped:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 "Refusing to go live: the plan had to ignore "
-                + "; ".join(account.dropped_allocations)
+                + "; ".join(_dropped)
                 + ". Fetch fresh state so those rates can be read, or set the "
                 "allocation(s) back to 'Keep own', then run again."
             ),
@@ -2909,6 +3067,26 @@ async def post_execute(
     desired_by_origin: dict[int, list[tuple[SheetRow, PlannedRoute]]] = {}
     for row, route in items:
         desired_by_origin.setdefault(route.origin_village_id, []).append((row, route))
+    if len(planned_segments) > 1:
+        # Merchants are one fleet shared across the day. Each profile fits its
+        # own budget, but a long round trip started late in one window is still
+        # in the air when the next begins -- the sum across profiles is the
+        # honest upper bound. Warned, never blocked: a short merchant is a late
+        # send, not a disaster, and the windows' separation usually absorbs it.
+        _fleet = {v.village_id: v.merchants_total for v in body.snapshot}
+        _committed_sum: dict[int, int] = {}
+        for _segment, _acc in planned_segments:
+            for _vid, _n in _acc.plan.merchants_committed.items():
+                _committed_sum[_vid] = _committed_sum.get(_vid, 0) + _n
+        for _vid, _total in sorted(_committed_sum.items()):
+            _have = _fleet.get(_vid, 0)
+            if _total > _have > 0:
+                warnings.append(
+                    f"{village_label(_vid, names)}: the profiles together commit "
+                    f"{_total} merchants against a fleet of {_have}; round trips "
+                    f"crossing a window boundary may briefly run short, delaying "
+                    f"sends rather than losing them"
+                )
     if body.reconcile_all_origins:
         # Every own village, whether the plan still ships from it or not. A
         # village with no desired routes is not skipped -- it is the case this
@@ -3237,23 +3415,17 @@ async def post_execute(
                     # the old profile's rows running, never pruned pre-existing
                     # out-of-window rows, and let cargo correction write one
                     # daily batch onto 24 hourly rows.
-                    trim_window = (
-                        tuple(body.dispatch_window)
-                        if body.prune_to_window and body.dispatch_window
-                        else None
-                    )
-
-                    def _planned_minutes(
-                        route: PlannedRoute,
-                        trim_window: tuple[int, int] | None = trim_window,
-                    ) -> list[int]:
+                    def _planned_minutes(route: PlannedRoute) -> list[int]:
+                        # Each route is judged against ITS OWN profile window --
+                        # a whole-day run carries several profiles in one pass,
+                        # and a Night row is not stale for keeping Night hours.
                         total = _game_rows(route.cycle_hours)
                         minutes = [
                             (route.dispatch_minute + i * route.cycle_hours * 60) % MINUTES_PER_DAY
                             for i in range(total)
                         ]
-                        if trim_window is not None:
-                            start, end = trim_window
+                        if route.window is not None:
+                            start, end = route.window
                             inside = [
                                 m
                                 for m in minutes
@@ -3265,9 +3437,19 @@ async def post_execute(
                                 minutes = inside
                         return sorted(minutes)
 
-                    expected_rows = {
-                        _desired_key(route): _planned_minutes(route) for route in wanted_here
-                    }
+                    # Minute MULTISETS, merged per destination. A dict
+                    # comprehension here silently kept only the LAST route's
+                    # minutes, and a whole-day union routinely wants the same
+                    # (origin, destination) from two profiles -- every shared
+                    # destination would have mismatched forever and churned
+                    # disable+recreate on every run.
+                    expected_rows: dict[int | tuple[int, int], list[int]] = {}
+                    for route in wanted_here:
+                        expected_rows.setdefault(_desired_key(route), []).extend(
+                            _planned_minutes(route)
+                        )
+                    for _k in expected_rows:
+                        expected_rows[_k] = sorted(expected_rows[_k])
 
                     def _row_minute(e: ExistingRoute) -> int:
                         # -1 for a row whose departure could not be read: it can
@@ -3289,24 +3471,55 @@ async def post_execute(
                             for k in _existing_keys(e) & set(expected_rows):
                                 dormant_rows_by_key.setdefault(k, []).append(e)
 
-                    schedule_matched: set[int | tuple[int, int]] = set()
+                    # Which desired ROUTES the live rows already satisfy. Keyed
+                    # by identity, not destination: a whole-day union routinely
+                    # wants two routes to one destination (Day's and Night's),
+                    # and satisfying the KEY on the first create skipped the
+                    # second route entirely.
+                    satisfied_route_ids: set[int] = set()
                     # Destinations whose planned rows ALL exist at their planned
                     # minutes but some are switched off. The fix for those is
                     # re-enabling exactly the off rows -- never disable-and-
                     # recreate, which costs more writes and churns row ids.
                     completable: dict[int | tuple[int, int], list[ExistingRoute]] = {}
                     mismatched: dict[int | tuple[int, int], str] = {}
+                    routes_by_key: dict[int | tuple[int, int], list[PlannedRoute]] = {}
+                    for _route in wanted_here:
+                        routes_by_key.setdefault(_desired_key(_route), []).append(_route)
                     for k, planned in expected_rows.items():
                         rows = active_rows_by_key.get(k, [])
                         dormant = dormant_rows_by_key.get(k, [])
                         if not rows and not dormant:
                             continue  # nothing live; the ordinary create path
-                        got = sorted(_row_minute(e) for e in rows)
-                        if got == planned:
-                            schedule_matched.add(k)
+                        # Subtract each route whose planned minutes are wholly
+                        # present. What survives is stray: rows no route claims,
+                        # or the remnants of a torn route -- either way the key
+                        # cannot be trusted and reconciles by full recreate.
+                        pool = Counter(_row_minute(e) for e in rows)
+                        present: list[PlannedRoute] = []
+                        for _route in routes_by_key.get(k, []):
+                            mine = Counter(_planned_minutes(_route))
+                            if all(pool[m] >= n for m, n in mine.items()):
+                                pool -= mine
+                                present.append(_route)
+                        unserved = len(present) < len(routes_by_key.get(k, []))
+                        if not +pool:
+                            # Nothing stray. Present routes are served; absent
+                            # ones go to the create path -- the half-provisioned
+                            # account gains its other profile without churn --
+                            # UNLESS the dormant rows complete the union, where
+                            # one re-enable beats a create-and-trim.
+                            satisfied_route_ids.update(id(_route) for _route in present)
+                            if (
+                                unserved
+                                and dormant
+                                and sorted(_row_minute(e) for e in rows + dormant) == planned
+                            ):
+                                completable[k] = dormant
                         elif dormant and sorted(_row_minute(e) for e in rows + dormant) == planned:
                             completable[k] = dormant
                         else:
+                            got = sorted(_row_minute(e) for e in rows)
                             mismatched[k] = (
                                 f"{len(rows)} live row(s) departing at minutes "
                                 f"{sorted(set(got))} where the plan wants {planned}"
@@ -3323,7 +3536,9 @@ async def post_execute(
                                 f"({mismatched[k]}); left untouched, so the plan's "
                                 f"figures for this destination will not match reality"
                             )
-                            schedule_matched.add(k)
+                            satisfied_route_ids.update(
+                                id(_route) for _route in routes_by_key.get(k, [])
+                            )
                             del mismatched[k]
 
                     def _off_schedule(
@@ -3454,7 +3669,9 @@ async def post_execute(
                     # Day route satisfy the Night plan's 1h demand for the same
                     # destination, which is exactly the destination-only matching
                     # this replaces.
-                    satisfied: set[int | tuple[int, int]] = set(schedule_matched)
+                    # Keys with a successful re-enable: every route of the key
+                    # is then served (the dormant set completed the whole union).
+                    satisfied: set[int | tuple[int, int]] = set()
                     # Re-enabling covers exactly the completable destinations:
                     # every planned row exists at its planned minute and the off
                     # ones only need switching back on. Anything else was
@@ -3490,6 +3707,10 @@ async def post_execute(
                             for e in disabled_desired:
                                 satisfied |= _existing_keys(e)
                                 reenabled_keys |= _existing_keys(e)
+                                for _k2 in _existing_keys(e) & set(routes_by_key):
+                                    satisfied_route_ids.update(
+                                        id(_route) for _route in routes_by_key[_k2]
+                                    )
                             reenabled_here.extend(disabled_desired)
                             re_enables.append(
                                 f"{village_label(origin, names)}: re-enabled {enabled.detail}"
@@ -3505,6 +3726,13 @@ async def post_execute(
                                 "disabled route the plan still wants"
                             )
 
+                    # Minutes each destination gained from creates THIS visit.
+                    # A later desired route colliding on any of them is the
+                    # duplicate the plan should never contain twice -- creating
+                    # it would stack two rows on one minute, unattributable
+                    # forever after. Distinct-minute routes to the same key are
+                    # the union's normal case and pass through.
+                    claimed_this_visit: dict[int | tuple[int, int], Counter] = {}
                     # Routes this origin claims to have created, paired with
                     # their action so the verdict can be corrected below.
                     created_here: list[tuple[RouteActionResponse, PlannedRoute]] = []
@@ -3543,7 +3771,20 @@ async def post_execute(
                                 )
                             )
                             continue
-                        if destination in satisfied:
+                        _mine_minutes = Counter(_planned_minutes(route))
+                        _already = claimed_this_visit.get(destination)
+                        if _already is not None and +(_already & _mine_minutes):
+                            actions.append(
+                                _action(
+                                    row,
+                                    route,
+                                    "skipped",
+                                    "duplicate: a route created moments ago already "
+                                    "departs at these minutes",
+                                )
+                            )
+                            continue
+                        if id(route) in satisfied_route_ids or destination in satisfied:
                             # The destination is served, but is it served with
                             # the RIGHT cargo? A route is created once and the
                             # plan moves every time production or stocks do, so
@@ -3551,8 +3792,20 @@ async def post_execute(
                             # they were born with and slowly come to describe a
                             # different account than the sheet does, with
                             # nothing detecting the divergence.
+                            # Only the rows that belong to THIS route: on a
+                            # shared destination the other profile's rows carry
+                            # a different (correct) batch, and comparing them
+                            # against this route's cargo would either flag them
+                            # as drifted forever or stamp this profile's batch
+                            # onto them. Disjoint windows make the minute an
+                            # exact attribution.
+                            _mine = set(_planned_minutes(route))
                             live = [
-                                e for e in visible if e.active and destination in _existing_keys(e)
+                                e
+                                for e in visible
+                                if e.active
+                                and destination in _existing_keys(e)
+                                and _row_minute(e) in _mine
                             ]
                             drifted = [e for e in live if cargo_has_drifted(e.cargo, route.cargo)]
                             if drifted and body.update_drifted and updates_done >= cap:
@@ -3710,7 +3963,7 @@ async def post_execute(
                         would_add = _rows_that_survive(
                             row.cycle_hours,
                             row.dispatch_minute,
-                            body.dispatch_window if body.prune_to_window else None,
+                            route.window,
                         )
                         if row_cap and rows_written + would_add > row_cap:
                             trace.decision(
@@ -3751,7 +4004,10 @@ async def post_execute(
                             action = _action(row, route, "created", result.detail)
                             actions.append(action)
                             created_here.append((action, route))
-                            satisfied.add(destination)
+                            satisfied_route_ids.add(id(route))
+                            claimed_this_visit.setdefault(destination, Counter()).update(
+                                _mine_minutes
+                            )
                             consecutive_failures = 0
                             continue
                         outstanding += 1
@@ -3855,25 +4111,80 @@ async def post_execute(
                             # pruning against an unverified read would be deleting
                             # rows on a guess. One delete for the whole origin
                             # rather than one per route.
-                            if body.prune_to_window and body.dispatch_window and created_here:
+                            if body.prune_to_window and created_here:
+                                # Pooled per destination, because per-route
+                                # attribution has a hole: an hourly fan-out
+                                # contains EVERY minute a 4h one has, so routes
+                                # protecting each other's minutes exempted each
+                                # other's strays as well. Per key the truth is
+                                # simple -- after the creates, the destination
+                                # should hold exactly the union's planned
+                                # minutes: keep fresh rows to satisfy that
+                                # multiset (a row whose cargo matches the route
+                                # that planned the minute wins the tie, so the
+                                # Night batch survives at a night minute rather
+                                # than the Day row sharing it) and delete every
+                                # other row the creates made.
                                 doomed: list[ExistingRoute] = []
+                                _created_keys: dict[int | tuple[int, int], list[PlannedRoute]] = {}
                                 for _action, _route in created_here:
-                                    _key = _desired_key(_route)
-                                    _mine = [e for e in fresh if _key in _existing_keys(e)]
-                                    try:
-                                        doomed.extend(
-                                            rows_outside_window(_mine, tuple(body.dispatch_window))
+                                    if _route.window is not None:
+                                        _created_keys.setdefault(_desired_key(_route), []).append(
+                                            _route
                                         )
-                                    except ValueError as exc:
-                                        # Refusing to prune leaves the route running
-                                        # round the clock, which the plan reports.
-                                        # Pruning every row would destroy the route
-                                        # this run just created.
+                                for _key, _routes_k in _created_keys.items():
+                                    _want: Counter = Counter()
+                                    _cargo_at: dict[int, list[dict]] = {}
+                                    for _route in _routes_k:
+                                        for _m in _planned_minutes(_route):
+                                            _want[_m] += 1
+                                            _cargo_at.setdefault(_m, []).append(_route.cargo)
+                                    _rows_k = [e for e in fresh if _key in _existing_keys(e)]
+                                    _keep: set[int] = set()
+                                    # Exact-cargo rows first, then anything at a
+                                    # still-wanted minute. Rows whose cargo the
+                                    # page did not state can only qualify in the
+                                    # second pass.
+                                    for _exact in (True, False):
+                                        for e in _rows_k:
+                                            if e.route_id in _keep:
+                                                continue
+                                            _m = _row_minute(e)
+                                            if _want.get(_m, 0) <= 0:
+                                                continue
+                                            if _exact and not (
+                                                e.cargo is not None
+                                                and any(
+                                                    {r: a for r, a in c.items() if a}
+                                                    == {r: a for r, a in e.cargo.items() if a}
+                                                    for c in _cargo_at.get(_m, [])
+                                                )
+                                            ):
+                                                continue
+                                            _keep.add(e.route_id)
+                                            _want[_m] -= 1
+                                    _leftover = [e for e in _rows_k if e.route_id not in _keep]
+                                    if _leftover and not _keep:
+                                        # Deleting every fresh row would destroy
+                                        # the routes this run just made -- the
+                                        # same refusal window_pruning encodes.
                                         problems.append(
-                                            f"{village_label(origin, names)} -> "
-                                            f"{_action.destination_name}: {exc}"
+                                            f"{village_label(origin, names)}: refusing "
+                                            f"to prune every new row of {_key}; the "
+                                            f"planned departure minutes matched none "
+                                            f"of what the game created"
                                         )
+                                        continue
+                                    doomed.extend(_leftover)
                                 if doomed:
+                                    _seen_ids: set[int] = set()
+                                    doomed = [
+                                        e
+                                        for e in doomed
+                                        if not (
+                                            e.route_id in _seen_ids or _seen_ids.add(e.route_id)
+                                        )
+                                    ]
                                     _ids = sorted(e.route_id for e in doomed)
                                     _res = None
                                     try:
