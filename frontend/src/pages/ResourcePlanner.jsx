@@ -1241,10 +1241,16 @@ export default function ResourcePlanner() {
   // one. Shared by the day check AND whole-day execution, so the day the
   // operator simulated and the day they go live with are the same day.
   const buildSegments = useCallback(() => {
+    // profileNames and windowFor are declared further DOWN the component, so
+    // neither may appear here -- not in the body via closure alone nor in the
+    // dependency array, which React evaluates at render and which has now
+    // crashed this page twice with a temporal-dead-zone error. Everything is
+    // derived from state declared above, and the deps are complete, so there
+    // is no eslint-disable to hide the next mistake behind.
     const segments = []
     const skipped = []
-    for (const name of profileNames) {
-      const w = windowFor(name)
+    for (const name of Object.keys(profiles)) {
+      const w = profileWindows[name] ?? DEFAULT_WINDOWS[name] ?? null
       const start = w && hhmmToMinutes(w[0])
       const end = w && hhmmToMinutes(w[1])
       if (start == null || end == null || start === end) {
@@ -1263,8 +1269,7 @@ export default function ResourcePlanner() {
       segments.push({ name, window: [start, end], allocations: sendAllocations })
     }
     return { segments, skipped }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profiles, profileNames, profileWindows])
+  }, [profiles, profileWindows])
 
   // The execute payload for the chosen mode. Whole-day: segments carry each
   // profile's allocations and hours, so the top-level pair is stripped -- the
