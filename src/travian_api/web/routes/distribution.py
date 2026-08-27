@@ -15,7 +15,7 @@ import asyncio
 import logging
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
@@ -1016,7 +1016,11 @@ _RATE_FIELD = {
 }
 
 
-def _storage_findings(body: PlanRequest, plan) -> list[Finding]:
+def _storage_findings(
+    body: PlanRequest,
+    plan,
+    dispatch_window: tuple[int, int] | None = None,
+) -> list[Finding]:
     """Overflow and starvation checks over the finished plan. Zero requests.
 
     Every input is already in the snapshot the caller handed back, so this costs
@@ -1068,7 +1072,13 @@ def _storage_findings(body: PlanRequest, plan) -> list[Finding]:
                 capacities.setdefault(vid, {})[resource] = cap
             statuses.append(store_status(vid, resource, stock, cap, net))
 
-    overflows = simulate_day(plan.beat, stocks, capacities, own_rates)
+    # When the run will prune the out-of-window rows, simulating them reports
+    # traffic that will never move: an hourly 8h night profile keeps 8 rows,
+    # and simulating all 24 tripled the reported flows -- false overflow,
+    # starvation and loss totals. Without pruning every firing is real (that is
+    # the round-the-clock danger the WINDOW findings report), so all are kept.
+    window = dispatch_window if getattr(body, "prune_to_window", False) else None
+    overflows = simulate_day(plan.beat, stocks, capacities, own_rates, dispatch_window=window)
     names = {v.village_id: v.name for v in body.snapshot if v.name}
     return list(storage_findings(statuses, overflows, names=names))
 
@@ -1328,6 +1338,29 @@ async def post_night_profile(
         )
     trade_office = {c.village_id: c.trade_office_level for c in body.config}
 
+    # An unreadable crop balance must stop the derivation, not pass as zero.
+    # `crop_per_hour or 0.0` made a village whose balance could not be read look
+    # like a healthy zero-crop village: it got no break-even allocation and no
+    # warning, and if its true balance is negative its granary drains all night
+    # while the derived profile claims it needs nothing. Starvation eats troops,
+    # which cannot be re-grown from a warehouse -- so this is refused outright
+    # rather than warned about, naming every village to fix.
+    unreadable_crop = sorted(
+        village_label(v.village_id, names) for v in body.snapshot if v.crop_per_hour is None
+    )
+    if unreadable_crop:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "The crop balance of "
+                + ", ".join(unreadable_crop)
+                + " could not be read, and a night profile built on a guessed crop "
+                "balance can starve the village it guesses wrong about. Fetch "
+                "fresh state (the crop balance needs the village's statistics "
+                "page), then derive again."
+            ),
+        )
+
     villages = [
         NightVillage(
             village_id=v.village_id,
@@ -1399,16 +1432,46 @@ async def post_night_profile(
     window_minutes = (end - start) % MINUTES_PER_DAY or MINUTES_PER_DAY
     window_hours = window_minutes / 60.0
 
+    # Every explicit mode is resolved to the absolute rate it means, with the
+    # same arithmetic the UI's remainder figure uses. Copying only ABSOLUTE
+    # values silently discarded percentage and sustain targets, so two Day
+    # profiles that mean the same thing -- "keep 50%" and its absolute
+    # equivalent -- derived different nights. KEEP and REMAINDER stay absent:
+    # keep is the default the derivation already assumes, and the remainder is
+    # the hub, chosen separately above.
+    rate_fields = {
+        Resource.LUMBER: "lumber_per_hour",
+        Resource.CLAY: "clay_per_hour",
+        Resource.IRON: "iron_per_hour",
+        Resource.CROP: "crop_per_hour",
+    }
     day_retention: dict[Resource, dict[int, float]] = {}
     for resource, per in body.allocations.items():
-        day_retention[resource] = {
-            vid: alloc.value for vid, alloc in per.items() if alloc.mode is AllocationMode.ABSOLUTE
+        own_rates = {
+            v.village_id: rate
+            for v in body.snapshot
+            if (rate := getattr(v, rate_fields[resource])) is not None
         }
+        account_total = sum(own_rates.values())
+        resolved: dict[int, float] = {}
+        for vid, alloc in per.items():
+            if alloc.mode is AllocationMode.ABSOLUTE:
+                resolved[vid] = alloc.value
+            elif alloc.mode is AllocationMode.PERCENTAGE:
+                resolved[vid] = account_total * alloc.value / 100.0
+            # SUSTAIN is deliberately not resolved. It only means something on a
+            # crop consumer, and the derivation never reads crop retention: its
+            # own crop design makes every consumer break even for the night,
+            # which supersedes whatever share the day plan sustained. Resolving
+            # it here would be dead code wearing the costume of support --
+            # proven by a test that passed identically with the branch deleted.
+        day_retention[resource] = resolved
 
     profile = derive_night_profile(
         villages,
         window_hours=window_hours,
         speed_fields_per_hour=body.speed_fields_per_hour,
+        map_span=body.map_span,
         day_retention=day_retention,
         hub_id=hub,
         consumer_ids=consumers,
@@ -1731,6 +1794,13 @@ class _PlannedAccount:
     busy merchants, unfunded tributes. Named for what it is, because a bare
     `findings` reads like the whole list and is not."""
 
+    dropped_allocations: list[str] = field(default_factory=list)
+    """Human-readable descriptions of explicit allocations that were IGNORED
+    because the village's rate could not be read. A dry run or /plan shows them
+    as CRITICAL findings; a live run refuses on them outright, because executing
+    silently without an allocation the operator explicitly wrote is executing a
+    different plan than the one they approved."""
+
     @property
     def all_findings(self) -> list[Finding]:
         """Every finding, plan and endpoint alike, in producer order.
@@ -1847,6 +1917,32 @@ async def _plan_account(
         if rates:
             productions[resource] = rates
 
+    # The window this plan will actually be pruned to, resolved once so the
+    # cycle choice below and the scheduler agree on it.
+    effective_window = dispatch_window if dispatch_window is not None else body.dispatch_window
+
+    # A windowed, pruned profile may only use cycles that divide the window.
+    #
+    # Travian fans "repeat every N hours" into 24/N daily rows and pruning keeps
+    # the in-window ones, so a route delivers batch x survivors per day -- and
+    # the batch is sized as rate x cycle. Those only multiply back to
+    # rate x window_hours when the cycle divides the window: a 6h cycle in an
+    # 8h window keeps 2 of its 4 firings and ships rate x 12 where the profile
+    # meant rate x 8, a 50% over-delivery paired with six hours of extra
+    # withdrawal at the origin. Equally spaced firings land exactly
+    # window/cycle inside ANY window whose length is a multiple of the spacing,
+    # whatever the phase, so divisor cycles deliver the modelled amount by
+    # construction. A window no candidate divides (odd minute lengths) falls
+    # back to the full set -- the WINDOW_PRUNED finding then reports the real
+    # ratio rather than the plan silently lying about it.
+    allowed_cycles: list[int] | tuple[int, ...] = tuple(DAILY_BEAT_CYCLES)
+    if effective_window is not None and getattr(body, "prune_to_window", False):
+        start, end = effective_window
+        window_minutes = (end - start) % MINUTES_PER_DAY or MINUTES_PER_DAY
+        dividing = [c for c in DAILY_BEAT_CYCLES if window_minutes % (c * 60) == 0]
+        if dividing:
+            allowed_cycles = dividing
+
     config = PlannerConfig(
         geometry=MapGeometry(span=body.map_span, speed_fields_per_hour=body.speed_fields_per_hour),
         merchant_model=MerchantModel(
@@ -1855,14 +1951,14 @@ async def _plan_account(
         ),
         merchant_reserve=body.merchant_reserve,
         merchant_headroom=body.merchant_headroom,
-        cycles=DAILY_BEAT_CYCLES,
+        cycles=allowed_cycles,
         max_latency_hours=body.max_latency_hours,
         min_arrival_gap_minutes=body.min_arrival_gap_minutes,
         reserved_window=body.reserved_window,
         # The explicit argument wins (the day check passes each segment's own
         # hours); otherwise take what the client sent on the request, which is
         # how /plan and /execute learn the active profile's window.
-        dispatch_window=dispatch_window if dispatch_window is not None else body.dispatch_window,
+        dispatch_window=effective_window,
         # Plan-time, because it changes what the plan MEANS: with pruning the
         # window is genuinely enforced and the escaping firings become a note
         # about a dependency, without it they are a critical over-delivery.
@@ -1912,8 +2008,12 @@ async def _plan_account(
             for target_id, target in foreign_ids.items():
                 owed = target.crop_per_hour * (1.0 + target.safety_margin_pct / 100.0)
                 crop_allocations[target_id] = Allocation(mode=AllocationMode.ABSOLUTE, value=owed)
+        dropped_allocations: list[str] = []
         for resource in sorted(set(allocations) - set(productions), key=lambda r: r.value):
             if allocations.pop(resource):
+                dropped_allocations.append(
+                    f"every {resource.value} allocation (no rate is known for any village)"
+                )
                 extra_findings.append(
                     Finding(
                         category=Category.UNREADABLE_RATE,
@@ -1935,6 +2035,9 @@ async def _plan_account(
                 del per_village[vid]
             if unreadable:
                 labels = [village_label(vid, names) for vid in unreadable]
+                dropped_allocations.append(
+                    f"the {resource.value} allocation(s) of " + ", ".join(labels)
+                )
                 extra_findings.append(
                     Finding(
                         category=Category.UNREADABLE_RATE,
@@ -1978,7 +2081,7 @@ async def _plan_account(
     # villages and 566ms at 40 -- and the day check calls this once per profile,
     # so three profiles blocked the loop for ~1.6s while stealth-timed game
     # requests and WebSocket frames waited.
-    extra_findings.extend(await asyncio.to_thread(_storage_findings, body, plan))
+    extra_findings.extend(await asyncio.to_thread(_storage_findings, body, plan, effective_window))
 
     for target_id, target in foreign_ids.items():
         suppliers = sorted({row.origin for row in plan.rows if row.destination == target_id})
@@ -2049,6 +2152,7 @@ async def _plan_account(
         foreign_ids=foreign_ids,
         config=config,
         extra_findings=extra_findings,
+        dropped_allocations=dropped_allocations,
     )
 
 
@@ -2731,6 +2835,21 @@ async def post_execute(
                 + " ".join(f"{reason}." for reason in blockers(plan, names))
             ).strip(),
         )
+    # An allocation the operator explicitly wrote that the planner had to IGNORE
+    # (its village's rate could not be read) makes the executable plan a
+    # different plan than the one they approved. A dry run previews it -- the
+    # CRITICAL finding names it -- but going live on it silently would ship a
+    # plan nobody wrote. Refused with the exact fix.
+    if account.dropped_allocations:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "Refusing to go live: the plan had to ignore "
+                + "; ".join(account.dropped_allocations)
+                + ". Fetch fresh state so those rates can be read, or set the "
+                "allocation(s) back to 'Keep own', then run again."
+            ),
+        )
 
     # One clear refusal before the loop, rather than N identical per-route
     # failures once inside it. The service guards create_route too, as defence
@@ -3108,6 +3227,124 @@ async def post_execute(
                         """
                         return bool({e.dest_village_id} & ids or _existing_keys(e) & coords)
 
+                    # The desired ROW SET per destination, not just the
+                    # destination. Travian fans "repeat every N hours" into 24/N
+                    # daily rows offset by the cycle from the Send-at minute
+                    # (proven live: departure_at % 86400 is exactly the payload
+                    # minute), and the trim then deletes the out-of-window ones.
+                    # This is what the game should hold when the run is done --
+                    # matching on destination alone let a profile switch leave
+                    # the old profile's rows running, never pruned pre-existing
+                    # out-of-window rows, and let cargo correction write one
+                    # daily batch onto 24 hourly rows.
+                    trim_window = (
+                        tuple(body.dispatch_window)
+                        if body.prune_to_window and body.dispatch_window
+                        else None
+                    )
+
+                    def _planned_minutes(
+                        route: PlannedRoute,
+                        trim_window: tuple[int, int] | None = trim_window,
+                    ) -> list[int]:
+                        total = _game_rows(route.cycle_hours)
+                        minutes = [
+                            (route.dispatch_minute + i * route.cycle_hours * 60) % MINUTES_PER_DAY
+                            for i in range(total)
+                        ]
+                        if trim_window is not None:
+                            start, end = trim_window
+                            inside = [
+                                m
+                                for m in minutes
+                                if ((start <= m < end) if start <= end else (m >= start or m < end))
+                            ]
+                            # window_pruning refuses to delete every row, so a
+                            # route with no in-window departure keeps them all.
+                            if inside:
+                                minutes = inside
+                        return sorted(minutes)
+
+                    expected_rows = {
+                        _desired_key(route): _planned_minutes(route) for route in wanted_here
+                    }
+
+                    def _row_minute(e: ExistingRoute) -> int:
+                        # -1 for a row whose departure could not be read: it can
+                        # never equal a planned minute, so an unverifiable
+                        # schedule reconciles by recreation rather than by trust.
+                        if e.departure_at is None:
+                            return -1
+                        return int(e.departure_at % 86400) // 60
+
+                    active_rows_by_key: dict[int | tuple[int, int], list[ExistingRoute]] = {}
+                    for e in existing:
+                        if e.visible and e.active:
+                            for k in _existing_keys(e) & set(expected_rows):
+                                active_rows_by_key.setdefault(k, []).append(e)
+
+                    dormant_rows_by_key: dict[int | tuple[int, int], list[ExistingRoute]] = {}
+                    for e in existing:
+                        if e.visible and not e.active:
+                            for k in _existing_keys(e) & set(expected_rows):
+                                dormant_rows_by_key.setdefault(k, []).append(e)
+
+                    schedule_matched: set[int | tuple[int, int]] = set()
+                    # Destinations whose planned rows ALL exist at their planned
+                    # minutes but some are switched off. The fix for those is
+                    # re-enabling exactly the off rows -- never disable-and-
+                    # recreate, which costs more writes and churns row ids.
+                    completable: dict[int | tuple[int, int], list[ExistingRoute]] = {}
+                    mismatched: dict[int | tuple[int, int], str] = {}
+                    for k, planned in expected_rows.items():
+                        rows = active_rows_by_key.get(k, [])
+                        dormant = dormant_rows_by_key.get(k, [])
+                        if not rows and not dormant:
+                            continue  # nothing live; the ordinary create path
+                        got = sorted(_row_minute(e) for e in rows)
+                        if got == planned:
+                            schedule_matched.add(k)
+                        elif dormant and sorted(_row_minute(e) for e in rows + dormant) == planned:
+                            completable[k] = dormant
+                        else:
+                            mismatched[k] = (
+                                f"{len(rows)} live row(s) departing at minutes "
+                                f"{sorted(set(got))} where the plan wants {planned}"
+                            )
+
+                    # A mismatched destination whose rows the operator protected
+                    # cannot be recreated without shipping twice, so it is left
+                    # exactly as it is -- counted as served, reported as diverged.
+                    for k in list(mismatched):
+                        if any(_is_protected(e) for e in active_rows_by_key.get(k, [])):
+                            problems.append(
+                                f"{village_label(origin, names)}: protected route(s) to "
+                                f"{k} run a different schedule than the plan "
+                                f"({mismatched[k]}); left untouched, so the plan's "
+                                f"figures for this destination will not match reality"
+                            )
+                            schedule_matched.add(k)
+                            del mismatched[k]
+
+                    def _off_schedule(
+                        e: ExistingRoute,
+                        mismatched: dict = mismatched,
+                    ) -> bool:
+                        """Part of a destination whose live row set diverges.
+
+                        The WHOLE set is recreated, not just the offending rows: a
+                        create fans out every row again, so keeping the on-minute
+                        survivors and creating would duplicate them.
+                        """
+                        return bool(_existing_keys(e) & set(mismatched))
+
+                    if mismatched:
+                        trace.event(
+                            "schedule_mismatch",
+                            origin=origin,
+                            destinations={str(k): why for k, why in mismatched.items()},
+                        )
+
                     # Honeypots (hidden) would be ignored entirely — neither
                     # acted on nor treated as occupying a destination. A no-op
                     # as things stand: nothing produces visible=False, because
@@ -3127,7 +3364,7 @@ async def post_execute(
                             for e in visible
                             if e.active
                             and _identifiable(e)
-                            and not _is_wanted(e)
+                            and (not _is_wanted(e) or _off_schedule(e))
                             and not _is_protected(e)
                         ]
                         # Named separately from `stale`: these ARE unwanted by the
@@ -3212,14 +3449,19 @@ async def post_execute(
                             disabled_here.extend(e.route_id for e in stale)
                             disables.append(line)
 
-                    # Only ENABLED routes satisfy the plan. A desired destination
-                    # whose route exists but is DISABLED is re-enabled rather than
-                    # duplicated; a desired destination with no route is created.
-                    satisfied: set[int | tuple[int, int]] = set()
-                    for e in visible:
-                        if e.active:
-                            satisfied |= _existing_keys(e)
-                    disabled_desired = [e for e in visible if not e.active and _is_wanted(e)]
+                    # Only a destination whose ENABLED rows match the planned
+                    # fan-out is satisfied. "Some active row exists" let a 3h
+                    # Day route satisfy the Night plan's 1h demand for the same
+                    # destination, which is exactly the destination-only matching
+                    # this replaces.
+                    satisfied: set[int | tuple[int, int]] = set(schedule_matched)
+                    # Re-enabling covers exactly the completable destinations:
+                    # every planned row exists at its planned minute and the off
+                    # ones only need switching back on. Anything else was
+                    # classified mismatched above and reconciles by disable-and-
+                    # recreate, because a create fans the whole set again and
+                    # would duplicate any surviving rows.
+                    disabled_desired = [e for rows in completable.values() for e in rows]
                     blocked: set[int | tuple[int, int]] = set()
                     # Routes this origin switched back ON, and the keys they
                     # cover. A re-enable is a WRITE, so it needs verifying like

@@ -48,6 +48,7 @@ def _account():
 def _derive(**kw):
     defaults = dict(
         window_hours=8.0,
+        map_span=401,
         speed_fields_per_hour=12.0,
         day_retention={Resource.LUMBER: {ARMY: 7_700.0}},
         hub_id=HUB,
@@ -113,6 +114,7 @@ class TestItNeverOverClaimsTheAccount:
         profile = derive_night_profile(
             villages,
             window_hours=8.0,
+            map_span=401,
             speed_fields_per_hour=12.0,
             day_retention={},
             hub_id=HUB,

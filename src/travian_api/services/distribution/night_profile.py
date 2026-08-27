@@ -76,8 +76,27 @@ class NightProfile:
     """Crop per hour taken back to absorb integer rounding. See below."""
 
 
-def _hours(a: NightVillage, b: NightVillage, speed: float) -> float:
-    return math.hypot(a.x - b.x, a.y - b.y) / speed
+def _wrapped_fields(dx: float, dy: float, map_span: int) -> float:
+    """Field distance on Travian's wrapped map.
+
+    The map is a torus: the shortest path between two edge villages can cross
+    the seam, and the game routes merchants that way. Raw hypot made a hub at
+    (-200|0) see a supplier at (200|0) as 400 fields away when it is 1, so the
+    night draw picked a genuinely distant village over a next-door one and
+    understated how much edge villages can shed overnight.
+    """
+    half = map_span / 2.0
+    dx = abs(dx) % map_span
+    dy = abs(dy) % map_span
+    if dx > half:
+        dx = map_span - dx
+    if dy > half:
+        dy = map_span - dy
+    return math.hypot(dx, dy)
+
+
+def _hours(a: NightVillage, b: NightVillage, speed: float, map_span: int) -> float:
+    return _wrapped_fields(a.x - b.x, a.y - b.y, map_span) / speed
 
 
 def derive_night_profile(
@@ -85,6 +104,7 @@ def derive_night_profile(
     *,
     window_hours: float,
     speed_fields_per_hour: float,
+    map_span: int,
     day_retention: Mapping[Resource, Mapping[int, float]],
     hub_id: int,
     consumer_ids: Sequence[int] = (),
@@ -131,7 +151,7 @@ def derive_night_profile(
             1 + trade_office_bonus_per_level * v.trade_office_level
         )
         fleet = max(0, v.merchants_total - merchant_reserve)
-        others = [_hours(v, o, speed_fields_per_hour) for o in villages if o is not v]
+        others = [_hours(v, o, speed_fields_per_hour, map_span) for o in villages if o is not v]
         if not others:
             return 0.0
         trips = max(1, int(window_hours // (2 * min(others))))
@@ -178,7 +198,7 @@ def derive_night_profile(
         if demand > 0:
             order = sorted(
                 (vid for vid in by_id if vid != hub_id and vid not in entries),
-                key=lambda vid: _hours(by_id[vid], by_id[hub_id], speed_fields_per_hour),
+                key=lambda vid: _hours(by_id[vid], by_id[hub_id], speed_fields_per_hour, map_span),
             )
             for vid in order:
                 if demand <= 0:
@@ -236,11 +256,11 @@ def derive_night_profile(
 
             def _cost(vid: int) -> float:
                 v = by_id[vid]
-                return math.hypot(v.x - tx, v.y - ty)
+                return _wrapped_fields(v.x - tx, v.y - ty, map_span)
         else:
 
             def _cost(vid: int) -> float:
-                return _hours(by_id[vid], by_id[hub_id], speed_fields_per_hour)
+                return _hours(by_id[vid], by_id[hub_id], speed_fields_per_hour, map_span)
 
         for vid in sorted((v for v in by_id if v not in crop), key=_cost):
             if demand <= 0:

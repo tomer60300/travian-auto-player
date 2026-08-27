@@ -427,13 +427,24 @@ def _trade_office_levels_needed(
     merchant_model: MerchantModel,
     budget: int,
     cycles: Sequence[int],
+    max_cycle: Mapping[int, int] | None = None,
 ) -> int | None:
-    """Smallest Trade Office increase that brings *village* within *budget*."""
+    """Smallest Trade Office increase that brings *village* within *budget*.
+
+    Each route is re-costed under its OWN destination's cadence cap. Advising
+    from the unrestricted cycle set let the advice quietly switch a 1h-capped
+    route to a 2h cycle nobody is allowed to create: on a 3,000/h haul with a
+    one-hour trip and a 1h cap, two merchant sets are needed at ANY Trade Office
+    level, and the unrestricted maths still recommended +5.
+    """
     for delta in range(1, MAX_TRADE_OFFICE_LEVEL - village.trade_office_level + 1):
         capacity = merchant_model.capacity(village.trade_office_level + delta)
         needed = sum(
             cheapest_cycle(
-                route.hourly_total, 2.0 * route.one_way_minutes, capacity, cycles
+                route.hourly_total,
+                2.0 * route.one_way_minutes,
+                capacity,
+                _cycles_for(route.destination, cycles, max_cycle),
             ).merchants_committed
             for route in routes_from
         )
@@ -1697,6 +1708,7 @@ def build_plan(
                 merchant_model,
                 villages[vid].spare_merchants(merchant_reserve),
                 cycles,
+                max_cycle_by_destination,
             ),
         )
         for vid, used in sorted(committed.items())

@@ -401,8 +401,12 @@ def build_beat(
             # merely disappointing; this one over-delivers into a store that was
             # sized for less, which is what an operator wakes up to.
             firings_per_day = MINUTES_PER_DAY // cycle_minutes
+            # Counted on the CHOSEN placement. `candidate` is whatever minute the
+            # search examined last, so counting its firings reported a schedule
+            # the plan is not using -- the reproduction showed one in-window
+            # firing and a 4x ratio where the placement actually keeps two.
             escaping = firings_per_day - len(
-                [m for m in candidate.dispatch_minutes if _in_window(m, dispatch_window)]
+                [m for m in placement.dispatch_minutes if _in_window(m, dispatch_window)]
             )
             if escaping > 0 and cycle_minutes < MINUTES_PER_DAY:
                 findings.append(

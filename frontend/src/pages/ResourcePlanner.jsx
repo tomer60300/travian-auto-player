@@ -880,13 +880,17 @@ export default function ResourcePlanner() {
   )
 
   const buildPlanPayload = useCallback(() => {
+    // Every explicit allocation is sent, readable rate or not. Filtering the
+    // unreadable ones here hid them from the backend's UNREADABLE_RATE critical
+    // finding -- the plan showed "Ready to run" while silently planning without
+    // an allocation the operator wrote. The backend drops what it cannot use,
+    // says so as a CRITICAL finding, and refuses a live run over it.
     const sendAllocations = {}
     for (const [resource, per] of Object.entries(allocations)) {
       const usable = {}
       for (const [vid, a] of Object.entries(per)) {
         if (a.mode === 'keep') continue
-        const v = villages.find((x) => x.village_id === Number(vid))
-        if (!v || v[`${resource}_per_hour`] == null) continue
+        if (!villages.some((x) => x.village_id === Number(vid))) continue
         usable[vid] = a
       }
       if (Object.keys(usable).length) sendAllocations[resource] = usable

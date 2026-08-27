@@ -4,6 +4,22 @@ Pure functions. The Travian map wraps at its edges, so the shortest path between
 two villages may cross the boundary rather than run through the middle -- a
 village at x=-190 and one at x=190 are neighbours on a 401-wide map, not 380
 fields apart.
+
+WORLD COMPATIBILITY -- constraints, not defects, recorded from the 2026-08-27
+external review so nobody rediscovers them the hard way:
+
+* Some special Travian worlds have HARD map edges. Everything here always
+  wraps, so distances near the seam are wrong on those worlds -- routes get
+  planned as short that are actually long. There is no flag for it; running
+  the planner on a hard-edge world is unsupported.
+* Special worlds may add trade SHIPS, which move alongside merchants on water
+  routes. The live create payload pins useTradeShips: false and no capacity
+  model for them exists, so on a ship world the planner under-uses what the
+  account could actually move.
+* Merchant capacity, speed, and the Trade Office / alliance-Commerce bonuses
+  vary by tribe and world. The merchant-model calibration fields on the
+  request are what absorb that; a wrong calibration changes feasibility
+  directly, which is why the UI surfaces those numbers instead of hiding them.
 """
 
 from __future__ import annotations

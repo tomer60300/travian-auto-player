@@ -177,6 +177,7 @@ def simulate_day(
     capacities: Mapping[int, Mapping[Resource, int]],
     net_per_hour: Mapping[int, Mapping[Resource, float]],
     step_minutes: int = 5,
+    dispatch_window: tuple[int, int] | None = None,
 ) -> tuple[OverflowEvent, ...]:
     """Replay the beat against real capacities until it settles. Issue #12.
 
@@ -207,10 +208,29 @@ def simulate_day(
     """
     # (route index, firing index, resource) -> what actually left the origin.
     firings: list[tuple[int, int, int, int, Resource, float]] = []
+
+    def _survives(minute: int) -> bool:
+        """Whether a departure at this minute-of-day will exist after pruning.
+
+        Passed a window only when the caller will actually delete the rows
+        outside it (prune_to_window). Simulating pruned firings reported traffic
+        that never moves: an hourly 8-hour profile keeps 8 of its 24 rows, and
+        replaying all 24 tripled every flow into false overflow and starvation.
+        """
+        if dispatch_window is None:
+            return True
+        start, end = dispatch_window
+        m = minute % MINUTES_PER_DAY
+        if start <= end:
+            return start <= m < end
+        return m >= start or m < end
+
     for scheduled in beat.routes:
         dispatches = scheduled.dispatch_minutes
         arrivals = scheduled.arrival_minutes
         for out_minute, in_minute in zip(dispatches, arrivals, strict=True):
+            if not _survives(out_minute):
+                continue
             for resource, amount in scheduled.route.batch_per_resource.items():
                 firings.append(
                     (

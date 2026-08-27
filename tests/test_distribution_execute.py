@@ -195,7 +195,9 @@ class TestLiveGate:
             plan = DistributionPlan(
                 routing=Plan(over_budget=(OverBudget(village_id=20003, committed=9, available=4),))
             )
-            return SimpleNamespace(plan=plan, names={20003: "Capital"}, coords={}, warnings=[])
+            return SimpleNamespace(
+                plan=plan, names={20003: "Capital"}, coords={}, warnings=[], dropped_allocations=[]
+            )
 
         with (
             _patch(dist_module, "_plan_account", _fake_plan),
@@ -459,13 +461,13 @@ class TestLiveExecution:
         }
 
     def test_incremental_leaves_active_routes_untouched(self):
-        desired = _desired_routes()
-        existing = {}
-        for a in desired:
-            existing.setdefault(a.origin, []).append(
-                ExistingRoute(1, a.destination, a.dest_x, a.dest_y)
-            )
-        svc = _FakeLiveSvc(existing=existing)
+        # Provisioned by an actual run: the double's create_route fans each
+        # route into its daily rows the way the game does, which is the only
+        # marketplace state a faithful "everything exists" fixture can be.
+        svc = _FakeLiveSvc()
+        self._run(svc, disable_existing=False, max_routes_per_run=50)
+        svc.created.clear()
+        svc.listed.clear()
         res = self._run(svc, disable_existing=False, max_routes_per_run=50)
         assert svc.created == [], "incremental mode must not recreate active routes"
         assert svc.disabled == [], "incremental mode disables nothing"
@@ -478,10 +480,8 @@ class TestLiveExecution:
         svc = _FakeLiveSvc()
         self._run(svc, disable_existing=False, max_routes_per_run=50)
         assert len(svc.created) > 0
-        for r in svc.created:  # marketplace now reflects run 1's creations
-            svc._existing.setdefault(r.origin_village_id, []).append(
-                ExistingRoute(1, r.dest_village_id, r.dest_x, r.dest_y)
-            )
+        # The double's create_route already put run 1's rows on the fake
+        # marketplace, fanned and time-stamped like the game's.
         svc.created.clear()
         self._run(svc, disable_existing=False, max_routes_per_run=50)
         assert svc.created == [], "a second incremental run must not rebuild"
@@ -493,15 +493,11 @@ class TestLiveExecution:
         desired = _desired_routes()
         a = desired[0]
         plan_dest = (a.dest_x, a.dest_y)
-        existing = {
-            a.origin: [
-                # the plan still wants this dest
-                ExistingRoute(1, a.destination, *plan_dest),
-                # stale — plan wants neither this village nor this coordinate
-                ExistingRoute(2, _UNWANTED_DEST, 99, 98),
-            ]
-        }
-        svc = _FakeLiveSvc(existing=existing)
+        # Provision the wanted routes by running, then plant one stale row.
+        svc = _FakeLiveSvc()
+        self._run(svc, disable_existing=False, max_routes_per_run=50)
+        svc._existing.setdefault(a.origin, []).append(ExistingRoute(999, _UNWANTED_DEST, 99, 98))
+        svc.created.clear()
         res = self._run(svc, disable_existing=True, max_routes_per_run=50)
         disabled_coords = {c for _, coords in svc.disabled for c in coords}
         assert (99, 98) in disabled_coords, "the stale route is disabled"
@@ -549,6 +545,7 @@ class TestLiveExecution:
             names={20003: "03", -1: "Ally"},
             coords={20003: (0, 0), -1: (40, 40)},
             warnings=[],
+            dropped_allocations=[],
         )
 
         async def _fake_plan(_body):
@@ -580,13 +577,10 @@ class TestLiveExecution:
         # route is skipped and NO create fires. A create-only cap would never
         # trip and the loop would sweep every village; the origins-VISITED cap
         # prevents that.
-        desired = _desired_routes()
-        existing = {}
-        for a in desired:
-            existing.setdefault(a.origin, []).append(
-                ExistingRoute(1, a.destination, a.dest_x, a.dest_y)
-            )
-        svc = _FakeLiveSvc(existing=existing)
+        svc = _FakeLiveSvc()
+        self._run(svc, disable_existing=False, max_routes_per_run=50)
+        svc.created.clear()
+        svc.listed.clear()
         self._run(svc, disable_existing=False, max_routes_per_run=1)
         assert svc.created == []
         assert len(svc.listed) <= 1, "a fully-provisioned account must not sweep every village"
@@ -760,6 +754,7 @@ def _two_origin_account():
         names={20003: "03", 20011: "11", -1: "A", -2: "B"},
         coords={20003: (0, 0), 20011: (10, 0), -1: (40, 40), -2: (50, 50)},
         warnings=[],
+        dropped_allocations=[],
     )
 
 
@@ -775,9 +770,45 @@ def _row(origin, destination, x, y, dispatch_minute=0):
     )
 
 
+def _fanned(
+    dest_village_id,
+    x=None,
+    y=None,
+    *,
+    cycle_hours=6,
+    dispatch_minute=100,
+    start_id=1,
+    active=True,
+    cargo=None,
+):
+    """The rows the game holds for one created route: one per daily departure,
+    each a cycle after the last, `departure_at % 86400` being that minute
+    (measured live: 1410 for a 23:30 request). What a faithful "this already
+    exists" fixture seeds, now that reconciliation matches the row set rather
+    than merely the destination -- a single bare row is not an existing route,
+    it is a schedule the plan does not recognise."""
+    rows = []
+    for i in range(max(1, 24 // cycle_hours)):
+        minute = (dispatch_minute + i * cycle_hours * 60) % _MINUTES_PER_DAY
+        rows.append(
+            ExistingRoute(
+                start_id + i,
+                dest_village_id,
+                x,
+                y,
+                active=active,
+                cargo=dict(cargo) if cargo else None,
+                departure_at=_EPOCH_DAY + minute * 60,
+            )
+        )
+    return rows
+
+
 def _account(rows, coords, names):
     plan = SimpleNamespace(is_feasible=True, warnings=(), rows=tuple(rows))
-    return SimpleNamespace(plan=plan, names=names, coords=coords, warnings=[])
+    return SimpleNamespace(
+        plan=plan, names=names, coords=coords, warnings=[], dropped_allocations=[]
+    )
 
 
 def _same_origin_account():
@@ -832,6 +863,7 @@ def _own_village_account():
         names={20003: "03", 20011: "11"},
         coords={20003: (0, 0), 20011: (10, 0)},
         warnings=[],
+        dropped_allocations=[],
     )
 
 
@@ -848,9 +880,7 @@ class TestOwnVillageRoutesSurviveABadWorldSpan:
         account = _own_village_account()
         # The route that is really there, as the page reports it: the right
         # village, with coordinates that came out wrong for this world.
-        svc = _FakeLiveSvc(
-            existing={20003: [ExistingRoute(1, 20011, dest_x=-137, dest_y=42, active=True)]}
-        )
+        svc = _FakeLiveSvc(existing={20003: _fanned(20011, -137, 42)})
         res = _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
 
         assert svc.disabled == [], "a route the plan still wants must never be disabled"
@@ -860,9 +890,7 @@ class TestOwnVillageRoutesSurviveABadWorldSpan:
     def test_an_unplaceable_map_id_does_not_churn_it_either(self):
         # dest_x/dest_y are None when the map id could not be placed at all.
         account = _own_village_account()
-        svc = _FakeLiveSvc(
-            existing={20003: [ExistingRoute(1, 20011, dest_x=None, dest_y=None, active=True)]}
-        )
+        svc = _FakeLiveSvc(existing={20003: _fanned(20011)})
         res = _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
 
         assert svc.disabled == [], "an unplaceable route the plan wants is not stale"
@@ -901,16 +929,16 @@ class TestExecutionHardening:
         assert payload["minute"] == 15
 
     def test_disabled_desired_route_is_re_enabled_not_duplicated(self):  # #60
-        svc = _FakeLiveSvc(
-            existing={20003: [ExistingRoute(1, _FOREIGN_REAL_ID, 40, 40, active=False)]}
-        )
+        svc = _FakeLiveSvc(existing={20003: _fanned(_FOREIGN_REAL_ID, 40, 40, active=False)})
         _run_live(svc, _two_origin_account(), max_routes_per_run=50)
-        assert (20003, ((40, 40),)) in svc.enabled, "a disabled desired route must be re-enabled"
+        assert any(vid == 20003 and (40, 40) in coords for vid, coords in svc.enabled), (
+            "a disabled desired route must be re-enabled"
+        )
         assert (40, 40) not in {(r.dest_x, r.dest_y) for r in svc.created}, "no duplicate create"
 
     def test_a_disabled_route_does_not_count_as_active(self):  # #60
         svc = _FakeLiveSvc(
-            existing={20003: [ExistingRoute(1, _FOREIGN_REAL_ID, 40, 40, active=False)]},
+            existing={20003: _fanned(_FOREIGN_REAL_ID, 40, 40, active=False)},
             enable_status="failed",
         )
         res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
@@ -1125,7 +1153,7 @@ class TestALiveRunLeavesAnAuditableTrace:
         # The whole point of the village-id reconciliation fix: a run must be
         # able to say whether it matched on the id or fell back to coordinates.
         account = _own_village_account()
-        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(1, 20011, 10, 0, active=True)]})
+        svc = _FakeLiveSvc(existing={20003: _fanned(20011, 10, 0)})
         res = _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
 
         decisions = [e for e in self._trace_events(res) if e["kind"] == "decision"]
@@ -1513,11 +1541,13 @@ class TestTheFanOutDoesNotCauseAReRun:
     """
 
     def _fan_out(self, svc, cycle_hours: int):
-        """Rewrite the fake marketplace the way the game would after a create."""
+        """Rewrite the fake marketplace the way the game would after a create:
+        one row per daily departure, each stamped with its departure time."""
         rows = {}
         for created in svc.created:
             origin = created.origin_village_id
             for i in range(24 // cycle_hours):
+                minute = (created.dispatch_minute + i * cycle_hours * 60) % _MINUTES_PER_DAY
                 rows.setdefault(origin, []).append(
                     ExistingRoute(
                         route_id=700000 + len(rows.get(origin, [])) + i,
@@ -1525,6 +1555,7 @@ class TestTheFanOutDoesNotCauseAReRun:
                         dest_x=created.dest_x,
                         dest_y=created.dest_y,
                         active=True,
+                        departure_at=_EPOCH_DAY + minute * 60,
                     )
                 )
         return rows
@@ -1566,18 +1597,18 @@ class TestTheFanOutDoesNotCauseAReRun:
         # destination, so the fix is to re-enable -- never to create more rows
         # on top of the ones already there.
         account = _own_village_account()
-        rows = [
-            ExistingRoute(route_id=700000 + i, dest_village_id=20011, active=(i % 2 == 0))
-            for i in range(8)
-        ]
+        rows = _fanned(20011, start_id=700000)
+        for i, row in enumerate(rows):
+            row.active = i % 2 == 0
         svc = _FakeLiveSvc(existing={20003: rows})
 
         _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
 
         assert svc.created == [], "a partly-live destination must never be duplicated"
+        assert svc.disabled == [], "and its live rows are not churned"
         assert svc.enabled, "the disabled half is switched back on"
         _, enabled_coords = svc.enabled[0]
-        assert len(enabled_coords) == 4, "exactly the four that were off"
+        assert len(enabled_coords) == 2, "exactly the two that were off"
 
 
 class TestAControlledRunCanTargetOnePair:
@@ -1784,12 +1815,9 @@ class TestCreatedMeansVerifiedNotAccepted:
 
     def test_a_run_that_creates_nothing_does_not_read_back(self):
         # No write, no verification: it would be a request for nothing.
-        existing = {}
-        for a in _desired_routes():
-            existing.setdefault(a.origin, []).append(
-                ExistingRoute(1, a.destination, a.dest_x, a.dest_y)
-            )
-        svc = _FakeLiveSvc(existing=existing)
+        svc = _FakeLiveSvc()
+        _execute(_exec_body(dry_run=False, disable_existing=False, max_routes_per_run=50), svc=svc)
+        svc.created.clear()
         res = _execute(
             _exec_body(dry_run=False, disable_existing=False, max_routes_per_run=50), svc=svc
         )
@@ -2015,7 +2043,7 @@ class TestADisableIsAlsoVerified:
             existing={
                 20003: [
                     ExistingRoute(9, _UNWANTED_DEST, active=True),
-                    ExistingRoute(10, 20011, active=True),
+                    *_fanned(20011, start_id=10),
                 ]
             }
         )
@@ -2050,17 +2078,7 @@ class TestCargoDriftIsCorrected:
     def _existing(self, crop):
         from travian_api.services.distribution.allocation import Resource
 
-        return {
-            20003: [
-                ExistingRoute(
-                    route_id=800 + i,
-                    dest_village_id=20011,
-                    active=True,
-                    cargo={Resource.CROP: crop},
-                )
-                for i in range(4)
-            ]
-        }
+        return {20003: _fanned(20011, start_id=800, cargo={Resource.CROP: crop})}
 
     def test_matching_cargo_is_left_alone(self):
         # The plan ships 100 crop (see _own_village_account).
@@ -2158,7 +2176,7 @@ class TestEveryKindOfWriteIsVerified:
         ]
 
     def test_a_re_enable_only_run_still_reads_back(self):
-        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(1, 20011, active=False)]})
+        svc = _FakeLiveSvc(existing={20003: _fanned(20011, active=False)})
         res = _run_live(svc, _own_village_account(), max_routes_per_run=50)
 
         assert res.re_enables, "the fixture is meant to re-enable"
@@ -2173,7 +2191,7 @@ class TestEveryKindOfWriteIsVerified:
                     row.active = False  # claim success, change nothing
                 return result
 
-        svc = _IgnoresEnables(existing={20003: [ExistingRoute(1, 20011, active=False)]})
+        svc = _IgnoresEnables(existing={20003: _fanned(20011, active=False)})
         res = _run_live(svc, _own_village_account(), max_routes_per_run=50)
 
         joined = " ".join(res.problems)
@@ -2183,7 +2201,7 @@ class TestEveryKindOfWriteIsVerified:
     def test_a_re_enabled_route_is_not_reported_as_already_active(self):
         # The response used to contradict itself: re_enables named the route and
         # actions called it "route already active".
-        svc = _FakeLiveSvc(existing={20003: [ExistingRoute(1, 20011, active=False)]})
+        svc = _FakeLiveSvc(existing={20003: _fanned(20011, active=False)})
         res = _run_live(svc, _own_village_account(), max_routes_per_run=50)
 
         assert [a.status for a in res.actions] == ["re_enabled"]
@@ -2192,9 +2210,7 @@ class TestEveryKindOfWriteIsVerified:
     def test_a_cargo_update_only_run_still_reads_back(self):
         from travian_api.services.distribution.allocation import Resource
 
-        svc = _FakeLiveSvc(
-            existing={20003: [ExistingRoute(1, 20011, active=True, cargo={Resource.CROP: 9000})]}
-        )
+        svc = _FakeLiveSvc(existing={20003: _fanned(20011, cargo={Resource.CROP: 9000})})
         res = _run_live(svc, _own_village_account(), max_routes_per_run=50, update_drifted=True)
 
         assert res.updates
@@ -2212,9 +2228,7 @@ class TestEveryKindOfWriteIsVerified:
                 # Report success, leave the cargo exactly as it was.
                 return RouteActionResult(vid, 0, 0, "updated", f"{len(routes)} route(s)")
 
-        svc = _IgnoresUpdates(
-            existing={20003: [ExistingRoute(1, 20011, active=True, cargo={Resource.CROP: 9000})]}
-        )
+        svc = _IgnoresUpdates(existing={20003: _fanned(20011, cargo={Resource.CROP: 9000})})
         res = _run_live(svc, _own_village_account(), max_routes_per_run=50, update_drifted=True)
 
         joined = " ".join(res.problems)
@@ -2232,14 +2246,13 @@ class TestTheUpdateBurstIsBounded:
     """
 
     def _drifted(self, n):
+        """*n* drifted destinations, each fully fanned out."""
         from travian_api.services.distribution.allocation import Resource
 
-        return {
-            20003: [
-                ExistingRoute(900 + i, 20011, active=True, cargo={Resource.CROP: 9000})
-                for i in range(n)
-            ]
-        }
+        rows = []
+        for d in range(n):
+            rows.extend(_fanned(20011 + d, start_id=900 + 10 * d, cargo={Resource.CROP: 9000}))
+        return {20003: rows}
 
     def _two_destinations(self):
         """One origin, two destinations, both already served."""
@@ -2268,6 +2281,7 @@ class TestTheUpdateBurstIsBounded:
             names={20003: "03", 20011: "11", 20012: "12"},
             coords={20003: (0, 0), 20011: (10, 0), 20012: (0, 10)},
             warnings=[],
+            dropped_allocations=[],
         )
 
     def test_updates_stop_at_the_cap(self):
@@ -2275,8 +2289,8 @@ class TestTheUpdateBurstIsBounded:
         # the operator told, or a stale route reads as a clean skip.
         existing = {
             20003: [
-                ExistingRoute(901, 20011, active=True, cargo={Resource.CROP: 9000}),
-                ExistingRoute(902, 20012, active=True, cargo={Resource.CROP: 9000}),
+                *_fanned(20011, start_id=901, cargo={Resource.CROP: 9000}),
+                *_fanned(20012, dispatch_minute=400, start_id=911, cargo={Resource.CROP: 9000}),
             ]
         }
         svc = _FakeLiveSvc(existing=existing)
