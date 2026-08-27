@@ -202,6 +202,12 @@ def _scrub_travian_credentials() -> None:
         if key.upper() not in _KEEP_ENV:
             del os.environ[key]
 
+    # Live trade-route writes default ON in production (operator's call,
+    # 2026-08-27), so merely DELETING the flag no longer disarms them. The
+    # suite must never be able to construct a session that writes to a real
+    # account, whatever the production default is -- forced off, explicitly.
+    os.environ["TRAVIAN_TRADE_ROUTE_LIVE"] = "false"
+
     import travian_api.config as config
 
     # A default Settings() must not read the developer's .env either. The

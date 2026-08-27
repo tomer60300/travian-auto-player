@@ -86,11 +86,14 @@ class Settings(BaseSettings):
     # than a missing capability: enabling it creates and toggles REAL routes on
     # the account. Preview (dry_run) never depends on it.
     trade_route_live: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Allow live trade-route creation. Off by default because turning it "
-            "on writes real routes to the account; the /api/v1/trade-routes "
-            "payload itself is verified against a real capture."
+            "Allow live trade-route creation. Defaults ON since 2026-08-27 at "
+            "the operator's explicit instruction: the payload is verified "
+            "against a real capture, the endpoint has its own confirm-and-"
+            "verify machinery, and the opt-in kept silently reverting to "
+            "preview-only on every server restart. Set to false for an "
+            "emergency preview-only mode."
         ),
     )
 

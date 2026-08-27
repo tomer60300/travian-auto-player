@@ -64,18 +64,23 @@ class _RecordingClient:
         return {}
 
 
-class TestTheSwitchDefaultsOff:
-    def test_settings_default_is_off(self, monkeypatch):
-        # Cleared explicitly: the repo ships a .env, and a developer who has
-        # turned the flag on there must not make this test pass by accident.
+class TestTheSwitchDefaultsOn:
+    """Reversed 2026-08-27 on the operator's instruction: the opt-in silently
+    reverted to preview-only on every restart, which cost a run. Live is now the
+    default; the flag remains as an emergency preview-only switch."""
+
+    def test_settings_default_is_on(self, monkeypatch):
         monkeypatch.delenv(FLAG, raising=False)
-        assert Settings(base_url=SERVER, _env_file=None).trade_route_live is False
+        assert Settings(base_url=SERVER, _env_file=None).trade_route_live is True
 
-    def test_the_env_var_turns_it_on(self, monkeypatch):
-        monkeypatch.setenv(FLAG, "1")
-        assert Settings(base_url=SERVER).trade_route_live is True
+    def test_the_env_var_can_turn_it_off(self, monkeypatch):
+        monkeypatch.setenv(FLAG, "0")
+        assert Settings(base_url=SERVER).trade_route_live is False
 
-    def test_the_service_constructor_still_defaults_off(self):
+    def test_the_service_constructor_alone_still_defaults_off(self):
+        # The SERVICE stays fail-closed: only a session that read Settings may
+        # hand it live_enabled=True. A bare constructor (tests, tooling) must
+        # never write to the game by accident.
         assert TradeRouteService(_RecordingClient()).live_enabled is False
 
 
@@ -87,8 +92,8 @@ class TestTheSessionWiresItThrough:
         session = TravianSession(1, SERVER, "someone", "secret")
         assert session.trade_route_service.live_enabled is True
 
-    def test_a_session_leaves_it_off_by_default(self, monkeypatch):
-        monkeypatch.delenv(FLAG, raising=False)
+    def test_a_session_can_be_forced_off(self, monkeypatch):
+        monkeypatch.setenv(FLAG, "0")
         session = TravianSession(2, SERVER, "someone", "secret")
         assert session.trade_route_service.live_enabled is False
 

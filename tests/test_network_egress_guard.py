@@ -180,9 +180,21 @@ class TestCredentialsCannotReachAClient:
             k
             for k in os.environ
             if k.upper().startswith("TRAVIAN_")
-            and k.upper() not in {"TRAVIAN_DB_PATH", "TRAVIAN_DEV", "TRAVIAN_DIST_DIAG"}
+            and k.upper()
+            not in {
+                "TRAVIAN_DB_PATH",
+                "TRAVIAN_DEV",
+                "TRAVIAN_DIST_DIAG",
+                # Present BY the scrub, pinned to "false": with live writes
+                # defaulting on in production, absence would mean armed.
+                "TRAVIAN_TRADE_ROUTE_LIVE",
+            }
         )
         assert leaked == [], f"credential/config env vars reachable from tests: {leaked}"
+        assert os.environ.get("TRAVIAN_TRADE_ROUTE_LIVE") == "false", (
+            "the suite's disarm pin is missing -- sessions built in tests could "
+            "write to a real account"
+        )
 
     def test_settings_does_not_read_a_dotenv_file(self):
         from travian_api.config import Settings
@@ -209,7 +221,10 @@ class TestLiveTradeRouteWritesStayDisarmed:
 
     def test_a_live_flag_in_the_environment_is_scrubbed(self, monkeypatch):
         """A developer with the live flag set in .env or their shell must not
-        thereby arm real writes inside the suite."""
+        thereby arm real writes inside the suite.
+
+        Since live now defaults ON in production, absence is armed -- so the
+        scrub must leave the flag PRESENT and false, not merely delete it."""
         from tests.conftest import _scrub_travian_credentials
 
         monkeypatch.setenv("TRAVIAN_TRADE_ROUTE_LIVE", "true")
@@ -217,7 +232,7 @@ class TestLiveTradeRouteWritesStayDisarmed:
 
         _scrub_travian_credentials()
 
-        assert "TRAVIAN_TRADE_ROUTE_LIVE" not in os.environ
+        assert os.environ.get("TRAVIAN_TRADE_ROUTE_LIVE") == "false"
         assert "TRAVIAN_PASSWORD" not in os.environ
 
 

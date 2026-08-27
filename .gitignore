@@ -86,3 +86,4 @@ scout-results*.md
 # Local dev/production server logs (started by the agent on 8000/8001)
 .server-*.log
 .server-*.log.err
+.playwright-mcp/
