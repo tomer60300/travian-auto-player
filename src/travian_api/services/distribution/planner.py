@@ -22,6 +22,7 @@ from .findings import Category, Finding, Severity
 from .geometry import MapGeometry
 from .merchants import CEIL_DUST_TOLERANCE, DAILY_BEAT_CYCLES, MerchantModel
 from .optimizer import (
+    DEFAULT_MERCHANT_HEADROOM,
     DEFAULT_MERCHANT_RESERVE,
     MAX_IMPROVE_PASSES,
     MAX_RELAY_HOPS,
@@ -45,6 +46,10 @@ class PlannerConfig:
     geometry: MapGeometry
     merchant_model: MerchantModel
     merchant_reserve: int = DEFAULT_MERCHANT_RESERVE
+    merchant_headroom: float = DEFAULT_MERCHANT_HEADROOM
+    """Fraction of each village's merchant budget to aim to leave uncommitted, so
+    load spreads rather than piling onto whichever village is cheapest to ship
+    from. Soft: exceeding it is reported, never fatal."""
     cycles: Sequence[int] = DAILY_BEAT_CYCLES
     max_latency_hours: float | None = 2.0
     min_arrival_gap_minutes: int = DEFAULT_MIN_ARRIVAL_GAP_MINUTES
@@ -353,6 +358,7 @@ def craft_plan(
         config.geometry,
         config.merchant_model,
         merchant_reserve=config.merchant_reserve,
+        merchant_headroom=config.merchant_headroom,
         cycles=config.cycles,
         max_latency_hours=config.max_latency_hours,
         min_send_fill=config.min_send_fill,
@@ -377,7 +383,7 @@ def craft_plan(
     # only estimate a leg's wait from its cycle length, which is wrong by up to
     # most of a day inside a profile window (the beat drops firings outside it).
     relays = time_relays(beat, routing.relays, config.dispatch_window)
-    findings.extend(relay_findings(relays, names, config.max_latency_hours))
+    findings.extend(relay_findings(relays, names, config.max_latency_hours, villages))
 
     rows = tuple(
         SheetRow(

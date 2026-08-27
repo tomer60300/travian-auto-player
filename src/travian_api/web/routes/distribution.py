@@ -55,6 +55,7 @@ from travian_api.services.distribution.night_profile import (
     derive_night_profile,
 )
 from travian_api.services.distribution.optimizer import (
+    DEFAULT_MERCHANT_HEADROOM,
     MAX_IMPROVE_PASSES,
     MAX_RELAY_HOPS,
     MIN_SEND_FILL,
@@ -291,6 +292,17 @@ class PlanRequest(BaseModel):
         default=EUROPE2_TEUTON.bonus_per_trade_office_level, ge=0
     )
     merchant_reserve: int = Field(default=2, ge=0)
+    merchant_headroom: float = Field(
+        default=DEFAULT_MERCHANT_HEADROOM,
+        ge=0.0,
+        lt=1.0,
+        description=(
+            "Fraction of each village's merchant budget the plan aims to leave "
+            "uncommitted, so load spreads instead of piling onto whichever village "
+            "is cheapest to ship from. Soft: exceeding it is reported, never fatal. "
+            "0 restores the pre-headroom behaviour exactly."
+        ),
+    )
     max_latency_hours: float | None = 2.0
     min_arrival_gap_minutes: int = Field(default=3, ge=0)
     # Odd only. A Travian world is centred on 0|0, so its width is always odd;
@@ -1842,6 +1854,7 @@ async def _plan_account(
             bonus_per_trade_office_level=body.trade_office_bonus_per_level,
         ),
         merchant_reserve=body.merchant_reserve,
+        merchant_headroom=body.merchant_headroom,
         cycles=DAILY_BEAT_CYCLES,
         max_latency_hours=body.max_latency_hours,
         min_arrival_gap_minutes=body.min_arrival_gap_minutes,

@@ -69,6 +69,7 @@ class Category(StrEnum):
     TRIBUTE_UNFUNDED = "tribute_unfunded"
     UNALLOCATED = "unallocated"
     MERCHANTS_BUSY = "merchants_busy"
+    MERCHANTS_CROWDED = "merchants_crowded"
     RELAY_LATENCY = "relay_latency"
     LATENCY = "latency"
     ARRIVAL_GAP = "arrival_gap"
@@ -91,8 +92,14 @@ class Category(StrEnum):
 class _Spec:
     """Everything the aggregate view needs to know about one category."""
 
-    order: int
-    """Editorial rank inside a severity. Fixed, so two runs read the same way."""
+    order: float
+    """Editorial rank inside a severity. Fixed, so two runs read the same way.
+
+    Float rather than int so a finding can be slotted between two existing ones
+    without renumbering everything below it -- a renumbering diff hides what
+    actually changed. The sort key that reads this is fully deterministic, so
+    fractional ranks order exactly as whole ones do.
+    """
 
     severity: Severity
     subject: str
@@ -179,6 +186,20 @@ _SPECS: Mapping[Category, _Spec] = {
         action=(
             "Existing routes or shipments hold the rest. Disable the stale routes first "
             "(the live run does that for you), or run again once the merchants are home."
+        ),
+    ),
+    Category.MERCHANTS_CROWDED: _Spec(
+        order=11.5,
+        severity=Severity.WARNING,
+        subject="village",
+        headline="{count} {subject} run out of merchant headroom while a nearer village idles",
+        action=(
+            "The plan already tries to spread load, so these are the ones it could not "
+            "move: shifting the work would have cost more merchants than the headroom is "
+            "priced at, or nothing else has the surplus. A village at its ceiling has "
+            "nothing left for a manual send or next run's drift, and one Trade Office "
+            "there is a large share of the plan. Raise its Trade Office, give the idle "
+            "village named below some surplus to ship, or accept it."
         ),
     ),
     Category.RELAY_LATENCY: _Spec(

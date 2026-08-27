@@ -71,6 +71,41 @@ from .merchants import DAILY_BEAT_CYCLES, MerchantModel, cheapest_cycle, cycle_s
 
 DEFAULT_MERCHANT_RESERVE = 2
 
+# Fraction of each village's merchant budget the plan aims to leave uncommitted.
+#
+# The reserve above is a flat count held back before planning starts; this is a
+# proportion held back *by the objective*, and the two answer different
+# questions. The reserve says "never plan with the last two merchants". This says
+# "do not run any single village at the redline while its neighbours idle".
+#
+# Why a soft cap rather than a smaller budget: exceeding it must not make a plan
+# infeasible. A village genuinely can be the only one placed to serve a receiver,
+# and refusing that plan outright would be worse than running it hot.
+#
+# 0.10 comes from a sweep over five real payloads (headroom x price, recorded in
+# scratchpad/sweep_headroom.py). Across those accounts it cost +1 merchant in
+# total while halving the number of villages running at 90% or more (11 -> 6),
+# and its worst single account paid +2. Larger settings buy more headroom but
+# stop being reliable: 0.15 and 0.20 each had an account pay +9 merchants
+# (+7.5%), which is the local search landing in a worse optimum rather than a
+# real price. On an 18-merchant budget 0.10 holds back 2, which together with
+# the flat reserve leaves 4 idle -- one ordinary extra route.
+DEFAULT_MERCHANT_HEADROOM = 0.10
+
+# What one merchant of over-the-soft-cap load is worth, in merchants of total
+# fleet. The soft cap is folded into the merchant term at this rate rather than
+# ranked above it, because ranking it above makes the price unbounded: measured
+# across five real payloads, an unbounded soft key paid +8 merchants (+5.0%) on
+# one account for no reduction in peak utilisation at all, the villages above the
+# cap being structurally forced there.
+#
+# 1 is the unbiased rate: a merchant above the soft cap simply counts twice, once
+# in the fleet total and once as crowding. The sweep found no reason to pay more
+# -- at 2 and 3 the same headroom cost strictly more merchants on four of five
+# accounts (night_payload: +2 at price 1, +4 at 2, +8 at 3, with identical peak
+# utilisation), which is the search buying headroom it cannot actually deliver.
+SOFT_BUDGET_PRICE = 1
+
 # Floor on how full a merchant must stay when idle merchants are spent to cut
 # latency. Shortening a cycle shrinks each batch, so without a floor the latency
 # pass runs half-empty merchants just to go faster — trading merchant fill (its
@@ -290,6 +325,7 @@ def relay_findings(
     hubs: Iterable[RelayHub],
     names: Mapping[int, str],
     max_latency_hours: float | None,
+    villages: Mapping[int, VillageState] | None = None,
 ) -> list[Finding]:
     """Report every relay hub: as a warning when the delivery misses the target.
 
@@ -297,12 +333,26 @@ def relay_findings(
     are really one delivery is a fact about the plan an operator typing them into
     the game needs, target or no target -- and on the account that motivated
     this, 45 of 66 plans used a relay and not one line of output said so.
+
+    With ``villages`` the hub's own crop production is named too. Relay refuses a
+    hub below zero outright, but a hub at +1/h passes that floor and is nothing
+    like one at +4,500/h: it breaks even on paper and recovers from a missed
+    refill at a crawl. The floor is not a judgement about margin, so the margin is
+    shown rather than silently accepted.
     """
     findings: list[Finding] = []
     for relay in hubs:
         hub = village_label(relay.hub, names)
         origins = _named(relay.origins, names)
         destinations = _named(relay.destinations, names)
+        # Named only when known. An absent villages map means the caller had no
+        # production to give, which is not the same as a hub that grows nothing.
+        own = None if villages is None else villages.get(relay.hub)
+        margin = (
+            ""
+            if own is None or own.crop_per_hour is None
+            else f", growing {own.crop_per_hour:+,.0f}/h of its own"
+        )
         over_target = (
             max_latency_hours is not None and relay.end_to_end_hours > max_latency_hours + EPSILON
         )
@@ -311,13 +361,14 @@ def relay_findings(
                 f"crop relayed through {hub} takes up to {relay.end_to_end_hours:.1f}h "
                 f"end-to-end against a {max_latency_hours:.0f}h target: at worst "
                 f"{relay.collect_hours:.1f}h in from {origins}, then "
-                f"{relay.forward_hours:.1f}h waiting there and travelling on to {destinations}"
+                f"{relay.forward_hours:.1f}h waiting there and travelling on to "
+                f"{destinations}{margin}"
             )
         else:
             message = (
                 f"{hub} relays crop: it forwards to {destinations} what it collects from "
                 f"{origins}, so those rows are legs of one delivery taking up to "
-                f"{relay.end_to_end_hours:.1f}h"
+                f"{relay.end_to_end_hours:.1f}h{margin}"
             )
         findings.append(
             Finding(
@@ -504,6 +555,94 @@ Assignment = dict[Resource, dict[FlowKey, float]]
 # measured up to 120 villages; a 22-village account finishes in ~11 passes and
 # never approaches it. Tunable via PlannerConfig.max_improve_passes.
 MAX_IMPROVE_PASSES = 1000
+
+
+# How idle a village must be before it counts as an alternative worth naming.
+# Half its own soft cap: enough slack to take real work, not a village that is
+# merely slightly less busy than the one straining.
+_IDLE_SHARE = 0.5
+
+
+def _crowding_findings(
+    villages: Mapping[int, VillageState],
+    routes: Sequence[Route],
+    committed: Mapping[int, int],
+    budgets: Mapping[int, int],
+    soft_budgets: Mapping[int, int],
+    geometry: MapGeometry,
+    names: Mapping[int, str],
+) -> list[Finding]:
+    """Name each village over its headroom, and a better-placed idle village.
+
+    "Better placed" means no further from the receiver the crowded village is
+    straining on. That avoids inventing a distance threshold: a village with
+    spare merchants that is no further from the work is genuinely an alternative,
+    and one on the far side of the map is not, without anyone having to pick a
+    number of fields.
+
+    Reported, never acted on. The optimizer has already tried to spread this load
+    and priced the attempt; these are the cases it could not fix, and hiding them
+    is what let a village sit at 100% while its neighbours ran at 6%.
+    """
+    outbound: dict[int, list[Route]] = {}
+    for route in routes:
+        outbound.setdefault(route.origin, []).append(route)
+
+    findings: list[Finding] = []
+    for vid in sorted(committed):
+        used = committed[vid]
+        soft = soft_budgets.get(vid, budgets.get(vid, 0))
+        if soft <= 0 or used <= soft:
+            continue
+        legs = outbound.get(vid)
+        if not legs:
+            continue
+        # The leg it is straining on: the one holding the most merchants.
+        worst = max(legs, key=lambda r: r.merchants_committed)
+        strained = worst.destination
+        if strained not in villages:
+            continue  # a foreign tribute has no coordinates we can compare against
+        own_reach = geometry.one_way_minutes(villages[vid].coords, villages[strained].coords)
+
+        best: tuple[float, int] | None = None
+        for other, other_used in committed.items():
+            if other == vid or other not in villages:
+                continue
+            other_budget = budgets.get(other, 0)
+            if other_budget <= 0:
+                continue
+            if other_used > _IDLE_SHARE * soft_budgets.get(other, other_budget):
+                continue
+            if not outbound.get(other):
+                continue  # a pure receiver has nothing to ship; not an alternative
+            reach = geometry.one_way_minutes(villages[other].coords, villages[strained].coords)
+            if reach > own_reach:
+                continue
+            share = other_used / other_budget
+            if best is None or share < best[0]:
+                best = (share, other)
+        if best is None:
+            continue
+
+        _, idle = best
+        findings.append(
+            Finding(
+                category=Category.MERCHANTS_CROWDED,
+                message=(
+                    f"{village_label(vid, names)} commits {used} of its {budgets.get(vid, 0)} "
+                    f"merchants, past the {soft} it should keep clear, while "
+                    f"{village_label(idle, names)} uses {committed[idle]} of "
+                    f"{budgets.get(idle, 0)} and is no further from "
+                    f"{village_label(strained, names)}"
+                ),
+                detail=(
+                    f"{village_label(vid, names)} {used}/{budgets.get(vid, 0)} vs "
+                    f"{village_label(idle, names)} {committed[idle]}/{budgets.get(idle, 0)}"
+                ),
+                village=village_label(vid, names),
+            )
+        )
+    return findings
 
 
 def _may_relay_through(village: VillageState) -> bool:
@@ -771,6 +910,15 @@ def _improve_flows(
     budgets: Mapping[int, int],
     max_passes: int = MAX_IMPROVE_PASSES,
     max_relay_hops: int = MAX_RELAY_HOPS,
+    # The utilisation the plan aims to stay under, per village. Defaults to the
+    # hard budget, which makes the soft key identically zero and the objective
+    # exactly what it was -- so a caller that does not care is unaffected.
+    soft_budgets: Mapping[int, int] | None = None,
+    # Cadence caps by destination. The search MUST see these: costing a pair with
+    # a cycle the builder is not allowed to use optimises against a price nobody
+    # will pay, and the error is not small -- a 1h cap on a long haul costs
+    # roughly twice what an unrestricted search assumes.
+    max_cycle: Mapping[int, int] | None = None,
 ) -> tuple[Assignment, bool]:
     """Lower merchant commitment by reassigning flow, seeded by the greedy plan.
 
@@ -818,6 +966,18 @@ def _improve_flows(
     # build_plan call, so nothing leaks between requests or between accounts.
     cost_memo: dict[tuple[int, float, float], int] = {}
 
+    # Cadence caps, and the candidate cycles they leave, resolved once per
+    # destination instead of on every one of the ~4M costing calls.
+    caps: Mapping[int, int] = max_cycle or {}
+    _allowed_cache: dict[int, Sequence[int]] = {}
+
+    def allowed_for(destination: int) -> Sequence[int]:
+        got = _allowed_cache.get(destination)
+        if got is None:
+            got = _cycles_for(destination, cycles, max_cycle)
+            _allowed_cache[destination] = got
+        return got
+
     def merchants_for(origin: int, destination: int, hourly_total: float) -> int:
         # Takes the already-summed tonnage rather than the cargo mapping: every
         # caller has just summed it for the objective anyway, and summing twice
@@ -839,12 +999,19 @@ def _improve_flows(
         # The round trip MUST be in the key: it sets sets_in_flight, so the same
         # rate to a nearer village costs fewer merchants. Leaving it out returned
         # one destination's cost for another's.
-        key = (capacity, hourly_total, one_way)
+        # The cadence cap MUST be in it too, for exactly the same reason: two
+        # destinations the same distance away with different caps cost different
+        # merchants, and sharing a cached price between them hands one the
+        # other's. Keyed on the cap rather than the filtered cycle tuple because
+        # equal caps imply equal candidates and an int hashes cheaper than a
+        # tuple at ~4M calls.
+        cap = caps.get(destination)
+        key = (capacity, hourly_total, one_way, cap)
         hit = cost_memo.get(key)
         if hit is not None:
             return hit
         committed = cheapest_cycle(
-            hourly_total, 2.0 * one_way, capacity, cycles
+            hourly_total, 2.0 * one_way, capacity, allowed_for(destination)
         ).merchants_committed
         cost_memo[key] = committed
         return committed
@@ -872,6 +1039,26 @@ def _improve_flows(
 
     def excess(origin: int, count: int) -> int:
         return max(0, count - budgets.get(origin, 0))
+
+    # Crowding, measured ONLY in the band between the soft cap and the hard one.
+    #
+    # Counting everything above the soft cap bills load over the HARD cap twice,
+    # once here and once in `excess`, which is simply not what this term means:
+    # merchants past the hard budget are infeasibility, not crowding.
+    #
+    # It is bookkeeping, not a behavioural fix, and the difference matters to
+    # anyone reading this. Clamped and unclamped were compared over four real
+    # payloads at three headrooms and produced identical plans in 12 of 12 cases.
+    # That is structural rather than luck: `excess` is the FIRST key, so an extra
+    # copy of it inside the second can never reorder two candidates -- when
+    # `excess` differs it decides alone, and when it ties at zero the unclamped
+    # term is zero as well. Kept because the honest formulation costs nothing and
+    # a future reordering of the keys would make the double charge real.
+    soft = soft_budgets if soft_budgets is not None else budgets
+
+    def soft_excess(origin: int, count: int) -> int:
+        hard = budgets.get(origin, 0)
+        return max(0, min(count, hard) - soft.get(origin, hard))
 
     # A village with no merchants cannot ship, so it is a pure sink: a foreign
     # tribute. Splitting one across suppliers is harder to run than an ordinary
@@ -983,6 +1170,17 @@ def _improve_flows(
             - excess(origin, committed.get(origin, 0))
             for origin, delta in per_origin.items()
         )
+        # Load spreading, priced INTO the merchant term at a fixed rate rather
+        # than ranked above it. Ranked above, the price is unbounded and the
+        # search will pay any number of merchants for a unit of headroom it may
+        # not even be able to deliver; priced in, it spends up to
+        # SOFT_BUDGET_PRICE and stops. Hard feasibility still outranks both, so
+        # no amount of headroom can be bought with an over-budget village.
+        soft_delta = sum(
+            soft_excess(origin, committed.get(origin, 0) + delta)
+            - soft_excess(origin, committed.get(origin, 0))
+            for origin, delta in per_origin.items()
+        )
         # Rounded to 6dp, not to whole minutes. Integer minutes made the last
         # key of the objective collide constantly, and a collision here was
         # settled by scan order -- which follows village ids. Relabelling the
@@ -991,7 +1189,12 @@ def _improve_flows(
         # between over-budget and within it. 6dp is far coarser than the ~1e-11
         # float dust these sums carry and far finer than a minute, so it
         # discriminates real differences without becoming unstable.
-        return (over_delta, total_delta, rc_delta, round(round_trip, 6)), (
+        return (
+            over_delta,
+            total_delta + SOFT_BUDGET_PRICE * soft_delta,
+            rc_delta,
+            round(round_trip, 6),
+        ), (
             touched_keys,
             new_cargo,
             new_merch,
@@ -1264,6 +1467,7 @@ def build_plan(
     merchant_model: MerchantModel,
     *,
     merchant_reserve: int = DEFAULT_MERCHANT_RESERVE,
+    merchant_headroom: float = DEFAULT_MERCHANT_HEADROOM,
     cycles: Sequence[int] = DAILY_BEAT_CYCLES,
     max_latency_hours: float | None = 2.0,
     min_send_fill: float = MIN_SEND_FILL,
@@ -1289,6 +1493,10 @@ def build_plan(
         geometry: distances and travel times for this server.
         merchant_model: capacity per Trade Office level.
         merchant_reserve: merchants to leave idle per village.
+        merchant_headroom: fraction of each village's budget the plan aims to
+            leave uncommitted, so load spreads instead of piling onto whichever
+            village is cheapest. Soft: exceeding it is reported, never fatal.
+            0.0 restores the pre-headroom behaviour exactly.
         cycles: candidate cycle lengths. Defaults to those dividing 24h so the
             schedule has a daily period.
         max_latency_hours: soft target; exceeding it warns rather than fails,
@@ -1334,6 +1542,10 @@ def build_plan(
     # per-phase: excess never rises anywhere; the merchant total is minimal here
     # and may rise later, strictly within per-village budgets (§8.3, §14).
     budgets = {vid: villages[vid].spare_merchants(merchant_reserve) for vid in villages}
+    # Floored, so the soft cap can never exceed the hard one, and a budget too
+    # small to hold back anything (1 or 2 merchants) simply has no soft cap
+    # rather than an impossible one.
+    soft_budgets = {vid: int(budget * (1.0 - merchant_headroom)) for vid, budget in budgets.items()}
     assignment, converged = _improve_flows(
         assignment,
         villages,
@@ -1343,6 +1555,8 @@ def build_plan(
         budgets,
         max_improve_passes,
         max_relay_hops,
+        soft_budgets=soft_budgets,
+        max_cycle=max_cycle_by_destination,
     )
     if not converged:
         # Never let a truncated search masquerade as a converged one: it inflates
@@ -1458,6 +1672,10 @@ def build_plan(
         )
         for vid, used in sorted(committed.items())
         if used > villages[vid].spare_merchants(merchant_reserve)
+    )
+
+    findings.extend(
+        _crowding_findings(villages, routes, committed, budgets, soft_budgets, geometry, names)
     )
 
     return Plan(
