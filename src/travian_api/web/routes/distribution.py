@@ -3512,6 +3512,37 @@ async def post_execute(
                     updated_here: list[tuple[ExistingRoute, dict]] = []
                     for i, (row, route) in enumerate(desired):
                         destination = _desired_key(route)
+                        # A mismatched destination in create-only mode is a dead
+                        # end, not a create: the live rows run a schedule the
+                        # plan does not want, fixing that requires the disable
+                        # the operator withheld, and creating anyway would ship
+                        # BOTH schedules at once. Found by a live probe trace --
+                        # eight 3h rows, a 6h plan, disable_existing=False --
+                        # where this loop happily built the duplicate: created 1,
+                        # disabled 0.
+                        if destination in mismatched and not body.disable_existing:
+                            trace.decision(
+                                origin=origin,
+                                destination=destination,
+                                decision="blocked",
+                                reason=(
+                                    "schedule mismatch in create-only mode: "
+                                    + mismatched[destination]
+                                ),
+                            )
+                            actions.append(
+                                _action(
+                                    row,
+                                    route,
+                                    "blocked",
+                                    (
+                                        f"live rows run a different schedule than the plan "
+                                        f"({mismatched[destination]}); creating would ship both "
+                                        f"at once — run with 'also disable' to replace them"
+                                    ),
+                                )
+                            )
+                            continue
                         if destination in satisfied:
                             # The destination is served, but is it served with
                             # the RIGHT cargo? A route is created once and the

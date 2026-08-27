@@ -1592,6 +1592,44 @@ class TestTheFanOutDoesNotCauseAReRun:
         _, coords = svc.disabled[0]
         assert len(coords) == 24, "every row of the dropped destination is disabled"
 
+    def test_create_only_never_duplicates_a_mismatched_destination(self):
+        # Found by a live probe trace (exec-d974a7098361): eight 3h rows to the
+        # destination, a plan wanting 6h, and disable_existing=False. The
+        # mismatch correctly kept the destination out of `satisfied` -- but
+        # nothing may disable in create-only mode, so the create path built a
+        # duplicate ON TOP of the eight live rows: created 1, disabled 0, and
+        # the destination shipped both schedules at once. Create-only means the
+        # only change is a route the plan is MISSING; a mismatched one is not
+        # missing, it is wrong, and fixing wrong requires the disable the
+        # operator withheld -- so the run must block and say that.
+        account = _own_village_account()  # wants 6h from minute 100
+        rows = _fanned(20011, cycle_hours=3, start_id=710000)  # 8 rows, 3h apart
+        svc = _FakeLiveSvc(existing={20003: rows})
+
+        res = _run_live(svc, account, disable_existing=False, max_routes_per_run=50)
+
+        assert svc.created == [], "create-only built a duplicate route on top of eight live rows"
+        assert svc.disabled == [], "create-only must never disable"
+        assert [a.status for a in res.actions] == ["blocked"]
+        assert "different schedule" in res.actions[0].detail
+        assert "disable" in res.actions[0].detail, "the operator must be told which switch fixes it"
+
+    def test_with_disable_the_same_mismatch_is_replaced_not_blocked(self):
+        # The other half, pinned so the block above cannot leak into the mode
+        # where fixing IS allowed: same eight 3h rows, disable ticked -- the old
+        # schedule is switched off and the plan's route created.
+        account = _own_village_account()
+        rows = _fanned(20011, cycle_hours=3, start_id=710000)
+        svc = _FakeLiveSvc(existing={20003: rows})
+
+        res = _run_live(svc, account, disable_existing=True, max_routes_per_run=50)
+
+        assert len(svc.created) == 1, "the plan's 6h route replaces the 3h schedule"
+        assert svc.disabled, "the mismatched rows are switched off first"
+        _, coords = svc.disabled[0]
+        assert len(coords) == 8, "all eight off-schedule rows, not a subset"
+        assert [a.status for a in res.actions] == ["created"]
+
     def test_a_partly_disabled_destination_is_restored_not_duplicated(self):
         # Half the rows off means half the cadence. The plan still wants this
         # destination, so the fix is to re-enable -- never to create more rows
