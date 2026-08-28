@@ -16,6 +16,7 @@ import logging
 import random
 import time
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -2677,6 +2678,136 @@ def _game_rows(cycle_hours: int) -> int:
     return max(1, -(-24 // cycle_hours))
 
 
+# ── Reconciliation matching rules ────────────────────────────────────────────
+#
+# How a desired route is recognised in what a marketplace already holds. These
+# lived as closures at depth 5 inside post_execute's per-village loop, which is
+# where every reconciliation bug this week lived; they were already pure (three
+# took their context through default-argument binding), so they are lifted here
+# to be readable and testable on their own terms.
+#
+# The two key kinds are deliberate and must not be unified. An OWN village is
+# matched by village id, which the page states outright. A FOREIGN target has no
+# id in the plan -- it is an operator-supplied coordinate carrying a synthetic
+# negative id -- so it can only match on coordinates, which are back-derived
+# through the world's span. Keying everything on coordinates churns every
+# own-village route whenever the span is wrong; keying everything on ids churns
+# every foreign one always.
+
+
+def _desired_key(route: PlannedRoute) -> int | tuple[int, int]:
+    """The key a desired route is recognised by: village id, or coordinates."""
+    if route.dest_village_id > 0:
+        return route.dest_village_id
+    return (route.dest_x, route.dest_y)
+
+
+def _existing_keys(e: ExistingRoute) -> set[int | tuple[int, int]]:
+    """Every key this live route could be recognised by.
+
+    Both kinds, because the route itself does not say which kind of plan entry
+    (if any) wanted it. An int key and a tuple key cannot collide, and a route
+    whose coordinates could not be derived contributes no coordinate key --
+    which is why an unplaceable map id no longer reads as a route to nowhere
+    that the plan does not want.
+    """
+    keys: set[int | tuple[int, int]] = {e.dest_village_id}
+    if e.dest_x is not None and e.dest_y is not None:
+        keys.add((e.dest_x, e.dest_y))
+    return keys
+
+
+def _identifiable(
+    e: ExistingRoute,
+    ids: set[int],
+    foreign: set[tuple[int, int]],
+) -> bool:
+    """Can this route be matched against the plan at all?
+
+    A FOREIGN target is known only by coordinates -- the plan has no real
+    village id for one -- so a live route whose map id could not be placed has
+    no key the foreign set can ever match. Judging it "not wanted" disabled it
+    and then created a replacement, every single run. When the plan wants
+    foreign destinations and the route cannot be placed, the honest answer is
+    "I do not know", and the safe action for "I do not know" is to leave it
+    alone.
+    """
+    if e.dest_village_id in ids:
+        return True
+    if not foreign:
+        return True  # nothing matches on coordinates anyway
+    return e.dest_x is not None and e.dest_y is not None
+
+
+def _is_wanted(
+    e: ExistingRoute,
+    ids: set[int],
+    foreign: set[tuple[int, int]],
+) -> bool:
+    """Does the plan want a route to where this one goes?"""
+    return bool({e.dest_village_id} & ids or _existing_keys(e) & foreign)
+
+
+def _is_protected(
+    e: ExistingRoute,
+    ids: set[int],
+    coords: set[tuple[int, int]],
+) -> bool:
+    """Declared off-limits by the operator, whatever the plan thinks.
+
+    Matched on the same two keys the reconciler already uses, for the same
+    reason: a hand-made route to a foreign target has no usable village id and
+    can only be named by where it goes on the map.
+    """
+    return bool({e.dest_village_id} & ids or _existing_keys(e) & coords)
+
+
+def _row_minute(e: ExistingRoute) -> int:
+    """The minute of the day this live row departs, or -1 if unknown.
+
+    -1 can never equal a planned minute, so a row whose departure could not be
+    read reconciles by recreation rather than by trust.
+    """
+    if e.departure_at is None:
+        return -1
+    return int(e.departure_at % 86400) // 60
+
+
+def _planned_minutes(route: PlannedRoute) -> list[int]:
+    """The minutes of the day this route's rows will depart, after the trim.
+
+    Travian fans "repeat every N hours" into 24/N daily rows offset by the cycle
+    from the Send-at minute (proven live: departure_at % 86400 is exactly the
+    payload minute). Each route is judged against ITS OWN profile window -- a
+    whole-day run carries several profiles in one pass, and a Night row is not
+    stale for keeping Night hours.
+    """
+    total = _game_rows(route.cycle_hours)
+    minutes = [
+        (route.dispatch_minute + i * route.cycle_hours * 60) % MINUTES_PER_DAY for i in range(total)
+    ]
+    if route.window is not None:
+        start, end = route.window
+        inside = [
+            m for m in minutes if ((start <= m < end) if start <= end else (m >= start or m < end))
+        ]
+        # window_pruning refuses to delete every row, so a route with no
+        # in-window departure keeps them all.
+        if inside:
+            minutes = inside
+    return sorted(minutes)
+
+
+def _off_schedule(e: ExistingRoute, mismatched: Mapping[int | tuple[int, int], str]) -> bool:
+    """Part of a destination whose live row set diverges from the plan.
+
+    The WHOLE set is recreated, not just the offending rows: a create fans out
+    every row again, so keeping the on-minute survivors and creating would
+    duplicate them.
+    """
+    return bool(_existing_keys(e) & set(mismatched))
+
+
 def _rows_that_survive(
     cycle_hours: int,
     dispatch_minute: int,
@@ -3406,69 +3537,6 @@ async def post_execute(
                         if route.dest_village_id < 0
                     }
 
-                    def _desired_key(route: PlannedRoute) -> int | tuple[int, int]:
-                        if route.dest_village_id > 0:
-                            return route.dest_village_id
-                        return (route.dest_x, route.dest_y)
-
-                    def _existing_keys(e: ExistingRoute) -> set[int | tuple[int, int]]:
-                        """Every key this live route could be recognised by.
-
-                        Both kinds, because the route itself does not say which
-                        kind of plan entry (if any) wanted it. An int key and a
-                        tuple key cannot collide, and a route whose coordinates
-                        could not be derived contributes no coordinate key --
-                        which is why an unplaceable map id no longer reads as a
-                        route to nowhere that the plan does not want.
-                        """
-                        keys: set[int | tuple[int, int]] = {e.dest_village_id}
-                        if e.dest_x is not None and e.dest_y is not None:
-                            keys.add((e.dest_x, e.dest_y))
-                        return keys
-
-                    def _identifiable(
-                        e: ExistingRoute,
-                        ids: set[int] = desired_ids,
-                        foreign: set[tuple[int, int]] = desired_foreign,
-                    ) -> bool:
-                        """Can this route be matched against the plan at all?
-
-                        A FOREIGN target is known only by coordinates -- the plan
-                        has no real village id for one -- so a live route whose
-                        map id could not be placed has no key the foreign set can
-                        ever match. Judging it "not wanted" disabled it and then
-                        created a replacement, every single run. When the plan
-                        wants foreign destinations and the route cannot be
-                        placed, the honest answer is "I do not know", and the
-                        safe action for "I do not know" is to leave it alone.
-                        """
-                        if e.dest_village_id in ids:
-                            return True
-                        if not foreign:
-                            return True  # nothing matches on coordinates anyway
-                        return e.dest_x is not None and e.dest_y is not None
-
-                    def _is_wanted(
-                        e: ExistingRoute,
-                        ids: set[int] = desired_ids,
-                        foreign: set[tuple[int, int]] = desired_foreign,
-                    ) -> bool:
-                        return bool({e.dest_village_id} & ids or _existing_keys(e) & foreign)
-
-                    def _is_protected(
-                        e: ExistingRoute,
-                        ids: set[int] = protected_ids,
-                        coords: set[tuple[int, int]] = protected_coords,
-                    ) -> bool:
-                        """Declared off-limits by the operator, whatever the plan thinks.
-
-                        Matched on the same two keys the reconciler already uses,
-                        for the same reason: a hand-made route to a foreign target
-                        has no usable village id and can only be named by where it
-                        goes on the map.
-                        """
-                        return bool({e.dest_village_id} & ids or _existing_keys(e) & coords)
-
                     # The desired ROW SET per destination, not just the
                     # destination. Travian fans "repeat every N hours" into 24/N
                     # daily rows offset by the cycle from the Send-at minute
@@ -3479,28 +3547,6 @@ async def post_execute(
                     # the old profile's rows running, never pruned pre-existing
                     # out-of-window rows, and let cargo correction write one
                     # daily batch onto 24 hourly rows.
-                    def _planned_minutes(route: PlannedRoute) -> list[int]:
-                        # Each route is judged against ITS OWN profile window --
-                        # a whole-day run carries several profiles in one pass,
-                        # and a Night row is not stale for keeping Night hours.
-                        total = _game_rows(route.cycle_hours)
-                        minutes = [
-                            (route.dispatch_minute + i * route.cycle_hours * 60) % MINUTES_PER_DAY
-                            for i in range(total)
-                        ]
-                        if route.window is not None:
-                            start, end = route.window
-                            inside = [
-                                m
-                                for m in minutes
-                                if ((start <= m < end) if start <= end else (m >= start or m < end))
-                            ]
-                            # window_pruning refuses to delete every row, so a
-                            # route with no in-window departure keeps them all.
-                            if inside:
-                                minutes = inside
-                        return sorted(minutes)
-
                     # Minute MULTISETS, merged per destination. A dict
                     # comprehension here silently kept only the LAST route's
                     # minutes, and a whole-day union routinely wants the same
@@ -3514,14 +3560,6 @@ async def post_execute(
                         )
                     for _k in expected_rows:
                         expected_rows[_k] = sorted(expected_rows[_k])
-
-                    def _row_minute(e: ExistingRoute) -> int:
-                        # -1 for a row whose departure could not be read: it can
-                        # never equal a planned minute, so an unverifiable
-                        # schedule reconciles by recreation rather than by trust.
-                        if e.departure_at is None:
-                            return -1
-                        return int(e.departure_at % 86400) // 60
 
                     active_rows_by_key: dict[int | tuple[int, int], list[ExistingRoute]] = {}
                     for e in existing:
@@ -3593,7 +3631,10 @@ async def post_execute(
                     # cannot be recreated without shipping twice, so it is left
                     # exactly as it is -- counted as served, reported as diverged.
                     for k in list(mismatched):
-                        if any(_is_protected(e) for e in active_rows_by_key.get(k, [])):
+                        if any(
+                            _is_protected(e, protected_ids, protected_coords)
+                            for e in active_rows_by_key.get(k, [])
+                        ):
                             problems.append(
                                 f"{village_label(origin, names)}: protected route(s) to "
                                 f"{k} run a different schedule than the plan "
@@ -3604,18 +3645,6 @@ async def post_execute(
                                 id(_route) for _route in routes_by_key.get(k, [])
                             )
                             del mismatched[k]
-
-                    def _off_schedule(
-                        e: ExistingRoute,
-                        mismatched: dict = mismatched,
-                    ) -> bool:
-                        """Part of a destination whose live row set diverges.
-
-                        The WHOLE set is recreated, not just the offending rows: a
-                        create fans out every row again, so keeping the on-minute
-                        survivors and creating would duplicate them.
-                        """
-                        return bool(_existing_keys(e) & set(mismatched))
 
                     if mismatched:
                         trace.event(
@@ -3642,9 +3671,12 @@ async def post_execute(
                             e
                             for e in visible
                             if e.active
-                            and _identifiable(e)
-                            and (not _is_wanted(e) or _off_schedule(e))
-                            and not _is_protected(e)
+                            and _identifiable(e, desired_ids, desired_foreign)
+                            and (
+                                not _is_wanted(e, desired_ids, desired_foreign)
+                                or _off_schedule(e, mismatched)
+                            )
+                            and not _is_protected(e, protected_ids, protected_coords)
                         ]
                         # Named separately from `stale`: these ARE unwanted by the
                         # plan and are being left running on purpose, which is a
@@ -3654,9 +3686,9 @@ async def post_execute(
                             e
                             for e in visible
                             if e.active
-                            and _identifiable(e)
-                            and not _is_wanted(e)
-                            and _is_protected(e)
+                            and _identifiable(e, desired_ids, desired_foreign)
+                            and not _is_wanted(e, desired_ids, desired_foreign)
+                            and _is_protected(e, protected_ids, protected_coords)
                         ]
                         if protected_here:
                             disables.append(
@@ -3670,7 +3702,11 @@ async def post_execute(
                                 origin=origin,
                                 route_ids=[e.route_id for e in protected_here],
                             )
-                        unidentifiable = [e for e in visible if e.active and not _identifiable(e)]
+                        unidentifiable = [
+                            e
+                            for e in visible
+                            if e.active and not _identifiable(e, desired_ids, desired_foreign)
+                        ]
                         if unidentifiable:
                             # Reported, not acted on. Silence would look like a
                             # clean run while these routes keep shipping.

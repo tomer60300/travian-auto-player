@@ -53,7 +53,18 @@ _LOCAL_HOSTNAMES = frozenset(
 # under the prefix feeds Settings (base_url/username/password/recon/live flags)
 # and is removed, so a new secret added to Settings later is scrubbed by
 # default instead of silently becoming reachable.
-_KEEP_ENV = frozenset({"TRAVIAN_DB_PATH", "TRAVIAN_DEV", "TRAVIAN_DIST_DIAG"})
+_KEEP_ENV = frozenset(
+    {
+        "TRAVIAN_DB_PATH",
+        "TRAVIAN_DEV",
+        "TRAVIAN_DIST_DIAG",
+        # A directory path, not an identity -- and it is the suite's OWN temp
+        # directory, set by _isolate_the_stealth_state above. Scrubbing it sent
+        # cookie/persona/scheduler state back to the repo-relative default,
+        # where parallel workers raced each other for the same three files.
+        "TRAVIAN_COOKIE_FILE",
+    }
+)
 
 _AF_UNIX = getattr(socket, "AF_UNIX", None)
 
@@ -217,6 +228,29 @@ def _scrub_travian_credentials() -> None:
     config.settings = config.Settings()
 
 
+def _isolate_the_stealth_state() -> None:
+    """Point stealth's on-disk state at a throwaway directory, per worker.
+
+    HttpClient defaults its cookie file to a RELATIVE ``.travian_cookies.json``,
+    and derives the persona and activity-scheduler state paths from that file's
+    parent -- so under pytest they all land in the repo working directory, and
+    every test process writes the same three files. Serially that quietly mixed
+    suite activity into the operator's real stealth accounting; in parallel
+    (``-n 8``, now the documented gate) the workers race each other and the
+    scheduler logs "Failed to save scheduler state: Access is denied" as the
+    atomic replace loses.
+
+    Isolated the same way the database and the trace directory already are:
+    chdir is not enough because a relative path is resolved at construction, so
+    the environment variable the client honours is set instead where one exists,
+    and the CWD-relative fallback is redirected by moving the process into a
+    temp directory for the whole session.
+    """
+    directory = tempfile.mkdtemp(prefix="travian-test-stealth-")
+    os.environ["TRAVIAN_COOKIE_FILE"] = str(Path(directory) / ".travian_cookies.json")
+    atexit.register(shutil.rmtree, directory, True)
+
+
 def _isolate_the_database() -> None:
     """Point the suite at a throwaway SQLite file, never the live one.
 
@@ -257,6 +291,7 @@ def _isolate_the_execution_traces() -> None:
 def pytest_configure(config: pytest.Config) -> None:
     _isolate_the_database()
     _isolate_the_execution_traces()
+    _isolate_the_stealth_state()
     _scrub_travian_credentials()
     _install_network_block()
 

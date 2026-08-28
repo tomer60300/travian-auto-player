@@ -125,8 +125,18 @@ class HttpClient:
         self.base_url = settings.base_url.rstrip("/")
         self._resolved_x_version: str | None = None
         self._auth_callback: Optional[callable] = None
+        # The cookie file's PARENT also becomes the home of the persona and
+        # activity-scheduler state, so this path decides where stealth
+        # accounting lives. A bare relative default meant "wherever the process
+        # happened to be launched from": start the server from another directory
+        # and it silently begins its daily-hours accounting from scratch, and
+        # under pytest every worker wrote the same three files in the repo root
+        # and raced on them. TRAVIAN_COOKIE_FILE makes the location explicit for
+        # anyone who needs it; the relative default is unchanged otherwise.
         self._cookie_file = (
-            cookie_file if cookie_file is not None else Path(".travian_cookies.json")
+            cookie_file
+            if cookie_file is not None
+            else Path(os.environ.get("TRAVIAN_COOKIE_FILE") or ".travian_cookies.json")
         )
 
         # Initialize stealth components (needs _cookie_file for persona/scheduler paths)

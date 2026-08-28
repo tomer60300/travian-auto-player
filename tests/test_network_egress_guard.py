@@ -185,12 +185,22 @@ class TestCredentialsCannotReachAClient:
                 "TRAVIAN_DB_PATH",
                 "TRAVIAN_DEV",
                 "TRAVIAN_DIST_DIAG",
+                # The suite's own temp path for cookie/persona/scheduler state.
+                # Plumbing, not identity -- and it must be PRESENT, or that
+                # state falls back to the repo-relative default where parallel
+                # workers race for the same files (and, run serially, mixed
+                # suite activity into the operator's real stealth accounting).
+                "TRAVIAN_COOKIE_FILE",
                 # Present BY the scrub, pinned to "false": with live writes
                 # defaulting on in production, absence would mean armed.
                 "TRAVIAN_TRADE_ROUTE_LIVE",
             }
         )
         assert leaked == [], f"credential/config env vars reachable from tests: {leaked}"
+        assert "travian-test-stealth-" in os.environ.get("TRAVIAN_COOKIE_FILE", ""), (
+            "stealth state is not isolated -- cookie, persona and scheduler files "
+            "would land in the repo and be shared across workers"
+        )
         assert os.environ.get("TRAVIAN_TRADE_ROUTE_LIVE") == "false", (
             "the suite's disarm pin is missing -- sessions built in tests could "
             "write to a real account"
