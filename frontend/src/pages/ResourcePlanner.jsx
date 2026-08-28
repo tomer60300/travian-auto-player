@@ -54,7 +54,18 @@ const splitProtected = (text) =>
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean)
-const SNAPSHOT_TTL_MS = 30 * 60 * 1000 // 30 minutes
+// Two tiers, because "is this snapshot usable" has two different answers.
+//
+// PLANNING consumes production rates, store capacities and Trade Office levels
+// -- figures that move over days. Gating that at 30 minutes cost ~15 game
+// requests of pure re-fetching in one planning session on an account whose
+// rates had not moved at all.
+//
+// GOING LIVE additionally consumes free merchants and stocks, which move minute
+// to minute and decide whether the plan can be staffed at all. That keeps the
+// strict gate.
+const SNAPSHOT_PLAN_TTL_MS = 4 * 60 * 60 * 1000 // 4 hours
+const SNAPSHOT_LIVE_TTL_MS = 30 * 60 * 1000 // 30 minutes
 const LS_MERCHANT = 'planner_merchant_model'
 // Named allocation profiles (e.g. Day / Night). Trade Office and the merchant
 // model stay account-wide — only the allocations differ per profile, so
@@ -410,7 +421,7 @@ export default function ResourcePlanner() {
   const dayCheckInputRev = useRef(0)
   const [snapshot, setSnapshot] = useState(null)
   // Client receipt time of the current snapshot, and an explicit opt-in to plan
-  // from a stale one (see SNAPSHOT_TTL_MS).
+  // from a stale one (see SNAPSHOT_PLAN_TTL_MS / SNAPSHOT_LIVE_TTL_MS).
   const [snapshotFetchedAt, setSnapshotFetchedAt] = useState(null)
   const [useStaleSnapshot, setUseStaleSnapshot] = useState(false)
   // Staleness is derived from the clock, but time passing does not re-render
@@ -497,6 +508,9 @@ export default function ResourcePlanner() {
   // union, so Day and Night rows coexist in the game (disjoint by departure
   // minute) and no daily profile switching is ever needed.
   const [wholeDay, setWholeDay] = useState(false)
+  // Run history from the app's own execution traces (zero game requests).
+  const [runHistory, setRunHistory] = useState(null)
+  const [historyLoading, setHistoryLoading] = useState(false)
   // Durable audit of the last LIVE run (see LS_LAST_RUN): survives the input
   // edits that clear execResult, and page reloads.
   const [lastRun, setLastRun] = useState(null)
@@ -522,7 +536,7 @@ export default function ResourcePlanner() {
   // cleared on unmount.
   useEffect(() => {
     if (!snapshot || snapshotFetchedAt == null) return undefined
-    const remaining = snapshotFetchedAt + SNAPSHOT_TTL_MS - Date.now()
+    const remaining = snapshotFetchedAt + SNAPSHOT_PLAN_TTL_MS - Date.now()
     if (remaining <= 0) {
       setNowMs(Date.now())
       return undefined
@@ -973,7 +987,7 @@ export default function ResourcePlanner() {
     // (the button-disable is a UI hint; this is the authoritative guard).
     if (
       !useStaleSnapshot &&
-      (snapshotFetchedAt == null || Date.now() - snapshotFetchedAt > SNAPSHOT_TTL_MS)
+      (snapshotFetchedAt == null || Date.now() - snapshotFetchedAt > SNAPSHOT_PLAN_TTL_MS)
     ) {
       toast.error(
         'Snapshot is stale — fetch fresh state, or tick “plan from this stale snapshot anyway”.'
@@ -1042,6 +1056,21 @@ export default function ResourcePlanner() {
     return { segments, skipped }
   }, [profiles, profileWindows])
 
+  // Reads the local trace files the app wrote on previous live runs. Costs
+  // nothing against the game, so it is safe to call whenever the operator opens
+  // the panel rather than on a timer.
+  const loadRunHistory = useCallback(async () => {
+    setHistoryLoading(true)
+    try {
+      const res = await api.get('/distribution/run-history', { params: { limit: 20 } })
+      setRunHistory(res.data)
+    } catch (err) {
+      toast.error(errorDetail(err, 'Could not read the run history'))
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [toast])
+
   // The execute payload for the chosen mode. Whole-day: segments carry each
   // profile's allocations and hours, so the top-level pair is stripped -- the
   // backend rejects them rather than silently ignoring one -- and the prune is
@@ -1077,10 +1106,12 @@ export default function ResourcePlanner() {
       if (
         !dryRun &&
         !useStaleSnapshot &&
-        (snapshotFetchedAt == null || Date.now() - snapshotFetchedAt > SNAPSHOT_TTL_MS)
+        (snapshotFetchedAt == null || Date.now() - snapshotFetchedAt > SNAPSHOT_LIVE_TTL_MS)
       ) {
         toast.error(
-          'Snapshot is stale — fetch fresh state, or tick “plan from this stale snapshot anyway”.'
+          'Snapshot is too old to write from — free merchants and stocks decide ' +
+            'whether this plan can be staffed, and they move by the minute. Fetch ' +
+            'fresh state, or tick “plan from this stale snapshot anyway”.'
         )
         return
       }
@@ -1718,7 +1749,12 @@ export default function ResourcePlanner() {
       ? nowMs - snapshotFetchedAt
       : null
     : null
-  const snapshotStale = !!snapshot && (snapshotFetchedAt == null || snapshotAgeMs > SNAPSHOT_TTL_MS)
+  const snapshotStale =
+    !!snapshot && (snapshotFetchedAt == null || snapshotAgeMs > SNAPSHOT_PLAN_TTL_MS)
+  // Stricter, and only consulted before a WRITE: free merchants and stocks
+  // decide whether the plan can be staffed, and those move minute to minute.
+  const snapshotStaleForLive =
+    !!snapshot && (snapshotFetchedAt == null || snapshotAgeMs > SNAPSHOT_LIVE_TTL_MS)
   const snapshotAgeLabel =
     snapshotAgeMs == null
       ? 'age unknown'
@@ -1828,14 +1864,22 @@ export default function ResourcePlanner() {
             stocks and free merchants may have changed. Fetch fresh state before building, or
             acknowledge to plan from it anyway.
           </p>
-          <label className="text-secondary text-xs flex items-center gap-1.5 mt-1.5">
-            <input
-              type="checkbox"
-              checked={useStaleSnapshot}
-              onChange={(e) => setUseStaleSnapshot(e.target.checked)}
-            />
-            Plan from this stale snapshot anyway
-          </label>
+          <div className="flex items-center gap-3 mt-1.5 flex-wrap">
+            {/* The honest fix, in reach. Before this the only action inside the
+                banner was the acknowledgement, while the button that actually
+                resolves it sat at the top of the page. */}
+            <button className="btn-secondary btn-xs" disabled={fetching} onClick={fetchSnapshot}>
+              {fetching ? 'Fetching…' : 'Fetch fresh state (3–4 requests)'}
+            </button>
+            <label className="text-secondary text-xs flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={useStaleSnapshot}
+                onChange={(e) => setUseStaleSnapshot(e.target.checked)}
+              />
+              Plan from this stale snapshot anyway
+            </label>
+          </div>
         </div>
       )}
 
@@ -3028,6 +3072,109 @@ export default function ResourcePlanner() {
         </div>
       )}
 
+      {/* What the automation has WRITTEN, from the app's own traces. Sits
+          outside the stage gates for the same reason the last-run card does:
+          this is the panel an operator opens when they are not planning at all,
+          just checking the thing still works. Deliberately a write history --
+          traces cannot say what the game shipped afterwards. */}
+      <div className="card p-3 mb-4">
+        <details
+          className="text-xs"
+          onToggle={(e) => {
+            if (e.currentTarget.open && !runHistory && !historyLoading) loadRunHistory()
+          }}
+        >
+          <summary className="cursor-pointer text-secondary">
+            Run history — what previous live runs wrote{' '}
+            <span className="text-primary">(0 requests)</span>
+          </summary>
+          {historyLoading && <p className="text-secondary mt-2">Reading traces…</p>}
+          {runHistory && runHistory.runs.length === 0 && (
+            <p className="text-secondary mt-2">
+              No live run has been recorded yet on this machine.
+            </p>
+          )}
+          {runHistory && runHistory.runs.length > 0 && (
+            <div className="mt-2 space-y-2">
+              <p className="text-secondary">
+                <strong className="text-primary">
+                  {runHistory.rollup.runs} run(s) · {runHistory.rollup.total_created} route(s)
+                  created
+                </strong>
+                {runHistory.rollup.total_problems > 0 &&
+                  ` · ${runHistory.rollup.total_problems} problem(s)`}
+                {runHistory.rollup.total_created_unverified > 0 && (
+                  <span className="text-warning">
+                    {' '}
+                    · {runHistory.rollup.total_created_unverified} unverified
+                  </span>
+                )}
+                {runHistory.rollup.failed_runs > 0 && (
+                  <span className="text-danger"> · {runHistory.rollup.failed_runs} failed</span>
+                )}
+              </p>
+              {runHistory.rollup.repeat_problem_villages.length > 0 && (
+                <p className="text-warning">
+                  Villages that hit a schedule mismatch in more than one run:{' '}
+                  {runHistory.rollup.repeat_problem_villages
+                    .map((v) => `${namesForVillageIds([v.village_id], villages) || v.village_id} (${v.runs}×)`)
+                    .join(', ')}{' '}
+                  — a destination whose live schedule keeps diverging is worth a look in the
+                  game.
+                </p>
+              )}
+              <table className="w-full">
+                <thead className="text-secondary uppercase">
+                  <tr>
+                    <th className="text-left py-1 pr-2">When</th>
+                    <th className="text-right px-2">Created</th>
+                    <th className="text-right px-2">Rows</th>
+                    <th className="text-right px-2">Disabled</th>
+                    <th className="text-left px-2">Result</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {runHistory.runs.map((r) => (
+                    <tr key={r.run_id} className="border-t border-gray-800">
+                      <td className="py-1 pr-2">{new Date(r.started_at).toLocaleString()}</td>
+                      <td className="text-right px-2">{r.created ?? '—'}</td>
+                      <td className="text-right px-2">{r.created_game_rows ?? '—'}</td>
+                      <td className="text-right px-2">{r.disabled ?? '—'}</td>
+                      <td
+                        className={`px-2 ${
+                          r.failed || r.needs_attention ? 'text-warning' : 'text-secondary'
+                        }`}
+                      >
+                        {r.failed
+                          ? `failed — ${r.error ?? 'no reason recorded'}`
+                          : !r.complete
+                            ? 'incomplete — the run did not finish writing its trace'
+                            : r.needs_attention
+                              ? [
+                                  r.created_unverified
+                                    ? `${r.created_unverified} unverified`
+                                    : null,
+                                  r.verify_failures ? `${r.verify_failures} verify failure(s)` : null,
+                                  r.problems ? `${r.problems} problem(s)` : null,
+                                  r.gold_club_blocked ? 'Gold Club refused' : null,
+                                  r.stopped_early ? 'stopped early' : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ')
+                              : 'clean'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <button className="btn-secondary btn-xs" onClick={loadRunHistory}>
+                Refresh (0 requests)
+              </button>
+            </div>
+          )}
+        </details>
+      </div>
+
       {/* Durable audit of the last LIVE run, rendered OUTSIDE the stage/plan
           gates on purpose: `plan` is cleared by any input edit and `stage`
           resets to 'snapshot' on reload, so nesting this inside them would hide
@@ -3812,6 +3959,25 @@ export default function ResourcePlanner() {
                               disable_existing, so stale routes are switched off
                               first and a partial failure can leave them off with
                               replacements missing (issue #67). */}
+                          {/* The strict tier, surfaced exactly where a write is
+                              about to happen. The BUILD gate is generous (rates
+                              and capacities move over days); this one is not,
+                              because free merchants and stocks decide whether
+                              the plan can be staffed at all. */}
+                          {snapshotStaleForLive && (
+                            <p className="text-danger text-xs mt-3">
+                              ⚠ This snapshot is {snapshotAgeLabel} — old enough that free
+                              merchants and stocks have probably moved. The plan may commit
+                              merchants that are no longer home.{' '}
+                              <button
+                                className="underline"
+                                disabled={fetching}
+                                onClick={fetchSnapshot}
+                              >
+                                {fetching ? 'Fetching…' : 'Fetch fresh state first'}
+                              </button>
+                            </p>
+                          )}
                           <p className="text-warning text-xs mt-3">
                             ⚠ Going live will first <strong>disable existing routes this plan no
                             longer wants</strong> on up to {plannedOriginCount} origin village

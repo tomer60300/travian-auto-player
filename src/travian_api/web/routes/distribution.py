@@ -17,8 +17,9 @@ import random
 import time
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from travian_api.exceptions import ActivityBudgetExhausted, NetworkError, TravianError
@@ -26,6 +27,7 @@ from travian_api.parsers.html_parser import (
     parse_village_stats_production,
     parse_village_stats_resources,
 )
+from travian_api.services.distribution import execution_trace
 from travian_api.services.distribution.allocation import (
     Allocation,
     AllocationError,
@@ -72,6 +74,12 @@ from travian_api.services.distribution.planner import (
     craft_plan,
 )
 from travian_api.services.distribution.route_revert import describe, plan_revert
+from travian_api.services.distribution.run_history import (
+    AccountRollup,
+    RunHistory,
+    RunSummary,
+    summarise_runs,
+)
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY
 from travian_api.services.distribution.storage import (
     ProfileSegment,
@@ -1425,6 +1433,29 @@ async def post_night_profile(
             ),
         )
 
+    # A store whose capacity could not be read cannot be given a ceiling: every
+    # night ceiling is a fraction OF the capacity. Reaching the derivation as
+    # None it raised TypeError and killed the whole request; guessing a capacity
+    # would be worse, because the guess decides how much crop is shipped into
+    # that store overnight. Refused by name, exactly as an unreadable crop
+    # balance is.
+    unreadable_capacity = sorted(
+        village_label(v.village_id, names)
+        for v in body.snapshot
+        if v.granary_capacity is None or v.warehouse_capacity is None
+    )
+    if unreadable_capacity:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "The store capacity of "
+                + ", ".join(unreadable_capacity)
+                + " could not be read, and every night ceiling is a fraction of "
+                "the capacity. Fetch fresh state so the warehouse and granary "
+                "sizes are known, then derive again."
+            ),
+        )
+
     villages = [
         NightVillage(
             village_id=v.village_id,
@@ -1547,6 +1578,39 @@ async def post_night_profile(
         trade_office_bonus_per_level=body.trade_office_bonus_per_level,
         merchant_reserve=body.merchant_reserve,
     )
+
+    # The typed baseline against the stores actually fetched. The derivation
+    # still obeys the typed number exactly -- this is a fact, not a correction,
+    # because which baseline to plan for is the operator's call and re-
+    # establishing it each night is what makes a profile last. The band is wide
+    # (20 percentage points) on purpose: stores drift constantly, and a check
+    # that fires every few percent is noise nobody reads on the day it matters.
+    _BAND = 0.20
+    for v in body.snapshot:
+        for _resource, _stock, _cap in (
+            (Resource.CROP, v.crop_stock, v.granary_capacity),
+            (Resource.LUMBER, v.lumber_stock, v.warehouse_capacity),
+        ):
+            if not _cap or _stock is None:
+                continue
+            _fill = _stock / _cap
+            if _fill > body.baseline_fill + _BAND:
+                _room = "past the target too" if _fill >= body.target_fill else "already"
+                warnings.append(
+                    f"{village_label(v.village_id, names)}: {_resource.value} is "
+                    f"{_fill:.0%} full, {_room} much fuller than the "
+                    f"{body.baseline_fill:.0%} baseline this profile assumes — the "
+                    f"room reserved to fill it will be shipped into a store that "
+                    f"cannot hold it. Re-check the baseline, or drain it first."
+                )
+            elif _fill < body.baseline_fill - _BAND:
+                warnings.append(
+                    f"{village_label(v.village_id, names)}: {_resource.value} is "
+                    f"{_fill:.0%} full, much emptier than the "
+                    f"{body.baseline_fill:.0%} baseline this profile assumes — the "
+                    f"night is sized to reach {body.target_fill:.0%} from there, so "
+                    f"it will fall short of the target rather than overfill."
+                )
 
     for resource, short in profile.unmet.items():
         if short > 1.0:
@@ -4518,4 +4582,143 @@ async def post_execute(
         next_chunk_wait_seconds=(round(random.uniform(*_CHUNK_GAP_S), 1) if unswept else None),
         warnings=warnings,
         problems=problems,
+    )
+
+
+class RunSummaryResponse(BaseModel):
+    """One past live run, as ITS OWN trace recorded it -- not as the game later
+    showed it. See `run_history` for the scope this is deliberately limited to:
+    what this app wrote and, where verified, saw land; never what the game did
+    with a shipment afterwards.
+    """
+
+    run_id: str
+    started_at: datetime
+    live_enabled: bool | None
+    complete: bool = Field(
+        description="Whether a run_end event was found. False means the run "
+        "was truncated -- killed mid-write or otherwise never reached its own "
+        "ending -- and the totals below are unknown rather than zero."
+    )
+    failed: bool
+    error: str | None = None
+    event_cap_truncated: bool = Field(
+        description="The run hit its own event cap (MAX_EVENTS) and stopped "
+        "recording further events; distinct from `complete` being False."
+    )
+    elapsed_s: float | None = None
+    created: int | None = None
+    created_unverified: int | None = None
+    not_created: int | None = None
+    created_game_rows: int | None = None
+    disabled: int | None = None
+    re_enabled: int | None = None
+    cargo_updated: int | None = None
+    deferred: int | None = None
+    outstanding: int | None = None
+    problems: int | None = None
+    stopped_early: bool | None = None
+    gold_club_blocked: bool | None = None
+    verify_failures: int
+    schedule_mismatch_origins: list[int] = []
+    needs_attention: bool = Field(
+        description="Something here is worth an operator's look: an unverified "
+        "or missing create, a verify failure, a reported problem, a Gold Club "
+        "block, an early stop, a schedule mismatch, an outright failure, or a "
+        "run that never reached its own ending."
+    )
+
+
+class RepeatProblemVillageResponse(BaseModel):
+    village_id: int
+    runs: int
+
+
+class AccountRollupResponse(BaseModel):
+    """Totals across the runs in this window, plus villages that keep coming up."""
+
+    runs: int
+    total_created: int
+    total_created_unverified: int
+    total_problems: int
+    verify_failures: int
+    gold_club_blocked_runs: int
+    stopped_early_runs: int
+    failed_runs: int
+    incomplete_runs: int
+    repeat_problem_villages: list[RepeatProblemVillageResponse] = []
+
+
+class RunHistoryResponse(BaseModel):
+    runs: list[RunSummaryResponse]
+    rollup: AccountRollupResponse
+
+
+def _run_summary_response(run: RunSummary) -> RunSummaryResponse:
+    return RunSummaryResponse(
+        run_id=run.run_id,
+        started_at=run.started_at,
+        live_enabled=run.live_enabled,
+        complete=run.complete,
+        failed=run.failed,
+        error=run.error,
+        event_cap_truncated=run.event_cap_truncated,
+        elapsed_s=run.elapsed_s,
+        created=run.created,
+        created_unverified=run.created_unverified,
+        not_created=run.not_created,
+        created_game_rows=run.created_game_rows,
+        disabled=run.disabled,
+        re_enabled=run.re_enabled,
+        cargo_updated=run.cargo_updated,
+        deferred=run.deferred,
+        outstanding=run.outstanding,
+        problems=run.problems,
+        stopped_early=run.stopped_early,
+        gold_club_blocked=run.gold_club_blocked,
+        verify_failures=run.verify_failures,
+        schedule_mismatch_origins=list(run.schedule_mismatch_origins),
+        needs_attention=run.needs_attention,
+    )
+
+
+def _rollup_response(rollup: AccountRollup) -> AccountRollupResponse:
+    return AccountRollupResponse(
+        runs=rollup.runs,
+        total_created=rollup.total_created,
+        total_created_unverified=rollup.total_created_unverified,
+        total_problems=rollup.total_problems,
+        verify_failures=rollup.verify_failures,
+        gold_club_blocked_runs=rollup.gold_club_blocked_runs,
+        stopped_early_runs=rollup.stopped_early_runs,
+        failed_runs=rollup.failed_runs,
+        incomplete_runs=rollup.incomplete_runs,
+        repeat_problem_villages=[
+            RepeatProblemVillageResponse(village_id=village_id, runs=runs)
+            for village_id, runs in rollup.repeat_problem_villages
+        ],
+    )
+
+
+@router.get("/run-history", response_model=RunHistoryResponse)
+async def get_run_history(
+    limit: int = Query(default=20, ge=1, le=200),
+    _user: User = Depends(get_current_user),
+):
+    """What recent live /execute runs WROTE, from their own traces. Zero game
+    requests, auth-only like /plan -- reading a local trace file costs nothing
+    against the game.
+
+    This is a write-history / audit report, NOT a delivery report: a trace
+    records what this app decided and put on the wire, and -- only where a run
+    verified it -- what the marketplace read-back showed right afterwards. It
+    never learns whether a shipment later actually fired, arrived, or was
+    changed by hand in-game. "Created" here means the write was made and, when
+    verified, seen to land as a route; it says nothing about what happened to
+    it after that.
+    """
+    history: RunHistory = summarise_runs(execution_trace.TRACE_DIR, limit=limit)
+    return RunHistoryResponse(
+        runs=[_run_summary_response(run) for run in history.runs],
+        rollup=_rollup_response(history.rollup),
     )
