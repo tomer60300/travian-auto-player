@@ -396,7 +396,7 @@ def parse_build_page(html: str, slot_id: int = 0) -> BuildingDetail:
 
     # Extract construction time
     construction_time = ""
-    time_element = soup.find(text=re.compile(r"\d+:\d+:\d+"))
+    time_element = soup.find(string=re.compile(r"\d+:\d+:\d+"))
     if time_element:
         construction_time = time_element.strip()
 

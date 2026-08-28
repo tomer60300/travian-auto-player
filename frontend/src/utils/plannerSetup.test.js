@@ -480,3 +480,19 @@ describe('foreign targets keep their cadence controls', () => {
     expect(() => roundTrip(doc)).toThrow(SetupFileError)
   })
 })
+
+describe('allocation values are whole units', () => {
+  it('rounds a raw-computation float from a file to something an input box can hold', () => {
+    // Seen live: a stored 43726.200918351606 rendered verbatim in the Value
+    // spinbutton. A /h rate has no sub-unit precision worth keeping.
+    const parsed = roundTrip({
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      account: null,
+      villages: [],
+      profiles: { Night: { crop: { 101: { mode: 'absolute', value: 43726.200918351606 } } } },
+    })
+
+    expect(parsed.profiles.Night.crop[101].value).toBe(43726)
+  })
+})

@@ -124,7 +124,11 @@ function parseProfile(raw, where) {
       if (!Number.isFinite(value)) {
         throw new SetupFileError(`${where}.${resource}[${vid}] has a non-numeric value.`)
       }
-      kept[id] = { mode: alloc.mode, value }
+      // Whole units. A file written from a raw computation can carry values
+      // like 43726.200918351606, and that lands verbatim in the operator's
+      // input box -- unreadable, uneditable, and pretending to a precision no
+      // /h rate has. Sub-unit differences are noise to the planner.
+      kept[id] = { mode: alloc.mode, value: Math.round(value) }
     }
     out[resource] = kept
   }
