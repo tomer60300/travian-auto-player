@@ -91,6 +91,52 @@ def _storage_inputs(body):
     return stocks, caps, own
 
 
+# `/plan` is "pure of game I/O" (see its docstring): same request in, same
+# response out, always. Several audits below replan the exact same account --
+# an unpermuted seed reused across test classes, mostly -- so memoise on the
+# request's own JSON rather than repeat a multi-second solve for input this
+# module already solved once. A hashing mistake here would show up immediately:
+# the strict-xfail relabelling tests below assert original and relabelled plans
+# DIFFER, so two distinct requests colliding on one cache entry turns an xfail
+# into an xpass and fails the suite.
+_post_plan_cache: dict[str, object] = {}
+
+
+@contextlib.contextmanager
+def _no_plan_cache():
+    """Run a block with plan memoisation disabled, and leave nothing behind.
+
+    Use this for ANY test that mutates global state -- a monkeypatched guard, a
+    patched planner internal -- around a call that reaches the planner. Two
+    distinct ways to get a FALSE PASS live here, and both were observed while
+    the cache was being introduced:
+
+    * a plan cached by an earlier, unmutated test satisfies the mutated call, so
+      the mutation never runs and `pytest.raises` reports DID NOT RAISE;
+    * the mutated call caches its own broken plan under that seed, which then
+      leaks into a later unmutated reader and fails *that* test instead.
+
+    Both failures are silent in the sense that matters: the suite still reports a
+    result, just not one about the code under test. Hence a named contextmanager
+    rather than a pair of bare clear() calls -- the next person writing a
+    mutation test needs to be able to find this.
+    """
+    _post_plan_cache.clear()
+    try:
+        yield
+    finally:
+        _post_plan_cache.clear()
+
+
+def _post_plan(request):
+    key = request.model_dump_json()
+    cached = _post_plan_cache.get(key)
+    if cached is None:
+        cached = asyncio.run(dist.post_plan(request, USER))
+        _post_plan_cache[key] = cached
+    return cached
+
+
 class TestOracleAgreement:
     """Two independent implementations of the same physics must agree."""
 
@@ -173,8 +219,8 @@ class TestVillageIdPermutation:
         account = random_account(seed, with_profiles=False)
         mapping = id_permutation(account.plan_request, seed + 1_000)
 
-        original = asyncio.run(dist.post_plan(account.plan_request, USER))
-        relabelled = asyncio.run(dist.post_plan(permute_ids(account.plan_request, mapping), USER))
+        original = _post_plan(account.plan_request)
+        relabelled = _post_plan(permute_ids(account.plan_request, mapping))
 
         assert plan_signature(relabelled, mapping) == plan_signature(original), (
             f"seed {seed}: the plan changed when only the village ids moved"
@@ -187,8 +233,8 @@ class TestVillageIdPermutation:
         account = next(a for a in adversarial_accounts() if a.name == "adv-tied-suppliers")
         mapping = id_permutation(account.plan_request, 77)
 
-        original = asyncio.run(dist.post_plan(account.plan_request, USER))
-        relabelled = asyncio.run(dist.post_plan(permute_ids(account.plan_request, mapping), USER))
+        original = _post_plan(account.plan_request)
+        relabelled = _post_plan(permute_ids(account.plan_request, mapping))
 
         assert relabelled.total_merchants == original.total_merchants
         assert len(relabelled.rows) == len(original.rows)
@@ -200,8 +246,8 @@ class TestVillageIdPermutation:
         account = case_account(index)
         mapping = id_permutation(account.plan_request, 500 + index)
 
-        original = asyncio.run(dist.post_plan(account.plan_request, USER))
-        relabelled = asyncio.run(dist.post_plan(permute_ids(account.plan_request, mapping), USER))
+        original = _post_plan(account.plan_request)
+        relabelled = _post_plan(permute_ids(account.plan_request, mapping))
 
         assert plan_signature(relabelled, mapping) == plan_signature(original)
 
@@ -240,7 +286,7 @@ class TestPlanArithmetic:
         as over-allocation rather than as a routing error.
         """
         account = random_account(seed, with_profiles=False)
-        result = asyncio.run(dist.post_plan(account.plan_request, USER))
+        result = _post_plan(account.plan_request)
         if any(u.unallocated < -1e-6 for u in result.unallocated):
             pytest.skip("this seed over-allocates on purpose; the ceiling does not apply")
 
@@ -270,7 +316,7 @@ class TestPlanArithmetic:
         flight is ceil(round trip / cycle). One set too few is a budget that
         cannot be staffed; one too many is waste."""
         account = random_account(seed, with_profiles=False)
-        result = asyncio.run(dist.post_plan(account.plan_request, USER))
+        result = _post_plan(account.plan_request)
 
         for budget in result.budgets:
             for leg in budget.legs:
@@ -291,7 +337,7 @@ class TestPlanArithmetic:
         reserve = account.plan_request.merchant_reserve
         totals = {v.village_id: v.merchants_total for v in account.plan_request.snapshot}
 
-        result = asyncio.run(dist.post_plan(account.plan_request, USER))
+        result = _post_plan(account.plan_request)
 
         for budget in result.budgets:
             if budget.village_id < 0:
@@ -305,7 +351,7 @@ class TestPlanArithmetic:
         silent overflow is resources thrown away with nothing said about it."""
         account = next(a for a in adversarial_accounts() if a.name == "adv-ship-into-a-full-store")
 
-        result = asyncio.run(dist.post_plan(account.plan_request, USER))
+        result = _post_plan(account.plan_request)
 
         overflow = [w for w in result.warnings if "hits the cap" in w]
         assert overflow, "a route into a store already at its cap reported no overflow"
@@ -415,7 +461,7 @@ class TestKnownDefects:
     def test_a_crop_neutral_midway_village_can_act_as_a_relay_hub(self) -> None:
         account = next(a for a in adversarial_accounts() if a.name == "adv-relay-shape")
 
-        result = asyncio.run(dist.post_plan(account.plan_request, USER))
+        result = _post_plan(account.plan_request)
 
         senders = {r.origin for r in result.rows if Resource.CROP in r.cargo}
         receivers = {r.destination for r in result.rows if Resource.CROP in r.cargo}
@@ -436,11 +482,7 @@ class TestKnownDefects:
         # The hub keeps 400/h of the 500/h it grows, so it ships 100/h.
         allocations[Resource.CROP][hub] = AllocationInput(mode=AllocationMode.ABSOLUTE, value=400.0)
 
-        result = asyncio.run(
-            dist.post_plan(
-                account.plan_request.model_copy(update={"allocations": allocations}), USER
-            )
-        )
+        result = _post_plan(account.plan_request.model_copy(update={"allocations": allocations}))
 
         senders = {r.origin for r in result.rows if Resource.CROP in r.cargo}
         receivers = {r.destination for r in result.rows if Resource.CROP in r.cargo}
@@ -512,8 +554,8 @@ class TestKnownDefects:
         account = random_account(seed, with_profiles=False)
         mapping = id_permutation(account.plan_request, seed + 1_000)
 
-        original = asyncio.run(dist.post_plan(account.plan_request, USER))
-        relabelled = asyncio.run(dist.post_plan(permute_ids(account.plan_request, mapping), USER))
+        original = _post_plan(account.plan_request)
+        relabelled = _post_plan(permute_ids(account.plan_request, mapping))
 
         assert plan_signature(relabelled, mapping) == plan_signature(original)
 
@@ -527,16 +569,12 @@ class TestKnownDefects:
     )
     def test_relabelling_does_not_change_what_the_plan_costs(self) -> None:
         account = random_account(7, with_profiles=False)
-        original = asyncio.run(dist.post_plan(account.plan_request, USER))
+        original = _post_plan(account.plan_request)
 
         totals = {original.total_merchants}
         for k in range(3):
             mapping = id_permutation(account.plan_request, 70 + k)
-            totals.add(
-                asyncio.run(
-                    dist.post_plan(permute_ids(account.plan_request, mapping), USER)
-                ).total_merchants
-            )
+            totals.add(_post_plan(permute_ids(account.plan_request, mapping)).total_merchants)
 
         assert len(totals) == 1, f"merchant total varies with the labelling: {sorted(totals)}"
 
@@ -554,8 +592,8 @@ class TestKnownDefects:
         account = case_account(2)
         mapping = id_permutation(account.plan_request, 502)
 
-        original = asyncio.run(dist.post_plan(account.plan_request, USER))
-        relabelled = asyncio.run(dist.post_plan(permute_ids(account.plan_request, mapping), USER))
+        original = _post_plan(account.plan_request)
+        relabelled = _post_plan(permute_ids(account.plan_request, mapping))
 
         back = {new: old for old, new in mapping.items()}
         assert {b.village_id for b in original.budgets if b.over_budget} == {
@@ -577,7 +615,7 @@ class TestKnownDefects:
             a for a in adversarial_accounts() if a.name == "adv-negative-absolute-target"
         )
 
-        result = asyncio.run(dist.post_plan(account.plan_request, USER))
+        result = _post_plan(account.plan_request)
 
         lumber = next(u for u in result.unallocated if u.resource is Resource.LUMBER)
         assert lumber.unallocated <= lumber.total_production
@@ -722,7 +760,12 @@ class TestTheGuardsActuallyGuard:
     @pytest.mark.slow
     @pytest.mark.parametrize("name", sorted(MUTATIONS))
     def test_the_matching_guard_catches_its_mutation(self, name: str) -> None:
-        with self.MUTATIONS[name](), pytest.raises(AssertionError):
+        # A GUARD is a real test method, and several of those are memoised by
+        # seed (see `_post_plan`). Clear before: a plan cached from an earlier,
+        # unmutated call would make this pass without the mutation ever running.
+        # Clear after: the mutated run may itself cache a broken plan under that
+        # same seed, which would then leak into a later, unmutated reader.
+        with _no_plan_cache(), self.MUTATIONS[name](), pytest.raises(AssertionError):
             self.GUARDS[name]()
 
     @pytest.mark.parametrize("name", sorted(GUARDS))

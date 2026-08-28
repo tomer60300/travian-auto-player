@@ -41,7 +41,7 @@ from travian_api.services.distribution.optimizer import VillageState, build_plan
 from travian_api.web.routes import distribution as dist
 
 from .distribution_synthetic import random_account
-from .test_distribution_audit import USER
+from .test_distribution_audit import USER, _post_plan
 
 GEOMETRY = MapGeometry(span=401, speed_fields_per_hour=12.0)
 MODEL = EUROPE2_TEUTON
@@ -281,9 +281,10 @@ class TestTheSoftCapSpreadsLoad:
         field and its threading are covered as well."""
         account = random_account(seed, with_profiles=False)
 
-        tight = asyncio.run(
-            dist.post_plan(account.plan_request.model_copy(update={"merchant_headroom": 0.0}), USER)
-        )
+        # The tight (headroom=0.0) plan is the same request for all three
+        # headroom values parametrized over the same seed -- memoised so it is
+        # solved once per seed rather than three times.
+        tight = _post_plan(account.plan_request.model_copy(update={"merchant_headroom": 0.0}))
         spread = asyncio.run(
             dist.post_plan(
                 account.plan_request.model_copy(update={"merchant_headroom": headroom}), USER
