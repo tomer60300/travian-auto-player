@@ -99,9 +99,9 @@ Every task MUST follow this exact pipeline. Do not skip steps.
 
 ### Phase 3: Verify
 
-Scope the gate to what you actually changed. The full backend suite takes ~4-5
-minutes, and it is paid on every iteration — running it to verify a Markdown
-edit verifies nothing and is pure waste.
+Scope the gate to what you actually changed. The full backend suite takes
+~1 minute in parallel (`-n 8`; measured 2026-08-28: 57s vs 185s serial) — even
+so, running it to verify a Markdown edit verifies nothing and is pure waste.
 
 **Always:**
 1. Backend linting, if any Python changed: `uv run ruff check . && uv run ruff format --check .`
@@ -109,13 +109,15 @@ edit verifies nothing and is pure waste.
 3. If fixing a bug: write a FAILING test first, then fix, then show it passing.
 
 **Backend (Python) changed:**
-4. `uv run --extra dev --extra web pytest -q --tb=short`
+4. `uv run --extra dev --extra web pytest -q -n 8 --tb=short`
    Use `--extra dev --extra web`. A bare `uv run pytest` does NOT install the
    optional extras, so it silently falls through to a global pytest whose
    editable install may point at a different checkout — which has already
    produced test results describing the wrong source tree.
-   While iterating, `-m "not slow"` skips the largest-account planner cases
-   (~48% of runtime, 20 tests). Run the full set before committing.
+   `-n 8` (pytest-xdist) is safe here: every process gets its own tmp DB, tmp
+   trace dir, scrubbed env and the live-writes pin, so workers cannot collide.
+   While iterating, `-m "not slow"` additionally skips the largest-account
+   planner cases. Run the full set (still `-n 8`) before committing.
 
 **Frontend changed:**
 5. `cd frontend && npx eslint . --max-warnings=20 && npm test && npm run build`

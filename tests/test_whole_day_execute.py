@@ -31,6 +31,7 @@ from travian_api.web.routes.distribution import ExecuteRequest
 
 from .test_distribution_execute import (
     _MINUTES_PER_DAY,
+    ExistingRoute,
     SheetRow,
     _execute,
     _FakeLiveSvc,
@@ -90,6 +91,24 @@ def _segments_body(**extra):
     payload = {
         "snapshot": [
             {
+                "village_id": 20011,
+                "name": "11",
+                "x": 10,
+                "y": 0,
+                "merchants_total": 20,
+                "merchants_free": 20,
+                "lumber_per_hour": 2000,
+                "clay_per_hour": 1000,
+                "iron_per_hour": 1000,
+                "crop_per_hour": 2000,
+                "lumber_stock": 10000,
+                "clay_stock": 10000,
+                "iron_stock": 10000,
+                "crop_stock": 10000,
+                "warehouse_capacity": 80000,
+                "granary_capacity": 80000,
+            },
+            {
                 "village_id": 20003,
                 "name": "03",
                 "x": 0,
@@ -106,7 +125,7 @@ def _segments_body(**extra):
                 "crop_stock": 10000,
                 "warehouse_capacity": 80000,
                 "granary_capacity": 80000,
-            }
+            },
         ],
         "config": [{"village_id": 20003, "trade_office_level": 10}],
         "allocations": {},
@@ -359,3 +378,47 @@ class TestThePreviewBillsTheRun:
         assert forecast["marketplace_reads"] >= 1
         assert forecast["trim_deletes"] == 1, "one origin, one batched trim"
         assert forecast["estimated_total"] <= forecast["estimated_total_max"]
+
+
+class TestOneVisitReportsItselfHonestly:
+    def test_shared_destination_actions_each_count_their_own_rows(self):
+        """The verify counts rows per (destination, minute), not per key: a
+        key-level count handed Day's and Night's action the SAME twelve rows,
+        so the response claimed 24 rows where 12 exist."""
+        svc = _FakeLiveSvc(existing={20003: _night_other_rows()})
+
+        res = _run_union(svc)
+
+        by_route = {
+            (a.destination, a.cycle_hours): a.observed_game_rows
+            for a in res.actions
+            if a.status == "created"
+        }
+        # Day 4h -> 6 pre-trim rows; Night 1h -> 24 pre-trim rows, same key.
+        assert by_route[(20011, 4)] == 6, by_route
+        assert by_route[(20011, 1)] == 24, by_route
+
+    def test_the_provisioning_sweep_equals_an_ordinary_run_plus_the_sweep(self):
+        """Whole-day sweep-create parity: reconcile_all_origins with a create
+        budget must build exactly what an ordinary capped run builds, while
+        still sweeping villages the plan does not ship from."""
+        ordinary = _FakeLiveSvc()
+        _run_union(ordinary)
+
+        sweeping = _FakeLiveSvc(
+            existing={
+                # A village the plan does not use, holding a stale route the
+                # sweep must switch off while it creates everywhere else.
+                20011: [ExistingRoute(9000, 77777, 99, 98, active=True)]
+            }
+        )
+        body = _segments_body(reconcile_all_origins=True, max_origins_per_run=0)
+        res = _run_union(sweeping, body=body)
+
+        assert {(r.dest_village_id, r.cycle_hours) for r in sweeping.created} == {
+            (r.dest_village_id, r.cycle_hours) for r in ordinary.created
+        }, "the sweep must create the same blueprint an ordinary run does"
+        assert any(vid == 20011 for vid, _ in sweeping.disabled), (
+            "and still disable the stale route on the village the plan skips"
+        )
+        assert sorted(res.swept_origins) == [20003, 20011], res.swept_origins

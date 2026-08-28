@@ -16,6 +16,7 @@ import { METER_TONE, allocationMeterSeverity } from '../utils/plannerAllocation'
 import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from '../utils/villageRefs'
 import { planStatus, relayLegIndex } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
+import { groupWarnings } from '../utils/warningGroups'
 import { copyToClipboard } from '../utils/clipboard'
 
 // Owned state the game will not tell us, kept per village. Trade Office level
@@ -3703,12 +3704,33 @@ export default function ResourcePlanner() {
                         ))}
                       </ul>
                     )}
+                    {/* Grouped by sentence shape, not dumped: a whole-day
+                        preview emits hundreds of per-route/per-store lines that
+                        differ only in their numbers, and a wall that long stops
+                        being read at all. Every original line stays reachable
+                        inside its group. */}
                     {execResult.warnings.length > 0 && (
-                      <ul className="text-xs text-secondary list-disc list-inside mb-2">
-                        {execResult.warnings.map((w, i) => (
-                          <li key={i}>{w}</li>
-                        ))}
-                      </ul>
+                      <div className="text-xs text-secondary mb-2 space-y-1">
+                        {groupWarnings(execResult.warnings).map((g) =>
+                          g.count === 1 ? (
+                            <p key={g.signature} className="list-item list-disc list-inside">
+                              {g.lines[0]}
+                            </p>
+                          ) : (
+                            <details key={g.signature}>
+                              <summary className="cursor-pointer">
+                                <span className="font-mono">{g.count}×</span> {g.lines[0]}{' '}
+                                <span className="text-primary">(show all {g.count})</span>
+                              </summary>
+                              <ul className="list-disc list-inside ml-4 mt-1">
+                                {g.lines.map((w, i) => (
+                                  <li key={i}>{w}</li>
+                                ))}
+                              </ul>
+                            </details>
+                          )
+                        )}
+                      </div>
                     )}
                     <table className="w-full text-xs">
                       <thead className="text-secondary uppercase">
@@ -3724,7 +3746,11 @@ export default function ResourcePlanner() {
                         </tr>
                       </thead>
                       <tbody>
-                        {execResult.actions.map((a, i) => (
+                        {/* Deferred rows dominate a capped preview -- 93 of
+                            94 on the first whole-day chunk -- and they all say
+                            the same thing. They collapse to one line below the
+                            table; everything the run acted on stays a row. */}
+                        {execResult.actions.filter((a) => a.status !== 'deferred').map((a, i) => (
                           <tr key={i} className="border-t border-gray-800">
                             <td className="py-1 px-2">
                               {a.origin_name} → {a.destination_name}{' '}
@@ -3758,6 +3784,25 @@ export default function ResourcePlanner() {
                         ))}
                       </tbody>
                     </table>
+                    {execResult.actions.some((a) => a.status === 'deferred') && (
+                      <details className="text-xs text-secondary mt-1 mb-2">
+                        <summary className="cursor-pointer">
+                          {execResult.actions.filter((a) => a.status === 'deferred').length}{' '}
+                          route(s) deferred to a later run — the per-run caps leave them for
+                          the next chunk. <span className="text-primary">Show them</span>
+                        </summary>
+                        <ul className="list-disc list-inside ml-4 mt-1 font-mono">
+                          {execResult.actions
+                            .filter((a) => a.status === 'deferred')
+                            .map((a, i) => (
+                              <li key={i}>
+                                {a.origin_name} → {a.destination_name} · {a.cycle_hours}h ·{' '}
+                                {a.merchants} merchant(s){a.segment ? ` · ${a.segment}` : ''}
+                              </li>
+                            ))}
+                        </ul>
+                      </details>
+                    )}
 
                     {execResult.dry_run &&
                       (execResult.live_enabled ? (

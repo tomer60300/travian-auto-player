@@ -4101,10 +4101,55 @@ async def post_execute(
                             # the reconciler matches routes (village id for own
                             # villages, coordinates for foreign targets), so
                             # attribution and recognition cannot drift apart.
-                            fresh_rows: dict[int | tuple[int, int], int] = {}
+                            # ...and split per CREATE within the destination: a
+                            # whole-day visit can create Day's and Night's route
+                            # to the same key back to back, and a key-level
+                            # count handed each action the other's rows as well
+                            # -- two actions each claiming all twelve. Rows are
+                            # assigned EXCLUSIVELY, most-specific route first
+                            # (fewest fan-out rows), exact cargo as the
+                            # tie-break at shared minutes; an hourly route's
+                            # minute set contains every other cycle's, so
+                            # minute membership alone over-counts on exactly
+                            # the accounts this exists for.
+                            fresh_by_key: dict[int | tuple[int, int], list[ExistingRoute]] = {}
                             for e in fresh:
                                 for key in _existing_keys(e):
-                                    fresh_rows[key] = fresh_rows.get(key, 0) + 1
+                                    fresh_by_key.setdefault(key, []).append(e)
+                            observed_by_action: dict[int, int] = {}
+                            _claim_groups: dict[int | tuple[int, int], list] = {}
+                            for action, route in created_here:
+                                _claim_groups.setdefault(_desired_key(route), []).append(
+                                    (action, route)
+                                )
+                            for key, group in _claim_groups.items():
+                                unclaimed = list(fresh_by_key.get(key, []))
+                                for action, route in sorted(
+                                    group, key=lambda ar: _game_rows(ar[1].cycle_hours)
+                                ):
+                                    own = {
+                                        (route.dispatch_minute + _i * route.cycle_hours * 60)
+                                        % MINUTES_PER_DAY
+                                        for _i in range(_game_rows(route.cycle_hours))
+                                    }
+                                    want = _game_rows(route.cycle_hours)
+                                    cargo = {r: a for r, a in route.cargo.items() if a}
+                                    taken: list[ExistingRoute] = []
+                                    for exact in (True, False):
+                                        for e in unclaimed:
+                                            if len(taken) >= want or e in taken:
+                                                continue
+                                            if _row_minute(e) not in own:
+                                                continue
+                                            if exact and not (
+                                                e.cargo is not None
+                                                and {r: a for r, a in e.cargo.items() if a} == cargo
+                                            ):
+                                                continue
+                                            taken.append(e)
+                                    unclaimed = [e for e in unclaimed if e not in taken]
+                                    observed_by_action[id(action)] = len(taken)
+
                             # Confine the fan-out to the profile hours, by
                             # subtraction. Done here because `fresh` is already the
                             # set of rows these creates are CONFIRMED to have made:
@@ -4321,7 +4366,7 @@ async def post_execute(
                                 )
                             for action, route in created_here:
                                 key = _desired_key(route)
-                                observed = fresh_rows.get(key, 0)
+                                observed = observed_by_action.get(id(action), 0)
                                 # Recorded whether it is what was predicted or
                                 # not, and recorded even when it is zero: zero
                                 # measured is a result, unlike "not measured".
