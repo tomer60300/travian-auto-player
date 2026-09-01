@@ -17,6 +17,12 @@ import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from '../u
 import { planStatus, relayLegIndex } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
 import { groupWarnings } from '../utils/warningGroups'
+import {
+  filterVillages,
+  nextSort,
+  sortVillages,
+  summariseSnapshot,
+} from '../utils/snapshotSummary'
 import { copyToClipboard } from '../utils/clipboard'
 
 // Owned state the game will not tell us, kept per village. Trade Office level
@@ -240,6 +246,39 @@ const signed = (n) => (n == null ? '—' : `${n > 0 ? '+' : ''}${Math.round(n).t
 /** Net crop, shown with a word as well as a colour.
  *  Design Guideline — Accessibility: never rely on colour alone to convey
  *  information, so "starving" is spelled out rather than implied by red. */
+/** A column header that sorts, and says which way it is sorting.
+ *
+ *  The arrow is paired with aria-sort rather than carrying the state alone, so
+ *  the ordering is announced rather than only seen. Cycling reaches unsorted on
+ *  the third press: the account's own order is the default and has to stay
+ *  reachable without a page reload.
+ */
+function SortHeader({ label, col, sortKey, sortDir, onSort }) {
+  const active = sortKey === col
+  return (
+    <button
+      type="button"
+      className={`inline-flex items-center gap-1 uppercase ${
+        active ? 'text-primary' : 'hover:text-primary'
+      }`}
+      aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+      title={
+        active
+          ? sortDir === 'asc'
+            ? `Sorted by ${label}, lowest first. Click for highest first.`
+            : `Sorted by ${label}, highest first. Click to return to account order.`
+          : `Sort by ${label}`
+      }
+      onClick={() => onSort(col)}
+    >
+      {label}
+      <span aria-hidden="true" className="text-[10px]">
+        {active ? (sortDir === 'asc' ? '\u25B2' : '\u25BC') : '\u2195'}
+      </span>
+    </button>
+  )
+}
+
 function CropCell({ village }) {
   if (village.crop_per_hour == null) {
     return (
@@ -395,6 +434,11 @@ export default function ResourcePlanner() {
   // and the merchant model.
   const accountKey = serverUrl && playerName ? `${serverUrl.replace(/\/+$/, '')}|${playerName}` : null
   const [stage, setStage] = useState('snapshot')
+  // Snapshot table view state. `sortKey` of null means the account's own order,
+  // which is meaningful and stays the default.
+  const [sortKey, setSortKey] = useState(null)
+  const [sortDir, setSortDir] = useState('asc')
+  const [rowFilter, setRowFilter] = useState(null)
   // Allocate stage has two views: the per-resource editor, and a read-only
   // result grid grouped by village showing what each ends up with. Grouping by
   // material is how the targets are EDITED; grouped by village is how the
@@ -1070,6 +1114,32 @@ export default function ResourcePlanner() {
       setHistoryLoading(false)
     }
   }, [toast])
+
+  // Reads the same fields the rows render, so the strip can never disagree
+  // with the table beneath it.
+  const health = useMemo(
+    () => summariseSnapshot(villages, tradeOffice),
+    [villages, tradeOffice]
+  )
+
+  const visibleVillages = useMemo(
+    () => sortVillages(filterVillages(villages, rowFilter, tradeOffice), sortKey, sortDir),
+    [villages, rowFilter, tradeOffice, sortKey, sortDir]
+  )
+
+  // Ascending, then descending, then the account's own order back -- the
+  // ordering is never a one-way door. The cycle is computed by a pure helper
+  // and both pieces of state are set from it, rather than deriving one inside
+  // the other's updater: React may invoke an updater more than once, which
+  // would advance the cycle twice from a single click.
+  const toggleSort = useCallback(
+    (key) => {
+      const next = nextSort({ key: sortKey, direction: sortDir }, key)
+      setSortKey(next.key)
+      setSortDir(next.direction)
+    },
+    [sortKey, sortDir]
+  )
 
   // The execute payload for the chosen mode. Whole-day: segments carry each
   // profile's allocations and hours, so the top-level pair is stripped -- the
@@ -1985,6 +2055,100 @@ export default function ResourcePlanner() {
           {/* Trade Office and Crop alert below are typed by hand and stored per
               origin, so they do not follow you between :80, :8001, the LAN
               address or Tailscale. Save them once and reload them instead. */}
+          {/* The account in one line. Every number here is a fact the operator
+              otherwise derives by scanning the rows, and each problem count is
+              a button that isolates exactly those rows. */}
+          <div className="flex items-center gap-2 flex-wrap mb-3 pb-3 border-b border-gray-800">
+            <span className="text-secondary text-xs uppercase">Account</span>
+            <span className="text-xs font-mono">
+              {health.total} villages
+            </span>
+            <span className="text-secondary text-xs">·</span>
+            <span
+              className={`text-xs font-mono ${
+                health.netCropPerHour < 0 ? 'text-danger' : 'text-success'
+              }`}
+              title={
+                health.netIsComplete
+                  ? 'Sum of every village crop rate.'
+                  : 'Sum of the readable rates only — villages whose rate could not be derived are left out rather than counted as zero.'
+              }
+            >
+              net {signed(health.netCropPerHour)}/h{health.netIsComplete ? '' : ' (partial)'}
+            </span>
+
+            {health.starving.length > 0 && (
+              <button
+                className={`text-xs px-2 py-0.5 rounded border ${
+                  rowFilter === 'starving'
+                    ? 'border-danger text-danger bg-danger/10'
+                    : 'border-gray-700 text-danger hover:bg-danger/10'
+                }`}
+                aria-pressed={rowFilter === 'starving'}
+                onClick={() => setRowFilter((f) => (f === 'starving' ? null : 'starving'))}
+                title="Show only the villages consuming more crop than they make."
+              >
+                {health.starving.length} starving ({signed(health.starvingCropPerHour)}/h)
+              </button>
+            )}
+
+            {health.noFreeMerchants.length > 0 && (
+              <button
+                className={`text-xs px-2 py-0.5 rounded border ${
+                  rowFilter === 'noMerchants'
+                    ? 'border-warning text-warning bg-warning/10'
+                    : 'border-gray-700 text-warning hover:bg-warning/10'
+                }`}
+                aria-pressed={rowFilter === 'noMerchants'}
+                onClick={() => setRowFilter((f) => (f === 'noMerchants' ? null : 'noMerchants'))}
+                title="Every merchant is already in flight, so these villages cannot start a route right now."
+              >
+                {health.noFreeMerchants.length} with no free merchants
+              </button>
+            )}
+
+            {health.unknownCrop.length > 0 && (
+              <button
+                className={`text-xs px-2 py-0.5 rounded border ${
+                  rowFilter === 'unknownCrop'
+                    ? 'border-warning text-warning bg-warning/10'
+                    : 'border-gray-700 text-warning hover:bg-warning/10'
+                }`}
+                aria-pressed={rowFilter === 'unknownCrop'}
+                onClick={() => setRowFilter((f) => (f === 'unknownCrop' ? null : 'unknownCrop'))}
+                title="Crop rate could not be derived for these villages. They are left out of the net above rather than counted as zero."
+              >
+                {health.unknownCrop.length} unknown crop
+              </button>
+            )}
+
+            {health.missingTradeOffice.length > 0 && (
+              <button
+                className={`text-xs px-2 py-0.5 rounded border ${
+                  rowFilter === 'missingTradeOffice'
+                    ? 'border-warning text-warning bg-warning/10'
+                    : 'border-gray-700 text-warning hover:bg-warning/10'
+                }`}
+                aria-pressed={rowFilter === 'missingTradeOffice'}
+                onClick={() =>
+                  setRowFilter((f) => (f === 'missingTradeOffice' ? null : 'missingTradeOffice'))
+                }
+                title="No Trade Office level typed. The planner floors these to 0, which over-provisions merchants rather than breaching the budget."
+              >
+                {health.missingTradeOffice.length} without Trade Office
+              </button>
+            )}
+
+            {rowFilter && (
+              <button
+                className="text-xs text-secondary underline"
+                onClick={() => setRowFilter(null)}
+              >
+                show all {health.total}
+              </button>
+            )}
+          </div>
+
           <div className="flex items-center gap-2 flex-wrap mb-3">
             <span className="text-secondary text-xs">Typed columns:</span>
             <button
@@ -2078,12 +2242,60 @@ export default function ResourcePlanner() {
             <table className="w-full text-sm">
               <thead className="text-secondary text-xs uppercase">
                 <tr>
-                  <th className="text-left py-2 px-2 sticky-col">Village</th>
-                  <th className="text-right px-2">Lumber/h</th>
-                  <th className="text-right px-2">Clay/h</th>
-                  <th className="text-right px-2">Iron/h</th>
-                  <th className="text-left px-2">Net crop</th>
-                  <th className="text-right px-2">Merchants</th>
+                  <th className="text-left py-2 px-2 sticky-col">
+                    <SortHeader
+                      label="Village"
+                      col="name"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                    />
+                  </th>
+                  <th className="text-right px-2">
+                    <SortHeader
+                      label="Lumber/h"
+                      col="lumber"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                    />
+                  </th>
+                  <th className="text-right px-2">
+                    <SortHeader
+                      label="Clay/h"
+                      col="clay"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                    />
+                  </th>
+                  <th className="text-right px-2">
+                    <SortHeader
+                      label="Iron/h"
+                      col="iron"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                    />
+                  </th>
+                  <th className="text-left px-2">
+                    <SortHeader
+                      label="Net crop"
+                      col="crop"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                    />
+                  </th>
+                  <th className="text-right px-2">
+                    <SortHeader
+                      label="Merchants"
+                      col="merchants"
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={toggleSort}
+                    />
+                  </th>
                   <th className="text-right px-2">Trade Office</th>
                   <th
                     className="text-right px-2"
@@ -2094,7 +2306,7 @@ export default function ResourcePlanner() {
                 </tr>
               </thead>
               <tbody>
-                {villages.map((v) => (
+                {visibleVillages.map((v) => (
                   <tr
                     key={v.village_id}
                     className="group touch-target border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors"
@@ -2155,6 +2367,14 @@ export default function ResourcePlanner() {
               </tbody>
             </table>
           </div>
+          {rowFilter && (
+            <p className="text-xs text-secondary mt-2">
+              Showing {visibleVillages.length} of {health.total} villages.{' '}
+              <button className="underline" onClick={() => setRowFilter(null)}>
+                Clear filter
+              </button>
+            </p>
+          )}
           {snapshot?.warnings?.length > 0 && (
             <div className="mt-3">
               {/* Explicit label so "this is a warning" is not carried by colour
