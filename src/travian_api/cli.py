@@ -29,6 +29,7 @@ from .services.military_service import MilitaryService
 from .services.reports_service import ReportsService
 from .services.target_resolver import TargetResolver
 from .services.video_reward_service import REWARD_TYPES, VideoRewardService
+from .stealth.timing import HumanTiming
 
 app = typer.Typer(
     name="travian",
@@ -83,6 +84,52 @@ def main_callback(
         _noise_rate_override = noise_rate
     if max_hours is not None:
         _max_hours_override = max_hours
+
+
+# Cap on the variable part of a loop wait, as a multiple of the interval. Mirrors
+# web/ws/_loop_stealth._MAX_WAIT_INTERVAL_MULTIPLE and exists for the same
+# reason: HumanTiming.delay's own clamp is 15x, and a 15x stall on a 15-minute
+# interval is nearly four hours -- indistinguishable from a hung loop to whoever
+# is watching the terminal.
+_MAX_LOOP_WAIT_MULTIPLE = 4.0
+
+# The tail cut above removes mass from the far right of the draw, which pulls the
+# mean DOWN -- and a mean below the configured interval means the loop sends MORE
+# traffic than the operator asked for, which is the opposite of what a stealth
+# change may do. Measured over 4,000 draws at 60s / 300s / 900s: capping at 4x
+# leaves the mean at 0.83-0.86x the interval, i.e. ~19% more requests. Drawing on
+# 1.25x the interval puts it back at 1.00-1.04x. Named and measured rather than
+# tuned by feel, and the test asserts the resulting mean rather than this number,
+# so a change to HumanTiming's shape fails loudly instead of silently speeding
+# every loop up.
+_TAIL_CUT_COMPENSATION = 1.25
+
+
+def _loop_wait(client: Any, interval: float) -> float:
+    """Seconds to wait between rounds of a recurring CLI loop.
+
+    A fixed interval is a razor-sharp periodogram peak: a loop left running
+    produces requests at exactly t, t+i, t+2i, ... and no human generates that.
+    So the wait is drawn from the same heavy-tailed sampler every other gap in
+    this codebase uses, and passed through the session's tempo so the loop's
+    super-cadence drifts WITH its short gaps rather than independently of them
+    (a session whose fine timing wanders while its cadence holds is its own
+    tell).
+
+    The draw is ADDED to nothing and capped rather than clamped downward: the
+    mean stays at or above the configured interval, so stealth can only make the
+    loop slower than the operator asked, never faster. Deterministic when
+    stealth is off, because dev and test runs need predictable timing -- and a
+    client that does not expose the flag is treated as off rather than crashing
+    a loop somebody is depending on.
+    """
+    interval = float(interval)
+    if not getattr(client, "stealth_enabled", False):
+        return interval
+    drawn = client.tempo_scale(
+        HumanTiming.delay(interval * _TAIL_CUT_COMPENSATION, variance_factor=1.0)
+    )
+    return min(drawn, interval * _MAX_LOOP_WAIT_MULTIPLE)
 
 
 def _settings(interactive: bool = True) -> Settings:
@@ -1844,7 +1891,7 @@ def farm_run(
                             f"[yellow][{now}] Error: {e} \u2014 retrying next interval[/yellow]"
                         )
 
-                    await asyncio.sleep(interval)
+                    await asyncio.sleep(_loop_wait(client, interval))
 
             except KeyboardInterrupt:
                 pass
@@ -1961,7 +2008,7 @@ def farm_run_all(
                             f"[yellow][{now}] Error: {e} \u2014 retrying next interval[/yellow]"
                         )
 
-                    await asyncio.sleep(interval)
+                    await asyncio.sleep(_loop_wait(client, interval))
 
             except KeyboardInterrupt:
                 pass
@@ -2316,7 +2363,7 @@ def scout_auto(
                     if not looping:
                         break
 
-                    await asyncio.sleep(interval)
+                    await asyncio.sleep(_loop_wait(client, interval))
 
             except KeyboardInterrupt:
                 pass
