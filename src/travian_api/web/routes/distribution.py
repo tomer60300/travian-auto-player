@@ -4272,7 +4272,20 @@ async def post_execute(
                                 # other row the creates made.
                                 doomed: list[ExistingRoute] = []
                                 _created_keys: dict[int | tuple[int, int], list[PlannedRoute]] = {}
-                                for _action, _route in created_here:
+                                # NOT named `_action`: that is the name of the
+                                # helper that builds a RouteActionResponse, and a
+                                # for-loop target leaks into the enclosing
+                                # FUNCTION scope. Binding it here replaced the
+                                # helper with a response object, so the deferred
+                                # summary at the very end of the run -- outside
+                                # this try block, after the trace has closed --
+                                # raised "RouteActionResponse object is not
+                                # callable" and the whole request 500'd with the
+                                # routes already written to the game. It needed a
+                                # trim AND deferred routes in the same run to
+                                # fire, which is exactly a capped whole-day pass.
+                                for _created_action, _route in created_here:
+                                    del _created_action  # only _route is used here
                                     if _route.window is not None:
                                         _created_keys.setdefault(_desired_key(_route), []).append(
                                             _route

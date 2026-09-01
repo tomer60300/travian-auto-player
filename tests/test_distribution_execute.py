@@ -415,6 +415,15 @@ class _FakeLiveSvc:
             return RouteActionResult(
                 route.origin_village_id, route.dest_x, route.dest_y, "stopped", reason
             )
+        if self._create_status == "stopped":
+            # A real stop happens after the pacing wait and BEFORE the POST
+            # (trade_route_service.create_route), so nothing reaches the game.
+            # This double used to record the attempt and fan out the rows anyway
+            # while returning "stopped" -- a resumed-run test then believed the
+            # marketplace held routes a stopped create had never made.
+            return RouteActionResult(
+                route.origin_village_id, route.dest_x, route.dest_y, "stopped", "stopped (test)"
+            )
         self.created.append(route)
         if not self._phantom:
             # The real game makes the route appear on the marketplace, which is
