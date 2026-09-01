@@ -2648,7 +2648,21 @@ class TestASweepDoesNotReadAsASweep:
             )
             assert res.unswept_origins == [20011]
             assert res.next_chunk_wait_seconds is not None
-            assert 45.0 <= res.next_chunk_wait_seconds <= 240.0
+            # Bounds read from the source rather than copied. They were hardcoded
+            # as 45-240 for the old flat-uniform draw, and when that became a
+            # heavy-tailed draw with a 360s cap this test began failing roughly
+            # whenever one of its six samples landed in the new tail -- an
+            # intermittent red that a single green run after the change did not
+            # reveal. A test that names the constants cannot drift out of step
+            # with them again.
+            assert res.next_chunk_wait_seconds >= dist_module._CHUNK_GAP_FLOOR_S, (
+                f"a {res.next_chunk_wait_seconds}s gap is below the "
+                f"{dist_module._CHUNK_GAP_FLOOR_S}s floor -- short enough to read as polling"
+            )
+            assert res.next_chunk_wait_seconds <= dist_module._CHUNK_GAP_CAP_S, (
+                f"a {res.next_chunk_wait_seconds}s gap exceeds the "
+                f"{dist_module._CHUNK_GAP_CAP_S}s cap -- long enough to read as a hung sweep"
+            )
             waits.add(res.next_chunk_wait_seconds)
 
         # A client that comes back on a metronome is its own signature, however
