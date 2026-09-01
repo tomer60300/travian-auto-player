@@ -211,3 +211,39 @@ def test_the_sampler_itself_is_heavy_tailed():
         "the sampler is not right-skewed; a symmetric jitter leaves a narrower, "
         "more detectable band than a heavy tail"
     )
+
+
+class TestTheSweepChunkGapIsAlsoShaped:
+    """The frontend sweep loop returns for the next chunk automatically, so the
+    server-supplied gap between chunks is an AUTOMATED cadence. It was the one
+    gap in the project still drawn from a flat uniform -- not a fixed tick, but a
+    distinguishable shape, which is why every other gap here is heavy-tailed."""
+
+    def _gaps(self, n=2000):
+        from travian_api.web.routes.distribution import _chunk_gap_seconds
+
+        return [_chunk_gap_seconds() for _ in range(n)]
+
+    def test_the_distribution_is_right_skewed(self):
+        gaps = self._gaps()
+
+        assert statistics.median(gaps) < statistics.fmean(gaps), (
+            "the gap is symmetric; a uniform or normal draw is KS-testable against "
+            "real human timing even when no single value repeats"
+        )
+
+    def test_the_mean_gap_is_not_tighter_than_the_uniform_it_replaced(self):
+        """The old uniform 45-240s averaged 142.5s. A shape change must not
+        quietly speed the sweep up -- that would be more traffic per unit time
+        than the behaviour it replaced."""
+        mean = statistics.fmean(self._gaps(4000))
+
+        assert mean >= 142.5 * 0.95, (
+            f"mean chunk gap {mean:.0f}s is tighter than the 142.5s it replaced"
+        )
+
+    def test_it_never_returns_a_gap_short_enough_to_look_like_polling(self):
+        assert min(self._gaps()) >= 45.0
+
+    def test_it_never_returns_a_gap_long_enough_to_look_like_a_hang(self):
+        assert max(self._gaps(4000)) <= 360.0

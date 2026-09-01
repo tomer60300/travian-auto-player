@@ -96,6 +96,7 @@ from travian_api.services.trade_route_service import (
     TradeRouteService,
     cargo_has_drifted,
 )
+from travian_api.stealth.timing import HumanTiming
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User
 from travian_api.web.operation_gate import active_ops, captcha_stop
@@ -2841,7 +2842,29 @@ def _rows_that_survive(
 # Drawn per response rather than fixed: a client that comes back on a metronome
 # is its own signature, however long the interval. Wide, because the operation
 # being imitated is a person working through their villages, not a poller.
-_CHUNK_GAP_S = (45.0, 240.0)
+#
+# SHAPE matters as well as spread, and this was the one gap in the project still
+# drawn from a flat uniform. throttler.py and human_delay.py both carry the
+# argument for why: a uniform draw is a distinguishable shape in its own right --
+# rejectable by a KS test against real human timing even though no single value
+# repeats -- which is why every other gap here is heavy-tailed. The frontend
+# sweep loop returns for the next chunk automatically, so this is an automated
+# cadence, not a human one, and it should look like the rest.
+# Calibrated so the MEAN gap is unchanged by this switch: the old uniform
+# 45-240s averaged 142.5s, and floor 45 + delay(130) capped at 360 measures 143s
+# over 4,000 draws (median 105s -- the shape is now right-skewed, which is the
+# whole point). Preserving the mean matters because a stealth change must never
+# tighten a cadence: that would send more traffic than the previous behaviour,
+# which is the opposite of the intent.
+_CHUNK_GAP_FLOOR_S = 45.0
+_CHUNK_GAP_MEAN_S = 130.0
+_CHUNK_GAP_CAP_S = 360.0  # a longer hold reads as a hung sweep to whoever waits
+
+
+def _chunk_gap_seconds() -> float:
+    """Seconds a client should hold before requesting the next sweep chunk."""
+    drawn = HumanTiming.delay(_CHUNK_GAP_MEAN_S, variance_factor=1.0)
+    return round(min(_CHUNK_GAP_FLOOR_S + drawn, _CHUNK_GAP_CAP_S), 1)
 
 
 async def _browse_between_villages(
@@ -4628,7 +4651,7 @@ async def post_execute(
         # never be misread as having cleared the account.
         swept_origins=swept,
         unswept_origins=unswept,
-        next_chunk_wait_seconds=(round(random.uniform(*_CHUNK_GAP_S), 1) if unswept else None),
+        next_chunk_wait_seconds=(_chunk_gap_seconds() if unswept else None),
         warnings=warnings,
         problems=problems,
     )
