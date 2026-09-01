@@ -82,6 +82,10 @@ class TestTheRealPage:
 
     def test_the_schedule_fields_are_present(self, page):
         routes = parse_trade_routes(page)
+        # Pins what the page SAYS, not the route's real cadence: 82 of the 83
+        # rows claim 1 while their departure spacing proves 2h, 3h and 12h
+        # cycles. See tests/test_real_page_fanout.py -- the reconciler derives
+        # cadence from departure_at and must never read this field.
         assert {r["repeat_hours"] for r in routes} == {1, 2}
         assert all(isinstance(r["merchants"], int) for r in routes)
 

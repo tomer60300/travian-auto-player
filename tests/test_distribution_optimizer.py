@@ -87,7 +87,20 @@ def make_plans(
     return plans, productions
 
 
-ACCOUNT_SIZES = [1, 2, 3, 5, 12, 22, 23, 40]
+# The largest account is marked slow rather than dropped: it is 14 of this
+# file's 128 cases but 11.4s of its 18.2s, so skipping it while iterating
+# (-m "not slow") is most of the wall clock for a ninth of the coverage. The
+# full gate still runs it.
+ACCOUNT_SIZES = [
+    1,
+    2,
+    3,
+    5,
+    12,
+    22,
+    23,
+    pytest.param(40, marks=pytest.mark.slow),
+]
 
 
 class TestScalesToAnyAccountSize:

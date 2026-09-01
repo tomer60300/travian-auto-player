@@ -116,8 +116,10 @@ so, running it to verify a Markdown edit verifies nothing and is pure waste.
    produced test results describing the wrong source tree.
    `-n 8` (pytest-xdist) is safe here: every process gets its own tmp DB, tmp
    trace dir, scrubbed env and the live-writes pin, so workers cannot collide.
-   While iterating, `-m "not slow"` additionally skips the largest-account
-   planner cases. Run the full set (still `-n 8`) before committing.
+   While iterating, `-m "not slow"` skips the heavy cases: the oracle
+   agreement checks, the relabelling permutations, the mutation guards, and
+   every 40-village planner case. Measured 2026-09-01 with `-n 8`: 57s full, 41s skipping slow.
+   Run the full set (still `-n 8`) before committing.
 
 **Frontend changed:**
 5. `cd frontend && npx eslint . --max-warnings=20 && npm test && npm run build`
