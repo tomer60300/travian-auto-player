@@ -47,7 +47,17 @@ nohup.out
 # Agent/tool state
 .clawhub/
 .openclaw/
-.claude/
+# Claude Code project tooling is VERSIONED: settings.json carries the hooks that
+# block editing .env/.secret/.key and refuse `git push --force` / `rm -rf /`, and
+# hooks/, agents/ and commands/ are the project's own tooling. A blanket ignore
+# left the guard that protects this repo's credentials unversioned -- a fresh
+# clone silently lost it. Only the machine-local and disposable parts are ignored.
+.claude/settings.local.json
+.claude/ux-audit/
+# Transient agent state: worktrees carry their own .venv (binaries) and are
+# disposable. Caught this while narrowing the rule -- a pytest.exe would have
+# been committed.
+.claude/worktrees/
 memory/
 
 # Cookie/session files (per-user, contain JWTs)
