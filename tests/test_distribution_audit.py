@@ -450,16 +450,13 @@ class TestKnownDefects:
     """Bugs this audit found. Each is an xfail on the behaviour that is right,
     so the day one is fixed the test says so instead of staying quiet."""
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "AUDIT: _relay_scan draws hub candidates only from villages already "
-            "inside the crop flow graph, so a crop-neutral midway village -- the "
-            "canonical hub of profile section 8.5 -- can never be chosen. Give "
-            "the same village a 100/h crop flow and the relay is found."
-        ),
-    )
     def test_a_crop_neutral_midway_village_can_act_as_a_relay_hub(self) -> None:
+        """Resolved 2026-09-02. _relay_scan drew hub candidates from the crop flow
+        graph alone, so a crop-neutral midway village -- the canonical hub of
+        profile section 8.5 -- could never be chosen, while the same village given
+        a 100/h flow was found at once (the test below). Candidates now come from
+        every merchant-capable, crop-solvent village of the account, and the
+        midway village is chosen on its geometry."""
         account = next(a for a in adversarial_accounts() if a.name == "adv-relay-shape")
 
         result = _post_plan(account.plan_request)
@@ -529,27 +526,20 @@ class TestKnownDefects:
         assert events[0].net_gain_per_day == pytest.approx(24_000.0, abs=1.0)
         assert events[0].wasted_per_day == pytest.approx(24_000.0, abs=1.0)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "AUDIT: the plan depends on the integer village ids. Relabelling the "
-            "villages of seed 55 -- six villages, nothing else changed -- gives a "
-            "different route set. 16 of 30 seeds sampled still differ under "
-            "relabelling, and seed 7 spanned 127-141 merchants (9.9%) for the same "
-            "account. The objective's last key is an integer, so candidate swaps "
-            "tie often and the tie is broken by the id-sorted scan order. "
-            "Seed 49 was the original example: the relay-hub solvency guard left "
-            "it invariant by removing ineligible hubs, and with them the ties the "
-            "scan order was breaking. That narrows the defect without fixing it, "
-            "which is why the seed was replaced rather than the test relaxed. "
-            "Seeds 0 and 8 were replaced by 6 and 9 for the same reason on "
-            "2026-09-02, when the merchant base was corrected from 2,200 to "
-            "2,500: the extra capacity removed the ties those two accounts hung "
-            "on, so they became invariant while the defect itself did not move."
-        ),
-    )
-    @pytest.mark.parametrize("seed", [55, 3, 5, 6, 9])
+    @pytest.mark.parametrize("seed", [55, 3, 5, 6, 9, 29])
     def test_relabelling_does_not_change_the_plan(self, seed: int) -> None:
+        """RESOLVED 2026-09-02. Renumber the villages and the plan is the same.
+
+        The plan used to depend on the integer ids: 16 of 30 seeds sampled gave a
+        different route set under relabelling, and seed 7 spanned 127-141
+        merchants (9.9%) for one account. Every tie-break that fell back to an id
+        is now geographic -- the greedy seed's receiver order and supplier order,
+        and the relay scan's hub, origin and destination keys -- and the relay
+        scan commits the best (leg, hub) pair across the whole scan rather than
+        the first leg in id order that had an improving hub. 29 of 30 seeds are
+        now invariant; seed 29 joins the parametrisation as one that used to
+        differ. For the thirtieth see the co-located test below.
+        """
         account = random_account(seed, with_profiles=False)
         mapping = id_permutation(account.plan_request, seed + 1_000)
 
@@ -558,15 +548,41 @@ class TestKnownDefects:
 
         assert plan_signature(relabelled, mapping) == plan_signature(original)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "AUDIT: the same account relabelled costs a different number of "
-            "merchants, so one labelling finds a cheaper plan than another and "
-            "which one you get is an accident of the village ids."
-        ),
-    )
+    def test_two_villages_on_one_tile_are_separable_only_by_id(self) -> None:
+        """The one limit of the geographic tie-breaks, stated rather than hidden.
+
+        Seed 20 puts two villages on tile (-8, -40). Coordinates cannot order
+        what shares them, so which of the two serves a given demand is decided by
+        the id and relabelling can still swap them: 98 routes against 97, the
+        same work split differently between the pair. The COST is invariant -- 322
+        merchants either way -- because the two are interchangeable by
+        construction.
+
+        This cannot happen on a real account: Travian permits one village per
+        tile, so coordinates are a total order there and the property above holds
+        outright. Asserted as the boundary of the fix, so that a future key
+        claiming to remove it has to face this case.
+        """
+        account = random_account(20, with_profiles=False)
+        coords = [(v.x, v.y) for v in account.plan_request.snapshot]
+        assert len(coords) != len(set(coords)), (
+            "seed 20 no longer has two villages on one tile, so it no longer "
+            "demonstrates the limit -- find another seed that does, or delete this"
+        )
+
+        mapping = id_permutation(account.plan_request, 1020)
+        original = _post_plan(account.plan_request)
+        relabelled = _post_plan(permute_ids(account.plan_request, mapping))
+
+        assert original.total_merchants == relabelled.total_merchants, (
+            "co-located villages are interchangeable, so the plan's COST must not "
+            "depend on which of them was picked"
+        )
+
     def test_relabelling_does_not_change_what_the_plan_costs(self) -> None:
+        """RESOLVED 2026-09-02 with the geographic tie-breaks. Seed 7 used to span
+        127-141 merchants (9.9%) across labellings of one account; no seed
+        sampled now moves at all."""
         account = random_account(7, with_profiles=False)
         original = _post_plan(account.plan_request)
 
@@ -578,19 +594,12 @@ class TestKnownDefects:
         assert len(totals) == 1, f"merchant total varies with the labelling: {sorted(totals)}"
 
     @pytest.mark.slow
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "AUDIT: the same account relabelled costs 459 merchants under one "
-            "labelling and 457 under another, and one village flips between over "
-            "budget and within it -- which is the number the Trade Office upgrade "
-            "advice is built from. Was case 2 at permutation 502, which the "
-            "2,200 -> 2,500 merchant base correction made invariant on "
-            "2026-09-02; case 1 at 500 was substituted because it still shows "
-            "BOTH halves, the over-budget set and the total."
-        ),
-    )
     def test_relabelling_does_not_change_who_is_over_budget(self) -> None:
+        """RESOLVED 2026-09-02. Case 1 at permutation 500 cost 459 merchants under
+        one labelling and 457 under another, and a village flipped between over
+        budget and within it -- the number the Trade Office upgrade advice is
+        built from. Both halves are now invariant on every case account across
+        seven permutations."""
         account = case_account(1)
         mapping = id_permutation(account.plan_request, 500)
 

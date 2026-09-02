@@ -507,7 +507,7 @@ def _flows_for_resource(
     }
     demand = sorted(
         (v for v in plan.receivers if v.village_id in villages),
-        key=lambda v: (-v.ship_per_hour, v.village_id),
+        key=lambda v: (-v.ship_per_hour, villages[v.village_id].coords),
     )
 
     flows: dict[tuple[int, int], float] = {}
@@ -529,7 +529,7 @@ def _flows_for_resource(
             ),
             key=lambda vid: (
                 geometry.distance(villages[vid].coords, villages[receiver.village_id].coords),
-                vid,
+                villages[vid].coords,
             ),
         )
         for origin in candidates:
@@ -1298,26 +1298,38 @@ def _improve_flows(
         legs = flows.get(Resource.CROP)
         if not legs:
             return False
-        # Only villages already carrying crop may act as hubs. A village with no
-        # crop allocation is typically one that has just been founded, and
-        # conscripting it as infrastructure would both surprise the operator and
-        # break the idempotent re-plan that route diffing depends on (known issue
-        # #10): merely adding a village would reshuffle routes that have nothing
-        # to do with it. Computed once per scan, not per edge.
+        # Every village of the account is a candidate, whether or not it already
+        # carries crop, subject to the two guards below. Until 2026-09-02
+        # candidates came from the crop flow graph alone, which the audit caught:
+        # the canonical midway hub of profile section 8.5 grows exactly what it
+        # keeps, so it has no crop leg and could never be chosen -- while the same
+        # village given any flow at all was found at once. The worry behind that
+        # restriction was conscripting a freshly founded village as
+        # infrastructure; the merchant guard is what actually covers that (no
+        # Marketplace, no merchants), and a relay is adopted only when it strictly
+        # lowers the objective, so a village nobody needs is left alone.
         # A hub relays crop through itself, so it must be a real village that can
-        # actually staff the extra leg. Foreign sinks (merchant_count == 0) and
-        # anything absent from the account are excluded: including a sink let the
-        # search adopt an impossible sink->sink leg (zero distance between two
-        # co-located tributes costs zero merchants), emitting a route whose origin
-        # is a negative foreign id.
+        # staff the extra leg. Foreign sinks (merchant_count == 0) are excluded:
+        # including a sink let the search adopt an impossible sink->sink leg (zero
+        # distance between two co-located tributes costs zero merchants), emitting
+        # a route whose origin is a negative foreign id.
         # A hub must also be solvent in crop: see :func:`_may_relay_through`.
-        # Relaying through a village that is already losing crop turns a slow
-        # deficit into a dead village the first time its refill slips.
+        # Relaying through a village already losing crop turns a slow deficit into
+        # a dead village the first time its refill slips, and an unreadable rate
+        # is refused there too -- unknown is not zero.
+        # Computed once per scan, not per edge.
         hubs = sorted(
-            v
-            for v in {v for key in legs for v in key}
-            if v in villages and villages[v].merchant_count > 0 and _may_relay_through(villages[v])
+            vid
+            for vid, village in villages.items()
+            if village.merchant_count > 0 and _may_relay_through(village)
         )
+        # ONE best relay per scan, chosen across every (leg, hub) pair rather than
+        # committing the first leg that happens to have an improving hub. Taking
+        # the first leg in id order let the labelling decide which relay got
+        # built, and widening the candidate set above made that bite: with more
+        # hubs to find, more legs have an improving one. Every tie-break key
+        # below is coordinates for the same reason.
+        best = None
         for origin, destination in sorted(key for key, amount in legs.items() if amount > EPSILON):
             # Both ends must be outside the relay graph, not just the origin.
             # Guarding only the origin let a leg that *ends* at an existing hub
@@ -1328,11 +1340,6 @@ def _improve_flows(
             amount = legs.get((origin, destination), 0.0)
             if amount <= EPSILON:
                 continue
-            # Score every candidate hub and take the best one. Accepting the
-            # first that merely improves picks by village id, which is arbitrary
-            # and measurably bad: it sent a 96-field haul through the
-            # lowest-numbered village when four nearer ones would have done.
-            best = None
             for hub in hubs:
                 if hub in (origin, destination):
                     continue
@@ -1364,25 +1371,27 @@ def _improve_flows(
                 delta, state = _score_changes(changes)
                 if delta >= (0, 0, 0, 0):
                     continue
-                # Tie-break on the collection leg: when two hubs cost the same,
-                # the nearer one is the better place to send cargo. The final key
-                # is the hub's COORDINATES, not the hub id -- which is what this
-                # comment already claimed and the code did not do: `hub` is a
-                # village id, so an exact tie on (delta, distance) was settled by
-                # the arbitrary numbering, and relabelling the account moved the
-                # plan. Coordinates survive relabelling.
+                # Tie-break on the collection leg: when two relays cost the
+                # same, the nearer hub is the better place to send cargo. Every
+                # remaining key is COORDINATES -- the hub's, then the leg's two
+                # ends' -- never ids: hub, origin and destination are village
+                # ids, so a tie settled by them was settled by the arbitrary
+                # numbering, and relabelling the account moved the plan.
+                # Coordinates survive relabelling.
                 key = (
                     delta,
                     one_way_cache.get((origin, hub), 0.0),
                     villages[hub].coords,
+                    villages[origin].coords,
+                    villages[destination].coords,
                 )
                 if best is None or key < best[0]:
                     best = (key, hub, changes, state)
-            if best is not None:
-                _, hub, changes, state = best
-                _commit_changes(changes, state)
-                hub_ids.add(hub)
-                return True
+        if best is not None:
+            _, hub, changes, state = best
+            _commit_changes(changes, state)
+            hub_ids.add(hub)
+            return True
         return False
 
     def _swap_changes(resource, o1, d1, o2, d2, t):

@@ -21,6 +21,8 @@ RECEIVER of crop that is nonetheless made to forward, which is exactly how the
 live hub qualified.
 """
 
+import dataclasses
+
 import pytest
 
 from travian_api.services.distribution.allocation import (
@@ -185,4 +187,54 @@ def test_a_break_even_village_may_still_relay() -> None:
     assert MIDPOINT in _relay_hubs(plan), (
         "a break-even village was refused as a hub; the guard is stricter than "
         "the danger it exists to prevent"
+    )
+
+
+# A village whose production and target agree, so it neither sends nor receives
+# crop and sits OUTSIDE the crop flow graph. The canonical midway hub of profile
+# section 8.5 looks exactly like this: it grows what it keeps and ships nothing.
+_OUTSIDE_THE_CROP_GRAPH = Allocation(AllocationMode.ABSOLUTE, 0.0)
+
+
+def test_a_crop_neutral_village_outside_the_crop_graph_may_relay() -> None:
+    """Hub candidates come from the whole account, not from the crop graph.
+
+    Until 2026-09-02 the hub search drew its candidates from the villages that
+    already carried crop, so the canonical midway hub -- no crop flow of its own
+    -- could never be chosen, while the same village with any flow at all was
+    found at once (the audit's known-defect pair). Solvency and merchants are the
+    guards that matter; carrying crop was never one of them.
+    """
+    villages, plans = _account(0.0, _OUTSIDE_THE_CROP_GRAPH)
+
+    plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+    assert MIDPOINT in _relay_hubs(plan), (
+        f"village {MIDPOINT} breaks even, has 20 merchants and sits halfway to the "
+        f"capital, yet was not made the hub because it carries no crop of its own"
+    )
+
+
+def test_an_unreadable_rate_outside_the_crop_graph_is_still_refused() -> None:
+    """Widening the candidates must not widen past the solvency guard."""
+    villages, plans = _account(None, _OUTSIDE_THE_CROP_GRAPH)
+
+    plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+    assert MIDPOINT not in _relay_hubs(plan), (
+        f"village {MIDPOINT} has an unreadable crop rate and was still made a "
+        f"relay hub once villages outside the crop graph became candidates"
+    )
+
+
+def test_a_village_with_no_merchants_is_never_a_relay_hub() -> None:
+    """A hub staffs the onward leg itself; a village with no merchants cannot."""
+    villages, plans = _account(0.0, _OUTSIDE_THE_CROP_GRAPH)
+    villages[MIDPOINT] = dataclasses.replace(villages[MIDPOINT], merchant_count=0)
+
+    plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+    assert MIDPOINT not in _relay_hubs(plan), (
+        f"village {MIDPOINT} has no merchants and was still made a relay hub -- "
+        f"the plan carries a leg nobody can send"
     )
