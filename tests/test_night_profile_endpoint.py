@@ -113,6 +113,30 @@ class TestTheOperatorSuppliesOnlyWhatTheAccountCannot:
             > full.allocations[Resource.LUMBER][ARMY].value
         )
 
+    def test_a_negative_absolute_day_retention_is_refused(self):
+        """Found 2026-09-02 while closing the same hole in the plan endpoints.
+
+        This endpoint reads ``alloc.value`` straight off the request instead of
+        building an ``Allocation``, so the dataclass guard that now refuses a
+        negative ABSOLUTE target never fires here. Left alone, -4,000/h flows in
+        as a "retention" and either derives nonsense or surfaces later as a 500
+        from inside the derivation. Refuse it at the door, like the plan does.
+        """
+        body = _body(
+            allocations={
+                "lumber": {
+                    str(HUB): {"mode": "remainder", "value": 0},
+                    str(ARMY): {"mode": "absolute", "value": -4000},
+                },
+                "crop": {str(HUB): {"mode": "remainder", "value": 0}},
+            }
+        )
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(post_night_profile(body, USER))
+        assert exc.value.status_code == 400
+        assert "-4000" in str(exc.value.detail)
+        assert "03" in str(exc.value.detail), "the refusal should name the village"
+
     def test_a_target_at_or_below_the_baseline_is_refused(self):
         # There would be no room for anything to arrive in, so the whole profile
         # would be a set of zeroes wearing the shape of a plan.

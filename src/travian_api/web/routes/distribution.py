@@ -1550,6 +1550,7 @@ async def post_night_profile(
         Resource.IRON: "iron_per_hour",
         Resource.CROP: "crop_per_hour",
     }
+    names = {v.village_id: v.name for v in body.snapshot}
     day_retention: dict[Resource, dict[int, float]] = {}
     for resource, per in body.allocations.items():
         own_rates = {
@@ -1561,6 +1562,19 @@ async def post_night_profile(
         resolved: dict[int, float] = {}
         for vid, alloc in per.items():
             if alloc.mode is AllocationMode.ABSOLUTE:
+                # The plan endpoints refuse this through Allocation's own guard.
+                # This path reads the value raw, so it must refuse it itself:
+                # let through, a negative retention derives nonsense or dies
+                # inside the derivation as a 500.
+                if alloc.value < 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"{village_label(vid, names)}: {resource.value} day retention "
+                            f"of {alloc.value:g}/h is negative -- a village cannot keep "
+                            f"less than nothing"
+                        ),
+                    )
                 resolved[vid] = alloc.value
             elif alloc.mode is AllocationMode.PERCENTAGE:
                 resolved[vid] = account_total * alloc.value / 100.0
