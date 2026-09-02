@@ -13,6 +13,12 @@
  * per-village rows, because an allocation keyed by village id is just as wrong
  * under the wrong account.
  *
+ * The village row also carries two more owned facts, both optional: where a
+ * village may ship (`ship_only_to`, a list of own village ids; absent means
+ * unrestricted and an EMPTY list means nobody) and the share of its warehouse it
+ * keeps stocked by NPC trading (`stock_floor_fraction`, 0 to 0.95), which the
+ * planner may draw down as extra lumber, clay or iron.
+ *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
  */
@@ -25,6 +31,21 @@ export const READABLE_VERSIONS = Object.freeze([1, 2])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
+
+/** The backend's ceiling for an NPC-backed stock floor. Above it a village
+ * keeps nothing worth drawing down. */
+export const MAX_STOCK_FLOOR_FRACTION = 0.95
+
+/** Is this a usable stock floor? The operator types a percent, whole or to one
+ * decimal, so the fraction must sit on a 0.001 grid between 0 and the ceiling.
+ * Shared by the file parser and the planner's input so the two cannot disagree
+ * about what a valid floor is. */
+export function isStockFloorFraction(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return false
+  if (value < 0 || value > MAX_STOCK_FLOOR_FRACTION) return false
+  const permille = value * 1000
+  return Math.abs(permille - Math.round(permille)) < 1e-6
+}
 
 /** The backend's AllocationMode, which the file must not outrun. */
 export const ALLOCATION_MODES = Object.freeze([
@@ -46,6 +67,8 @@ export function buildSetup({
   villages,
   tradeOffice,
   cropCeilings,
+  shipOnlyTo,
+  stockFloors,
   profiles,
   profileWindows,
   merchantModel,
@@ -56,10 +79,16 @@ export function buildSetup({
   for (const village of villages ?? []) {
     const level = tradeOffice?.[village.village_id]
     const ceiling = cropCeilings?.[village.village_id]
-    if (level == null && ceiling == null) continue
+    const allowed = shipOnlyTo?.[village.village_id]
+    const floor = stockFloors?.[village.village_id]
+    if (level == null && ceiling == null && allowed == null && floor == null) continue
     const row = { village_id: village.village_id, name: village.name ?? '' }
     if (level != null) row.trade_office_level = Number(level)
     if (ceiling != null) row.crop_ceiling = Number(ceiling)
+    // An empty list is written, not dropped: it says "ships to nobody", which
+    // is a different answer from the unrestricted default an absent field means.
+    if (allowed != null) row.ship_only_to = allowed.map(Number)
+    if (floor != null) row.stock_floor_fraction = Number(floor)
     rows.push(row)
   }
   const doc = {
@@ -282,6 +311,31 @@ export function parseSetup(text) {
       }
       parsed.crop_ceiling = ceiling
     }
+    if (row.ship_only_to != null) {
+      if (!Array.isArray(row.ship_only_to)) {
+        throw new SetupFileError(`${where} has a ship_only_to that is not a list of village ids.`)
+      }
+      parsed.ship_only_to = row.ship_only_to.map((raw) => {
+        const id = Number(raw)
+        if (!Number.isInteger(id) || id <= 0) {
+          throw new SetupFileError(
+            `${where} has ${JSON.stringify(raw)} in ship_only_to; it must be a village id.`
+          )
+        }
+        return id
+      })
+    }
+    if (row.stock_floor_fraction != null) {
+      const floor = Number(row.stock_floor_fraction)
+      if (!isStockFloorFraction(floor)) {
+        throw new SetupFileError(
+          `${where} has stock floor ${row.stock_floor_fraction}; it must be a fraction ` +
+            `from 0 to ${MAX_STOCK_FLOOR_FRACTION} in steps of 0.001 ` +
+            `(a whole percent or one decimal).`
+        )
+      }
+      parsed.stock_floor_fraction = floor
+    }
     return parsed
   })
 
@@ -333,6 +387,8 @@ export function mergeSetup({
   villages,
   tradeOffice,
   cropCeilings,
+  shipOnlyTo,
+  stockFloors,
   profiles,
   profileWindows,
   foreignTargets,
@@ -340,6 +396,8 @@ export function mergeSetup({
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
   const nextTradeOffice = { ...(tradeOffice ?? {}) }
   const nextCropCeilings = { ...(cropCeilings ?? {}) }
+  const nextShipOnlyTo = { ...(shipOnlyTo ?? {}) }
+  const nextStockFloors = { ...(stockFloors ?? {}) }
 
   const missingFromAccount = []
   let loaded = 0
@@ -354,6 +412,8 @@ export function mergeSetup({
     loaded += 1
     if (row.trade_office_level != null) nextTradeOffice[row.village_id] = row.trade_office_level
     if (row.crop_ceiling != null) nextCropCeilings[row.village_id] = row.crop_ceiling
+    if (row.ship_only_to != null) nextShipOnlyTo[row.village_id] = row.ship_only_to
+    if (row.stock_floor_fraction != null) nextStockFloors[row.village_id] = row.stock_floor_fraction
   }
 
   const stillUnknown = []
@@ -392,6 +452,8 @@ export function mergeSetup({
   return {
     tradeOffice: nextTradeOffice,
     cropCeilings: nextCropCeilings,
+    shipOnlyTo: nextShipOnlyTo,
+    stockFloors: nextStockFloors,
     profiles: nextProfiles,
     profileWindows: nextWindows,
     merchantModel: setup.merchantModel ?? null,

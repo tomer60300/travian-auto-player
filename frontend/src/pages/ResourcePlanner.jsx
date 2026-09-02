@@ -7,6 +7,7 @@ import api from '../api'
 import {
   SetupFileError,
   buildSetup,
+  isStockFloorFraction,
   mergeSetup,
   parseSetup,
   setupFilename,
@@ -112,6 +113,8 @@ const DEFAULT_MERCHANT_MODEL = { base_capacity: 2500, bonus_per_to_level: 0.2 }
 
 const LS_WINDOWS = 'planner_profile_windows'
 const LS_CROP_CEILING = 'planner_crop_ceiling'
+const LS_SHIP_ONLY_TO = 'planner_ship_only_to'
+const LS_STOCK_FLOOR = 'planner_stock_floor'
 // Sensible defaults by convention; anything else starts unset until the
 // operator gives it hours.
 const DEFAULT_WINDOWS = { Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] }
@@ -146,6 +149,23 @@ const usableForeignTargets = (targets, villages = []) =>
         ? { exclude_origins: excludedOriginIds(t, villages) }
         : {}),
     }))
+
+// The operator types a stock floor as a percent; the request and the file carry
+// a fraction of warehouse capacity, so the two meet here. Printed through
+// toPrecision because 0.3 * 100 is 30.000000000000004 in floating point, and
+// that would land in the input box verbatim.
+const fractionToPercent = (fraction) => Number((fraction * 100).toPrecision(12))
+
+// The "ships only to" picker's one-line summary. Nothing stored is the
+// unrestricted default and reads as such; an EMPTY list is a real answer --
+// this village ships to nobody -- and must not look like the default. Names,
+// not a count, while they fit.
+const describeShipOnlyTo = (allowed, villages) => {
+  if (allowed == null) return 'any village'
+  if (allowed.length === 0) return 'nobody'
+  if (allowed.length <= 2) return namesForVillageIds(allowed, villages)
+  return `${allowed.length} villages`
+}
 
 // Trade Office building id, as the game reports it in a village's slot list.
 const TRADE_OFFICE_GID = 28
@@ -451,6 +471,15 @@ export default function ResourcePlanner() {
   // Operator alert level for a village's crop stock (e.g. an NPC trigger),
   // below capacity. Cached per account like the Trade Office levels.
   const [cropCeilings, setCropCeilings] = useState({})
+  // Where each village may ship: { [village_id]: number[] }. Absent means
+  // unrestricted (the default); an empty list means nobody. Owned, like the
+  // Trade Office level -- nothing in the game says which of your own villages a
+  // merchant may be sent to.
+  const [shipOnlyTo, setShipOnlyTo] = useState({})
+  // Share of warehouse capacity each village keeps stocked by NPC trading, as a
+  // FRACTION (0.3, not 30) so state, file and request agree; the input shows it
+  // as a percent. The planner may draw it down as lumber, clay or iron.
+  const [stockFloors, setStockFloors] = useState({})
   // Result of the last setup-file load, kept on screen rather than only in a
   // toast: a file that is missing villages produces a quietly wrong plan, so
   // what it did and did not cover has to stay readable.
@@ -598,6 +627,8 @@ export default function ResourcePlanner() {
       setLastRun(null)
       setUseStaleSnapshot(false)
       setTradeOffice({})
+      setShipOnlyTo({})
+      setStockFloors({})
       setProfiles({ [DEFAULT_PROFILE]: {} })
       setForeignTargets([])
       setActiveProfile(DEFAULT_PROFILE)
@@ -620,6 +651,8 @@ export default function ResourcePlanner() {
     setForeignTargets(loadJson(`${LS_FOREIGN}::${accountKey}`, []))
     setProfileWindows(loadJson(`${LS_WINDOWS}::${accountKey}`, {}))
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
+    setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
+    setStockFloors(loadJson(`${LS_STOCK_FLOOR}::${accountKey}`, {}))
     setDayCheck(null)
     setProfiles(loaded)
     setActiveProfile(loaded[storedActive] ? storedActive : Object.keys(loaded)[0])
@@ -656,7 +689,17 @@ export default function ResourcePlanner() {
     // snapshot and the allocations, and this list still described that older,
     // narrower request -- so editing a Trade Office level left the green
     // all-clear on screen describing a day computed from the old capacity.
-  }, [profiles, profileWindows, cropCeilings, snapshot, foreignTargets, tradeOffice, merchantModel])
+  }, [
+    profiles,
+    profileWindows,
+    cropCeilings,
+    snapshot,
+    foreignTargets,
+    tradeOffice,
+    shipOnlyTo,
+    stockFloors,
+    merchantModel,
+  ])
   // Same rule for the route sheet, with higher stakes: its rows are copied
   // field by field into the game's trade-route dialog. A sheet computed from
   // yesterday's allocations, Trade Office levels, merchant model, tributes or
@@ -687,6 +730,8 @@ export default function ResourcePlanner() {
   }, [
     allocations,
     tradeOffice,
+    shipOnlyTo,
+    stockFloors,
     merchantModel,
     foreignTargets,
     snapshot,
@@ -697,6 +742,12 @@ export default function ResourcePlanner() {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_CROP_CEILING), cropCeilings)
   }, [cropCeilings, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_SHIP_ONLY_TO), shipOnlyTo)
+  }, [shipOnlyTo, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_STOCK_FLOOR), stockFloors)
+  }, [stockFloors, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_PROFILES), profiles)
   }, [profiles, hydratedKey, accountKey, storageKey])
@@ -827,7 +878,11 @@ export default function ResourcePlanner() {
       return
     }
     const typed = villages.filter(
-      (v) => tradeOffice[v.village_id] != null || cropCeilings[v.village_id] != null
+      (v) =>
+        tradeOffice[v.village_id] != null ||
+        cropCeilings[v.village_id] != null ||
+        shipOnlyTo[v.village_id] != null ||
+        stockFloors[v.village_id] != null
     ).length
     const named = Object.entries(profiles).filter(([, a]) => Object.keys(a ?? {}).length)
     if (!typed && !named.length) {
@@ -842,6 +897,8 @@ export default function ResourcePlanner() {
         villages,
         tradeOffice,
         cropCeilings,
+        shipOnlyTo,
+        stockFloors,
         profiles,
         profileWindows,
         merchantModel,
@@ -857,6 +914,8 @@ export default function ResourcePlanner() {
     villages,
     tradeOffice,
     cropCeilings,
+    shipOnlyTo,
+    stockFloors,
     profiles,
     profileWindows,
     merchantModel,
@@ -896,6 +955,8 @@ export default function ResourcePlanner() {
         villages,
         tradeOffice,
         cropCeilings,
+        shipOnlyTo,
+        stockFloors,
         profiles,
         profileWindows,
         foreignTargets,
@@ -903,6 +964,8 @@ export default function ResourcePlanner() {
       setTradeOffice(merged.tradeOffice)
       setForeignTargets(merged.foreignTargets)
       setCropCeilings(merged.cropCeilings)
+      setShipOnlyTo(merged.shipOnlyTo)
+      setStockFloors(merged.stockFloors)
       setProfiles(merged.profiles)
       setProfileWindows(merged.profileWindows)
       // Capacity is server-calibrated, so a file that carries a calibration is
@@ -925,7 +988,18 @@ export default function ResourcePlanner() {
       }
       toast.success(`Loaded ${parts.join(' and ') || 'nothing'} from the setup file`)
     },
-    [villages, tradeOffice, cropCeilings, profiles, profileWindows, foreignTargets, accountKey, toast]
+    [
+      villages,
+      tradeOffice,
+      cropCeilings,
+      shipOnlyTo,
+      stockFloors,
+      profiles,
+      profileWindows,
+      foreignTargets,
+      accountKey,
+      toast,
+    ]
   )
 
   const onSetupFileChosen = useCallback(
@@ -994,6 +1068,13 @@ export default function ResourcePlanner() {
       config: villages.map((v) => ({
         village_id: v.village_id,
         trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
+        // Both omitted when unset, so an ordinary village's row is byte-identical
+        // to before: absent means "unrestricted" and "no floor" on the backend.
+        // An EMPTY ship_only_to list is sent, because it means "nobody".
+        ...(shipOnlyTo[v.village_id] != null ? { ship_only_to: shipOnlyTo[v.village_id] } : {}),
+        ...(stockFloors[v.village_id] != null
+          ? { stock_floor_fraction: stockFloors[v.village_id] }
+          : {}),
       })),
       allocations: sendAllocations,
       foreign_targets: usableForeignTargets(foreignTargets, villages),
@@ -1012,6 +1093,8 @@ export default function ResourcePlanner() {
   }, [
     villages,
     tradeOffice,
+    shipOnlyTo,
+    stockFloors,
     allocations,
     foreignTargets,
     merchantModel,
@@ -2228,15 +2311,15 @@ export default function ResourcePlanner() {
             </div>
           )}
 
-          {/* Same rule as the Allocate grid, and for higher stakes: the two
-              hand-typed columns are the RIGHTMOST of eight, so on a phone the
+          {/* Same rule as the Allocate grid, and for higher stakes: the four
+              hand-typed columns are the RIGHTMOST of ten, so on a phone the
               village name is off-screen exactly while a Trade Office level is
               being typed — and a level typed one row off breaches that
               village's merchant budget without a warning anywhere. Pin the
               identity column and say the rest are there. */}
           <p className="text-secondary text-xs mb-1 sm:hidden">
-            Swipe the table sideways for Merchants, Trade Office and Crop alert — the village
-            column stays pinned.
+            Swipe the table sideways for Merchants, Trade Office, Crop alert, Ships only to and
+            Stock floor — the village column stays pinned.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -2303,6 +2386,18 @@ export default function ResourcePlanner() {
                   >
                     Crop alert
                   </th>
+                  <th
+                    className="text-left px-2"
+                    title="Where this village may send. Unrestricted by default; once restricted it ships to the ticked villages only, and a restriction with nothing ticked ships to nobody. Tributes are governed by their own exclusions."
+                  >
+                    Ships only to
+                  </th>
+                  <th
+                    className="text-right px-2"
+                    title="Share of warehouse capacity this village keeps stocked by NPC trading. The planner may draw it down over the profile window as extra lumber, clay or iron — never crop."
+                  >
+                    Stock floor %
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -2361,6 +2456,115 @@ export default function ResourcePlanner() {
                           }))
                         }
                       />
+                    </td>
+                    <td className="px-2">
+                      {/* Owned, like the Trade Office level. Nothing stored is the
+                          unrestricted default and reads muted like the other blanks;
+                          a restriction reads in full-strength text. Ticking a village
+                          while unrestricted starts the list; unticking the last one
+                          leaves an EMPTY list, which is "nobody", not "anyone" --
+                          only "Lift restriction" returns to the default. */}
+                      {(() => {
+                        const allowed = shipOnlyTo[v.village_id]
+                        return (
+                          <details className="text-xs">
+                            <summary
+                              className={`cursor-pointer whitespace-nowrap pointer-coarse:min-h-11 ${
+                                allowed == null ? 'text-secondary' : 'text-primary'
+                              }`}
+                            >
+                              <span className="sr-only">Ships only to, for {v.name}: </span>
+                              {describeShipOnlyTo(allowed, villages)}
+                            </summary>
+                            <div
+                              role="group"
+                              aria-label={`Villages ${v.name} may ship to`}
+                              className="mt-1 max-h-40 overflow-y-auto"
+                            >
+                              {villages
+                                .filter((o) => o.village_id !== v.village_id)
+                                .map((o) => (
+                                  <label
+                                    key={o.village_id}
+                                    className="flex items-center gap-1 whitespace-nowrap"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={allowed?.includes(o.village_id) ?? false}
+                                      onChange={(e) =>
+                                        setShipOnlyTo((prev) => {
+                                          const current = prev[v.village_id] ?? []
+                                          return {
+                                            ...prev,
+                                            [v.village_id]: e.target.checked
+                                              ? [...current, o.village_id]
+                                              : current.filter((id) => id !== o.village_id),
+                                          }
+                                        })
+                                      }
+                                    />
+                                    {o.name}
+                                  </label>
+                                ))}
+                              {allowed != null && (
+                                <button
+                                  type="button"
+                                  className="underline mt-1"
+                                  onClick={() =>
+                                    setShipOnlyTo((prev) => {
+                                      const next = { ...prev }
+                                      delete next[v.village_id]
+                                      return next
+                                    })
+                                  }
+                                >
+                                  Lift restriction
+                                </button>
+                              )}
+                            </div>
+                          </details>
+                        )
+                      })()}
+                    </td>
+                    <td className="text-right px-2">
+                      {(() => {
+                        const floor = stockFloors[v.village_id]
+                        const invalid = floor != null && !isStockFloorFraction(floor)
+                        const problemId = `stock-floor-problem-${v.village_id}`
+                        return (
+                          <>
+                            <input
+                              type="number"
+                              min="0"
+                              max="95"
+                              step="0.1"
+                              aria-label={`NPC-backed stock floor for ${v.name}, percent of warehouse`}
+                              aria-invalid={invalid || undefined}
+                              aria-describedby={invalid ? problemId : undefined}
+                              placeholder="—"
+                              className="input-field w-16 text-right text-xs py-1"
+                              value={floor == null ? '' : fractionToPercent(floor)}
+                              onChange={(e) =>
+                                setStockFloors((prev) => ({
+                                  ...prev,
+                                  [v.village_id]:
+                                    e.target.value === ''
+                                      ? undefined
+                                      : Number(e.target.value) / 100,
+                                }))
+                              }
+                            />
+                            {/* Named, not just coloured: the backend refuses a floor
+                                outside 0-95%, and the operator should not need a
+                                failed plan to learn that. */}
+                            {invalid && (
+                              <span id={problemId} className="block text-warning text-xs mt-0.5">
+                                0–95%, whole or one decimal
+                              </span>
+                            )}
+                          </>
+                        )
+                      })()}
                     </td>
                   </tr>
                 ))}

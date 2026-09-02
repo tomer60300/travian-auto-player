@@ -4,6 +4,7 @@ import {
   SETUP_VERSION,
   SetupFileError,
   buildSetup,
+  isStockFloorFraction,
   mergeSetup,
   parseSetup,
   setupFilename,
@@ -494,5 +495,186 @@ describe('allocation values are whole units', () => {
     })
 
     expect(parsed.profiles.Night.crop[101].value).toBe(43726)
+  })
+})
+
+// ── Per-village shipping restriction and NPC-backed stock floor ────────────
+// Two more pieces of owned state on the same village row as the Trade Office
+// level, and with the same stakes: "ships only to" narrows where a village's
+// merchants may go, and the stock floor is supply the planner draws down over
+// the window. Losing either to a cleared origin silently changes the plan.
+
+describe('ship_only_to and stock_floor_fraction in the setup file', () => {
+  it('writes both onto the village row', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 13 },
+      shipOnlyTo: { 20030: [20031, 20032] },
+      stockFloors: { 20030: 0.3 },
+      exportedAt: STAMP,
+    })
+    expect(setup.villages).toEqual([
+      {
+        village_id: 20030,
+        name: 'Capital',
+        trade_office_level: 13,
+        ship_only_to: [20031, 20032],
+        stock_floor_fraction: 0.3,
+      },
+    ])
+  })
+
+  it('keeps an empty list, which means "ships to nobody" and not "unrestricted"', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      shipOnlyTo: { 20031: [] },
+      exportedAt: STAMP,
+    })
+    expect(setup.villages).toEqual([{ village_id: 20031, name: 'V05', ship_only_to: [] }])
+  })
+
+  it('carries a village that has only a restriction or only a floor typed', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      shipOnlyTo: { 20031: [20030] },
+      stockFloors: { 20032: 0.5 },
+      exportedAt: STAMP,
+    })
+    expect(setup.villages.map((v) => v.village_id)).toEqual([20031, 20032])
+  })
+
+  it('survives the round trip unchanged', () => {
+    const shipOnlyTo = { 20030: [20031], 20031: [] }
+    const stockFloors = { 20030: 0.3, 20032: 0.125 }
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, shipOnlyTo, stockFloors, exportedAt: STAMP })
+    )
+    const merged = mergeSetup({ setup, villages: VILLAGES })
+    expect(merged.shipOnlyTo).toEqual(shipOnlyTo)
+    expect(merged.stockFloors).toEqual(stockFloors)
+  })
+
+  it('leaves both absent when the row carries neither', () => {
+    // Absent must stay absent: a row with only a Trade Office level must not
+    // import as "ships to nobody" or as a floor of 0.
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 13 }, exportedAt: STAMP })
+    )
+    expect('ship_only_to' in setup.villages[0]).toBe(false)
+    expect('stock_floor_fraction' in setup.villages[0]).toBe(false)
+  })
+
+  it('does not overwrite an existing value when the file row has none', () => {
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 13 }, exportedAt: STAMP })
+    )
+    const merged = mergeSetup({
+      setup,
+      villages: VILLAGES,
+      shipOnlyTo: { 20030: [20032], 20031: [] },
+      stockFloors: { 20030: 0.2 },
+    })
+    expect(merged.shipOnlyTo).toEqual({ 20030: [20032], 20031: [] })
+    expect(merged.stockFloors).toEqual({ 20030: 0.2 })
+  })
+
+  it('lets the file win over an existing value', () => {
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        shipOnlyTo: { 20030: [20031] },
+        stockFloors: { 20030: 0.4 },
+        exportedAt: STAMP,
+      })
+    )
+    const merged = mergeSetup({
+      setup,
+      villages: VILLAGES,
+      shipOnlyTo: { 20030: [20032] },
+      stockFloors: { 20030: 0.1 },
+    })
+    expect(merged.shipOnlyTo[20030]).toEqual([20031])
+    expect(merged.stockFloors[20030]).toBe(0.4)
+  })
+
+  it('drops both for a village the account no longer has', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 99999, ship_only_to: [20030], stock_floor_fraction: 0.5 }],
+    }
+    const merged = mergeSetup({ setup: roundTrip(doc), villages: VILLAGES })
+    expect(merged.shipOnlyTo).toEqual({})
+    expect(merged.stockFloors).toEqual({})
+    expect(merged.report.missingFromAccount.map((v) => v.village_id)).toEqual([99999])
+  })
+
+  it('rejects a ship_only_to that is not a list', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 20030, ship_only_to: 20031 }],
+    }
+    expect(() => roundTrip(doc)).toThrow(/ship_only_to/)
+  })
+
+  it('rejects destination ids that are not village ids', () => {
+    for (const bad of ['the hub', 1.5, 0, -3]) {
+      const doc = {
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20030, ship_only_to: [20031, bad] }],
+      }
+      expect(() => roundTrip(doc)).toThrow(SetupFileError)
+    }
+  })
+
+  it('rejects a stock floor above 0.95 instead of clamping it', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 20030, stock_floor_fraction: 0.96 }],
+    }
+    expect(() => roundTrip(doc)).toThrow(/0 to 0\.95/)
+  })
+
+  it('rejects a negative, non-numeric, or over-precise stock floor', () => {
+    // The input takes a whole percent or one decimal, so 0.1234 (12.34%) is a
+    // value the operator could never have typed and the file is wrong.
+    for (const floor of [-0.1, 'lots', 0.1234]) {
+      const doc = {
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20030, stock_floor_fraction: floor }],
+      }
+      expect(() => roundTrip(doc)).toThrow(SetupFileError)
+    }
+  })
+
+  it('accepts the bounds and a one-decimal percent', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [
+        { village_id: 20030, stock_floor_fraction: 0 },
+        { village_id: 20031, stock_floor_fraction: 0.95 },
+        { village_id: 20032, stock_floor_fraction: 0.125 },
+      ],
+    }
+    expect(roundTrip(doc).villages.map((v) => v.stock_floor_fraction)).toEqual([0, 0.95, 0.125])
+  })
+})
+
+describe('isStockFloorFraction', () => {
+  // Shared by the file parser and the planner's input, so the two cannot
+  // disagree about what a usable floor is.
+  it('accepts 0 to 0.95 on a one-decimal-percent grid', () => {
+    for (const ok of [0, 0.3, 0.95, 0.125, 0.001]) expect(isStockFloorFraction(ok)).toBe(true)
+  })
+
+  it('refuses out-of-range, over-precise and non-numeric values', () => {
+    for (const bad of [0.96, -0.1, 0.1234, NaN, Infinity, undefined, null, '0.3']) {
+      expect(isStockFloorFraction(bad)).toBe(false)
+    }
   })
 })
