@@ -151,3 +151,20 @@ read. Do not run the test suite.
 ## Farm Status Reading
 - Empty slots = success
 - "Not enough troops" = expected troop exhaustion, not a failure
+
+## Frontend UI Gates
+
+The design tokens and the UI acceptance gate live in `frontend/CLAUDE.md`, not here — they are
+frontend-only and would be noise during backend work. Two sections there:
+
+- **## Design System** — the real MD3 tokens in `frontend/src/index.css` (colour, spacing,
+  typography, radius, elevation, motion, breakpoints) and the rule that components consume
+  tokens only, never raw hex or Tailwind palette colours.
+- **## UI Definition of Done** — six conditions every UI change must meet (responsive at
+  375/768/1440, keyboard + visible focus, WCAG AA contrast in both themes, 44px tap targets,
+  all five states, no CLS and LCP < 2.5s).
+
+Phase 3 for a frontend change is the eslint/vitest/build command above **plus** the UI
+Definition of Done. Run `/ux-audit <url>` to measure it against the running app; it drives
+Chrome DevTools MCP and hands the artifacts to the `ux-reviewer` subagent
+(`.claude/agents/ux-reviewer.md`).
