@@ -943,6 +943,10 @@ def _improve_flows(
     # will pay, and the error is not small -- a 1h cap on a long haul costs
     # roughly twice what an unrestricted search assumes.
     max_cycle: Mapping[int, int] | None = None,
+    # Origins the operator has forbidden, per destination. The search MUST see
+    # these for the same reason it must see the cadence caps: it picks senders,
+    # and a sender it is not allowed to use is not a sender.
+    excluded_origins: Mapping[int, set[int]] | None = None,
 ) -> tuple[Assignment, bool]:
     """Lower merchant commitment by reassigning flow, seeded by the greedy plan.
 
@@ -996,6 +1000,20 @@ def _improve_flows(
     # destination instead of on every one of the ~4M costing calls.
     caps: Mapping[int, int] = max_cycle or {}
     _allowed_cache: dict[int, Sequence[int]] = {}
+
+    # The greedy seed filters candidate senders on this (:func:`_flows_for_resource`),
+    # but the seed is not the only thing that chooses an origin: a 2x2 swap lands a
+    # flow on ``(o1, d2)`` and a relay invents ``(hub, destination)``, and neither
+    # pair was ever vetted. Live account, 2026-09-02: the operator excluded his
+    # resource hub from a foreign tribute, the seed duly avoided it, and the swap
+    # put it straight back -- a direct route from the one origin that was banned,
+    # 10,266 crop/h on 9 merchants. The exclusion was worse than useless: it moved
+    # the seed into a poorer basin and was then violated anyway.
+    excluded: Mapping[int, set[int]] = excluded_origins or {}
+
+    def _origin_allowed(origin: int, destination: int) -> bool:
+        forbidden = excluded.get(destination)
+        return not forbidden or origin not in forbidden
 
     def allowed_for(destination: int) -> Sequence[int]:
         got = _allowed_cache.get(destination)
@@ -1318,6 +1336,14 @@ def _improve_flows(
             for hub in hubs:
                 if hub in (origin, destination):
                     continue
+                # Relay invents ``(origin, hub)`` and ``(hub, destination)``.
+                # The second is the dangerous one: it makes the hub a sender to
+                # a destination that may forbid it, which is how a banned
+                # village became a forwarding hub into a foreign tribute.
+                if excluded and not (
+                    _origin_allowed(origin, hub) and _origin_allowed(hub, destination)
+                ):
+                    continue
                 # Never create a two-way crop pair. A 2-cycle is not a relay: it
                 # makes "ship after you collect" unsatisfiable at both ends
                 # simultaneously, so no schedule can honour it.
@@ -1411,6 +1437,11 @@ def _improve_flows(
                     # travel time makes it cost zero merchants -- the most
                     # attractive move there is, silently deleting real delivery.
                     if o1 in (o2, d2) or d1 in (d2, o2):
+                        continue
+                    # A swap names two senders the seed never vetted. Rejected
+                    # here rather than after scoring: a forbidden pair must not
+                    # be priced, let alone win on price.
+                    if excluded and not (_origin_allowed(o1, d2) and _origin_allowed(o2, d1)):
                         continue
                     t_full = min(legs.get((o1, d1), 0.0), legs.get((o2, d2), 0.0))
                     if t_full <= EPSILON:
@@ -1589,6 +1620,7 @@ def build_plan(
         max_relay_hops,
         soft_budgets=soft_budgets,
         max_cycle=max_cycle_by_destination,
+        excluded_origins=excluded_origins_by_destination,
     )
     if not converged:
         # Never let a truncated search masquerade as a converged one: it inflates
