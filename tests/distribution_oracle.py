@@ -73,6 +73,12 @@ def oracle_day(
     settled day whenever the beat settles at all -- the same figure
     ``simulate_day`` reports, reached without its convergence bookkeeping.
 
+    When the last day did NOT repeat the one before it, its clamping is not the
+    recurring loss. A capped store still gaining will sit at its cap and shed
+    its whole daily gain from then on, so any such store whose last day showed
+    less than that is reported at the gain -- the contract's projection rule,
+    reimplemented here from the specification.
+
     Order within a minute matches the documented contract: production for the
     minute, then arrivals, then departures (cargo landing now is available to a
     route leaving now).
@@ -93,6 +99,8 @@ def oracle_day(
     # dispatch, and what lands is yesterday's load, not a fresh nominal batch.
     in_flight: dict[int, float] = {}
     result: dict[tuple[int, Resource], dict[str, float]] = {}
+    previous_close: dict[tuple[int, Resource], float] | None = None
+    settled = False
     for _day in range(days):
         wasted: dict[tuple[int, Resource], float] = {}
         first_full: dict[tuple[int, Resource], int] = {}
@@ -127,6 +135,11 @@ def oracle_day(
                 level[key] = level.get(key, 0.0) - shipped
                 moved[key] = moved.get(key, 0.0) - shipped
 
+        settled = previous_close is not None and all(
+            abs(level.get(key, 0.0) - previous_close.get(key, 0.0)) < 1e-6
+            for key in set(level) | set(previous_close)
+        )
+        previous_close = dict(level)
         result = {
             key: {
                 "wasted": amount,
@@ -136,6 +149,17 @@ def oracle_day(
             }
             for key, amount in wasted.items()
         }
+    if not settled:
+        for vid, per in capacities.items():
+            for resource in per:
+                key = (vid, resource)
+                gain = net_per_hour.get(vid, {}).get(resource, 0.0) * 24.0 + moved.get(key, 0.0)
+                if gain > 1.0 and gain - wasted.get(key, 0.0) >= 1.0:
+                    result[key] = {
+                        "wasted": gain,
+                        "first_full": float(first_full.get(key, 0)),
+                        "net_gain": gain,
+                    }
     return result
 
 

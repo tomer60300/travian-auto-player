@@ -147,6 +147,22 @@ class OverflowEvent:
     two were reported with identical wording, and the wording asserted the
     reason for the case that was in fact the rarer of the two.
     """
+    projected: bool = False
+    """The loss was extrapolated, not watched.
+
+    The replay ran its whole horizon without the day repeating, and this store
+    was still gaining: it had not reached its cap yet, or reached it too late in
+    the last day for that day to show the whole loss. So ``wasted_per_day`` is
+    its ``net_gain_per_day`` -- what a store that never leaves its cap loses --
+    rather than a figure any simulated day produced.
+    """
+    days_to_cap: float = 0.0
+    """Days from the snapshot until a projected store sits at its cap.
+
+    The horizon the replay ran, plus whatever headroom was left at its end
+    covered at the last day's net gain. Zero for an observed event: its store
+    is already there.
+    """
 
     @property
     def structural(self) -> bool:
@@ -269,6 +285,7 @@ def simulate_day(
     in_flight: dict[int, float] = {}
     previous_close: dict[tuple[int, Resource], float] | None = None
     production_steps = len(range(0, MINUTES_PER_DAY, step_minutes))
+    settled = False
 
     for _day in range(MAX_SETTLING_DAYS):
         wasted = {}
@@ -313,28 +330,60 @@ def simulate_day(
             abs(closing.get(key, 0.0) - previous_close.get(key, 0.0)) < 1e-6
             for key in set(closing) | set(previous_close)
         ):
+            settled = True
             break
         previous_close = closing
 
-    return tuple(
-        sorted(
-            (
-                OverflowEvent(
+    def net_gain_per_day(vid: int, resource: Resource) -> float:
+        per_step = net_per_hour.get(vid, {}).get(resource, 0.0) * step_minutes / 60.0
+        return per_step * production_steps + moved.get((vid, resource), 0.0)
+
+    events: dict[tuple[int, Resource], OverflowEvent] = {
+        (vid, resource): OverflowEvent(
+            village_id=vid,
+            resource=resource,
+            minute=first_full[(vid, resource)],
+            wasted_per_day=amount,
+            net_gain_per_day=net_gain_per_day(vid, resource),
+        )
+        for (vid, resource), amount in wasted.items()
+        if amount >= MIN_REPORTED_WASTE
+    }
+    if not settled:
+        # The horizon ran out before the day repeated, so the last day is not a
+        # settled one and what it clamped is not the recurring figure: a store
+        # that reaches its cap on day 15 clamped nothing, one that got there at
+        # noon on day 14 clamped half a day. Physics answers instead. A store
+        # gaining more per day than it passes on WILL sit at its cap, and once
+        # there everything beyond what leaves is lost -- so its recurring loss
+        # is its net gain, and the horizon only decided whether the replay got
+        # to watch it.
+        for vid, per_resource in capacities.items():
+            for resource, cap in per_resource.items():
+                key = (vid, resource)
+                gain = net_gain_per_day(vid, resource)
+                # A day that clamped within MIN_REPORTED_WASTE of the gain was
+                # spent at the cap, and the gap is float residue: that observed
+                # event already IS the recurring loss, so it stands.
+                if gain <= MIN_REPORTED_WASTE or gain - wasted.get(key, 0.0) < MIN_REPORTED_WASTE:
+                    continue
+                events[key] = OverflowEvent(
                     village_id=vid,
                     resource=resource,
-                    minute=first_full[(vid, resource)],
-                    wasted_per_day=amount,
-                    net_gain_per_day=(
-                        net_per_hour.get(vid, {}).get(resource, 0.0)
-                        * step_minutes
-                        / 60.0
-                        * production_steps
-                        + moved.get((vid, resource), 0.0)
-                    ),
+                    # Structural by construction, so as for any structural event
+                    # this is not the time of anything. Where the last day did
+                    # clamp it is at least that day's real first-full minute
+                    # rather than an invented one.
+                    minute=first_full.get(key, 0),
+                    wasted_per_day=gain,
+                    net_gain_per_day=gain,
+                    projected=True,
+                    days_to_cap=MAX_SETTLING_DAYS + (cap - level.get(key, 0.0)) / gain,
                 )
-                for (vid, resource), amount in wasted.items()
-                if amount >= MIN_REPORTED_WASTE
-            ),
+
+    return tuple(
+        sorted(
+            events.values(),
             key=lambda event: (-event.wasted_per_day, event.village_id, event.resource.value),
         )
     )
@@ -416,7 +465,17 @@ def storage_findings(
             )
     for event in overflows:
         label = village_label(event.village_id, names)
-        if event.structural:
+        if event.projected:
+            # The replay never saw this day: the cap is past the horizon, and
+            # the loss is what the store will shed once it sits there.
+            message = (
+                f"{label}: {event.resource.value} will reach its cap in about "
+                f"{event.days_to_cap:.0f} days and then lose about "
+                f"{event.wasted_per_day:,.0f}/day — the {_store_name(event.resource)} will "
+                f"never leave its cap, because {event.net_gain_per_day:,.0f}/day more arrives "
+                f"than leaves"
+            )
+        elif event.structural:
             # No clock: a store that never leaves its cap did not "reach" it at a
             # minute of the day, and reporting 00:00 as an event time sent the
             # operator looking for a midnight arrival that does not exist.

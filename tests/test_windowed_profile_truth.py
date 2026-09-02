@@ -155,16 +155,17 @@ class TestStorageDiagnosticsSimulateTheSurvivingRows:
             one_way_minutes=10.0,
         )
         beat = Beat(routes=(ScheduledRoute(route=route, dispatch_minute=23 * 60),))
-        # The physics must survive to a SETTLED day, which is all simulate_day
-        # reports: the origin grows what it ships (or the flow dies with its
-        # stock and nothing overflows in either mode), and the receiver eats
-        # 333/h -- just under the pruned inflow of 8,000/day, so the windowed
-        # case holds steady while the unpruned 24,000/day drowns it.
+        # Only the receiver has a cap to overflow. The origin's is left unread
+        # (skipped, not assumed): windowed, it ships 8 of the 24 batches it
+        # grows and would fill any finite store eventually, which simulate_day
+        # now projects and which is not what this test is about. The receiver
+        # eats exactly the pruned inflow of 8,000/day, so the windowed case
+        # holds level while the unpruned 24,000/day drowns it.
         return simulate_day(
             beat,
             stocks={1: {Resource.CROP: 50_000}, 2: {Resource.CROP: 0}},
-            capacities={1: {Resource.CROP: 10_000_000}, 2: {Resource.CROP: 10_000}},
-            net_per_hour={1: {Resource.CROP: 1000.0}, 2: {Resource.CROP: -333.0}},
+            capacities={2: {Resource.CROP: 10_000}},
+            net_per_hour={1: {Resource.CROP: 1000.0}, 2: {Resource.CROP: -8_000 / 24}},
             dispatch_window=dispatch_window,
         )
 

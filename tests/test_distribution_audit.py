@@ -489,16 +489,13 @@ class TestKnownDefects:
         receivers = {r.destination for r in result.rows if Resource.CROP in r.cargo}
         assert hub in senders & receivers
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "AUDIT: simulate_day gives up after MAX_SETTLING_DAYS=14 and reports "
-            "whatever the 14th day happened to waste. A store that reaches its cap "
-            "on day 15 is reported as losing nothing at all, though its net gain "
-            "per day says it will sit at the cap for ever."
-        ),
-    )
     def test_a_store_that_reaches_its_cap_after_the_settling_horizon_is_reported(self) -> None:
+        """Resolved 2026-09-02. simulate_day gave up after MAX_SETTLING_DAYS=14
+        and reported whatever the 14th day happened to waste, so a store that
+        reaches its cap on day 15 was reported as losing nothing at all. It now
+        records whether the horizon settled and, when it did not, reports a
+        capped store still gaining at its net gain per day -- the loss it will
+        shed once it sits at the cap -- as a projected overflow."""
         from travian_api.services.distribution.schedule import Beat
 
         # +1,000/h into a 400,000 store holding 40,000: full in exactly 15 days,
@@ -513,15 +510,12 @@ class TestKnownDefects:
         assert events, "a store certain to sit at its cap reported no overflow"
         assert events[0].wasted_per_day == pytest.approx(24_000.0, abs=1.0)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "AUDIT: wasted_per_day is read off the last simulated day even when "
-            "the simulation never settled, so a store that first clamps part-way "
-            "through day 14 reports half its recurring loss."
-        ),
-    )
     def test_the_reported_loss_is_the_recurring_one_not_a_partial_first_day(self) -> None:
+        """Resolved 2026-09-02. wasted_per_day was read off the last simulated
+        day even when the simulation never settled, so a store that first clamps
+        part-way through day 14 reported half its recurring loss. On an
+        unsettled horizon a store whose last-day clamping falls short of its net
+        gain is now reported at the net gain, which is the recurring figure."""
         from travian_api.services.distribution.schedule import Beat
 
         # Full on day 13.5, so day 14 clamps for only half of it.

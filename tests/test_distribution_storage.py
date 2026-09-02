@@ -316,3 +316,88 @@ class TestWhyItOverflowed:
         assert burst[0].category is Category.OVERFLOW_BURST
         assert structural[0].action != burst[0].action
         assert structural[0].loss_per_day > 0, "the cost is carried, not just described"
+
+
+class TestBeyondTheSettlingHorizon:
+    """A store the horizon never saw settle is still heading somewhere.
+
+    simulate_day gives up after MAX_SETTLING_DAYS and used to report whatever
+    the last day happened to clamp: nothing at all for a store that reaches its
+    cap the day after, half a day's loss for one that got there at noon on the
+    last day. But a store gaining more each day than it passes on WILL sit at
+    its cap, and once there everything beyond what leaves is lost -- so its
+    recurring loss is its net gain, whether or not the replay ran long enough
+    to watch it happen.
+    """
+
+    def _lone_store(self, stock: int, capacity: int, per_hour: float) -> tuple[OverflowEvent, ...]:
+        return simulate_day(
+            build_beat(()),
+            stocks={1: {Resource.CROP: stock}},
+            capacities={1: {Resource.CROP: capacity}},
+            net_per_hour={1: {Resource.CROP: per_hour}},
+        )
+
+    def test_a_store_that_fills_after_the_horizon_is_reported_at_its_net_gain(self):
+        # +1,000/h into a 400,000 store holding 40,000: full on day 15, one day
+        # past the horizon, and losing 24,000/day every day after that.
+        events = self._lone_store(40_000, 400_000, 1_000.0)
+
+        assert len(events) == 1, "a store certain to sit at its cap reported no overflow"
+        event = events[0]
+        assert event.projected is True
+        assert event.net_gain_per_day == pytest.approx(24_000.0, abs=1.0)
+        assert event.wasted_per_day == pytest.approx(event.net_gain_per_day)
+        assert event.structural, "a surplus with nowhere to go is not a batch problem"
+        assert event.days_to_cap == pytest.approx(15.0, abs=0.1)
+
+    def test_a_store_that_first_clamps_inside_the_last_day_reports_the_whole_recurring_loss(
+        self,
+    ):
+        # Full at noon on day 14, so the last day clamped for only half of it.
+        events = self._lone_store(76_000, 400_000, 1_000.0)
+
+        assert len(events) == 1
+        assert events[0].projected is True
+        assert events[0].wasted_per_day == pytest.approx(24_000.0, abs=1.0), (
+            "half a day's clamping was reported as the daily loss"
+        )
+
+    def test_a_settled_overflow_is_observed_not_projected(self):
+        # 926/h into a store 1,000 short of its cap: at the cap inside the first
+        # day, and the second day repeats the first. Exactly the event the replay
+        # reported before there was any projection.
+        events = self._lone_store(799_000, 800_000, 926.0)
+
+        assert len(events) == 1
+        event = events[0]
+        assert event.projected is False
+        assert event.days_to_cap == 0.0
+        assert event.minute == 0
+        assert event.wasted_per_day == pytest.approx(926 * 24)
+        assert event.net_gain_per_day == pytest.approx(926 * 24)
+
+    def test_a_draining_store_is_not_projected_however_long_the_run(self):
+        # Village 2 empties 24,000/day out of 500,000 and never settles, so the
+        # whole account is still drifting at the horizon; village 1 is the
+        # day-15 store above, which proves the projection path did run.
+        events = simulate_day(
+            build_beat(()),
+            stocks={1: {Resource.CROP: 40_000}, 2: {Resource.CROP: 500_000}},
+            capacities={1: {Resource.CROP: 400_000}, 2: {Resource.CROP: 800_000}},
+            net_per_hour={1: {Resource.CROP: 1_000.0}, 2: {Resource.CROP: -1_000.0}},
+        )
+
+        assert [e.village_id for e in events] == [1], (
+            "a store that is emptying can never sit at its cap"
+        )
+
+    def test_a_projected_overflow_says_when_and_how_much(self):
+        findings = storage_findings([], self._lone_store(40_000, 400_000, 1_000.0), names={1: "19"})
+
+        assert len(findings) == 1
+        assert findings[0].category is Category.OVERFLOW_STRUCTURAL
+        assert findings[0].loss_per_day == pytest.approx(24_000.0, abs=1.0)
+        assert "will reach its cap in about 15 days" in findings[0].message
+        assert "24,000/day" in findings[0].message
+        assert "00:00" not in findings[0].message
