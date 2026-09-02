@@ -65,10 +65,10 @@ never hidden.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .allocation import EPSILON, Resource, ResourcePlan, village_label
+from .allocation import EPSILON, AllocationMode, Resource, ResourcePlan, village_label
 from .findings import Category, Finding
 from .geometry import MapGeometry
 from .merchants import DAILY_BEAT_CYCLES, MerchantModel, cheapest_cycle, cycle_sweep
@@ -974,6 +974,11 @@ def _improve_flows(
     # these for the same reason it must see the cadence caps: it picks senders,
     # and a sender it is not allowed to use is not a sender.
     excluded_origins: Mapping[int, set[int]] | None = None,
+    # Villages the operator has put in the crop plan, and so the only ones relay
+    # may conscript as forwarding hubs. Empty by default, which means no relay:
+    # a caller that does not supply it gets direct routes rather than a search
+    # quietly free to draft any village it likes.
+    relay_hub_candidates: Collection[int] = (),
 ) -> tuple[Assignment, bool]:
     """Lower merchant commitment by reassigning flow, seeded by the greedy plan.
 
@@ -1325,30 +1330,53 @@ def _improve_flows(
         legs = flows.get(Resource.CROP)
         if not legs:
             return False
-        # Every village of the account is a candidate, whether or not it already
-        # carries crop, subject to the two guards below. Until 2026-09-02
-        # candidates came from the crop flow graph alone, which the audit caught:
-        # the canonical midway hub of profile section 8.5 grows exactly what it
-        # keeps, so it has no crop leg and could never be chosen -- while the same
-        # village given any flow at all was found at once. The worry behind that
-        # restriction was conscripting a freshly founded village as
-        # infrastructure; the merchant guard is what actually covers that (no
-        # Marketplace, no merchants), and a relay is adopted only when it strictly
-        # lowers the objective, so a village nobody needs is left alone.
-        # A hub relays crop through itself, so it must be a real village that can
-        # staff the extra leg. Foreign sinks (merchant_count == 0) are excluded:
-        # including a sink let the search adopt an impossible sink->sink leg (zero
-        # distance between two co-located tributes costs zero merchants), emitting
-        # a route whose origin is a negative foreign id.
-        # A hub must also be solvent in crop: see :func:`_may_relay_through`.
-        # Relaying through a village already losing crop turns a slow deficit into
-        # a dead village the first time its refill slips, and an unreadable rate
-        # is refused there too -- unknown is not zero.
-        # Computed once per scan, not per edge.
+        # A candidate is a village the operator gave a crop instruction, whether
+        # or not that instruction leaves it carrying any crop --
+        # ``relay_hub_candidates``, which :func:`build_plan` derives from the crop
+        # allocations. The set has moved twice, and both earlier versions were
+        # wrong in opposite directions:
+        #
+        # * Until 2026-09-02 candidates came from the crop FLOW graph, so the
+        #   canonical midway hub of profile section 8.5 -- it grows exactly what
+        #   it keeps, so it has an allocation and no leg -- could never be chosen,
+        #   while the same village given any flow at all was found at once.
+        # * The fix widened it to every village of the account, one village too
+        #   far: a village nobody had said anything about was conscripted the
+        #   moment a relay through it priced marginally cheaper. Measured on the
+        #   safety fixture, adding ONE village with no crop allocation changed
+        #   the hub and moved every leg -- on a live account, 27,000/h of someone
+        #   else's crop into a granary nobody had sized for it.
+        #
+        # That second failure is known issue #10, and this is its answer. A
+        # re-plan on unchanged input must give an identical route set, because
+        # /execute acts on the DIFF against the live configuration: it deletes
+        # and recreates real Gold Club rows from it, so a settle that reshuffles
+        # untouched villages is destructive, not merely surprising. A settle adds
+        # no allocation, so it adds no candidate, so nothing moves. The
+        # allocation is also the CONSENT: naming a village in the crop plan --
+        # even at an absolute target equal to its own production, which changes
+        # nothing else about the plan -- is how the operator offers it as
+        # infrastructure. KEEP is not such a naming: `resolve_resource` defaults
+        # every village with a production figure to KEEP, and the route layer
+        # drops explicit KEEP entries because they mean exactly what an absent
+        # one means.
+        #
+        # Two guards then apply on top. A hub relays crop through itself, so it
+        # must be a real village that can staff the extra leg: foreign sinks
+        # (merchant_count == 0) are excluded, because including a sink let the
+        # search adopt an impossible sink->sink leg (zero distance between two
+        # co-located tributes costs zero merchants), emitting a route whose
+        # origin is a negative foreign id. And a hub must be solvent in crop (see
+        # :func:`_may_relay_through`): relaying through a village already losing
+        # crop turns a slow deficit into a dead village the first time its refill
+        # slips, and an unreadable rate is refused there too -- unknown is not
+        # zero. Computed once per scan, not per edge.
         hubs = sorted(
             vid
-            for vid, village in villages.items()
-            if village.merchant_count > 0 and _may_relay_through(village)
+            for vid in relay_hub_candidates
+            if vid in villages
+            and villages[vid].merchant_count > 0
+            and _may_relay_through(villages[vid])
         )
         # ONE best relay per scan, chosen across every (leg, hub) pair rather than
         # committing the first leg that happens to have an improving hub. Taking
@@ -1645,6 +1673,26 @@ def build_plan(
     soft_budgets = {
         vid: budget - int(budget * merchant_headroom + 0.5) for vid, budget in budgets.items()
     }
+    # Relay may only conscript a village the operator put in the crop plan; see
+    # the candidate-set comment in `_relay_scan` for why, and for what KEEP
+    # means here.
+    #
+    # Cost, measured rather than assumed. Widening the candidates to the whole
+    # account cost +56% of planning time at 40 villages (1.86s -> 2.91s) and
+    # nothing measurable at 20. Narrowing back to the crop plan does NOT simply
+    # undo that: on the synthetic seed-7 account the candidate count halves (21
+    # of 40) but the search finds a different relay set, so the improvement pass
+    # measures 1.48s narrowed against 1.34s widened at 40 villages, and 0.21s
+    # against 0.31s at 20. Runtime here is dominated by which relays are found,
+    # not by how many candidates were scanned, and every figure is well inside
+    # the budget -- so this gate was chosen for correctness, and its performance
+    # is a wash.
+    crop_plan = resource_plans.get(Resource.CROP)
+    relay_hub_candidates = frozenset(
+        allocation.village_id
+        for allocation in (crop_plan.villages if crop_plan is not None else ())
+        if allocation.mode is not AllocationMode.KEEP
+    )
     assignment, converged = _improve_flows(
         assignment,
         villages,
@@ -1657,6 +1705,7 @@ def build_plan(
         soft_budgets=soft_budgets,
         max_cycle=max_cycle_by_destination,
         excluded_origins=excluded_origins_by_destination,
+        relay_hub_candidates=relay_hub_candidates,
     )
     if not converged:
         # Never let a truncated search masquerade as a converged one: it inflates

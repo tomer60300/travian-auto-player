@@ -215,6 +215,95 @@ def test_a_crop_neutral_village_outside_the_crop_graph_may_relay() -> None:
     )
 
 
+# A village the operator never gave a crop instruction. `_plan_account` drops
+# explicit KEEP entries because they mean exactly what an absent entry means, so
+# this is what a freshly settled village looks like to the planner.
+_NOT_IN_THE_CROP_PLAN = Allocation(AllocationMode.KEEP)
+
+
+def test_a_village_with_no_crop_allocation_is_not_conscripted_as_a_hub() -> None:
+    """Widening the candidates to the whole account went one village too far.
+
+    The midway hub of section 8.5 has an allocation that nets to zero flow; a
+    village nobody has said anything about has no allocation at all, and the
+    two are different things. Conscripting the second means the operator finds
+    27,000/h of someone else's crop routed into a granary they never sized for
+    it, on a village they may have founded an hour ago -- and every crop route
+    in the account rewritten to make it happen.
+    """
+    villages, plans = _account(0.0, _NOT_IN_THE_CROP_PLAN)
+
+    plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+    assert MIDPOINT not in _relay_hubs(plan), (
+        f"village {MIDPOINT} carries no crop instruction of its own and was still "
+        f"made infrastructure because a relay through it priced slightly cheaper"
+    )
+    assert _relay_hubs(plan), (
+        "no relay at all -- the case is vacuous unless the search still had "
+        "somewhere legitimate to go"
+    )
+
+
+def test_settling_a_village_does_not_rewrite_the_crop_routes() -> None:
+    """Known issue #10, which the widening deleted the answer to.
+
+    A re-plan on unchanged input must produce an identical route set or the diff
+    against the live configuration is meaningless -- and /execute acts on that
+    diff, deleting and recreating real Gold Club rows. Adding ONE village with
+    no crop allocation moved every leg and changed the hub, so a settle the
+    operator had not finished thinking about rewrote the whole sheet. It cannot
+    now: a village with no crop instruction is not a candidate, so the account
+    it joins plans exactly as it did before.
+    """
+    # MIDPOINT is insolvent here, so the relay legitimately runs through the
+    # off-axis ALTERNATIVE and the axis is free for the newcomer to look better
+    # on. Without that the incumbent hub wins on distance anyway and the test
+    # would pass while demonstrating nothing.
+    villages, plans = _account(-1.0, _NOT_IN_THE_CROP_PLAN)
+    before = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+    assert _relay_hubs(before) == {ALTERNATIVE}, _relay_hubs(before)
+
+    # Squarely on the haul the relay is trying to shorten, solvent, with
+    # merchants to spare: everything the widened candidate set asked of a hub,
+    # and nothing the operator ever said about crop.
+    newcomer = 99
+    villages[newcomer] = VillageState(
+        newcomer, 58, 0, merchant_count=20, trade_office_level=10, crop_per_hour=0.0
+    )
+    plans_after = {
+        Resource.CROP: resolve_resource(
+            Resource.CROP,
+            {
+                CAPITAL: 0.0,
+                MIDPOINT: -1.0,
+                ALTERNATIVE: 1200.0,
+                STRANDED: 9000.0,
+                newcomer: 0.0,
+            },
+            {
+                CAPITAL: Allocation(AllocationMode.REMAINDER),
+                ALTERNATIVE: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                STRANDED: Allocation(AllocationMode.ABSOLUTE, 0.0),
+            },
+        )
+    }
+    after = build_plan(villages, plans_after, GEOMETRY, MODEL, max_latency_hours=None)
+
+    def _crop_legs(plan):
+        return sorted(
+            (route.origin, route.destination, round(route.cargo_per_hour[Resource.CROP], 6))
+            for route in plan.routes
+            if route.cargo_per_hour.get(Resource.CROP, 0.0)
+        )
+
+    assert newcomer not in _relay_hubs(after)
+    assert _crop_legs(after) == _crop_legs(before), (
+        "settling one village rewrote the crop route set; the /execute diff would "
+        "delete and recreate rows for villages the operator never touched"
+    )
+
+
 def test_an_unreadable_rate_outside_the_crop_graph_is_still_refused() -> None:
     """Widening the candidates must not widen past the solvency guard."""
     villages, plans = _account(None, _OUTSIDE_THE_CROP_GRAPH)
