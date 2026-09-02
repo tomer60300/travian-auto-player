@@ -303,11 +303,13 @@ def derive_night_profile(
     # ANY negative residual as the allocation over-claiming the account, so 0.29
     # crop an hour out of 106,558 made a plan that simulates perfectly read as not
     # executable. Give the rounding somewhere to land, taking it from the largest
-    # entry -- the one least disturbed by losing a unit.
+    # entry -- the one least disturbed by losing a unit. Only when the demand was
+    # covered, though: an unmet shortfall is not rounding, it is already reported
+    # as ``unmet``, and trimming it would push a retention below zero.
     produced = sum(v.production.get(Resource.CROP, 0.0) for v in villages)
     claimed = sum(a.value for a in crop.values())
     residual = produced - tribute_per_hour - claimed
-    if residual < 0:
+    if residual < 0 and demand <= 0:
         slack = int(-residual) + 1
         largest = max(crop, key=lambda vid: crop[vid].value)
         crop[largest] = Allocation(mode=AllocationMode.ABSOLUTE, value=crop[largest].value - slack)

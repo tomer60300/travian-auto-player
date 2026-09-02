@@ -27,6 +27,7 @@ import math
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from tests.distribution_oracle import oracle_day, oracle_profile_cycle
 from tests.distribution_synthetic import (
@@ -608,25 +609,22 @@ class TestKnownDefects:
         }
         assert original.total_merchants == relabelled.total_merchants
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "AUDIT: AllocationInput.value is unbounded, so an ABSOLUTE target of "
-            "-4,000/h is accepted. It means 'retain less than nothing', the sender "
-            "is given a route it cannot fund, `unallocated` reads +6,000/h on an "
-            "account that makes 2,000/h, and the plan is reported feasible."
-        ),
-    )
     def test_a_negative_absolute_target_is_not_silently_planned(self) -> None:
+        """An ABSOLUTE target of -4,000/h means 'retain less than nothing'. It
+        used to be accepted: the sender was given a route it cannot fund,
+        `unallocated` read +6,000/h on an account that makes 2,000/h, and the
+        plan was reported feasible. Resolved 2026-09-02 by refusing a negative
+        absolute retention in ``Allocation.__post_init__``, which /plan
+        translates into a 400 that names the value."""
         account = next(
             a for a in adversarial_accounts() if a.name == "adv-negative-absolute-target"
         )
 
-        result = _post_plan(account.plan_request)
+        with pytest.raises(HTTPException) as excinfo:
+            _post_plan(account.plan_request)
 
-        lumber = next(u for u in result.unallocated if u.resource is Resource.LUMBER)
-        assert lumber.unallocated <= lumber.total_production
-        assert not result.feasible
+        assert excinfo.value.status_code == 400
+        assert "-4000" in excinfo.value.detail
 
 
 # ---------------------------------------------------------------------------

@@ -84,6 +84,8 @@ class Allocation:
             raise AllocationError(f"percentage must be 0-100, got {self.value}")
         if self.mode is AllocationMode.SUSTAIN and self.value < 0:
             raise AllocationError(f"sustain headroom cannot be negative, got {self.value}")
+        if self.mode is AllocationMode.ABSOLUTE and self.value < 0:
+            raise AllocationError(f"absolute retention cannot be negative, got {self.value}")
 
 
 @dataclass(frozen=True)

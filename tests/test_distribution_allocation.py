@@ -173,6 +173,12 @@ class TestDefaultsAndValidation:
         with pytest.raises(AllocationError):
             Allocation(AllocationMode.PERCENTAGE, value)
 
+    def test_negative_absolute_retention_is_rejected(self):
+        """-4,000/h means 'retain less than nothing': the sender is handed a
+        route it cannot fund and `unallocated` exceeds the whole account."""
+        with pytest.raises(AllocationError, match="absolute retention cannot be negative"):
+            Allocation(AllocationMode.ABSOLUTE, -4000)
+
     def test_percentage_against_a_crop_negative_account_is_rejected(self):
         """30% of a net -4,000/h account is a target of -1,200 — an instruction
         to ship crop out of a starving village. A warning is not enough: the
