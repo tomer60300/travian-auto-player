@@ -66,7 +66,7 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4 bg-base">
+    <main className="min-h-screen flex items-center justify-center px-4 bg-base">
       <div className="w-full max-w-md">
         {/* Title */}
         <h1 className="logo-title text-3xl text-center mb-8">
@@ -80,6 +80,7 @@ export default function Login() {
             <button
               type="button"
               onClick={() => switchMode('login')}
+              aria-pressed={mode === 'login'}
               className={`tab-btn${mode === 'login' ? ' tab-btn-active' : ''}`}
             >
               Login
@@ -87,6 +88,7 @@ export default function Login() {
             <button
               type="button"
               onClick={() => switchMode('register')}
+              aria-pressed={mode === 'register'}
               className={`tab-btn${mode === 'register' ? ' tab-btn-active' : ''}`}
             >
               Register
@@ -94,7 +96,11 @@ export default function Login() {
           </div>
 
           {/* Form */}
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          <form
+            onSubmit={handleSubmit}
+            className="flex flex-col gap-4"
+            aria-describedby={error ? 'login-error' : undefined}
+          >
             <div className="flex flex-col gap-1.5">
               <label
                 htmlFor="username"
@@ -155,8 +161,16 @@ export default function Login() {
             )}
 
             {/* Error message */}
+            {/* role="alert" carries an implicit assertive live region. Without it
+                the box renders and a screen-reader user submitting the form hears
+                nothing at all -- the page had no live region of any kind. It is
+                described from the FORM rather than each input because one failure
+                ("Invalid credentials") is about the pair, and marking a field
+                invalid that may be perfectly correct is a worse lie than silence. */}
             {error && (
-              <div className="error-box">{error}</div>
+              <div className="error-box" id="login-error" role="alert">
+                {error}
+              </div>
             )}
 
             {/* Submit */}
@@ -179,6 +193,6 @@ export default function Login() {
           </form>
         </div>
       </div>
-    </div>
+    </main>
   )
 }

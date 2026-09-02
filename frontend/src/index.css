@@ -245,7 +245,11 @@ h1, h2, h3 {
   padding: 0.75rem 1rem;
   border-radius: 12px 12px 0 0;
   width: 100%;
-  outline: none;
+  /* No `outline: none` here. The only other focus affordance is a 2px underline
+     colour change plus a background shift, which measures 1.41:1 against the
+     unfocused state -- focus carried by colour alone (WCAG 1.4.1, Level A), and
+     on a filled field the shift makes it stop looking like a field at all.
+     The ring lives on :focus-visible below so pointer users never see it. */
   transition: border-color 200ms var(--md-easing), background-color 200ms;
   font-family: 'Roboto', system-ui, sans-serif;
   font-size: 1rem;
@@ -254,8 +258,14 @@ h1, h2, h3 {
   border-bottom-color: var(--md-primary);
   background-color: var(--md-surface-container);
 }
-.input-field::placeholder { color: var(--md-on-surface-variant); opacity: 0.6; }
-.input-field:focus-visible { outline: none; }
+/* opacity: 0.6 used to drag the declared colour (7.63:1) down to 2.93:1 light /
+   4.03:1 dark, under the 4.5 minimum. The token is already the muted one -- it
+   does not need dimming twice. */
+.input-field::placeholder { color: var(--md-on-surface-variant); }
+.input-field:focus-visible {
+  outline: 2px solid var(--md-primary);
+  outline-offset: 2px;
+}
 
 /* ── Layout ── */
 
@@ -443,6 +453,12 @@ h1, h2, h3 {
   font-family: 'Roboto', system-ui, sans-serif;
 }
 .tab-btn:hover { color: var(--md-on-surface); background-color: rgba(103,80,164,0.05); }
+/* Its siblings have a designed ring; without this the tab strip falls back to
+   the UA default and focus reads as inconsistent across the same card. */
+.tab-btn:focus-visible {
+  outline: 2px solid var(--md-primary);
+  outline-offset: -2px;
+}
 .tab-btn-active {
   color: var(--md-primary);
   border-bottom-color: var(--md-primary);
