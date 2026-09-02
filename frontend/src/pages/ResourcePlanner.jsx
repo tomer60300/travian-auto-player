@@ -108,7 +108,7 @@ function loadProfiles(accountKey) {
 // docs/25), so it cannot be derived from tribe and defaults to the operator's
 // calibrated Europe 2 Teuton values. Travel SPEED, by contrast, is tribe-derived
 // server-side and travels in the snapshot.
-const DEFAULT_MERCHANT_MODEL = { base_capacity: 2200, bonus_per_to_level: 0.2 }
+const DEFAULT_MERCHANT_MODEL = { base_capacity: 2500, bonus_per_to_level: 0.2 }
 
 const LS_WINDOWS = 'planner_profile_windows'
 const LS_CROP_CEILING = 'planner_crop_ceiling'

@@ -5,16 +5,21 @@ module:
 
 **R1 — RESOLVED, and the review was wrong.** The review argued the profile's
 ``base 2200`` / ``+20%`` per Trade Office level had to be mistaken, because
-published Teuton values are ``base 1000`` / ``+10%``. A live reading settled it:
-a TO 13 village carries **7,920** per merchant, which is exactly
-``2200 * (1 + 0.2 * 13)``. Stock Teuton would have given 2,300. The profile was
-right and this server is not stock.
+published Teuton values are ``base 1000`` / ``+10%``. Live readings settled it:
+whatever this server is, it is not stock, by a wide margin. The base currently
+reads **2,500** (operator, 2026-09-02), superseding an earlier reading of
+**7,920** at TO 13 that fitted ``2200 * (1 + 0.2 * 13)`` exactly. Stock Teuton
+would give 2,300 there.
 
-The seam stays regardless. Capacity lives in one injectable
+Those two readings cannot both describe one model -- ``2500`` / ``+20%``
+predicts 9,000 at TO 13, not 7,920 -- so the earlier one is recorded as
+superseded rather than reconciled. Both came off the game, so something changed
+between them; the mechanism is not established, and a Trade artifact is one
+thing that could do it.
+
+Which is exactly why the seam exists. Capacity lives in one injectable
 :class:`MerchantModel` and can be *derived from observation* via
-:func:`calibrate`, because the measured model is still only pinned by a single
-data point -- any ``base * (1 + 13k) = 7920`` fits it, and a Trade artifact can
-change it mid-server. Nothing else in the planner may hardcode a capacity.
+:func:`calibrate`. Nothing else in the planner may hardcode a capacity.
 
 **R5 — cycles should divide 24 hours.** Otherwise the schedule has no repeating
 daily period and cannot be written down as a beat. :data:`DAILY_BEAT_CYCLES` is
@@ -85,15 +90,20 @@ class MerchantModel:
         return math.floor(scaled)
 
 
-# Measured on Europe 2 (Teuton): a TO 13 village carries 7,920, and
-# 2200 * (1 + 0.2 * 13) == 7920 exactly. Still only one data point -- other
-# (base, bonus) pairs also satisfy it -- so re-derive with calibrate() when a
-# village at a different Trade Office level is to hand.
-EUROPE2_TEUTON = MerchantModel(base_capacity=2200, bonus_per_trade_office_level=0.20)
+# Europe 2 (Teuton). Base re-read by the operator as 2,500 on 2026-09-02, which
+# supersedes the earlier 7,920-at-TO-13 reading that fitted base 2,200 exactly.
+# See the module docstring: the two cannot be reconciled, only ordered.
+#
+# The BASE is what was re-read. The +20% per level is carried over from the
+# profile and has NOT been re-measured against it, so this model is pinned on
+# one end only. A reading from a Trade Office 0 village settles the base with no
+# inversion at all -- calibrate() prefers exactly that sample, and villages 03
+# and 26 are at TO 0 -- and any second level then pins the bonus.
+EUROPE2_TEUTON = MerchantModel(base_capacity=2500, bonus_per_trade_office_level=0.20)
 
 # Published stock Teuton values at 1x, kept only as the counter-example: they
-# predict 2,300 at TO 13 where the game reports 7,920, which is how we know this
-# server is not stock. Roman and Gaul figures are deliberately absent -- the tool
+# predict 2,300 at TO 13 where the game reports several times that, which is how
+# we know this server is not stock. Roman and Gaul figures are deliberately absent -- the tool
 # is single-account, and an unused constant is one more thing to get wrong.
 STOCK_TEUTON = MerchantModel(base_capacity=1000, bonus_per_trade_office_level=0.10)
 

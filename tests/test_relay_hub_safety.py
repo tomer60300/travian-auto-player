@@ -43,10 +43,25 @@ def _account(midpoint_crop_per_hour: float | None, midpoint_alloc: Allocation):
     """A stranded village that cannot afford its own haul, and a midpoint.
 
     The midpoint sits halfway to the capital, so on distance alone it is the hub
-    relay wants. ``ALTERNATIVE`` is solvent and only slightly further off-axis,
-    so refusing the midpoint leaves the optimizer somewhere to go -- without it
-    a passing test could mean no relay was possible at all, rather than that the
-    sink was correctly refused.
+    relay wants. ``ALTERNATIVE`` is solvent and further off-axis, so refusing the
+    midpoint leaves the optimizer somewhere to go -- without it a passing test
+    could mean no relay was possible at all, rather than that the sink was
+    correctly refused.
+
+    ``ALTERNATIVE``'s offset is load-bearing in BOTH directions, so do not treat
+    it as a free parameter:
+
+    * Too near the axis and the hub choice is a coin-flip. At ``y=25`` the two
+      candidates sat 60 and 65 fields from ``STRANDED``, close enough that the
+      winner was decided by the objective's tie-break rather than by geometry --
+      so the break-even case picked ``MIDPOINT`` at merchant base 2,200 and
+      ``ALTERNATIVE`` at 2,500, for no reason the test was interested in.
+    * Too far and the refusal cases go vacuous. At ``y=60`` the ``-1`` case
+      produced no relay whatsoever, which would have turned "the sink was
+      refused" into "nothing was attempted" while still passing.
+
+    ``y=40`` is inside both bounds: the midpoint wins on geometry when it is
+    eligible, and ``ALTERNATIVE`` still gets chosen whenever it is refused.
     """
     villages = {
         CAPITAL: VillageState(
@@ -63,7 +78,7 @@ def _account(midpoint_crop_per_hour: float | None, midpoint_alloc: Allocation):
         ALTERNATIVE: VillageState(
             ALTERNATIVE,
             60,
-            25,
+            40,
             merchant_count=20,
             trade_office_level=10,
             crop_per_hour=1200.0,

@@ -539,17 +539,21 @@ class TestKnownDefects:
         reason=(
             "AUDIT: the plan depends on the integer village ids. Relabelling the "
             "villages of seed 55 -- six villages, nothing else changed -- gives a "
-            "different route set. 13 of 25 seeds sampled still differ under "
+            "different route set. 16 of 30 seeds sampled still differ under "
             "relabelling, and seed 7 spanned 127-141 merchants (9.9%) for the same "
             "account. The objective's last key is an integer, so candidate swaps "
             "tie often and the tie is broken by the id-sorted scan order. "
             "Seed 49 was the original example: the relay-hub solvency guard left "
             "it invariant by removing ineligible hubs, and with them the ties the "
             "scan order was breaking. That narrows the defect without fixing it, "
-            "which is why the seed was replaced rather than the test relaxed."
+            "which is why the seed was replaced rather than the test relaxed. "
+            "Seeds 0 and 8 were replaced by 6 and 9 for the same reason on "
+            "2026-09-02, when the merchant base was corrected from 2,200 to "
+            "2,500: the extra capacity removed the ties those two accounts hung "
+            "on, so they became invariant while the defect itself did not move."
         ),
     )
-    @pytest.mark.parametrize("seed", [55, 0, 3, 5, 8])
+    @pytest.mark.parametrize("seed", [55, 3, 5, 6, 9])
     def test_relabelling_does_not_change_the_plan(self, seed: int) -> None:
         account = random_account(seed, with_profiles=False)
         mapping = id_permutation(account.plan_request, seed + 1_000)
@@ -582,15 +586,18 @@ class TestKnownDefects:
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "AUDIT: the same 17-village account relabelled costs 687 merchants "
-            "under one labelling and 709 under another, and one village flips "
-            "between over budget and within it -- which is the number the Trade "
-            "Office upgrade advice is built from."
+            "AUDIT: the same account relabelled costs 459 merchants under one "
+            "labelling and 457 under another, and one village flips between over "
+            "budget and within it -- which is the number the Trade Office upgrade "
+            "advice is built from. Was case 2 at permutation 502, which the "
+            "2,200 -> 2,500 merchant base correction made invariant on "
+            "2026-09-02; case 1 at 500 was substituted because it still shows "
+            "BOTH halves, the over-budget set and the total."
         ),
     )
     def test_relabelling_does_not_change_who_is_over_budget(self) -> None:
-        account = case_account(2)
-        mapping = id_permutation(account.plan_request, 502)
+        account = case_account(1)
+        mapping = id_permutation(account.plan_request, 500)
 
         original = _post_plan(account.plan_request)
         relabelled = _post_plan(permute_ids(account.plan_request, mapping))

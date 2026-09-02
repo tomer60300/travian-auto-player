@@ -84,12 +84,19 @@ class TestCalibration:
         assert measured.capacity(11) / stock.capacity(11) == pytest.approx(3.35, abs=0.01)
 
     def test_the_measured_europe2_model_matches_the_live_reading(self):
-        """R1 resolved: a TO 13 village on Europe 2 carries 7,920 per merchant.
+        """R1 resolved: the operator re-read the base as 2,500 on 2026-09-02.
 
-        2200 * (1 + 0.2 * 13) == 7920 exactly. Stock Teuton predicts 2,300, so
-        this server is not stock and the review's objection was wrong.
+        2500 * (1 + 0.2 * 13) == 9000 at TO 13. Stock Teuton predicts 2,300
+        there, so this server is not stock and the review's objection was wrong
+        under either reading. The earlier 7,920 figure fitted base 2,200 and is
+        superseded, not reconciled -- see the module docstring.
+
+        Asserting the base directly as well as a derived level: the base is the
+        half that was actually read, and a future re-measurement of the +20%
+        bonus should not be able to drift it silently.
         """
-        assert EUROPE2_TEUTON.capacity(13) == 7920
+        assert EUROPE2_TEUTON.base_capacity == 2500
+        assert EUROPE2_TEUTON.capacity(13) == 9000
         assert STOCK_TEUTON.capacity(13) == 2300
 
     def test_inconsistent_observations_raise_rather_than_average(self):
