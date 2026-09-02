@@ -96,15 +96,29 @@ class VillageAllocation:
     mode: AllocationMode
     own_per_hour: float
     target_per_hour: float
+    supplement_per_hour: float = 0.0
+    """Extra supply this village can draw on beyond its production, per hour.
+
+    A warehouse the operator keeps stocked by NPC trading is real supply: the
+    village can ship from it, so the plan may ask it to. Defaults to zero, which
+    is the whole existing planner.
+    """
+
+    @property
+    def available_per_hour(self) -> float:
+        """What the village can actually put on a cart: production plus stock."""
+        return self.own_per_hour + self.supplement_per_hour
 
     @property
     def ship_per_hour(self) -> float:
         """Rate that must arrive (positive) or leave (negative). The cargo.
 
-        Never ship ``target_per_hour``; a village already produces
-        ``own_per_hour`` of its own target.
+        Never ship ``target_per_hour``; a village already has
+        ``available_per_hour`` of its own target. Measured against *available*
+        rather than production, which is what lets a village with a stock floor
+        ship more than it makes -- the point of the supplement.
         """
-        return self.target_per_hour - self.own_per_hour
+        return self.target_per_hour - self.available_per_hour
 
     @property
     def is_receiver(self) -> bool:
@@ -121,6 +135,11 @@ class ResourcePlan:
 
     resource: Resource
     total_production: float
+    """Real production. Never includes the supplement -- every caller that
+    reports "production" to the operator reads this."""
+    total_supplement: float
+    """Stock-funded supply across the account, carried apart from production so
+    neither figure can be mistaken for the other."""
     villages: tuple[VillageAllocation, ...]
     remainder_village_id: int | None
     unallocated: float
@@ -146,7 +165,7 @@ class ResourcePlan:
         return tuple(v for v in self.villages if v.is_sender)
 
 
-def _explicit_target(allocation: Allocation, own: float, total: float) -> float:
+def _explicit_target(allocation: Allocation, own: float, total: float, available: float) -> float:
     """Retention rate this allocation asks for, before the remainder is settled."""
     if allocation.mode is AllocationMode.PERCENTAGE:
         return total * allocation.value / 100.0
@@ -159,7 +178,10 @@ def _explicit_target(allocation: Allocation, own: float, total: float) -> float:
         if own >= 0:
             return own
         return -own * allocation.value / 100.0
-    return own  # KEEP
+    # KEEP means neither send nor receive, so the target is what the village
+    # already has -- INCLUDING any stock it draws on. Returning production here
+    # would make a keep village ship its whole allowance to the remainder.
+    return available
 
 
 def resolve_resource(
@@ -167,6 +189,7 @@ def resolve_resource(
     productions: Mapping[int, float],
     allocations: Mapping[int, Allocation],
     names: Mapping[int, str] | None = None,
+    supplement: Mapping[int, float] | None = None,
 ) -> ResourcePlan:
     """Resolve one resource's allocations into per-village shipping rates.
 
@@ -176,6 +199,9 @@ def resolve_resource(
             for crop.
         allocations: village id -> allocation. Villages absent from this mapping
             default to :attr:`AllocationMode.KEEP` and neither send nor receive.
+        supplement: village id -> extra supply per hour beyond production, from
+            stock the operator keeps topped up. Raises available, never
+            production. Materials only in practice -- a granary is not NPC-fed.
 
     Returns:
         A :class:`ResourcePlan`. Problems that leave the plan usable but wrong
@@ -195,6 +221,20 @@ def resolve_resource(
             + ", ".join(village_label(vid, names) for vid in sorted(unknown))
         )
 
+    extra: Mapping[int, float] = supplement or {}
+    unknown_supplement = set(extra) - set(productions)
+    if unknown_supplement:
+        raise AllocationError(
+            "supplement references villages with no production: "
+            + ", ".join(village_label(vid, names) for vid in sorted(unknown_supplement))
+        )
+    negative = sorted(vid for vid, amount in extra.items() if amount < 0)
+    if negative:
+        raise AllocationError(
+            "supplement cannot be negative: "
+            + ", ".join(village_label(vid, names) for vid in negative)
+        )
+
     remainder_ids = [vid for vid, a in allocations.items() if a.mode is AllocationMode.REMAINDER]
     if len(remainder_ids) > 1:
         raise AllocationError(
@@ -205,6 +245,11 @@ def resolve_resource(
     remainder_id = remainder_ids[0] if remainder_ids else None
 
     total = sum(productions.values())
+    # Percentage targets stay a share of PRODUCTION, as their docstring says: a
+    # share of the stock as well would move every village's target whenever the
+    # operator changed one village's floor.
+    total_supplement = sum(extra.values())
+    total_available = total + total_supplement
     findings: list[Finding] = []
 
     # A percentage of a negative total is meaningless: 30% of an account that is
@@ -237,9 +282,9 @@ def resolve_resource(
                     resource=resource,
                 )
             )
-        targets[vid] = _explicit_target(allocation, own, total)
+        targets[vid] = _explicit_target(allocation, own, total, own + extra.get(vid, 0.0))
 
-    unallocated = total - sum(targets.values())
+    unallocated = total_available - sum(targets.values())
 
     if remainder_id is not None:
         # The remainder holds whatever is left. When over-allocated this goes
@@ -255,7 +300,8 @@ def resolve_resource(
                 Finding(
                     category=Category.OVER_ALLOCATED,
                     message=(
-                        f"{resource.value}: allocations exceed production by "
+                        f"{resource.value}: allocations exceed "
+                        f"{'available supply' if total_supplement else 'production'} by "
                         f"{-unallocated:.0f}/h, so the remainder village {label} "
                         f"would have to send more than it has"
                     ),
@@ -283,6 +329,7 @@ def resolve_resource(
             mode=allocations.get(vid, Allocation(AllocationMode.KEEP)).mode,
             own_per_hour=own,
             target_per_hour=targets[vid],
+            supplement_per_hour=extra.get(vid, 0.0),
         )
         for vid, own in sorted(productions.items())
     )
@@ -290,6 +337,7 @@ def resolve_resource(
     return ResourcePlan(
         resource=resource,
         total_production=total,
+        total_supplement=total_supplement,
         villages=villages,
         remainder_village_id=remainder_id,
         unallocated=unallocated,

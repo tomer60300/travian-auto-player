@@ -321,6 +321,7 @@ def craft_plan(
     productions: Mapping[Resource, Mapping[int, float]],
     allocations: Mapping[Resource, Mapping[int, Allocation]],
     config: PlannerConfig,
+    supplements: Mapping[Resource, Mapping[int, float]] | None = None,
 ) -> DistributionPlan:
     """Plan resource distribution for whatever account state is supplied.
 
@@ -332,6 +333,11 @@ def craft_plan(
             here are simply not planned; villages absent within a resource keep
             what they produce.
         config: tunables.
+        supplements: per resource, village id -> supply per hour beyond
+            production, drawn from stock the operator keeps topped up. Account
+            state, not a tunable, which is why it sits here and not on
+            :class:`PlannerConfig`. The caller converts a stock FLOOR into this
+            RATE, because only the caller knows the window it is spread over.
 
     Returns:
         A :class:`DistributionPlan` carrying the setup sheet, the merchant
@@ -347,7 +353,11 @@ def craft_plan(
 
     for resource in sorted(productions, key=lambda r: r.value):
         plan = resolve_resource(
-            resource, productions[resource], allocations.get(resource, {}), names
+            resource,
+            productions[resource],
+            allocations.get(resource, {}),
+            names,
+            supplement=(supplements or {}).get(resource),
         )
         resource_plans[resource] = plan
         findings.extend(plan.findings)

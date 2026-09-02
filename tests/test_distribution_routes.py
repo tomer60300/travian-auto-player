@@ -1093,3 +1093,157 @@ class TestShipOnlyTo:
         res = asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
 
         assert any("Day: 11 is short" in w for w in res.warnings), res.warnings
+
+
+class TestStockFundedSupply:
+    """Stock-funded supply: a village ships more than it makes, from a warehouse
+    it keeps topped up by NPC.
+
+    The operator's spec: "02 always performs NPC trading ... Treat 02's
+    warehouses as always at least 30% full, meaning even though the total wood
+    account is negative, 02 has extra wood to distribute." The planner refused
+    that day profile as over-allocated by 12,210/h of lumber because it drew
+    every village's supply from production alone. `stock_floor_fraction` names
+    the stock; the allowance it funds over the profile window is extra supply
+    of lumber, clay and iron -- never crop, and never production.
+    """
+
+    HUB, NEAR, FAR = 20002, 20011, 20003
+    DAY = [7 * 60, 23 * 60]  # 16 hours: 0.30 x 1,200,000 / 16 = 22,500/h
+
+    def _payload(self, *, floor=0.30, capacity=1_200_000, hub_crop=20_000.0, near=10_000, far=8000):
+        """02 makes 6,000/h of lumber against 18,000/h claimed: short by 12,000.
+
+        A 1,200,000 warehouse kept 30% full is 360,000 in stock, 22,500/h over
+        the 16-hour day -- enough to fund the shortfall with room to spare.
+        Lower the claims below 6,000 and nothing is short, so the allowance goes
+        undrawn.
+        """
+        hub = _own_village(self.HUB, "02", 0, 0, lumber=6000, crop=hub_crop, merchants=200)
+        hub["warehouse_capacity"] = capacity
+        snapshot = [
+            hub,
+            _own_village(self.NEAR, "11", -5, 0),
+            _own_village(self.FAR, "03", 5, 0),
+        ]
+        allocations = {
+            "lumber": {
+                str(self.HUB): {"mode": "remainder"},
+                str(self.NEAR): {"mode": "absolute", "value": near},
+                str(self.FAR): {"mode": "absolute", "value": far},
+            }
+        }
+        config = []
+        if floor is not None:
+            config.append({"village_id": self.HUB, "stock_floor_fraction": floor})
+        return {
+            "snapshot": snapshot,
+            "allocations": allocations,
+            "config": config,
+            "dispatch_window": self.DAY,
+            "prune_to_window": True,
+        }
+
+    def _plan(self, **kw):
+        return asyncio.run(post_plan(PlanRequest.model_validate(self._payload(**kw))))
+
+    @staticmethod
+    def _findings(res, category):
+        return [
+            f
+            for group in res.diagnostics.groups
+            if group.category == category
+            for f in group.findings
+        ]
+
+    def test_the_fixture_really_is_over_allocated_without_a_floor(self):
+        res = self._plan(floor=None)
+
+        assert res.feasible is False
+        assert any("exceed production" in w for w in res.warnings), res.warnings
+
+    def test_a_stock_floor_makes_the_operators_day_profile_feasible(self):
+        res = self._plan()
+
+        assert res.feasible is True, res.warnings
+        assert not any("exceed production" in w for w in res.warnings), res.warnings
+        assert not res.shortfalls
+
+    def test_the_reported_production_does_not_move(self):
+        """The stock is supply, not production: inflating the production figure
+        would have the response claim the account makes more than it does."""
+        without = next(
+            u for u in self._plan(floor=None).unallocated if u.resource is Resource.LUMBER
+        )
+        with_floor = next(u for u in self._plan().unallocated if u.resource is Resource.LUMBER)
+
+        assert with_floor.total_production == without.total_production == 6000
+        assert with_floor.total_supplement == pytest.approx(22_500)
+        assert without.total_supplement == 0
+
+    def test_stock_funded_shipping_is_a_visible_dependency(self):
+        res = self._plan()
+
+        funded = self._findings(res, "stock_funded")
+        assert len(funded) == 1, res.warnings
+        assert funded[0].severity == "warning"
+        assert funded[0].village == "02"
+        assert "02 ships 12,000/h of lumber beyond its production" in funded[0].message
+        assert "30% full" in funded[0].message
+
+    def test_an_allowance_that_is_not_drawn_on_is_not_reported(self):
+        # 1,000 + 2,000 claimed against 6,000 made: production alone covers it.
+        res = self._plan(near=1000, far=2000)
+        assert not any("exceed production" in w for w in res.warnings)
+
+        assert self._findings(res, "stock_funded") == [], res.warnings
+        assert self._findings(res, "stock_floor_unsustainable") == []
+
+    def test_a_floor_drawn_faster_than_the_crop_surplus_will_not_hold(self):
+        """NPC converts crop to materials one for one, so the stock can only be
+        replenished as fast as the village's crop surplus."""
+        res = self._plan(hub_crop=5000.0)
+
+        unsustainable = self._findings(res, "stock_floor_unsustainable")
+        assert len(unsustainable) == 1, res.warnings
+        assert unsustainable[0].severity == "warning"
+        assert "02's stock floor is drawn down 7,000/h faster" in unsustainable[0].message
+        assert "will not hold" in unsustainable[0].message
+
+    def test_a_crop_surplus_that_covers_the_draw_is_not_warned_about(self):
+        res = self._plan(hub_crop=20_000.0)
+
+        assert self._findings(res, "stock_floor_unsustainable") == [], res.warnings
+
+    def test_a_floor_without_a_capacity_reading_is_refused_and_named(self):
+        with pytest.raises(HTTPException) as exc:
+            self._plan(capacity=None)
+
+        assert exc.value.status_code == 422
+        assert "02" in exc.value.detail
+        assert "capacit" in exc.value.detail
+
+    @pytest.mark.parametrize("fraction", [-0.1, 0.96, 1.0])
+    def test_the_fraction_is_bounded(self, fraction):
+        with pytest.raises(ValidationError):
+            VillageConfig(village_id=1, stock_floor_fraction=fraction)
+
+    def test_the_day_check_honours_the_floor(self):
+        """Each profile is planned through `_plan_account`, so the day picture
+        must be built from the same stock-funded routes /plan shows."""
+        payload = self._payload()
+        body = DayCheckRequest.model_validate(
+            {
+                "snapshot": payload["snapshot"],
+                "config": payload["config"],
+                "prune_to_window": True,
+                "segments": [
+                    {"name": "Day", "window": self.DAY, "allocations": payload["allocations"]}
+                ],
+            }
+        )
+
+        res = asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
+
+        assert not any("exceed production" in w for w in res.warnings), res.warnings
+        assert any("Day: 02 ships 12,000/h of lumber" in w for w in res.warnings), res.warnings

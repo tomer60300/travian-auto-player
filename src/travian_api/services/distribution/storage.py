@@ -186,6 +186,11 @@ CROSSING_TOLERANCE = 1e-6
 # once the transient has drained; this only bounds a pathological input.
 MAX_SETTLING_DAYS = 14
 
+# How far ahead a projected overflow is still this plan's problem. Beyond a
+# month the account has changed -- fields upgraded, troops trained, targets
+# retuned -- so a store that far from its cap says nothing about the sheet.
+MAX_PROJECTION_DAYS = 30
+
 
 def simulate_day(
     beat: Beat,
@@ -194,6 +199,7 @@ def simulate_day(
     net_per_hour: Mapping[int, Mapping[Resource, float]],
     step_minutes: int = 5,
     dispatch_window: tuple[int, int] | None = None,
+    floors: Mapping[int, Mapping[Resource, float]] | None = None,
 ) -> tuple[OverflowEvent, ...]:
     """Replay the beat against real capacities until it settles. Issue #12.
 
@@ -281,6 +287,11 @@ def simulate_day(
     # ``rate * step`` a fixed number of times, so its total is arithmetic. That
     # matters -- production is added ~28,800 times a day on a 25-village
     # account, and folding a second dict update into that loop cost 34%.
+    _floors: Mapping[int, Mapping[Resource, float]] = floors or {}
+
+    def floor_for(vid: int, resource: Resource) -> float | None:
+        return _floors.get(vid, {}).get(resource)
+
     moved: dict[tuple[int, Resource], float] = {}
     in_flight: dict[int, float] = {}
     previous_close: dict[tuple[int, Resource], float] | None = None
@@ -320,9 +331,18 @@ def simulate_day(
                 for index, origin, _dest, resource, batch in departures.get(event_minute, ()):
                     key = (origin, resource)
                     available = level.get(key, 0.0)
-                    shipped = min(batch, available)
+                    # An operator who NPCs the warehouse back up whenever it dips
+                    # below its floor really does hold that floor, every hour, so
+                    # a departure always finds its full batch. One dict lookup;
+                    # this branch runs per departure, not per step.
+                    floor = floor_for(origin, resource)
+                    if floor is None:
+                        shipped = min(batch, available)
+                        level[key] = available - shipped
+                    else:
+                        shipped = batch
+                        level[key] = max(floor, available - batch)
                     in_flight[index] = shipped
-                    level[key] = available - shipped
                     moved[key] = moved.get(key, 0.0) - shipped
 
         closing = dict(level)
@@ -367,6 +387,13 @@ def simulate_day(
                 # event already IS the recurring loss, so it stands.
                 if gain <= MIN_REPORTED_WASTE or gain - wasted.get(key, 0.0) < MIN_REPORTED_WASTE:
                     continue
+                days_to_cap = MAX_SETTLING_DAYS + (cap - level.get(key, 0.0)) / gain
+                # A store more than a month out is not a defect in THIS plan.
+                # Production, troops and targets all move first, so projecting a
+                # CRITICAL structural loss that far ahead reported accounts as
+                # broken over stores 130 days from trouble.
+                if days_to_cap > MAX_PROJECTION_DAYS:
+                    continue
                 events[key] = OverflowEvent(
                     village_id=vid,
                     resource=resource,
@@ -378,7 +405,7 @@ def simulate_day(
                     wasted_per_day=gain,
                     net_gain_per_day=gain,
                     projected=True,
-                    days_to_cap=MAX_SETTLING_DAYS + (cap - level.get(key, 0.0)) / gain,
+                    days_to_cap=days_to_cap,
                 )
 
     return tuple(

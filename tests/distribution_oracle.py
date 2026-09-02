@@ -151,15 +151,23 @@ def oracle_day(
         }
     if not settled:
         for vid, per in capacities.items():
-            for resource in per:
+            for resource, cap in per.items():
                 key = (vid, resource)
                 gain = net_per_hour.get(vid, {}).get(resource, 0.0) * 24.0 + moved.get(key, 0.0)
-                if gain > 1.0 and gain - wasted.get(key, 0.0) >= 1.0:
-                    result[key] = {
-                        "wasted": gain,
-                        "first_full": float(first_full.get(key, 0)),
-                        "net_gain": gain,
-                    }
+                if gain <= 1.0 or gain - wasted.get(key, 0.0) < 1.0:
+                    continue
+                # Projected only within a month of the cap, the contract's other
+                # half: past that the account has changed and the store says
+                # nothing about this sheet. Spelled out with its own literal
+                # rather than importing the planner's, so the two
+                # implementations stay genuinely independent.
+                if days + (cap - level.get(key, 0.0)) / gain > 30:
+                    continue
+                result[key] = {
+                    "wasted": gain,
+                    "first_full": float(first_full.get(key, 0)),
+                    "net_gain": gain,
+                }
     return result
 
 

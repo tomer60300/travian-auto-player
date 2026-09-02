@@ -392,6 +392,20 @@ class TestBeyondTheSettlingHorizon:
             "a store that is emptying can never sit at its cap"
         )
 
+    def test_a_store_a_month_or_more_from_its_cap_is_not_a_plan_defect(self):
+        """Rates change before then. A store 133 days from its cap was reported
+        as a CRITICAL structural loss; nothing about this plan is wrong with it."""
+        # +500/h into a 400,000 store: 12,000/day, so 28,000 in store is 31
+        # days from the cap and 52,000 is 29.
+        assert self._lone_store(28_000, 400_000, 500.0) == ()
+
+    def test_a_store_inside_thirty_days_of_its_cap_is_still_projected(self):
+        events = self._lone_store(52_000, 400_000, 500.0)
+
+        assert len(events) == 1
+        assert events[0].projected is True
+        assert events[0].days_to_cap == pytest.approx(29.0, abs=0.1)
+
     def test_a_projected_overflow_says_when_and_how_much(self):
         findings = storage_findings([], self._lone_store(40_000, 400_000, 1_000.0), names={1: "19"})
 
@@ -401,3 +415,64 @@ class TestBeyondTheSettlingHorizon:
         assert "will reach its cap in about 15 days" in findings[0].message
         assert "24,000/day" in findings[0].message
         assert "00:00" not in findings[0].message
+
+
+class TestStockFloors:
+    """A store the operator keeps topped up by NPC never runs dry in the replay.
+
+    Without a floor the simulation is right to ship only what the origin holds:
+    cargo is conserved. But a village that NPCs its crop surplus into lumber
+    whenever the warehouse dips below 30% does hold that 30%, every hour, so a
+    departure from it always finds its full batch. Modelling it as an ordinary
+    store made every stock-funded route ship a fraction of its cargo and the
+    receivers' whole day understated.
+    """
+
+    def _daily_route(self, origin: int, destination: int, per_hour: float) -> Route:
+        return Route(
+            origin=origin,
+            destination=destination,
+            cargo_per_hour={Resource.LUMBER: per_hour},
+            cycle_hours=24,
+            merchants_per_send=1,
+            sets_in_flight=1,
+            one_way_minutes=60.0,
+        )
+
+    def _replay(self, **kwargs) -> tuple[OverflowEvent, ...]:
+        # Village 1 makes 24,000/day and is asked to ship 120,000/day -- five
+        # times its production -- out of a 40,000 stock. Village 2 burns exactly
+        # the 120,000 a day it would receive, but its store only holds 80,000,
+        # so a FULL batch overflows it by 40,000 (issue #12's shape) while a
+        # batch the origin could not fund does not.
+        return simulate_day(
+            build_beat((self._daily_route(1, 2, 5_000),)),
+            stocks={1: {Resource.LUMBER: 40_000}, 2: {Resource.LUMBER: 40_000}},
+            capacities={1: {Resource.LUMBER: 1_000_000}, 2: {Resource.LUMBER: 80_000}},
+            net_per_hour={1: {Resource.LUMBER: 1_000}, 2: {Resource.LUMBER: -5_000}},
+            **kwargs,
+        )
+
+    def test_an_unfloored_origin_still_ships_only_what_it_holds(self):
+        """Cargo stays conserved for every store that has no floor: the origin
+        runs down to its 24,000/day and the receiver never sees a full batch."""
+        overflows = self._replay()
+
+        assert not [e for e in overflows if e.village_id == 2], (
+            "the origin cannot fund 120,000/day, so no full batch ever lands"
+        )
+
+    def test_a_floored_origin_ships_its_full_batch_every_day(self):
+        overflows = self._replay(floors={1: {Resource.LUMBER: 40_000}})
+
+        event = next((e for e in overflows if e.village_id == 2), None)
+        assert event is not None, "a floored origin must fund the whole 120,000 batch"
+        # Exactly one full batch's excess over the store, on the settled day:
+        # the origin was topped back to its floor before every departure.
+        assert event.wasted_per_day == pytest.approx(40_000, abs=1.0)
+
+    def test_the_floor_applies_only_to_the_store_that_has_one(self):
+        """A floor on the receiver's own store must not fund the origin."""
+        overflows = self._replay(floors={2: {Resource.LUMBER: 40_000}})
+
+        assert not [e for e in overflows if e.village_id == 2]

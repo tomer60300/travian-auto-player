@@ -201,3 +201,102 @@ class TestDefaultsAndValidation:
 
         assert plan.total_production == -4000
         assert plan.is_conserved
+
+
+class TestStockFundedSupply:
+    """A village may ship more than it makes, drawing on a warehouse stock it
+    keeps topped up by NPC trading.
+
+    The operator's day profile was refused as over-allocated -- "the remainder
+    village would have to send more than it has" -- while 02 sat on a warehouse
+    it keeps 30% full precisely so that it CAN send more than it makes. The
+    supplement is extra SUPPLY for one resource, never production: every figure
+    that says "production" must keep meaning production.
+    """
+
+    def _plan(self, supplement=None):
+        return resolve_resource(
+            Resource.LUMBER,
+            productions={1: 1000, 2: 0},
+            allocations={
+                1: Allocation(AllocationMode.REMAINDER),
+                2: Allocation(AllocationMode.ABSOLUTE, 1200),
+            },
+            supplement=supplement,
+        )
+
+    def test_a_supplement_raises_what_the_village_has_available(self):
+        plan = self._plan(supplement={1: 500})
+        hub = next(v for v in plan.villages if v.village_id == 1)
+
+        assert hub.own_per_hour == 1000
+        assert hub.supplement_per_hour == 500
+        assert hub.available_per_hour == 1500
+
+    def test_ship_is_the_gap_to_available_so_the_village_can_ship_more_than_it_makes(self):
+        """Known issue #1 in its new form: the cargo is target minus what the
+        village has, and what it has now includes the stock it draws on."""
+        plan = self._plan(supplement={1: 500})
+        hub = next(v for v in plan.villages if v.village_id == 1)
+
+        assert hub.target_per_hour == pytest.approx(300)  # 1,500 available - 1,200 claimed
+        assert hub.ship_per_hour == pytest.approx(-1200), "ships 200/h more than it produces"
+        assert plan.is_conserved
+
+    def test_a_negative_remainder_becomes_non_negative(self):
+        """The exact complaint: 1,200/h claimed against 1,000/h produced."""
+        without = self._plan()
+        assert without.unallocated == pytest.approx(-200)
+        assert any("exceed production" in w for w in without.warnings)
+
+        with_stock = self._plan(supplement={1: 500})
+
+        assert with_stock.unallocated == pytest.approx(300)
+        assert not any("exceed production" in w for w in with_stock.warnings)
+
+    def test_total_production_stays_real_and_the_supplement_is_carried_apart(self):
+        plan = self._plan(supplement={1: 500})
+
+        assert plan.total_production == 1000, "production must not be inflated by stock"
+        assert plan.total_supplement == 500
+
+    @pytest.mark.parametrize("supplement", [None, {}, {1: 0.0}])
+    def test_no_supplement_leaves_every_figure_identical(self, supplement):
+        """Regression guard: the whole existing planner runs with no supplement."""
+        baseline = self._plan()
+        plan = self._plan(supplement=supplement)
+
+        assert plan.total_production == baseline.total_production
+        assert plan.total_supplement == 0
+        assert plan.unallocated == baseline.unallocated
+        assert plan.warnings == baseline.warnings
+        assert [
+            (v.village_id, v.own_per_hour, v.target_per_hour, v.ship_per_hour)
+            for v in plan.villages
+        ] == [
+            (v.village_id, v.own_per_hour, v.target_per_hour, v.ship_per_hour)
+            for v in baseline.villages
+        ]
+
+    def test_a_keep_village_with_a_supplement_still_ships_nothing(self):
+        """Keep means neither send nor receive. The allowance must not turn
+        into an instruction to ship the stock away to the remainder."""
+        plan = resolve_resource(
+            Resource.CLAY,
+            productions={1: 1000, 2: 500},
+            allocations={2: Allocation(AllocationMode.REMAINDER)},
+            supplement={1: 400},
+        )
+        kept = next(v for v in plan.villages if v.village_id == 1)
+
+        assert kept.ship_per_hour == 0
+        assert plan.is_conserved
+
+    def test_a_supplement_for_an_unknown_village_is_rejected(self):
+        with pytest.raises(AllocationError, match="no production"):
+            resolve_resource(
+                Resource.IRON,
+                productions={1: 100},
+                allocations={},
+                supplement={99: 500},
+            )

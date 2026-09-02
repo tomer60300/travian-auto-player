@@ -68,6 +68,8 @@ class Category(StrEnum):
     OVER_ALLOCATED = "over_allocated"
     TRIBUTE_UNFUNDED = "tribute_unfunded"
     UNALLOCATED = "unallocated"
+    STOCK_FLOOR_UNSUSTAINABLE = "stock_floor_unsustainable"
+    STOCK_FUNDED = "stock_funded"
     MERCHANTS_BUSY = "merchants_busy"
     MERCHANTS_CROWDED = "merchants_crowded"
     RELAY_LATENCY = "relay_latency"
@@ -176,6 +178,29 @@ _SPECS: Mapping[Category, _Spec] = {
             "Slack piles up wherever it happens to be produced, and is lost once those "
             "stores fill. Name a remainder village for {resource} so it lands somewhere "
             "you chose."
+        ),
+    ),
+    Category.STOCK_FLOOR_UNSUSTAINABLE: _Spec(
+        order=19,
+        severity=Severity.WARNING,
+        subject="village",
+        headline="{count} {subject} draw their stock floor down faster than it refills",
+        action=(
+            "NPC trades crop for materials one for one, so a floor refills no faster than "
+            "the village's crop surplus. Drawn harder than that the floor sinks, and the "
+            "routes it funds quietly start under-delivering. Ship less from it, raise its "
+            "crop, or lower the claims it is covering."
+        ),
+    ),
+    Category.STOCK_FUNDED: _Spec(
+        order=21,
+        severity=Severity.WARNING,
+        subject="village",
+        headline="{count} {subject} ship more than they produce, funded from stock",
+        action=(
+            "These routes only deliver while the warehouse stays at its floor. That is an "
+            "operator promise, not a fact of the account -- keep NPC trading, or the cargo "
+            "arrives short with nothing in the plan to say why."
         ),
     ),
     Category.MERCHANTS_BUSY: _Spec(

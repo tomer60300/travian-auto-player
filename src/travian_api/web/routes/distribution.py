@@ -208,6 +208,17 @@ class VillageConfig(BaseModel):
             "breaches the merchant budget invisibly."
         ),
     )
+    stock_floor_fraction: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=0.95,
+        description=(
+            "Fraction of warehouse capacity this village keeps stocked by NPC "
+            "trading. The planner may draw that stock down over the profile "
+            "window as extra supply of lumber, clay and iron -- never crop, "
+            "because a granary is not NPC-fed. None means no stock-funded supply."
+        ),
+    )
     ship_only_to: list[int] | None = Field(
         default=None,
         description=(
@@ -476,6 +487,12 @@ class BudgetResponse(BaseModel):
     )
 
 
+# A stock-funded figure below this is rounding, not a dependency worth naming.
+# Deliberately not allocation.EPSILON: that is a numeric tolerance (1e-6), and a
+# millionth of a resource an hour is not something to warn an operator about.
+_STOCK_DRAW_FLOOR = 1.0
+
+
 class ShortfallResponse(BaseModel):
     village_id: int
     village_name: str = ""
@@ -487,6 +504,9 @@ class ShortfallResponse(BaseModel):
 class UnallocatedResponse(BaseModel):
     resource: Resource
     total_production: float
+    # Real production and stock-funded supply, kept apart so neither can be read
+    # as the other: the account does not make what its warehouses merely hold.
+    total_supplement: float = 0.0
     unallocated: float
     # Optional in meaning (a resource may have no remainder village) and given
     # an explicit default so the model never depends on the caller supplying it.
@@ -1178,7 +1198,25 @@ def _storage_findings(
     # starvation and loss totals. Without pruning every firing is real (that is
     # the round-the-clock danger the WINDOW findings report), so all are kept.
     window = dispatch_window if getattr(body, "prune_to_window", False) else None
-    overflows = simulate_day(plan.beat, stocks, capacities, own_rates, dispatch_window=window)
+    # A village the operator NPCs back to a floor never runs its warehouse down,
+    # so its departures are funded in full. Modelling it as an ordinary store
+    # made every stock-funded route ship a fraction of its cargo and understated
+    # the receivers' whole day. Materials only -- a granary is not NPC-fed.
+    floors: dict[int, dict[Resource, float]] = {}
+    for cfg in body.config:
+        if cfg.stock_floor_fraction is None:
+            continue
+        capacity = next(
+            (v.warehouse_capacity for v in body.snapshot if v.village_id == cfg.village_id), None
+        )
+        if capacity is None:
+            continue  # already refused in _plan_account, which runs first
+        level = cfg.stock_floor_fraction * capacity
+        for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
+            floors.setdefault(cfg.village_id, {})[resource] = level
+    overflows = simulate_day(
+        plan.beat, stocks, capacities, own_rates, dispatch_window=window, floors=floors
+    )
     names = {v.village_id: v.name for v in body.snapshot if v.name}
     return list(storage_findings(statuses, overflows, names=names))
 
@@ -2097,6 +2135,37 @@ async def _plan_account(
     # cycle choice below and the scheduler agree on it.
     effective_window = dispatch_window if dispatch_window is not None else body.dispatch_window
 
+    # A stock FLOOR is a level; the allocation layer needs a RATE. Spreading the
+    # floor across the window the profile actually runs is the honest
+    # conversion: 30% of a 1,200,000 warehouse is 360,000, which over a 16-hour
+    # day is 22,500/h of extra supply and over an 8-hour night is 45,000/h.
+    # Materials only -- a granary is not NPC-fed, so crop is never supplemented.
+    if effective_window is None:
+        window_hours = 24.0
+    else:
+        _from, _to = effective_window
+        window_hours = ((_to - _from) % MINUTES_PER_DAY or MINUTES_PER_DAY) / 60.0
+    capacities_by_id = {v.village_id: v.warehouse_capacity for v in body.snapshot}
+    supplements: dict[Resource, dict[int, float]] = {}
+    for cfg in body.config:
+        if cfg.stock_floor_fraction is None:
+            continue
+        capacity = capacities_by_id.get(cfg.village_id)
+        if capacity is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"{village_label(cfg.village_id, names)}: a stock floor of "
+                    f"{cfg.stock_floor_fraction:.0%} was set but this village has no "
+                    f"warehouse capacity in the snapshot, so the floor cannot be "
+                    f"turned into a rate. Fetch capacities first, or clear the floor."
+                ),
+            )
+        allowance = cfg.stock_floor_fraction * capacity / window_hours
+        for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
+            if cfg.village_id in productions.get(resource, {}):
+                supplements.setdefault(resource, {})[cfg.village_id] = allowance
+
     # A windowed, pruned profile may only use cycles that divide the window.
     #
     # Travian fans "repeat every N hours" into 24/N daily rows and pruning keeps
@@ -2228,9 +2297,79 @@ async def _plan_account(
                 )
         # The beat search is pure CPU; off the event loop so it cannot stall
         # WebSocket frames or stealth-timed game requests while the user replans.
-        plan = await asyncio.to_thread(craft_plan, villages, productions, allocations, config)
+        plan = await asyncio.to_thread(
+            craft_plan, villages, productions, allocations, config, supplements
+        )
     except AllocationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # What the stock floors are actually funding. An allowance nobody drew on
+    # says nothing and is not reported; shipping that DOES exceed production is a
+    # standing dependency on the operator's NPC trading, so it is named.
+    floors = {
+        cfg.village_id: cfg.stock_floor_fraction
+        for cfg in body.config
+        if cfg.stock_floor_fraction is not None
+    }
+    for vid, floor in sorted(floors.items()):
+        label = village_label(vid, names)
+        drawn: dict[Resource, float] = {}
+        for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
+            rp_res = plan.resource_plans.get(resource)
+            if rp_res is None:
+                continue
+            allocation = next((v for v in rp_res.villages if v.village_id == vid), None)
+            if allocation is None:
+                continue
+            beyond = -allocation.ship_per_hour - allocation.own_per_hour
+            if beyond > _STOCK_DRAW_FLOOR:
+                drawn[resource] = beyond
+        if not drawn:
+            continue
+        total_drawn = sum(drawn.values())
+        named = [r.value for r in sorted(drawn, key=lambda r: r.value)]
+        which = " and ".join([", ".join(named[:-1]), named[-1]] if len(named) > 2 else named)
+        extra_findings.append(
+            Finding(
+                category=Category.STOCK_FUNDED,
+                message=(
+                    f"{label} ships {total_drawn:,.0f}/h of {which} beyond its "
+                    f"production, funded from its stock floor -- keep the warehouse "
+                    f"at least {floor:.0%} full by NPC or these routes under-deliver"
+                ),
+                detail=f"{label} -- {total_drawn:,.0f}/h stock-funded",
+                village=label,
+            )
+        )
+        # NPC trades crop for materials one for one, so the floor refills no
+        # faster than the crop this village has left after the plan's crop
+        # routes. Beyond that the floor sinks and the routes above go short.
+        crop_plan = plan.resource_plans.get(Resource.CROP)
+        crop_alloc = (
+            next((v for v in crop_plan.villages if v.village_id == vid), None)
+            if crop_plan is not None
+            else None
+        )
+        if crop_alloc is not None:
+            crop_surplus = crop_alloc.own_per_hour + min(0.0, crop_alloc.ship_per_hour)
+        else:
+            crop_surplus = next(
+                (v.crop_per_hour or 0.0 for v in body.snapshot if v.village_id == vid), 0.0
+            )
+        deficit = total_drawn - crop_surplus
+        if deficit > _STOCK_DRAW_FLOOR:
+            extra_findings.append(
+                Finding(
+                    category=Category.STOCK_FLOOR_UNSUSTAINABLE,
+                    message=(
+                        f"{label}'s stock floor is drawn down {deficit:,.0f}/h faster "
+                        f"than its crop surplus can replenish by NPC; the floor will "
+                        f"not hold and these routes will start arriving short"
+                    ),
+                    detail=f"{label} -- short {deficit:,.0f}/h of crop to refill",
+                    village=label,
+                )
+            )
 
     free_now = {v.village_id: v.merchants_free for v in body.snapshot}
     for vid in sorted(plan.merchants_committed):
@@ -2411,6 +2550,7 @@ async def post_plan(
             UnallocatedResponse(
                 resource=resource,
                 total_production=rp.total_production,
+                total_supplement=rp.total_supplement,
                 unallocated=rp.unallocated,
                 remainder_village_id=rp.remainder_village_id,
             )
