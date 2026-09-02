@@ -10,15 +10,17 @@ A route with a 3-hour cycle fires eight times a day. Scheduling therefore works
 on a 1440-minute timeline and places *every* firing, rather than a minute-of-hour
 offset -- a 60-minute table cannot express a multi-hour cycle at all (review R5).
 
-Two things this deliberately does not do:
+Two things worth knowing about hubs:
 
-* **Collect-then-ship ordering at hubs** is moot in the current model. Netting in
-  :mod:`.allocation` leaves each village either a sender or a receiver of a given
-  resource, never both, so no village relays a resource and there is no inbound
-  that an outbound must wait for.
-* **Crop relay through a sub-hub**, which profile section 3.5 permits, cannot be
-  expressed for the same reason. Supporting it needs multi-leg flows in the
-  optimizer, not scheduling changes.
+* **Collect-then-ship ordering** only matters where a village both receives and
+  forwards a resource. Netting in :mod:`.allocation` rules that out for lumber,
+  clay and iron -- each village is a sender or a receiver of a material, never
+  both -- so no material has an inbound that an outbound must wait for.
+* **Crop is the exception.** :mod:`.optimizer` may route crop through a sub-hub
+  (profile section 3.5, ``MAX_RELAY_HOPS``), so a hub's forward sends are phased
+  after its collecting arrivals, and :func:`time_relays` re-times every hub
+  against the schedule actually built -- including the windowed case, where a
+  cargo landing after the window's last send waits until tomorrow.
 """
 
 from __future__ import annotations
