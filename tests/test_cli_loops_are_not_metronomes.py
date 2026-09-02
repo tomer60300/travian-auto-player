@@ -19,11 +19,33 @@ to stay near the interval the operator asked for -- a stealth fix that silently
 halves the configured cadence would be its own kind of wrong.
 """
 
+import random
 import statistics
 
 import pytest
 
 from travian_api.stealth.timing import HumanTiming
+
+# Every assertion in this file is a property of a DISTRIBUTION measured from a
+# few hundred draws, so an unseeded run is a hypothesis test that fails a small
+# fraction of the time by design. `test_the_average_cadence_stays_near_what_was
+# _asked_for` was the one whose margin was thin enough to bite: the loop wait's
+# population mean is 1.007x the interval (0.7*Exp(0.5) + 0.25*Exp(1.5) +
+# 0.05*Exp(5), clamped to [0.1x, 3.2x] of the draw and scaled by the 1.25
+# compensation), with a per-draw sd of 1.08x -- so the sd of a 400-draw mean is
+# 0.054x and the 0.9x bound sits only 2.0 sigma away. That is roughly one failure
+# in forty per parametrised case, observed as `mean 53.05 >= 54.0` in a full run
+# that passed in isolation. Widening the bound to cover the sampling error would
+# have to reach 0.85x, which is inside the "~19% more traffic than configured"
+# band that _TAIL_CUT_COMPENSATION exists to prevent -- it would stop asserting
+# the thing worth asserting. So the draws are seeded instead: the same 400
+# samples every run, the bound stays where the engineering argument put it, and
+# a change to the sampler's shape still moves the mean far enough to fail. At
+# this seed the realised 400-draw mean is 0.966x the interval at all three
+# intervals (the whole wait is scale-invariant in the interval), so the 0.9x
+# bound has 7% of headroom -- recorded here because the number is now a fixed
+# property of the seed rather than something a re-run re-rolls.
+_SEED = 20260903
 
 
 class _FakeClient:
@@ -46,6 +68,22 @@ class _StealthOffClient:
 
     def tempo_scale(self, value: float) -> float:  # pragma: no cover - never called
         raise AssertionError("tempo_scale must not be consulted when stealth is off")
+
+
+@pytest.fixture(autouse=True)
+def _seeded_draws():
+    """Fixed sampler state per test, restored afterwards.
+
+    Restored rather than left set so seeding here cannot make some other
+    module's stealth draws reproducible by accident -- this file's
+    determinism must not leak into the suite it shares a process with.
+    """
+    state = random.getstate()
+    random.seed(_SEED)
+    try:
+        yield
+    finally:
+        random.setstate(state)
 
 
 def _waits(client, interval, n=200):
