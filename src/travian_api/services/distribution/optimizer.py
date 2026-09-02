@@ -1043,7 +1043,11 @@ def _improve_flows(
     # the seed into a poorer basin and was then violated anyway.
     excluded: Mapping[int, set[int]] = excluded_origins or {}
 
-    def _origin_allowed(origin: int, destination: int) -> bool:
+    # `_may_send`, not the old `_origin_allowed`: that name sat three lines
+    # above `allowed_for`, which answers an unrelated question (which CYCLES a
+    # destination allows), and the pair read as two halves of one idea. This
+    # matches `_may_relay_through`, the module's other permission predicate.
+    def _may_send(origin: int, destination: int) -> bool:
         forbidden = excluded.get(destination)
         return not forbidden or origin not in forbidden
 
@@ -1402,9 +1406,7 @@ def _improve_flows(
                 # The second is the dangerous one: it makes the hub a sender to
                 # a destination that may forbid it, which is how a banned
                 # village became a forwarding hub into a foreign tribute.
-                if excluded and not (
-                    _origin_allowed(origin, hub) and _origin_allowed(hub, destination)
-                ):
+                if excluded and not (_may_send(origin, hub) and _may_send(hub, destination)):
                     continue
                 # Never create a two-way crop pair. A 2-cycle is not a relay: it
                 # makes "ship after you collect" unsatisfiable at both ends
@@ -1505,7 +1507,7 @@ def _improve_flows(
                     # A swap names two senders the seed never vetted. Rejected
                     # here rather than after scoring: a forbidden pair must not
                     # be priced, let alone win on price.
-                    if excluded and not (_origin_allowed(o1, d2) and _origin_allowed(o2, d1)):
+                    if excluded and not (_may_send(o1, d2) and _may_send(o2, d1)):
                         continue
                     t_full = min(legs.get((o1, d1), 0.0), legs.get((o2, d2), 0.0))
                     if t_full <= EPSILON:

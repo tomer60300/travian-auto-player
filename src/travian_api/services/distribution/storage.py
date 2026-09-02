@@ -294,12 +294,11 @@ def simulate_day(
     # ``rate * step`` a fixed number of times, so its total is arithmetic. That
     # matters -- production is added ~28,800 times a day on a 25-village
     # account, and folding a second dict update into that loop cost 34%.
-    _floors: Mapping[int, Mapping[Resource, float]] = floors or {}
-
-    def floor_for(vid: int, resource: Resource) -> float | None:
-        return _floors.get(vid, {}).get(resource)
-
     moved: dict[tuple[int, Resource], float] = {}
+    # The parameter is rebound rather than aliased behind a one-line closure:
+    # the lookup has a single call site, and the alias had wedged itself between
+    # the comment above and the `moved` it describes.
+    floors = floors or {}
     in_flight: dict[int, float] = {}
     previous_close: dict[tuple[int, Resource], float] | None = None
     production_steps = len(range(0, MINUTES_PER_DAY, step_minutes))
@@ -342,7 +341,7 @@ def simulate_day(
                     # below its floor really does hold that floor, every hour, so
                     # a departure always finds its full batch. One dict lookup;
                     # this branch runs per departure, not per step.
-                    floor = floor_for(origin, resource)
+                    floor = floors.get(origin, {}).get(resource)
                     if floor is None:
                         shipped = min(batch, available)
                         level[key] = available - shipped

@@ -430,3 +430,72 @@ class TestTheEndpointShowsThem:
         categories = {group.category for group in result.diagnostics.groups}
 
         assert {"relay", "relay_latency"} & categories
+
+
+class TestRelayTimingOnlyFiltersAWindowThatIsEnforced:
+    """A windowed profile the executor will NOT prune fires round the clock.
+
+    Travian fans a repeat interval across the whole day and offers nothing to
+    confine it, which is why `prune_to_window` exists: with pruning the
+    out-of-window rows are deleted after creation and the window is real,
+    without it every firing happens and the plan says so (a CRITICAL
+    WINDOW_NOT_ENFORCEABLE finding). `time_relays` filters each route's sends to
+    the window, so handing it a window that is not enforced re-times the hub
+    against a schedule nobody runs: the firings it drops are exactly the ones
+    that make the wait short. Measured on this fixture, that reported 44.1h of
+    relay latency where the truthful worst case is ~14h -- and relay latency is
+    what the plan tells the operator to buy merchants for.
+
+    `_storage_findings` already gates its window on `prune_to_window`; this path
+    is the same question about the same schedule.
+    """
+
+    WINDOW = (6 * 60, 7 * 60)
+
+    def _relays(self, *, prune: bool):
+        from travian_api.services.distribution.allocation import Allocation, AllocationMode
+        from travian_api.services.distribution.geometry import MapGeometry
+        from travian_api.services.distribution.merchants import EUROPE2_TEUTON
+        from travian_api.services.distribution.optimizer import VillageState
+        from travian_api.services.distribution.planner import PlannerConfig, craft_plan
+
+        villages = {
+            1: VillageState(1, 0, 0, merchant_count=20, trade_office_level=15, crop_per_hour=0.0),
+            2: VillageState(2, 60, 0, merchant_count=20, trade_office_level=10, crop_per_hour=0.0),
+            3: VillageState(
+                3, 120, 0, merchant_count=6, trade_office_level=10, crop_per_hour=9000.0
+            ),
+        }
+        productions = {Resource.CROP: {1: 0.0, 2: 0.0, 3: 9000.0}}
+        allocations = {
+            Resource.CROP: {
+                1: Allocation(AllocationMode.REMAINDER),
+                2: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                3: Allocation(AllocationMode.ABSOLUTE, 0.0),
+            }
+        }
+        config = PlannerConfig(
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            max_latency_hours=None,
+            dispatch_window=self.WINDOW,
+            prune_to_window=prune,
+        )
+        return craft_plan(villages, productions, allocations, config).relays
+
+    def test_the_fixture_still_relays_under_both_settings(self):
+        assert self._relays(prune=True), "no relay: the comparison below is vacuous"
+        assert self._relays(prune=False), "no relay: the comparison below is vacuous"
+
+    def test_an_unpruned_window_is_timed_against_every_firing(self):
+        unpruned = self._relays(prune=False)[0]
+        pruned = self._relays(prune=True)[0]
+
+        assert unpruned.end_to_end_hours < pruned.end_to_end_hours, (
+            f"an unpruned windowed profile was re-timed against the pruned "
+            f"schedule: {unpruned.end_to_end_hours:.1f}h reported where every "
+            f"firing really happens"
+        )
+        assert unpruned.end_to_end_hours < 24.0, (
+            "a route that fires round the clock cannot wait a day for its next send"
+        )

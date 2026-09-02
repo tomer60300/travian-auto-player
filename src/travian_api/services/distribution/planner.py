@@ -355,13 +355,14 @@ def craft_plan(
     # villages, and a second source of names could disagree with the first.
     names = {vid: village.name for vid, village in villages.items() if village.name}
 
+    stock = supplements or {}
     for resource in sorted(productions, key=lambda r: r.value):
         plan = resolve_resource(
             resource,
             productions[resource],
             allocations.get(resource, {}),
             names,
-            supplement=(supplements or {}).get(resource),
+            supplement=stock.get(resource),
         )
         resource_plans[resource] = plan
         findings.extend(plan.findings)
@@ -396,7 +397,19 @@ def craft_plan(
     # Re-timed against the schedule that was actually built: `relay_chains` can
     # only estimate a leg's wait from its cycle length, which is wrong by up to
     # most of a day inside a profile window (the beat drops firings outside it).
-    relays = time_relays(beat, routing.relays, config.dispatch_window)
+    #
+    # The window is passed ONLY when the executor will prune to it, the same
+    # gate `_storage_findings` applies to the same schedule. Travian fans a
+    # repeat interval across the whole day and offers nothing to confine it, so
+    # without pruning every firing outside the window really happens -- and
+    # `time_relays` filters each route's sends to the window, dropping exactly
+    # the firings that make the wait short. Measured on a two-leg relay through
+    # a one-hour window: 53h of relay latency reported where the truthful worst
+    # case is a couple of hours, which is advice to buy merchants for a wait
+    # that is not there.
+    relays = time_relays(
+        beat, routing.relays, config.dispatch_window if config.prune_to_window else None
+    )
     findings.extend(relay_findings(relays, names, config.max_latency_hours, villages))
 
     rows = tuple(

@@ -55,6 +55,7 @@ from travian_api.services.distribution.merchants import (
 from travian_api.services.distribution.night_profile import (
     DEFAULT_BASELINE_FILL,
     DEFAULT_TARGET_FILL,
+    MATERIALS,
     NightVillage,
     derive_night_profile,
 )
@@ -490,10 +491,27 @@ class BudgetResponse(BaseModel):
     )
 
 
+def _window_minutes(window: tuple[int, int]) -> int:
+    """How many minutes of the day a dispatch window covers.
+
+    ``(start, end)`` are minutes past midnight and the window may wrap past it,
+    so the length is the difference modulo the day. The ``or MINUTES_PER_DAY``
+    reads a zero difference as the whole day rather than nothing; validation
+    refuses a zero-width window ahead of this, so that arm is unreachable today
+    and exists so the arithmetic cannot silently produce a division by zero if
+    it ever stops being.
+    """
+    return (window[1] - window[0]) % MINUTES_PER_DAY or MINUTES_PER_DAY
+
+
 # A stock-funded figure below this is rounding, not a dependency worth naming.
 # Deliberately not allocation.EPSILON: that is a numeric tolerance (1e-6), and a
 # millionth of a resource an hour is not something to warn an operator about.
-_STOCK_DRAW_FLOOR = 1.0
+#
+# Named for what it is. It was `_STOCK_DRAW_FLOOR`, in a module where a "stock
+# floor" is a warehouse LEVEL the operator maintains -- so the name claimed this
+# bounded the draw, when all it does is decide what gets a sentence.
+_MIN_REPORTED_STOCK_DRAW = 1.0
 
 
 class ShortfallResponse(BaseModel):
@@ -1215,7 +1233,7 @@ def _storage_findings(
         if capacity is None:
             continue  # already refused in _plan_account, which runs first
         level = cfg.stock_floor_fraction * capacity
-        for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
+        for resource in MATERIALS:
             floors.setdefault(cfg.village_id, {})[resource] = level
     overflows = simulate_day(
         plan.beat, stocks, capacities, own_rates, dispatch_window=window, floors=floors
@@ -1453,6 +1471,11 @@ async def post_night_profile(
     Pure arithmetic over the snapshot the caller already has, so it can be redone
     as often as the operator likes while they settle on a baseline.
     """
+    # Unfiltered, unlike the two `if v.name` builders in this module: this one
+    # feeds the derived profile's own village labels, where a nameless village
+    # must still appear as a row rather than be dropped from the sheet.
+    # `village_label` handles the empty string the same way it handles a missing
+    # id. Bound once -- it was rebuilt identically 138 lines further down.
     names = {v.village_id: v.name for v in body.snapshot}
     if not body.snapshot:
         raise HTTPException(
@@ -1533,7 +1556,7 @@ async def post_night_profile(
     # for it again would be asking the operator to restate a decision the
     # allocations already record.
     hub = None
-    for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
+    for resource in MATERIALS:
         for vid, alloc in (body.allocations.get(resource) or {}).items():
             if alloc.mode is AllocationMode.REMAINDER:
                 hub = vid
@@ -1545,9 +1568,7 @@ async def post_night_profile(
         # would move every material route without the operator knowing why.
         hub = max(
             villages,
-            key=lambda v: sum(
-                v.production[r] for r in (Resource.LUMBER, Resource.CLAY, Resource.IRON)
-            ),
+            key=lambda v: sum(v.production[r] for r in MATERIALS),
         ).village_id
         warnings.append(
             f"No remainder village is set for materials, so "
@@ -1574,8 +1595,7 @@ async def post_night_profile(
                 "it has to fill -- so give the profile a window first."
             ),
         )
-    start, end = body.dispatch_window
-    window_minutes = (end - start) % MINUTES_PER_DAY or MINUTES_PER_DAY
+    window_minutes = _window_minutes(body.dispatch_window)
     window_hours = window_minutes / 60.0
 
     # Every explicit mode is resolved to the absolute rate it means, with the
@@ -1591,7 +1611,6 @@ async def post_night_profile(
         Resource.IRON: "iron_per_hour",
         Resource.CROP: "crop_per_hour",
     }
-    names = {v.village_id: v.name for v in body.snapshot}
     day_retention: dict[Resource, dict[int, float]] = {}
     for resource, per in body.allocations.items():
         own_rates = {
@@ -2160,8 +2179,7 @@ async def _plan_account(
     if effective_window is None:
         window_hours = 24.0
     else:
-        _from, _to = effective_window
-        window_hours = ((_to - _from) % MINUTES_PER_DAY or MINUTES_PER_DAY) / 60.0
+        window_hours = _window_minutes(effective_window) / 60.0
     capacities_by_id = {v.village_id: v.warehouse_capacity for v in body.snapshot}
     supplements: dict[Resource, dict[int, float]] = {}
     for cfg in body.config:
@@ -2179,7 +2197,7 @@ async def _plan_account(
                 ),
             )
         allowance = cfg.stock_floor_fraction * capacity / window_hours
-        for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
+        for resource in MATERIALS:
             if cfg.village_id in productions.get(resource, {}):
                 supplements.setdefault(resource, {})[cfg.village_id] = allowance
 
@@ -2199,8 +2217,7 @@ async def _plan_account(
     # ratio rather than the plan silently lying about it.
     allowed_cycles: list[int] | tuple[int, ...] = tuple(DAILY_BEAT_CYCLES)
     if effective_window is not None and getattr(body, "prune_to_window", False):
-        start, end = effective_window
-        window_minutes = (end - start) % MINUTES_PER_DAY or MINUTES_PER_DAY
+        window_minutes = _window_minutes(effective_window)
         dividing = [c for c in DAILY_BEAT_CYCLES if window_minutes % (c * 60) == 0]
         if dividing:
             allowed_cycles = dividing
@@ -2331,21 +2348,23 @@ async def _plan_account(
     for vid, floor in sorted(floors.items()):
         label = village_label(vid, names)
         drawn: dict[Resource, float] = {}
-        for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
-            rp_res = plan.resource_plans.get(resource)
-            if rp_res is None:
+        for resource in MATERIALS:
+            rp = plan.resource_plans.get(resource)
+            if rp is None:
                 continue
-            allocation = next((v for v in rp_res.villages if v.village_id == vid), None)
+            allocation = next((v for v in rp.villages if v.village_id == vid), None)
             if allocation is None:
                 continue
             beyond = -allocation.ship_per_hour - allocation.own_per_hour
-            if beyond > _STOCK_DRAW_FLOOR:
+            if beyond > _MIN_REPORTED_STOCK_DRAW:
                 drawn[resource] = beyond
         if not drawn:
             continue
         total_drawn = sum(drawn.values())
-        named = [r.value for r in sorted(drawn, key=lambda r: r.value)]
-        which = " and ".join([", ".join(named[:-1]), named[-1]] if len(named) > 2 else named)
+        # `Resource` is a StrEnum, so it sorts by its own value; the explicit key
+        # was saying the same thing twice.
+        named = [r.value for r in sorted(drawn)]
+        which = " and ".join(filter(None, [", ".join(named[:-1]), named[-1]]))
         extra_findings.append(
             Finding(
                 category=Category.STOCK_FUNDED,
@@ -2374,7 +2393,7 @@ async def _plan_account(
                 (v.crop_per_hour or 0.0 for v in body.snapshot if v.village_id == vid), 0.0
             )
         deficit = total_drawn - crop_surplus
-        if deficit > _STOCK_DRAW_FLOOR:
+        if deficit > _MIN_REPORTED_STOCK_DRAW:
             extra_findings.append(
                 Finding(
                     category=Category.STOCK_FLOOR_UNSUSTAINABLE,
