@@ -908,6 +908,16 @@ def _own_village(vid, name, x, y, *, lumber=0.0, crop=0.0, merchants=20):
     }
 
 
+def _findings(res, category):
+    """Every finding of one category, flattened out of the grouped view."""
+    return [
+        finding
+        for group in res.diagnostics.groups
+        for finding in group.findings
+        if finding.category == category
+    ]
+
+
 class TestShipOnlyTo:
     """A per-origin whitelist of OWN destinations.
 
@@ -995,6 +1005,18 @@ class TestShipOnlyTo:
         assert short and short[0].village_name == "11", res.shortfalls
         assert self._lumber(res, destination=self.NEAR) + short[0].per_hour == pytest.approx(3000)
 
+    def test_the_shortfall_blames_the_whitelist_and_not_the_account(self):
+        """ "No village has surplus left to cover this demand" is false here: 02
+        has 3,000/h of it left and the whitelist is what keeps it off 11. Told
+        the false version, the operator goes looking for lumber production when
+        the fix is one line of their own config."""
+        res = self._plan(ship_only_to=[self.FAR])
+
+        short = [s for s in res.shortfalls if s.village_id == self.NEAR]
+        assert short, res.shortfalls
+        assert "excluded" in short[0].reason, short[0].reason
+        assert "02" in short[0].reason, "the origin whose list to edit must be named"
+
     def test_an_unknown_destination_is_refused_and_named(self):
         with pytest.raises(HTTPException) as exc:
             self._plan(ship_only_to=[self.FAR, 99999])
@@ -1024,6 +1046,81 @@ class TestShipOnlyTo:
         assert tribute_rows, "the tribute was never shipped"
         assert {row.origin for row in tribute_rows} == {20003}
         assert not [row for row in res.rows if row.origin == 20003 and row.destination == 20011]
+
+    def test_the_whitelist_binds_crop_as_well_as_the_materials(self):
+        """A deliberate DECISION, pinned so it is not flipped by accident.
+
+        Exempting crop was considered: crop starvation kills troops, where a
+        material shortfall only slows building. It was rejected. The operator's
+        own spec sentence -- "02 must not send to any village except 03, 18,
+        14, 13, 01 Hammer" -- names the ARMY village in the list, which is
+        direct evidence they expect the restriction to bind crop and have
+        already accounted for it. An exemption would silently overrule a
+        declared restriction, and it would be invisible: nothing in the picker,
+        the file or the response would say why 02 shipped crop somewhere its
+        list forbids. What the operator gets instead is a shortfall that names
+        the whitelist as the cause, which is the honest failure mode.
+        """
+        body = _plan_request(
+            {"crop": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}},
+            crop=3000.0,
+        )
+        body.config = [VillageConfig(village_id=20003, ship_only_to=[])]
+
+        res = asyncio.run(post_plan(body))
+
+        assert not [row for row in res.rows if row.origin == 20003], (
+            "the whitelist let crop out of a village restricted to nobody"
+        )
+        assert VillageConfig.model_fields["ship_only_to"].description is not None
+        assert "crop" in VillageConfig.model_fields["ship_only_to"].description, (
+            "the field must say the restriction covers crop; a reader who assumes "
+            "materials-only writes a config that starves an army village"
+        )
+
+    def test_a_tribute_fed_from_a_restricted_village_is_reported(self):
+        """The exemption above is right but silent on the plan that used it.
+
+        `ship_only_to` exists for merchant thrift, and a distant tribute is the
+        most expensive destination on the map -- so a village restricted to
+        nobody being put on a tribute haul is precisely the outcome the operator
+        was trying to avoid, arrived at by a rule they cannot see from the
+        picker. The rule stays (extending the whitelist to tributes would make
+        "keeps paying the tribute" unexpressible: `ship_only_to` takes own
+        village ids and a target has none). The plan says it happened.
+        """
+        body = _plan_request(
+            {"crop": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}},
+            crop=3000.0,
+        )
+        body.foreign_targets = [
+            ForeignTarget(name="Ally-Keep", x=40, y=40, crop_per_hour=500.0, route_eligible=True)
+        ]
+        body.config = [VillageConfig(village_id=20003, ship_only_to=[])]
+
+        res = asyncio.run(post_plan(body))
+
+        flagged = _findings(res, "whitelist_vs_tribute")
+        assert flagged, [g.category for g in res.diagnostics.groups]
+        assert "Ally-Keep" in flagged[0].message
+        assert "03" in flagged[0].message, "the restricted origin must be named"
+
+    def test_an_unrestricted_village_feeding_a_tribute_is_not_reported(self):
+        """No whitelist, nothing surprising -- and a finding raised on every
+        tribute would be noise in a list the operator already stopped reading
+        once."""
+        body = _plan_request(
+            {"crop": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}},
+            crop=3000.0,
+        )
+        body.foreign_targets = [
+            ForeignTarget(name="Ally-Keep", x=40, y=40, crop_per_hour=500.0, route_eligible=True)
+        ]
+
+        res = asyncio.run(post_plan(body))
+
+        assert [row for row in res.rows if row.destination < 0], "the tribute was never shipped"
+        assert not _findings(res, "whitelist_vs_tribute")
 
     def _crosswise(self, *, whitelist):
         """`_crosswise_plan` from test_tribute_supplier_choice, as a request.

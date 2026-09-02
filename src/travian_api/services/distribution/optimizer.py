@@ -484,6 +484,7 @@ def _flows_for_resource(
     plan: ResourcePlan,
     villages: Mapping[int, VillageState],
     geometry: MapGeometry,
+    names: Mapping[int, str] | None = None,
     excluded: Mapping[int, set[int]] | None = None,
 ) -> tuple[dict[tuple[int, int], float], list[Shortfall]]:
     """Match receivers to their nearest senders, largest demand first.
@@ -543,12 +544,38 @@ def _flows_for_resource(
             remaining -= taken
 
         if remaining > EPSILON:
+            # WHY it could not be routed, not just that it could not. The loop
+            # above ran out of candidates, and there are two quite different
+            # reasons for that with two different fixes: the account genuinely
+            # has no surplus left, or it has some and the operator's own lists
+            # put it out of reach. Told only the first, an operator whose
+            # `ship_only_to` or `exclude_origins` caused the shortfall goes
+            # looking for production they already have. `banned` was computed
+            # and discarded; this keeps the distinction.
+            #
+            # Keyed off `banned` and not off "somebody still has surplus":
+            # a village filtered out for having no Marketplace is nobody's
+            # exclusion and must not send the operator to edit a list.
+            withheld = [
+                vid
+                for vid in banned
+                if surplus.get(vid, 0.0) > EPSILON and vid != receiver.village_id
+            ]
+            reason = (
+                "no village has surplus left to cover this demand"
+                if not withheld
+                else (
+                    "every village with surplus left is excluded from this destination "
+                    "by ship_only_to or exclude_origins: "
+                    + ", ".join(village_label(vid, names) for vid in sorted(withheld))
+                )
+            )
             shortfalls.append(
                 Shortfall(
                     village_id=receiver.village_id,
                     resource=plan.resource,
                     per_hour=remaining,
-                    reason="no village has surplus left to cover this demand",
+                    reason=reason,
                 )
             )
     return flows, shortfalls
@@ -1596,7 +1623,7 @@ def build_plan(
                 )
             )
         flows, resource_shortfalls = _flows_for_resource(
-            plan, villages, geometry, excluded_origins_by_destination
+            plan, villages, geometry, names, excluded_origins_by_destination
         )
         shortfalls.extend(resource_shortfalls)
         assignment[resource] = {key: amount for key, amount in flows.items() if amount > EPSILON}

@@ -222,9 +222,12 @@ class VillageConfig(BaseModel):
     ship_only_to: list[int] | None = Field(
         default=None,
         description=(
-            "If set, this village may send to these OWN villages only. Foreign "
-            "targets are governed separately by their own exclude_origins. None "
-            "means unrestricted."
+            "If set, this village may send to these OWN villages only, for EVERY "
+            "resource -- crop included, so a village left off the list is not fed "
+            "from here even when its granary is emptying. Foreign targets are "
+            "governed separately by their own exclude_origins; a whitelist cannot "
+            "stop a tribute, and the plan raises whitelist_vs_tribute when one is "
+            "supplied from a restricted village. None means unrestricted."
         ),
     )
 
@@ -2089,7 +2092,21 @@ async def _plan_account(
     # sees one denylist whichever side the operator wrote it from. Foreign
     # targets are left alone -- they carry their own exclude_origins, and a
     # whitelist that also starved every tribute would be a second lever nobody
-    # asked for. A village naming itself is harmless and ignored.
+    # asked for; `ship_only_to` takes own village ids and a tribute has none, so
+    # binding it would leave "restricted, but keeps paying the tribute"
+    # impossible to say. The plan reports WHITELIST_VS_TRIBUTE when one is
+    # actually supplied that way, so the exemption is visible on the plan that
+    # used it rather than only in a tooltip.
+    #
+    # Every resource, crop included. Exempting crop was considered -- crop
+    # starvation kills troops where a material shortfall only slows building --
+    # and rejected: the operator's own spec whitelists the ARMY village, which
+    # says they expect the list to bind crop, and an exemption would silently
+    # overrule a declared restriction with nothing anywhere to explain the
+    # extra route. A starved receiver surfaces as a shortfall naming the
+    # whitelist as the cause instead (see `_flows_for_resource`).
+    #
+    # A village naming itself is harmless and ignored.
     own_ids = {v.village_id for v in body.snapshot}
     for entry in body.config:
         if entry.ship_only_to is None:
@@ -2398,8 +2415,33 @@ async def _plan_account(
     # requests and WebSocket frames waited.
     extra_findings.extend(await asyncio.to_thread(_storage_findings, body, plan, effective_window))
 
+    restricted = {c.village_id for c in body.config if c.ship_only_to is not None}
     for target_id, target in foreign_ids.items():
         suppliers = sorted({row.origin for row in plan.rows if row.destination == target_id})
+        # From the EMITTED rows, not from the whitelist: an operator who
+        # restricted a village and never saw it routed to a tribute has nothing
+        # to act on, and a finding raised on the intent would fire on every
+        # restricted village in the account.
+        for row in sorted(
+            (r for r in plan.rows if r.destination == target_id and r.origin in restricted),
+            key=lambda r: r.origin,
+        ):
+            label = village_label(row.origin, names)
+            extra_findings.append(
+                Finding(
+                    category=Category.WHITELIST_VS_TRIBUTE,
+                    message=(
+                        f"{label} is restricted by ship_only_to, but the plan still "
+                        f"supplies the tribute {target.name} ({target.x}|{target.y}) from "
+                        f"it -- {row.one_way_minutes / 60.0:.1f}h each way on "
+                        f"{row.merchants} merchants. A whitelist covers own villages "
+                        f"only; put {label} in that target's exclude_origins to keep it off"
+                    ),
+                    detail=f"{label} -> {target.name} — {row.merchants} merchants",
+                    village=label,
+                    resource=Resource.CROP,
+                )
+            )
         if not suppliers:
             extra_findings.append(
                 Finding(

@@ -81,6 +81,7 @@ class Category(StrEnum):
     WINDOW_PRUNED = "window_pruned"
     RESERVED_WINDOW = "reserved_window"
     MANUAL_TRANSFER = "manual_transfer"
+    WHITELIST_VS_TRIBUTE = "whitelist_vs_tribute"
     UNREADABLE_RATE = "unreadable_rate"
     SEARCH_TRUNCATED = "search_truncated"
     STORE_FILLING = "store_filling"
@@ -193,7 +194,15 @@ _SPECS: Mapping[Category, _Spec] = {
         ),
     ),
     Category.STOCK_FUNDED: _Spec(
-        order=21,
+        # Immediately after STOCK_FLOOR_UNSUSTAINABLE, not two ranks below it:
+        # the two describe one mechanism (what the floor funds, and whether it
+        # can keep funding it) and reading them either side of an unrelated
+        # note about the route search made them look like separate subjects.
+        # Fractional, which is what `order` being a float is for -- 11.5 does
+        # the same job for MERCHANTS_CROWDED -- so no other rank moves. Ranks
+        # are per-severity, so the CRITICAL 19 on UNREADABLE_RATE is a
+        # different scale and does not collide with the WARNING 19 above.
+        order=19.5,
         severity=Severity.WARNING,
         subject="village",
         headline="{count} {subject} ship more than they produce, funded from stock",
@@ -327,6 +336,22 @@ _SPECS: Mapping[Category, _Spec] = {
             "Travian only routes to your own, Wonder, or alliance-artifact villages, so no "
             "merchants are reserved for these. Ship them by hand, or mark them "
             "route-eligible if they really are one of those."
+        ),
+    ),
+    Category.WHITELIST_VS_TRIBUTE: _Spec(
+        order=18.5,
+        severity=Severity.WARNING,
+        subject="tribute",
+        headline="{count} {subject} are supplied from a village restricted by ship_only_to",
+        action=(
+            "`ship_only_to` restricts a village's OWN destinations only -- a foreign "
+            "target is governed by its own `exclude_origins`, so no whitelist can stop "
+            "one. That is deliberate: the list takes own village ids and a tribute has "
+            "none, so binding it would leave 'keeps paying the tribute' impossible to "
+            "say. But a distant tribute is the most expensive haul on the map and "
+            "merchant thrift is usually why the whitelist exists, so this is worth "
+            "seeing. Add the origin to that target's exclude_origins if you meant it "
+            "kept off."
         ),
     ),
     Category.UNREADABLE_RATE: _Spec(

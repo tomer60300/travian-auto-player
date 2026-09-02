@@ -15,9 +15,11 @@
  *
  * The village row also carries two more owned facts, both optional: where a
  * village may ship (`ship_only_to`, a list of own village ids; absent means
- * unrestricted and an EMPTY list means nobody) and the share of its warehouse it
- * keeps stocked by NPC trading (`stock_floor_fraction`, 0 to 0.95), which the
- * planner may draw down as extra lumber, clay or iron.
+ * unrestricted and an EMPTY list means no OWN village, for every resource
+ * including crop -- foreign tributes keep their own exclusions and a whitelist
+ * cannot stop one) and the share of its warehouse it keeps stocked by NPC
+ * trading (`stock_floor_fraction`, 0 to 0.95), which the planner may draw down
+ * as extra lumber, clay or iron.
  *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.

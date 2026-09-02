@@ -1009,3 +1009,87 @@ class TestRouteShape:
 
         assert route.one_way_minutes == pytest.approx(60.0)
         assert route.latency_hours == pytest.approx(route.cycle_hours + 1.0)
+
+
+class TestAShortfallSaysWhichCauseItHad:
+    """ "No village has surplus left" and "the villages that do are excluded" are
+    different problems with different fixes.
+
+    The reason was a single hardcoded string, so an operator whose whitelist or
+    `exclude_origins` had starved a village was told to go and find production.
+    `_flows_for_resource` already computes `banned`; it just threw the
+    distinction away.
+    """
+
+    VILLAGES = {
+        1: VillageState(1, 0, 0, merchant_count=20),
+        2: VillageState(2, 10, 0, merchant_count=20),
+    }
+    NAMES = {1: "02", 2: "11"}
+
+    def _plan(self, produced: float, wanted: float):
+        return resolve_resource(
+            Resource.IRON,
+            {1: produced, 2: 0.0},
+            {
+                1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                2: Allocation(AllocationMode.ABSOLUTE, wanted),
+            },
+        )
+
+    def test_a_genuine_lack_of_surplus_reads_as_one(self):
+        _, shortfalls = _flows_for_resource(
+            self._plan(produced=1000.0, wanted=3000.0), self.VILLAGES, GEOMETRY, self.NAMES
+        )
+
+        assert len(shortfalls) == 1
+        assert shortfalls[0].reason == "no village has surplus left to cover this demand"
+
+    def test_an_exclusion_that_removed_the_last_candidate_is_named(self):
+        _, shortfalls = _flows_for_resource(
+            self._plan(produced=3000.0, wanted=3000.0),
+            self.VILLAGES,
+            GEOMETRY,
+            self.NAMES,
+            {2: {1}},
+        )
+
+        assert len(shortfalls) == 1
+        reason = shortfalls[0].reason
+        assert "excluded" in reason, reason
+        assert "02" in reason, "the origin the operator has to un-exclude must be named"
+        assert "no village has surplus" not in reason
+
+    def test_an_exclusion_that_cost_nothing_is_not_blamed(self):
+        """3 has the surplus and is not excluded; 1 is excluded but had none
+        left to give anyway. Blaming the list here would send the operator to
+        edit a list that is not the problem."""
+        villages = dict(self.VILLAGES) | {3: VillageState(3, 20, 0, merchant_count=20)}
+        plan = resolve_resource(
+            Resource.IRON,
+            {1: 0.0, 2: 0.0, 3: 1000.0},
+            {
+                1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                2: Allocation(AllocationMode.ABSOLUTE, 3000.0),
+                3: Allocation(AllocationMode.ABSOLUTE, 0.0),
+            },
+        )
+
+        _, shortfalls = _flows_for_resource(plan, villages, GEOMETRY, self.NAMES, {2: {1}})
+
+        assert shortfalls[0].reason == "no village has surplus left to cover this demand"
+
+    def test_a_village_without_merchants_is_not_reported_as_excluded(self):
+        """It was filtered out of `surplus` for having no Marketplace, not by
+        anybody's list, and it is not in `banned` either -- so this pins that
+        the new branch keys off `banned` and not off "somebody had surplus"."""
+        villages = {
+            1: VillageState(1, 0, 0, merchant_count=0),
+            2: VillageState(2, 10, 0, merchant_count=20),
+        }
+
+        _, shortfalls = _flows_for_resource(
+            self._plan(produced=3000.0, wanted=3000.0), villages, GEOMETRY, self.NAMES
+        )
+
+        assert shortfalls[0].reason == "no village has surplus left to cover this demand"

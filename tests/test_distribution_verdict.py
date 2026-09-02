@@ -70,6 +70,30 @@ class TestWhatItWeighed:
         assert "Capital" in verdict.blockers[0]
         assert "crop" in verdict.blockers[0]
 
+    def test_the_blocker_repeats_the_reason_the_shortfall_gave(self):
+        """`blockers` ignored `short.reason` and hardcoded "no village has
+        spare", so an operator whose own exclusion list caused the shortfall
+        was sent looking for production. /execute renders exactly this tuple."""
+        reasons = blockers(
+            _plan(
+                shortfalls=(
+                    Shortfall(
+                        village_id=7,
+                        resource=Resource.CROP,
+                        per_hour=1200.0,
+                        reason="every village with surplus left is excluded from this "
+                        "destination: V03",
+                    ),
+                )
+            ),
+            NAMES,
+        )
+
+        assert len(reasons) == 1
+        assert "excluded" in reasons[0], reasons
+        assert "V03" in reasons[0], "the excluded origin must survive into the blocker"
+        assert "no village has spare" not in reasons[0]
+
     def test_a_village_with_no_name_is_still_identified(self):
         verdict = assess(
             _plan(over_budget=(OverBudget(village_id=99, committed=9, available=4),)),

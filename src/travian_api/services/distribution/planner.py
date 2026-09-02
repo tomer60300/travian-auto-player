@@ -267,9 +267,13 @@ def blockers(plan: DistributionPlan, names: Mapping[int, str] | None = None) -> 
             f"but its budget allows {over.available}"
         )
     for short in plan.shortfalls:
+        # `short.reason`, not a second hardcoded "no village has spare": the
+        # optimizer distinguishes a genuine lack of surplus from an exclusion
+        # list that put the surplus out of reach, and restating only the first
+        # sends the operator hunting production they already have.
         reasons.append(
             f"{village_label(short.village_id, names)} needs {short.per_hour:,.0f} "
-            f"{short.resource.value}/h that no village has spare"
+            f"{short.resource.value}/h: {short.reason}"
         )
     for resource in plan.over_allocated:
         reasons.append(
