@@ -208,6 +208,14 @@ class VillageConfig(BaseModel):
             "breaches the merchant budget invisibly."
         ),
     )
+    ship_only_to: list[int] | None = Field(
+        default=None,
+        description=(
+            "If set, this village may send to these OWN villages only. Foreign "
+            "targets are governed separately by their own exclude_origins. None "
+            "means unrestricted."
+        ),
+    )
 
 
 class ForeignTarget(BaseModel):
@@ -2023,6 +2031,30 @@ async def _plan_account(
             trade_office_level=0,
             name=target.name,
         )
+
+    # A village's whitelist is the same exclusion seen from the origin: it bans
+    # that origin from every OWN destination it does not name, so the optimizer
+    # sees one denylist whichever side the operator wrote it from. Foreign
+    # targets are left alone -- they carry their own exclude_origins, and a
+    # whitelist that also starved every tribute would be a second lever nobody
+    # asked for. A village naming itself is harmless and ignored.
+    own_ids = {v.village_id for v in body.snapshot}
+    for entry in body.config:
+        if entry.ship_only_to is None:
+            continue
+        unknown = sorted(set(entry.ship_only_to) - own_ids)
+        if unknown:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"{village_label(entry.village_id, names)}: ship_only_to names "
+                    + ", ".join(f"village {vid}" for vid in unknown)
+                    + ", which the snapshot does not contain. Fix the list, or fetch "
+                    "fresh state if the village was settled after the snapshot."
+                ),
+            )
+        for destination in own_ids - set(entry.ship_only_to) - {entry.village_id}:
+            excluded_origins.setdefault(destination, set()).add(entry.village_id)
 
     rate_field = {
         Resource.LUMBER: "lumber_per_hour",

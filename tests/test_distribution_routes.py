@@ -16,9 +16,12 @@ from pydantic import ValidationError
 from travian_api.services.building_service import BuildingService
 from travian_api.services.distribution.allocation import Resource
 from travian_api.web.routes.distribution import (
+    DayCheckRequest,
     ForeignTarget,
     PlanRequest,
+    VillageConfig,
     get_snapshot,
+    post_day_check,
     post_plan,
 )
 from travian_api.web.sessions import get_travian_session
@@ -888,3 +891,205 @@ class TestPlanDiagnostics:
                     assert str(village.village_id) not in finding.detail, (
                         f"detail identifies a village by id: {finding.detail}"
                     )
+
+
+def _own_village(vid, name, x, y, *, lumber=0.0, crop=0.0, merchants=20):
+    return {
+        "village_id": vid,
+        "name": name,
+        "x": x,
+        "y": y,
+        "merchants_total": merchants,
+        "merchants_free": merchants,
+        "lumber_per_hour": lumber,
+        "clay_per_hour": 0,
+        "iron_per_hour": 0,
+        "crop_per_hour": crop,
+    }
+
+
+class TestShipOnlyTo:
+    """A per-origin whitelist of OWN destinations.
+
+    The operator's spec says "village 02 must not send to any village except
+    03, 18, 14, 13, 01 Hammer". Exclusions were built from `foreign_targets`
+    alone, so that could not be said at all -- and unconstrained, the day plan
+    had 02 shipping 36,000/h to village 11. `ship_only_to` is a second INPUT
+    onto the exclusion the foreign denylist already feeds; the mechanism binds
+    the seed, the swaps and the relays, so what these pin is that the whitelist
+    reaches it on every planning path and restricts exactly what it says: own
+    villages, never foreign targets.
+    """
+
+    HUB, NEAR, FAR, SPARE = 20002, 20011, 20003, 20019
+
+    def _payload(self, *, ship_only_to=None, spare=False):
+        """`02` has the lumber and sits between `11` and `03`, both wanting it.
+
+        Unconstrained the optimizer feeds both from 02 -- 11 is as close as 03
+        and 02 is the only source. With `spare` a second source `19` stands on
+        11's far side: a whitelist keeping 02 off 11 then leaves 19 as the one
+        village that can cover it, where without `spare` nothing can.
+        """
+        snapshot = [
+            _own_village(self.HUB, "02", 0, 0, lumber=6000),
+            _own_village(self.NEAR, "11", -5, 0),
+            _own_village(self.FAR, "03", 5, 0),
+        ]
+        allocations = {
+            str(self.HUB): {"mode": "absolute", "value": 0},
+            str(self.NEAR): {"mode": "absolute", "value": 3000},
+            str(self.FAR): {"mode": "absolute", "value": 3000},
+        }
+        if spare:
+            snapshot.append(_own_village(self.SPARE, "19", -20, 0, lumber=3000))
+            allocations[str(self.SPARE)] = {"mode": "absolute", "value": 0}
+        config = []
+        if ship_only_to is not None:
+            config.append({"village_id": self.HUB, "ship_only_to": ship_only_to})
+        return {"snapshot": snapshot, "allocations": {"lumber": allocations}, "config": config}
+
+    def _plan(self, **kw):
+        return asyncio.run(post_plan(PlanRequest.model_validate(self._payload(**kw))))
+
+    @staticmethod
+    def _lumber(res, origin=None, destination=None):
+        return sum(
+            row.cargo.get(Resource.LUMBER, 0)
+            for row in res.rows
+            if (origin is None or row.origin == origin)
+            and (destination is None or row.destination == destination)
+        )
+
+    def test_the_fixture_really_does_tempt_the_optimizer(self):
+        # Guards the fixture: if the unconstrained plan did not put 02 onto 11,
+        # the whitelist tests below would pass while forbidding nothing.
+        res = self._plan(spare=True)
+        assert self._lumber(res, origin=self.HUB, destination=self.NEAR) > 0, (
+            "fixture no longer creates the temptation"
+        )
+
+    @pytest.mark.parametrize("spare", [False, True])
+    def test_no_row_leaves_the_origin_for_a_village_off_the_list(self, spare):
+        res = self._plan(ship_only_to=[self.FAR], spare=spare)
+
+        strayed = [(r.origin, r.destination) for r in res.rows if r.origin == self.HUB]
+        assert all(destination == self.FAR for _, destination in strayed), strayed
+
+    def test_the_listed_destination_still_receives_from_it(self):
+        # The whitelist restricts; it does not silence the village.
+        res = self._plan(ship_only_to=[self.FAR])
+
+        assert self._lumber(res, origin=self.HUB, destination=self.FAR) == pytest.approx(3000)
+
+    def test_demand_it_can_no_longer_serve_is_met_elsewhere(self):
+        res = self._plan(ship_only_to=[self.FAR], spare=True)
+
+        assert self._lumber(res, origin=self.SPARE, destination=self.NEAR) == pytest.approx(3000)
+        assert not res.shortfalls, "19 could cover 11; nothing is short"
+
+    def test_demand_nobody_else_can_serve_is_a_shortfall_not_a_silence(self):
+        res = self._plan(ship_only_to=[self.FAR])
+
+        short = [s for s in res.shortfalls if s.village_id == self.NEAR]
+        assert short and short[0].village_name == "11", res.shortfalls
+        assert self._lumber(res, destination=self.NEAR) + short[0].per_hour == pytest.approx(3000)
+
+    def test_an_unknown_destination_is_refused_and_named(self):
+        with pytest.raises(HTTPException) as exc:
+            self._plan(ship_only_to=[self.FAR, 99999])
+
+        assert exc.value.status_code == 422
+        assert "99999" in exc.value.detail
+        assert "02" in exc.value.detail, "the origin whose list is wrong must be named"
+
+    def test_foreign_targets_keep_their_own_denylist(self):
+        """`ship_only_to` is about OWN villages. A tribute without
+        `exclude_origins` must still be fed by the whitelisted village -- the
+        operator already has a lever for foreign targets, and an empty
+        whitelist silently starving every tribute would be a second one
+        nobody asked for."""
+        body = _plan_request(
+            {"crop": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}},
+            crop=3000.0,
+        )
+        body.foreign_targets = [
+            ForeignTarget(name="Ally-Keep", x=40, y=40, crop_per_hour=500.0, route_eligible=True)
+        ]
+        body.config = [VillageConfig(village_id=20003, ship_only_to=[])]
+
+        res = asyncio.run(post_plan(body))
+
+        tribute_rows = [row for row in res.rows if row.destination < 0]
+        assert tribute_rows, "the tribute was never shipped"
+        assert {row.origin for row in tribute_rows} == {20003}
+        assert not [row for row in res.rows if row.origin == 20003 and row.destination == 20011]
+
+    def _crosswise(self, *, whitelist):
+        """`_crosswise_plan` from test_tribute_supplier_choice, as a request.
+
+        `hub` is one field from `near` and `spare` one field from `other`, so the
+        cheap pairing is hub->near. Keeping hub off `near` forces the seed to
+        cross the two hauls at ~100 fields each, and uncrossing them is a large
+        improvement the 2x2 swap will take unless the whitelist binds the swap
+        too. All four are OWN villages -- the case a foreign target's
+        `exclude_origins` could never express.
+        """
+        snapshot = [
+            _own_village(1, "hub", 0, 0, crop=5000, merchants=40),
+            _own_village(2, "spare", 100, 0, crop=6000, merchants=40),
+            _own_village(8, "other", 101, 0, merchants=40),
+            _own_village(9, "near", 1, 0, merchants=40),
+        ]
+        allocations = {
+            "1": {"mode": "absolute", "value": 0},
+            "2": {"mode": "absolute", "value": 0},
+            "8": {"mode": "absolute", "value": 5000},
+            "9": {"mode": "absolute", "value": 6000},
+        }
+        body = PlanRequest.model_validate(
+            {
+                "snapshot": snapshot,
+                "allocations": {"crop": allocations},
+                "config": [{"village_id": 1, "ship_only_to": [8]}] if whitelist else [],
+                "max_latency_hours": None,
+                "map_span": 401,
+                "speed_fields_per_hour": 12.0,
+            }
+        )
+        return asyncio.run(post_plan(body))
+
+    def test_the_crosswise_fixture_really_does_tempt_the_search(self):
+        res = self._crosswise(whitelist=False)
+        assert 1 in {r.origin for r in res.rows if r.destination == 9}, (
+            "fixture no longer creates the temptation"
+        )
+
+    def test_a_swap_may_not_land_the_origin_on_a_village_off_the_list(self):
+        res = self._crosswise(whitelist=True)
+
+        assert {r.origin for r in res.rows if r.destination == 9} == {2}
+        assert not res.shortfalls, "the demand is coverable without hub"
+
+    def test_the_day_check_plans_every_profile_under_the_same_whitelist(self):
+        """The day check and the segmented execute plan each profile through
+        `_plan_account`; a whitelist honoured by /plan alone would leave the
+        day picture built from routes the operator forbade."""
+        payload = self._payload(ship_only_to=[self.FAR])
+        body = DayCheckRequest.model_validate(
+            {
+                "snapshot": payload["snapshot"],
+                "config": payload["config"],
+                "segments": [
+                    {
+                        "name": "Day",
+                        "window": [8 * 60, 20 * 60],
+                        "allocations": payload["allocations"],
+                    }
+                ],
+            }
+        )
+
+        res = asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
+
+        assert any("Day: 11 is short" in w for w in res.warnings), res.warnings
