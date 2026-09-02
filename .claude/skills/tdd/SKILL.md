@@ -47,10 +47,23 @@ Follow the strict Red-Green-Refactor cycle for every feature or bug fix.
 
 ### Backend Tests
 ```bash
-cd travian-auto-player && uv run pytest -x -v tests/
+cd travian-auto-player && uv run --extra dev --extra web pytest -q -n 8 --tb=short
 ```
 
-### Frontend Tests (when added)
+`--extra dev --extra web` is not optional: a bare `uv run pytest` does not
+install the extras and falls through to a global pytest whose editable install
+may point at a different checkout, which has already produced results
+describing the wrong source tree. `-n 8` is safe here (per-worker tmp DB, tmp
+trace dir, scrubbed env) and takes the suite from ~185s serial to ~60-85s.
+While iterating inside one Red-Green cycle, add `-m "not slow"`; run the full
+set before committing.
+
+### Frontend Tests
 ```bash
-cd travian-auto-player/frontend && npx vitest run
+cd travian-auto-player/frontend && npx eslint . --max-warnings=20 && npm test && npm run build
 ```
+
+`npm test` is vitest (`vitest run`). Note that `npm run build` writes into
+`src/travian_api/web/static`, which the production server on :80 serves
+directly -- there is no staging step, so a build is a deploy. Leave it out of
+a Red-Green cycle and run it once at the end.

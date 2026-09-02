@@ -33,7 +33,7 @@
           },
           {
             "type": "command",
-            "command": "path=$(jq -r '.tool_input.file_path // \"\"'); echo \"$path\" | grep -qE '\\.(ts|tsx|js|jsx)$' || exit 0; cd \"$(dirname \"$path\")\"; while [ ! -f package.json ] && [ \"$PWD\" != / ]; do cd ..; done; npx prettier --write \"$path\" 2>/dev/null; npx eslint --fix --quiet \"$path\" 2>/dev/null || true",
+            "command": "path=$(jq -r '.tool_input.file_path // \"\"'); echo \"$path\" | grep -qE '\\.(ts|tsx|js|jsx)$' || exit 0; cd \"$(dirname \"$path\")\"; while [ ! -f package.json ] && [ \"$PWD\" != / ]; do cd ..; done; npx eslint --fix --quiet \"$path\" 2>/dev/null || true",
             "statusMessage": "Formatting JS/TS..."
           }
         ]
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/test-gate.py",
+            "command": "uv run python .claude/hooks/test-gate.py",
             "statusMessage": "Running test gate..."
           }
         ]

@@ -15,6 +15,37 @@ import sys
 import os
 
 
+# The command CLAUDE.md mandates, verbatim. Three parts of it are load-bearing:
+#
+# * `--extra dev --extra web` -- a BARE `uv run pytest` does not install the
+#   optional extras, so it falls through to a global pytest whose editable
+#   install may point at a different checkout. That has already produced test
+#   results describing the wrong source tree.
+# * `-n 8` -- every worker gets its own tmp DB, tmp trace dir, scrubbed env and
+#   the live-writes pin, so they cannot collide. Serial is ~185s; -n 8 is ~60-85s.
+# * no `-x` -- with xdist, `-x` stops the run at the first failure any worker
+#   happens to reach, which hides the rest of the picture the gate exists to show.
+PYTEST_COMMAND = [
+    "uv",
+    "run",
+    "--extra",
+    "dev",
+    "--extra",
+    "web",
+    "pytest",
+    "-q",
+    "-n",
+    "8",
+    "--tb=short",
+]
+
+# Comfortably above the real runtime rather than under it. The previous 120s sat
+# BELOW the ~185s serial runtime, so the gate blocked on its own timeout on every
+# single stop and never once reported a test result. -n 8 measures 60-85s on this
+# machine; 600s leaves room for a cold `uv sync` and a loaded machine.
+TIMEOUT_SECONDS = 600
+
+
 def main():
     # Read hook input from stdin
     try:
@@ -40,29 +71,31 @@ def main():
 
     try:
         result = subprocess.run(
-            ["uv", "run", "pytest", "-x", "--tb=short", "-q"],
+            PYTEST_COMMAND,
             capture_output=True,
             text=True,
             cwd=project_root,
-            timeout=120,
+            timeout=TIMEOUT_SECONDS,
         )
     except FileNotFoundError:
-        # uv not available, try plain pytest
-        try:
-            result = subprocess.run(
-                ["python", "-m", "pytest", "-x", "--tb=short", "-q"],
-                capture_output=True,
-                text=True,
-                cwd=project_root,
-                timeout=120,
-            )
-        except FileNotFoundError:
-            # No pytest available, skip
-            sys.exit(0)
+        # No silent pass and no second-best pytest. A gate that cannot run has
+        # verified nothing, and the previous fallback to a bare `python -m
+        # pytest` is the very command CLAUDE.md forbids: it resolves to
+        # whatever pytest is on PATH, whose editable install may point at a
+        # different checkout, so it can report green about another source tree.
+        print(json.dumps({
+            "decision": "block",
+            "reason": (
+                "The test gate could not run: `uv` is not on PATH. This project "
+                "is verified only through `uv run --extra dev --extra web`; "
+                "install uv or run the suite by hand before stopping."
+            ),
+        }))
+        sys.exit(0)
     except subprocess.TimeoutExpired:
         print(json.dumps({
             "decision": "block",
-            "reason": "Test suite timed out after 120 seconds"
+            "reason": f"Test suite timed out after {TIMEOUT_SECONDS} seconds"
         }))
         sys.exit(0)
 

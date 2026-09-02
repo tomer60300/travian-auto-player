@@ -47,17 +47,27 @@ nohup.out
 # Agent/tool state
 .clawhub/
 .openclaw/
-# Claude Code project tooling is VERSIONED: settings.json carries the hooks that
-# block editing .env/.secret/.key and refuse `git push --force` / `rm -rf /`, and
-# hooks/, agents/ and commands/ are the project's own tooling. A blanket ignore
-# left the guard that protects this repo's credentials unversioned -- a fresh
-# clone silently lost it. Only the machine-local and disposable parts are ignored.
-.claude/settings.local.json
-.claude/ux-audit/
-# Transient agent state: worktrees carry their own .venv (binaries) and are
-# disposable. Caught this while narrowing the rule -- a pytest.exe would have
-# been committed.
-.claude/worktrees/
+# Claude Code project tooling is VERSIONED, by ALLOWLIST: settings.json carries
+# the hooks that block editing .env/.secret/.key and refuse `git push --force` /
+# `rm -rf /`, and hooks/, agents/, commands/ and skills/ are the project's own
+# tooling. A blanket ignore left the guard that protects this repo's credentials
+# unversioned -- a fresh clone silently lost it.
+#
+# Allowlisted, not denylisted. The first attempt at narrowing named the three
+# machine-local paths to ignore, which makes every FUTURE file any tool drops
+# into .claude/ committed by default -- untenable in a public repo with a
+# recorded credential exposure. Adding a new versioned path here is a
+# deliberate one-line act; leaking one is now impossible by omission.
+#
+# `.claude/*` and not `.claude/`: git never descends into an excluded
+# DIRECTORY, so a `!` line beneath `.claude/` could not re-include anything.
+# Excluding the contents one by one is what makes the un-ignores below work.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/agents/
+!.claude/commands/
+!.claude/skills/
 memory/
 
 # Cookie/session files (per-user, contain JWTs)
