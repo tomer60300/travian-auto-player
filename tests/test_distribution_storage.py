@@ -11,7 +11,7 @@ heading the other way?
 import pytest
 
 from travian_api.services.distribution.allocation import Resource
-from travian_api.services.distribution.findings import Category
+from travian_api.services.distribution.findings import Category, Severity, summarise
 from travian_api.services.distribution.optimizer import Route
 from travian_api.services.distribution.schedule import build_beat
 from travian_api.services.distribution.storage import (
@@ -372,7 +372,10 @@ class TestBeyondTheSettlingHorizon:
         assert len(events) == 1
         event = events[0]
         assert event.projected is False
-        assert event.days_to_cap == 0.0
+        # None, not 0.0: `projected` is now derived from this field's absence,
+        # so an observed event has no countdown rather than a zero-length one
+        # that would have printed as "in about 0 days".
+        assert event.days_to_cap is None
         assert event.minute == 0
         assert event.wasted_per_day == pytest.approx(926 * 24)
         assert event.net_gain_per_day == pytest.approx(926 * 24)
@@ -406,15 +409,91 @@ class TestBeyondTheSettlingHorizon:
         assert events[0].projected is True
         assert events[0].days_to_cap == pytest.approx(29.0, abs=0.1)
 
+    def test_a_store_exactly_at_the_horizon_is_not_dropped_by_float_residue(self):
+        """+500/h out of 40,000 into 400,000 lands on 30.000000000000004 days.
+
+        The bound is a month, chosen because the account has changed by then --
+        so a store the report would call "about 30 days" and a store one float
+        step past 30 are the same store. Compared after rounding, which is also
+        how the message states it, so the number admitted and the number printed
+        cannot disagree.
+        """
+        events = self._lone_store(40_000, 400_000, 500.0)
+
+        assert len(events) == 1, "a store 30.000000000000004 days out was dropped"
+        assert events[0].days_to_cap == pytest.approx(30.0, abs=0.01)
+
     def test_a_projected_overflow_says_when_and_how_much(self):
         findings = storage_findings([], self._lone_store(40_000, 400_000, 1_000.0), names={1: "19"})
 
         assert len(findings) == 1
-        assert findings[0].category is Category.OVERFLOW_STRUCTURAL
-        assert findings[0].loss_per_day == pytest.approx(24_000.0, abs=1.0)
         assert "will reach its cap in about 15 days" in findings[0].message
         assert "24,000/day" in findings[0].message
-        assert "00:00" not in findings[0].message
+        assert "00:00" not in findings[0].message, (
+            "a store that has not reached its cap has no minute of the day"
+        )
+
+
+class TestAProjectedLossIsNotAPresentOne:
+    """A store 20 days from its cap was reported as a CRITICAL structural
+    overflow and its future loss was summed into "This account loses N
+    resources a day at its store caps" -- present tense, about something that
+    has not started. The 30-day horizon fixed how far ahead the planner would
+    look and not the tense it reported in, so one quiet village 20 days out
+    produced a red headline claiming a 24,000/day loss that was not happening.
+    """
+
+    def _projected(self) -> tuple[OverflowEvent, ...]:
+        # +1,000/h into a 400,000 store holding 40,000: full on day 15.
+        return simulate_day(
+            build_beat(()),
+            stocks={1: {Resource.CROP: 40_000}},
+            capacities={1: {Resource.CROP: 400_000}},
+            net_per_hour={1: {Resource.CROP: 1_000.0}},
+        )
+
+    def test_it_is_a_warning_in_its_own_category(self):
+        findings = storage_findings([], self._projected(), names={1: "19"})
+
+        assert len(findings) == 1
+        assert findings[0].category is Category.OVERFLOW_PROJECTED
+        assert findings[0].severity is Severity.WARNING, (
+            "a loss that has not started cannot be a reason to refuse the plan"
+        )
+
+    def test_it_costs_nothing_per_day_yet(self):
+        findings = storage_findings([], self._projected(), names={1: "19"})
+
+        assert findings[0].loss_per_day == 0.0, (
+            "the future loss was counted as a present one; the account's daily "
+            "total then describes a day that has not happened"
+        )
+        assert "24,000" in findings[0].detail, (
+            "the figure still has to be visible -- excluded from the total is "
+            "not the same as hidden"
+        )
+
+    def test_the_account_headline_does_not_claim_the_loss_is_happening(self):
+        diagnostics = summarise(list(storage_findings([], self._projected(), names={1: "19"})))
+
+        assert diagnostics.total_loss_per_day == 0.0
+        assert "loses" not in diagnostics.headline, diagnostics.headline
+        assert "Nothing is being wasted" in diagnostics.headline, diagnostics.headline
+
+    def test_an_observed_overflow_still_counts_in_full(self):
+        """The distinction is projected-vs-watched, not overflow-vs-nothing."""
+        observed = simulate_day(
+            build_beat(()),
+            stocks={1: {Resource.CROP: 799_000}},
+            capacities={1: {Resource.CROP: 800_000}},
+            net_per_hour={1: {Resource.CROP: 926.0}},
+        )
+
+        findings = storage_findings([], observed, names={1: "19"})
+
+        assert findings[0].category is Category.OVERFLOW_STRUCTURAL
+        assert findings[0].loss_per_day == pytest.approx(926 * 24)
+        assert summarise(list(findings)).total_loss_per_day == pytest.approx(926 * 24)
 
 
 class TestStockFloors:

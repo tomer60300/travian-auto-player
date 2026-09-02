@@ -65,6 +65,7 @@ class Category(StrEnum):
     STARVATION = "starvation"
     OVERFLOW_STRUCTURAL = "overflow_structural"
     OVERFLOW_BURST = "overflow_burst"
+    OVERFLOW_PROJECTED = "overflow_projected"
     OVER_ALLOCATED = "over_allocated"
     TRIBUTE_UNFUNDED = "tribute_unfunded"
     UNALLOCATED = "unallocated"
@@ -168,6 +169,22 @@ _SPECS: Mapping[Category, _Spec] = {
         action=(
             "Free crop somewhere -- lower another village's target, or drop the obligation. "
             "As planned it simply will not be paid."
+        ),
+    ),
+    Category.OVERFLOW_PROJECTED: _Spec(
+        # First among the warnings: it is the only one measured in resources,
+        # so it is the one an operator scanning for cost should meet first.
+        # Ranks are per-severity, so this does not compete with the CRITICALs.
+        order=9.5,
+        severity=Severity.WARNING,
+        subject="store",
+        headline="{count} {subject} will reach their {resource} cap within the month",
+        action=(
+            "Nothing is lost yet. These stores are still filling; each line says when it "
+            "arrives at the cap and what it will shed per day once it never leaves. Thirty "
+            "days is a horizon rather than a forecast -- fields, troops and targets all "
+            "move before then -- so this is worth a plan, not an emergency: give the "
+            "{resource} somewhere to go, raise the store, or spend it in-village."
         ),
     ),
     Category.UNALLOCATED: _Spec(

@@ -147,22 +147,29 @@ class OverflowEvent:
     two were reported with identical wording, and the wording asserted the
     reason for the case that was in fact the rarer of the two.
     """
-    projected: bool = False
-    """The loss was extrapolated, not watched.
-
-    The replay ran its whole horizon without the day repeating, and this store
-    was still gaining: it had not reached its cap yet, or reached it too late in
-    the last day for that day to show the whole loss. So ``wasted_per_day`` is
-    its ``net_gain_per_day`` -- what a store that never leaves its cap loses --
-    rather than a figure any simulated day produced.
-    """
-    days_to_cap: float = 0.0
+    days_to_cap: float | None = None
     """Days from the snapshot until a projected store sits at its cap.
 
     The horizon the replay ran, plus whatever headroom was left at its end
-    covered at the last day's net gain. Zero for an observed event: its store
-    is already there.
+    covered at the last day's net gain. ``None`` for an observed event, whose
+    store is already at its cap -- and that absence is what :attr:`projected`
+    reads, so the two cannot disagree. They used to be separate fields with an
+    invariant nobody enforced: a ``projected`` event with ``days_to_cap`` left
+    at 0.0 would have reported "will reach its cap in about 0 days".
     """
+
+    @property
+    def projected(self) -> bool:
+        """The loss was extrapolated, not watched.
+
+        True when the replay ran its whole horizon without the day repeating
+        and this store was still gaining: it had not reached its cap yet, or
+        reached it too late in the last day for that day to show the whole loss.
+        Then ``wasted_per_day`` is its ``net_gain_per_day`` -- what a store that
+        never leaves its cap loses -- rather than a figure any simulated day
+        produced.
+        """
+        return self.days_to_cap is not None
 
     @property
     def structural(self) -> bool:
@@ -390,9 +397,16 @@ def simulate_day(
                 days_to_cap = MAX_SETTLING_DAYS + (cap - level.get(key, 0.0)) / gain
                 # A store more than a month out is not a defect in THIS plan.
                 # Production, troops and targets all move first, so projecting a
-                # CRITICAL structural loss that far ahead reported accounts as
-                # broken over stores 130 days from trouble.
-                if days_to_cap > MAX_PROJECTION_DAYS:
+                # loss that far ahead reported accounts as broken over stores
+                # 130 days from trouble.
+                #
+                # Rounded before comparing, and rounded the same way the message
+                # states it (`:.0f`, i.e. round-half-even, as `round` is). The
+                # accumulation leaves float residue -- 40,000 rising at 500/h
+                # lands on 30.000000000000004 days -- so an exact comparison
+                # dropped a store the report would have called "about 30 days"
+                # while keeping one at 29.99.
+                if round(days_to_cap) > MAX_PROJECTION_DAYS:
                     continue
                 events[key] = OverflowEvent(
                     village_id=vid,
@@ -404,7 +418,6 @@ def simulate_day(
                     minute=first_full.get(key, 0),
                     wasted_per_day=gain,
                     net_gain_per_day=gain,
-                    projected=True,
                     days_to_cap=days_to_cap,
                 )
 
@@ -495,6 +508,18 @@ def storage_findings(
         if event.projected:
             # The replay never saw this day: the cap is past the horizon, and
             # the loss is what the store will shed once it sits there.
+            #
+            # Its own WARNING category, and no `loss_per_day`. A projected event
+            # used to land in OVERFLOW_STRUCTURAL, which is CRITICAL and whose
+            # figures are summed into "This account loses N resources a day at
+            # its store caps" -- so one quiet village 20 days from its cap
+            # produced a red headline about a 24,000/day loss that had not
+            # started. The 30-day bound above fixed the horizon and not the
+            # tense. The figure stays visible in the message and the detail;
+            # excluded from the account total is not the same as hidden.
+            category = Category.OVERFLOW_PROJECTED
+            loss_per_day = 0.0
+            detail = f"{label} — {event.wasted_per_day:,.0f}/day in ~{event.days_to_cap:.0f} days"
             message = (
                 f"{label}: {event.resource.value} will reach its cap in about "
                 f"{event.days_to_cap:.0f} days and then lose about "
@@ -506,6 +531,9 @@ def storage_findings(
             # No clock: a store that never leaves its cap did not "reach" it at a
             # minute of the day, and reporting 00:00 as an event time sent the
             # operator looking for a midnight arrival that does not exist.
+            category = Category.OVERFLOW_STRUCTURAL
+            loss_per_day = event.wasted_per_day
+            detail = f"{label} — {event.wasted_per_day:,.0f}/day"
             message = (
                 f"{label}: {event.resource.value} hits the cap and loses about "
                 f"{event.wasted_per_day:,.0f}/day — the {_store_name(event.resource)} never "
@@ -513,6 +541,9 @@ def storage_findings(
                 f"than leaves"
             )
         else:
+            category = Category.OVERFLOW_BURST
+            loss_per_day = event.wasted_per_day
+            detail = f"{label} — {event.wasted_per_day:,.0f}/day"
             message = (
                 f"{label}: {event.resource.value} hits the cap at "
                 f"{event.minute // 60:02d}:{event.minute % 60:02d} and loses about "
@@ -521,14 +552,12 @@ def storage_findings(
             )
         findings.append(
             Finding(
-                category=(
-                    Category.OVERFLOW_STRUCTURAL if event.structural else Category.OVERFLOW_BURST
-                ),
+                category=category,
                 message=message,
-                detail=f"{label} — {event.wasted_per_day:,.0f}/day",
+                detail=detail,
                 village=label,
                 resource=event.resource,
-                loss_per_day=event.wasted_per_day,
+                loss_per_day=loss_per_day,
             )
         )
     return tuple(findings)
