@@ -7,6 +7,7 @@ import useLogStore from '../stores/logStore'
 import api from '../api'
 import {
   CONSUMABLE_RESOURCES,
+  MAX_MERCHANTS_PER_VILLAGE,
   SetupFileError,
   VILLAGE_ROLES,
   allocationsForRequest,
@@ -15,6 +16,7 @@ import {
   describeConsumption,
   describeSpendSource,
   isConsumptionRate,
+  isMaxBusyMerchants,
   isStockFloorFraction,
   mergeSetup,
   parseSetup,
@@ -136,12 +138,21 @@ function loadProfiles(accountKey) {
 // docs/25), so it cannot be derived from tribe and defaults to the operator's
 // calibrated Europe 2 Teuton values. Travel SPEED, by contrast, is tribe-derived
 // server-side and travels in the snapshot.
-const DEFAULT_MERCHANT_MODEL = { base_capacity: 2500, bonus_per_to_level: 0.2 }
+// The two merchant levers default to the planner's own values, so an account
+// nobody has touched sends what the backend would have used anyway -- exposing
+// them must not change a single plan by itself.
+const DEFAULT_MERCHANT_MODEL = {
+  base_capacity: 2500,
+  bonus_per_to_level: 0.2,
+  merchant_reserve: 2,
+  merchant_headroom: 0.1,
+}
 
 const LS_WINDOWS = 'planner_profile_windows'
 const LS_CROP_CEILING = 'planner_crop_ceiling'
 const LS_SHIP_ONLY_TO = 'planner_ship_only_to'
 const LS_STOCK_FLOOR = 'planner_stock_floor'
+const LS_MAX_BUSY = 'planner_max_busy'
 const LS_CONSUMPTION = 'planner_consumption'
 const LS_VILLAGE_ROLES = 'planner_village_roles'
 const LS_MAY_RELAY = 'planner_may_relay'
@@ -502,6 +513,13 @@ export default function ResourcePlanner() {
   // FRACTION (0.3, not 30) so state, file and request agree; the input shows it
   // as a percent. The planner may draw it down as lumber, clay or iron.
   const [stockFloors, setStockFloors] = useState({})
+  // The most merchants each village may have underway or returning at once:
+  // { [village_id]: number }. Profile section 5 gives the capital one such
+  // number and the game states none, so it is owned exactly as the Trade Office
+  // level is. A CAP, not a reserve -- `merchant_reserve` below holds merchants
+  // back at every village, and off a full fleet the two are not even the same
+  // figure (19 merchants less a reserve of 12 is 7, where the cap says 8).
+  const [maxBusy, setMaxBusy] = useState({})
   // What each village SPENDS per hour: { [village_id]: { lumber, clay, iron,
   // crop } }, only the resources the operator has typed. Owned, like the
   // Trade Office level, and for a harder reason: the game's statistics page
@@ -700,6 +718,7 @@ export default function ResourcePlanner() {
       setProfiles({ [DEFAULT_PROFILE]: {} })
       setForeignTargets([])
       setMayRelay({})
+      setMaxBusy({})
       setActiveProfile(DEFAULT_PROFILE)
       setMerchantModel(DEFAULT_MERCHANT_MODEL)
       setSelected({})
@@ -724,6 +743,7 @@ export default function ResourcePlanner() {
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
     setStockFloors(loadJson(`${LS_STOCK_FLOOR}::${accountKey}`, {}))
+    setMaxBusy(loadJson(`${LS_MAX_BUSY}::${accountKey}`, {}))
     // A role outside the five is dropped on the way in, the same way a stored
     // crop spend is: the backend answers an unknown role with a 422, so a
     // stale one from a future build would 422 every plan over a value the
@@ -757,7 +777,10 @@ export default function ResourcePlanner() {
     setDayCheck(null)
     setProfiles(loaded)
     setActiveProfile(loaded[storedActive] ? storedActive : Object.keys(loaded)[0])
-    setMerchantModel(loadJson(`${LS_MERCHANT}::${accountKey}`, DEFAULT_MERCHANT_MODEL))
+    setMerchantModel({
+      ...DEFAULT_MERCHANT_MODEL,
+      ...loadJson(`${LS_MERCHANT}::${accountKey}`, DEFAULT_MERCHANT_MODEL),
+    })
     setSelected({})
     setPlan(null)
     setSetupReport(null)
@@ -799,6 +822,7 @@ export default function ResourcePlanner() {
     tradeOffice,
     shipOnlyTo,
     stockFloors,
+    maxBusy,
     consumption,
     villageRoles,
     mayRelay,
@@ -837,6 +861,7 @@ export default function ResourcePlanner() {
     tradeOffice,
     shipOnlyTo,
     stockFloors,
+    maxBusy,
     consumption,
     villageRoles,
     mayRelay,
@@ -857,6 +882,9 @@ export default function ResourcePlanner() {
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_STOCK_FLOOR), stockFloors)
   }, [stockFloors, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_MAX_BUSY), maxBusy)
+  }, [maxBusy, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_CONSUMPTION), consumption)
@@ -1007,6 +1035,7 @@ export default function ResourcePlanner() {
         cropCeilings[v.village_id] != null ||
         shipOnlyTo[v.village_id] != null ||
         stockFloors[v.village_id] != null ||
+        maxBusy[v.village_id] != null ||
         villageRoles[v.village_id] != null ||
         mayRelay[v.village_id] != null ||
         declaresConsumption(consumption[v.village_id])
@@ -1024,6 +1053,7 @@ export default function ResourcePlanner() {
         account: accountKey,
         villages,
         tradeOffice,
+        maxBusy,
         cropCeilings,
         shipOnlyTo,
         stockFloors,
@@ -1046,6 +1076,7 @@ export default function ResourcePlanner() {
   }, [
     villages,
     tradeOffice,
+    maxBusy,
     cropCeilings,
     shipOnlyTo,
     stockFloors,
@@ -1091,6 +1122,7 @@ export default function ResourcePlanner() {
         setup,
         villages,
         tradeOffice,
+        maxBusy,
         cropCeilings,
         shipOnlyTo,
         stockFloors,
@@ -1107,6 +1139,7 @@ export default function ResourcePlanner() {
       setCropCeilings(merged.cropCeilings)
       setShipOnlyTo(merged.shipOnlyTo)
       setStockFloors(merged.stockFloors)
+      setMaxBusy(merged.maxBusy)
       setConsumption(merged.consumption)
       setVillageRoles(merged.villageRoles)
       setMayRelay(merged.mayRelay)
@@ -1115,7 +1148,9 @@ export default function ResourcePlanner() {
       setProfileWindows(merged.profileWindows)
       // Capacity is server-calibrated, so a file that carries a calibration is
       // more trustworthy than this build's default. Absent, the default stands.
-      if (merged.merchantModel) setMerchantModel(merged.merchantModel)
+      if (merged.merchantModel) {
+        setMerchantModel({ ...DEFAULT_MERCHANT_MODEL, ...merged.merchantModel })
+      }
       // Land on a profile the file actually brought, so its numbers are what the
       // operator sees rather than whichever profile happened to be selected.
       const [first] = merged.report.profilesLoaded
@@ -1139,6 +1174,7 @@ export default function ResourcePlanner() {
     [
       villages,
       tradeOffice,
+      maxBusy,
       cropCeilings,
       shipOnlyTo,
       stockFloors,
@@ -1234,6 +1270,12 @@ export default function ResourcePlanner() {
         ...(stockFloors[v.village_id] != null
           ? { stock_floor_fraction: stockFloors[v.village_id] }
           : {}),
+        // Omitted when unset, so a village with no ceiling is byte-identical to
+        // before: absent means the fleet, less the account reserve, is the
+        // budget. 0 IS sent -- it grounds the village, which is an answer.
+        ...(maxBusy[v.village_id] != null
+          ? { max_busy_merchants: Number(maxBusy[v.village_id]) }
+          : {}),
         // An empty map is omitted too: the backend reads absent and {} the
         // same way, and sending {} would only make the request look like it
         // declares a spend. A village mid-edit with every box cleared is not
@@ -1254,6 +1296,16 @@ export default function ResourcePlanner() {
       speed_fields_per_hour:
         Number(merchantModel.speed_fields_per_hour) || snapshot?.speed_fields_per_hour,
       merchant_base_capacity: Number(merchantModel.base_capacity) || undefined,
+      // Both existed on the request and neither was ever sent, so the backend's
+      // defaults were the only values reachable from this page. A reserve of 0
+      // is valid (ship with everything) and a headroom of 0 restores the
+      // pre-headroom packing exactly, so neither may be dropped by `|| default`.
+      merchant_reserve: Number.isInteger(Number(merchantModel.merchant_reserve))
+        ? Number(merchantModel.merchant_reserve)
+        : undefined,
+      merchant_headroom: Number.isFinite(Number(merchantModel.merchant_headroom))
+        ? Number(merchantModel.merchant_headroom)
+        : undefined,
       // A per-level bonus of 0 is valid (a world with no Trade Office scaling),
       // so preserve it — `|| undefined` would drop it and use the 0.2 default.
       trade_office_bonus_per_level: Number.isFinite(Number(merchantModel.bonus_per_to_level))
@@ -1265,6 +1317,7 @@ export default function ResourcePlanner() {
     tradeOffice,
     shipOnlyTo,
     stockFloors,
+    maxBusy,
     consumption,
     villageRoles,
     mayRelay,
@@ -2735,6 +2788,12 @@ export default function ResourcePlanner() {
                   <th className="text-right px-2">Trade Office</th>
                   <th
                     className="text-right px-2"
+                    title="The most merchants this village may have underway or RETURNING at once (profile section 5: “maximum 8 busy at 02”). A ceiling on the plan, not merchants held back: the account-wide reserve below holds some idle at EVERY village, and off a full fleet the two are not even the same figure — 19 merchants less a reserve of 12 is 7, where a cap of 8 is 8. Blank means no ceiling, so the budget is the fleet less the reserve. 0 grounds the village."
+                  >
+                    Max busy
+                  </th>
+                  <th
+                    className="text-right px-2"
                     title="Alert when this village's crop stock would cross this level (e.g. your NPC trigger). Used by the full-day check."
                   >
                     Crop alert
@@ -2846,6 +2905,50 @@ export default function ResourcePlanner() {
                           }))
                         }
                       />
+                    </td>
+                    <td className="text-right px-2">
+                      {(() => {
+                        const cap = maxBusy[v.village_id]
+                        const beyondFleet =
+                          cap != null &&
+                          typeof v.merchants_total === 'number' &&
+                          cap > v.merchants_total
+                        const invalid = (cap != null && !isMaxBusyMerchants(cap)) || beyondFleet
+                        const problemId = `max-busy-problem-${v.village_id}`
+                        return (
+                          <>
+                            <input
+                              type="number"
+                              min="0"
+                              max={v.merchants_total ?? MAX_MERCHANTS_PER_VILLAGE}
+                              aria-label={`Most merchants busy at once for ${v.name}`}
+                              aria-invalid={invalid || undefined}
+                              aria-describedby={invalid ? problemId : undefined}
+                              placeholder="none"
+                              className="input-field w-16 text-right text-xs py-1"
+                              value={cap ?? ''}
+                              onChange={(e) =>
+                                setMaxBusy((prev) => ({
+                                  ...prev,
+                                  [v.village_id]:
+                                    e.target.value === '' ? undefined : Number(e.target.value),
+                                }))
+                              }
+                            />
+                            {/* Named, not just outlined: the backend refuses the
+                                whole plan over a ceiling the village cannot
+                                reach, and "422" on a Build click is not a
+                                sentence that leads anyone back to this cell. */}
+                            {invalid && (
+                              <span id={problemId} className="block text-warning text-xs mt-0.5">
+                                {beyondFleet
+                                  ? `only ${v.merchants_total} merchants here`
+                                  : `0 to ${MAX_MERCHANTS_PER_VILLAGE}`}
+                              </span>
+                            )}
+                          </>
+                        )
+                      })()}
                     </td>
                     <td className="text-right px-2">
                       <input
@@ -3181,6 +3284,57 @@ export default function ResourcePlanner() {
                   setMerchantModel((m) => ({
                     ...m,
                     speed_fields_per_hour: e.target.value === '' ? undefined : Number(e.target.value),
+                  }))
+                }
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              <span
+                className="text-secondary"
+                title="Merchants to leave idle at EVERY village, so a shipment can be sent by hand without waiting for a route to come home. Account-wide: to hold ONE village down, cap it in the Max busy column instead."
+              >
+                Reserve / village
+              </span>
+              <input
+                type="number"
+                min="0"
+                max={MAX_MERCHANTS_PER_VILLAGE}
+                aria-label="Merchants held in reserve at every village"
+                placeholder={String(DEFAULT_MERCHANT_MODEL.merchant_reserve)}
+                className="input-field w-16 text-right py-1"
+                value={merchantModel.merchant_reserve ?? ''}
+                onChange={(e) =>
+                  setMerchantModel((m) => ({
+                    ...m,
+                    merchant_reserve: e.target.value === '' ? undefined : Number(e.target.value),
+                  }))
+                }
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              <span
+                className="text-secondary"
+                title="Share of each village's merchant budget the plan aims to leave uncommitted, so load spreads instead of piling onto whichever village is cheapest to ship from. Soft: exceeding it is reported, never fatal. 0 packs as tightly as it can."
+              >
+                Headroom %
+              </span>
+              <input
+                type="number"
+                min="0"
+                max="99"
+                aria-label="Merchant headroom, percent of each village's budget"
+                placeholder={String(DEFAULT_MERCHANT_MODEL.merchant_headroom * 100)}
+                className="input-field w-16 text-right py-1"
+                value={
+                  merchantModel.merchant_headroom == null
+                    ? ''
+                    : Math.round(merchantModel.merchant_headroom * 1000) / 10
+                }
+                onChange={(e) =>
+                  setMerchantModel((m) => ({
+                    ...m,
+                    merchant_headroom:
+                      e.target.value === '' ? undefined : Number(e.target.value) / 100,
                   }))
                 }
               />

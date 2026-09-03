@@ -10,6 +10,7 @@ import {
   describeConsumption,
   describeSpendSource,
   isConsumptionRate,
+  isMaxBusyMerchants,
   isStockFloorFraction,
   materialSpendOnly,
   mergeSetup,
@@ -23,6 +24,7 @@ import {
   setupMatchesAccount,
   stripStoredCropSpends,
   stripUnknownRoles,
+  unreachableCaps,
 } from './plannerSetup'
 import { withEditedAllocation } from './plannerAllocation'
 
@@ -225,12 +227,12 @@ describe('profiles in the setup file', () => {
       merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
       exportedAt: STAMP,
     })
-    // 4 since the per-village `may_relay` landed (3 was the role templates).
-    // Pinned to a literal on purpose: the version has to rise whenever a field
-    // is added, so that an older build refuses a file it would otherwise
-    // half-load, and a literal is what makes forgetting the bump a failing
-    // test rather than a tautology.
-    expect(setup.version).toBe(4)
+    // 5 since the per-village merchant cap landed (4 was `may_relay`, 3 the
+    // role templates). Pinned to a literal on purpose: the version has to rise
+    // whenever a field is added, so that an older build refuses a file it would
+    // otherwise half-load, and a literal is what makes forgetting the bump a
+    // failing test rather than a tautology.
+    expect(setup.version).toBe(5)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -1073,13 +1075,14 @@ describe('roles and role templates in the setup file', () => {
     expect(merged.roles).toEqual(TEMPLATES)
   })
 
-  it('is a version 4 file, and every older one simply carries less', () => {
-    // Rewritten from "is a version 3 file" when the per-village `may_relay`
-    // landed: the contract is the RULE, not the number -- the version rises
-    // whenever a field is added, so that a build which cannot read the new one
-    // refuses a file it would otherwise half-load rather than dropping the
-    // field and planning a different account in silence.
-    expect(SETUP_VERSION).toBe(4)
+  it('is the current version, and every older file simply carries less', () => {
+    // Rewritten twice now -- from "is a version 3 file" when the per-village
+    // `may_relay` landed, and again for the merchant cap. The contract is the
+    // RULE, not the number: the version rises whenever a field is added, so
+    // that a build which cannot read the new one refuses a file it would
+    // otherwise half-load rather than dropping the field and planning a
+    // different account in silence. The number itself is pinned in the merchant
+    // cap's own suite, which is where the field that last moved it lives.
     const older = {
       format: SETUP_FORMAT,
       version: 2,
@@ -1931,5 +1934,222 @@ describe('may_relay in the setup file', () => {
       role: 'def',
       may_relay: true,
     })
+  })
+})
+
+// ── The per-village merchant cap (format version 5) ────────────────────────
+// Profile section 5 gives the capital one number -- "maximum 8 busy merchants
+// at any instant" -- and it is owned state: nothing in the game states a
+// ceiling. It is also the field whose loss is least visible. A Trade Office
+// level dropped on a cleared origin makes the plan over-provision, which is
+// safe; a CAP dropped makes the plan quietly commit sixteen merchants at a
+// village the operator holds to eight, and the sheet reads feasible.
+describe('the merchant cap in the setup file', () => {
+  it('carries a cap, and exports a village whose only typed field is one', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      maxBusy: { 20031: 8 },
+      exportedAt: STAMP,
+    })
+
+    expect(setup.villages.map((v) => v.village_id)).toEqual([20031])
+    expect(setup.villages[0].max_busy_merchants).toBe(8)
+  })
+
+  it('keeps a cap of 0, which says "this village sends nothing"', () => {
+    // The same rule a Trade Office level of 0 follows: an answer, not a blank.
+    // Dropped, the village goes back to shipping with its whole fleet.
+    const setup = buildSetup({ villages: VILLAGES, maxBusy: { 20032: 0 }, exportedAt: STAMP })
+
+    expect(setup.villages[0].max_busy_merchants).toBe(0)
+  })
+
+  it('survives a round trip beside the other owned columns', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20031: 13 },
+      maxBusy: { 20031: 8 },
+      exportedAt: STAMP,
+    })
+
+    expect(parseSetup(JSON.stringify(setup)).villages[0]).toEqual({
+      village_id: 20031,
+      name: 'V05',
+      trade_office_level: 13,
+      max_busy_merchants: 8,
+    })
+  })
+
+  it('refuses a cap that is not a whole number of merchants', () => {
+    for (const bad of [8.5, '8', 'nine', true]) {
+      const doc = {
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20031, max_busy_merchants: bad }],
+      }
+      expect(() => roundTrip(doc), JSON.stringify(bad)).toThrow(SetupFileError)
+      expect(() => roundTrip(doc), JSON.stringify(bad)).toThrow(/merchant/)
+    }
+  })
+
+  it('refuses a negative cap', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 20031, max_busy_merchants: -1 }],
+    }
+
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+    expect(() => roundTrip(doc)).toThrow(/-1/)
+  })
+
+  it('refuses a cap above the 20 merchants a village can ever hold', () => {
+    // Section 8's hard cap. Above it the figure cannot be a merchant count at
+    // all, whatever the account -- and clamping it would leave the operator's
+    // file and the plan describing different accounts, which is the same
+    // reason the backend answers 422 rather than trimming.
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 20031, max_busy_merchants: 21 }],
+    }
+
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+    expect(() => roundTrip(doc)).toThrow(/20/)
+  })
+
+  it('applies the file over the caps on screen, leaving silent rows alone', () => {
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, maxBusy: { 20031: 8 }, exportedAt: STAMP })
+    )
+
+    const merged = mergeSetup({
+      setup,
+      villages: VILLAGES,
+      maxBusy: { 20030: 12, 20031: 20 },
+    })
+
+    expect(merged.maxBusy).toEqual({ 20030: 12, 20031: 8 })
+  })
+
+  it('is a version 5 file, and every older one simply carries less', () => {
+    // Rewritten from "is a version 4 file" when the per-village merchant cap
+    // landed. The contract is the RULE, not the number: the version rises
+    // whenever a field is added, so a build that cannot read the new one
+    // REFUSES a file it would otherwise half-load. A v4 build silently
+    // dropping a cap plans sixteen merchants where the operator allowed eight.
+    expect(SETUP_VERSION).toBe(5)
+
+    const older = {
+      format: SETUP_FORMAT,
+      version: 4,
+      villages: [{ village_id: 20030, trade_office_level: 3, may_relay: true }],
+    }
+    const parsed = roundTrip(older)
+
+    expect(parsed.villages[0].trade_office_level).toBe(3)
+    expect(parsed.villages[0].may_relay).toBe(true)
+    expect(parsed.villages[0].max_busy_merchants).toBeUndefined()
+  })
+})
+
+describe('isMaxBusyMerchants', () => {
+  it('accepts every whole count a village can actually field', () => {
+    for (const value of [0, 1, 8, 19, 20]) expect(isMaxBusyMerchants(value)).toBe(true)
+  })
+
+  it('refuses a fraction, a negative, a string and anything past 20', () => {
+    for (const value of [8.5, -1, '8', 21, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(isMaxBusyMerchants(value), String(value)).toBe(false)
+    }
+  })
+})
+
+describe('unreachableCaps', () => {
+  // The bound the FILE cannot check: a village's own merchant count comes from
+  // the snapshot, so 20 is legal in a file and still wrong for the village
+  // with 19. The backend answers that with a 422 naming the village; this is
+  // the same fact, computed live, so the operator sees it on the cell they
+  // typed rather than on their next plan.
+  const FLEETS = [
+    { village_id: 20030, name: 'Capital', merchants_total: 20 },
+    { village_id: 20031, name: 'V05', merchants_total: 19 },
+    { village_id: 20032, name: 'V16', merchants_total: 20 },
+  ]
+
+  it('is empty when every cap is inside its village fleet', () => {
+    expect(unreachableCaps({ 20030: 8, 20031: 19 }, FLEETS)).toEqual([])
+  })
+
+  it('names the village, its cap and the fleet it cannot reach', () => {
+    expect(unreachableCaps({ 20031: 20 }, FLEETS)).toEqual([
+      { village_id: 20031, name: 'V05', cap: 20, merchants_total: 19 },
+    ])
+  })
+
+  it('says nothing about a village whose merchant count was never read', () => {
+    // Unknown is not zero. A village the snapshot could not read a merchant
+    // count for has no bound to fail, and inventing one would flag a cap that
+    // may be perfectly correct.
+    expect(unreachableCaps({ 20033: 20 }, FLEETS)).toEqual([])
+    expect(unreachableCaps({ 20030: 20 }, [{ village_id: 20030, name: 'Capital' }])).toEqual([])
+  })
+})
+
+describe('the account-wide merchant levers in the setup file', () => {
+  // `merchant_reserve` and `merchant_headroom` are on PlanRequest and the page
+  // never sent either, so the backend's defaults were the only values an
+  // operator could have. They are account-wide, so they ride in the merchant
+  // model rather than the village rows.
+  it('round-trips the reserve and the headroom', () => {
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        tradeOffice: { 20030: 19 },
+        merchantModel: {
+          base_capacity: 2500,
+          bonus_per_to_level: 0.2,
+          merchant_reserve: 4,
+          merchant_headroom: 0.25,
+        },
+        exportedAt: STAMP,
+      })
+    )
+
+    expect(setup.merchantModel).toEqual({
+      base_capacity: 2500,
+      bonus_per_to_level: 0.2,
+      merchant_reserve: 4,
+      merchant_headroom: 0.25,
+    })
+  })
+
+  it('leaves them out when the file does not carry them', () => {
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        tradeOffice: { 20030: 19 },
+        merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
+        exportedAt: STAMP,
+      })
+    )
+
+    expect(setup.merchantModel).toEqual({ base_capacity: 2500, bonus_per_to_level: 0.2 })
+  })
+
+  it('refuses a reserve that is not a whole number of merchants', () => {
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.merchant_model = { base_capacity: 2500, bonus_per_to_level: 0.2, merchant_reserve: -1 }
+
+    expect(() => roundTrip(doc)).toThrow(/merchant_reserve/)
+  })
+
+  it('refuses a headroom of 1, which would hold every merchant back', () => {
+    // The backend's `lt=1.0`: at 1 the whole budget is held clear and every
+    // route is billed as crowding, which is not a plan.
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.merchant_model = { base_capacity: 2500, bonus_per_to_level: 0.2, merchant_headroom: 1 }
+
+    expect(() => roundTrip(doc)).toThrow(/merchant_headroom/)
   })
 })

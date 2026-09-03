@@ -55,6 +55,16 @@
  * The version rises for it: a v3 build would drop the field in silence, and a
  * relay permission lost that way is a route set the operator never sees change.
  *
+ * Version 5 adds `max_busy_merchants` to the village row -- the most merchants
+ * that village may have underway or returning at once (profile section 5:
+ * "maximum 8 busy at 02") -- and the account-wide `merchant_reserve` /
+ * `merchant_headroom` to the merchant model. The cap is the field whose loss is
+ * least visible of any here: a Trade Office level dropped on a cleared origin
+ * makes the plan over-provision, which is safe, while a dropped CAP makes the
+ * plan commit sixteen merchants at a village the operator holds to eight and
+ * report the sheet as feasible. So the version rises for it, and a build that
+ * cannot read one refuses the file rather than half-loading it.
+ *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
  */
@@ -62,17 +72,68 @@
 import { RESOURCE_LABEL, ROLE_LABEL } from '../constants/planner'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 4
-/** Versions this build can read. A v1 file simply carries no profiles and a v2
- * one no roles and a v3 one no per-village relay answer, so refusing any of
- * them would strand every export written before those travelled. The version still has to rise when a field is added, and in
+export const SETUP_VERSION = 5
+/** Versions this build can read. A v1 file simply carries no profiles, a v2 one
+ * no roles, a v3 one no per-village relay answer and a v4 one no merchant cap,
+ * so refusing any of them would strand every export written before those
+ * travelled. The version still has to rise when a field is added, and in
  * the other direction: a build that cannot read roles must REFUSE a file that
  * has them, or it loads the villages, drops their profiles and plans a
  * different account without saying so. */
-export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4])
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
+
+/** Travian's hard ceiling on merchants in one village (profile section 8).
+ *
+ * The only bound on a merchant cap a FILE can check. The real bound is that
+ * village's own `merchants_total`, which lives in the snapshot and not in the
+ * file -- see `unreachableCaps`, which checks it against live state. */
+export const MAX_MERCHANTS_PER_VILLAGE = 20
+
+/** Is this a usable ceiling on busy merchants?
+ *
+ * A whole count of merchants, from 0 to the 20 a village can ever hold. Zero is
+ * accepted because it says something ("this village sends nothing"), the same
+ * way a Trade Office level of 0 is an answer rather than a blank. Shared by the
+ * file parser and the planner's input so the two cannot disagree about what a
+ * valid cap is.
+ */
+export function isMaxBusyMerchants(value) {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return false
+  return value >= 0 && value <= MAX_MERCHANTS_PER_VILLAGE
+}
+
+/** Caps that name more merchants than their village actually fields.
+ *
+ * The bound the file cannot enforce: a village's merchant count comes from the
+ * snapshot, so 20 is a legal figure in a file and still wrong for the village
+ * with 19. The backend refuses such a plan with a 422 naming the village, and
+ * this is the same fact computed from live state -- so the operator sees it on
+ * the cell they typed instead of on their next plan.
+ *
+ * A village whose merchant count was never read has no bound to fail and is
+ * left alone. Unknown is not zero, and inventing a bound would flag a cap that
+ * may be perfectly correct.
+ */
+export function unreachableCaps(maxBusy, villages) {
+  const out = []
+  for (const village of villages ?? []) {
+    const cap = maxBusy?.[village.village_id]
+    const fleet = village.merchants_total
+    if (cap == null || typeof fleet !== 'number') continue
+    if (cap > fleet) {
+      out.push({
+        village_id: village.village_id,
+        name: village.name ?? '',
+        cap: Number(cap),
+        merchants_total: fleet,
+      })
+    }
+  }
+  return out
+}
 
 /** The backend's ceiling for an NPC-backed stock floor. Above it a village
  * keeps nothing worth drawing down. */
@@ -462,6 +523,7 @@ export function buildSetup({
   account,
   villages,
   tradeOffice,
+  maxBusy,
   cropCeilings,
   shipOnlyTo,
   stockFloors,
@@ -478,6 +540,7 @@ export function buildSetup({
   const rows = []
   for (const village of villages ?? []) {
     const level = tradeOffice?.[village.village_id]
+    const cap = maxBusy?.[village.village_id]
     const ceiling = cropCeilings?.[village.village_id]
     const allowed = shipOnlyTo?.[village.village_id]
     const floor = stockFloors?.[village.village_id]
@@ -489,6 +552,7 @@ export function buildSetup({
     const spends = materialSpendOnly(consumption?.[village.village_id])
     if (
       level == null &&
+      cap == null &&
       ceiling == null &&
       allowed == null &&
       floor == null &&
@@ -501,6 +565,9 @@ export function buildSetup({
     const row = { village_id: village.village_id, name: village.name ?? '' }
     if (role != null) row.role = String(role)
     if (level != null) row.trade_office_level = Number(level)
+    // 0 is written, not dropped: it says this village sends nothing, which is
+    // an answer, and dropping it puts the village's whole fleet back to work.
+    if (cap != null) row.max_busy_merchants = Number(cap)
     if (ceiling != null) row.crop_ceiling = Number(ceiling)
     // An empty list is written, not dropped: it says "ships to nobody", which
     // is a different answer from the unrestricted default an absent field means.
@@ -880,6 +947,21 @@ export function parseSetup(text) {
       }
       parsed.trade_office_level = level
     }
+    if (row.max_busy_merchants != null) {
+      // Not clamped, for the reason the backend answers 422 rather than
+      // trimming: a ceiling nobody can reach plans as the fleet, so the figure
+      // in the file and the figure in force would differ with nothing saying
+      // which is being obeyed.
+      const cap = row.max_busy_merchants
+      if (!isMaxBusyMerchants(cap)) {
+        throw new SetupFileError(
+          `${where} may have ${JSON.stringify(cap)} merchants busy at once; it must be ` +
+            `a whole number from 0 to ${MAX_MERCHANTS_PER_VILLAGE}, the most a village ` +
+            `can ever hold.`
+        )
+      }
+      parsed.max_busy_merchants = cap
+    }
     if (row.crop_ceiling != null) {
       const ceiling = Number(row.crop_ceiling)
       if (!Number.isFinite(ceiling) || ceiling < 0) {
@@ -970,6 +1052,31 @@ export function parseSetup(text) {
       throw new SetupFileError('merchant_model.bonus_per_to_level must be zero or more.')
     }
     merchantModel = { base_capacity: base, bonus_per_to_level: bonus }
+    // The two account-wide merchant levers, carried only when the file has
+    // them: they are the planner's own defaults otherwise, and writing a
+    // default in would make an old file look like a decision.
+    if (m.merchant_reserve != null) {
+      const reserve = Number(m.merchant_reserve)
+      if (!Number.isInteger(reserve) || reserve < 0) {
+        throw new SetupFileError(
+          `merchant_model.merchant_reserve is ${JSON.stringify(m.merchant_reserve)}; ` +
+            `it must be a whole number of merchants, zero or more.`
+        )
+      }
+      merchantModel.merchant_reserve = reserve
+    }
+    if (m.merchant_headroom != null) {
+      const headroom = Number(m.merchant_headroom)
+      // Below 1, matching the backend's `lt=1.0`: at 1 the entire budget is
+      // held clear and every route is billed as crowding, which is not a plan.
+      if (!Number.isFinite(headroom) || headroom < 0 || headroom >= 1) {
+        throw new SetupFileError(
+          `merchant_model.merchant_headroom is ${JSON.stringify(m.merchant_headroom)}; ` +
+            `it must be a fraction from 0 up to but not including 1.`
+        )
+      }
+      merchantModel.merchant_headroom = headroom
+    }
   }
 
   const foreignTargets =
@@ -992,6 +1099,7 @@ export function mergeSetup({
   setup,
   villages,
   tradeOffice,
+  maxBusy,
   cropCeilings,
   shipOnlyTo,
   stockFloors,
@@ -1005,6 +1113,7 @@ export function mergeSetup({
 }) {
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
   const nextTradeOffice = { ...(tradeOffice ?? {}) }
+  const nextMaxBusy = { ...(maxBusy ?? {}) }
   const nextCropCeilings = { ...(cropCeilings ?? {}) }
   const nextShipOnlyTo = { ...(shipOnlyTo ?? {}) }
   const nextStockFloors = { ...(stockFloors ?? {}) }
@@ -1028,6 +1137,7 @@ export function mergeSetup({
     if (row.role != null) nextVillageRoles[row.village_id] = row.role
     if (row.may_relay != null) nextMayRelay[row.village_id] = row.may_relay
     if (row.trade_office_level != null) nextTradeOffice[row.village_id] = row.trade_office_level
+    if (row.max_busy_merchants != null) nextMaxBusy[row.village_id] = row.max_busy_merchants
     if (row.crop_ceiling != null) nextCropCeilings[row.village_id] = row.crop_ceiling
     if (row.ship_only_to != null) nextShipOnlyTo[row.village_id] = row.ship_only_to
     if (row.stock_floor_fraction != null) nextStockFloors[row.village_id] = row.stock_floor_fraction
@@ -1085,6 +1195,7 @@ export function mergeSetup({
 
   return {
     tradeOffice: nextTradeOffice,
+    maxBusy: nextMaxBusy,
     cropCeilings: nextCropCeilings,
     shipOnlyTo: nextShipOnlyTo,
     stockFloors: nextStockFloors,
