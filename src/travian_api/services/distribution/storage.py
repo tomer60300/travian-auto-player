@@ -30,11 +30,12 @@ somewhere to go. :attr:`OverflowEvent.structural` is which.
 
 A third case reads off the same replay: a village holding cargo it never grew.
 :func:`relay_buffer_findings` asks whether a DECLARED material relay (profile
-section 5) has the warehouse to absorb its pass-through between collecting and
-forwarding. That is the reason material relay was deferred once before -- the
-capital's warehouse is 1,200,000 and a neighbour's is 160,000 -- and it is not
-the same question as either check above, because the cargo at risk is somebody
-else's and its loss is invisible at both ends of the tier.
+section 5) has the warehouse to absorb its pass-through -- the collecting rate
+over the longer of its two cycles. That is the reason material relay was
+deferred once before -- the capital's warehouse is 1,200,000 and a neighbour's
+is 160,000 -- and it is not the same question as either check above, because the
+cargo at risk is somebody else's and its loss is invisible at both ends of the
+tier.
 
 Pure functions over already-fetched state. Nothing here spends a game request.
 """
@@ -671,11 +672,34 @@ def relay_buffer_findings(
     """Can each declared material relay's WAREHOUSE hold its pass-through?
 
     This is the check that had material relay deferred once before, and it is
-    not a refinement of the generic overflow report. The capital's warehouse is
-    1,200,000 and a neighbour's is 160,000; hand the neighbour the capital's
-    wood flow and it fills in under 7 hours of an 8-hour night. A relay does not
-    merely receive -- it holds cargo it never grew between collecting and
-    forwarding, and a store that tops out in between destroys the difference.
+    not a refinement of the generic overflow report. A relay does not merely
+    receive -- it holds cargo it never grew between collecting and forwarding,
+    and a store that tops out in between destroys the difference.
+
+    The law, and the two readings of it that are both wrong. What the warehouse
+    must hold is
+
+        **the collecting rate times the LONGER of the two cycles.**
+
+    Not "one collecting batch": that is ``rate x collect_cycle``, and it is the
+    answer only when the forward leg is no slower. Not "the pass-through between
+    two forward sends" either: that is ``rate x forward_cycle``, and it is the
+    answer only when the COLLECTING leg is no slower. Both regimes are real. On
+    the operator's own geometry the forward leg is the slower one -- 02 -> 18 is
+    one field and costs least on 1h, 18 -> 11 is seventeen and costs least on 2h
+    -- so two batches land between forward sends and the relay holds both:
+    silent at 33,488 (16,744/h x 2h) and reporting at 32,988, while one batch is
+    16,744. Move the relay far from its source and the other regime appears:
+    measured at collect 1,000/h on a 2h cycle against a 1h forward cycle, the
+    finding is silent at a 2,000 warehouse and critical at 1,800, where
+    ``rate x forward_cycle`` is 500.
+
+    The deferral's own figure -- the capital at 1,200,000, a neighbour at
+    160,000, "it fills in under 7 hours of an 8-hour night" -- assumed the relay
+    does not forward while it collects, which is the defect the collect-then-ship
+    generalisation in :func:`~.schedule.build_beat` fixed for materials. With the
+    forward legs phased after the collecting arrival, 160,000 is many times this
+    tier's pass-through and never troubles it.
 
     Read off the replay rather than re-simulated: :func:`simulate_day` already
     walks the beat against real capacities and records the minute each store
@@ -683,14 +707,49 @@ def relay_buffer_findings(
     simulation with its own assumptions is how /plan and /day-check came to
     answer the same account differently once before.
 
+    That inheritance also bounds what this can see, and the bound is worth
+    stating: ``simulate_day`` reports only waste that survives to a **settled**
+    day, so the figures here are recurring rates. A relay that starts nearly
+    full sheds one pass-through on day one and then settles -- measured on a
+    160,000 warehouse holding 150,000, a 6,744 shed that this reports as silent,
+    and at 159,999 a 16,743 shed, also silent. That is a real one-off cost and
+    it is deliberately not this finding: it is bounded by a single pass-through,
+    it is fixed by draining the village once rather than by changing the tier,
+    and the continuous fill-time check is what reports it. So "capacity, not
+    free space" holds for the RECURRING figure. In steady state the trough
+    settles at ``cap - peak`` wherever that is positive, and only a capacity
+    below the peak sheds something every cycle.
+
+    **Only overflow the pass-through can explain.** A relay forwards everything
+    it collects -- the tier nets zero at the hub by construction, and
+    :func:`~.optimizer._relay_tier_flows` asserts it -- so the pass-through
+    cannot be what makes a store gain more every day than it sheds. Where the
+    replay reports a *structural* event (the store never leaves its cap) and the
+    warehouse is big enough to hold the pass-through, what fills it is the
+    relay's OWN retention or production, and ``storage_findings`` already names
+    that with the right cause: "N/day more arrives than leaves". Measured before
+    this gate: a relay whose 100,000 warehouse held its 10,000 pass-through ten
+    times over got a CRITICAL blaming the tier for 240,000/day that was entirely
+    its own 10,000/h target, and prescribed three fixes none of which was the
+    one.
+
+    A *burst* event is the opposite case and is always this function's: the
+    average fits and one delivery does not, and the delivery is the tier's.
+
     Severity turns on **whether anything had left yet**, which is the difference
     between destroyed cargo and a scheduling cost:
 
-    * the store fills before the forward leg's first send -> the relay never
-      passed any of it on, so everything above the cap is destroyed at the
-      relay. :attr:`Category.RELAY_BUFFER`, critical.
-    * it fills after a forward send -> the tier IS delivering, and the warehouse
-      tops out afterwards and sheds what lands next.
+    * a store pinned at its cap all day -> it cannot pass on what keeps landing,
+      so everything above the cap is destroyed at the relay.
+      :attr:`Category.RELAY_BUFFER`, critical. No clock: a store that never
+      leaves its cap did not reach it at a minute of the day, exactly as
+      :func:`storage_findings` says for ``OVERFLOW_STRUCTURAL``. Nor does it
+      claim nothing was forwarded -- measured on a 12,000 warehouse, 401,856/day
+      landed and 288,000/day left again.
+    * a burst that fills before the forward leg's first send -> the relay never
+      passed any of it on. :attr:`Category.RELAY_BUFFER`, critical.
+    * a burst that fills after a forward send -> the tier IS delivering, and the
+      warehouse tops out afterwards and sheds what lands next.
       :attr:`Category.RELAY_BUFFER_TIGHT`, a warning.
 
     Crop hubs are not this function's business. A granary filling on a relay is
@@ -730,15 +789,35 @@ def relay_buffer_findings(
             for minute in scheduled.dispatch_minutes
         )
         first_send = forwards[0] if forwards else None
-        # A structural event has no meaningful minute -- the store is already at
-        # its cap when the day starts and never leaves -- so it cannot have
-        # forwarded anything first, whatever the clock says.
-        before_any_send = event.structural or first_send is None or event.minute <= first_send
         capacity = capacities.get(relay.hub, {}).get(relay.resource)
+        bound = _pass_through_bound(relay, beat)
+        if (
+            event.structural
+            and capacity is not None
+            and bound is not None
+            and capacity + MIN_REPORTED_WASTE >= bound
+        ):
+            # The store gains every day and the warehouse holds the pass-through
+            # anyway, so the surplus pinning it at its cap is the relay's own.
+            # `storage_findings` reports it, with the cause that is actually
+            # true.
+            continue
         held = "" if capacity is None else f"{capacity:,}"
         collected = _named_villages(relay.origins, names)
         onward = _named_villages(relay.destinations, names)
-        if before_any_send:
+        if event.structural:
+            # No clock, and no claim about what was forwarded. A store that
+            # never leaves its cap did not reach it at a minute of the day, and
+            # it does forward -- it simply cannot keep up with what keeps
+            # landing.
+            message = (
+                f"{hub} relays {relay.resource.value} from {collected} to {onward}, and its "
+                f"{held or 'own'} warehouse cannot hold the pass-through: it sits at its cap "
+                f"all day and {event.wasted_per_day:,.0f}/day is destroyed AT THE RELAY. A "
+                f"relay has to hold the collecting rate over the longer of its two cycles"
+            )
+            category = Category.RELAY_BUFFER
+        elif first_send is None or event.minute <= first_send:
             message = (
                 f"{hub} relays {relay.resource.value} from {collected} to {onward}, and its "
                 f"{held or 'own'} warehouse is full at "
@@ -786,6 +865,46 @@ def relay_buffer_findings(
     # Worst first, as every other finding list is ordered -- on the EVENT's
     # figure, which the findings themselves no longer carry.
     return [finding for _waste, finding in sorted(findings, key=lambda f: (-f[0], f[1].village))]
+
+
+def _pass_through_bound(relay: RelayHub, beat: Beat) -> float | None:
+    """What *relay*'s store must hold for the tier, or None if it cannot be told.
+
+    The law from :func:`relay_buffer_findings`: the pass-through rate times the
+    LONGER of the collecting and forwarding cycles. Both regimes occur, and each
+    half of the bound on its own is wrong in one of them -- see that docstring.
+
+    The rate is read off the FORWARD legs, not the collecting ones. They are the
+    same figure for a pure relay, because the tier forwards everything it
+    collects; where they differ, the collecting leg has the relay's own
+    retention merged into it (routes carry one village pair's whole cargo), and
+    the relay's own target is not something the tier asked it to hold.
+
+    Cycles come from the beat rather than from :attr:`RelayHub.forward_hours`,
+    which is a LATENCY and would size the store from travel time.
+    """
+    collect = [
+        scheduled.route
+        for scheduled in beat.routes
+        if scheduled.route.destination == relay.hub
+        and scheduled.route.origin in relay.origins
+        and relay.resource in scheduled.route.cargo_per_hour
+    ]
+    forward = [
+        scheduled.route
+        for scheduled in beat.routes
+        if scheduled.route.origin == relay.hub
+        and scheduled.route.destination in relay.destinations
+        and relay.resource in scheduled.route.cargo_per_hour
+    ]
+    if not collect or not forward:
+        return None
+    rate = sum(route.cargo_per_hour[relay.resource] for route in forward)
+    window = max(
+        max(route.cycle_hours for route in collect),
+        max(route.cycle_hours for route in forward),
+    )
+    return rate * window
 
 
 def _named_villages(village_ids: Sequence[int], names: Mapping[int, str] | None) -> str:

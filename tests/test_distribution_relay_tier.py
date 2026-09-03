@@ -545,30 +545,48 @@ class TestTheRelaysWarehouseMustHoldThePassThrough:
     in ``schedule.build_beat`` fixed for materials. With the forward legs phased
     after the collecting arrival, the law is sharper:
 
-        **the relay's warehouse must hold what lands between two FORWARD
-        sends** -- the collecting rate times the FORWARDING cycle.
+        **the pass-through rate times the LONGER of the two cycles.**
 
-    Two things about that are worth stating, because the first reading of it is
-    wrong in both directions.
+    Both halves of that are half a law, and each is right in one regime only.
+    Both regimes are measured below, because a fixture in one of them cannot
+    tell the two apart -- which is how each half in turn came to look
+    established.
 
-    It is not "one collecting batch". That is only the same number when the two
-    legs share a cycle, and on the operator's own geometry they do not: 02 -> 18
-    is one field and costs least on a 1h cycle, while 18 -> 11 is seventeen and
-    costs least on 2h -- so TWO batches land between forward sends and the relay
-    holds both. Measured on his fixture, the finding is silent at a 33,488
-    warehouse (16,744/h x 2h) and fires at 33,000, while one batch is 16,744.
+    It is not "one collecting batch" (``rate x collect_cycle``). That is the
+    answer only where the forward leg is no slower, and on the operator's own
+    geometry it is: 02 -> 18 is one field and costs least on a 1h cycle, while
+    18 -> 11 is seventeen and costs least on 2h -- so TWO batches land between
+    forward sends and the relay holds both. Measured on his fixture, silent at
+    33,488 (16,744/h x 2h) and firing at 32,988, while one batch is 16,744.
 
-    And it is not free SPACE. The steady state settles the trough at
+    Nor is it "the pass-through between two forward sends"
+    (``rate x forward_cycle``). That is the answer only where the COLLECTING leg
+    is no slower, and it need not be: put the relay 160 fields out on a 1,000/h
+    flow and its cheapest cycle is 2h against a 1h forward cycle, so one
+    collecting batch is the whole peak. Measured, silent at 2,000 and critical
+    at 1,900, where ``rate x forward_cycle`` is 1,000 and would have called both
+    safe.
+
+    And it is not free SPACE, in steady state. The settled trough sits at
     ``cap - peak`` wherever that is positive, so a relay that starts nearly full
-    sheds once and then never sheds again -- a real cost, and the one the
-    existing filling-store check already reports. Only a capacity below the peak
-    sheds something on every cycle, which is the recurring defect this names.
+    sheds once and then never sheds again -- a real cost, bounded by one
+    pass-through, and the one the existing filling-store check reports. Only a
+    capacity below the peak sheds something on every cycle, which is the
+    recurring defect this names, and ``simulate_day`` reports only what survives
+    to a settled day.
 
     So 02's neighbour at 160,000 holds this tier with room to spare, and what
     does not hold is a relay whose warehouse is smaller than the pass-through --
     a freshly settled feeder near the capital, which is exactly the shape of
     village a tier gets drawn from.
     """
+
+    # A low flow over a long haul: the collecting leg's cheapest cycle is then
+    # LONGER than the forward legs', which is the regime the corrected law needs
+    # and the one no case here covered. Measured with the latency pass off:
+    # collect 1,000/h on 2h, forward 1,000/h on 1h.
+    FAR_RELAY = {RELAY_A: (160, 0), D1: (161, 0), D2: (160, 1)}
+    SMALL_TARGET = 500.0
 
     def _relay_buffer(self, res):
         """Every relay-buffer finding, in either severity.
@@ -584,47 +602,118 @@ class TestTheRelaysWarehouseMustHoldThePassThrough:
         ]
 
     def _pass_through(self, res):
-        """What lands at RELAY_A between two of its forward sends.
+        """What RELAY_A's warehouse has to hold: the law, read off the plan.
 
-        Read off the plan rather than written down, so this states the LAW and
-        not a number that happens to hold for one set of cycles. A fixture whose
-        cycles moved would otherwise leave every threshold below measuring
-        something else, and all of them would still pass.
+        The pass-through rate over the LONGER of the two cycles. Read off the
+        plan rather than written down, so this states the LAW and not a number
+        that happens to hold for one set of cycles. A fixture whose cycles moved
+        would otherwise leave every threshold below measuring something else,
+        and all of them would still pass.
+
+        The rate is the FORWARD legs' -- the same figure as the collecting leg's
+        for a pure relay, and the right one where they differ, because a
+        collecting leg carries the relay's own retention merged into it and that
+        is not something the tier asked it to hold.
         """
         rows = {(r.origin, r.destination): r for r in res.rows}
         collect = rows[(CAPITAL, RELAY_A)]
-        collect_rate = collect.cargo[Resource.LUMBER] / collect.cycle_hours
-        forward_cycle = max(
-            row.cycle_hours for (origin, _d), row in rows.items() if origin == RELAY_A
+        onward = [row for (origin, _d), row in rows.items() if origin == RELAY_A]
+        rate = sum(row.cargo[Resource.LUMBER] / row.cycle_hours for row in onward)
+        window = max(collect.cycle_hours, max(row.cycle_hours for row in onward))
+        return rate * window
+
+    def _far_downstream_plan(self, **kw):
+        """The forward-cycle-longer regime: the operator's own, exaggerated."""
+        return _plan(relays=TIER, coords=FAR_DOWNSTREAM, **LATENCY_OFF, **kw)
+
+    def _far_relay_plan(self, **kw):
+        """The collect-cycle-longer regime: a 1,000/h flow 160 fields out."""
+        return _plan(
+            relays=TIER,
+            coords=self.FAR_RELAY,
+            allocations={
+                "lumber": {
+                    str(CAPITAL): {"mode": "absolute", "value": 0},
+                    str(D1): {"mode": "absolute", "value": self.SMALL_TARGET},
+                    str(D2): {"mode": "absolute", "value": self.SMALL_TARGET},
+                    str(D3): {"mode": "absolute", "value": self.SMALL_TARGET},
+                    str(DIRECT): {"mode": "absolute", "value": self.SMALL_TARGET},
+                    str(REMAINDER): {"mode": "remainder"},
+                }
+            },
+            **LATENCY_OFF,
+            **kw,
         )
-        return collect_rate * forward_cycle
 
-    def test_the_bound_is_the_pass_through_between_forward_sends(self):
-        """The law itself, found by sweeping and compared with the arithmetic.
+    @pytest.mark.parametrize("regime", ["forward-cycle-longer", "collect-cycle-longer"])
+    def test_the_bound_is_the_rate_over_the_longer_of_the_two_cycles(self, regime):
+        """The law itself, swept in BOTH regimes and compared with the arithmetic.
 
-        This is the test that would have caught the first version of this
-        class, which asserted a one-batch bound: on a fixture with equal cycles
-        one batch IS the pass-through, so the narrower claim passed and read as
-        though it had been established.
+        One regime alone cannot establish this and twice did not: on the equal-
+        cycle fixture one collecting batch IS the pass-through between forward
+        sends, so a one-batch claim passed; on the forward-cycle-longer fixture
+        the pass-through between forward sends IS the peak, so that claim passed
+        too. Only the pair distinguishes ``max`` from either half, so the
+        assertion below is run against both and the guard makes each case prove
+        it is in the regime it claims.
         """
-        reference = _plan(relays=TIER)
-        bound = self._pass_through(reference)
+        plan_it = (
+            self._far_downstream_plan
+            if regime == "forward-cycle-longer"
+            else (self._far_relay_plan)
+        )
+        step = 500 if regime == "forward-cycle-longer" else 100
+        reference = plan_it()
+        rows = {(r.origin, r.destination): r for r in reference.rows}
+        collect_cycle = rows[(CAPITAL, RELAY_A)].cycle_hours
+        forward_cycle = max(row.cycle_hours for (o, _d), row in rows.items() if o == RELAY_A)
+        # The guard: a case that drifted into the other regime would pass while
+        # measuring nothing, which is exactly how the law came to be half-stated.
+        if regime == "forward-cycle-longer":
+            assert forward_cycle > collect_cycle, f"{collect_cycle}h / {forward_cycle}h"
+        else:
+            assert collect_cycle > forward_cycle, f"{collect_cycle}h / {forward_cycle}h"
 
+        bound = self._pass_through(reference)
         # Coarse either side of the bound, then the two capacities that bracket
         # it: the claim is about where the finding APPEARS, so the pair astride
         # it is the whole measurement and the rest is context.
-        holds = [int(bound), int(bound) + 5_000, int(bound) * 4]
-        sheds = [int(bound) - 500, int(bound) // 2, int(bound) // 4]
-        for warehouse in holds:
-            res = _plan(relays=TIER, warehouses={RELAY_A: warehouse})
-            assert self._relay_buffer(res) == [], (
-                f"{warehouse:,} holds the {bound:,.0f} pass-through and was flagged anyway"
+        for warehouse in (int(bound), int(bound) + step * 10, int(bound) * 4):
+            assert self._relay_buffer(plan_it(warehouses={RELAY_A: warehouse})) == [], (
+                f"{regime}: {warehouse:,} holds the {bound:,.0f} pass-through and was "
+                f"flagged anyway"
             )
-        for warehouse in sheds:
-            res = _plan(relays=TIER, warehouses={RELAY_A: warehouse})
-            assert self._relay_buffer(res), (
-                f"{warehouse:,} cannot hold the {bound:,.0f} pass-through and said nothing"
+        for warehouse in (int(bound) - step, int(bound) // 2, int(bound) // 4):
+            assert self._relay_buffer(plan_it(warehouses={RELAY_A: warehouse})), (
+                f"{regime}: {warehouse:,} cannot hold the {bound:,.0f} pass-through and "
+                f"said nothing"
             )
+
+    def test_the_forward_half_of_the_law_is_not_the_whole_of_it(self):
+        """The measurement that separates ``max`` from ``rate x forward_cycle``.
+
+        In the collect-cycle-longer regime the two differ, and the shipped code
+        agrees with ``max``: it reports at capacities the forward-cycle reading
+        calls safe. This is the case ``c6b357a`` would have needed to keep it
+        from replacing one half of the bound with the other.
+        """
+        reference = self._far_relay_plan()
+        rows = {(r.origin, r.destination): r for r in reference.rows}
+        onward = [row for (origin, _d), row in rows.items() if origin == RELAY_A]
+        rate = sum(row.cargo[Resource.LUMBER] / row.cycle_hours for row in onward)
+        forward_only = rate * max(row.cycle_hours for row in onward)
+        bound = self._pass_through(reference)
+        assert bound > forward_only, (
+            f"this case needs the collecting cycle to be the longer one, and the plan "
+            f"gave a {bound:,.0f} bound against a {forward_only:,.0f} forward-only reading"
+        )
+
+        # Between the two readings: safe by the forward-only half, and not.
+        between = int((forward_only + bound) // 2)
+        assert self._relay_buffer(self._far_relay_plan(warehouses={RELAY_A: between})), (
+            f"{between:,} clears the {forward_only:,.0f} the forward-cycle reading asks "
+            f"for but not the {bound:,.0f} that actually lands, and nothing was reported"
+        )
 
     def test_a_slower_forward_leg_raises_the_bound_above_one_batch(self):
         """The regime the corrected law exists for, and the one that caught it.
@@ -722,12 +811,13 @@ class TestTheRelaysWarehouseMustHoldThePassThrough:
         assert f"{overflow.loss_per_day:,.0f}" in found[0].message
         assert f"{overflow.loss_per_day:,.0f}" in found[0].detail
 
-    def test_it_is_critical_because_nothing_was_forwarded_first(self):
-        """The cargo is destroyed at the relay, not merely delayed.
+    def test_it_is_critical_because_the_cargo_is_destroyed_not_delayed(self):
+        """Destroyed at the relay, and invisible at both ends of the tier.
 
-        02's reserved wood leaves 02, never reaches 11 or 17, and neither end's
-        own store says anything is wrong -- which is why this is its own finding
-        rather than an overflow line at village 18.
+        02's reserved wood leaves 02 and only part of it reaches 11 and 17 --
+        measured on this warehouse, 401,856/day lands at 18 and 288,000/day
+        leaves again. Neither end's own store says anything is wrong, which is
+        why this is its own finding rather than an overflow line at 18.
         """
         found = self._relay_buffer(_plan(relays=TIER, warehouses={RELAY_A: 12_000}))
 
@@ -770,6 +860,95 @@ class TestTheRelaysWarehouseMustHoldThePassThrough:
         res = _plan(warehouses={RELAY_A: 12_000})
 
         assert self._relay_buffer(res) == []
+
+    # 18's own lumber target, small enough that 02 can still serve the whole
+    # tier and the direct leg. Its warehouse holds the pass-through many times
+    # over; what fills it is this figure, arriving every hour with nothing
+    # spending it.
+    OWN_TARGET = 3_000.0
+
+    def _relay_with_its_own_target(self, **kw):
+        return _plan(
+            relays=TIER,
+            allocations={
+                "lumber": {
+                    str(CAPITAL): {"mode": "absolute", "value": 0},
+                    str(RELAY_A): {"mode": "absolute", "value": self.OWN_TARGET},
+                    str(D1): {"mode": "absolute", "value": DEF_LUMBER},
+                    str(D2): {"mode": "absolute", "value": DEF_LUMBER},
+                    str(D3): {"mode": "absolute", "value": DEF_LUMBER},
+                    str(DIRECT): {"mode": "absolute", "value": DEF_LUMBER},
+                    str(REMAINDER): {"mode": "remainder"},
+                }
+            },
+            **kw,
+        )
+
+    def test_a_relay_filling_from_its_OWN_target_is_not_the_tiers_fault(self):
+        """The tier conserves, so it cannot be what makes a store gain every day.
+
+        A relay forwards everything it collects -- the pass-through nets zero at
+        the hub by construction, and `_relay_tier_flows` asserts it. So a store
+        that never leaves its cap while its warehouse comfortably holds the
+        pass-through is filling from something else: here 18's own 3,000/h
+        retention target, with nothing spending it.
+
+        Measured before the fix, on a relay whose 100,000 warehouse held a
+        10,000 pass-through ten times over: a CRITICAL relay_buffer saying
+        "240,000/day is destroyed AT THE RELAY", prescribing three fixes none of
+        which was the actual one, and making the plan unclean. The generic
+        OVERFLOW_STRUCTURAL line says the true thing -- "N/day more arrives than
+        leaves" -- and it is still reported here.
+        """
+        res = self._relay_with_its_own_target(warehouses={RELAY_A: 400_000})
+
+        # Not vacuous: 18's store really does fill, and it is still reported.
+        overflow = [
+            finding
+            for group in res.diagnostics.groups
+            for finding in group.findings
+            if finding.village == "18"
+            and finding.resource is Resource.LUMBER
+            and finding.category.startswith("overflow")
+        ]
+        assert overflow, "the fixture no longer overflows 18, so this proves nothing"
+        # And the tier is not blamed for it.
+        assert self._relay_buffer(res) == [], (
+            f"the tier was blamed for 18's own retention: "
+            f"{[f.message for f in self._relay_buffer(res)]}"
+        )
+
+    def test_a_relay_with_its_own_target_is_STILL_blamed_when_it_cannot_hold_the_pass_through(
+        self,
+    ):
+        """The other side of it, or the fix above would be a silencer.
+
+        Same account, same own target, a warehouse below the pass-through. The
+        tier really is jammed then -- the relay cannot fund its forward legs out
+        of a store that small -- and this is the finding for it.
+        """
+        res = self._relay_with_its_own_target(warehouses={RELAY_A: 12_000})
+
+        found = self._relay_buffer(res)
+        assert found, "a 12,000 warehouse taking a 19,744/h collecting leg said nothing"
+        assert [f.village for f in found] == ["18"]
+
+    def test_a_structural_relay_buffer_does_not_claim_nothing_was_forwarded(self):
+        """A store pinned at its cap all day forwards; it just cannot keep up.
+
+        Measured on the 12,000 warehouse: 401,856/day lands and 288,000/day
+        leaves again, so the relay forwards 12,000/h of a 16,744/h
+        pass-through. The finding used to say "full at 00:07 before it has
+        forwarded any of it" -- both halves wrong, and the clock meaningless for
+        a store that never leaves its cap, which is exactly why
+        ``storage_findings`` prints no time for ``OVERFLOW_STRUCTURAL``.
+        """
+        found = self._relay_buffer(_plan(relays=TIER, warehouses={RELAY_A: 12_000}))
+
+        assert len(found) == 1
+        assert "before it has forwarded any of it" not in found[0].message
+        assert "cap" in found[0].message
+        assert "/day is destroyed" in found[0].message
 
 
 class TestTheBufferSeverityTurnsOnWhetherAnythingLeftFirst:
