@@ -8,6 +8,7 @@ import {
   buildSetup,
   declaresConsumption,
   describeConsumption,
+  describeSpendSource,
   isConsumptionRate,
   isStockFloorFraction,
   materialSpendOnly,
@@ -15,6 +16,7 @@ import {
   parseSetup,
   resolveRoleAllocation,
   resolveRoleSpend,
+  resolvedSpend,
   roleDeviates,
   rolesForRequest,
   setupFilename,
@@ -1680,5 +1682,79 @@ describe('rolesForRequest', () => {
       'may_relay',
     ])
     expect(sent.feeder.may_relay).toBe(true)
+  })
+})
+
+describe('resolvedSpend', () => {
+  const DEF = { consumption: { lumber: 8372, clay: 5168, iron: 5809 } }
+
+  it('reads the role figures a templated village will actually spend', () => {
+    // The defect on the setup table: it read the own map alone, so a
+    // defensive village showed "none" and three blank boxes while the plan
+    // spent 8,372/h of its lumber. The Allocate view resolved the same
+    // question correctly, so the two surfaces disagreed about one village.
+    const { effective, fromRole, overridden } = resolvedSpend(DEF, undefined)
+
+    expect(effective).toEqual({ lumber: 8372, clay: 5168, iron: 5809 })
+    expect(fromRole).toEqual(['lumber', 'clay', 'iron'])
+    expect(overridden).toEqual([])
+    expect(describeConsumption(effective)).toBe(`${(19349).toLocaleString()}/h, all three`)
+  })
+
+  it('takes an own figure over the role, per resource', () => {
+    // Overriding one village's lumber must leave its clay and iron on the
+    // profile -- the same per-resource rule the targets follow.
+    const { effective, fromRole, overridden } = resolvedSpend(DEF, { lumber: 14751 })
+
+    expect(effective).toEqual({ lumber: 14751, clay: 5168, iron: 5809 })
+    expect(fromRole).toEqual(['clay', 'iron'])
+    expect(overridden).toEqual(['lumber'])
+  })
+
+  it('reads a declared zero as an override, not as silence', () => {
+    // Zero says "measured, and it spends none", which is a claim. Falling
+    // through to the role here would spend 8,372/h at a village the operator
+    // has explicitly said spends nothing.
+    const { effective, overridden } = resolvedSpend(DEF, { lumber: 0 })
+
+    expect(effective.lumber).toBe(0)
+    expect(overridden).toEqual(['lumber'])
+  })
+
+  it('resolves to nothing for a village with no role and no figures', () => {
+    const { effective, fromRole } = resolvedSpend(undefined, undefined)
+
+    expect(effective).toEqual({})
+    expect(fromRole).toEqual([])
+    expect(describeConsumption(effective)).toBe('none')
+  })
+
+  it('never carries a crop figure through', () => {
+    // Crop cannot be declared on either side; a template stored by an older
+    // build could still hold one, and printing it would claim a spend the
+    // planner refuses to apply.
+    const { effective } = resolvedSpend({ consumption: { crop: 2200 } }, { crop: 8519 })
+
+    expect(effective).toEqual({})
+  })
+})
+
+describe('describeSpendSource', () => {
+  it('credits the role where every figure on screen is the role s', () => {
+    expect(describeSpendSource({ fromRole: ['lumber'], overridden: [] }, 'def')).toBe('from DEF')
+  })
+
+  it('names the resources the village states itself', () => {
+    expect(
+      describeSpendSource({ fromRole: ['clay', 'iron'], overridden: ['lumber'] }, 'def')
+    ).toBe('DEF, own Lumber')
+  })
+
+  it('says nothing where the role supplied none of the figures', () => {
+    // An untemplated village, and a village that overrode every figure the
+    // role has: crediting the profile there would name one the plan is not
+    // using.
+    expect(describeSpendSource({ fromRole: [], overridden: [] }, undefined)).toBeNull()
+    expect(describeSpendSource({ fromRole: [], overridden: ['lumber'] }, 'def')).toBeNull()
   })
 })

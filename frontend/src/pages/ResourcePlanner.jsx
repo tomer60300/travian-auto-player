@@ -13,12 +13,14 @@ import {
   buildSetup,
   declaresConsumption,
   describeConsumption,
+  describeSpendSource,
   isConsumptionRate,
   isStockFloorFraction,
   mergeSetup,
   parseSetup,
   resolveRoleAllocation,
   resolveRoleSpend,
+  resolvedSpend,
   roleDeviates,
   rolesForRequest,
   setupFilename,
@@ -2690,7 +2692,7 @@ export default function ResourcePlanner() {
                   </th>
                   <th
                     className="text-left px-2"
-                    title="What this village SPENDS per hour — lumber, clay and iron only: the building queue and the troop upkeep. Not the allocation target: the target is the rate that must be HERE (own production plus whatever ships in), so the store nets target − consumption. Nothing in the game reports this, because the statistics page shows materials gross — a village burning lumber still reads positive there. Crop is refused, because the snapshot's crop rate is already net of upkeep; say what a village keeps of its crop with its crop target instead."
+                    title="What this village SPENDS per hour — lumber, clay and iron only: the building queue and the troop upkeep. Not the allocation target: the target is the rate that must be HERE (own production plus whatever ships in), so the store nets target − consumption. Nothing in the game reports this, because the statistics page shows materials gross — a village burning lumber still reads positive there. Crop is refused, because the snapshot's crop rate is already net of upkeep; say what a village keeps of its crop with its crop target instead. A village with a role takes its role template's figures for every resource it does not state itself, and the cell says which those are."
                   >
                     Consumption /h
                   </th>
@@ -2919,7 +2921,24 @@ export default function ResourcePlanner() {
                           nothing declared and reads muted like the other blanks;
                           clearing every box is the same as never typing one. */}
                       {(() => {
-                        const spent = consumption[v.village_id]
+                        // The RESOLVED spend, role template included, and the
+                        // same reader the Allocate view uses. Reading the own
+                        // map alone printed "none" and three blank boxes for a
+                        // defensive village the plan was spending 8,372/h of
+                        // lumber at -- so the two surfaces disagreed about one
+                        // village, which is the defect the targets already had.
+                        const role = villageRoles[v.village_id]
+                        const resolved = resolvedSpend(
+                          roleTemplates[role],
+                          consumption[v.village_id]
+                        )
+                        const spent = resolved.effective
+                        // Named, because a role's figure and a hand-typed one
+                        // are the same digits: without this the operator cannot
+                        // tell which village they have actually said something
+                        // about, and would read a whole profile as their own
+                        // entry.
+                        const source = describeSpendSource(resolved, role)
                         return (
                           <details className="text-xs">
                             <summary
@@ -2929,6 +2948,9 @@ export default function ResourcePlanner() {
                             >
                               <span className="sr-only">Spends per hour, for {v.name}: </span>
                               {describeConsumption(spent)}
+                              {source && (
+                                <span className="text-info ml-1">{'· '}{source}</span>
+                              )}
                             </summary>
                             <div
                               role="group"
@@ -2984,7 +3006,28 @@ export default function ResourcePlanner() {
                                 crop <span className="text-primary">target</span> instead — 0 holds
                                 a crop-negative village level.
                               </p>
-                              {declaresConsumption(spent) && (
+                              {/* Says where a figure the operator did not type
+                                  came from, and what typing over it does. The
+                                  boxes now hold the RESOLVED spend, so without
+                                  this a whole profile reads as this village's
+                                  own entry. */}
+                              {resolved.fromRole.length > 0 && (
+                                <p className="text-info mt-1 max-w-56">
+                                  {resolved.fromRole
+                                    .map((resource) => RESOURCE_LABEL[resource])
+                                    .join(', ')}{' '}
+                                  {resolved.fromRole.length === 1 ? 'comes' : 'come'} from the{' '}
+                                  {ROLE_LABEL[role]} template. Typing here overrides this village
+                                  only, per resource; clearing the box hands it back to the
+                                  profile.
+                                </p>
+                              )}
+                              {/* Gated on what this village ITSELF states, not
+                                  on the resolved figures: a templated village
+                                  with no own entry has nothing to clear, and
+                                  offering the button there would read as a way
+                                  to drop the role's profile. */}
+                              {declaresConsumption(consumption[v.village_id]) && (
                                 <button
                                   type="button"
                                   className="underline mt-1"
@@ -2996,7 +3039,7 @@ export default function ResourcePlanner() {
                                     })
                                   }
                                 >
-                                  Clear the profile
+                                  Clear this village&apos;s own figures
                                 </button>
                               )}
                             </div>

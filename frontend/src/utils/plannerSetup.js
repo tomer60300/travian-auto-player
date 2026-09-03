@@ -50,7 +50,7 @@
  * than read. That keeps the round trip testable without a browser.
  */
 
-import { RESOURCE_LABEL } from '../constants/planner'
+import { RESOURCE_LABEL, ROLE_LABEL } from '../constants/planner'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
 export const SETUP_VERSION = 3
@@ -203,6 +203,55 @@ export function roleDeviates(template, resource, allocation) {
   const stated = template?.allocations?.[resource]
   if (stated == null || allocation == null) return false
   return stated.mode !== allocation.mode || Number(stated.value) !== Number(allocation.value)
+}
+
+/** One village's spend as the plan will APPLY it, and where each figure came
+ *  from.
+ *
+ * `resolveRoleSpend` answers this for one resource; this is the whole map,
+ * because two surfaces show a village's spend collapsed and both were reading
+ * the own map alone. The setup table therefore printed "none" and three blank
+ * boxes for a defensive village the plan was spending 8,372/h of lumber at --
+ * the same defect the Allocate grid had for its targets, and the reason the two
+ * views must resolve through one reader rather than two.
+ *
+ * `fromRole` and `overridden` are the provenance the collapsed cell needs:
+ * without them a role's figure and a hand-typed one are the same digits, and
+ * the operator cannot tell which village they have actually said something
+ * about. Materials only, like every other spend reader -- crop cannot be
+ * declared.
+ */
+export function resolvedSpend(template, spent) {
+  const effective = {}
+  const fromRole = []
+  const overridden = []
+  for (const resource of CONSUMABLE_RESOURCES) {
+    const own = spent?.[resource]
+    const role = template?.consumption?.[resource]
+    if (own != null) {
+      effective[resource] = Number(own)
+      if (role != null) overridden.push(resource)
+    } else if (role != null) {
+      effective[resource] = Number(role)
+      fromRole.push(resource)
+    }
+  }
+  return { effective, fromRole, overridden }
+}
+
+/** Where the figures a spend cell is showing came from, in one phrase.
+ *
+ * `null` where the role supplied none of them: every figure on screen was then
+ * typed against this village, which is what an untemplated account looks like
+ * and needs no attribution. Naming the role only where it actually supplied
+ * something is the whole point -- an attribution on a village that overrode
+ * every figure would credit a profile the plan is not using.
+ */
+export function describeSpendSource({ fromRole, overridden }, role) {
+  if (!fromRole.length) return null
+  const label = ROLE_LABEL[role] ?? role
+  if (!overridden.length) return `from ${label}`
+  return `${label}, own ${overridden.map((resource) => RESOURCE_LABEL[resource]).join(', ')}`
 }
 
 /** A spend map with everything undeclarable dropped, or null when nothing
