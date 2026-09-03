@@ -1703,7 +1703,7 @@ class TestConsumptionProfiles:
         longer be declared as a spend at all.
 
         If P14 makes a material rate nullable, this test fails, and the silent
-        drop below `_declared_consumption` must then be given the voice D8 asked
+        drop below `_resolve_roles` must then be given the voice D8 asked
         for before that change can land.
         """
         for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):

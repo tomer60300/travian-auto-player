@@ -370,7 +370,7 @@ class VillageConfig(BaseModel):
     ) -> dict[Resource, float] | None:
         """Crop cannot be declared, because the snapshot already nets it.
 
-        Refused here rather than in `_declared_consumption` so that ONE rule
+        Refused here rather than in `_resolve_roles` so that ONE rule
         covers every planning path: `/plan`, `/day-check`, `/execute` and
         `/night-profile` all carry this model, and a check further in would
         have to be repeated in each of the four -- which is exactly how
