@@ -156,8 +156,16 @@ class TestTheClaudeDirectoryIsAllowlisted:
     rather than by re-implementing gitignore precedence in the test."""
 
     def _ignored(self, *paths: str) -> set[str]:
+        """`--no-index` is what makes this question about `.gitignore`.
+
+        Without it `git check-ignore` short-circuits on the index: a TRACKED
+        path is reported as not-ignored whatever the rules say, which is every
+        one of the five allowlisted paths. Deleting all five `!` lines from a
+        scratch copy of `.gitignore` left both tests below green, so the
+        allowlist they exist to guard was never being read.
+        """
         result = subprocess.run(
-            ["git", "check-ignore", "--", *paths],
+            ["git", "check-ignore", "--no-index", "--", *paths],
             capture_output=True,
             text=True,
             cwd=_ROOT,
