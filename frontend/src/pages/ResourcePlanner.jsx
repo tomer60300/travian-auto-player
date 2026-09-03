@@ -2510,13 +2510,21 @@ export default function ResourcePlanner() {
         </button>
         {/* The hours this profile actually runs. Profiles are separate plans,
             but the account lives through all of them every day; without hours
-            the full-day check cannot line them up. */}
+            the full-day check cannot line them up.
+
+            `w-auto` rather than `w-[74px]`, because the UA draws this control
+            and knows what it needs: cloned at `width: auto` it asks for
+            106.8px for the widget it is going to render, and 74px was 32.8px
+            short of that -- enough for "07:00" (39.8px of glyphs in 42px of
+            room) and not for the picker button beside it. Nothing in the DOM
+            said so, which is why `scrollWidth` read 74 against a `clientWidth`
+            of 74 and the width sweep called it fine. */}
         <span className="flex items-center gap-1 text-xs text-secondary ml-1">
           runs
           <input
             type="time"
             aria-label={`${activeProfile} window start`}
-            className="input-field text-xs py-0.5 px-1 w-[74px]"
+            className="input-field text-xs py-0.5 px-1 w-auto"
             value={(windowFor(activeProfile) ?? ['', ''])[0]}
             onChange={(e) =>
               setProfileWindows((prev) => ({
@@ -2529,7 +2537,7 @@ export default function ResourcePlanner() {
           <input
             type="time"
             aria-label={`${activeProfile} window end`}
-            className="input-field text-xs py-0.5 px-1 w-[74px]"
+            className="input-field text-xs py-0.5 px-1 w-auto"
             value={(windowFor(activeProfile) ?? ['', ''])[1]}
             onChange={(e) =>
               setProfileWindows((prev) => ({

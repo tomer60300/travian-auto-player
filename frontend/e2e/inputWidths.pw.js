@@ -49,8 +49,9 @@
  * as "no diff" for as long as the defect stood. A width against its own content
  * is a claim that cannot be baselined wrong.
  *
- * Reading a control's content width takes two methods, because the DOM offers
- * no single one:
+ * Reading a control's content width takes four methods, because the DOM offers
+ * no single one and because the four kinds of control are not asked the same
+ * question:
  *
  *   * a `<select>` never overflows -- it clips its label instead -- so it is
  *     cloned with `width: auto` and the clone's natural width is what it
@@ -60,47 +61,65 @@
  *     is the direct question and needs no font arithmetic. A figure is the one
  *     kind of content where scrolling is not an acceptable answer: a spend box
  *     showing "837" of "8372" is not truncated, it is WRONG, and nothing on
- *     screen says so.
- *   * a FREE-TEXT input is measured against the GREATER of its placeholder and
- *     the first `TEXT_CAP_CHARS` characters of its own value. Both halves are
- *     load bearing. The placeholder is what must fit before the field is
- *     filled, or the field cannot even be identified -- and it is vacuous for
- *     the two `Day window` boxes, which have none, where it reduced to "is the
- *     box wider than its own padding". The value is what must be READABLE
- *     after, and measuring the placeholder alone reported zero clipped on a
- *     box that showed nine characters of a twenty-two character ally name.
+ *     screen says so. This is the glyph-fit rule, and figures are what it is
+ *     for -- which is what the argument for it was always actually about.
+ *   * a BROWSER-DRAWN input -- `time`, and the other UA-widget types the list
+ *     in `MEASURE` names -- is cloned like a select, and for the same reason:
+ *     the UA renders fields, separators, a spinner and a picker button out of
+ *     nothing the DOM will show you, so `scrollWidth` reports no overflow and
+ *     a canvas run over `value` measures a string the widget is not drawing.
+ *     The two profile-window pickers are the case. They are `w-[74px]`, which
+ *     leaves 42px of glyph room -- half of what the narrowest free-text box
+ *     has -- and they passed the free-text branch by the coincidence that
+ *     `ctx.measureText("07:00")` is 39.8px. Cloned at `width: auto` the UA
+ *     asks for 106.8px for that widget and had been given 74, so it was
+ *     dropping the picker affordance; they are `w-auto` now and get what the
+ *     UA asks.
+ *   * a FREE-TEXT input is measured against its PLACEHOLDER only, and its
+ *     value is asked a different question entirely.
  *
- *     The cap is the whole of what makes that second half a rule rather than a
- *     wish, and it was set to 32 characters, which NOTHING can satisfy: 32
- *     characters of an ally name is 296.1px of glyphs, so the box would have
- *     to be 328.1px inside a cell of 345px, inside a pinned column whose whole
- *     visible strip at 375px is 293px. Measured, by seeding exactly that name:
- *     224px for 296.1px, red at all three viewports, with no code defect and
- *     no reachable width. A rule that cannot be satisfied is worse than no
- *     rule -- and it had already done damage, because the 214px "clip" it
- *     reported for a 144px name box is what talked round 8 into `w-56` and 82%
- *     of the strip.
+ *     The placeholder is what must fit before the field is filled, or the
+ *     field cannot even be identified. It is also the half a column can
+ *     actually be sized to, because it is authored rather than typed: 35.3px
+ *     for "none", 69.8px for "Ally name", 94.9px for "New farm list", 137.9px
+ *     for "Alliance name or ID" -- every one a number the design owns.
  *
- *     So the cap is what a column can actually afford. 10 characters, and the
- *     arithmetic is the app's, not a guess: `.input-field` spends 32px on
- *     padding and declares no left/right border, and its `font-size: 1rem`
- *     beats `text-xs` unlayered (below 640px the mobile `16px !important` rule
- *     pins it there anyway), so a box of width W has W-32 px for 16px Roboto.
- *     The narrowest free-text box in the app is the foreign-target `Not from`
- *     field at `w-28`: 80px, which holds its "02, 11, 13" at 68.2px and ten
- *     characters of a name-shaped run exactly. The pinned name box at `w-36`
- *     has 112px, room for thirteen. Only a PINNED column is bounded by the
- *     visible strip; a scrolling one can be widened a step whenever a real
- *     value outgrows it, which is why 10 is a number the design can meet and
- *     32 is not.
+ *     The VALUE is not a width requirement and cannot be made into one. This
+ *     spec has now tried twice. 32 characters of an ally name is 296.1px of
+ *     glyphs, needing a 328.1px box inside a 293px strip: unsatisfiable, red
+ *     at all three viewports with no code defect, and it had already done
+ *     damage -- the 214px "clip" it reported for a 144px name box is what
+ *     talked round 8 into `w-56` and 82% of the strip. Ten characters looked
+ *     satisfiable only because it was never exercised: it was derived from
+ *     `Not from` at `w-28`, 80px of glyph room, and the fixture seeded that
+ *     box EMPTY, so the basis fell back to the placeholder every time. Filled
+ *     with what an operator types there -- a comma-separated list of village
+ *     names -- ten characters is 68.2px for "02, 11, 13" but 87.4px for
+ *     "Muehlenbac", 94.5px for "Sommerwind", 86.9px for "Nordwestpo": eight of
+ *     ten plausible runs over an 80px budget, again with no code defect. A
+ *     cap on unbounded input is a wish whatever number it is set to, and the
+ *     one calibration site it was derived from is the one that breaks it.
  *
- *     Read it as a floor on readability rather than a ceiling on the field: a
- *     free-text box must show at least ten characters of what is in it, and
- *     the rest may scroll. A NAME that scrolls is still legible -- the caret
- *     and the arrow keys reach the rest of it, and the operator typed it. That
- *     is the difference from a FIGURE, and it is why the fixture now seeds a
- *     32-character name on purpose: the spec's verdict no longer depends on
- *     how long the seeded name happens to be.
+ *     So the value's claim is not that it FITS but that the operator can get
+ *     to it: the box must be scrollable to the end of its own content, asked
+ *     by moving its scrollport and reading back where it landed, the same way
+ *     the wrapper pass asks it of a container. A name that scrolls is still
+ *     legible -- the caret and the arrow keys reach the rest, and the operator
+ *     typed it. A name that is CLIPPED is not, and that is what this catches:
+ *     an `overflow: hidden`, a `text-overflow: ellipsis`, a `readonly` box
+ *     showing nine characters of thirty-two with no way to see the rest. It is
+ *     exercised rather than vacuous -- the foreign-target name box holds 296px
+ *     of value in 144px and reaches all 152px of the difference -- and it is
+ *     satisfiable at any width, which the glyph cap was not.
+ *
+ *     A bare minimum box width was the other candidate and is not here: 80px
+ *     or 100px would be a magic number with no argument behind it, where the
+ *     placeholder is the app's own statement of what has to be legible.
+ *
+ * A `.input-field` on any other input type is reported as `unclassified` and
+ * FAILS. Measuring a control by a method that does not fit it is how the
+ * profile-window pickers passed for a year, and the next control type added
+ * to this app should not get the same silence.
  *
  * NO BACKEND AND NO GAME REQUEST, by the two fail-closed mechanisms
  * `roleTemplates.pw.js` documents: `page.route('** /api/**')` answers the two
@@ -245,11 +264,24 @@ async function seed(page) {
         [defB]: { lumber: 8372, clay: 5168, iron: 5809 },
       })
       set('planner_may_relay', { [defA]: true })
-      // 32 characters, on purpose and past every cap: it is longer than any
-      // box in the app can show, so it proves the free-text rule holds
-      // independently of how long the seeded name happens to be. The rule
-      // used to be calibrated to a 22-character seed and went red the moment
-      // this string replaced it -- see the header comment on TEXT_CAP_CHARS.
+      // 32 characters, on purpose and longer than any box in the app can
+      // show: the free-text rule has to hold independently of how long the
+      // seeded name happens to be, and a 22-character seed is what let a rule
+      // calibrated to it look satisfiable.
+      //
+      // `exclude_origins_text` is seeded for the same reason and it is the
+      // more important half. This box held NOTHING before, so the one
+      // free-text box the whole cap was calibrated against was never measured
+      // carrying a value -- the basis fell back to its "none" placeholder at
+      // 35.3px in 80px of room and the rule passed by not being exercised.
+      // Filled, at that box's own computed font, ten characters of a real
+      // exclusion list is 68.2px for "02, 11, 13" but 87.4px for
+      // "Muehlenbac", 94.5px for "Sommerwind" and 85.5px for "Weinberg-W":
+      // eight of ten plausible village names blow an 80px budget with no code
+      // defect and no reachable width. This value is the one an operator
+      // actually types -- a comma-separated list of village names -- so the
+      // calibration point is exercised now and the rule above is the one that
+      // can survive it.
       set('planner_foreign_targets', [
         {
           name: 'Rheinbund-Aussenposten-Nordwest3',
@@ -258,6 +290,7 @@ async function seed(page) {
           crop_per_hour: 12_500,
           safety_margin_pct: 5,
           route_eligible: true,
+          exclude_origins_text: '02, 11, 13',
         },
       ])
       set('planner_allocations_v2', null)
@@ -273,13 +306,28 @@ async function seed(page) {
  * bounding box but not what the box needed to be.
  */
 const MEASURE = () => {
-  // How much of a free-text VALUE the field is required to show. Ten, because
-  // that is what the app's narrowest free-text box (`Not from`, `w-28`, 80px
-  // of glyphs after `.input-field`'s 32px of padding) can actually hold; the
-  // header comment has the arithmetic and the measurement that killed 32.
-  // Declared in here rather than beside the other constants because this
-  // function is serialised into the page and closes over nothing from Node.
-  const TEXT_CAP_CHARS = 10
+  // The three kinds of `<input>` this app puts `.input-field` on, because they
+  // need three different questions. Declared in here rather than beside the
+  // other constants because this function is serialised into the page and
+  // closes over nothing from Node.
+  //
+  // BROWSER-DRAWN: the UA renders a widget of its own -- fields, separators, a
+  // spinner, a picker button -- out of nothing the DOM will show you. Canvas
+  // arithmetic over `value` does not model any of it, which is how the two
+  // profile-window pickers passed for a year: `ctx.measureText("07:00")` is
+  // 39.8px in 42px of glyph room, so the FREE-TEXT branch called them fine
+  // while the UA wanted 106.8px for the widget and got 74px.
+  //
+  // FREE TEXT: unbounded operator input. See the header comment on why its
+  // value cannot be a width requirement at all.
+  //
+  // Everything else here is `number`, which is the one kind where scrolling is
+  // not an acceptable answer. Anything that is none of the three is reported
+  // and asserted on rather than quietly measured by the last branch: a control
+  // type this list has never seen is exactly the case that produced a
+  // meaningless verdict before.
+  const BROWSER_DRAWN = ['time', 'date', 'datetime-local', 'month', 'week', 'color', 'range', 'file']
+  const FREE_TEXT = ['text', 'search', 'email', 'url', 'tel', 'password', '']
 
   const scroller = (el) => {
     for (let node = el.parentElement; node; node = node.parentElement) {
@@ -379,6 +427,9 @@ const MEASURE = () => {
     const borders = parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth)
     let needed
     let basis
+    // Free text only: whether the box can be scrolled to the end of what is
+    // in it. Null everywhere else, which is what `assertFits` filters on.
+    let reachedInside = null
     if (el.tagName === 'SELECT') {
       // A select clips rather than scrolls, so ask a clone what it wanted.
       const clone = el.cloneNode(true)
@@ -387,33 +438,57 @@ const MEASURE = () => {
       needed = clone.getBoundingClientRect().width
       clone.remove()
       basis = 'options'
-    } else if (el.tagName === 'INPUT' && el.type !== 'number') {
-      // The greater of the empty state's prompt and the first TEXT_CAP_CHARS
-      // characters of the value actually in the box.
+    } else if (el.tagName === 'INPUT' && BROWSER_DRAWN.includes(el.type)) {
+      // Asked exactly the way a `<select>` is asked, and for the same reason:
+      // the UA draws the control and neither `scrollWidth` nor a canvas run
+      // over `value` can see what it drew. A clone at `width: auto` reports
+      // the intrinsic width the UA wants for the widget it is going to render
+      // -- fields, separators, spinner, picker button and all -- so
+      // `width < needed` is the statement "the UA has been given less room
+      // than the control it was asked for".
       //
-      // The placeholder ALONE is what this measured before, and it is vacuous
-      // for a free-text input that has none -- both `Day window` boxes --
-      // where it reduced to "is the box wider than its own padding".
-      //
-      // The cap is what makes the value half satisfiable: a name has no
-      // bound, so a column asked to fit ANY value is asked for a width that
-      // does not exist. 32 was exactly that (296.1px of glyphs in a 293px
-      // strip, measured); 10 is what the narrowest free-text column already
-      // affords. Read it as "must show ten characters of what is in it" --
-      // the rest of a NAME may scroll, because the caret reaches it and it is
-      // still legible. A FIGURE may not, which is the branch below.
+      // `value` is copied onto the clone because `cloneNode` copies the
+      // ATTRIBUTE and these boxes are React-controlled: the attribute is
+      // empty, and an empty time input can have a different intrinsic width
+      // from a filled one.
+      const clone = el.cloneNode(true)
+      clone.value = el.value
+      clone.style.cssText = 'width:auto;position:absolute;left:-9999px;top:0'
+      document.body.appendChild(clone)
+      needed = clone.getBoundingClientRect().width
+      clone.remove()
+      basis = 'widget'
+    } else if (el.tagName === 'INPUT' && FREE_TEXT.includes(el.type)) {
+      // The PLACEHOLDER, and nothing about the value -- see the header
+      // comment. The placeholder is the app's own statement of what has to be
+      // legible before the field is filled, it is authored rather than typed,
+      // and it is therefore the one half of this that a column can be sized
+      // to. The value is asked a different question, below and in
+      // `unreachable`: not "does it fit" but "can the operator get to it".
       ctx.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`
-      const placeholder = ctx.measureText(el.placeholder ?? '').width
-      const value = ctx.measureText((el.value ?? '').slice(0, TEXT_CAP_CHARS)).width
       needed =
-        Math.max(placeholder, value) +
+        ctx.measureText(el.placeholder ?? '').width +
         parseFloat(style.paddingLeft) +
         parseFloat(style.paddingRight) +
         borders
-      basis = value > placeholder ? 'value (text)' : 'placeholder'
-    } else {
+      basis = 'placeholder'
+      // Asked by MOVING it, as the wrapper pass asks the same question of a
+      // container. An input's own scrollport has no descendants whose boxes
+      // this could shift, and it is restored immediately either way.
+      const before = el.scrollLeft
+      el.scrollLeft = el.scrollWidth
+      reachedInside = el.scrollLeft
+      el.scrollLeft = before
+    } else if (el.tagName === 'INPUT' && el.type === 'number') {
       needed = el.scrollWidth + borders
       basis = 'value'
+    } else {
+      // Neither a select nor any input type this spec knows how to ask about.
+      // Measured the least wrong way and then FAILED on, rather than reported
+      // as fine: a verdict from the wrong method is what `basis` exists to
+      // make visible.
+      needed = el.scrollWidth + borders
+      basis = `unclassified ${el.tagName.toLowerCase()}/${el.type}`
     }
     const wrapper = scroller(el)
     out.push({
@@ -435,6 +510,7 @@ const MEASURE = () => {
       // catching a 1px overflow and absorbing it.
       clientWidth: el.clientWidth,
       scrollWidth: el.scrollWidth,
+      reachedInside,
       wrapperClient: wrapper ? wrapper.clientWidth : null,
       wrapperScroll: wrapper ? wrapper.scrollWidth : null,
       // Where the scrolling container's own box ENDS. A table may be wider than
@@ -741,10 +817,43 @@ function report(where, measured) {
 function assertFits(where, measured, viewport) {
   expect(measured.controls.length, `${where}: nothing measured`).toBeGreaterThan(0)
 
+  // No control may be measured by a method that does not fit it. This is the
+  // guard on `basis` itself: a `.input-field` on an input type the three
+  // branches above have never seen would otherwise be measured as a number
+  // box and reported as fine.
+  const unclassified = measured.controls
+    .filter((c) => c.basis.startsWith('unclassified'))
+    .map((c) => `${c.surface} / "${c.label}": ${c.basis}`)
+  expect(unclassified, `${where}: a control was measured by a method that does not fit it`).toEqual(
+    [],
+  )
+
   const clipped = measured.controls
     .filter(isClipped)
     .map((c) => `${c.surface} / ${c.tag} "${c.label}": ${c.width}px for ${c.needed}px of ${c.basis}`)
   expect(clipped, `${where}: controls narrower than their content`).toEqual([])
+
+  // The other half of the free-text rule, and the half that replaces the
+  // glyph cap. A name may be longer than its box -- that is what makes it
+  // free text -- so the claim is not that it fits but that the operator can
+  // GET to the rest of it: the caret and the arrow keys reach what scrolls,
+  // and this asks by moving the box's own scrollport to the end and reading
+  // back where it landed. It is what catches an `overflow: hidden`, a
+  // `text-overflow: ellipsis` or a `readonly` box that shows nine characters
+  // of a thirty-two character ally name with no way to see the rest, which is
+  // the real defect the 32-character cap was reaching for and could not
+  // state. Exercised rather than vacuous: the foreign-target name box holds
+  // 296px of value in 144px and reaches all 152px of the difference.
+  const unreachable = measured.controls
+    .filter((c) => c.reachedInside != null)
+    .filter((c) => c.scrollWidth - c.clientWidth > 0)
+    .filter((c) => c.reachedInside < c.scrollWidth - c.clientWidth - 1)
+    .map(
+      (c) =>
+        `${c.surface} / "${c.label}": ${c.clientWidth}/${c.scrollWidth} scrolled only to` +
+        ` ${c.reachedInside}`,
+    )
+  expect(unreachable, `${where}: a free-text box hides part of its value`).toEqual([])
 
   // A wrapper that overflows must be reachable -- and this asks by MOVING it.
   // The version this replaces filtered on `overflows && !overflows`, which is
