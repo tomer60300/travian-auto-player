@@ -2465,7 +2465,7 @@ export default function ResourcePlanner() {
                   </th>
                   <th
                     className="text-left px-2"
-                    title="What this village SPENDS per hour, by resource — the building queue and the troop upkeep. Not the allocation target, which is what must ARRIVE: the store's net is target + own production − consumption. Nothing in the game reports this, because the statistics page shows materials gross."
+                    title="What this village SPENDS per hour, by resource — the building queue and the troop upkeep. Not the allocation target: the target is the rate that must be HERE (own production plus whatever ships in), so the store nets target − consumption. Nothing in the game reports this, because the statistics page shows materials gross — a village burning lumber still reads positive there."
                   >
                     Consumption /h
                   </th>
