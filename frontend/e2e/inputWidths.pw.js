@@ -716,6 +716,151 @@ const SURFACES = [
   { name: 'Auto-scout (loop mode)', open: openScoutLoop, seed: seedShell, socket: scanSocket },
 ]
 
+/**
+ * The two DISCLOSURE pickers in the village table, measured the same way.
+ *
+ * `Ships only to` and `Relays for` are not `.input-field`s -- they are a
+ * `<summary>` over a checkbox list -- so the sweep above has never looked at
+ * them, and profile section 5's relay tier added the second one. A summary is
+ * exactly as clippable as a number box and in the same way: `whitespace-nowrap`
+ * plus a column narrower than the text is a name the operator cannot read, with
+ * nothing on screen saying it was cut.
+ *
+ * Measured rather than screenshotted, and measured OPEN as well as closed, for
+ * the same reason the sweep is: a baseline of a clipped summary is a baseline of
+ * the defect. Open matters because the panel is where the village names live --
+ * a closed summary reads "not a relay" and fits anything, while the open list is
+ * 26 rows of names inside a `max-h-40 overflow-y-auto`.
+ *
+ * Kept as its own test rather than folded into MEASURE's selector so the
+ * eighteen cases above keep saying exactly what they say now, and so a failure
+ * here names the picker rather than arriving as one more line in a sweep.
+ */
+const PICKERS = [
+  // `group` is the panel's own accessible name, which is how the checkboxes are
+  // reached: the panel carries no visible heading, so a text filter finds
+  // nothing and the ticking silently does not happen -- measured, and it left
+  // every summary reading its own placeholder while the spec claimed to be
+  // measuring names.
+  {
+    column: 'Ships only to',
+    group: /may ship to$/,
+    // What the summary must read once two villages are ticked. Asserted, so a
+    // picker whose panel moves cannot leave this measuring the resting state.
+    filled: /^Ships only to, for 02: \S+, \S+$/,
+  },
+  {
+    column: 'Relays for',
+    group: /forwards material to$/,
+    filled: /^Relays for, for 02: \S+, \S+$/,
+  },
+]
+
+for (const viewport of VIEWPORTS) {
+  test.describe(`the village table's pickers fit their content at ${viewport.width}px`, () => {
+    test.use({ viewport })
+
+    for (const picker of PICKERS) {
+      test(picker.column, async ({ page }) => {
+        await isolate(page)
+        await seed(page)
+        await openSnapshot(page)
+
+        // Every one of them, on every village row -- the defect this guards is
+        // per column, but the content differs per row and only one row needs to
+        // be too long for the operator to lose a name.
+        const summaries = page.locator('summary').filter({ hasText: picker.column })
+        const rows = await summaries.count()
+        expect(rows, `${picker.column}: no picker found in the village table`).toBeGreaterThan(0)
+
+        // Ticked on the first row, so the summary is measured carrying real
+        // village names rather than its own resting placeholder. An unfilled
+        // control measures as wide as its padding and would pass a collapsed
+        // column -- the same reason this spec seeds values into the number
+        // boxes above. And the result is ASSERTED: the first version of this
+        // reached the panel by its text, found nothing, ticked nothing and
+        // measured three summaries reading "not a relay" while claiming to
+        // measure names.
+        await summaries.first().click()
+        const ticks = page.getByRole('group', { name: picker.group }).first().getByRole('checkbox')
+        await expect(ticks.first()).toBeVisible()
+        await ticks.nth(0).check()
+        await ticks.nth(1).check()
+        await expect(summaries.first()).toHaveText(picker.filled)
+
+        const measured = await page.evaluate(() => {
+          const out = []
+          for (const el of document.querySelectorAll('summary')) {
+            const rect = el.getBoundingClientRect()
+            if (rect.width === 0 && rect.height === 0) continue
+            let wrapper = null
+            for (let node = el.parentElement; node; node = node.parentElement) {
+              const overflowX = getComputedStyle(node).overflowX
+              if (overflowX === 'auto' || overflowX === 'scroll') {
+                wrapper = node
+                break
+              }
+            }
+            out.push({
+              text: el.textContent.trim().slice(0, 48),
+              clientWidth: el.clientWidth,
+              scrollWidth: el.scrollWidth,
+              width: Math.round(rect.width * 10) / 10,
+              height: Math.round(rect.height * 10) / 10,
+              wrapperRight: wrapper ? wrapper.getBoundingClientRect().right : null,
+            })
+          }
+          return {
+            summaries: out,
+            pageClientWidth: document.documentElement.clientWidth,
+            pageScrollWidth: document.documentElement.scrollWidth,
+          }
+        })
+
+        const mine = measured.summaries.filter((sum) => sum.text.startsWith(picker.column))
+        expect(mine.length, `${picker.column}: nothing measured`).toBeGreaterThan(0)
+        // `globalThis.process`, as the sweep's own reporter does it: `process`
+        // is not a declared global in this config, so the bare form is a lint
+        // ERROR rather than a warning and fails the gate.
+        if (globalThis.process?.env?.MEASURE) {
+          console.log(
+            `  ${viewport.width}px ${picker.column}: ${mine.length} summaries, ` +
+              `page ${measured.pageClientWidth}/${measured.pageScrollWidth}\n` +
+              mine
+                .map(
+                  (sum) =>
+                    `    ${sum.clientWidth}/${sum.scrollWidth}px h${sum.height} "${sum.text}"`
+                )
+                .join('\n')
+          )
+        }
+
+        // Integers from the same rounding rule, so this is exact -- see
+        // `assertFits` on why the `value` basis gets no tolerance.
+        const clipped = mine
+          .filter((sum) => sum.scrollWidth > sum.clientWidth)
+          .map((sum) => `"${sum.text}": ${sum.clientWidth}px for ${sum.scrollWidth}px`)
+        expect(clipped, `${viewport.width}px ${picker.column}: summaries narrower than their text`)
+          .toEqual([])
+
+        // Item 1 of the UI Definition of Done, asked of the column this feature
+        // added: a wider table must still scroll inside its own container.
+        const escaped = mine
+          .filter((sum) => sum.wrapperRight != null && sum.wrapperRight > viewport.width + 1)
+          .map((sum) => `container ends at ${sum.wrapperRight} in a ${viewport.width} viewport`)
+        expect(escaped, `${viewport.width}px ${picker.column}: a scroll container escaped`).toEqual(
+          []
+        )
+        expect(
+          measured.pageScrollWidth,
+          `${viewport.width}px ${picker.column}: the document overflows by ` +
+            `${measured.pageScrollWidth - measured.pageClientWidth}px`
+        ).toBeLessThanOrEqual(measured.pageClientWidth)
+      })
+    }
+  })
+}
+
 for (const viewport of VIEWPORTS) {
   test.describe(`every .input-field fits its content at ${viewport.width}px`, () => {
     test.use({ viewport })

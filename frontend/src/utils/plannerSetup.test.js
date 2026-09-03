@@ -229,12 +229,13 @@ describe('profiles in the setup file', () => {
       merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
       exportedAt: STAMP,
     })
-    // 5 since the per-village merchant cap landed (4 was `may_relay`, 3 the
-    // role templates). Pinned to a literal on purpose: the version has to rise
-    // whenever a field is added, so that an older build refuses a file it would
-    // otherwise half-load, and a literal is what makes forgetting the bump a
-    // failing test rather than a tautology.
-    expect(setup.version).toBe(5)
+    // 6 since profile section 5's declared relay tier landed (5 was the
+    // per-village merchant cap, 4 `may_relay`, 3 the role templates). Pinned to
+    // a literal on purpose: the version has to rise whenever a field is added,
+    // so that an older build refuses a file it would otherwise half-load, and a
+    // literal is what makes forgetting the bump a failing test rather than a
+    // tautology.
+    expect(setup.version).toBe(6)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -2200,13 +2201,16 @@ describe('the merchant cap in the setup file', () => {
     expect(merged.maxBusy).toEqual({ 20030: 12, 20031: 8 })
   })
 
-  it('is a version 5 file, and every older one simply carries less', () => {
-    // Rewritten from "is a version 4 file" when the per-village merchant cap
-    // landed. The contract is the RULE, not the number: the version rises
-    // whenever a field is added, so a build that cannot read the new one
-    // REFUSES a file it would otherwise half-load. A v4 build silently
-    // dropping a cap plans sixteen merchants where the operator allowed eight.
-    expect(SETUP_VERSION).toBe(5)
+  it('is a version 6 file, and every older one simply carries less', () => {
+    // Rewritten from "is a version 5 file" when profile section 5's declared
+    // relay tier landed, and from "version 4" when the per-village merchant cap
+    // did. The contract is the RULE, not the number: the version rises whenever
+    // a field is added, so a build that cannot read the new one REFUSES a file
+    // it would otherwise half-load. A v4 build silently dropping a cap plans
+    // sixteen merchants where the operator allowed eight; a v5 build dropping a
+    // relay tier reports the villages beyond it as unreachable while the answer
+    // sits on screen.
+    expect(SETUP_VERSION).toBe(6)
 
     const older = {
       format: SETUP_FORMAT,
@@ -2218,6 +2222,16 @@ describe('the merchant cap in the setup file', () => {
     expect(parsed.villages[0].trade_office_level).toBe(3)
     expect(parsed.villages[0].may_relay).toBe(true)
     expect(parsed.villages[0].max_busy_merchants).toBeUndefined()
+
+    const v5 = {
+      format: SETUP_FORMAT,
+      version: 5,
+      villages: [{ village_id: 20030, trade_office_level: 3, max_busy_merchants: 8 }],
+    }
+    const fromV5 = roundTrip(v5)
+
+    expect(fromV5.villages[0].max_busy_merchants).toBe(8)
+    expect(fromV5.villages[0].relay_for).toBeUndefined()
   })
 })
 

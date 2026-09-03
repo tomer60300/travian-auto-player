@@ -67,22 +67,39 @@
  * carried like any other figure: it makes every route from that village a
  * budget breach, and does not withdraw the village from the plan.
  *
+ * Version 6 adds `relay_for` to the village row: the villages this one FORWARDS
+ * the capital's lumber, clay and iron on to (profile section 5's relay tier).
+ * It is not a preference and losing it is not a cosmetic loss -- 02 may reach
+ * only its own neighbours, so without the tier the defensive villages beyond
+ * them are simply unreachable and the plan comes back INFEASIBLE with a
+ * shortfall each. A v5 build would drop the field in silence and report those
+ * shortfalls as though the operator had never answered, which is the worst of
+ * the available outcomes: the answer is on screen and the plan says it is
+ * missing. So the version rises, and a build that cannot read one refuses the
+ * file rather than half-loading it.
+ *
+ * An empty list is REFUSED rather than carried, which is the one place this
+ * field differs from `ship_only_to`: an empty whitelist is a real answer
+ * ("ships to nobody"), while "forwards to nobody" says nothing that leaving the
+ * field off does not already say.
+ *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
  */
 
 import { RESOURCE_LABEL, ROLE_LABEL } from '../constants/planner'
+import { namesForVillageIds } from './villageRefs'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 5
+export const SETUP_VERSION = 6
 /** Versions this build can read. A v1 file simply carries no profiles, a v2 one
- * no roles, a v3 one no per-village relay answer and a v4 one no merchant cap,
- * so refusing any of them would strand every export written before those
- * travelled. The version still has to rise when a field is added, and in
- * the other direction: a build that cannot read roles must REFUSE a file that
- * has them, or it loads the villages, drops their profiles and plans a
- * different account without saying so. */
-export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5])
+ * no roles, a v3 one no per-village relay answer, a v4 one no merchant cap and a
+ * v5 one no relay tier, so refusing any of them would strand every export
+ * written before those travelled. The version still has to rise when a field is
+ * added, and in the other direction: a build that cannot read roles must REFUSE
+ * a file that has them, or it loads the villages, drops their profiles and plans
+ * a different account without saying so. */
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
@@ -231,6 +248,104 @@ export const VILLAGE_ROLES = Object.freeze([
   'def',
   'feeder',
 ])
+
+/** Roles that may NOT be a relay, and the backend's `Role` names for them.
+ *
+ * Profile section 5.9: role villages may not relay. A feeder may, and so may a
+ * village with no role declared, which is most of an account nobody has
+ * described yet. Derived from `VILLAGE_ROLES` rather than typed out, so a sixth
+ * role cannot be added on one side only.
+ */
+export const ROLES_THAT_MAY_NOT_RELAY = Object.freeze(
+  VILLAGE_ROLES.filter((role) => role !== 'feeder')
+)
+
+/** Everything wrong with a declared relay tier, BY THE RELAY that has to change.
+ *
+ * The same four refusals the backend makes at the schema, computed from live
+ * state so the operator reads them on the cells they typed instead of on their
+ * next plan -- exactly what `unreachableCaps` above does for the merchant cap,
+ * and for the same reason: a 422 arriving from a plan call names a village in a
+ * 26-row table and nothing on screen points at it.
+ *
+ * Keyed by the relay rather than returned flat, because the relay's own list is
+ * the cell that has to change in every one of the four cases -- including the
+ * chain, whose message names two villages but whose fix is to move a downstream
+ * off one of their lists. A flat list would have to be attributed back to a cell
+ * by matching its prose, which is the kind of thing that works until someone
+ * rewords a sentence.
+ *
+ * `relayFor` is `{ [village_id]: number[] }`, `villageRoles` is
+ * `{ [village_id]: role }`. A village with an EMPTY list is deliberately not a
+ * problem: the picker holds one for the moment between opening and the first
+ * tick, and flagging that would make the control shout at its own resting
+ * state. `buildPlanPayload` drops an empty list and the file parser refuses
+ * one, which are the two places it could do harm.
+ */
+export function relayTierProblemsByVillage(relayFor, villages, villageRoles) {
+  const known = new Set((villages ?? []).map((v) => v.village_id))
+  const named = (id) => {
+    const found = (villages ?? []).find((v) => v.village_id === id)
+    return found?.name || String(id)
+  }
+  const relays = new Set(
+    Object.entries(relayFor ?? {})
+      .filter(([, list]) => list?.length)
+      .map(([vid]) => Number(vid))
+  )
+  const out = {}
+  for (const relay of [...relays].sort((a, b) => a - b)) {
+    const downstream = relayFor[relay] ?? []
+    const problems = []
+    const missing = downstream.filter((vid) => !known.has(vid))
+    if (missing.length) {
+      problems.push(
+        `${named(relay)} relays for ${missing.map(named).join(', ')}, which this account ` +
+          `does not have.`
+      )
+    }
+    if (downstream.includes(relay)) {
+      problems.push(`${named(relay)} is its own relay, which is not a leg.`)
+    }
+    const role = villageRoles?.[relay]
+    if (role && ROLES_THAT_MAY_NOT_RELAY.includes(role)) {
+      problems.push(
+        `${named(relay)} is a relay but its role is ${ROLE_LABEL[role] ?? role}. Profile ` +
+          `section 5.9 says role villages may not relay — only a feeder, or a village ` +
+          `with no role.`
+      )
+    }
+    const chained = downstream.filter((vid) => vid !== relay && relays.has(vid))
+    if (chained.length) {
+      problems.push(
+        `${named(relay)} relays for ${chained.map(named).join(', ')}, which is itself a ` +
+          `relay. One hop only — a relay may not feed a relay.`
+      )
+    }
+    if (problems.length) out[relay] = problems
+  }
+  return out
+}
+
+/** The same problems as one flat list, relay order, for a summary line. */
+export function relayTierProblems(relayFor, villages, villageRoles) {
+  return Object.values(relayTierProblemsByVillage(relayFor, villages, villageRoles)).flat()
+}
+
+/** The relay picker's one-line summary.
+ *
+ * Nothing stored is the default and reads as such. An EMPTY list is the picker
+ * mid-edit rather than an answer -- unlike `ship_only_to`, where empty means
+ * "ships to nobody" -- so it says so plainly and does not pretend a tier
+ * exists. Names while they fit, then a count, matching the ships-only-to
+ * summary beside it.
+ */
+export function describeRelayFor(downstream, villages) {
+  if (downstream == null) return 'not a relay'
+  if (downstream.length === 0) return 'nobody yet'
+  if (downstream.length <= 2) return namesForVillageIds(downstream, villages)
+  return `${downstream.length} villages`
+}
 
 /** Neither send nor receive: the default for a village nothing has said about.
  *
@@ -612,6 +727,7 @@ export function buildSetup({
   maxBusy,
   cropCeilings,
   shipOnlyTo,
+  relayFor,
   stockFloors,
   consumption,
   villageRoles,
@@ -629,6 +745,7 @@ export function buildSetup({
     const cap = maxBusy?.[village.village_id]
     const ceiling = cropCeilings?.[village.village_id]
     const allowed = shipOnlyTo?.[village.village_id]
+    const forwards = relayFor?.[village.village_id]
     const floor = stockFloors?.[village.village_id]
     const role = villageRoles?.[village.village_id]
     const relay = mayRelay?.[village.village_id]
@@ -641,6 +758,7 @@ export function buildSetup({
       cap == null &&
       ceiling == null &&
       allowed == null &&
+      !forwards?.length &&
       floor == null &&
       role == null &&
       relay == null &&
@@ -659,6 +777,12 @@ export function buildSetup({
     // An empty list is written, not dropped: it says "ships to nobody", which
     // is a different answer from the unrestricted default an absent field means.
     if (allowed != null) row.ship_only_to = allowed.map(Number)
+    // The opposite rule, and the one place this field differs from the
+    // whitelist above: an EMPTY relay list is dropped rather than written,
+    // because "forwards to nobody" says nothing that leaving the field off does
+    // not already say -- and the file parser and the backend both refuse one, so
+    // writing it would produce a file this same parser will not read.
+    if (forwards?.length) row.relay_for = forwards.map(Number)
     if (floor != null) row.stock_floor_fraction = Number(floor)
     // false is written, not dropped: it is the answer that keeps ONE village
     // out of the relay tier its role otherwise permits, which is exactly the
@@ -1070,6 +1194,37 @@ export function parseSetup(text) {
         return id
       })
     }
+    if (row.relay_for != null) {
+      if (!Array.isArray(row.relay_for)) {
+        throw new SetupFileError(`${where} has a relay_for that is not a list of village ids.`)
+      }
+      // Refused, not read as "no tier". Unlike `ship_only_to`, where an empty
+      // list is the real answer "ships to nobody", there is no reading of
+      // "forwards to nobody" that differs from leaving the field off -- so
+      // accepting it would let a half-typed row look like a decision, and the
+      // backend answers one with a 422 naming the village.
+      if (row.relay_for.length === 0) {
+        throw new SetupFileError(
+          `${where} has an empty relay_for. A relay for nobody is not a tier — remove the ` +
+            `field, or name the villages this one forwards to.`
+        )
+      }
+      parsed.relay_for = row.relay_for.map((raw) => {
+        const id = Number(raw)
+        if (!Number.isInteger(id) || id <= 0) {
+          throw new SetupFileError(
+            `${where} has ${JSON.stringify(raw)} in relay_for; it must be a village id.`
+          )
+        }
+        if (id === parsed.village_id) {
+          throw new SetupFileError(
+            `${where} names itself in relay_for, which is not a leg. A relay forwards to ` +
+              `OTHER villages.`
+          )
+        }
+        return id
+      })
+    }
     if (row.may_relay != null) {
       if (typeof row.may_relay !== 'boolean') {
         throw new SetupFileError(
@@ -1098,6 +1253,44 @@ export function parseSetup(text) {
     }
     return parsed
   })
+
+  // The two relay rules that need MORE THAN ONE ROW to check, so they cannot
+  // live in the loop above. Both are the backend's own refusals, made here so a
+  // file that would 422 on the next plan call is refused at import instead --
+  // where the message can still say which row, and where the operator has not
+  // yet lost the state on screen to a half-applied load.
+  //
+  // The village ids are NOT checked against an account here, because the file
+  // does not know one: a downstream village with nothing else typed has no row
+  // at all, so demanding one would refuse a perfectly good file. `mergeSetup`
+  // prunes against live villages and reports what it dropped, and
+  // `relayTierProblems` shows the same facts on the cells as they are typed.
+  const declaredRelays = new Set(
+    villages.filter((row) => row.relay_for?.length).map((row) => row.village_id)
+  )
+  for (const row of villages) {
+    if (!row.relay_for?.length) continue
+    const label = row.name || String(row.village_id)
+    if (row.role && ROLES_THAT_MAY_NOT_RELAY.includes(row.role)) {
+      throw new SetupFileError(
+        `${label} is a relay in this file but its role is ${row.role}. Profile section 5.9 ` +
+          `says role villages may not relay — only a feeder, or a village with no role. ` +
+          `Refused rather than dropped: the backend answers it with a 422, and a relay ` +
+          `dropped here would leave those villages unreachable with nothing saying why.`
+      )
+    }
+    const chained = row.relay_for.filter((id) => declaredRelays.has(id))
+    if (chained.length) {
+      const named = chained
+        .map((id) => villages.find((v) => v.village_id === id)?.name || String(id))
+        .join(', ')
+      throw new SetupFileError(
+        `${label} relays for ${named}, which is itself a relay in this file. One hop only — ` +
+          `a relay may not feed a relay, because a chain puts one hub's forward leg behind ` +
+          `another's and no daily beat can order both.`
+      )
+    }
+  }
 
   const profiles = {}
   if (raw.profiles != null) {
@@ -1192,6 +1385,7 @@ export function mergeSetup({
   maxBusy,
   cropCeilings,
   shipOnlyTo,
+  relayFor,
   stockFloors,
   consumption,
   villageRoles,
@@ -1206,12 +1400,18 @@ export function mergeSetup({
   const nextMaxBusy = { ...(maxBusy ?? {}) }
   const nextCropCeilings = { ...(cropCeilings ?? {}) }
   const nextShipOnlyTo = { ...(shipOnlyTo ?? {}) }
+  const nextRelayFor = { ...(relayFor ?? {}) }
   const nextStockFloors = { ...(stockFloors ?? {}) }
   const nextConsumption = { ...(consumption ?? {}) }
   const nextVillageRoles = { ...(villageRoles ?? {}) }
   const nextMayRelay = { ...(mayRelay ?? {}) }
 
   const missingFromAccount = []
+  // Relay downstreams the account no longer has, per relay. Reported rather
+  // than silently pruned: a tier that has quietly lost one of the villages it
+  // was feeding is a tier the operator believes is complete, and the plan will
+  // report that village as unreachable with nothing connecting the two.
+  const relayTargetsDropped = []
   let loaded = 0
 
   for (const row of setup.villages) {
@@ -1230,6 +1430,17 @@ export function mergeSetup({
     if (row.max_busy_merchants != null) nextMaxBusy[row.village_id] = row.max_busy_merchants
     if (row.crop_ceiling != null) nextCropCeilings[row.village_id] = row.crop_ceiling
     if (row.ship_only_to != null) nextShipOnlyTo[row.village_id] = row.ship_only_to
+    if (row.relay_for?.length) {
+      const kept = row.relay_for.filter((id) => known.has(id))
+      const gone = row.relay_for.filter((id) => !known.has(id))
+      if (gone.length) {
+        relayTargetsDropped.push({ village_id: row.village_id, name: row.name, dropped: gone })
+      }
+      // A tier left with nobody to feed is removed outright rather than kept as
+      // an empty list, which neither the file nor the backend accepts.
+      if (kept.length) nextRelayFor[row.village_id] = kept
+      else delete nextRelayFor[row.village_id]
+    }
     if (row.stock_floor_fraction != null) nextStockFloors[row.village_id] = row.stock_floor_fraction
     // Replaced wholesale where the file has one, not merged per resource: half
     // of an old spend under a new profile is a figure nobody entered, and a
@@ -1288,6 +1499,7 @@ export function mergeSetup({
     maxBusy: nextMaxBusy,
     cropCeilings: nextCropCeilings,
     shipOnlyTo: nextShipOnlyTo,
+    relayFor: nextRelayFor,
     stockFloors: nextStockFloors,
     consumption: nextConsumption,
     villageRoles: nextVillageRoles,
@@ -1307,6 +1519,7 @@ export function mergeSetup({
       profilesLoaded,
       rolesLoaded: rolesLoaded.sort(),
       profileVillagesDropped: [...droppedVillages].sort((a, b) => a - b),
+      relayTargetsDropped,
     },
   }
 }

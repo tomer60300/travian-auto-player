@@ -14,6 +14,7 @@ import {
   buildSetup,
   declaresConsumption,
   describeConsumption,
+  describeRelayFor,
   describeSpendSource,
   isConsumptionRate,
   isEmptyTemplate,
@@ -22,6 +23,7 @@ import {
   mergeSetup,
   parseSetup,
   relayFlagsOnly,
+  relayTierProblemsByVillage,
   resolveRoleAllocation,
   resolveRoleSpend,
   resolvedSpend,
@@ -154,6 +156,7 @@ const DEFAULT_MERCHANT_MODEL = {
 const LS_WINDOWS = 'planner_profile_windows'
 const LS_CROP_CEILING = 'planner_crop_ceiling'
 const LS_SHIP_ONLY_TO = 'planner_ship_only_to'
+const LS_RELAY_FOR = 'planner_relay_for'
 const LS_STOCK_FLOOR = 'planner_stock_floor'
 const LS_MAX_BUSY = 'planner_max_busy'
 const LS_CONSUMPTION = 'planner_consumption'
@@ -526,6 +529,22 @@ export default function ResourcePlanner() {
   // Trade Office level -- nothing in the game says which of your own villages a
   // merchant may be sent to.
   const [shipOnlyTo, setShipOnlyTo] = useState({})
+  // Profile section 5's relay TIER: { [village_id]: number[] } -- the villages
+  // this one forwards the capital's lumber, clay and iron on to. Absent means
+  // "not a relay", which is every village until the operator says otherwise.
+  //
+  // Owned like the whitelist above, and for a sharper reason than most: 02 may
+  // reach only its own neighbours, so without a tier the defensive villages
+  // beyond them are unreachable and the plan comes back INFEASIBLE with a
+  // shortfall each. Nothing in the game states a tier, and no role template
+  // carries one -- a relay is a fact about a village's POSITION, not about the
+  // kind of village it is.
+  //
+  // An INSTRUCTION, not a permission. `mayRelay` below answers whether the
+  // route search may conscript a village as a CROP hub; this says which
+  // villages a named relay forwards a material to. The two are different fields
+  // because they are different questions.
+  const [relayFor, setRelayFor] = useState({})
   // Share of warehouse capacity each village keeps stocked by NPC trading, as a
   // FRACTION (0.3, not 30) so state, file and request agree; the input shows it
   // as a percent. The planner may draw it down as lumber, clay or iron.
@@ -759,6 +778,7 @@ export default function ResourcePlanner() {
     setProfileWindows(loadJson(`${LS_WINDOWS}::${accountKey}`, {}))
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
+    setRelayFor(loadJson(`${LS_RELAY_FOR}::${accountKey}`, {}))
     setStockFloors(loadJson(`${LS_STOCK_FLOOR}::${accountKey}`, {}))
     setMaxBusy(loadJson(`${LS_MAX_BUSY}::${accountKey}`, {}))
     // A role outside the five is dropped on the way in, the same way a stored
@@ -901,6 +921,9 @@ export default function ResourcePlanner() {
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_SHIP_ONLY_TO), shipOnlyTo)
   }, [shipOnlyTo, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_RELAY_FOR), relayFor)
+  }, [relayFor, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_STOCK_FLOOR), stockFloors)
   }, [stockFloors, hydratedKey, accountKey, storageKey])
@@ -1056,6 +1079,7 @@ export default function ResourcePlanner() {
         tradeOffice[v.village_id] != null ||
         cropCeilings[v.village_id] != null ||
         shipOnlyTo[v.village_id] != null ||
+        relayFor[v.village_id]?.length > 0 ||
         stockFloors[v.village_id] != null ||
         maxBusy[v.village_id] != null ||
         villageRoles[v.village_id] != null ||
@@ -1078,6 +1102,7 @@ export default function ResourcePlanner() {
         maxBusy,
         cropCeilings,
         shipOnlyTo,
+        relayFor,
         stockFloors,
         consumption,
         villageRoles,
@@ -1101,6 +1126,7 @@ export default function ResourcePlanner() {
     maxBusy,
     cropCeilings,
     shipOnlyTo,
+    relayFor,
     stockFloors,
     consumption,
     villageRoles,
@@ -1147,6 +1173,7 @@ export default function ResourcePlanner() {
         maxBusy,
         cropCeilings,
         shipOnlyTo,
+        relayFor,
         stockFloors,
         consumption,
         villageRoles,
@@ -1160,6 +1187,7 @@ export default function ResourcePlanner() {
       setForeignTargets(merged.foreignTargets)
       setCropCeilings(merged.cropCeilings)
       setShipOnlyTo(merged.shipOnlyTo)
+      setRelayFor(merged.relayFor)
       setStockFloors(merged.stockFloors)
       setMaxBusy(merged.maxBusy)
       setConsumption(merged.consumption)
@@ -1199,6 +1227,7 @@ export default function ResourcePlanner() {
       maxBusy,
       cropCeilings,
       shipOnlyTo,
+      relayFor,
       stockFloors,
       consumption,
       villageRoles,
@@ -1289,6 +1318,13 @@ export default function ResourcePlanner() {
         // to before: absent means "unrestricted" and "no floor" on the backend.
         // An EMPTY ship_only_to list is sent, because it means "nobody".
         ...(shipOnlyTo[v.village_id] != null ? { ship_only_to: shipOnlyTo[v.village_id] } : {}),
+        // Profile section 5's relay tier, and the one field here whose EMPTY
+        // list is dropped rather than sent. An empty `ship_only_to` means
+        // "nobody", which is an answer; "forwards to nobody" says nothing that
+        // omitting the field does not, so the backend refuses an empty list with
+        // a 422 -- and the picker holds one for the moment between opening and
+        // the first tick, which must not 422 the plan.
+        ...(relayFor[v.village_id]?.length ? { relay_for: relayFor[v.village_id] } : {}),
         ...(stockFloors[v.village_id] != null
           ? { stock_floor_fraction: stockFloors[v.village_id] }
           : {}),
@@ -1339,6 +1375,7 @@ export default function ResourcePlanner() {
     villages,
     tradeOffice,
     shipOnlyTo,
+    relayFor,
     stockFloors,
     maxBusy,
     consumption,
@@ -1469,6 +1506,17 @@ export default function ResourcePlanner() {
   const unreachableFleets = useMemo(
     () => new Set(unreachableCaps(maxBusy, villages).map((c) => c.village_id)),
     [maxBusy, villages]
+  )
+
+  // The same four refusals the backend makes on a declared relay tier, computed
+  // live and keyed by the relay whose list has to change. Same reasoning as
+  // `unreachableFleets` above, the same shared helper, and the same reason for
+  // it: the rule is written and tested once in `plannerSetup.js`, and a 422
+  // arriving from a plan call names a village in a 26-row table with nothing on
+  // screen pointing at it.
+  const relayProblems = useMemo(
+    () => relayTierProblemsByVillage(relayFor, villages, villageRoles),
+    [relayFor, villages, villageRoles]
   )
 
   // Ascending, then descending, then the account's own order back -- the
@@ -2698,6 +2746,22 @@ export default function ResourcePlanner() {
                   {setupStillUnknown.map((v) => v.name || v.village_id).join(', ')}
                 </div>
               )}
+              {/* A relay tier that quietly lost one of the villages it was
+                  feeding is a tier the operator believes is complete, with the
+                  next plan reporting that village as unreachable and nothing
+                  connecting the two. So the pruning is named. */}
+              {(setupReport.relayTargetsDropped?.length ?? 0) > 0 && (
+                <div className="text-warning">
+                  A relay in the file forwards to village(s) this account no longer has, so
+                  they were taken off its list:{' '}
+                  {setupReport.relayTargetsDropped
+                    .map(
+                      (entry) =>
+                        `${entry.name || entry.village_id} → ${entry.dropped.join(', ')}`
+                    )
+                    .join('; ')}
+                </div>
+              )}
             </div>
           )}
 
@@ -2770,7 +2834,8 @@ export default function ResourcePlanner() {
                 Stock floor described a table that does not exist, which is
                 worse than no hint: the reader counts across to the wrong
                 column and types a figure into it. */}
-            Swipe the table sideways for Merchants, Trade Office, Crop alert, Ships only to, Stock
+            Swipe the table sideways for Merchants, Trade Office, Crop alert, Ships only to,
+            Relays for, Stock
             floor and Consumption — the village column stays pinned.
           </p>
           <div className="relative overflow-x-auto">
@@ -2855,6 +2920,12 @@ export default function ResourcePlanner() {
                     title="Where this village may send. Unrestricted by default; once restricted it ships to the ticked villages only, and a restriction with nothing ticked ships to nobody. Tributes are governed by their own exclusions."
                   >
                     Ships only to
+                  </th>
+                  <th
+                    className="text-left px-2"
+                    title="Villages this one FORWARDS the capital's lumber, clay and iron on to (profile section 5's relay tier). Not a preference: 02 may only reach its own neighbours, so without a relay the defensive villages beyond them are unreachable and the plan comes back infeasible with a shortfall each. One hop only, and a role village may not relay — a feeder, or a village with no role, may. Materials only: crop already relays through a sub-hub wherever the route search finds it worth doing. The merchants for the COLLECTING leg are billed to whoever sends it, so at 02 they count inside its Max busy."
+                  >
+                    Relays for
                   </th>
                   <th
                     className="text-right px-2"
@@ -3094,6 +3165,91 @@ export default function ResourcePlanner() {
                                 </button>
                               )}
                             </div>
+                          </details>
+                        )
+                      })()}
+                    </td>
+                    <td className="px-2">
+                      {/* Owned like Ships only to beside it, and the same picker
+                          shape -- but the OPPOSITE rule about an empty list.
+                          Nothing stored is "not a relay" and reads muted; an
+                          empty list is the picker mid-edit rather than an
+                          answer, so it says "nobody yet" and is dropped from the
+                          request. "Stop relaying" removes the row entirely.
+                          A problem shows on the cell that caused it: the backend
+                          refuses the same four things with a 422, and a 422 from
+                          a plan call names a village in a 26-row table with
+                          nothing on screen pointing at it. */}
+                      {(() => {
+                        const forwards = relayFor[v.village_id]
+                        const problems = relayProblems[v.village_id] ?? []
+                        const problemId = `relay-problem-${v.village_id}`
+                        return (
+                          <details className="text-xs">
+                            <summary
+                              className={`cursor-pointer whitespace-nowrap pointer-coarse:min-h-11 ${
+                                problems.length
+                                  ? 'text-danger'
+                                  : forwards?.length
+                                    ? 'text-primary'
+                                    : 'text-secondary'
+                              }`}
+                              aria-describedby={problems.length ? problemId : undefined}
+                            >
+                              <span className="sr-only">Relays for, for {v.name}: </span>
+                              {describeRelayFor(forwards, villages)}
+                            </summary>
+                            <div
+                              role="group"
+                              aria-label={`Villages ${v.name} forwards material to`}
+                              className="mt-1 max-h-40 overflow-y-auto"
+                            >
+                              {villages
+                                .filter((o) => o.village_id !== v.village_id)
+                                .map((o) => (
+                                  <label
+                                    key={o.village_id}
+                                    className="flex items-center gap-1 whitespace-nowrap"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={forwards?.includes(o.village_id) ?? false}
+                                      onChange={(e) =>
+                                        setRelayFor((prev) => {
+                                          const current = prev[v.village_id] ?? []
+                                          return {
+                                            ...prev,
+                                            [v.village_id]: e.target.checked
+                                              ? [...current, o.village_id]
+                                              : current.filter((id) => id !== o.village_id),
+                                          }
+                                        })
+                                      }
+                                    />
+                                    {o.name}
+                                  </label>
+                                ))}
+                              {forwards != null && (
+                                <button
+                                  type="button"
+                                  className="underline mt-1"
+                                  onClick={() =>
+                                    setRelayFor((prev) => {
+                                      const next = { ...prev }
+                                      delete next[v.village_id]
+                                      return next
+                                    })
+                                  }
+                                >
+                                  Stop relaying
+                                </button>
+                              )}
+                            </div>
+                            {problems.length > 0 && (
+                              <p id={problemId} className="text-danger mt-1 max-w-xs">
+                                {problems.join(' ')}
+                              </p>
+                            )}
                           </details>
                         )
                       })()}
