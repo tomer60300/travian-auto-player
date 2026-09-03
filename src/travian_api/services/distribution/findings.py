@@ -511,13 +511,19 @@ _SPECS: Mapping[Category, _Spec] = {
         order=2.5,
         severity=Severity.CRITICAL,
         subject="relay",
-        headline="{count} {subject} fill with {resource} before they forward any of it",
+        headline="{count} {subject} cannot hold the {resource} they are passing on",
         action=(
-            "A relay's warehouse has to hold the pass-through between collecting and "
-            "forwarding, and this one is full before its onward leg has sent anything -- so "
-            "the cargo beyond the cap is destroyed at the relay, not late. Shorten the "
-            "COLLECTING leg's cycle so each batch is smaller, raise the relay's warehouse, "
-            "or move those downstream villages to a relay that can hold them."
+            # The remediation used to open with "shorten the COLLECTING leg's cycle", which
+            # was written under the one-batch reading of the bound. On the operator's own
+            # geometry the binding term is the FORWARD cycle and the collecting leg is
+            # already at the 1h `DAILY_BEAT_CYCLES` minimum -- so the first thing offered
+            # was unactionable in exactly the case the finding exists for.
+            "A relay has to hold the collecting rate over the LONGER of its two cycles, and "
+            "this one cannot -- so the cargo beyond the cap is destroyed at the relay, not "
+            "late. Look at which cycle is the longer one on the sheet: if it is the FORWARD "
+            "leg, more merchants at the relay buy it a shorter one (a leg already at 1h "
+            "cannot be shortened further). Otherwise raise the relay's warehouse, or move "
+            "those downstream villages to a relay that has the store for them."
         ),
     ),
     Category.RELAY_BUFFER_TIGHT: _Spec(
@@ -529,8 +535,11 @@ _SPECS: Mapping[Category, _Spec] = {
         headline="{count} {subject} run out of {resource} headroom later in the day",
         action=(
             "The relay does forward before it fills, so the tier is delivering -- but its "
-            "warehouse tops out afterwards and sheds whatever lands next. Shorten the "
-            "collecting leg's cycle, or raise the relay's warehouse."
+            "warehouse tops out afterwards and sheds whatever lands next. What it has to "
+            "hold is the collecting rate over the LONGER of its two cycles, so shorten "
+            "whichever of them the sheet shows as the longer one -- more merchants at the "
+            "relay for a forward leg, more at the source for a collecting one -- or raise "
+            "the relay's warehouse."
         ),
     ),
 }
