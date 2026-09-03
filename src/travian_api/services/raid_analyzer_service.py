@@ -208,6 +208,18 @@ def extract_trap_capacity(buildings: List[Dict[str, Any]]) -> int:
     return 0
 
 
+def unsupported_defender_ids(defenders: dict[str, int]) -> list[str]:
+    """Defender unit ids with no UNIT_DEF_TABLE entry, sorted for a stable reason.
+
+    The hero is one of them: its defence depends on attributes no report
+    carries, so it has no entry either. A defender listed here cannot be
+    scored, and treating it as zero defence would read as "undefended".
+    """
+    return sorted(
+        uid for uid, count in defenders.items() if count > 0 and uid not in UNIT_DEF_TABLE
+    )
+
+
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
@@ -262,6 +274,10 @@ def calculate_score(
 
     # Quick check: single club always dies if atk < 83 and no defenders
     # (still try, the loop handles it)
+
+    # ── Refuse what cannot be scored ───────────────────────────
+    if unsupported_defender_ids(state.defenders):
+        return None
 
     # ── Defense calculation ────────────────────────────────────
     N_def = 0
@@ -701,6 +717,12 @@ def calculate_score_v2(
         return None
 
     club_atk = smithy_stat(CLUB_ATK, CLUB_UPKEEP, smithy_level)
+
+    # ── Refuse what cannot be scored ───────────────────────────
+    # An unrecognised defender adds nothing to DEF, so without this the fast
+    # path below reads its garrison as "no defenders" and predicts no losses.
+    if unsupported_defender_ids(state.defenders):
+        return None
 
     # Fast path: no defenders, no traps
     N_def = sum(v for k, v in state.defenders.items() if k != "uhero" and k in UNIT_DEF_TABLE)
@@ -1227,6 +1249,16 @@ class RaidAnalyzerService:
                     )
                 )
                 # Still score it (stale data is better than none) but flag it
+
+            # Unscorable garrison → refuse by name, and say which unit did it
+            unsupported = unsupported_defender_ids(state.defenders)
+            if unsupported:
+                warnings.append(
+                    f"({state.x}|{state.y}) {state.village_name or '?'} skipped: "
+                    f"no defence stats for unit ids {', '.join(unsupported)} "
+                    "— losses cannot be predicted."
+                )
+                continue
 
             rec = calculate_score_v2(
                 state,
