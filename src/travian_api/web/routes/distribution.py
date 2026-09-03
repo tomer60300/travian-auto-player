@@ -949,7 +949,9 @@ class PlanResponse(BaseModel):
             "Per village, per resource: own production, target, cargo, declared "
             "spend and the resulting net. The allocation grid reads the net from "
             "here rather than recomputing it, so the page and the plan cannot "
-            "disagree about what a store does."
+            "disagree about what a store does. OWN villages only -- a foreign "
+            "tribute is a sink with no store, and it appears in `shortfalls` "
+            "instead."
         ),
     )
     # Every finding as prose, in producer order. Kept because it is the contract
@@ -3260,6 +3262,15 @@ async def post_plan(
             )
             for resource, rp in sorted(plan.resource_plans.items(), key=lambda kv: kv[0].value)
             for v in rp.villages
+            # Own villages only. A route-eligible foreign target rides through
+            # the optimizer as a pseudo-village with a negative id, and it came
+            # back out of here as `own 0 / target 500 / net 500` -- a store for
+            # a sink that has none. Invisible in the grid, which indexes by real
+            # village id, but this list is documented as what one village's
+            # STORE does and P2/P6 read it server-side, where a permanent
+            # 500/h accumulation is exactly the wrong reading. The obligation
+            # is reported as a shortfall, which is about the obligation.
+            if v.village_id >= 0
         ],
         warnings=[f.message for f in findings],
         # The route count is what lets the headline stop blaming the plan for

@@ -1484,7 +1484,9 @@ class TestConsumptionProfiles:
     # The army village lands 5,000/h of lumber because it burns 5,000/h.
     BURN = 5_000.0
 
-    def _payload(self, *, consumption=None, hub_consumption=None, target=BURN, army_own=0.0):
+    def _payload(
+        self, *, consumption=None, hub_consumption=None, target=BURN, army_own=0.0, tribute=False
+    ):
         snapshot = [
             _own_village(
                 self.HUB,
@@ -1513,7 +1515,7 @@ class TestConsumptionProfiles:
             config[1]["consumption_per_hour"] = consumption
         if hub_consumption is not None:
             config[0]["consumption_per_hour"] = hub_consumption
-        return {
+        payload = {
             "snapshot": snapshot,
             "config": config,
             "allocations": {
@@ -1523,6 +1525,20 @@ class TestConsumptionProfiles:
                 }
             },
         }
+        if tribute:
+            # A route-eligible foreign target joins the optimizer as a
+            # pseudo-village with a NEGATIVE id, which is how `village_nets`
+            # came to carry a "store" for something that has none.
+            payload["foreign_targets"] = [
+                {
+                    "name": "Ally-Keep",
+                    "x": 8,
+                    "y": 0,
+                    "crop_per_hour": 500.0,
+                    "route_eligible": True,
+                }
+            ]
+        return payload
 
     def _plan(self, **kw):
         return asyncio.run(post_plan(PlanRequest.model_validate(self._payload(**kw))))
@@ -1685,11 +1701,26 @@ class TestConsumptionProfiles:
             )
 
     def test_every_planned_village_and_resource_gets_a_row(self):
-        res = self._plan()
+        """R4-P3-3. With a tribute in the account too: `village_nets` is
+        documented as what one VILLAGE'S STORE does, and a foreign target has
+        no store -- it is a sink that grows nothing and holds nothing. It
+        reached the optimizer as a pseudo-village with a negative id and came
+        back out as a row reading `own 0 / target 500 / net 500`, which a
+        server-side reader (P2's templates, P6's fill floor) would take for a
+        village accumulating 500/h forever."""
+        res = self._plan(tribute=True)
 
         assert {(n.village_id, n.resource) for n in res.village_nets} == {
             (vid, resource) for resource in Resource for vid in (self.HUB, self.ARMY)
         }
+
+    def test_the_tribute_is_still_planned_it_just_has_no_store(self):
+        """The other half, so the filter above cannot pass by dropping the
+        obligation: a shortfall is about the OBLIGATION rather than a store, and
+        that channel still names the target by its synthetic id."""
+        res = self._plan(tribute=True)
+
+        assert [(s.village_id, s.village_name) for s in res.shortfalls] == [(-1, "Ally-Keep")]
 
     def test_no_declared_spend_can_be_dropped_for_an_unreadable_rate(self):
         """R3-D8 reported that a spend on a resource with an unreadable rate is
