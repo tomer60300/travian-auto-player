@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from travian_api.services.distribution.allocation import Resource
 from travian_api.web.routes.distribution import (
@@ -186,3 +187,75 @@ class TestItRefusesRatherThanGuess:
         with pytest.raises(HTTPException) as caught:
             asyncio.run(post_night_profile(body, USER))
         assert caught.value.status_code == 400
+
+
+class TestConsumptionReachesTheFourthPlanningPath:
+    """`/night-profile` inherited `consumption_per_hour` and ignored it (R3-D2).
+
+    This is the path that SEEDS the other three. The page posts the same
+    `buildPlanPayload()` body here and writes the derived allocations straight
+    into the active profile, so a spend dropped at this endpoint is a spend
+    missing from every plan built on the night it produced -- and the operator
+    has no way to tell, because the field was accepted without complaint.
+
+    `NightVillage.production` was built from the raw snapshot rates, and the
+    unknown-village 422 that `/plan` runs never ran here at all.
+    """
+
+    def _derive_with(self, consumption, vid=ARMY):
+        return asyncio.run(
+            post_night_profile(
+                _body(
+                    config=[
+                        {"village_id": HUB, "trade_office_level": 19},
+                        {"village_id": vid, "consumption_per_hour": consumption},
+                    ]
+                ),
+                USER,
+            )
+        )
+
+    def test_a_spend_of_the_whole_material_production_moves_the_derivation(self):
+        """The reviewer's probe. 03 makes 1,750/h of clay and iron; declaring
+        that it spends all of it means it has none to keep, and a derivation
+        that still hands it 1,750 is one that never read the field."""
+        before = _derive()
+        after = self._derive_with({"lumber": 1750, "clay": 1750, "iron": 1750})
+
+        for resource in (Resource.CLAY, Resource.IRON):
+            assert before.allocations[resource][ARMY].value == pytest.approx(1750)
+            assert after.allocations[resource][ARMY].value == pytest.approx(0), (
+                f"{resource.value}: the declared spend never reached the derivation"
+            )
+
+    def test_a_partial_spend_moves_it_by_exactly_the_spend(self):
+        """Net, not floored and not doubled: 1,750 made less 700 spent is
+        1,050 to keep."""
+        after = self._derive_with({"clay": 700})
+
+        assert after.allocations[Resource.CLAY][ARMY].value == pytest.approx(1050)
+
+    def test_the_crop_derivation_is_untouched_by_a_material_spend(self):
+        """Crop cannot be declared at all (R3-D1) and the crop rate is already
+        net, so netting materials must not disturb who counts as a consumer."""
+        before = _derive()
+        after = self._derive_with({"lumber": 1750, "clay": 1750, "iron": 1750})
+
+        assert after.consumers == before.consumers == ["03"]
+        assert after.allocations[Resource.CROP] == before.allocations[Resource.CROP]
+
+    def test_a_spend_for_a_village_not_in_the_snapshot_is_refused(self):
+        """The same 422 `/plan` raises. A figure attached to an id that is not
+        being planned is a typo or a chiefed village, and either way the
+        operator's declared spend is not reaching the profile they are reading
+        -- which this endpoint answered with a cheerful 200."""
+        with pytest.raises(HTTPException) as caught:
+            self._derive_with({"lumber": 10}, vid=999)
+
+        assert caught.value.status_code == 422
+        assert "999" in str(caught.value.detail)
+
+    def test_a_crop_spend_is_refused_here_too(self):
+        """The ruling is at the schema, so it binds this request model as well."""
+        with pytest.raises(ValidationError):
+            _body(config=[{"village_id": ARMY, "consumption_per_hour": {"crop": 9000}}])

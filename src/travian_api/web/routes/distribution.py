@@ -1224,10 +1224,14 @@ _RATE_FIELD = {
 def _declared_consumption(config: Sequence[VillageConfig]) -> dict[int, dict[Resource, float]]:
     """What each village spends per hour, village-major. Operator-declared.
 
-    One reader for two shapes: the storage replays want it per village (their
-    stores are keyed that way) and the allocation layer wants it per resource
-    beside ``supplements``. Built from the same config either way, so the two
+    One reader for three callers: the storage replays want it per village
+    (their stores are keyed that way), the allocation layer wants it per
+    resource beside ``supplements``, and the night derivation nets it off
+    ``NightVillage.production``. Built from the same config every time, so they
     cannot disagree about what the operator typed.
+
+    Crop never appears here -- ``VillageConfig`` refuses it, because
+    ``crop_per_hour`` is already net of upkeep.
     """
     out: dict[int, dict[Resource, float]] = {}
     for cfg in config:
@@ -1629,6 +1633,28 @@ async def post_night_profile(
             ),
         )
 
+    # Section 2's declared spend, which this path inherited from PlanRequest and
+    # then ignored. It is the FOURTH planning path and the one that SEEDS the
+    # other three -- the page posts the same payload here and writes the derived
+    # allocations straight into the active profile -- so a spend dropped here is
+    # a spend missing from every plan built on the night it produced.
+    #
+    # Refused for a village the snapshot does not contain, word for word as
+    # `_plan_account` does it: this endpoint answered such a body with a
+    # cheerful 200 and a profile that silently ignored the figure.
+    declared_consumption = _declared_consumption(body.config)
+    unknown_consumers = sorted(set(declared_consumption) - {v.village_id for v in body.snapshot})
+    if unknown_consumers:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "consumption_per_hour names "
+                + ", ".join(f"village {vid}" for vid in unknown_consumers)
+                + ", which the snapshot does not contain. Fix the figure, or fetch "
+                "fresh state if the village was settled after the snapshot."
+            ),
+        )
+
     villages = [
         NightVillage(
             village_id=v.village_id,
@@ -1639,10 +1665,19 @@ async def post_night_profile(
             trade_office_level=trade_office.get(v.village_id, 0),
             warehouse_capacity=v.warehouse_capacity,
             granary_capacity=v.granary_capacity,
+            # Net of what the village spends, MATERIALS only. A village that
+            # burns its whole lumber production has none to keep overnight and
+            # none to shed, and a derivation reading the gross rate hands it a
+            # retention it cannot fund. Crop is never netted here because
+            # `crop_per_hour` already is (the schema refuses a crop spend), so
+            # subtracting one would double-count the same upkeep.
             production={
-                Resource.LUMBER: v.lumber_per_hour or 0.0,
-                Resource.CLAY: v.clay_per_hour or 0.0,
-                Resource.IRON: v.iron_per_hour or 0.0,
+                Resource.LUMBER: (v.lumber_per_hour or 0.0)
+                - declared_consumption.get(v.village_id, {}).get(Resource.LUMBER, 0.0),
+                Resource.CLAY: (v.clay_per_hour or 0.0)
+                - declared_consumption.get(v.village_id, {}).get(Resource.CLAY, 0.0),
+                Resource.IRON: (v.iron_per_hour or 0.0)
+                - declared_consumption.get(v.village_id, {}).get(Resource.IRON, 0.0),
                 Resource.CROP: v.crop_per_hour or 0.0,
             },
         )

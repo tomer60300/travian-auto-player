@@ -55,7 +55,15 @@ class NightVillage:
     warehouse_capacity: int
     granary_capacity: int
     production: Mapping[Resource, float]
-    """Own net production per hour. Crop may be negative for an army village."""
+    """Own net production per hour, after whatever the village SPENDS.
+
+    Crop may be negative for an army village. A material may be negative too,
+    once the operator declares a spend larger than the village makes: the
+    caller nets `consumption_per_hour` off the material rates here, because a
+    village that burns its whole lumber production has none to keep overnight
+    and none to shed. Crop is NOT netted -- the snapshot's crop rate is already
+    net of upkeep, so subtracting a spend would count the same troops twice.
+    """
 
     def capacity_for(self, resource: Resource) -> int:
         return self.granary_capacity if resource is Resource.CROP else self.warehouse_capacity

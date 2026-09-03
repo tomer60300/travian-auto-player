@@ -3012,11 +3012,15 @@ class TestTheRowBudgetCountsWhatSurvives:
 class TestConsumptionReachesTheThirdPlanningPath:
     """/execute recomputes the plan server-side, so it needs the spend too.
 
-    The three planning paths share `_plan_account`, but "shares a helper" is a
-    claim about today's code, and /execute is the one that WRITES. A declared
-    consumption that reached /plan and /day-check and not this one would mean
-    the sheet the operator approved and the routes actually created were judged
-    against different arithmetic.
+    Three of the four planning paths share `_plan_account`, but "shares a
+    helper" is a claim about today's code, and /execute is the one that WRITES.
+    A declared consumption that reached /plan and /day-check and not this one
+    would mean the sheet the operator approved and the routes actually created
+    were judged against different arithmetic.
+
+    The fourth path, /night-profile, does NOT share `_plan_account` -- which is
+    precisely how it came to ignore the field (R3-D2). It has its own test in
+    tests/test_night_profile_endpoint.py.
     """
 
     ARMY = 20011

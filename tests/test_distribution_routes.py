@@ -17,7 +17,9 @@ from travian_api.services.building_service import BuildingService
 from travian_api.services.distribution.allocation import Resource
 from travian_api.web.routes.distribution import (
     DayCheckRequest,
+    ExecuteRequest,
     ForeignTarget,
+    NightProfileRequest,
     PlanRequest,
     VillageConfig,
     get_snapshot,
@@ -1634,6 +1636,48 @@ class TestConsumptionProfiles:
             PlanRequest.model_validate(
                 self._payload(consumption={"lumber": self.BURN, "crop": 9_000})
             )
+
+    def test_the_field_binds_all_four_planning_paths(self):
+        """The standing rule, made checkable.
+
+        `consumption_per_hour` must reach `/plan`, `/day-check`, `/execute`
+        AND `/night-profile`. It became four rather than three because the
+        night endpoint inherits the field from `PlanRequest` and SEEDS the
+        other three -- the page writes its derived allocations into the active
+        profile -- yet ignored the figure entirely (R3-D2).
+
+        What this pins is the refusal every one of the four shares, so none can
+        quietly stop carrying the field again. Each path's own behaviour is
+        exercised where it lives: `/plan` and `/day-check` in this class,
+        `/execute` in TestConsumptionReachesTheThirdPlanningPath, and
+        `/night-profile` in TestConsumptionReachesTheFourthPlanningPath.
+        """
+        paths = (PlanRequest, DayCheckRequest, ExecuteRequest, NightProfileRequest)
+
+        def shaped(**kw):
+            """`/day-check` carries its allocations per segment, not at the top
+            level, so the same body has to be restated for it. Nothing about
+            the consumption field changes -- it lives on `config` either way."""
+            payload = self._payload(**kw)
+            if model is DayCheckRequest:
+                allocations = payload.pop("allocations")
+                payload |= {
+                    "prune_to_window": False,
+                    "segments": [
+                        {"name": "All day", "window": [0, 1439], "allocations": allocations}
+                    ],
+                }
+            return payload
+
+        for model in paths:
+            carried = model.model_validate(shaped(consumption={"lumber": self.BURN}))
+            spend = [c.consumption_per_hour for c in carried.config if c.consumption_per_hour]
+            assert spend == [{Resource.LUMBER: self.BURN}], (
+                f"{model.__name__} did not carry the declared spend"
+            )
+
+            with pytest.raises(ValidationError, match="already net"):
+                model.model_validate(shaped(consumption={"crop": 9_000}))
 
     def test_a_crop_spend_of_zero_is_refused_too(self):
         """Zero is a claim, not silence -- and the claim is still about a figure
