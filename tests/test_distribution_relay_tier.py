@@ -74,8 +74,29 @@ DEF_LUMBER = 8372.0
 WHITELIST = [RELAY_A, RELAY_B, DIRECT, REMAINDER]
 
 
-def _village(vid, *, lumber=0.0, merchants=20, warehouse=400_000, lumber_stock=None):
-    x, y = COORDS[vid]
+# A forward haul long enough that its cheapest cycle is LONGER than the
+# collecting leg's, which is the regime the operator's own geometry is in (02 ->
+# 18 is one field, 18 -> 11 is seventeen) and the one that makes the relay's
+# buffer bound more than a single batch.
+#
+# Ten fields from the relay at (3|0) is a 50-minute trip: a 1h cycle keeps two
+# sets in the air where a 2h cycle keeps one, and `cheapest_cycle` takes the 2h.
+# Measured, with the latency pass off (see LATENCY_OFF): collect 1h, forward 2h,
+# and the relay commits 14 of its 18 -- so the case is feasible and the buffer
+# is the only thing under test.
+FAR_DOWNSTREAM = {D1: (13, 0), D2: (3, 10)}
+
+# The latency pass spends a village's IDLE merchants on shorter cycles, and on a
+# haul this short it spends them all the way back to a 1h forward cycle -- which
+# is the right thing for the plan and would leave the case above measuring the
+# equal-cycle regime again (measured: it did, and the case's own guard caught
+# it). Switched off here so the cycles are the merchant-minimal ones, which is
+# what `max_latency_hours=None` is documented to give.
+LATENCY_OFF = {"max_latency_hours": None}
+
+
+def _village(vid, *, lumber=0.0, merchants=20, warehouse=400_000, lumber_stock=None, coords=None):
+    x, y = (coords or COORDS)[vid]
     return {
         "village_id": vid,
         "name": f"{vid:02d}",
@@ -105,6 +126,7 @@ def _payload(
     caps=None,
     warehouses=None,
     lumber_stocks=None,
+    coords=None,
     **kw,
 ):
     """02 the only wood source, and 11/17/19 out of its reach.
@@ -117,12 +139,14 @@ def _payload(
     warehouses = warehouses or {}
     lumber_stocks = lumber_stocks or {}
     village_roles = village_roles or {}
+    where = {**COORDS, **(coords or {})}
     snapshot = [
         _village(
             vid,
             lumber=40_000.0 if vid == CAPITAL else 0.0,
             warehouse=warehouses.get(vid, 400_000),
             lumber_stock=lumber_stocks.get(vid),
+            coords=where,
         )
         for vid in sorted(COORDS)
     ]
@@ -451,29 +475,32 @@ class TestTheRelaysWarehouseMustHoldThePassThrough:
     8-hour night". That reasoning assumed the relay does not forward while it
     collects, which is precisely the defect the collect-then-ship generalisation
     in ``schedule.build_beat`` fixed for materials. With the forward legs phased
-    after the collecting arrival, the measured law is different and sharper:
+    after the collecting arrival, the law is sharper:
 
-        **the relay's warehouse must hold ONE COLLECTING BATCH**, where a batch
-        is the collecting leg's rate times its cycle.
+        **the relay's warehouse must hold what lands between two FORWARD
+        sends** -- the collecting rate times the FORWARDING cycle.
 
-    Measured on this fixture (16,744/h on a 1h cycle, so a 16,744 batch): 20,000
-    holds, 12,000 does not, and 160,000 / 400,000 / 1,200,000 are nowhere near
-    it. Why capacity and not free space: the steady state settles the trough at
-    ``cap - batch`` wherever that is positive, so a relay that starts nearly
-    full sheds one batch and then never sheds another -- a real cost, and the
-    one the existing filling-store check already reports. Only ``cap < batch``
-    sheds something on EVERY send, which is the recurring defect this names.
+    Two things about that are worth stating, because the first reading of it is
+    wrong in both directions.
 
-    So 02's neighbour is fine, and what is not fine is a relay whose warehouse
-    is smaller than a single delivery -- a freshly settled feeder near the
-    capital, which is exactly the shape of village a tier gets drawn from.
+    It is not "one collecting batch". That is only the same number when the two
+    legs share a cycle, and on the operator's own geometry they do not: 02 -> 18
+    is one field and costs least on a 1h cycle, while 18 -> 11 is seventeen and
+    costs least on 2h -- so TWO batches land between forward sends and the relay
+    holds both. Measured on his fixture, the finding is silent at a 33,488
+    warehouse (16,744/h x 2h) and fires at 33,000, while one batch is 16,744.
+
+    And it is not free SPACE. The steady state settles the trough at
+    ``cap - peak`` wherever that is positive, so a relay that starts nearly full
+    sheds once and then never sheds again -- a real cost, and the one the
+    existing filling-store check already reports. Only a capacity below the peak
+    sheds something on every cycle, which is the recurring defect this names.
+
+    So 02's neighbour at 160,000 holds this tier with room to spare, and what
+    does not hold is a relay whose warehouse is smaller than the pass-through --
+    a freshly settled feeder near the capital, which is exactly the shape of
+    village a tier gets drawn from.
     """
-
-    # One collecting batch on this fixture: 18 collects for 11 and 17, so
-    # 2 x 8,372 = 16,744/h, and the cheapest cycle over a 3-field trip is 1h.
-    BATCH = 16_744
-    TOO_SMALL = {RELAY_A: 12_000}
-    JUST_HOLDS = {RELAY_A: 20_000}
 
     def _relay_buffer(self, res):
         """Every relay-buffer finding, in either severity.
@@ -488,24 +515,94 @@ class TestTheRelaysWarehouseMustHoldThePassThrough:
             if finding.category.startswith("relay_buffer")
         ]
 
-    def _collect_batch(self, res):
-        row = next(r for r in res.rows if (r.origin, r.destination) == (CAPITAL, RELAY_A))
-        return row.cargo[Resource.LUMBER]
+    def _pass_through(self, res):
+        """What lands at RELAY_A between two of its forward sends.
 
-    def test_the_batch_this_class_reasons_about_is_the_batch_the_plan_builds(self):
-        """Guard on the reasoning above, not on the code below it.
-
-        Every threshold in this class is one batch, so if the plan ever chooses
-        a different cycle for the collecting leg the other tests here stop
-        testing what they say they test -- silently, by all passing.
+        Read off the plan rather than written down, so this states the LAW and
+        not a number that happens to hold for one set of cycles. A fixture whose
+        cycles moved would otherwise leave every threshold below measuring
+        something else, and all of them would still pass.
         """
-        assert self._collect_batch(_plan(relays=TIER)) == self.BATCH
+        rows = {(r.origin, r.destination): r for r in res.rows}
+        collect = rows[(CAPITAL, RELAY_A)]
+        collect_rate = collect.cargo[Resource.LUMBER] / collect.cycle_hours
+        forward_cycle = max(
+            row.cycle_hours for (origin, _d), row in rows.items() if origin == RELAY_A
+        )
+        return collect_rate * forward_cycle
 
-    def test_it_fires_when_the_relay_cannot_hold_one_delivery(self):
-        res = _plan(relays=TIER, warehouses=self.TOO_SMALL)
+    def test_the_bound_is_the_pass_through_between_forward_sends(self):
+        """The law itself, found by sweeping and compared with the arithmetic.
+
+        This is the test that would have caught the first version of this
+        class, which asserted a one-batch bound: on a fixture with equal cycles
+        one batch IS the pass-through, so the narrower claim passed and read as
+        though it had been established.
+        """
+        reference = _plan(relays=TIER)
+        bound = self._pass_through(reference)
+
+        # Coarse either side of the bound, then the two capacities that bracket
+        # it: the claim is about where the finding APPEARS, so the pair astride
+        # it is the whole measurement and the rest is context.
+        holds = [int(bound), int(bound) + 5_000, int(bound) * 4]
+        sheds = [int(bound) - 500, int(bound) // 2, int(bound) // 4]
+        for warehouse in holds:
+            res = _plan(relays=TIER, warehouses={RELAY_A: warehouse})
+            assert self._relay_buffer(res) == [], (
+                f"{warehouse:,} holds the {bound:,.0f} pass-through and was flagged anyway"
+            )
+        for warehouse in sheds:
+            res = _plan(relays=TIER, warehouses={RELAY_A: warehouse})
+            assert self._relay_buffer(res), (
+                f"{warehouse:,} cannot hold the {bound:,.0f} pass-through and said nothing"
+            )
+
+    def test_a_slower_forward_leg_raises_the_bound_above_one_batch(self):
+        """The regime the corrected law exists for, and the one that caught it.
+
+        With the downstreams moved far enough out that their cheapest cycle is
+        2h against the collecting leg's 1h, TWO collecting batches land between
+        forward sends and the relay has to hold both. A warehouse that holds one
+        batch comfortably is then not enough -- which is exactly what the first
+        version of this class asserted was fine, and what the operator's own
+        geometry does.
+        """
+        reference = _plan(relays=TIER, coords=FAR_DOWNSTREAM, **LATENCY_OFF)
+        rows = {(r.origin, r.destination): r for r in reference.rows}
+        collect = rows[(CAPITAL, RELAY_A)]
+        forward_cycle = max(
+            row.cycle_hours for (origin, _d), row in rows.items() if origin == RELAY_A
+        )
+        assert forward_cycle > collect.cycle_hours, (
+            f"this case needs a slower forward leg to mean anything, and the plan "
+            f"gave collect {collect.cycle_hours}h / forward {forward_cycle}h"
+        )
+        one_batch = collect.cargo[Resource.LUMBER]
+        bound = self._pass_through(reference)
+        assert bound > one_batch
+
+        # A warehouse between the two: it holds a batch and not the
+        # pass-through, so it is the capacity the one-batch reading called safe.
+        between = (one_batch + int(bound)) // 2
+        flagged = _plan(
+            relays=TIER, coords=FAR_DOWNSTREAM, warehouses={RELAY_A: between}, **LATENCY_OFF
+        )
+        assert self._relay_buffer(flagged), (
+            f"{between:,} holds one {one_batch:,} batch but not the {bound:,.0f} that "
+            f"lands between forward sends, and nothing was reported"
+        )
+
+        held = _plan(
+            relays=TIER, coords=FAR_DOWNSTREAM, warehouses={RELAY_A: int(bound)}, **LATENCY_OFF
+        )
+        assert self._relay_buffer(held) == []
+
+    def test_it_fires_when_the_relay_cannot_hold_the_pass_through(self):
+        res = _plan(relays=TIER, warehouses={RELAY_A: 12_000})
 
         found = self._relay_buffer(res)
-        assert found, f"a 12,000 warehouse taking a {self.BATCH:,} batch said nothing"
+        assert found, "a 12,000 warehouse taking a 16,744 batch said nothing"
         assert [f.village for f in found] == ["18"]
         assert "12,000" in found[0].message
         assert "relay" in found[0].message.lower()
@@ -518,22 +615,10 @@ class TestTheRelaysWarehouseMustHoldThePassThrough:
         own store says anything is wrong -- which is why this is its own finding
         rather than an overflow line at village 18.
         """
-        found = self._relay_buffer(_plan(relays=TIER, warehouses=self.TOO_SMALL))
+        found = self._relay_buffer(_plan(relays=TIER, warehouses={RELAY_A: 12_000}))
 
         assert [f.severity for f in found] == ["critical"]
         assert [f.category for f in found] == [Category.RELAY_BUFFER.value]
-
-    def test_a_warehouse_that_holds_one_delivery_does_not_fire(self):
-        """The boundary, so nobody re-tunes this to fire on FREE SPACE.
-
-        20,000 against a 16,744 batch: the steady state settles at 3,256 and
-        peaks at exactly the cap, shedding nothing on any send. A check on
-        headroom would flag it, the operator would find nothing wrong there, and
-        the next real one would be ignored.
-        """
-        res = _plan(relays=TIER, warehouses=self.JUST_HOLDS)
-
-        assert self._relay_buffer(res) == []
 
     def test_the_capitals_own_warehouse_size_is_not_close_to_the_bound(self):
         res = _plan(relays=TIER, warehouses={RELAY_A: 1_200_000, RELAY_B: 1_200_000})
@@ -544,16 +629,31 @@ class TestTheRelaysWarehouseMustHoldThePassThrough:
         """The figure section 5's deferral was argued from, measured.
 
         Asserted because it is worth knowing rather than assuming: with the
-        forward legs phased after the collecting arrival, 160,000 is nearly ten
-        batches and the pass-through never troubles it.
+        forward legs phased after the collecting arrival, 160,000 is many times
+        the pass-through and never troubles it.
         """
         res = _plan(relays=TIER, warehouses={RELAY_A: 160_000})
 
         assert self._relay_buffer(res) == []
 
+    def test_a_relay_that_starts_nearly_full_is_not_this_finding(self):
+        """Free space is a transient; capacity below the peak is not.
+
+        A relay holding 94% of a warehouse that CAN take the pass-through sheds
+        one load and then settles, which the filling-store check reports. Firing
+        here as well would teach the operator to ignore the one that matters.
+        """
+        res = _plan(
+            relays=TIER,
+            warehouses={RELAY_A: 160_000},
+            lumber_stocks={RELAY_A: 150_000},
+        )
+
+        assert self._relay_buffer(res) == []
+
     def test_it_says_nothing_about_a_relay_nobody_declared(self):
         """No tier, no pass-through, no finding -- however small the warehouse."""
-        res = _plan(warehouses=self.TOO_SMALL)
+        res = _plan(warehouses={RELAY_A: 12_000})
 
         assert self._relay_buffer(res) == []
 
