@@ -644,12 +644,19 @@ async function openFarmFilters(page) {
   await page.goto('/farm')
   // The list ROW, not the loop-mode checkbox label that carries the same text.
   await page.getByRole('cell', { name: /^Rheinbund raids/ }).click()
-  // The filter bar renders only once the selected list has slots.
-  await expect(page.getByText('Max dist:')).toBeVisible()
+  // The filter bar renders only once the selected list has slots. Reached BY
+  // LABEL, and both boxes are filled the same way: `getByText` and
+  // `input[placeholder="any"]` are what this used before, and both were
+  // concessions to markup that named nothing -- the visible "Max dist:" and
+  // "Min pop:" were bare `<span>`s, so `getByLabel` resolved 0 elements and
+  // the second filter had to be picked out by ordinal among identical
+  // placeholders. Naming the inputs is WCAG 4.1.2; reaching them by that name
+  // here is what stops the concession coming back.
+  await expect(page.getByLabel('Max dist')).toBeVisible()
   // Filters the operator has actually typed. An empty number box measures as
   // wide as its own padding and would pass a collapsed column.
-  await page.locator('input[placeholder="any"]').first().fill('120')
-  await page.locator('input[placeholder="any"]').nth(1).fill('500')
+  await page.getByLabel('Max dist').fill('120')
+  await page.getByLabel('Min pop').fill('500')
 }
 
 /**
@@ -685,9 +692,13 @@ async function openScoutLoop(page) {
   await page.getByRole('button', { name: 'Scan Map' }).click()
   await expect(page.getByText('Loop mode')).toBeVisible()
   await page.getByLabel('Loop mode').check()
-  // `getByText`, not `getByLabel`: the "Interval (s):" label carries no
-  // `htmlFor` and does not wrap its input, so it names nothing.
-  await expect(page.getByText('Interval (s):')).toBeVisible()
+  // BY LABEL. This used `getByText`, because the "Interval (s):" and
+  // "Duration (min):" `<label>`s carry no `htmlFor` and do not wrap their
+  // input, so they named nothing and `getByLabel` resolved 0 elements. The
+  // inputs carry `aria-label` now (WCAG 4.1.2) and this asks for them that
+  // way, so the concession cannot quietly return.
+  await expect(page.getByLabel('Interval (s)')).toBeVisible()
+  await expect(page.getByLabel('Duration (min)')).toBeVisible()
 }
 
 const SURFACES = [

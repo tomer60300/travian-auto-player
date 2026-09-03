@@ -904,11 +904,17 @@ export default function FarmLists() {
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className="text-secondary">Max dist:</span>
-                  <input className="input-field text-xs py-0.5 px-1.5 w-20" type="number" placeholder="any" value={filterMaxDist} onChange={(e) => setFilterMaxDist(e.target.value)} />
+                  {/* The visible text is a `<span>`, so it names nothing: no
+                      `htmlFor`, no wrapping `<label>`. WCAG 4.1.2 -- and the
+                      accessible name repeats the visible one rather than
+                      spelling it out ("Maximum distance"), because 2.5.3
+                      Label in Name wants the on-screen text inside the
+                      accessible name. */}
+                  <input className="input-field text-xs py-0.5 px-1.5 w-20" type="number" aria-label="Max dist" placeholder="any" value={filterMaxDist} onChange={(e) => setFilterMaxDist(e.target.value)} />
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className="text-secondary">Min pop:</span>
-                  <input className="input-field text-xs py-0.5 px-1.5 w-20" type="number" placeholder="any" value={filterMinPop} onChange={(e) => setFilterMinPop(e.target.value)} />
+                  <input className="input-field text-xs py-0.5 px-1.5 w-20" type="number" aria-label="Min pop" placeholder="any" value={filterMinPop} onChange={(e) => setFilterMinPop(e.target.value)} />
                 </div>
                 <label className="flex items-center gap-1 cursor-pointer text-secondary select-none">
                   <input type="checkbox" className="checkbox-gold" checked={filterFullBooty} onChange={(e) => setFilterFullBooty(e.target.checked)} />

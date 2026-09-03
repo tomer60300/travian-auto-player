@@ -1641,12 +1641,17 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
         {loopEnabled && (
           <div className="flex items-center gap-4 flex-wrap mt-3">
             <div className="flex items-center gap-2">
+              {/* These two `<label>`s carry no `htmlFor` and do not wrap
+                  their input, so they named nothing: WCAG 4.1.2. The
+                  accessible name repeats the visible text rather than
+                  expanding it, because 2.5.3 Label in Name wants the
+                  on-screen words inside the accessible name. */}
               <label className="text-xs text-secondary">Interval (s):</label>
-              <input type="number" className="input-field text-xs py-1 px-2 w-20" min={30} max={3600} value={loopInterval} onChange={(e) => setLoopInterval(Number(e.target.value) || 300)} disabled={running} />
+              <input type="number" aria-label="Interval (s)" className="input-field text-xs py-1 px-2 w-20" min={30} max={3600} value={loopInterval} onChange={(e) => setLoopInterval(Number(e.target.value) || 300)} disabled={running} />
             </div>
             <div className="flex items-center gap-2">
               <label className="text-xs text-secondary">Duration (min):</label>
-              <input type="number" className="input-field text-xs py-1 px-2 w-20" min={0} max={1440} value={loopDuration} onChange={(e) => setLoopDuration(Number(e.target.value) || 0)} disabled={running} />
+              <input type="number" aria-label="Duration (min)" className="input-field text-xs py-1 px-2 w-20" min={0} max={1440} value={loopDuration} onChange={(e) => setLoopDuration(Number(e.target.value) || 0)} disabled={running} />
               <span className="text-xs text-secondary opacity-70">0 = infinite</span>
             </div>
           </div>
