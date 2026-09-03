@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import PlanDiagnostics from '../components/PlanDiagnostics'
+import RoleTemplates from '../components/RoleTemplates'
 import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
 import useLogStore from '../stores/logStore'
@@ -7,6 +8,7 @@ import api from '../api'
 import {
   CONSUMABLE_RESOURCES,
   SetupFileError,
+  VILLAGE_ROLES,
   buildSetup,
   declaresConsumption,
   isConsumptionRate,
@@ -14,6 +16,9 @@ import {
   materialSpendOnly,
   mergeSetup,
   parseSetup,
+  resolveRoleAllocation,
+  resolveRoleSpend,
+  roleDeviates,
   setupFilename,
   setupMatchesAccount,
 } from '../utils/plannerSetup'
@@ -29,6 +34,12 @@ import {
   summariseSnapshot,
 } from '../utils/snapshotSummary'
 import { copyToClipboard } from '../utils/clipboard'
+import {
+  MODES,
+  RESOURCES,
+  RESOURCE_LABEL,
+  ROLE_LABEL,
+} from '../constants/planner'
 
 // Owned state the game will not tell us, kept per village. Trade Office level
 // changes only when the operator builds one, so it is stored rather than fetched.
@@ -120,6 +131,8 @@ const LS_CROP_CEILING = 'planner_crop_ceiling'
 const LS_SHIP_ONLY_TO = 'planner_ship_only_to'
 const LS_STOCK_FLOOR = 'planner_stock_floor'
 const LS_CONSUMPTION = 'planner_consumption'
+const LS_VILLAGE_ROLES = 'planner_village_roles'
+const LS_ROLE_TEMPLATES = 'planner_role_templates'
 // Sensible defaults by convention; anything else starts unset until the
 // operator gives it hours.
 const DEFAULT_WINDOWS = { Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] }
@@ -175,8 +188,6 @@ const describeShipOnlyTo = (allowed, villages) => {
 // Trade Office building id, as the game reports it in a village's slot list.
 const TRADE_OFFICE_GID = 28
 
-const RESOURCES = ['lumber', 'clay', 'iron', 'crop']
-const RESOURCE_LABEL = { lumber: 'Lumber', clay: 'Clay', iron: 'Iron', crop: 'Crop' }
 
 // Minimal inline glyphs in the game's resource order, so cargo reads the way
 // the marketplace shows it. Drawn here rather than shipped as assets: no
@@ -216,13 +227,6 @@ function ResourceIcon({ resource }) {
     </svg>
   )
 }
-const MODES = [
-  { value: 'keep', label: 'Keep own' },
-  { value: 'absolute', label: 'Absolute /h' },
-  { value: 'percentage', label: '% of total' },
-  { value: 'sustain', label: 'Sustain +%' },
-]
-
 function loadJson(key, fallback) {
   try {
     return JSON.parse(localStorage.getItem(key)) ?? fallback
@@ -513,6 +517,17 @@ export default function ResourcePlanner() {
   // which is how an army village came to be reported as losing target x 24 a
   // day at a cap it never reaches.
   const [consumption, setConsumption] = useState({})
+  // Which of profile section 1's five kinds each village is: { [village_id]:
+  // role }. Owned, like the Trade Office level and for the same reason --
+  // nothing in the game says a village is the Hammer -- and it decides three
+  // things the page cannot: which template supplies the village's targets and
+  // spend, whether the optimizer may relay through it, and how loud a designed
+  // crop deficit is reported.
+  const [villageRoles, setVillageRoles] = useState({})
+  // One profile per role: { [role]: { allocations, consumption, may_relay,
+  // crop_negative_by_design } }. Section 2.1 gives ONE profile for FOUR
+  // defensive villages, so this is where those four numbers are typed -- once.
+  const [roleTemplates, setRoleTemplates] = useState({})
   // Result of the last setup-file load, kept on screen rather than only in a
   // toast: a file that is missing villages produces a quietly wrong plan, so
   // what it did and did not cover has to stay readable.
@@ -662,6 +677,8 @@ export default function ResourcePlanner() {
       setTradeOffice({})
       setShipOnlyTo({})
       setStockFloors({})
+      setVillageRoles({})
+      setRoleTemplates({})
       setProfiles({ [DEFAULT_PROFILE]: {} })
       setForeignTargets([])
       setActiveProfile(DEFAULT_PROFILE)
@@ -686,6 +703,24 @@ export default function ResourcePlanner() {
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
     setStockFloors(loadJson(`${LS_STOCK_FLOOR}::${accountKey}`, {}))
+    // A role outside the five is dropped on the way in, the same way a stored
+    // crop spend is: the backend answers an unknown role with a 422, so a
+    // stale one from a future build would 422 every plan over a value the
+    // selector cannot show.
+    setVillageRoles(
+      Object.fromEntries(
+        Object.entries(loadJson(`${LS_VILLAGE_ROLES}::${accountKey}`, {})).filter(([, role]) =>
+          VILLAGE_ROLES.includes(role)
+        )
+      )
+    )
+    setRoleTemplates(
+      Object.fromEntries(
+        Object.entries(loadJson(`${LS_ROLE_TEMPLATES}::${accountKey}`, {})).filter(([role]) =>
+          VILLAGE_ROLES.includes(role)
+        )
+      )
+    )
     // Crop is dropped on the way in. An earlier build let one be typed, and
     // the input no longer shows a crop box -- so a stored crop figure could be
     // neither seen nor cleared while still riding along on every request and
@@ -743,6 +778,8 @@ export default function ResourcePlanner() {
     shipOnlyTo,
     stockFloors,
     consumption,
+    villageRoles,
+    roleTemplates,
     merchantModel,
   ])
   // Same rule for the route sheet, with higher stakes: its rows are copied
@@ -778,6 +815,8 @@ export default function ResourcePlanner() {
     shipOnlyTo,
     stockFloors,
     consumption,
+    villageRoles,
+    roleTemplates,
     merchantModel,
     foreignTargets,
     snapshot,
@@ -798,6 +837,14 @@ export default function ResourcePlanner() {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_CONSUMPTION), consumption)
   }, [consumption, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_VILLAGE_ROLES), villageRoles)
+  }, [villageRoles, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_ROLE_TEMPLATES), roleTemplates)
+  }, [roleTemplates, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_PROFILES), profiles)
   }, [profiles, hydratedKey, accountKey, storageKey])
@@ -933,10 +980,12 @@ export default function ResourcePlanner() {
         cropCeilings[v.village_id] != null ||
         shipOnlyTo[v.village_id] != null ||
         stockFloors[v.village_id] != null ||
+        villageRoles[v.village_id] != null ||
         declaresConsumption(consumption[v.village_id])
     ).length
     const named = Object.entries(profiles).filter(([, a]) => Object.keys(a ?? {}).length)
-    if (!typed && !named.length) {
+    const templated = Object.keys(roleTemplates).length
+    if (!typed && !named.length && !templated) {
       toast.error('Nothing typed yet — fill in a Trade Office level, crop alert or allocation first')
       return
     }
@@ -951,6 +1000,8 @@ export default function ResourcePlanner() {
         shipOnlyTo,
         stockFloors,
         consumption,
+        villageRoles,
+        roles: roleTemplates,
         profiles,
         profileWindows,
         merchantModel,
@@ -961,6 +1012,7 @@ export default function ResourcePlanner() {
     const parts = []
     if (typed) parts.push(`${typed} village(s)`)
     if (named.length) parts.push(`${named.length} profile(s)`)
+    if (templated) parts.push(`${templated} role template(s)`)
     toast.success(`Saved ${parts.join(' and ')} — keep the file, load it after a rebuild`)
   }, [
     villages,
@@ -969,6 +1021,8 @@ export default function ResourcePlanner() {
     shipOnlyTo,
     stockFloors,
     consumption,
+    villageRoles,
+    roleTemplates,
     profiles,
     profileWindows,
     merchantModel,
@@ -1011,6 +1065,8 @@ export default function ResourcePlanner() {
         shipOnlyTo,
         stockFloors,
         consumption,
+        villageRoles,
+        roles: roleTemplates,
         profiles,
         profileWindows,
         foreignTargets,
@@ -1021,6 +1077,8 @@ export default function ResourcePlanner() {
       setShipOnlyTo(merged.shipOnlyTo)
       setStockFloors(merged.stockFloors)
       setConsumption(merged.consumption)
+      setVillageRoles(merged.villageRoles)
+      setRoleTemplates(merged.roles)
       setProfiles(merged.profiles)
       setProfileWindows(merged.profileWindows)
       // Capacity is server-calibrated, so a file that carries a calibration is
@@ -1041,6 +1099,9 @@ export default function ResourcePlanner() {
       if (merged.report.profilesLoaded.length) {
         parts.push(`profile(s) ${merged.report.profilesLoaded.join(', ')}`)
       }
+      if (merged.report.rolesLoaded.length) {
+        parts.push(`role(s) ${merged.report.rolesLoaded.join(', ')}`)
+      }
       toast.success(`Loaded ${parts.join(' and ') || 'nothing'} from the setup file`)
     },
     [
@@ -1050,6 +1111,8 @@ export default function ResourcePlanner() {
       shipOnlyTo,
       stockFloors,
       consumption,
+      villageRoles,
+      roleTemplates,
       profiles,
       profileWindows,
       foreignTargets,
@@ -1082,11 +1145,36 @@ export default function ResourcePlanner() {
     for (const [resource, per] of Object.entries(allocations)) {
       const usable = {}
       for (const [vid, a] of Object.entries(per)) {
-        if (a.mode === 'keep') continue
+        // A keep is silence for an ordinary village -- the backend resolves an
+        // absent entry to exactly the same thing -- but on a village with a
+        // ROLE it is a statement: the alternative to the template is not
+        // "nothing", it is "hold your own production". Dropped here, the
+        // template would fill straight back in and the grid would show Keep own
+        // while the plan shipped the profile.
+        if (a.mode === 'keep' && villageRoles[Number(vid)] == null) continue
         if (!villages.some((x) => x.village_id === Number(vid))) continue
         usable[vid] = a
       }
       if (Object.keys(usable).length) sendAllocations[resource] = usable
+    }
+    // Every claimed role's template, with its crop spend dropped: the backend
+    // refuses one (the snapshot's crop rate is already net of upkeep) and a
+    // template stored by an older build could still carry one, which would 422
+    // every plan over a figure the editor no longer shows. The four halves are
+    // spelled out rather than spread, so a template that was only half typed
+    // still reaches the backend as a complete one.
+    const claimed = new Set(
+      villages.map((v) => villageRoles[v.village_id]).filter((role) => role != null)
+    )
+    const sendRoles = {}
+    for (const role of claimed) {
+      const template = roleTemplates[role] ?? {}
+      sendRoles[role] = {
+        allocations: template.allocations ?? {},
+        consumption: materialSpendOnly(template.consumption) ?? {},
+        may_relay: template.may_relay ?? null,
+        crop_negative_by_design: Boolean(template.crop_negative_by_design),
+      }
     }
     // The active profile's own hours. Without them the optimizer phases each
     // route's send time anywhere in its cycle, so a profile that runs only part
@@ -1124,6 +1212,10 @@ export default function ResourcePlanner() {
       config: villages.map((v) => ({
         village_id: v.village_id,
         trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
+        // Omitted when unset, so an undeclared village's row is byte-identical
+        // to before. A role sent WITHOUT its template is a 422, which is why
+        // `sendRoles` above carries every role some village claims.
+        ...(villageRoles[v.village_id] != null ? { role: villageRoles[v.village_id] } : {}),
         // Both omitted when unset, so an ordinary village's row is byte-identical
         // to before: absent means "unrestricted" and "no floor" on the backend.
         // An EMPTY ship_only_to list is sent, because it means "nobody".
@@ -1140,6 +1232,10 @@ export default function ResourcePlanner() {
           : {}),
       })),
       allocations: sendAllocations,
+      // Only the roles some village actually claims. A template nobody claims
+      // is harmless on the backend, but sending it would put a half-typed
+      // profile into every request made while one is being filled in.
+      ...(Object.keys(sendRoles).length ? { roles: sendRoles } : {}),
       foreign_targets: usableForeignTargets(foreignTargets, villages),
       // Geometry defaults to the snapshot (map span + tribe-derived x1 merchant
       // speed) but the operator can override both for non-Europe 2 worlds.
@@ -1159,6 +1255,8 @@ export default function ResourcePlanner() {
     shipOnlyTo,
     stockFloors,
     consumption,
+    villageRoles,
+    roleTemplates,
     allocations,
     foreignTargets,
     merchantModel,
@@ -1238,14 +1336,16 @@ export default function ResourcePlanner() {
       for (const resource of RESOURCES) {
         const usable = {}
         for (const [vid, a] of Object.entries(per[resource] ?? {})) {
-          if (a.mode !== 'keep') usable[vid] = a
+          // Same rule as buildPlanPayload: a keep is silence unless the village
+          // has a role, where it is the one way to say "not the template".
+          if (a.mode !== 'keep' || villageRoles[Number(vid)] != null) usable[vid] = a
         }
         if (Object.keys(usable).length) sendAllocations[resource] = usable
       }
       segments.push({ name, window: [start, end], allocations: sendAllocations })
     }
     return { segments, skipped }
-  }, [profiles, profileWindows])
+  }, [profiles, profileWindows, villageRoles])
 
   // Reads the local trace files the app wrote on previous live runs. Costs
   // nothing against the game, so it is safe to call whenever the operator opens
@@ -1706,11 +1806,97 @@ export default function ResourcePlanner() {
     })
   }
 
+
+  // ── Role templates: one profile per role, edited in one place ────────
+  // Every setter writes through the role KEY, so the key exists the moment the
+  // operator gives a role any figure at all -- which is what the village row's
+  // "no template yet" warning and the payload's `roles` map both read. A
+  // half-typed template is still a template; an absent one is a village with a
+  // role the backend will refuse, and that refusal is the point.
+  const setTemplateAllocation = (role, resource, patch) => {
+    setRoleTemplates((prev) => {
+      const template = prev[role] ?? {}
+      const allocations = { ...(template.allocations ?? {}) }
+      const next = { ...(allocations[resource] ?? { mode: 'keep', value: 0 }), ...patch }
+      // Keep is the absence of a target, not a target of its own: a resource
+      // the template says "keep" about has to fall through to whatever the
+      // village itself says, which is exactly what an absent entry does.
+      if (next.mode === 'keep') delete allocations[resource]
+      else allocations[resource] = next
+      return { ...prev, [role]: { ...template, allocations } }
+    })
+  }
+
+  const setTemplateSpend = (role, resource, raw) => {
+    setRoleTemplates((prev) => {
+      const template = prev[role] ?? {}
+      const spend = { ...(template.consumption ?? {}) }
+      if (raw === '') delete spend[resource]
+      else spend[resource] = Number(raw)
+      return { ...prev, [role]: { ...template, consumption: spend } }
+    })
+  }
+
+  const patchTemplate = (role, patch) => {
+    setRoleTemplates((prev) => ({ ...prev, [role]: { ...(prev[role] ?? {}), ...patch } }))
+  }
+
+  const clearTemplate = (role) => {
+    setRoleTemplates((prev) => {
+      const next = { ...prev }
+      delete next[role]
+      return next
+    })
+  }
+
+  // How many villages each role is standing in for. The whole claim of a
+  // template is "one profile, four villages", so the count is the number that
+  // says whether it is doing that -- and a template nothing claims is dead
+  // weight the operator should be able to see.
+  const villagesInRole = (role) =>
+    villages.filter((v) => villageRoles[v.village_id] === role).length
+
+  // Handed to the panel as data rather than as a callback, so the panel stays a
+  // pure function of its props and a test can render it with no page around it.
+  const roleCounts = Object.fromEntries(VILLAGE_ROLES.map((role) => [role, villagesInRole(role)]))
+
+  // Roles some village claims and nobody has given a profile to. The backend
+  // refuses exactly these, so naming them here is the difference between a
+  // 422 the operator can act on and one they have to decode.
+  const rolesMissingTemplates = VILLAGE_ROLES.filter(
+    (role) => villagesInRole(role) > 0 && roleTemplates[role] == null
+  )
+
+  // The allocation the plan will ACTUALLY use for one cell: the village's own
+  // where it has one, otherwise its role's template, otherwise keep. The same
+  // merge the backend does, per resource, and the page has to do it too --
+  // without this the grid shows a defensive village as "Keep own" while the
+  // plan ships it 8,372/h, and the unassigned meter counts its own 1,500
+  // instead of the profile's figure, so the Rest village's displayed target is
+  // wrong by the difference. One resolver, so the numbers on screen and the
+  // numbers in the plan cannot come from two different rules.
+  const effectiveAllocation = (resource, villageId) =>
+    resolveRoleAllocation(
+      roleTemplates[villageRoles[villageId]],
+      resource,
+      allocations[resource]?.[villageId]
+    )
+
+  // And the spend, on the same rule: a village's own figure per resource, else
+  // its role's. Only for the LIVE preview before a plan exists -- once there is
+  // one, the grid reads the spend off the plan's own `village_nets`.
+  const effectiveSpend = (resource, villageId) =>
+    resolveRoleSpend(
+      roleTemplates[villageRoles[villageId]],
+      resource,
+      consumption[villageId]?.[resource]
+    )
+
   // What a village ends up retaining per hour after the plan runs -- the same
   // resolution the backend applies, so the grid never disagrees with the plan.
   const targetFor = (resource, v) => {
     const own = v[`${resource}_per_hour`]
-    const a = allocations[resource]?.[v.village_id] ?? { mode: 'keep', value: 0 }
+    const a = effectiveAllocation(resource, v.village_id)
     // Unreadable rate: the backend drops this village's allocation entirely
     // (with a warning) rather than plan blind, so showing any target here --
     // even an absolute one -- would promise something the plan will not do.
@@ -1776,14 +1962,14 @@ export default function ResourcePlanner() {
   }
 
   const explicitTotal = (resource) => {
-    const per = allocations[resource] ?? {}
     const { total } = totals[resource]
     let assigned = 0
     for (const v of villages) {
-      // A village with no entry keeps its own production — the same default the
-      // backend resolves — so an untouched account shows 0 unassigned, not the
-      // whole account total.
-      const a = per[v.village_id] ?? { mode: 'keep', value: 0 }
+      // A village with no entry of its own takes its ROLE's figure, and only
+      // then keeps its own production — the same order the backend resolves in,
+      // so an untouched account shows 0 unassigned rather than the whole
+      // account total, and a templated one shows what its profiles claim.
+      const a = effectiveAllocation(resource, v.village_id)
       if (a.mode === 'remainder') continue
       const own = v[`${resource}_per_hour`]
       // A village whose rate could not be read has its allocation DROPPED by
@@ -2479,6 +2665,12 @@ export default function ResourcePlanner() {
                       onSort={toggleSort}
                     />
                   </th>
+                  <th
+                    className="text-left px-2"
+                    title="What this village is FOR (profile section 1). Its role's template supplies every target and spend the village does not state itself, decides whether the planner may relay through it, and whether a crop deficit here reads as designed rather than as an emergency. Nothing in the game says a village is the Hammer, so this is typed once. Give the role a template in Role templates, under Allocate."
+                  >
+                    Role
+                  </th>
                   <th className="text-right px-2">Trade Office</th>
                   <th
                     className="text-right px-2"
@@ -2526,6 +2718,54 @@ export default function ResourcePlanner() {
                     </td>
                     <td className="text-right px-2 font-mono">
                       {v.merchants_free}/{v.merchants_total}
+                    </td>
+                    <td className="px-2">
+                      {/* Owned, like the Trade Office level. Section 1 assigns a
+                          role to every village, and the role is what makes one
+                          profile serve four defensive villages -- so this is the
+                          field that removes the typing, not decoration. */}
+                      {(() => {
+                        const role = villageRoles[v.village_id]
+                        const missing = role != null && roleTemplates[role] == null
+                        const problemId = `role-problem-${v.village_id}`
+                        return (
+                          <>
+                            <select
+                              aria-label={`Role for ${v.name}`}
+                              aria-invalid={missing || undefined}
+                              aria-describedby={missing ? problemId : undefined}
+                              className="input-field text-xs py-1"
+                              value={role ?? ''}
+                              onChange={(e) =>
+                                setVillageRoles((prev) => {
+                                  const next = { ...prev }
+                                  if (e.target.value === '') delete next[v.village_id]
+                                  else next[v.village_id] = e.target.value
+                                  return next
+                                })
+                              }
+                            >
+                              <option value="">none</option>
+                              {VILLAGE_ROLES.map((name) => (
+                                <option key={name} value={name}>
+                                  {ROLE_LABEL[name]}
+                                </option>
+                              ))}
+                            </select>
+                            {/* Named, not just coloured, and named HERE: the
+                                backend refuses a role whose template was never
+                                sent, because planning without it would read this
+                                village as keeping its own production -- a tenth
+                                of what a defensive village needs -- and call the
+                                plan feasible. */}
+                            {missing && (
+                              <span id={problemId} className="block text-warning text-xs mt-0.5">
+                                no {ROLE_LABEL[role]} template yet
+                              </span>
+                            )}
+                          </>
+                        )
+                      })()}
                     </td>
                     <td className="text-right px-2">
                       {/* Owned, not fetched — editable, and blank means "unknown",
@@ -3270,6 +3510,20 @@ export default function ResourcePlanner() {
             )}
           </div>
 
+
+          {/* One profile per kind of village. Its own component so a render
+              test can reach it: the stage it sits in needs a snapshot, and
+              renderToString runs no effects, so it never has one. */}
+          <RoleTemplates
+            templates={roleTemplates}
+            roleCounts={roleCounts}
+            missingTemplates={rolesMissingTemplates}
+            onAllocation={setTemplateAllocation}
+            onSpend={setTemplateSpend}
+            onPatch={patchTemplate}
+            onClear={clearTemplate}
+          />
+
           {allocView === 'village' && (
             <div className="card p-4 overflow-x-auto">
               <table className="w-full text-xs">
@@ -3319,7 +3573,7 @@ export default function ResourcePlanner() {
                         // fallback for a missing field -- every input change
                         // clears the plan, so a plan on screen matches these
                         // inputs exactly.
-                        const declared = consumption[v.village_id]?.[resource]
+                        const declared = effectiveSpend(resource, v.village_id)
                         const planned = planNet[resource]?.[v.village_id]
                         let spent = null
                         let net = null
@@ -3653,7 +3907,28 @@ export default function ResourcePlanner() {
                     <tbody>
                       {villages.map((v) => {
                         const own = v[`${resource}_per_hour`]
-                        const a = allocations[resource]?.[v.village_id] ?? { mode: 'keep', value: 0 }
+                        // Does this cell disagree with the village's role?
+                        // Overriding a template is legitimate -- one of four
+                        // defensive villages always has a wall going up -- but
+                        // it must not be invisible: the operator reads the
+                        // role's profile, the plan ships something else, and
+                        // nothing says which cell. The predicate is the shared
+                        // one, so the mark cannot land on a cell the backend
+                        // did not report as a deviation.
+                        const role = villageRoles[v.village_id]
+                        const fromRole = roleTemplates[role]?.allocations?.[resource]
+                        // What the row EDITS is the resolved figure, so a
+                        // templated village shows its profile rather than the
+                        // "Keep own" default it has no entry for. Typing over
+                        // it writes the village's own entry, which is what
+                        // makes the next line a deviation.
+                        const deviates = roleDeviates(
+                          roleTemplates[role],
+                          resource,
+                          allocations[resource]?.[v.village_id]
+                        )
+                        const deviationId = `deviates-${resource}-${v.village_id}`
+                        const a = effectiveAllocation(resource, v.village_id)
                         let target = own ?? 0
                         if (a.mode === 'absolute') target = Number(a.value) || 0
                         else if (a.mode === 'percentage')
@@ -3704,7 +3979,10 @@ export default function ResourcePlanner() {
                               <input
                                 type="number"
                                 aria-label={`${RESOURCE_LABEL[resource]} value for ${v.name}`}
-                                className="input-field w-24 text-right text-xs py-0.5"
+                                aria-describedby={deviates ? deviationId : undefined}
+                                className={`input-field w-24 text-right text-xs py-0.5 ${
+                                  deviates ? 'border-info' : ''
+                                }`}
                                 disabled={a.mode === 'keep' || a.mode === 'remainder'}
                                 value={a.value ?? 0}
                                 onChange={(e) =>
@@ -3713,6 +3991,23 @@ export default function ResourcePlanner() {
                                   })
                                 }
                               />
+                              {/* Said in words and with the profile's own
+                                  figure, never by the border alone: a coloured
+                                  edge cannot tell the operator WHAT the role
+                                  asked for, which is the only thing that makes
+                                  the mark worth acting on. */}
+                              {deviates && (
+                                <span
+                                  id={deviationId}
+                                  className="block text-info text-[11px] mt-0.5 whitespace-nowrap"
+                                >
+                                  {'\u2260 '}
+                                  {ROLE_LABEL[role]}:{' '}
+                                  {MODES.find((m) => m.value === fromRole.mode)?.label ??
+                                    fromRole.mode}{' '}
+                                  {fmt(fromRole.value)}
+                                </span>
+                              )}
                             </td>
                             {/* Ship is the primary number: the cargo is the GAP,
                                 not the target. Profile known issue #1. */}

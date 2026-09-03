@@ -3,6 +3,7 @@ import {
   SETUP_FORMAT,
   SETUP_VERSION,
   SetupFileError,
+  KEEP_ALLOCATION,
   buildSetup,
   declaresConsumption,
   isConsumptionRate,
@@ -10,6 +11,8 @@ import {
   materialSpendOnly,
   mergeSetup,
   parseSetup,
+  resolveRoleAllocation,
+  resolveRoleSpend,
   roleDeviates,
   setupFilename,
   setupMatchesAccount,
@@ -1318,5 +1321,66 @@ describe('roleDeviates', () => {
 
   it('is false with no template at all, which is a village with no role', () => {
     expect(roleDeviates(undefined, 'lumber', { mode: 'absolute', value: 1 })).toBe(false)
+  })
+})
+
+describe('resolveRoleAllocation and resolveRoleSpend', () => {
+  // The page has to resolve the templates itself, because the operator edits
+  // before any plan exists. Two implementations of one merge rule drift, so the
+  // rule lives here, beside `roleDeviates` which asks the other half of the
+  // same question, and the component is a thin wrapper over both. What this
+  // pins is the ORDER -- village, then role, then keep -- because getting it
+  // wrong is not a visible bug: the grid would show a defensive village as
+  // "Keep own" while the plan shipped it 8,372/h, and the unassigned meter
+  // would count its own 1,500 instead, so the Rest village's displayed target
+  // would be wrong by the difference.
+  const TEMPLATE = {
+    allocations: { lumber: { mode: 'absolute', value: 8372 } },
+    consumption: { lumber: 8372, clay: 5168 },
+  }
+
+  it('takes the village own entry first', () => {
+    expect(
+      resolveRoleAllocation(TEMPLATE, 'lumber', { mode: 'percentage', value: 10 })
+    ).toEqual({ mode: 'percentage', value: 10 })
+  })
+
+  it('falls through to the role template', () => {
+    expect(resolveRoleAllocation(TEMPLATE, 'lumber', undefined)).toEqual({
+      mode: 'absolute',
+      value: 8372,
+    })
+  })
+
+  it('falls through per resource, not per village', () => {
+    // Overriding lumber must not revert clay: the whole reason the merge is per
+    // resource is that one of four defensive villages always has a wall going
+    // up and wants ONE figure changed.
+    expect(resolveRoleAllocation(TEMPLATE, 'clay', undefined)).toEqual(KEEP_ALLOCATION)
+  })
+
+  it('is keep when there is no role and no entry', () => {
+    expect(resolveRoleAllocation(undefined, 'lumber', undefined)).toEqual(KEEP_ALLOCATION)
+    expect(KEEP_ALLOCATION).toEqual({ mode: 'keep', value: 0 })
+  })
+
+  it('keeps an explicit keep, which a role makes meaningful', () => {
+    // With a role the alternative to the template is not "nothing", it is
+    // "hold your own production" -- so the entry has to survive resolution,
+    // and `roleDeviates` reports it.
+    const kept = resolveRoleAllocation(TEMPLATE, 'lumber', { mode: 'keep', value: 0 })
+    expect(kept).toEqual({ mode: 'keep', value: 0 })
+    expect(roleDeviates(TEMPLATE, 'lumber', kept)).toBe(true)
+  })
+
+  it('resolves a spend the same way', () => {
+    expect(resolveRoleSpend(TEMPLATE, 'lumber', 9500)).toBe(9500)
+    expect(resolveRoleSpend(TEMPLATE, 'clay', undefined)).toBe(5168)
+    expect(resolveRoleSpend(TEMPLATE, 'iron', undefined)).toBeUndefined()
+    expect(resolveRoleSpend(undefined, 'lumber', undefined)).toBeUndefined()
+  })
+
+  it('keeps a declared spend of zero, which is a claim and not silence', () => {
+    expect(resolveRoleSpend(TEMPLATE, 'lumber', 0)).toBe(0)
   })
 })

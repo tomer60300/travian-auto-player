@@ -282,6 +282,30 @@ class TestAnExplicitEntryOverridesTheTemplate:
         assert only.template_allocation.value == pytest.approx(PROFILE_DEF["lumber"])
         assert only.village_allocation.value == pytest.approx(12_000.0)
 
+    def test_an_explicit_keep_overrides_the_template_and_is_reported(self):
+        """KEEP is a statement, not an absence, and the page depends on it.
+
+        Elsewhere in this module an explicit KEEP means exactly what an absent
+        entry means, and the route layer drops it for that reason. A role
+        changes that: the alternative to the template is not "nothing", it is
+        "hold your own production" -- so a village whose operator picked Keep
+        own must keep its own, and the deviation has to be reported or the grid
+        shows Keep own while the plan ships the profile.
+        """
+        allocations = _allocations()
+        allocations["lumber"][str(self.ODD_ONE)] = {"mode": "keep", "value": 0}
+
+        res = _plan(roles={"def": _def_template()}, allocations=allocations)
+
+        assert _target(res, self.ODD_ONE, Resource.LUMBER) == pytest.approx(1500.0), (
+            "the template filled in over an explicit keep"
+        )
+        assert [(d.resource, d.village_id) for d in res.role_deviations] == [
+            (Resource.LUMBER, self.ODD_ONE)
+        ]
+        for vid in DEF[1:]:
+            assert _target(res, vid, Resource.LUMBER) == pytest.approx(PROFILE_DEF["lumber"])
+
     def test_an_explicit_value_equal_to_the_template_is_not_a_deviation(self):
         """Otherwise every account that spelled its profile out before templates
         existed would light up with deviations it does not have."""

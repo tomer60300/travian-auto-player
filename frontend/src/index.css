@@ -346,6 +346,7 @@ h1, h2, h3 {
    (e.g. `border-warning/40`) only apply to Tailwind-generated utilities, not to
    the semantic classes above — a bare `border-warning` would render colorless. */
 .border-warning { border-color: var(--warning); }
+.border-info { border-color: var(--info); }
 
 /* ── Wide-table mobile ergonomics ──
    A dense editor table (village × mode/value/ship/rest) cannot fit a 390px

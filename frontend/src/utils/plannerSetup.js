@@ -135,6 +135,37 @@ export const VILLAGE_ROLES = Object.freeze([
   'feeder',
 ])
 
+/** Neither send nor receive: the default for a village nothing has said about.
+ *
+ * Frozen and shared so every caller compares against one object rather than
+ * minting its own literal, which is how two "defaults" come to differ. */
+export const KEEP_ALLOCATION = Object.freeze({ mode: 'keep', value: 0 })
+
+/** The allocation a plan will actually use for one village and one resource.
+ *
+ * The village's own entry where it has one, then its role's template, then
+ * keep -- the same order, and the same per-resource granularity, the backend
+ * resolves in. The page has to do this itself because the operator edits before
+ * any plan exists, and getting the order wrong is not a visible bug: the grid
+ * would show a defensive village as "Keep own" while the plan shipped it
+ * 8,372/h, and the unassigned meter would count its own 1,500 instead, so the
+ * Rest village's displayed target would be wrong by the difference.
+ *
+ * An explicit `keep` SURVIVES rather than falling through. On a village with a
+ * role the alternative to the template is not "nothing", it is "hold your own
+ * production" -- so it is an answer, `roleDeviates` reports it, and the request
+ * carries it.
+ */
+export function resolveRoleAllocation(template, resource, allocation) {
+  return allocation ?? template?.allocations?.[resource] ?? KEEP_ALLOCATION
+}
+
+/** The same resolution for what a village spends. Zero is a claim, not silence,
+ * so only an absent figure falls through to the role's. */
+export function resolveRoleSpend(template, resource, spend) {
+  return spend ?? template?.consumption?.[resource]
+}
+
 /** Does this village's own allocation differ from what its role's template says?
  *
  * The same question the backend answers with `role_deviations`, asked here so
