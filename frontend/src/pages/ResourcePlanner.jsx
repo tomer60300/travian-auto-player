@@ -4656,6 +4656,35 @@ export default function ResourcePlanner() {
               </div>
             </div>
 
+            {/* These two figures and the full-day check's two thresholds are
+                the same pair of quantities seen from either side -- "never
+                overflow during the night, never arrive empty at morning" --
+                and on this account they do not agree: the boxes above default
+                to 30% and 80% while the check measures against the server's
+                own 25% and 60%. Which pair is right is an OPEN question with
+                the operator, so this names the gap and picks no winner.
+                Shown only once a check has run, because until then there is no
+                second pair to compare against and the note would be noise. */}
+            {dayCheck != null &&
+              (Math.abs(Number(baselineFill) / 100 - dayCheck.pre_night_baseline) > 0.001 ||
+                Math.abs(Number(targetFill) / 100 - dayCheck.morning_floor) > 0.001) && (
+                <p className="text-warning text-xs mt-2">
+                  These are your figures. The full-day check measures the same two switches
+                  against{' '}
+                  <span className="font-mono">
+                    {Math.round(dayCheck.pre_night_baseline * 100)}%
+                  </span>{' '}
+                  and{' '}
+                  <span className="font-mono">{Math.round(dayCheck.morning_floor * 100)}%</span>,
+                  which is not the pair above — so a profile derived for{' '}
+                  <span className="font-mono">
+                    {baselineFill}% → {targetFill}%
+                  </span>{' '}
+                  is reported against a different night. Which pair the account should run on
+                  is still open; nothing here decides it.
+                </p>
+              )}
+
             {/* The premise, stated where it cannot be missed. This is night
                 arithmetic: it assumes nothing is spent, so everything that
                 arrives stays. On a profile covering most of the day that is
