@@ -40,16 +40,45 @@
  *     showing "837" of "8372" is not truncated, it is WRONG, and nothing on
  *     screen says so.
  *   * a FREE-TEXT input is measured against the GREATER of its placeholder and
- *     its own value, the value capped at 32 characters. Both halves are load
- *     bearing. The placeholder is what must fit before the field is filled, or
- *     the field cannot even be identified; the value is what must fit after,
- *     and measuring the placeholder alone hid a 70px clip in this spec's own
- *     fixture (`Foreign target 1 name`, 144px for 214px of
- *     "Rheinbund-Aussenposten") while reporting zero clipped. The cap is why
- *     the value can be measured at all -- a name field's content has no bound,
- *     so demanding that a column fit ANY value is unsatisfiable rather than
- *     strict. It is a stop, not a target: every value seeded here is well
- *     inside it and so is asserted in full.
+ *     the first `TEXT_CAP_CHARS` characters of its own value. Both halves are
+ *     load bearing. The placeholder is what must fit before the field is
+ *     filled, or the field cannot even be identified -- and it is vacuous for
+ *     the two `Day window` boxes, which have none, where it reduced to "is the
+ *     box wider than its own padding". The value is what must be READABLE
+ *     after, and measuring the placeholder alone reported zero clipped on a
+ *     box that showed nine characters of a twenty-two character ally name.
+ *
+ *     The cap is the whole of what makes that second half a rule rather than a
+ *     wish, and it was set to 32 characters, which NOTHING can satisfy: 32
+ *     characters of an ally name is 296.1px of glyphs, so the box would have
+ *     to be 328.1px inside a cell of 345px, inside a pinned column whose whole
+ *     visible strip at 375px is 293px. Measured, by seeding exactly that name:
+ *     224px for 296.1px, red at all three viewports, with no code defect and
+ *     no reachable width. A rule that cannot be satisfied is worse than no
+ *     rule -- and it had already done damage, because the 214px "clip" it
+ *     reported for a 144px name box is what talked round 8 into `w-56` and 82%
+ *     of the strip.
+ *
+ *     So the cap is what a column can actually afford. 10 characters, and the
+ *     arithmetic is the app's, not a guess: `.input-field` spends 32px on
+ *     padding and declares no left/right border, and its `font-size: 1rem`
+ *     beats `text-xs` unlayered (below 640px the mobile `16px !important` rule
+ *     pins it there anyway), so a box of width W has W-32 px for 16px Roboto.
+ *     The narrowest free-text box in the app is the foreign-target `Not from`
+ *     field at `w-28`: 80px, which holds its "02, 11, 13" at 68.2px and ten
+ *     characters of a name-shaped run exactly. The pinned name box at `w-36`
+ *     has 112px, room for thirteen. Only a PINNED column is bounded by the
+ *     visible strip; a scrolling one can be widened a step whenever a real
+ *     value outgrows it, which is why 10 is a number the design can meet and
+ *     32 is not.
+ *
+ *     Read it as a floor on readability rather than a ceiling on the field: a
+ *     free-text box must show at least ten characters of what is in it, and
+ *     the rest may scroll. A NAME that scrolls is still legible -- the caret
+ *     and the arrow keys reach the rest of it, and the operator typed it. That
+ *     is the difference from a FIGURE, and it is why the fixture now seeds a
+ *     32-character name on purpose: the spec's verdict no longer depends on
+ *     how long the seeded name happens to be.
  *
  * NO BACKEND AND NO GAME REQUEST, by the two fail-closed mechanisms
  * `roleTemplates.pw.js` documents: `page.route('** /api/**')` answers the two
@@ -194,9 +223,14 @@ async function seed(page) {
         [defB]: { lumber: 8372, clay: 5168, iron: 5809 },
       })
       set('planner_may_relay', { [defA]: true })
+      // 32 characters, on purpose and past every cap: it is longer than any
+      // box in the app can show, so it proves the free-text rule holds
+      // independently of how long the seeded name happens to be. The rule
+      // used to be calibrated to a 22-character seed and went red the moment
+      // this string replaced it -- see the header comment on TEXT_CAP_CHARS.
       set('planner_foreign_targets', [
         {
-          name: 'Rheinbund-Aussenposten',
+          name: 'Rheinbund-Aussenposten-Nordwest3',
           x: -117,
           y: 143,
           crop_per_hour: 12_500,
@@ -217,11 +251,13 @@ async function seed(page) {
  * bounding box but not what the box needed to be.
  */
 const MEASURE = () => {
-  // How much of a free-text VALUE the field is required to fit. See the
-  // text-input branch below for why there is a cap at all. Declared in here
-  // rather than beside the other constants because this function is
-  // serialised into the page and closes over nothing from Node.
-  const TEXT_CAP_CHARS = 32
+  // How much of a free-text VALUE the field is required to show. Ten, because
+  // that is what the app's narrowest free-text box (`Not from`, `w-28`, 80px
+  // of glyphs after `.input-field`'s 32px of padding) can actually hold; the
+  // header comment has the arithmetic and the measurement that killed 32.
+  // Declared in here rather than beside the other constants because this
+  // function is serialised into the page and closes over nothing from Node.
+  const TEXT_CAP_CHARS = 10
 
   const scroller = (el) => {
     for (let node = el.parentElement; node; node = node.parentElement) {
@@ -293,21 +329,20 @@ const MEASURE = () => {
       clone.remove()
       basis = 'options'
     } else if (el.tagName === 'INPUT' && el.type !== 'number') {
-      // The greater of the empty state's prompt and the value actually in the
-      // box, the value capped at TEXT_CAP_CHARS characters.
+      // The greater of the empty state's prompt and the first TEXT_CAP_CHARS
+      // characters of the value actually in the box.
       //
-      // The placeholder ALONE is what this measured before, and it hid a real
-      // clip in this spec's own fixture: `Foreign target 1 name` is `w-36`
-      // (144px) and holds the seeded "Rheinbund-Aussenposten", which wants
-      // 214px -- and the spec reported nothing. It is also vacuous for a
-      // free-text input with no placeholder at all, where it reduced to "is
-      // the box wider than its own padding".
+      // The placeholder ALONE is what this measured before, and it is vacuous
+      // for a free-text input that has none -- both `Day window` boxes --
+      // where it reduced to "is the box wider than its own padding".
       //
-      // The cap is why a value can be measured at all: a name field's content
-      // has no bound, so demanding a column fit ANY value is unsatisfiable
-      // rather than strict. The cap is a stop, not a target -- every value
-      // this fixture seeds is well inside it, so every one of them is
-      // asserted in full.
+      // The cap is what makes the value half satisfiable: a name has no
+      // bound, so a column asked to fit ANY value is asked for a width that
+      // does not exist. 32 was exactly that (296.1px of glyphs in a 293px
+      // strip, measured); 10 is what the narrowest free-text column already
+      // affords. Read it as "must show ten characters of what is in it" --
+      // the rest of a NAME may scroll, because the caret reaches it and it is
+      // still legible. A FIGURE may not, which is the branch below.
       ctx.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`
       const placeholder = ctx.measureText(el.placeholder ?? '').width
       const value = ctx.measureText((el.value ?? '').slice(0, TEXT_CAP_CHARS)).width
@@ -594,7 +629,7 @@ const FARM_LIST = {
 const FARM_SLOTS = [
   {
     id: 11,
-    target_name: 'Rheinbund-Aussenposten',
+    target_name: 'Rheinbund-Aussenposten-Nordwest3',
     x: -117,
     y: 143,
     distance: 34.2,
@@ -674,7 +709,7 @@ async function openFarmFilters(page) {
  * Every other socket still closes immediately.
  */
 const SCAN_TILES = [
-  { x: -117, y: 143, name: 'Rheinbund-Aussenposten', population: 512, player_name: 'Bergvolk' },
+  { x: -117, y: 143, name: 'Rheinbund-Aussenposten-Nordwest3', population: 512, player_name: 'Bergvolk' },
   { x: -112, y: 139, name: 'Oase 47', population: 0, player_name: '' },
 ]
 
