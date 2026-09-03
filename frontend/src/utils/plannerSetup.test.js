@@ -6,6 +6,7 @@ import {
   KEEP_ALLOCATION,
   buildSetup,
   declaresConsumption,
+  describeConsumption,
   isConsumptionRate,
   isStockFloorFraction,
   materialSpendOnly,
@@ -16,6 +17,7 @@ import {
   roleDeviates,
   setupFilename,
   setupMatchesAccount,
+  stripStoredCropSpends,
 } from './plannerSetup'
 
 const VILLAGES = [
@@ -1382,5 +1384,124 @@ describe('resolveRoleAllocation and resolveRoleSpend', () => {
 
   it('keeps a declared spend of zero, which is a claim and not silence', () => {
     expect(resolveRoleSpend(TEMPLATE, 'lumber', 0)).toBe(0)
+  })
+})
+
+describe('the unknown-resource message names only what may be declared', () => {
+  const declare = (spend) =>
+    roundTrip({
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 20030, consumption_per_hour: spend }],
+    })
+
+  it('offers lumber, clay and iron', () => {
+    expect(() => declare({ gold: 100 })).toThrow(/unknown resource "gold"/)
+    expect(() => declare({ gold: 100 })).toThrow(/must be one of lumber, clay, iron\./)
+  })
+
+  it('does not offer crop, which it refuses one branch later', () => {
+    // The operator took the message's advice, corrected "gold" to "crop", and
+    // got a second error for it.
+    let message = ''
+    try {
+      declare({ gold: 100 })
+    } catch (err) {
+      message = err.message
+    }
+    expect(message).not.toMatch(/crop/)
+  })
+})
+
+describe('stripStoredCropSpends', () => {
+  it('keeps the materials and drops the crop figure', () => {
+    const { consumption } = stripStoredCropSpends({
+      20030: { lumber: 14751, crop: 8519 },
+      20032: { clay: 5168 },
+    })
+
+    expect(consumption).toEqual({ 20030: { lumber: 14751 }, 20032: { clay: 5168 } })
+  })
+
+  it('says which villages lost one, so the strip is not silent', () => {
+    // R4-P3-2. Stripping is right; silence is not -- the removal makes a
+    // previously-silenced CRITICAL reappear on the next plan with nothing
+    // connecting cause to effect, while the file-import path raises a loud
+    // SetupFileError for exactly the same figure.
+    const { droppedFrom } = stripStoredCropSpends({
+      20030: { lumber: 14751, crop: 8519 },
+      20032: { clay: 5168 },
+    })
+
+    expect(droppedFrom).toEqual(['20030'])
+  })
+
+  it('reports a village whose only stored figure was crop, and drops the row', () => {
+    // The loudest case: nothing about that village survives, so without the
+    // receipt there is nothing on screen to notice.
+    const { consumption, droppedFrom } = stripStoredCropSpends({ 20031: { crop: 8519 } })
+
+    expect(consumption).toEqual({})
+    expect(droppedFrom).toEqual(['20031'])
+  })
+
+  it('reports nothing when nothing was stripped', () => {
+    const { consumption, droppedFrom } = stripStoredCropSpends({ 20030: { lumber: 1 } })
+
+    expect(consumption).toEqual({ 20030: { lumber: 1 } })
+    expect(droppedFrom).toEqual([])
+  })
+
+  it('drops a village whose map is empty, as "declared nothing" is one state', () => {
+    const { consumption, droppedFrom } = stripStoredCropSpends({ 20030: {}, 20031: null })
+
+    expect(consumption).toEqual({})
+    expect(droppedFrom).toEqual([])
+  })
+
+  it('survives an empty or missing store', () => {
+    // Hydration runs against whatever localStorage holds, including nothing.
+    expect(stripStoredCropSpends(undefined)).toEqual({ consumption: {}, droppedFrom: [] })
+    expect(stripStoredCropSpends(null)).toEqual({ consumption: {}, droppedFrom: [] })
+    expect(stripStoredCropSpends({})).toEqual({ consumption: {}, droppedFrom: [] })
+  })
+
+  it('reports a crop figure of zero, which is a declaration like any other', () => {
+    const { droppedFrom } = stripStoredCropSpends({ 20030: { lumber: 1, crop: 0 } })
+
+    expect(droppedFrom).toEqual(['20030'])
+  })
+})
+
+describe('describeConsumption', () => {
+  it('says nothing is declared when nothing is', () => {
+    expect(describeConsumption(undefined)).toBe('none')
+    expect(describeConsumption({})).toBe('none')
+  })
+
+  it('sums the declared materials and names them', () => {
+    expect(describeConsumption({ lumber: 14751, clay: 5168 })).toBe(
+      `${(19919).toLocaleString()}/h · Lumber, Clay`
+    )
+  })
+
+  it('collapses to "all three" once every material is declared', () => {
+    expect(describeConsumption({ lumber: 1000, clay: 2000, iron: 3000 })).toBe(
+      `${(6000).toLocaleString()}/h, all three`
+    )
+  })
+
+  it('never summarises a crop figure an older build stored', () => {
+    // Crop is refused everywhere else, so summarising it here would print a
+    // spend that is not being applied -- and `stripStoredCropSpends` has
+    // already thrown it away by the time the cell renders.
+    expect(describeConsumption({ crop: 8519 })).toBe('none')
+    expect(describeConsumption({ lumber: 1000, crop: 8519 })).toBe(
+      `${(1000).toLocaleString()}/h · Lumber`
+    )
+  })
+
+  it('reads a declared zero as a declaration', () => {
+    expect(describeConsumption({ iron: 0 })).toBe('0/h · Iron')
   })
 })

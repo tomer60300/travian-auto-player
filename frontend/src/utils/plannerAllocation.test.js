@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { METER_TOLERANCE, METER_TONE, allocationMeterSeverity } from './plannerAllocation'
+import {
+  METER_TOLERANCE,
+  METER_TONE,
+  allocationMeterSeverity,
+  planCellFigures,
+  villageNetIndex,
+} from './plannerAllocation'
 
 describe('allocationMeterSeverity', () => {
   it('reads an over-allocation as an error even with a Rest village set', () => {
@@ -56,5 +62,151 @@ describe('METER_TONE', () => {
       settled: 'text-success',
       unassigned: 'text-warning',
     })
+  })
+})
+
+describe('villageNetIndex', () => {
+  const plan = {
+    village_nets: [
+      { village_id: 1, resource: 'lumber', target_per_hour: 100, net_per_hour: 40 },
+      { village_id: 2, resource: 'lumber', target_per_hour: 200, net_per_hour: 0 },
+      { village_id: 1, resource: 'crop', target_per_hour: 300, net_per_hour: -5 },
+    ],
+  }
+
+  it('indexes the plan by resource and then village', () => {
+    const index = villageNetIndex(plan)
+
+    expect(index.lumber[1].target_per_hour).toBe(100)
+    expect(index.lumber[2].net_per_hour).toBe(0)
+    expect(index.crop[1].net_per_hour).toBe(-5)
+  })
+
+  it('is an empty index before there is a plan, not a crash', () => {
+    // The grid renders on every keystroke of the Allocate stage, with no plan
+    // for most of them.
+    expect(villageNetIndex(null)).toEqual({})
+    expect(villageNetIndex({})).toEqual({})
+    expect(villageNetIndex({ village_nets: [] })).toEqual({})
+  })
+
+  it('has no row for a village the plan never mentioned', () => {
+    expect(villageNetIndex(plan).lumber[99]).toBeUndefined()
+    expect(villageNetIndex(plan).iron).toBeUndefined()
+  })
+})
+
+describe('planCellFigures', () => {
+  // The stock-floor case from R4-P2-1, in the operator's own numbers: 02 makes
+  // 5,000/h of lumber, keeps its own production, and a 30% floor on a 1,200,000
+  // warehouse over a 16h day is 22,500/h of supplement -- of which the plan
+  // ships 15,000 out. KEEP's plan target INCLUDES the supplement; the page's
+  // local derivation cannot know about it.
+  const floored = {
+    village_id: 2,
+    resource: 'lumber',
+    own_per_hour: 5_000,
+    supplement_per_hour: 15_000,
+    target_per_hour: 20_000,
+    ship_per_hour: 0,
+    consumption_per_hour: 4_000,
+    net_per_hour: 16_000,
+  }
+
+  it('takes every figure off the plan, so the three lines cannot contradict', () => {
+    const figures = planCellFigures({
+      planned: floored,
+      own: 5_000,
+      localTarget: 5_000, // what `targetFor` derives for KEEP: own production
+      declaredSpend: 4_000,
+    })
+
+    // The bug: the top line read 5,000/h (local) while the net line read
+    // 16,000 (plan) -- "5,000/h ... -4,000 = 16,000 net" in one cell, off by
+    // exactly the supplement.
+    expect(figures).toEqual({
+      target: 20_000,
+      ship: 0,
+      spent: 4_000,
+      net: 16_000,
+      supplement: 15_000,
+    })
+    expect(figures.target - figures.spent).toBe(figures.net)
+  })
+
+  it('never derives the cargo when the plan states it', () => {
+    // `target - own` is 15,000 here and the real cargo is 0: the supplement
+    // funds the whole difference, so deriving the delta invents a route.
+    const figures = planCellFigures({
+      planned: floored,
+      own: 5_000,
+      localTarget: 5_000,
+      declaredSpend: null,
+    })
+
+    expect(figures.ship).toBe(0)
+    expect(figures.target).toBe(20_000)
+    // Named, so the cell can say what funds a retention four times the
+    // village's own production with no cargo behind it.
+    expect(figures.supplement).toBe(15_000)
+  })
+
+  it('leaves the spend and net lines unrendered where nothing is declared', () => {
+    const figures = planCellFigures({
+      planned: floored,
+      own: 5_000,
+      localTarget: 5_000,
+      declaredSpend: null,
+    })
+
+    expect(figures.spent).toBeNull()
+    expect(figures.net).toBeNull()
+  })
+
+  it('prints the spend the PLAN used, not the one the operator typed', () => {
+    // The planner sets aside a declared spend whose rate it could not read.
+    const figures = planCellFigures({
+      planned: { ...floored, consumption_per_hour: 0, net_per_hour: 20_000 },
+      own: 5_000,
+      localTarget: 5_000,
+      declaredSpend: 4_000,
+    })
+
+    expect(figures.spent).toBe(0)
+    expect(figures.net).toBe(20_000)
+  })
+
+  it('previews the inputs on screen while there is no plan', () => {
+    const figures = planCellFigures({
+      planned: undefined,
+      own: 5_000,
+      localTarget: 12_000,
+      declaredSpend: 4_000,
+    })
+
+    expect(figures).toEqual({
+      target: 12_000,
+      ship: 7_000,
+      spent: 4_000,
+      net: 8_000,
+      // The floor is a warehouse LEVEL spread across the profile's hours,
+      // which only the planner works out -- so the preview cannot show one.
+      supplement: 0,
+    })
+  })
+
+  it('says nothing about an unreadable rate rather than guessing', () => {
+    // `own` is null when the snapshot could not read the rate, and `localTarget`
+    // is null when the backend would drop the allocation with it.
+    expect(planCellFigures({ planned: null, own: null, localTarget: 5_000, declaredSpend: 1 }).ship)
+      .toBeNull()
+    const unknown = planCellFigures({
+      planned: null,
+      own: 5_000,
+      localTarget: null,
+      declaredSpend: 1,
+    })
+    expect(unknown.ship).toBeNull()
+    expect(unknown.net).toBeNull()
   })
 })

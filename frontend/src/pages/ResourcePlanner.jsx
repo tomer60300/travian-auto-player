@@ -11,6 +11,7 @@ import {
   VILLAGE_ROLES,
   buildSetup,
   declaresConsumption,
+  describeConsumption,
   isConsumptionRate,
   isStockFloorFraction,
   materialSpendOnly,
@@ -21,8 +22,14 @@ import {
   roleDeviates,
   setupFilename,
   setupMatchesAccount,
+  stripStoredCropSpends,
 } from '../utils/plannerSetup'
-import { METER_TONE, allocationMeterSeverity } from '../utils/plannerAllocation'
+import {
+  METER_TONE,
+  allocationMeterSeverity,
+  planCellFigures,
+  villageNetIndex,
+} from '../utils/plannerAllocation'
 import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from '../utils/villageRefs'
 import { planStatus, relayLegIndex } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
@@ -272,23 +279,6 @@ function errorDetail(err, fallback) {
 const fmt = (n) => (n == null ? '—' : Math.round(n).toLocaleString())
 const signed = (n) => (n == null ? '—' : `${n > 0 ? '+' : ''}${Math.round(n).toLocaleString()}`)
 
-// The collapsed summary of a village's spend, in the same register as
-// describeShipOnlyTo above: what it says, not how many fields it has. Declared
-// down here rather than beside it because it reads RESOURCES, RESOURCE_LABEL
-// and fmt -- naming a const above its own declaration is the temporal-dead-zone
-// shape that has taken this page white three times.
-const describeConsumption = (spent) => {
-  if (!declaresConsumption(spent)) return 'none'
-  // Materials only: crop cannot be declared, because the snapshot's crop rate
-  // is already net of upkeep. Reading RESOURCES here would have summarised a
-  // crop figure the planner refuses to accept.
-  const declared = CONSUMABLE_RESOURCES.filter((resource) => spent[resource] != null)
-  if (!declared.length) return 'none'
-  const total = declared.reduce((sum, resource) => sum + (Number(spent[resource]) || 0), 0)
-  if (declared.length === CONSUMABLE_RESOURCES.length) return `${fmt(total)}/h, all three`
-  return `${fmt(total)}/h · ${declared.map((resource) => RESOURCE_LABEL[resource]).join(', ')}`
-}
-
 /** Net crop, shown with a word as well as a colour.
  *  Design Guideline — Accessibility: never rely on colour alone to convey
  *  information, so "starving" is spelled out rather than implied by red. */
@@ -532,6 +522,14 @@ export default function ResourcePlanner() {
   // toast: a file that is missing villages produces a quietly wrong plan, so
   // what it did and did not cover has to stay readable.
   const [setupReport, setSetupReport] = useState(null)
+  // Villages whose stored crop spend was dropped on the way in, as village-id
+  // keys. Stripping it is right -- the input no longer offers crop and the
+  // backend 422s it -- but doing so in silence makes a CRITICAL the figure was
+  // silencing reappear on the next plan with nothing to connect them, while
+  // the file-import path raises a loud error for the same figure. Reported
+  // once: the stripped map is what gets saved back, so the next hydration has
+  // nothing to strip.
+  const [cropSpendsDropped, setCropSpendsDropped] = useState([])
   const [pasteOpen, setPasteOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
   const setupFileRef = useRef(null)
@@ -688,6 +686,7 @@ export default function ResourcePlanner() {
       // The load report names villages from the snapshot it was matched
       // against, so it cannot outlive that account.
       setSetupReport(null)
+      setCropSpendsDropped([])
       setHydratedKey(null)
       return
     }
@@ -725,13 +724,15 @@ export default function ResourcePlanner() {
     // the input no longer shows a crop box -- so a stored crop figure could be
     // neither seen nor cleared while still riding along on every request and
     // 422-ing the plan over a number the operator cannot find.
-    setConsumption(
-      Object.fromEntries(
-        Object.entries(loadJson(`${LS_CONSUMPTION}::${accountKey}`, {}))
-          .map(([vid, spent]) => [vid, materialSpendOnly(spent)])
-          .filter(([, spent]) => spent)
-      )
-    )
+    //
+    // And the drop is stated, not silent. Removing that figure makes a
+    // previously-silenced CRITICAL reappear on the next plan, and the operator
+    // had nothing on screen connecting the two -- while loading the very same
+    // figure from a FILE raises a loud error. The note clears itself on the
+    // next hydration, because the stripped map is what gets saved back.
+    const stored = stripStoredCropSpends(loadJson(`${LS_CONSUMPTION}::${accountKey}`, {}))
+    setConsumption(stored.consumption)
+    setCropSpendsDropped(stored.droppedFrom)
     setDayCheck(null)
     setProfiles(loaded)
     setActiveProfile(loaded[storedActive] ? storedActive : Object.keys(loaded)[0])
@@ -2195,21 +2196,15 @@ export default function ResourcePlanner() {
   const verdict = planState?.verdict ?? null
   const relays = plan?.relays ?? []
 
-  // The backend's own net per resource per village, so the grid reads the
-  // figure the plan used instead of recomputing `target − spend` here. Two
-  // implementations of one formula drift, and these two could: the planner
-  // drops a declared spend whose rate it cannot read while this page still
-  // holds what the operator typed. `plan` is set to null by any input change
-  // (see the planInputRev effect), so a plan on screen was computed from
-  // exactly these inputs -- there is no stale-figure case to guard against.
-  const planNet = useMemo(() => {
-    const out = {}
-    for (const row of plan?.village_nets ?? []) {
-      if (!out[row.resource]) out[row.resource] = {}
-      out[row.resource][row.village_id] = row
-    }
-    return out
-  }, [plan])
+  // The backend's own figures per resource per village, so the grid reads what
+  // the plan used instead of recomputing any of it here. Two implementations of
+  // one formula drift, and these two could: the planner drops a declared spend
+  // whose rate it cannot read, and a stock floor makes a KEEP village's target
+  // exceed its production, neither of which this page can derive. `plan` is set
+  // to null by any input change (see the planInputRev effect), so a plan on
+  // screen was computed from exactly these inputs -- there is no stale-figure
+  // case to guard against.
+  const planNet = useMemo(() => villageNetIndex(plan), [plan])
   const relayLegs = relayLegIndex(relays)
 
   // What going live will actually do, derived from the PREVIEW the operator is
@@ -2590,6 +2585,23 @@ export default function ResourcePlanner() {
                   {setupStillUnknown.map((v) => v.name || v.village_id).join(', ')}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* The stored crop spend that was dropped on the way in. Said out
+              loud, because the figure was silencing a CRITICAL and removing it
+              brings that finding back on the next plan -- and loading the same
+              figure from a file raises a visible error, so silence here was the
+              odd one out. `role="status"` rather than an alert: nothing is
+              broken, and it is already history by the time it is read. */}
+          {cropSpendsDropped.length > 0 && (
+            <div className="mb-3 text-xs text-warning" role="status">
+              A saved crop spend was dropped for{' '}
+              {namesForVillageIds(cropSpendsDropped.map(Number), villages)} — crop is stated as a
+              TARGET, not a spend, because the snapshot&rsquo;s crop rate is already net of troop
+              upkeep. Set what {cropSpendsDropped.length > 1 ? 'they should' : 'it should'} keep
+              with its crop allocation instead; an overflow that figure was hiding will show up
+              on the next plan.
             </div>
           )}
 
@@ -3554,37 +3566,31 @@ export default function ResourcePlanner() {
                       </td>
                       {RESOURCES.map((resource) => {
                         const own = v[`${resource}_per_hour`]
-                        const after = targetFor(resource, v)
-                        const ship = after == null || own == null ? null : after - own
                         const isRest = remainderFor(resource) === v.village_id
-                        // What the store actually does. The top line is what
-                        // must LAND; this subtracts what the village SPENDS, so
-                        // an operator who enters a consumption profile and
-                        // leaves the target at its gross figure SEES the net go
-                        // to zero instead of reading the target as a stockpile.
+                        // All three lines from ONE source. The retention, the
+                        // cargo, the spend and the net come off the plan once
+                        // there is one, and off these inputs while there is not.
                         //
-                        // Both halves come off the plan once there is one, so
-                        // this line cannot print a spend the net did not use.
-                        // That is the drift worth closing: the planner sets
-                        // aside a declared spend whose rate it cannot read,
-                        // and the page went on showing the figure the operator
-                        // typed as though it had been applied. The local sum is
-                        // the live preview before any plan exists, not a
-                        // fallback for a missing field -- every input change
-                        // clears the plan, so a plan on screen matches these
-                        // inputs exactly.
-                        const declared = effectiveSpend(resource, v.village_id)
-                        const planned = planNet[resource]?.[v.village_id]
-                        let spent = null
-                        let net = null
-                        if (declared != null) {
-                          spent = planned ? planned.consumption_per_hour : declared
-                          net = planned
-                            ? planned.net_per_hour
-                            : after == null
-                              ? null
-                              : after - spent
-                        }
+                        // Mixing the two put three contradictory numbers in one
+                        // cell: the top line was this page's own derivation
+                        // (KEEP → own production) while the net came from the
+                        // plan, whose KEEP target INCLUDES the supplement a
+                        // stock floor makes available -- so a floored village
+                        // read "5,000/h ... −4,000 = 16,000 net", off by exactly
+                        // the 15,000/h supplement. The cargo was derived as
+                        // `target − own`, which the supplement funds, so it
+                        // overstated the route as well.
+                        //
+                        // The spend line still prints what the PLAN used, not
+                        // what was typed: the planner sets aside a declared
+                        // spend whose rate it cannot read, and showing the typed
+                        // figure claimed it had been applied.
+                        const { target: after, ship, spent, net, supplement } = planCellFigures({
+                          planned: planNet[resource]?.[v.village_id],
+                          own,
+                          localTarget: targetFor(resource, v),
+                          declaredSpend: effectiveSpend(resource, v.village_id),
+                        })
                         return (
                           <td key={resource} className="text-right px-3 py-1.5 align-top">
                             {/* A sign change is the story worth telling:
@@ -3600,7 +3606,19 @@ export default function ResourcePlanner() {
                                     ? 'text-danger'
                                     : ''
                               }`}
-                              title={own == null ? 'own production unknown' : `own ${fmt(own)}/h`}
+                              /* The supplement is named where there is one, or
+                                 the reconciled cell still reads as a
+                                 contradiction: a floored KEEP village shows a
+                                 20,000/h retention against 5,000/h of own
+                                 production and no cargo, and only the stock
+                                 floor explains the other 15,000. */
+                              title={
+                                own == null
+                                  ? 'own production unknown'
+                                  : supplement > 0
+                                    ? `own ${fmt(own)}/h + ${fmt(supplement)}/h drawn from the stock floor`
+                                    : `own ${fmt(own)}/h`
+                              }
                             >
                               {after == null ? (
                                 '?'

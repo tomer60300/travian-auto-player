@@ -50,6 +50,8 @@
  * than read. That keeps the round trip testable without a browser.
  */
 
+import { RESOURCE_LABEL } from '../constants/planner'
+
 export const SETUP_FORMAT = 'travian-planner-owned-state'
 export const SETUP_VERSION = 3
 /** Versions this build can read. A v1 file simply carries no profiles and a v2
@@ -201,6 +203,52 @@ export function materialSpendOnly(spent) {
   }
   return Object.keys(out).length ? out : null
 }
+
+/** Rehydrate a stored consumption map, and say whose crop figure was dropped.
+ *
+ * The strip itself is `materialSpendOnly` applied village by village; what this
+ * adds is the RECEIPT. Stripping silently made a previously-silenced CRITICAL
+ * reappear on the next plan with nothing on screen connecting cause to effect,
+ * while the file-import path raises a loud `SetupFileError` for the very same
+ * figure. The page turns `droppedFrom` into a note beside the setup table.
+ *
+ * A village whose ONLY stored figure was crop is reported too, and it is the
+ * loudest case: it leaves the map entirely, so nothing about it is visible
+ * anywhere afterwards.
+ *
+ * Lifted out of the page's hydration effect because `renderToString` runs no
+ * effects, so the strip could not be reached by a test at all where it lived.
+ */
+export function stripStoredCropSpends(stored) {
+  const consumption = {}
+  const droppedFrom = []
+  if (!stored || typeof stored !== 'object') return { consumption, droppedFrom }
+  for (const [villageId, spent] of Object.entries(stored)) {
+    const kept = materialSpendOnly(spent)
+    if (kept) consumption[villageId] = kept
+    if (spent && typeof spent === 'object' && spent.crop != null) droppedFrom.push(villageId)
+  }
+  return { consumption, droppedFrom }
+}
+
+/** The collapsed summary of one village's spend, for the setup table's cell.
+ *
+ * What it says, not how many fields it has. Materials only: crop cannot be
+ * declared, because the snapshot's crop rate is already net of upkeep, so
+ * reading every resource here would summarise a figure the planner refuses to
+ * accept -- and a stored one, which `stripStoredCropSpends` has already thrown
+ * away, would print as a spend that is not being applied.
+ */
+export function describeConsumption(spent) {
+  if (!declaresConsumption(spent)) return 'none'
+  const declared = CONSUMABLE_RESOURCES.filter((resource) => spent[resource] != null)
+  if (!declared.length) return 'none'
+  const total = declared.reduce((sum, resource) => sum + (Number(spent[resource]) || 0), 0)
+  const rate = `${Math.round(total).toLocaleString()}/h`
+  if (declared.length === CONSUMABLE_RESOURCES.length) return `${rate}, all three`
+  return `${rate} · ${declared.map((resource) => RESOURCE_LABEL[resource]).join(', ')}`
+}
+
 /** Travian's repeat interval, which is a closed set of the divisors of 24. */
 export const TRAVIAN_REPEAT_INTERVALS = Object.freeze([1, 2, 3, 4, 6, 8, 12, 24])
 
@@ -417,9 +465,13 @@ function parseConsumption(raw, where) {
   const out = {}
   for (const [resource, rate] of Object.entries(raw)) {
     if (!SETUP_RESOURCES.includes(resource)) {
+      // The DECLARABLE list, not every resource the planner knows. Enumerating
+      // `SETUP_RESOURCES` here offered crop as a correction and then refused it
+      // one branch below, so the operator fixed "gold" to "crop" on this
+      // message's own advice and got a second error for their trouble.
       throw new SetupFileError(
         `${where} has unknown resource "${resource}"; ` +
-          `it must be one of ${SETUP_RESOURCES.join(', ')}.`
+          `it must be one of ${CONSUMABLE_RESOURCES.join(', ')}.`
       )
     }
     // A separate message from the unknown-resource one, because "unknown
