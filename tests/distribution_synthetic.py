@@ -397,6 +397,15 @@ def _consumption(rng: random.Random, snapshot: list[VillageSnapshot]) -> dict[in
     MATERIALS only, matching the schema: crop is refused because the snapshot's
     `crop_per_hour` is net of upkeep already (R3-D1), so a generated crop spend
     would 422 two fifths of these seeds rather than exercise anything.
+
+    Crop is dropped at the STORE, not at the loop, and that is deliberate. The
+    loop still runs over every `Resource` and still draws crop's `rng.choice`,
+    so the stream of draws is exactly the one that generated this corpus before
+    crop became undeclarable. Looping over `MATERIALS` instead took three draws
+    per village where there had been four and re-rolled the MATERIAL figures of
+    30 of the 80 seed/profile combinations -- a silent corpus re-roll, which
+    this module's own docstring forbids: a seed name has to keep meaning the
+    same account, or the audit's history stops describing anything.
     """
     if rng.random() < 0.6:
         return {}  # most accounts declare nothing, which must stay the quiet path
@@ -405,12 +414,12 @@ def _consumption(rng: random.Random, snapshot: list[VillageSnapshot]) -> dict[in
         if rng.random() < 0.5:
             continue
         per = {}
-        for resource in MATERIALS:
+        for resource in Resource:
             rate = _rate(village, resource)
             if rate is None:
                 continue  # an unreadable rate sits its resource out entirely
             share = rng.choice([0.0, 0.25, 0.5, 1.0, 1.4])
-            if share:
+            if share and resource is not Resource.CROP:
                 per[resource] = round(abs(rate) * share, 1)
         if per:
             out[village.village_id] = per
