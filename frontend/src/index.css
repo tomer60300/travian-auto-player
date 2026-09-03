@@ -300,6 +300,33 @@ h1, h2, h3 {
   outline: 2px solid var(--md-primary);
   outline-offset: 2px;
 }
+/* A disabled field has to LOOK disabled -- item 5 of the UI Definition of Done
+   -- and without this rule it did not, anywhere in the app. Chrome greys a
+   disabled input by its OWN `color`, which an author declaration beats, and
+   `.input-field` declares both `color` and `background-color`: measured at 1440
+   in the Role-templates panel, the disabled value box beside a "Keep own" mode
+   select and the editable one beside "Absolute /h" both computed to
+   `background-color: rgb(236, 230, 240)`, `color: rgb(28, 27, 31)` and a solid
+   underline -- pixel identical. All twenty of that panel's value boxes start
+   disabled, because
+   keep is the absence of a target, so the panel opened as twenty figures that
+   ignore typing with nothing on screen saying why. "change resources value",
+   in the operator's words.
+
+   Three cues, because one of them may not be perceived: the container recedes
+   toward the page (`-low` is lighter than `-high` in light theme and darker in
+   dark, so "recessed" reads the same way in both), the text takes the muted
+   token, and the underline goes DASHED -- which is the one that survives
+   greyscale, a monitor calibrated flat, and colour blindness (WCAG 1.4.1). The
+   cursor says it on hover for pointer users. No `opacity`: the comment above
+   records what dimming a declared colour did to contrast, and this rule would
+   repeat it. */
+.input-field:disabled {
+  background-color: var(--md-surface-container-low);
+  color: var(--md-on-surface-variant);
+  border-bottom-style: dashed;
+  cursor: not-allowed;
+}
 /* A full-width field by default, but only by DEFAULT -- and that is why this one
    declaration sits in a layer while the rest of `.input-field` does not.
 

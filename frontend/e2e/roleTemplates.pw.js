@@ -97,7 +97,7 @@ const SNAPSHOT = {
 }
 
 /** Everything the shell asks for, and a hard stop for anything else. */
-async function isolate(page) {
+async function isolate(page, snapshot = SNAPSHOT) {
   await page.routeWebSocket(/.*/, (ws) => ws.close())
   await page.route('**/api/**', (route) => {
     const path = new URL(route.request().url()).pathname
@@ -112,7 +112,7 @@ async function isolate(page) {
           player_name: PLAYER,
           tribe_id: 1,
           active_village_id: CAPITAL,
-          villages: SNAPSHOT.villages.map((v) => ({ id: v.village_id, name: v.name })),
+          villages: snapshot.villages.map((v) => ({ id: v.village_id, name: v.name })),
         },
       })
     }
@@ -123,20 +123,25 @@ async function isolate(page) {
   })
 }
 
-/** A connected account with a fresh snapshot and two villages already DEF. */
-async function seed(page) {
+/**
+ * A connected account with a fresh snapshot and the roles its villages claim.
+ *
+ * Two villages already DEF by default, which is what every test below the
+ * first describe block is written against. `roles` and `snapshot` are
+ * parameters because "the warning is the way in" needs a village on
+ * `troops_off` -- the role the operator actually assigned -- and the payload
+ * test needs one village per role, five of them.
+ */
+async function seed(page, { snapshot = SNAPSHOT, roles = { [DEF_A]: 'def', [DEF_B]: 'def' } } = {}) {
   await page.addInitScript(
-    ([key, snapshot, defA, defB]) => {
+    ([key, snap, roleMap]) => {
       localStorage.setItem('token', 'e2e-not-a-real-token')
-      localStorage.setItem(`planner_snapshot::${key}`, JSON.stringify(snapshot))
+      localStorage.setItem(`planner_snapshot::${key}`, JSON.stringify(snap))
       // Fresh, so the stale-snapshot gate is not what this spec is measuring.
       localStorage.setItem(`planner_snapshot_at::${key}`, JSON.stringify(Date.now()))
-      localStorage.setItem(
-        `planner_village_roles::${key}`,
-        JSON.stringify({ [defA]: 'def', [defB]: 'def' }),
-      )
+      localStorage.setItem(`planner_village_roles::${key}`, JSON.stringify(roleMap))
     },
-    [KEY, SNAPSHOT, DEF_A, DEF_B],
+    [KEY, snapshot, roles],
   )
 }
 
@@ -355,5 +360,357 @@ test.describe('role templates, driven', () => {
     await expect(page.getByText('0 typed, covering 0 village(s)')).toBeVisible()
     await page.getByLabel('DEF Lumber mode').selectOption('absolute')
     await expect(page.getByText('1 typed, covering 2 village(s)')).toBeVisible()
+  })
+})
+
+// ג”€ג”€ The warning is the way IN ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€
+//
+// "no Troops off template yet" in the Snapshot row named the problem and
+// offered no way to fix it. The figures are on ANOTHER stage, behind a
+// COLLAPSED disclosure, in the widest table in the app -- so the operator had
+// to know the panel existed, switch stage, find it, open it, and pick their
+// role out of five rows. Verbatim: "If you decided to add the role assignment
+// in the UI, first let create it in the UI and change resources value".
+//
+// The first test measures the hazard rather than assuming it: a closed
+// `<details>` renders its content with `content-visibility: hidden`, so the
+// row IS in the DOM, with a zero-size box, and a `focus()` or a
+// `scrollIntoView()` into it silently does nothing. That is why the panel
+// opens from its FIRST render when the page has sent the operator to a role,
+// and not from an effect a frame later.
+
+/** The village this fixture puts on Troops off -- '11'. */
+const OFF = DEF_A
+const OFF_NAME = '11'
+
+test.describe('from the warning to the figures', () => {
+  test.use({ viewport: { width: 1440, height: 1200 } })
+
+  test.beforeEach(async ({ page }) => {
+    await isolate(page)
+    // One village, one role, no template: the state the operator was in.
+    await seed(page, { roles: { [OFF]: 'troops_off' } })
+  })
+
+  test('the figures are in a closed subtree until the disclosure is driven open', async ({
+    page,
+  }) => {
+    // The measurement the design rests on, taken on the path that does NOT go
+    // through the new control: reach the Allocate stage by hand and the row is
+    // present, laid out nowhere, and unfocusable.
+    await page.goto('/resource-planner')
+    await page.getByRole('button', { name: 'Allocate' }).click()
+
+    const panel = page.locator('details').filter({ hasText: 'Role templates' })
+    await expect(panel).toHaveCount(1)
+    expect(await panel.evaluate((d) => d.open)).toBe(false)
+
+    const target = page.getByLabel('Troops off Lumber mode')
+    await expect(target).toHaveCount(1)
+    await expect(target).toBeHidden()
+    // The hazard, measured on the running app rather than reasoned about. The
+    // box is not empty -- 135x47, so a test that asked for a zero rect would
+    // have called this reachable -- but the subtree is SKIPPED: it does not
+    // paint, `checkVisibility()` says so, and `focus()` on it leaves
+    // `document.activeElement` where it was. That last number is the whole
+    // design constraint: a jump that focused before opening would silently do
+    // nothing, twice over, because `scrollIntoView` does not move to it either
+    // (top 780 in a 1200 viewport, where centring would be 576).
+    const closed = await target.evaluate((el) => {
+      const box = el.getBoundingClientRect()
+      const out = {
+        laidOut: box.width > 0 && box.height > 0,
+        visible: el.checkVisibility(),
+      }
+      el.focus()
+      out.focusTook = document.activeElement === el
+      return out
+    })
+    expect(closed).toEqual({ laidOut: true, visible: false, focusTook: false })
+  })
+
+  test('the warning leads to that role, with the panel open and the caret in it', async ({
+    page,
+  }) => {
+    await page.goto('/resource-planner')
+    // The Snapshot row is where the role was assigned and where the warning is.
+    await expect(page.getByText('no Troops off template yet')).toBeVisible()
+
+    // ONE action.
+    await page.getByRole('button', { name: 'Type the Troops off figures' }).click()
+
+    const panel = page.locator('details').filter({ hasText: 'Role templates' })
+    expect(await panel.evaluate((d) => d.open)).toBe(true)
+
+    const target = page.getByLabel('Troops off Lumber mode')
+    await expect(target).toBeFocused()
+    await expect(target).toBeVisible()
+
+    // On screen, not merely laid out: the panel sits below a card of derivation
+    // controls, so arriving without a scroll would arrive at nothing.
+    const seen = await target.evaluate((el) => {
+      const r = el.getBoundingClientRect()
+      return {
+        visible: el.checkVisibility(),
+        width: Math.round(r.width),
+        inViewport: r.top >= 0 && r.bottom <= window.innerHeight,
+      }
+    })
+    expect(seen.visible).toBe(true)
+    expect(seen.width).toBeGreaterThan(0)
+    expect(seen.inViewport).toBe(true)
+
+    // Unambiguously THAT row, by the pair index.css designs for a table wider
+    // than its container: the row takes a tint and its PINNED identity cell
+    // takes a coloured left edge. Neither is a focus indicator -- they answer
+    // "which of the five rows is this".
+    const marked = await target.evaluate((el) => {
+      const row = el.closest('tr')
+      const edge = row.querySelector('.row-focus-edge')
+      return {
+        role: row.querySelector('.sticky-col').textContent,
+        tint: getComputedStyle(row).backgroundColor,
+        edge: getComputedStyle(edge).borderLeftColor,
+        edgeIsPinned: edge.classList.contains('sticky-col'),
+      }
+    })
+    expect(marked.role).toContain('Troops off')
+    expect(marked.tint).not.toBe('rgba(0, 0, 0, 0)')
+    expect(marked.edge).not.toBe('rgba(0, 0, 0, 0)')
+    expect(marked.edgeIsPinned).toBe(true)
+
+    // And the table work it landed in the middle of still holds: 1839px of
+    // columns in a 1122px container, so the container is marked as
+    // overflowing, the Role column is pinned, and the hint is there.
+    const table = await target.evaluate((el) => {
+      const wrap = el.closest('.overflow-x-auto')
+      const head = wrap.querySelector('thead th.sticky-col')
+      return {
+        client: wrap.clientWidth,
+        scroll: wrap.scrollWidth,
+        marked: wrap.classList.contains('table-overflowing'),
+        pinned: getComputedStyle(head).position,
+      }
+    })
+    expect(table.scroll).toBeGreaterThan(table.client)
+    expect(table.marked).toBe(true)
+    expect(table.pinned).toBe('sticky')
+    await expect(page.locator('.scroll-hint')).toContainText('Role stays pinned')
+
+    // The caret is where the first keystroke goes, and the keystrokes land.
+    await target.selectOption('absolute')
+    await page.getByLabel('Troops off Lumber value').fill('3200')
+    expect((await stored(page)).troops_off.allocations.lumber).toEqual({
+      mode: 'absolute',
+      value: 3200,
+    })
+
+    // The loop closes: the warning that sent them here is gone.
+    await page.getByRole('button', { name: 'Snapshot' }).click()
+    await expect(page.getByText('no Troops off template yet')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Type the Troops off figures' })).toHaveCount(0)
+  })
+
+  test('it is one Tab from the role select and fires on Enter', async ({ page }) => {
+    // Item 2 of the UI Definition of Done, and the reason the control is a
+    // BUTTON beside the warning rather than a click target on the warning
+    // text: the operator who assigned the role with the keyboard is still on
+    // the select when they read it.
+    await page.goto('/resource-planner')
+    await page.getByLabel(`Role for ${OFF_NAME}`).focus()
+    await page.keyboard.press('Tab')
+
+    const jump = page.getByRole('button', { name: 'Type the Troops off figures' })
+    await expect(jump).toBeFocused()
+
+    await page.keyboard.press('Enter')
+    await expect(page.getByLabel('Troops off Lumber mode')).toBeFocused()
+  })
+
+  test('the warning is still the role select description, and the new control is named', async ({
+    page,
+  }) => {
+    // The association the select carries has to survive the new control, and
+    // the new control needs a name of its own. Text only inside the described
+    // element: a screen reader flattens a description to its text, so an
+    // interactive child would be announced as words and reachable only by
+    // accident. Hence a SIBLING.
+    await page.goto('/resource-planner')
+
+    const select = page.getByLabel(`Role for ${OFF_NAME}`)
+    await expect(select).toHaveAttribute('aria-invalid', 'true')
+    const described = await select.getAttribute('aria-describedby')
+    expect(described).toBe(`role-problem-${OFF}`)
+
+    const problem = page.locator(`#${described}`)
+    await expect(problem).toHaveText('no Troops off template yet')
+    await expect(problem.locator('button')).toHaveCount(0)
+
+    // Its accessible name contains its visible label (WCAG 2.5.3), because it
+    // IS its visible label -- no aria-label overriding the words on screen.
+    const jump = page.getByRole('button', { name: 'Type the Troops off figures' })
+    await expect(jump).toHaveText('Type the Troops off figures')
+  })
+
+  test('a second press brings the operator back to the row', async ({ page }) => {
+    // The panel is left open behind them, so nothing about the second press
+    // changes state -- which is exactly how a jump that only fired once would
+    // pass unnoticed. The row has to be re-focused.
+    await page.goto('/resource-planner')
+    await page.getByRole('button', { name: 'Type the Troops off figures' }).click()
+    await expect(page.getByLabel('Troops off Lumber mode')).toBeFocused()
+
+    await page.getByRole('button', { name: 'Snapshot' }).click()
+    await page.getByLabel('Trade Office level for 11').focus()
+    await page.getByRole('button', { name: 'Type the Troops off figures' }).click()
+
+    await expect(page.getByLabel('Troops off Lumber mode')).toBeFocused()
+  })
+})
+
+// ג”€ג”€ Every figure, on every role, into the request ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€ג”€
+//
+// "change resources value", the second half of the complaint. The panel's
+// columns are rendered by a `map` over five roles and four resources, so a
+// column that is editable for DEF is editable for every role BY CONSTRUCTION
+// -- but that is an argument about the source, and the source is not what the
+// operator types into. Every one of the 35 boxes is typed here, with a
+// distinct figure in each so a cross-wired row or column is caught by value
+// rather than by presence, and then the plan request is READ: a figure that
+// does not reach the payload is a figure the operator typed for nothing.
+//
+// Crop deliberately has a TARGET box and no spend box -- the snapshot's crop
+// rate is already net of upkeep, so a role says what it should KEEP -- which
+// is why the counts below are 4 and 3 rather than 4 and 4.
+
+const FEEDER_V = 20031
+const CAP_V = 20033
+
+const FIVE = {
+  ...SNAPSHOT,
+  villages: [
+    ...SNAPSHOT.villages,
+    village(FEEDER_V, '31', 8, 0, 1500),
+    village(CAP_V, '33', 0, 8, 1500),
+  ],
+}
+
+/** One village per role, so `rolesForRequest` carries all five. */
+const ONE_PER_ROLE = {
+  [CAPITAL]: 'capital',
+  [DEF_A]: 'troops_off',
+  [DEF_B]: 'full_off',
+  [FEEDER_V]: 'def',
+  [CAP_V]: 'feeder',
+}
+
+// The labels the panel puts on its controls, mirroring `ROLE_LABEL` in
+// src/constants/planner.js. Typed out rather than imported so that a rename
+// fails here loudly instead of renaming both sides at once.
+const ROLES = [
+  ['capital', 'Capital / storage / NPC'],
+  ['troops_off', 'Troops off'],
+  ['full_off', 'Full off (Hammer)'],
+  ['def', 'DEF'],
+  ['feeder', 'Feeder'],
+]
+const TARGETS = [
+  ['lumber', 'Lumber'],
+  ['clay', 'Clay'],
+  ['iron', 'Iron'],
+  ['crop', 'Crop'],
+]
+const SPENDS = TARGETS.slice(0, 3)
+
+test.describe('every figure, on every role', () => {
+  test.use({ viewport: { width: 1440, height: 1200 } })
+
+  test.beforeEach(async ({ page }) => {
+    await isolate(page, FIVE)
+    await seed(page, { snapshot: FIVE, roles: ONE_PER_ROLE })
+  })
+
+  test('all 35 boxes are editable, and every figure reaches the plan request', async ({
+    page,
+  }) => {
+    test.setTimeout(120_000)
+
+    // The plan POST is READ and then ABORTED. Registered after `isolate`, so
+    // it takes precedence over the catch-all; aborting keeps the fail-closed
+    // rule intact -- nothing reaches the debug backend, let alone the game.
+    const sent = []
+    await page.route('**/distribution/plan', (route) => {
+      sent.push(route.request().postDataJSON())
+      return route.abort('blockedbyclient')
+    })
+
+    await openPanel(page)
+
+    const expected = {}
+    for (const [i, [role, label]] of ROLES.entries()) {
+      expected[role] = { allocations: {}, consumption: {} }
+      for (const [j, [resource, resLabel]] of TARGETS.entries()) {
+        const value = (i + 1) * 1000 + j * 10
+        await page.getByLabel(`${label} ${resLabel} mode`).selectOption('absolute')
+        await page.getByLabel(`${label} ${resLabel} value`).fill(String(value))
+        expected[role].allocations[resource] = { mode: 'absolute', value }
+      }
+      for (const [j, [resource, resLabel]] of SPENDS.entries()) {
+        const value = (i + 1) * 100 + j
+        await page.getByLabel(`${resLabel} spent per hour by a ${label} village`).fill(String(value))
+        expected[role].consumption[resource] = value
+      }
+    }
+
+    // Crop is offered as a target and never as a spend, counted rather than
+    // read off a comment.
+    await expect(page.getByLabel(/ Crop value$/)).toHaveCount(ROLES.length)
+    await expect(page.getByLabel(/^Crop spent per hour/)).toHaveCount(0)
+
+    expect(await stored(page)).toEqual(expected)
+    await expect(page.getByText('5 typed, covering 5 village(s)')).toBeVisible()
+
+    await page.getByRole('button', { name: 'Build plan (0 requests)' }).click()
+    await expect.poll(() => sent.length).toBe(1)
+
+    const roles = sent[0].roles
+    expect(Object.keys(roles).sort()).toEqual(ROLES.map(([role]) => role).sort())
+    for (const [role, body] of Object.entries(expected)) {
+      expect(roles[role], `${role} did not arrive as typed`).toEqual({
+        ...body,
+        may_relay: null,
+        crop_negative_by_design: false,
+      })
+    }
+  })
+
+  test('a value box beside "Keep own" is visibly not editable', async ({ page }) => {
+    // Keep is the ABSENCE of a target, so the value box is disabled until a
+    // mode is chosen -- and all twenty of them start that way. A disabled box
+    // that looks identical to an editable one is item 5 of the UI Definition
+    // of Done, and it is the shape of "change resources value": the operator
+    // clicks the figure, types, and nothing happens.
+    await openPanel(page)
+
+    const box = page.getByLabel('Troops off Lumber value')
+    await expect(box).toBeDisabled()
+    const off = await box.evaluate((el) => {
+      const s = getComputedStyle(el)
+      return { bg: s.backgroundColor, color: s.color, edge: s.borderBottomStyle, cursor: s.cursor }
+    })
+
+    await page.getByLabel('Troops off Lumber mode').selectOption('absolute')
+    await expect(box).toBeEnabled()
+    const on = await box.evaluate((el) => {
+      const s = getComputedStyle(el)
+      return { bg: s.backgroundColor, color: s.color, edge: s.borderBottomStyle, cursor: s.cursor }
+    })
+
+    // Three cues, so it is not carried by colour alone (WCAG 1.4.1).
+    expect(off.bg).not.toBe(on.bg)
+    expect(off.color).not.toBe(on.color)
+    expect(off.edge).toBe('dashed')
+    expect(on.edge).toBe('solid')
+    expect(off.cursor).toBe('not-allowed')
   })
 })

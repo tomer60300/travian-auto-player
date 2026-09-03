@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from 'react'
+
 import ScrollableTable from './ScrollableTable'
 import {
   CONSUMABLE_RESOURCES,
@@ -20,26 +22,73 @@ import {
  * four chances for them to drift apart, and the operator maintains those
  * villages as one thing -- so this is where they are typed once.
  *
- * A pure function of its props, deliberately. It belongs to the planner's
+ * Data in, callbacks out, and one effect. It belongs to the planner's
  * Allocate stage, which only renders once a snapshot has arrived, and
  * `renderToString` never gets there: it runs no effects, so there is no
  * snapshot and no villages. As inline JSX none of this had render coverage, in
  * a page whose own render test exists because three white-screen crashes
  * escaped exactly that way. `roleCounts` is data rather than a callback into
  * the page for the same reason.
+ *
+ * `focusRole` / `focusSeq` are the panel's OTHER door. The Snapshot row's "no
+ * DEF template yet" named a problem whose only remedy was on another stage,
+ * behind this disclosure, in a 1839px table -- so the page sends the operator
+ * here by role, and the row takes the caret. `focusSeq` rises on every press
+ * of that control rather than the role alone changing, because pressing it
+ * twice for the same role must land twice: the state it would compare is
+ * already what it wants.
  */
 export default function RoleTemplates({
   templates,
   roleCounts,
   missingTemplates,
+  focusRole,
+  focusSeq,
   onAllocation,
   onSpend,
   onPatch,
   onClear,
 }) {
+  const detailsRef = useRef(null)
+  const focusRef = useRef(null)
+  // OPEN FROM THE FIRST RENDER when the page has sent the operator to a role,
+  // not from the effect below, and this is the load-bearing half of the whole
+  // feature. A closed `<details>` skips its subtree: measured at 1440 in
+  // e2e/roleTemplates.pw.js, the DEF Lumber mode select has a 135x47 box --
+  // so a zero-rect check would call it reachable -- while
+  // `checkVisibility()` is false and `el.focus()` leaves
+  // `document.activeElement` untouched. Opening in an effect would therefore
+  // focus nothing on the frame it ran, and `ScrollableTable`'s own layout
+  // effect would have measured a skipped table (client == scroll == 0), losing
+  // the pinned Role column and the scroll hint until a ResizeObserver
+  // delivery a frame later shifted the table down to make room for the hint.
+  //
+  // Frozen at mount on purpose: the jump always crosses a stage, which mounts
+  // this component, so the arrival state is known on the first render. React
+  // never diffs a prop whose value it has not changed, so the operator can
+  // still close the panel from its own summary and it stays closed.
+  const [openOnArrival] = useState(focusRole != null)
+
+  useEffect(() => {
+    if (focusRole == null) return
+    const details = detailsRef.current
+    const target = focusRef.current
+    if (details == null || target == null) return
+    // The disclosure FIRST, and imperatively, so this holds even on the path
+    // `openOnArrival` cannot cover -- a jump arriving at an already-mounted
+    // panel the operator had closed. React is not tracking `open` (the prop
+    // never changes), so it will not write it back.
+    details.open = true
+    // `preventScroll` and then an explicit scroll: focus()'s own scrolling
+    // brings an element barely into view at the bottom edge, and this row is
+    // one of five in a table the operator has to read across.
+    target.focus({ preventScroll: true })
+    target.scrollIntoView({ block: 'center', inline: 'nearest' })
+  }, [focusRole, focusSeq])
+
   return (
     <div className="card p-3">
-      <details className="text-xs">
+      <details ref={detailsRef} open={openOnArrival} className="text-xs">
         <summary className="cursor-pointer pointer-coarse:min-h-11 flex items-center flex-wrap gap-x-2">
           <span className="text-primary font-semibold">Role templates</span>
           {/* Counted on `isEmptyTemplate`, the same predicate the request and
@@ -128,7 +177,7 @@ export default function RoleTemplates({
                           : claiming + (claiming === 1 ? ' village' : ' villages')}
                       </span>
                     </td>
-                    {RESOURCES.map((resource) => {
+                    {RESOURCES.map((resource, column) => {
                       const alloc = template?.allocations?.[resource] ?? {
                         mode: 'keep',
                         value: 0,
@@ -137,6 +186,15 @@ export default function RoleTemplates({
                         <td key={resource} className="px-2">
                           <div className="flex items-center gap-1">
                             <select
+                              // Where a jump lands: the first control of the
+                              // row, which is also the first thing the
+                              // operator has to answer -- the value box beside
+                              // it is disabled until a mode is chosen, because
+                              // keep is the absence of a target. Its own
+                              // accessible name names the role, so a screen
+                              // reader announces which row the caret arrived
+                              // in without the row needing to say it again.
+                              ref={role === focusRole && column === 0 ? focusRef : null}
                               aria-label={ROLE_LABEL[role] + ' ' + RESOURCE_LABEL[resource] + ' mode'}
                               className="input-field w-auto text-xs py-0.5"
                               value={alloc.mode}

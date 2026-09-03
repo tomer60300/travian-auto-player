@@ -587,6 +587,12 @@ export default function ResourcePlanner() {
   // crop_negative_by_design } }. Section 2.1 gives ONE profile for FOUR
   // defensive villages, so this is where those four numbers are typed -- once.
   const [roleTemplates, setRoleTemplates] = useState({})
+  // Which role's figures the operator has just asked to be taken to, as
+  // `{ role, seq }`. `seq` rather than the role alone: the second press of the
+  // same village's button has to land again, and the role it would compare is
+  // already the role it wants. Never cleared -- it is a request, and the panel
+  // acts on each one exactly once, keyed on the number.
+  const [templateFocus, setTemplateFocus] = useState(null)
   // Result of the last setup-file load, kept on screen rather than only in a
   // toast: a file that is missing villages produces a quietly wrong plan, so
   // what it did and did not cover has to stay readable.
@@ -2005,6 +2011,24 @@ export default function ResourcePlanner() {
     })
   }
 
+  // From the warning to the figures, in one press.
+  //
+  // The Snapshot row says "no DEF template yet" because the backend refuses a
+  // claimed role whose template never arrived -- and for four rounds that was
+  // all it said. The remedy is on ANOTHER stage, behind a collapsed
+  // disclosure, in the widest table in the app, so acting on it meant knowing
+  // the panel existed, finding it, opening it and picking one row out of five.
+  //
+  // Both state changes in one handler and therefore in one commit: the stage
+  // switch MOUNTS the panel, which is what lets it render already open and be
+  // measured open by `ScrollableTable`'s layout effect in the same frame. A
+  // panel that opened afterwards would focus a skipped subtree, which is a
+  // no-op -- measured in e2e/roleTemplates.pw.js, not assumed.
+  const jumpToRoleTemplate = (role) => {
+    setStage('allocate')
+    setTemplateFocus((prev) => ({ role, seq: (prev?.seq ?? 0) + 1 }))
+  }
+
   // How many villages each role is standing in for. The whole claim of a
   // template is "one profile, four villages", so the count is the number that
   // says whether it is doing that -- and a template nothing claims is dead
@@ -3017,9 +3041,33 @@ export default function ResourcePlanner() {
                                 of what a defensive village needs -- and call the
                                 plan feasible. */}
                             {missing && (
-                              <span id={problemId} className="block text-warning text-xs mt-0.5">
-                                no {ROLE_LABEL[role]} template yet
-                              </span>
+                              <>
+                                <span id={problemId} className="block text-warning text-xs mt-0.5">
+                                  no {ROLE_LABEL[role]} template yet
+                                </span>
+                                {/* A SIBLING of the description, not a child of
+                                    it. The select's `aria-describedby` points at
+                                    the span above, and a screen reader flattens
+                                    a description to its text -- so a button
+                                    inside it would be read out as words and
+                                    reached only by accident. Outside it, the
+                                    description says exactly what it always said
+                                    and this is the next tab stop after the
+                                    select the operator just used.
+
+                                    The role is in the VISIBLE label rather than
+                                    an aria-label, so the accessible name
+                                    contains the words on screen (WCAG 2.5.3) and
+                                    four rows claiming the same missing role do
+                                    not announce as four unlabelled buttons. */}
+                                <button
+                                  type="button"
+                                  className="block underline text-warning hover:text-primary text-xs mt-0.5 pointer-coarse:min-h-11"
+                                  onClick={() => jumpToRoleTemplate(role)}
+                                >
+                                  Type the {ROLE_LABEL[role]} figures
+                                </button>
+                              </>
                             )}
                           </>
                         )
@@ -4015,6 +4063,8 @@ export default function ResourcePlanner() {
             templates={roleTemplates}
             roleCounts={roleCounts}
             missingTemplates={rolesMissingTemplates}
+            focusRole={templateFocus?.role ?? null}
+            focusSeq={templateFocus?.seq ?? 0}
             onAllocation={setTemplateAllocation}
             onSpend={setTemplateSpend}
             onPatch={patchTemplate}

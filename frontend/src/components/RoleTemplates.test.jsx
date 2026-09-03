@@ -47,6 +47,8 @@ function render(props = {}) {
       templates={{}}
       roleCounts={NO_COUNTS}
       missingTemplates={[]}
+      focusRole={null}
+      focusSeq={0}
       onAllocation={() => {}}
       onSpend={() => {}}
       onPatch={() => {}}
@@ -125,6 +127,17 @@ describe('RoleTemplates', () => {
 
   it('says nothing about missing templates when none are missing', () => {
     expect(render({ templates: { def: DEF_TEMPLATE } })).not.toContain('will refuse it')
+  })
+
+  it('arrives already OPEN when the page has sent the operator to a role', () => {
+    // The one thing about the jump that `renderToString` CAN see, and it is the
+    // half that has to be true on the FIRST render rather than in an effect: a
+    // closed <details> skips its subtree, so `focus()` into it is a no-op and
+    // `ScrollableTable` would measure a table of zero width -- losing the
+    // pinned Role column and the scroll hint. Both are measured for real in
+    // e2e/roleTemplates.pw.js; this pins the render that makes them possible.
+    expect(render()).not.toMatch(/<details[^>]*\bopen\b/)
+    expect(render({ focusRole: 'troops_off', focusSeq: 1 })).toMatch(/<details[^>]*\bopen\b/)
   })
 
   it('offers Clear only for a role that has a template to clear', () => {
