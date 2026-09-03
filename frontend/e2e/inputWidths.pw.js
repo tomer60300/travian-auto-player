@@ -535,6 +535,15 @@ const MEASURE = () => {
     if (!head.checkVisibility()) continue
     const cell = table.querySelector('tbody .sticky-col')
     const hint = wrapper.parentElement?.querySelector(':scope > .scroll-hint') ?? null
+    // `.row-focus-edge` and `.sticky-col` have to be the SAME cell. The pair
+    // is the whole answer index.css gives to "the pinned cell sits out of the
+    // row tint" -- an opaque background cannot show the tint, so the edge
+    // colours the pinned cell's left border instead. Put the edge on a cell
+    // that scrolls and the focused row has no marker on the only cell that
+    // stays, which is the cell the marker exists for. Structural, so it is the
+    // same answer at every viewport: at 1440 the Allocate grid does not even
+    // overflow, and the mismatch was still there.
+    const edge = table.querySelector('tbody .row-focus-edge')
     const before = wrapper.scrollLeft
     wrapper.scrollLeft = wrapper.scrollWidth
     const pinnedLeft = cell ? Math.round(cell.getBoundingClientRect().left) : null
@@ -547,6 +556,7 @@ const MEASURE = () => {
       pinnedLeft,
       hasHint: hint != null,
       hintVisible: hint != null && hint.checkVisibility(),
+      edgeOnPinned: edge == null ? null : edge.classList.contains('sticky-col'),
     })
   }
 
@@ -749,6 +759,26 @@ function assertFits(where, measured, viewport) {
         ` while its container starts at ${t.wrapperLeft}`,
     )
   expect(slipped, `${where}: the identity column scrolled out of its own container`).toEqual([])
+
+  // The pinned cell has to be the cell that carries the focus edge. index.css
+  // justifies pinning partly on that pair -- the pinned cell cannot show the
+  // row tint through its opaque background, so the edge marks it instead --
+  // and the pair only works if both classes land on one cell. The Allocate
+  // grid put `.row-focus-edge` on the row-select checkbox cell and
+  // `.sticky-col` on the village cell beside it, so the focused row had no
+  // marker on the only cell that stays put, and the checkbox itself scrolled
+  // off: measured at the end of the scroll, x -171..-158 in a container
+  // starting at 41 (375) and 214..227 in one starting at 249 (768).
+  const unmarked = measured.tables
+    .filter((t) => t.edgeOnPinned === false)
+    .map(
+      (t) =>
+        `${t.surface}: the row focus edge is on a cell that scrolls, not on the pinned` +
+        ' identity cell',
+    )
+  expect(unmarked, `${where}: the pinned identity cell does not carry the row focus edge`).toEqual(
+    [],
+  )
 
   // And the hint, in BOTH directions: absent where the table scrolls is the
   // defect above; present where it does not is a table claiming to hide

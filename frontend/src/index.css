@@ -484,7 +484,18 @@ h1, h2, h3 {
    sitting out of the row tint: it always did at 375, and the compensation is
    already designed — `.row-focus-edge` colours the pinned cell's LEFT BORDER on
    focus-within (see `.row-focus` above), which an opaque background cannot
-   cover. That is why the pair exists. */
+   cover. That is why the pair exists.
+
+   That compensation only works when BOTH classes land on one cell, and it did
+   not at one of the four sites this rule reaches: the Allocate grid carried
+   `.row-focus-edge` on its row-select checkbox cell and `.sticky-col` on the
+   village cell beside it, so the focused row's marker was on a cell that
+   scrolled away and the pinned cell was left unmarked. The checkbox went with
+   it — measured at the end of the scroll, x -171..-158 in a container starting
+   at 41 (375) and 214..227 in one starting at 249 (768). The tick now rides
+   inside the pinned identity cell, and `e2e/inputWidths.pw.js` asserts the two
+   classes are the same cell for every table this rule pins, structurally, so
+   the sentence above cannot come untrue at one site again. */
 .table-overflowing .sticky-col {
   position: sticky;
   left: 0;

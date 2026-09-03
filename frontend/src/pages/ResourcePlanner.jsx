@@ -4383,18 +4383,31 @@ export default function ResourcePlanner() {
                   <table className="w-full text-xs">
                     <thead className="text-secondary uppercase">
                       <tr>
-                        <th className="text-center px-2">
-                          <input
-                            type="checkbox"
-                            aria-label="Select all villages"
-                            checked={allSelected(resource)}
-                            ref={(el) => {
-                              if (el) el.indeterminate = someSelected(resource) && !allSelected(resource)
-                            }}
-                            onChange={() => toggleSelectAll(resource)}
-                          />
+                        {/* The tick rides INSIDE the pinned identity column,
+                            not in a column of its own beside it. As its own
+                            column it was the one cell the pinned column
+                            scrolled over: at the end of the scroll the row
+                            checkbox sat at x -171..-158 in a container
+                            starting at 41 (375) and at 214..227 in one
+                            starting at 249 (768), so the operator could not
+                            tick a row without scrolling back for it. It also
+                            split the pair index.css relies on -- the edge that
+                            marks the focused row was on the checkbox cell
+                            while the pinning was on this one. */}
+                        <th className="text-left py-1 px-2 sticky-col">
+                          <span className="inline-flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              aria-label="Select all villages"
+                              checked={allSelected(resource)}
+                              ref={(el) => {
+                                if (el) el.indeterminate = someSelected(resource) && !allSelected(resource)
+                              }}
+                              onChange={() => toggleSelectAll(resource)}
+                            />
+                            Village
+                          </span>
                         </th>
-                        <th className="text-left py-1 px-2 sticky-col">Village</th>
                         <th className="text-right px-2">Own/h</th>
                         <th className="text-left px-2">Mode</th>
                         <th className="text-right px-2">Value</th>
@@ -4445,15 +4458,17 @@ export default function ResourcePlanner() {
                               isSelected(resource, v.village_id) ? 'bg-violet-400/10' : ''
                             }`}
                           >
-                            <td className="text-center px-2 row-focus-edge">
-                              <input
-                                type="checkbox"
-                                aria-label={`Select ${v.name} for batch edit`}
-                                checked={isSelected(resource, v.village_id)}
-                                onChange={() => toggleSelected(resource, v.village_id)}
-                              />
+                            <td className="py-1 px-2 sticky-col row-focus-edge">
+                              <span className="inline-flex items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  aria-label={`Select ${v.name} for batch edit`}
+                                  checked={isSelected(resource, v.village_id)}
+                                  onChange={() => toggleSelected(resource, v.village_id)}
+                                />
+                                {v.name}
+                              </span>
                             </td>
-                            <td className="py-1 px-2 sticky-col">{v.name}</td>
                             <td className="text-right px-2 font-mono text-secondary">
                               {own == null ? '—' : signed(own)}
                             </td>
