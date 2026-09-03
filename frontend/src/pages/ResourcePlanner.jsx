@@ -2687,9 +2687,16 @@ export default function ResourcePlanner() {
               A saved crop spend was dropped for{' '}
               {namesForVillageIds(cropSpendsDropped.map(Number), villages)} — crop is stated as a
               TARGET, not a spend, because the snapshot&rsquo;s crop rate is already net of troop
-              upkeep. Set what {cropSpendsDropped.length > 1 ? 'they should' : 'it should'} keep
-              with its crop allocation instead; an overflow that figure was hiding will show up
-              on the next plan.
+              upkeep. Set what{' '}
+              {/* One branch per number rather than a plural verb followed by a
+                  singular possessive: "what they should keep with its crop
+                  allocation" reads as one village's allocation shared by
+                  several, which is the opposite of what a per-village target
+                  is. */}
+              {cropSpendsDropped.length > 1
+                ? 'they should keep with their crop allocations'
+                : 'it should keep with its crop allocation'}{' '}
+              instead; an overflow that figure was hiding will show up on the next plan.
             </div>
           )}
 
@@ -2708,8 +2715,14 @@ export default function ResourcePlanner() {
               {namesForVillageIds(rolesDropped.droppedFrom.map(Number), villages)} — the backend
               refuses an unknown role, so it would have failed every plan. Set{' '}
               {rolesDropped.droppedFrom.length > 1 ? 'their roles' : 'its role'} again in the
-              table below; until then {rolesDropped.droppedFrom.length > 1 ? 'they keep' : 'it keeps'}{' '}
-              only its own production, with no template targets and no spend.
+              table below; until then{' '}
+              {/* Same rule as the crop note above: the verb and the possessive
+                  have to agree, or several villages are described as keeping
+                  one village's production. */}
+              {rolesDropped.droppedFrom.length > 1
+                ? 'they keep only their own production'
+                : 'it keeps only its own production'}
+              , with no template targets and no spend.
             </div>
           )}
           {rolesDropped && rolesDropped.droppedTemplates.length > 0 && (

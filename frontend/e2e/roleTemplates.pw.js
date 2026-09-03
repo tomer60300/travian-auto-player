@@ -23,9 +23,19 @@
  *      backend on 8001). `routeWebSocket` closes the log stream for the same
  *      reason.
  *   2. The snapshot is SEEDED into localStorage rather than fetched. The page
- *      hydrates it per account key, so the Allocate stage is reachable with
- *      zero network -- and there is no code path here that could ask the game
+ *      hydrates it per account key, so the Allocate stage is reachable with no
+ *      backend at all -- and there is no code path here that could ask the game
  *      for anything.
+ *
+ * "No backend", not "zero network", and the difference was measured rather than
+ * reasoned: with `page.on('request')` recording every request, four leave
+ * localhost -- `fonts.googleapis.com/css2?family=Roboto` plus the three woff2
+ * files it points at on `fonts.gstatic.com`, because `index.html` links Roboto
+ * with a `<link rel="stylesheet">`. Every `/api` call is answered by the route
+ * handler above (four of them, not two: React's StrictMode runs each effect
+ * twice in dev). Nothing reaches the game and nothing reaches :8001, which is
+ * the claim that matters -- but "zero network" was simply false, and an
+ * isolation claim that is only nearly true is the kind nobody re-measures.
  *
  * The assertions read `localStorage` rather than the rendered inputs, and
  * deliberately: what a callback must do is change the stored template, and a
