@@ -3,9 +3,14 @@
  * of Done names.
  *
  * `@playwright/test` plus its browser downloads is ~400MB, and this repo's frontend gate
- * (`npx eslint . && npm test && npm run build`) runs in a couple of seconds, so for a while
- * the spec shipped as a template with the dependency left out. The operator asked for it on
- * 2026-09-02; it is installed now and the baselines are committed.
+ * (`npx eslint . && npm test`) runs in a couple of seconds, so for a while the spec shipped
+ * as a template with the dependency left out. The operator asked for it on 2026-09-02; it is
+ * installed now and the baselines are committed.
+ *
+ * The gate stops at vitest. `npm run build` used to be named here as the third step, which
+ * was wrong and was the last sentence in the repo still saying so: the build writes into
+ * `src/travian_api/web/static`, which the production server on :80 serves directly, so on
+ * this checkout a build IS a deploy. See CLAUDE.md, Phase 2.
  *
  * Running it:
  *   cd frontend
@@ -20,8 +25,10 @@
  * Not every spec here is a visual one. `roleTemplates.pw.js` drives the Role-templates
  * panel's change handlers -- which `renderToString` cannot reach, because it runs no
  * events -- and asserts on stored state rather than on pixels, so the platform-suffixed
- * baseline reasoning above does not apply to it. It mocks every `/api` call and aborts
- * anything it did not anticipate, so it needs no backend either.
+ * baseline reasoning above does not apply to it. `inputWidths.pw.js` asserts on measured
+ * geometry for the same reason it is not a screenshot spec: a baseline PNG of a collapsed
+ * table is a baseline of the defect. Both mock every `/api` call and abort anything they
+ * did not anticipate, so they need no backend either.
  *
  * Note the `.pw.js` suffix on specs, and `testMatch` below. It is not decoration: vitest's
  * default include pattern is `**\/*.{test,spec}.?(c|m)[jt]s?(x)`, so a conventionally-named
