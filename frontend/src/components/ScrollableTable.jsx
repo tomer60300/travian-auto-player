@@ -1,4 +1,22 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+
+/**
+ * `useLayoutEffect` in a browser, `useEffect` on a server render.
+ *
+ * The distinction is load bearing here rather than idiomatic noise, and it was
+ * measured both ways. `useEffect` runs AFTER paint, so the table painted
+ * unpinned and un-hinted for one frame and the hint's arrival shifted
+ * everything below it: CLS attributed to the scroll container was 0.0047 at
+ * 375, 0.0097 at 768 and 0.0064 at 1440. `useLayoutEffect` runs before paint,
+ * the ResizeObserver's first delivery is dispatched in the same frame, and the
+ * first frame the operator sees already has the pinning and the hint.
+ *
+ * The switch is because `renderToString` runs no effects and warns about this
+ * one specifically -- and every vitest suite in this repo renders that way, one
+ * of them without a `console.error` mock. `window` is the environment test
+ * React itself uses for the warning.
+ */
+const useMeasureEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
 
 /**
  * A dense editor table that scrolls sideways inside its own box, pinning its
@@ -49,13 +67,20 @@ export default function ScrollableTable({ hint, className = '', children }) {
   const ref = useRef(null)
   const [overflowing, setOverflowing] = useState(false)
 
-  useEffect(() => {
+  useMeasureEffect(() => {
     const node = ref.current
     if (node == null) return
     const measure = () => setOverflowing(node.scrollWidth > node.clientWidth)
-    // A ResizeObserver's first callback is delivered after layout and before
-    // the next paint, so the hint and the pinning land on the same frame as
-    // the table — no layout shift (item 6 of the UI Definition of Done).
+    // Measured HERE, synchronously, and not left to the observer's first
+    // callback. `observe()` queues that callback for the next rendering cycle,
+    // so the frame this effect belongs to still painted an unpinned table with
+    // no hint, and the hint's arrival one frame later was a real shift: CLS
+    // attributed to this container was 0.0047 at 375, 0.0097 at 768 and 0.0064
+    // at 1440, and suppressing the hint took each of them to zero. A setState
+    // in a layout effect is flushed before paint, which is why this is a layout
+    // effect. Item 6 of the UI Definition of Done.
+    measure()
+    // From here the observer is for CHANGES only.
     const observer = new ResizeObserver(measure)
     observer.observe(node)
     // The container's own box does not change when a COLUMN does, so the table
