@@ -10,6 +10,19 @@
  * control, the village-selector `<select>` the shell renders twice and shows
  * once, at whichever of the two breakpoints is not in force.
  *
+ * "By name" is now true rather than asserted. That line read
+ * `1 not on screen: select` at all eighteen cases, because `labelOf` fell
+ * through every branch to the tag name -- the selector carried no
+ * `aria-label`, no `title`, no `aria-labelledby`, no wrapping `<label>`, no
+ * previous-sibling text and no placeholder -- and a control the sweep had
+ * genuinely missed would have printed identically. The selector is named now
+ * (`Active village`, one name for both renders), and `labelOf`'s last resort
+ * points at a PLACE rather than a tag, so the two cases can no longer be
+ * confused. Round 10 confirmed the double render independently -- two selects
+ * with identical options and value, one in `HEADER.top-bar > DIV.mobile-only`
+ * with a real rect and one in `ASIDE.sidebar` with a zero rect -- which is the
+ * evidence for the sentence above; the census line is what makes it legible.
+ *
  * `index.css` starts with `@import "tailwindcss"`, so Tailwind's utilities live
  * in `@layer utilities` while the hand-written component classes below are
  * UNLAYERED -- and unlayered normal declarations beat layered ones whatever the
@@ -317,7 +330,20 @@ const MEASURE = () => {
     const prev = el.previousElementSibling?.textContent?.trim()
     if (prev) return prev.slice(0, 32)
     if (el.placeholder) return `placeholder "${el.placeholder}"`
-    return el.tagName.toLowerCase()
+    // Nothing names it, so say WHERE it is rather than WHAT it is. The tag
+    // name this used to return is the one answer that cannot be acted on and
+    // cannot be told apart from a control the sweep genuinely missed: the
+    // census line read `1 not on screen: select` at all eighteen cases, which
+    // is exactly what a real miss would have printed, so the docstring's claim
+    // that the leftover is "reported by name" was carried by a word that named
+    // nothing. Every control on these surfaces is named now (the sidebar
+    // village selector was the last one), so this branch is the guard rather
+    // than the normal case -- and when it does fire it points at a place.
+    const path = []
+    for (let node = el.parentElement; node != null && path.length < 3; node = node.parentElement) {
+      path.unshift(node.classList[0] ? `${node.tagName}.${node.classList[0]}` : node.tagName)
+    }
+    return `UNNAMED ${el.tagName.toLowerCase()} in ${path.join(' > ')}`
   }
 
   const ctx = document.createElement('canvas').getContext('2d')
@@ -893,6 +919,10 @@ async function openFarmFilters(page) {
   // wide as its own padding and would pass a collapsed column.
   await page.getByLabel('Max dist').fill('120')
   await page.getByLabel('Min pop').fill('500')
+  // The THIRD control on the same bar, and it was left behind when the other
+  // two were named: identical `<span>` + control markup, so the census could
+  // only report it as `select`.
+  await expect(page.getByLabel('Status', { exact: true })).toBeVisible()
 }
 
 /**
@@ -935,6 +965,19 @@ async function openScoutLoop(page) {
   // way, so the concession cannot quietly return.
   await expect(page.getByLabel('Interval (s)')).toBeVisible()
   await expect(page.getByLabel('Duration (min)')).toBeVisible()
+  // Six more on this surface that the census could only report by tag or by
+  // the wrong text. The stealth pair sits under one `field-label-lg` that
+  // names neither box, so `previousElementSibling` gave the first of them the
+  // tag name and the second the em dash between them. The four bonus selects
+  // ARE inside a wrapping `<label>`, which is why the census printed
+  // "Wood-25%50%75%100%" -- a label element's text with the options folded in
+  // is not a name a reader can act on, and the accessible name it computes
+  // carries the current VALUE rather than the field.
+  await expect(page.getByLabel('Stealth delay minimum (s)')).toBeVisible()
+  await expect(page.getByLabel('Stealth delay maximum (s)')).toBeVisible()
+  for (const resource of ['Wood', 'Clay', 'Iron', 'Crop']) {
+    await expect(page.getByLabel(`${resource} minimum %`)).toBeVisible()
+  }
 }
 
 const SURFACES = [

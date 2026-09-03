@@ -600,6 +600,7 @@ export default function BuildQueue() {
         {/* Local village selector — does NOT change the global active village */}
         {villages && villages.length > 0 && (
           <select
+            aria-label="Village to queue for"
             value={villageId || ''}
             onChange={(e) => { const id = Number(e.target.value); if (id) handleVillageSwitch(id) }}
             disabled={running}

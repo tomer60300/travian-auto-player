@@ -896,7 +896,10 @@ export default function FarmLists() {
               <div className="flex gap-3 items-center flex-wrap mb-3 p-2.5 bg-surface rounded-md border-default text-xs">
                 <div className="flex items-center gap-1.5">
                   <span className="text-secondary">Status:</span>
-                  <select className="input-field text-xs py-0.5 px-1.5 w-auto" value={filterActive} onChange={(e) => setFilterActive(e.target.value)}>
+                  {/* Same `<span>`-names-nothing markup as the two boxes
+                      below, and named the same way: the visible word verbatim,
+                      so WCAG 2.5.3 Label in Name holds. */}
+                  <select aria-label="Status" className="input-field text-xs py-0.5 px-1.5 w-auto" value={filterActive} onChange={(e) => setFilterActive(e.target.value)}>
                     <option value="all">All</option>
                     <option value="active">Active only</option>
                     <option value="inactive">Inactive only</option>

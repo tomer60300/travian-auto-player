@@ -843,7 +843,16 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
                 {RESOURCES.map(({ id, label }) => (
                   <label key={id} className="flex flex-col items-center gap-1">
                     <span className="text-xs text-secondary">{label}</span>
+                    {/* The wrapping `<label>` does name this, but it names it
+                        badly: accname folds the embedded control's VALUE into
+                        the label's text, so the name changes as the operator
+                        picks a percentage, and a census reading the label
+                        element's own text gets every option appended
+                        ("Wood-25%50%75%100%"). An explicit name repeating the
+                        visible "Wood" and the visible "Minimum %" above is
+                        stable and still satisfies WCAG 2.5.3. */}
                     <select
+                      aria-label={`${label} minimum %`}
                       className="input-field text-center"
                       value={bonusResourceMins[id] || 0}
                       onChange={(e) =>
@@ -1594,11 +1603,17 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
       {/* Stealth delay range */}
       <div className="mb-4">
         <label className="field-label-lg">Stealth delay</label>
+        {/* The `field-label-lg` above carries no `htmlFor` and wraps neither
+            box, so neither had a name: the first reported as `input` and the
+            second as the em dash beside it. Both names repeat the visible
+            "Stealth delay" and the visible "s" (WCAG 2.5.3), with the end of
+            the range spelled out because position is the only thing on screen
+            that distinguishes them. */}
         <div className="flex items-center gap-2">
-          <input type="number" className="input-field w-20" value={delayMin} min={0} max={60} onChange={(e) => setDelayMin(Number(e.target.value))} disabled={running} />
+          <input type="number" aria-label="Stealth delay minimum (s)" className="input-field w-20" value={delayMin} min={0} max={60} onChange={(e) => setDelayMin(Number(e.target.value))} disabled={running} />
           <span className="text-secondary">s</span>
           <span className="text-secondary">&mdash;</span>
-          <input type="number" className="input-field w-20" value={delayMax} min={0} max={120} onChange={(e) => setDelayMax(Number(e.target.value))} disabled={running} />
+          <input type="number" aria-label="Stealth delay maximum (s)" className="input-field w-20" value={delayMax} min={0} max={120} onChange={(e) => setDelayMax(Number(e.target.value))} disabled={running} />
           <span className="text-secondary">s</span>
         </div>
         <p className="text-xs text-secondary mt-1">Human-like delay — heavy-tailed distribution (most delays shorter, occasional longer pauses)</p>

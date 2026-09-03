@@ -14,8 +14,14 @@ export default function VillageSelector({ compact = false }) {
     try { await switchVillage(id) } finally { setSwitching(false) }
   }
 
+  // One name for both renders: the shell mounts this twice -- `compact` in the
+  // mobile top bar and full-width in the sidebar -- and shows whichever the
+  // breakpoint allows. Neither had a name, so the one control the width
+  // census cannot see was reported to its reader as "select", which is
+  // indistinguishable from a control the sweep genuinely missed.
   return (
     <select
+      aria-label="Active village"
       value={activeVillageId || ''}
       onChange={(e) => { const id = Number(e.target.value); if (id) handleSwitch(id) }}
       disabled={switching}
