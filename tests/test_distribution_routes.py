@@ -1685,8 +1685,21 @@ class TestConsumptionProfiles:
         with pytest.raises(ValidationError):
             PlanRequest.model_validate(self._payload(consumption={"crop": 0}))
 
-    def test_an_absent_consumption_is_byte_for_byte_the_old_plan(self):
-        """The regression guard for every account that declares nothing."""
+    def test_an_empty_consumption_map_plans_identically_to_none(self):
+        """`{}` and absent are ONE state, not two.
+
+        Named for what it pins, because the old name -- "byte for byte the old
+        plan" -- claimed a guarantee it cannot give: both sides of this
+        comparison run today's code, so a change that neutered consumption
+        entirely would leave the two equal and this test green (it did, under
+        mutation M4). What it does pin is real and worth pinning: the file, the
+        request and the input all have to treat a cleared profile as silence,
+        or one of them starts claiming something the others do not.
+
+        The BYTE-FOR-BYTE guard against the pre-P1 planner is the frozen
+        fixture in tests/test_distribution_golden.py, which is compared to
+        recorded output rather than to another run of the same code.
+        """
         absent = self._plan()
         empty = self._plan(consumption={})
 

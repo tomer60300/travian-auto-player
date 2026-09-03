@@ -2398,9 +2398,12 @@ export default function ResourcePlanner() {
               village's merchant budget without a warning anywhere. Pin the
               identity column and say the rest are there. */}
           <p className="text-secondary text-xs mb-1 sm:hidden">
-            Swipe the table sideways for Merchants, Trade Office, Crop alert, Ships only to,
-            Consumption and
-            Stock floor — the village column stays pinned.
+            {/* In the SAME order as the columns. Listing Consumption before
+                Stock floor described a table that does not exist, which is
+                worse than no hint: the reader counts across to the wrong
+                column and types a figure into it. */}
+            Swipe the table sideways for Merchants, Trade Office, Crop alert, Ships only to, Stock
+            floor and Consumption — the village column stays pinned.
           </p>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
