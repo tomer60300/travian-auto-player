@@ -254,3 +254,21 @@ describe('relayLegIndex', () => {
     expect(relayLegIndex([]).size).toBe(0)
   })
 })
+
+describe('SEVERITY_LABEL', () => {
+  // Pinned, because the labels are what the operator reads the sections BY and
+  // the set of kinds under each one keeps growing. Section 6, 7 and 9 added
+  // seven, and four of the warnings are not targets: a drift flag under
+  // "Missed targets" sends someone looking for a target to fix.
+  it('describes what is actually under each heading', () => {
+    expect(SEVERITY_LABEL.critical).toBe('Costing you now')
+    expect(SEVERITY_LABEL.warning).toBe('Missed targets and stale assumptions')
+    expect(SEVERITY_LABEL.note).toBe('Notes')
+  })
+
+  it('has a label for every severity the backend ranks', () => {
+    for (const severity of SEVERITY_ORDER) {
+      expect(SEVERITY_LABEL[severity], severity).toBeTruthy()
+    }
+  })
+})

@@ -27,7 +27,15 @@ export const SEVERITY_TONE = {
  *  amber from red gets no information from the panel at all. */
 export const SEVERITY_LABEL = {
   critical: 'Costing you now',
-  warning: 'Missed targets',
+  // Widened when section 6, 7 and 9's findings arrived, because four of the
+  // warning kinds are not targets at all: `crop_profile_drift` is a
+  // hand-maintained figure that has gone stale, `npc_wood_low` is a state
+  // observation, and `pre_night_baseline` is an assumption the operator
+  // establishes by hand rather than something the plan aims at. A section
+  // heading that misdescribes what is under it is a rendering defect, not a
+  // wording preference -- an operator who reads "Missed targets" over a drift
+  // flag goes looking for a target to fix.
+  warning: 'Missed targets and stale assumptions',
   note: 'Notes',
 }
 
