@@ -42,13 +42,14 @@ Pure functions over already-fetched state. Nothing here spends a game request.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .allocation import MATERIALS, Resource, village_label
 from .findings import Category, Finding
 from .night_profile import DEFAULT_BASELINE_FILL, DEFAULT_TARGET_FILL
+from .npc import NpcReserve
 from .optimizer import RelayHub
 from .schedule import MINUTES_PER_DAY, Beat, ScheduledRoute
 
@@ -244,6 +245,73 @@ def _net_of_consumption(
     return out
 
 
+def _accrue(
+    reserves: Mapping[int, NpcReserve], budget: MutableMapping[int, float], hours: float
+) -> None:
+    """Add ``hours`` of conversion capacity to each village's budget.
+
+    Capped at one day's allowance: a budget that accumulated without bound over
+    the settling days would be the infinite reservoir again, wearing a rate.
+    """
+    for vid, reserve in reserves.items():
+        if reserve.allowance_per_day > 0.0:
+            budget[vid] = min(
+                reserve.allowance_per_day,
+                budget.get(vid, 0.0) + reserve.allowance_per_hour * hours,
+            )
+
+
+def _npc_top_up(
+    reserve: NpcReserve,
+    resource: Resource,
+    level: Mapping[tuple[int, Resource], float],
+    budget: MutableMapping[int, float],
+    shortfall: float,
+) -> tuple[float, dict[Resource, float]]:
+    """How much conversion funds this departure, and what each store paid for it.
+
+    Bounded three ways, and each one is load-bearing: by what is asked for, by
+    the budget accrued so far (so the reservoir is finite and can run out), and
+    by what the feedstock stores actually hold (so nothing is converted from
+    crop that has already been shipped away). NPC conserves the village's total,
+    so this only ever MOVES resources between that village's own stores at 1:1 --
+    the caller books both halves.
+
+    A material source keeps the buffer the operator maintains on it; crop keeps
+    nothing, because a granary has no floor -- it is not NPC-fed.
+    """
+    if shortfall <= 0.0 or not reserve.sources:
+        return 0.0, {}
+    spare: dict[Resource, float] = {}
+    for source in reserve.sources:
+        keep = 0.0 if source is Resource.CROP else reserve.floor_level
+        spare[source] = max(0.0, level.get((reserve.village_id, source), 0.0) - keep)
+    funded = min(shortfall, budget.get(reserve.village_id, 0.0), sum(spare.values()))
+    if funded <= 0.0:
+        return 0.0, {}
+    budget[reserve.village_id] = budget.get(reserve.village_id, 0.0) - funded
+    # Proportional to each store's share of the retention that sized the
+    # allowance, so the store funding most of it is debited most -- then spilled
+    # onto whatever else has room where one store cannot cover its share. The
+    # operator converts from what is actually in the village, not from a ratio.
+    paid: dict[Resource, float] = {}
+    left = funded
+    for source in reserve.sources:
+        want = min(spare[source], funded * reserve.share_of(source))
+        if want > 0.0:
+            paid[source] = want
+            left -= want
+    for source in reserve.sources:
+        if left <= 0.0:
+            break
+        room = spare[source] - paid.get(source, 0.0)
+        if room > 0.0:
+            take = min(room, left)
+            paid[source] = paid.get(source, 0.0) + take
+            left -= take
+    return funded, paid
+
+
 def simulate_day(
     beat: Beat,
     stocks: Mapping[int, Mapping[Resource, int]],
@@ -251,7 +319,7 @@ def simulate_day(
     net_per_hour: Mapping[int, Mapping[Resource, float]],
     step_minutes: int = 5,
     dispatch_window: tuple[int, int] | None = None,
-    floors: Mapping[int, Mapping[Resource, float]] | None = None,
+    npc: Mapping[int, NpcReserve] | None = None,
     consumption: Mapping[int, Mapping[Resource, float]] | None = None,
 ) -> tuple[OverflowEvent, ...]:
     """Replay the beat against real capacities until it settles. Issue #12.
@@ -286,6 +354,16 @@ def simulate_day(
     accumulation, and an army village told to land what it burns is reported as
     losing ``target x 24`` a day at a cap it never actually reaches. Absent, the
     rate is production alone and this is the pre-consumption replay exactly.
+
+    ``npc`` is section 7's balancing, per village: a buffer level a departure
+    may be topped back up to, out of a budget that **accrues at the allowance
+    and exhausts**. The previous version topped the store back to its floor
+    however often it was asked -- an infinite reservoir, which reported cargo
+    nobody could have funded. Here the top-up is bounded by the accrued budget
+    AND by what the feedstock stores actually hold, it is booked as an inflow so
+    ``net_gain_per_day`` stays true, and the feedstock is debited by exactly
+    what it paid for. That last debit is what makes a granary trigger honest:
+    crop converted into wood is crop the granary no longer holds.
     """
     net_per_hour = _net_of_consumption(net_per_hour, consumption)
     # (route index, firing index, resource) -> what actually left the origin.
@@ -348,12 +426,14 @@ def simulate_day(
     # matters -- production is added ~28,800 times a day on a 25-village
     # account, and folding a second dict update into that loop cost 34%.
     moved: dict[tuple[int, Resource], float] = {}
-    # The parameter is rebound rather than aliased behind a one-line closure:
-    # the lookup has a single call site, and the alias had wedged itself between
-    # the comment above and the `moved` it describes.
-    floors = floors or {}
+    # Section 7's reserves, and the conversion budget each one has accrued so
+    # far. The budget starts EMPTY: nothing has been traded yet, which is the
+    # conservative direction, and the replay runs to a steady state anyway.
+    reserves: Mapping[int, NpcReserve] = npc or {}
+    budget: dict[int, float] = {}
     in_flight: dict[int, float] = {}
     previous_close: dict[tuple[int, Resource], float] | None = None
+    previous_budget: dict[int, float] | None = None
     production_steps = len(range(0, MINUTES_PER_DAY, step_minutes))
     # A flag rather than the `for/else` it looks like: the only reader is the
     # `if not settled` block far below, which needs `events` -- built from the
@@ -380,6 +460,8 @@ def simulate_day(
                 for resource, rate in per_resource.items():
                     if rate:
                         add(vid, resource, rate * step_minutes / 60.0, minute)
+            if reserves:
+                _accrue(reserves, budget, step_minutes / 60.0)
             for event_minute in range(minute, min(minute + step_minutes, MINUTES_PER_DAY)):
                 # Arrivals before departures within the same minute: cargo that
                 # lands now is available to a route leaving now, which is what
@@ -392,29 +474,62 @@ def simulate_day(
                     moved[key] = moved.get(key, 0.0) + landed
                 for index, origin, _dest, resource, batch in departures.get(event_minute, ()):
                     key = (origin, resource)
+                    # An operator who NPCs the warehouse back up when it dips
+                    # below its floor funds this departure -- but only as far as
+                    # the conversion budget and the feedstock actually go. Booked
+                    # as an inflow at the destination store and a debit at the
+                    # source ones, so the day's net gain stays true at both ends
+                    # and the granary really does shrink by what it paid.
+                    reserve = reserves.get(origin)
+                    if reserve is not None and resource in MATERIALS:
+                        funded, paid = _npc_top_up(
+                            reserve,
+                            resource,
+                            level,
+                            budget,
+                            batch + reserve.floor_level - level.get(key, 0.0),
+                        )
+                        if funded:
+                            # What LANDED, not what was funded: NPC cannot
+                            # exceed a store's cap either (reference I.6.4), so
+                            # a top-up into a nearly full warehouse clamps -- and
+                            # booking the pre-clamp figure would leave
+                            # net_gain_per_day describing resources that were
+                            # discarded on arrival.
+                            before = level.get(key, 0.0)
+                            add(origin, resource, funded, event_minute)
+                            moved[key] = moved.get(key, 0.0) + (level.get(key, 0.0) - before)
+                            for source, amount in paid.items():
+                                add(origin, source, -amount, event_minute)
+                                source_key = (origin, source)
+                                moved[source_key] = moved.get(source_key, 0.0) - amount
                     available = level.get(key, 0.0)
-                    # An operator who NPCs the warehouse back up whenever it dips
-                    # below its floor really does hold that floor, every hour, so
-                    # a departure always finds its full batch. One dict lookup;
-                    # this branch runs per departure, not per step.
-                    floor = floors.get(origin, {}).get(resource)
-                    if floor is None:
-                        shipped = min(batch, available)
-                        level[key] = available - shipped
-                    else:
-                        shipped = batch
-                        level[key] = max(floor, available - batch)
+                    shipped = min(batch, available)
+                    level[key] = available - shipped
                     in_flight[index] = shipped
                     moved[key] = moved.get(key, 0.0) - shipped
 
         closing = dict(level)
-        if previous_close is not None and all(
-            abs(closing.get(key, 0.0) - previous_close.get(key, 0.0)) < 1e-6
-            for key in set(closing) | set(previous_close)
+        # The conversion budget is part of the closing state: a day that ended
+        # with the reserve half spent is not the same day as one that ended with
+        # it full, and calling the first settled would report a loss figure
+        # measured while the reservoir was still draining.
+        closing_budget = dict(budget)
+        if (
+            previous_close is not None
+            and all(
+                abs(closing.get(key, 0.0) - previous_close.get(key, 0.0)) < 1e-6
+                for key in set(closing) | set(previous_close)
+            )
+            and all(
+                abs(closing_budget.get(vid, 0.0) - (previous_budget or {}).get(vid, 0.0)) < 1e-6
+                for vid in closing_budget
+            )
         ):
             settled = True
             break
         previous_close = closing
+        previous_budget = closing_budget
 
     def net_gain_per_day(vid: int, resource: Resource) -> float:
         per_step = net_per_hour.get(vid, {}).get(resource, 0.0) * step_minutes / 60.0
@@ -948,6 +1063,16 @@ class ProfileSegment:
     it. Leaving it out entirely would flatter the day by the whole obligation.
     """
 
+    npc_attended: bool = True
+    """Whether the operator is at the marketplace during this profile's hours.
+
+    Section 7's conversion is a manual action, so a profile the operator sleeps
+    through accrues no conversion budget at all -- the night one, on this
+    account. Nothing here guesses which that is: the endpoint refuses a request
+    that declares a floor and does not say, so by the time a segment reaches
+    this replay the answer came from the operator.
+    """
+
     def covers(self, minute: int) -> bool:
         if self.start_minute == self.end_minute:
             return False  # zero-width: validated away upstream, inert here
@@ -1012,6 +1137,7 @@ def simulate_profile_cycle(
     step_minutes: int = 5,
     max_days: int = 45,
     consumption: Mapping[int, Mapping[Resource, float]] | None = None,
+    npc: Mapping[int, NpcReserve] | None = None,
 ) -> tuple[list[VillageTrajectory], list[TrajectoryBreach]]:
     """Replay a day that switches between allocation profiles.
 
@@ -1047,6 +1173,14 @@ def simulate_profile_cycle(
     NET sign. Read off production alone it would miss the operator's own army
     village, whose lumber and crop both read gross positive while it is in fact
     5,880/h short: the granary would empty and nothing would say so.
+
+    ``npc`` is section 7's balancing, per village, and it is here for the same
+    reason ``consumption`` is: one replay given a mechanism and not the other is
+    how /plan and /day-check came to answer the same account differently. The
+    reservoir is finite in both, and here the budget accrues only while an
+    ATTENDED profile is running -- see :attr:`ProfileSegment.npc_attended`.
+    Overnight the operator is asleep, so a night route funded by conversion
+    finds nothing to convert, which is the whole reason attendance is stated.
 
     Runs until the daily trajectory repeats (steady state) or ``max_days``.
     A store still drifting at the horizon is reported unsettled with its daily
@@ -1165,6 +1299,8 @@ def simulate_profile_cycle(
     lows: dict[tuple[int, Resource], float] = {}
     highs: dict[tuple[int, Resource], float] = {}
     in_flight: dict[int, float] = {}
+    reserves: Mapping[int, NpcReserve] = npc or {}
+    budget: dict[int, float] = {}
     day_nets: dict[tuple[int, Resource], float] = {}
     # profile name -> store -> level as that profile took over, measured day.
     openings: dict[str, dict[tuple[int, Resource], float]] = {}
@@ -1256,6 +1392,22 @@ def simulate_profile_cycle(
             for index in departures.get(minute, ()):
                 _out, _in, origin, _destination, resource, amount = firings[index]
                 key = (origin, resource)
+                # Section 7's conversion, finite here exactly as in simulate_day:
+                # what the budget has accrued and what the feedstock stores hold,
+                # never a store magically restored to its floor.
+                reserve = reserves.get(origin)
+                if reserve is not None and resource in MATERIALS:
+                    funded, paid = _npc_top_up(
+                        reserve,
+                        resource,
+                        level,
+                        budget,
+                        amount + reserve.floor_level - level.get(key, 0.0),
+                    )
+                    if funded:
+                        apply(key, funded, minute, day, draining=False)
+                        for source, debit in paid.items():
+                            apply((origin, source), -debit, minute, day, draining=True)
                 shipped = min(amount, max(0.0, level.get(key, 0.0)))
                 in_flight[index] = shipped
                 if shipped:
@@ -1283,6 +1435,11 @@ def simulate_profile_cycle(
                 # Hand-shipped obligations: rate-based, and only while the
                 # profile that owns them is the one running.
                 active = segment_at(minute)
+                # Conversion capacity accrues only while somebody is awake to
+                # convert. An hour with no profile at all is nobody's hour, so
+                # it accrues nothing either.
+                if reserves and active is not None and active.npc_attended:
+                    _accrue(reserves, budget, span_hours)
                 if active is not None:
                     for vid, per in active.manual_rates.items():
                         for resource, rate in per.items():

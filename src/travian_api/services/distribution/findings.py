@@ -70,7 +70,21 @@ class Category(StrEnum):
     OVER_ALLOCATED = "over_allocated"
     TRIBUTE_UNFUNDED = "tribute_unfunded"
     UNALLOCATED = "unallocated"
-    STOCK_FLOOR_UNSUSTAINABLE = "stock_floor_unsustainable"
+    # Section 7's NPC balancing, in the three things it can say. CAPACITY_SHORT
+    # replaced STOCK_FLOOR_UNSUSTAINABLE, which asked the same question of the
+    # wrong model: it compared the draw against the village's crop surplus after
+    # the fact, where the allowance IS the feedstock surplus and the comparison
+    # belongs in the solve. CRITICAL rather than WARNING because the spec's rule
+    # is to fail loudly: a plan whose cargo rests on conversion the feedstock
+    # cannot fund is not a plan that merely misses a target.
+    #
+    # The other two are the spec's own triggers -- reports about when the
+    # operator should trade, never an action the planner takes -- and they are
+    # two categories because they say opposite things: one is a shortage about
+    # to under-deliver routes, the other a surplus standing idle.
+    NPC_CAPACITY_SHORT = "npc_capacity_short"
+    NPC_WOOD_LOW = "npc_wood_low"
+    NPC_CROP_BANKED = "npc_crop_banked"
     STOCK_FUNDED = "stock_funded"
     MERCHANT_MODEL_UNCALIBRATED = "merchant_model_uncalibrated"
     MERCHANTS_BUSY = "merchants_busy"
@@ -267,27 +281,58 @@ _SPECS: Mapping[Category, _Spec] = {
             "you chose."
         ),
     ),
-    Category.STOCK_FLOOR_UNSUSTAINABLE: _Spec(
+    Category.NPC_CAPACITY_SHORT: _Spec(
+        # Beside OVER_ALLOCATED, which is the same fact seen without the
+        # conversion: the account claims more than it has, and NPC was the thing
+        # covering the gap. Reading them together is the point -- the operator
+        # needs to know both that the plan over-claims and that the trading
+        # meant to fund it cannot.
+        order=3.5,
+        severity=Severity.CRITICAL,
+        subject="village",
+        headline="{count} {subject} need more NPC conversion than their feedstock can fund",
+        action=(
+            "NPC exchanges one resource for another 1:1 inside one village, so a conversion "
+            "is bounded by what that village RETAINS of the resources it is not shipping -- "
+            "clay and crop at the balancing hub. Beyond that there is nothing to convert "
+            "from and the routes it funds arrive short with nothing in the plan to say why. "
+            "Ship less from it, raise the feedstock it keeps, or lower the claims it covers."
+        ),
+    ),
+    Category.NPC_WOOD_LOW: _Spec(
+        # Just above STOCK_FUNDED: that finding says the routes depend on NPC
+        # trading, and this one says the trading is due now.
         order=19,
         severity=Severity.WARNING,
         subject="village",
-        headline="{count} {subject} draw their stock floor down faster than it refills",
+        headline="{count} {subject} are at or below their wood floor",
         action=(
-            "NPC trades crop for materials one for one, so a floor refills no faster than "
-            "the village's crop surplus. Drawn harder than that the floor sinks, and the "
-            "routes it funds quietly start under-delivering. Ship less from it, raise its "
-            "crop, or lower the claims it is covering."
+            "Section 7's first NPC trigger. The buffer these routes ship out of is gone, so "
+            "convert clay or crop into lumber there before the cargo starts arriving short. "
+            "The floor read is the village's own `stock_floor_fraction` of its warehouse -- "
+            "the spec states no wood figure of its own, so this is the account's number."
+        ),
+    ),
+    Category.NPC_CROP_BANKED: _Spec(
+        order=35,
+        severity=Severity.NOTE,
+        subject="village",
+        headline="{count} {subject} hold crop past the 700,000 NPC trigger",
+        action=(
+            "Section 7's second NPC trigger, and an opportunity rather than a fault: banked "
+            "crop is feedstock. Convert it into whatever the account is short of -- wood, on "
+            "this one -- or it sits there until the granary caps and sheds it."
         ),
     ),
     Category.STOCK_FUNDED: _Spec(
-        # Immediately after STOCK_FLOOR_UNSUSTAINABLE, not two ranks below it:
-        # the two describe one mechanism (what the floor funds, and whether it
-        # can keep funding it) and reading them either side of an unrelated
-        # note about the route search made them look like separate subjects.
-        # Fractional, which is what `order` being a float is for -- 11.5 does
-        # the same job for MERCHANTS_CROWDED -- so no other rank moves. Ranks
-        # are per-severity, so the CRITICAL 19 on UNREADABLE_RATE is a
-        # different scale and does not collide with the WARNING 19 above.
+        # Immediately after NPC_WOOD_LOW, not two ranks below it: the two
+        # describe one mechanism (what the conversion funds, and whether it is
+        # due) and reading them either side of an unrelated note about the route
+        # search made them look like separate subjects. Fractional, which is
+        # what `order` being a float is for -- 11.5 does the same job for
+        # MERCHANTS_CROWDED -- so no other rank moves. Ranks are per-severity,
+        # so the CRITICAL 19 on UNREADABLE_RATE is a different scale and does
+        # not collide with the WARNING 19 above.
         order=19.5,
         severity=Severity.WARNING,
         subject="village",

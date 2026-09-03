@@ -12,6 +12,7 @@ import pytest
 
 from travian_api.services.distribution.allocation import Resource
 from travian_api.services.distribution.findings import Category, Severity, summarise
+from travian_api.services.distribution.npc import NpcReserve
 from travian_api.services.distribution.optimizer import Route
 from travian_api.services.distribution.schedule import build_beat
 from travian_api.services.distribution.storage import (
@@ -498,15 +499,22 @@ class TestAProjectedLossIsNotAPresentOne:
         assert summarise(list(findings)).total_loss_per_day == pytest.approx(926 * 24)
 
 
-class TestStockFloors:
-    """A store the operator keeps topped up by NPC never runs dry in the replay.
+class TestNpcReserves:
+    """A store the operator NPCs back up funds its departures -- as far as the
+    conversion goes, and no further.
 
-    Without a floor the simulation is right to ship only what the origin holds:
-    cargo is conserved. But a village that NPCs its crop surplus into lumber
-    whenever the warehouse dips below 30% does hold that 30%, every hour, so a
-    departure from it always finds its full batch. Modelling it as an ordinary
-    store made every stock-funded route ship a fraction of its cargo and the
-    receivers' whole day understated.
+    Without a reserve the simulation is right to ship only what the origin
+    holds: cargo is conserved. A village that converts its crop surplus into
+    lumber does hold more than it produces, so a departure from it finds more
+    than the store made -- but only what the conversion could actually fund.
+
+    **RE-SEEDED from the previous model, which two of these tests pinned.** It
+    took ``floors`` alone and did ``level = max(floor, level - batch)``, an
+    INFINITE reservoir: the origin below funded the whole 120,000/day batch off
+    24,000/day of production and 96,000/day of nothing at all. Now the
+    conversion is a finite budget out of a named feedstock store, so the same
+    120,000/day is funded only when 96,000/day of feedstock is there to fund it
+    -- and the arithmetic is written down in each case.
     """
 
     def _daily_route(self, origin: int, destination: int, per_hour: float) -> Route:
@@ -520,41 +528,117 @@ class TestStockFloors:
             one_way_minutes=60.0,
         )
 
-    def _replay(self, **kwargs) -> tuple[OverflowEvent, ...]:
-        # Village 1 makes 24,000/day and is asked to ship 120,000/day -- five
-        # times its production -- out of a 40,000 stock. Village 2 burns exactly
-        # the 120,000 a day it would receive, but its store only holds 80,000,
-        # so a FULL batch overflows it by 40,000 (issue #12's shape) while a
-        # batch the origin could not fund does not.
+    def _reserve(self, vid: int, allowance_per_day: float) -> NpcReserve:
+        return NpcReserve(
+            village_id=vid,
+            floor_level=40_000,
+            allowance_per_day=allowance_per_day,
+            sources=(Resource.CROP,) if allowance_per_day else (),
+            shares=(1.0,) if allowance_per_day else (),
+            drawn=frozenset({Resource.LUMBER}) if allowance_per_day else frozenset(),
+        )
+
+    def _replay(
+        self,
+        *,
+        crop_stock: float = 200_000,
+        crop_capacity: float = 1_000_000,
+        crop_per_hour: float = 4_000,
+        **kwargs,
+    ) -> tuple[OverflowEvent, ...]:
+        # Village 1 makes 24,000 lumber/day (1,000/h) and is asked to ship
+        # 120,000/day -- five times its production -- out of a 40,000 stock. The
+        # 96,000/day gap is exactly what its 4,000/h of crop can convert into,
+        # 1:1, which is the whole of section 7's mechanism written as a fixture.
+        # Village 2 burns exactly the 120,000 a day it would receive, but its
+        # store only holds 80,000, so a FULL batch overflows it by 40,000
+        # (issue #12's shape) while a batch the origin could not fund does not.
         return simulate_day(
             build_beat((self._daily_route(1, 2, 5_000),)),
-            stocks={1: {Resource.LUMBER: 40_000}, 2: {Resource.LUMBER: 40_000}},
-            capacities={1: {Resource.LUMBER: 1_000_000}, 2: {Resource.LUMBER: 80_000}},
-            net_per_hour={1: {Resource.LUMBER: 1_000}, 2: {Resource.LUMBER: -5_000}},
+            stocks={
+                1: {Resource.LUMBER: 40_000, Resource.CROP: crop_stock},
+                2: {Resource.LUMBER: 40_000},
+            },
+            capacities={
+                1: {Resource.LUMBER: 1_000_000, Resource.CROP: crop_capacity},
+                2: {Resource.LUMBER: 80_000},
+            },
+            net_per_hour={
+                1: {Resource.LUMBER: 1_000, Resource.CROP: crop_per_hour},
+                2: {Resource.LUMBER: -5_000},
+            },
             **kwargs,
         )
 
-    def test_an_unfloored_origin_still_ships_only_what_it_holds(self):
-        """Cargo stays conserved for every store that has no floor: the origin
-        runs down to its 24,000/day and the receiver never sees a full batch."""
+    def test_an_origin_with_no_reserve_ships_only_what_it_holds(self):
+        """Cargo stays conserved for every store with no conversion behind it:
+        the origin runs down to its 24,000/day and the receiver never sees a
+        full batch."""
         overflows = self._replay()
 
         assert not [e for e in overflows if e.village_id == 2], (
             "the origin cannot fund 120,000/day, so no full batch ever lands"
         )
 
-    def test_a_floored_origin_ships_its_full_batch_every_day(self):
-        overflows = self._replay(floors={1: {Resource.LUMBER: 40_000}})
+    def test_a_funded_reserve_ships_the_full_batch_every_day(self):
+        """96,000/day of allowance against a 96,000/day gap, out of a granary
+        producing exactly that: the batch is funded and the receiver overflows
+        by exactly one batch's excess over its 80,000 store."""
+        overflows = self._replay(npc={1: self._reserve(1, allowance_per_day=96_000)})
 
         event = next((e for e in overflows if e.village_id == 2), None)
-        assert event is not None, "a floored origin must fund the whole 120,000 batch"
-        # Exactly one full batch's excess over the store, on the settled day:
-        # the origin was topped back to its floor before every departure.
+        assert event is not None, "a funded reserve must cover the whole 120,000 batch"
         assert event.wasted_per_day == pytest.approx(40_000, abs=1.0)
 
-    def test_the_floor_applies_only_to_the_store_that_has_one(self):
-        """A floor on the receiver's own store must not fund the origin."""
-        overflows = self._replay(floors={2: {Resource.LUMBER: 40_000}})
+    def test_the_reservoir_is_finite_and_exhausts(self):
+        """The infinite-reservoir bug, pinned. Same 96,000/day gap and a granary
+        with a million crop in it, but only 10,000/day of conversion behind it:
+        the batch cannot be funded, so no full batch ever lands."""
+        overflows = self._replay(
+            crop_stock=1_000_000, npc={1: self._reserve(1, allowance_per_day=10_000)}
+        )
+
+        assert not [e for e in overflows if e.village_id == 2], (
+            "a 10,000/day allowance cannot fund a 96,000/day gap"
+        )
+
+    def test_an_empty_feedstock_store_funds_nothing(self):
+        """NPC is an exchange: the allowance is a rate, but there still has to be
+        crop in the granary to convert. 96,000/day of allowance against a
+        granary that is empty and grows nothing funds nothing at all."""
+        overflows = self._replay(
+            crop_stock=0,
+            crop_per_hour=0,
+            npc={1: self._reserve(1, allowance_per_day=96_000)},
+        )
+
+        assert not [e for e in overflows if e.village_id == 2]
+
+    def test_the_feedstock_store_is_really_debited(self):
+        """The half that makes the 700,000 crop trigger honest: crop converted
+        into wood is crop the granary no longer banks.
+
+        The granary here holds 100,000 and gains 96,000/day, so undebited it
+        tops out and sheds every one of them. Paying for the conversion is the
+        only thing that can keep it level -- so the crop overflow disappearing
+        IS the debit, measured rather than asserted."""
+        undebited = self._replay(crop_stock=50_000, crop_capacity=100_000)
+        debited = self._replay(
+            crop_stock=50_000,
+            crop_capacity=100_000,
+            npc={1: self._reserve(1, allowance_per_day=96_000)},
+        )
+
+        shed = next(e for e in undebited if e.village_id == 1 and e.resource is Resource.CROP)
+        assert shed.wasted_per_day == pytest.approx(96_000, abs=1.0)
+        assert not [e for e in debited if e.village_id == 1 and e.resource is Resource.CROP], (
+            "the conversion must take the crop out of the granary, not leave it to shed"
+        )
+        assert any(e.village_id == 2 for e in debited), "and it did fund the batch"
+
+    def test_a_reserve_applies_only_to_the_village_that_has_one(self):
+        """A reserve on the receiver must not fund the origin."""
+        overflows = self._replay(npc={2: self._reserve(2, allowance_per_day=96_000)})
 
         assert not [e for e in overflows if e.village_id == 2]
 
@@ -704,6 +788,81 @@ class TestConsumptionAcrossTheProfileDay:
 
         assert now_rows == was_rows
         assert now_breaches == was_breaches
+
+
+class TestNpcAcrossTheProfileDay:
+    """The composite replay needs section 7 too, and needs it per segment.
+
+    Both replays, not one: a previous feature was threaded into ``simulate_day``
+    and not into ``simulate_profile_cycle``, so /plan and /day-check answered
+    the same account differently. And here attendance matters, because the
+    reservoir refills only while a profile the operator is awake for is running.
+    """
+
+    RESERVE = NpcReserve(
+        village_id=1,
+        floor_level=40_000,
+        # 96,000/day: exactly the gap between 1's 24,000/day of lumber and the
+        # 120,000/day it is asked to ship.
+        allowance_per_day=96_000,
+        sources=(Resource.CROP,),
+        shares=(1.0,),
+        drawn=frozenset({Resource.LUMBER}),
+    )
+
+    def _segments(self, *, attended: bool) -> list[ProfileSegment]:
+        route = Route(
+            origin=1,
+            destination=2,
+            cargo_per_hour={Resource.LUMBER: 5_000},
+            cycle_hours=24,
+            merchants_per_send=1,
+            sets_in_flight=1,
+            one_way_minutes=60.0,
+        )
+        beat = build_beat((route,))
+        return [
+            ProfileSegment(
+                name="All day",
+                start_minute=0,
+                end_minute=1439,
+                routes=beat.routes,
+                npc_attended=attended,
+            )
+        ]
+
+    def _run(self, *, attended: bool, npc):
+        return simulate_profile_cycle(
+            self._segments(attended=attended),
+            own_rates={1: {Resource.LUMBER: 1_000, Resource.CROP: 4_000}},
+            stocks={1: {Resource.LUMBER: 40_000, Resource.CROP: 200_000}},
+            capacities={1: {Resource.LUMBER: 1_000_000, Resource.CROP: 1_000_000}},
+            step_minutes=5,
+            max_days=6,
+            npc=npc,
+        )
+
+    def test_the_conversion_moves_crop_into_lumber_one_for_one(self):
+        """96,000/day out of the granary and 96,000/day into the warehouse, on
+        top of the 24,000/day the fields make -- so the lumber store's day nets
+        120,000 of inflow against the 120,000 that ships out."""
+        without, _ = self._run(attended=True, npc=None)
+        with_npc, _ = self._run(attended=True, npc={1: self.RESERVE})
+
+        crop_before = next(t for t in without if t.resource is Resource.CROP)
+        crop_after = next(t for t in with_npc if t.resource is Resource.CROP)
+
+        assert crop_before.daily_net == pytest.approx(96_000, abs=100.0)
+        assert crop_after.daily_net == pytest.approx(0.0, abs=100.0)
+
+    def test_an_unattended_profile_converts_nothing(self):
+        """The operator is asleep, so the granary keeps every unit and the
+        warehouse gets none -- the whole reason attendance is stated per
+        segment rather than inferred from the clock."""
+        asleep, _ = self._run(attended=False, npc={1: self.RESERVE})
+
+        crop = next(t for t in asleep if t.resource is Resource.CROP)
+        assert crop.daily_net == pytest.approx(96_000, abs=100.0)
 
 
 class TestADesignedCropDeficitIsNotAnEmergency:

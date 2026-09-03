@@ -185,7 +185,11 @@ class TestThePlanContract:
             "village_id",
             "resource",
             "own_per_hour",
-            "supplement_per_hour",
+            # Two figures where there was one `supplement_per_hour`: section 7's
+            # allowance is a CEILING and the draw is what the plan spent of it,
+            # and the grid's `ship = target - own - draw` needs the second one.
+            "npc_allowance_per_hour",
+            "npc_draw_per_hour",
             "target_per_hour",
             "ship_per_hour",
             "consumption_per_hour",
@@ -196,6 +200,56 @@ class TestThePlanContract:
         row = next(n for n in nets if n["village_id"] == spender and n["resource"] == "lumber")
         assert row["consumption_per_hour"] == pytest.approx(2000)
         assert row["net_per_hour"] == pytest.approx(row["target_per_hour"] - 2000)
+
+    def test_a_stock_floor_with_a_window_and_no_attendance_is_a_422(self, client):
+        """Section 7. Over the wire, because this is the refusal the operator's
+        night profile depends on and a 500 or a silent default would both be
+        worse than the 422."""
+        body = _plan_body(dispatch_window=[420, 1380], prune_to_window=True)
+        body["config"][0]["stock_floor_fraction"] = 0.30
+        body["snapshot"][0]["warehouse_capacity"] = 1_200_000
+
+        res = client.post("/api/distribution/plan", json=body)
+
+        assert res.status_code == 422, res.text
+        assert "npc_attended" in res.text
+
+    def test_the_npc_tables_travel_over_the_wire(self, client):
+        """`npc_reserves` and `npc_triggers` are what the page renders instead
+        of parsing the prose, so their field names are part of the contract."""
+        body = _plan_body(dispatch_window=[420, 1380], prune_to_window=True, npc_attended=True)
+        body["config"][0]["stock_floor_fraction"] = 0.30
+        body["snapshot"][0]["warehouse_capacity"] = 1_200_000
+
+        res = client.post("/api/distribution/plan", json=body)
+
+        assert res.status_code == 200, res.text
+        reserves = res.json()["npc_reserves"]
+        assert len(reserves) == 1, reserves
+        assert set(reserves[0]) == {
+            "village_id",
+            "village_name",
+            "floor_level",
+            "allowance_per_day",
+            "allowance_per_hour",
+            "feedstock",
+            "feedstock_shares",
+            "drawn",
+        }
+        assert reserves[0]["floor_level"] == pytest.approx(0.30 * 1_200_000)
+        # The hub holds no wood at all against a 360,000 floor, so section 7's
+        # first trigger is due.
+        triggers = res.json()["npc_triggers"]
+        assert [t["kind"] for t in triggers] == ["wood_low"], triggers
+        assert set(triggers[0]) == {
+            "village_id",
+            "village_name",
+            "kind",
+            "resource",
+            "level",
+            "threshold",
+            "projected",
+        }
 
     def test_a_consumption_under_an_unknown_resource_is_a_readable_422(self, client):
         body = _plan_body()

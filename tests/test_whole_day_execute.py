@@ -352,6 +352,9 @@ class TestTheUnionRefusesWhatItCannotKeepStraight:
         bad_night.plan.over_budget = ()
         bad_night.plan.shortfalls = ()
         bad_night.plan.over_allocated = ()
+        # Section 7's NPC refusal is one of the reasons `blockers()` reports, so
+        # a stub plan has to answer it like the real one does.
+        bad_night.plan.npc_short = ()
         accounts = {tuple(DAY): ACCOUNTS[tuple(DAY)], tuple(NIGHT): bad_night}
 
         from fastapi import HTTPException

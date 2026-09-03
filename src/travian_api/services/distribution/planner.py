@@ -22,6 +22,7 @@ from .findings import Category, Finding, Severity
 from .geometry import MapGeometry
 from .merchants import CEIL_DUST_TOLERANCE, DAILY_BEAT_CYCLES, MerchantModel
 from .night_profile import is_night_window
+from .npc import NpcPolicy, NpcReserve, derive_reserves, draw_allowance
 from .optimizer import (
     DEFAULT_MERCHANT_HEADROOM,
     DEFAULT_MERCHANT_RESERVE,
@@ -161,6 +162,13 @@ class DistributionPlan:
     relays: tuple[RelayHub, ...] = ()
     """Villages the plan routes crop THROUGH, which the sheet's rows cannot show.
     Timed from the beat, so these figures are what the schedule will really do."""
+    npc: Mapping[int, NpcReserve] = field(default_factory=dict)
+    """Section 7's conversion budget per village, as the two-pass solve sized it.
+
+    Carried on the plan because everything downstream needs the SAME figure the
+    allocation layer was given: the storage replay tops stores up out of it, the
+    trigger report measures against its floor, and the response exposes it. A
+    second derivation could disagree with the first."""
 
     @property
     def warnings(self) -> tuple[str, ...]:
@@ -183,7 +191,20 @@ class DistributionPlan:
         would break a deliberate stockpile. See :func:`assess`, which says out
         loud both what this weighed and what it did not.
         """
-        return self.routing.is_feasible and not self.over_allocated
+        return self.routing.is_feasible and not self.over_allocated and not self.npc_short
+
+    @property
+    def npc_short(self) -> tuple[Finding, ...]:
+        """Villages whose cargo needs more NPC conversion than they can fund.
+
+        Weighed by :attr:`is_feasible` rather than left to the operator, because
+        section 7's rule is to fail loudly: those routes WILL arrive short, and
+        unlike an overflow that is not a fact about the account the plan is
+        allowed to leave in place -- it is the plan promising cargo that does
+        not exist. Kept separate from :attr:`over_allocated` because a resource
+        with no remainder village over-claims without that reporting it.
+        """
+        return tuple(f for f in self.findings if f.category is Category.NPC_CAPACITY_SHORT)
 
     @property
     def over_allocated(self) -> tuple[Resource, ...]:
@@ -219,13 +240,17 @@ FEASIBILITY_COVERS: tuple[str, ...] = (
     "every origin stays inside its merchant budget",
     "every receiver's demand can be supplied by some village",
     "no resource is allocated beyond what the account produces",
+    "no village is asked for more NPC conversion than its feedstock can fund",
 )
 
-# The one critical category ``is_feasible`` has an opinion about. Every other
+# The critical categories ``is_feasible`` has an opinion about. Every other
 # critical finding is real AND unweighed: a plan can destroy resources all day
 # and still be perfectly executable, so those belong in `unweighed` rather than
-# in a veto.
-_WEIGHED_CRITICALS: frozenset[Category] = frozenset({Category.OVER_ALLOCATED})
+# in a veto. These two are not about the account's outcome but about the sheet
+# promising cargo that does not exist.
+_WEIGHED_CRITICALS: frozenset[Category] = frozenset(
+    {Category.OVER_ALLOCATED, Category.NPC_CAPACITY_SHORT}
+)
 
 
 @dataclass(frozen=True)
@@ -292,6 +317,10 @@ def blockers(plan: DistributionPlan, names: Mapping[int, str] | None = None) -> 
             f"{resource.value} allocations claim more than the account produces, so the "
             f"remainder village would have to ship what it does not have"
         )
+    # The finding's own message, not a second phrasing of it: it already names
+    # the village, the resource and the gap, and /execute refuses with this
+    # tuple. Two wordings of one refusal is how they come to disagree.
+    reasons.extend(finding.message for finding in plan.npc_short)
     return tuple(reasons)
 
 
@@ -337,7 +366,7 @@ def craft_plan(
     productions: Mapping[Resource, Mapping[int, float]],
     allocations: Mapping[Resource, Mapping[int, Allocation]],
     config: PlannerConfig,
-    supplements: Mapping[Resource, Mapping[int, float]] | None = None,
+    npc: NpcPolicy | None = None,
     consumption: Mapping[Resource, Mapping[int, float]] | None = None,
 ) -> DistributionPlan:
     """Plan resource distribution for whatever account state is supplied.
@@ -350,11 +379,13 @@ def craft_plan(
             here are simply not planned; villages absent within a resource keep
             what they produce.
         config: tunables.
-        supplements: per resource, village id -> supply per hour beyond
-            production, drawn from stock the operator keeps topped up. Account
-            state, not a tunable, which is why it sits here and not on
-            :class:`PlannerConfig`. The caller converts a stock FLOOR into this
-            RATE, because only the caller knows the window it is spread over.
+        npc: section 7's balancing declaration -- which villages hold a buffer
+            level, whether the operator is at the marketplace during these
+            hours, and any explicit feedstock override. Account state, not a
+            tunable, which is why it sits here and not on
+            :class:`PlannerConfig`. The caller supplies the buffer LEVEL (only
+            it knows the warehouse capacity); the conversion RATE is derived
+            here, from what the first pass says each village retains.
         consumption: per resource, village id -> what the village SPENDS per
             hour. Account state for the same reason the supplement is, and the
             operator's own figure: nothing in the game reports it, because the
@@ -367,26 +398,68 @@ def craft_plan(
         budget per village, and every warning, shortfall and over-budget village
         raised along the way. Nothing is dropped to make the plan look clean.
     """
-    resource_plans: dict[Resource, ResourcePlan] = {}
     findings: list[Finding] = []
     # Warnings are read by a person, so they name villages the way that person
     # does. Derived here rather than passed in: the caller already gave us the
     # villages, and a second source of names could disagree with the first.
     names = {vid: village.name for vid, village in villages.items() if village.name}
 
-    stock = supplements or {}
     spend = consumption or {}
-    for resource in sorted(productions, key=lambda r: r.value):
-        plan = resolve_resource(
-            resource,
-            productions[resource],
-            allocations.get(resource, {}),
-            names,
-            supplement=stock.get(resource),
-            consumption=spend.get(resource),
-        )
-        resource_plans[resource] = plan
-        findings.extend(plan.findings)
+    ordered = sorted(productions, key=lambda r: r.value)
+
+    def solve(
+        allowances: Mapping[Resource, Mapping[int, float]],
+    ) -> dict[Resource, ResourcePlan]:
+        return {
+            resource: resolve_resource(
+                resource,
+                productions[resource],
+                allocations.get(resource, {}),
+                names,
+                npc_allowance=allowances.get(resource),
+                consumption=spend.get(resource),
+            )
+            for resource in ordered
+        }
+
+    # Section 7 needs two passes, and there is no way around it: how much a
+    # village can convert INTO wood is what it retains of clay and crop, and
+    # what it retains of clay and crop is an output of the solve. So pass one
+    # runs with no conversion at all, its retention sizes each village's budget,
+    # and pass two spends that budget against the demand pass one could not
+    # meet. Measured at ~1.6s -> 3.2s on 40 villages, and accepted: the
+    # alternative is deriving the budget from a store LEVEL, which is the model
+    # that made a shorter window raise the claim.
+    #
+    # Only when a floor is actually declared. With none, `solve({})` is the
+    # single pass the planner has always been.
+    policy = npc or NpcPolicy()
+    reserves: dict[int, NpcReserve] = {}
+    if policy.is_declared:
+        first = solve({})
+        retention = {
+            resource: {v.village_id: v.target_per_hour for v in plan.villages}
+            for resource, plan in first.items()
+        }
+        reserves, npc_findings = derive_reserves(policy, retention, names)
+        findings.extend(npc_findings)
+        # Every floored village gets an entry under every material so the
+        # declaration is visible to the solve -- but a village whose rate for a
+        # material could not be read is not in that resource's production map at
+        # all, and `resolve_resource` rightly refuses an allowance for a village
+        # it is not planning. Filtered here, where both maps are in hand, rather
+        # than by loosening that refusal.
+        allowances = {
+            resource: {
+                vid: cap for vid, cap in per_village.items() if vid in productions.get(resource, {})
+            }
+            for resource, per_village in draw_allowance(reserves, retention).items()
+        }
+        resource_plans = solve(allowances)
+    else:
+        resource_plans = solve({})
+    for resource in ordered:
+        findings.extend(resource_plans[resource].findings)
 
     # Section 6: the standing latency target is a DAY rule and does not apply
     # inside the night window. Overnight nothing is spent, so a delivery nobody
@@ -491,4 +564,5 @@ def craft_plan(
         beat=beat,
         findings=tuple(findings),
         relays=relays,
+        npc=reserves,
     )

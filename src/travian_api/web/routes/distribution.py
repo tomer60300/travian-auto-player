@@ -60,6 +60,14 @@ from travian_api.services.distribution.night_profile import (
     derive_night_profile,
     is_night_window,
 )
+from travian_api.services.distribution.npc import (
+    NpcPolicy,
+    NpcReserve,
+    NpcTrigger,
+    TriggerKind,
+    evaluate_triggers,
+    trigger_findings,
+)
 from travian_api.services.distribution.optimizer import (
     DEFAULT_MERCHANT_HEADROOM,
     MAX_IMPROVE_PASSES,
@@ -413,9 +421,44 @@ class VillageConfig(BaseModel):
         le=0.95,
         description=(
             "Fraction of warehouse capacity this village keeps stocked by NPC "
-            "trading. The planner may draw that stock down over the profile "
-            "window as extra supply of lumber, clay and iron -- never crop, "
-            "because a granary is not NPC-fed. None means no stock-funded supply."
+            "trading — LUMBER, CLAY and IRON only, never crop, because a "
+            "granary is not NPC-fed. "
+            "A BUFFER LEVEL and nothing else: `fraction x warehouse_capacity`, "
+            "in resources. It is NOT a supply rate and is never divided by the "
+            "window. That was the previous model and it made a shorter window "
+            "RAISE the claim — 30% of a 1,200,000 warehouse read as 22,500/h "
+            "over a 16-hour day and 45,000/h over an 8-hour night, off the same "
+            "warehouse — so a night profile funded routes from stock a day "
+            "profile could not. "
+            "What the floor DOES is two things. It is the level a departure may "
+            "be topped back up to by NPC conversion, and it is this account's "
+            "reading of section 7's 'wood is low' trigger: at or below it, the "
+            "buffer these routes ship out of is gone. "
+            "How much conversion that top-up can draw on is derived, not "
+            "declared: it is what the village RETAINS per hour of the resources "
+            "it is not shipping — clay and crop at the hub — because NPC "
+            "exchanges 1:1 inside one village and cannot create resources. So "
+            "the allowance is a rate built from rates and no window length can "
+            "move it. "
+            "Requires `npc_attended` on the request (or on each segment) "
+            "whenever a window is given: the operator sleeps through the night, "
+            "and a guessed default would fund night routes from trading nobody "
+            "is doing. "
+            "0.0 is the same as None — no floor at all, nothing about NPC "
+            "applies, and no attendance declaration is needed."
+        ),
+    )
+    npc_feedstock: list[Resource] | None = Field(
+        default=None,
+        description=(
+            "Which of this village's stores NPC may convert FROM, overriding "
+            "the derivation. Left None the feedstock is everything the village "
+            "is not drawing on, which is the honest default and what section 7 "
+            "describes for 02 (clay and crop into wood). "
+            "Naming a resource the village is already shipping beyond its own "
+            "production is refused rather than trimmed: NPC exchanges one "
+            "resource for another and cannot convert a resource into itself. "
+            "Only meaningful alongside `stock_floor_fraction`."
         ),
     )
     consumption_per_hour: dict[Resource, float] | None = Field(
@@ -962,6 +1005,59 @@ class PlanRequest(BaseModel):
             "is meant to be running. May wrap past midnight."
         ),
     )
+    npc_attended: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the operator is at the marketplace during these hours, so "
+            "section 7's NPC conversion can actually be performed. "
+            "REQUIRED — 422 without it — whenever any village in `config` has a "
+            "`stock_floor_fraction` above 0 AND `dispatch_window` is set. Not "
+            "defaulted, deliberately: this account sleeps through the night "
+            "window, and a guessed 'attended' would fund night routes from "
+            "trading nobody is doing, which is the plan promising cargo that "
+            "does not exist. "
+            "False means the conversion allowance is zero for this profile — "
+            "the crop keeps growing, but nobody is converting it — so a village "
+            "asked to ship beyond its production comes back "
+            "NPC_CAPACITY_SHORT and the plan is refused rather than quietly "
+            "under-delivering. "
+            "With no `dispatch_window` the route set runs round the clock and "
+            "has no night hours to mis-fund, so this may be omitted and the "
+            "conversion is taken as available. On /day-check attendance lives "
+            "on each entry in `segments` instead, since that is where the hours "
+            "are."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _npc_attendance_is_stated(self) -> "PlanRequest":
+        """A floor plus a window has to say whether anyone is trading.
+
+        Here rather than in the handler so that ONE rule covers every planning
+        path -- /plan, /execute and /night-profile all carry this model. The
+        day check overrides it: its windows live on `segments`, and each
+        segment answers for its own hours.
+
+        0.0 is not a floor (`0.0 is None` at every layer), so a village whose
+        fraction is zero declares nothing and asks nothing of the operator.
+        """
+        if self.npc_attended is not None or self.dispatch_window is None:
+            return self
+        floored = sorted(
+            cfg.village_id
+            for cfg in self.config
+            if cfg.stock_floor_fraction is not None and cfg.stock_floor_fraction > 0.0
+        )
+        if floored:
+            raise ValueError(
+                "npc_attended is required: "
+                + ", ".join(f"village {vid}" for vid in floored)
+                + " has a stock floor and this plan runs a window, so whether the "
+                "operator is awake to do the NPC trading decides whether those "
+                "routes are funded at all. Send npc_attended=true for the day "
+                "profile and false for the night one."
+            )
+        return self
 
     @field_validator("reserved_window", "dispatch_window")
     @classmethod
@@ -1071,16 +1167,32 @@ class VillageNetResponse(BaseModel):
     resource: Resource
     own_per_hour: float
     """The village's own production, as the snapshot reported it."""
-    supplement_per_hour: float
-    """Stock-funded supply an NPC-backed warehouse floor makes available."""
+    npc_allowance_per_hour: float
+    """Most this village COULD convert into this resource by NPC (section 7).
+
+    A ceiling, not a supply: it is what the village retains of the resources it
+    is not shipping, and nothing is obliged to use any of it. Zero without a
+    declared `stock_floor_fraction`, and zero when `npc_attended` is false."""
+    npc_draw_per_hour: float
+    """How much of that allowance this plan actually spends. Never an addend.
+
+    Consumed only against unmet demand, so a floor on a village that needs
+    nothing reads zero here."""
     target_per_hour: float
-    """What must be HERE: own production plus whatever is shipped in."""
+    """What must be HERE: own production, plus any NPC draw, plus what is shipped in."""
     ship_per_hour: float
-    """The cargo: what must arrive (positive) or leave (negative)."""
+    """The cargo: what must arrive (positive) or leave (negative).
+
+    `target - own - npc_draw`. The draw is subtracted, so a village funding its
+    own demand by conversion has less shipped to it, not more."""
     consumption_per_hour: float
     """What the village SPENDS, from `VillageConfig.consumption_per_hour`."""
     net_per_hour: float
-    """target - consumption: the rate the STORE moves at. Zero is level."""
+    """target - consumption: the rate the STORE moves at. Zero is level.
+
+    Does NOT subtract what the NPC conversion takes out of a feedstock store --
+    that debit belongs to the store being converted FROM, and `npc_triggers`
+    carries the figure with it already applied."""
 
 
 class RoleDeviationResponse(BaseModel):
@@ -1141,9 +1253,13 @@ class ShortfallResponse(BaseModel):
 class UnallocatedResponse(BaseModel):
     resource: Resource
     total_production: float
-    # Real production and stock-funded supply, kept apart so neither can be read
-    # as the other: the account does not make what its warehouses merely hold.
-    total_supplement: float = 0.0
+    # Real production and NPC conversion, kept apart so neither can be read as
+    # the other: the account does not PRODUCE what its operator converts by hand.
+    total_npc_allowance: float = 0.0
+    """Account-wide ceiling on conversion into this resource. Never spent by
+    itself: a plan that needs none of it draws none of it."""
+    total_npc_draw: float = 0.0
+    """Account-wide conversion this plan actually spends into this resource."""
     unallocated: float
     # Optional in meaning (a resource may have no remainder village) and given
     # an explicit default so the model never depends on the caller supplying it.
@@ -1275,6 +1391,86 @@ class RelayResponse(BaseModel):
             "What the operator waits for a delivery: both legs' worst cases in "
             "turn. The per-route latency target is checked per leg, so two "
             "compliant legs can compose into a delivery that misses it."
+        )
+    )
+
+
+class NpcReserveResponse(BaseModel):
+    """One village's NPC balancing capacity, as the two-pass solve sized it.
+
+    Every figure here is derived, not declared: the operator states a
+    `stock_floor_fraction` and an `npc_attended`, and this is what those come
+    to once the first pass has said what the village retains.
+    """
+
+    village_id: int
+    village_name: str = ""
+    floor_level: float = Field(
+        description=(
+            "The buffer, in resources: `stock_floor_fraction x "
+            "warehouse_capacity`. Applies to lumber, clay and iron; a granary "
+            "has no floor because it is not NPC-fed. Also this account's "
+            "reading of section 7's 'wood is low' trigger."
+        )
+    )
+    allowance_per_day: float = Field(
+        description=(
+            "How much this village could convert per DAY: 24 x what it retains "
+            "per hour of the resources it is not shipping. Zero while "
+            "`npc_attended` is false, and zero when a feedstock rate could not "
+            "be read. Not a share of the warehouse, and not divided by the "
+            "window -- a rate built from rates."
+        )
+    )
+    allowance_per_hour: float
+    feedstock: list[Resource] = Field(
+        default=[],
+        description=(
+            "Which stores pay for the conversion, 1:1. Derived as everything "
+            "the village is not drawing on unless `npc_feedstock` overrode it."
+        ),
+    )
+    feedstock_shares: list[float] = Field(
+        default=[],
+        description=(
+            "Each feedstock store's share of every conversion, parallel to "
+            "`feedstock` and summing to 1. Proportional to the retention that "
+            "sized the allowance, so the store funding most of it is debited "
+            "most."
+        ),
+    )
+    drawn: list[Resource] = Field(
+        default=[],
+        description=(
+            "Materials this village must ship beyond its own production, so is "
+            "converting INTO. The complement of `feedstock`. Empty means the "
+            "floor funded nothing in this plan, which costs the account nothing."
+        ),
+    )
+
+
+class NpcTriggerResponse(BaseModel):
+    """One of section 7's two triggers, fired. Advice, never an action.
+
+    The planner does not press the NPC button; it says when the operator should.
+    """
+
+    village_id: int
+    village_name: str = ""
+    kind: TriggerKind = Field(
+        description=(
+            "`wood_low` -- the wood buffer is at or below the village's own "
+            "floor -- or `crop_banked` -- crop past 700,000, which is feedstock "
+            "standing idle."
+        )
+    )
+    resource: Resource
+    level: float = Field(description="What the store holds, or is left holding.")
+    threshold: float = Field(description="What it was measured against: the floor, or 700,000.")
+    projected: bool = Field(
+        description=(
+            "True when it is where a day of THIS PLAN leaves the store rather "
+            "than where the snapshot found it."
         )
     )
 
@@ -1421,6 +1617,40 @@ def _night_overrun_rows(
     return sorted(rows, key=lambda row: (-row.overrun_minutes, row.origin, row.destination))
 
 
+def _npc_reserve_rows(plan, names: Mapping[int, str]) -> list[NpcReserveResponse]:
+    """Section 7's sized reserves as a table. Empty when no floor is declared."""
+    return [
+        NpcReserveResponse(
+            village_id=vid,
+            village_name=village_label(vid, names),
+            floor_level=reserve.floor_level,
+            allowance_per_day=reserve.allowance_per_day,
+            allowance_per_hour=reserve.allowance_per_hour,
+            feedstock=list(reserve.sources),
+            feedstock_shares=list(reserve.shares),
+            drawn=sorted(reserve.drawn, key=lambda r: r.value),
+        )
+        for vid, reserve in sorted(plan.npc.items())
+    ]
+
+
+def _npc_trigger_rows(
+    triggers: tuple[NpcTrigger, ...], names: Mapping[int, str]
+) -> list[NpcTriggerResponse]:
+    return [
+        NpcTriggerResponse(
+            village_id=trigger.village_id,
+            village_name=village_label(trigger.village_id, names),
+            kind=trigger.kind,
+            resource=trigger.resource,
+            level=trigger.level,
+            threshold=trigger.threshold,
+            projected=trigger.projected,
+        )
+        for trigger in triggers
+    ]
+
+
 class PlanResponse(BaseModel):
     rows: list[SheetRowResponse]
     budgets: list[BudgetResponse]
@@ -1468,6 +1698,27 @@ class PlanResponse(BaseModel):
             "is the same fact with the arithmetic in fields instead of prose."
         ),
     )
+    npc_reserves: list[NpcReserveResponse] = Field(
+        default=[],
+        description=(
+            "Section 7's NPC balancing, per village that declared a "
+            "`stock_floor_fraction`. Empty when none did. What the operator "
+            "declared is a floor and an attendance; this is what the planner "
+            "made of it -- the buffer level, the conversion budget, which "
+            "stores pay for it and which it converts into."
+        ),
+    )
+    npc_triggers: list[NpcTriggerResponse] = Field(
+        default=[],
+        description=(
+            "Section 7's two triggers, where they fired: wood at or below the "
+            "village's floor, or crop past 700,000. Reports about when the "
+            "operator should trade -- the planner never presses the button. "
+            "Each row also appears in `diagnostics` as an `npc_wood_low` or "
+            "`npc_crop_banked` finding; this is the same fact with the "
+            "arithmetic in fields instead of prose."
+        ),
+    )
     # Every finding as prose, in producer order. Kept because it is the contract
     # the UI and the tests were built on -- but a 25-village account put 132
     # lines in here and the operator stopped reading, so `diagnostics` is what
@@ -1483,6 +1734,17 @@ class DaySegmentInput(BaseModel):
     window: tuple[int, int]
     """Minutes past midnight (start, end); may wrap past midnight."""
     allocations: dict[Resource, dict[int, AllocationInput]] = {}
+    npc_attended: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the operator is at the marketplace during THIS profile's "
+            "hours. Required — 422 without it — on every segment as soon as any "
+            "village has a `stock_floor_fraction` above 0. The night segment is "
+            "the one where it is false; nothing here infers that from the "
+            "window, because 'the operator is asleep' is a fact about the "
+            "operator and not about the clock."
+        ),
+    )
 
     @field_validator("window")
     @classmethod
@@ -1556,6 +1818,24 @@ class ExecuteRequest(PlanRequest):
             raise ValueError(
                 "allocations belong to each entry in `segments` for a "
                 "whole-day run -- a top-level set would silently be ignored"
+            )
+        # Same rule /day-check applies, for the same reason: on a whole-day run
+        # the hours live on the segments, so `PlanRequest`'s own attendance
+        # check cannot see them. This is the endpoint that WRITES, so the one
+        # place it must not be inferred is here.
+        floored = sorted(
+            cfg.village_id
+            for cfg in self.config
+            if cfg.stock_floor_fraction is not None and cfg.stock_floor_fraction > 0.0
+        )
+        silent = [s.name for s in self.segments if s.npc_attended is None]
+        if floored and silent:
+            raise ValueError(
+                "npc_attended is required on every segment: "
+                + ", ".join(f"village {vid}" for vid in floored)
+                + " has a stock floor, so whether the operator is awake to do the "
+                "NPC trading decides whether each profile's routes are funded. "
+                "Missing on: " + ", ".join(silent)
             )
         # Two profiles cannot run at the same time -- an overlap would create
         # rows this run itself then classifies as someone else's mismatch.
@@ -2098,6 +2378,59 @@ def _resolve_roles(body: PlanRequest) -> _ResolvedRoles:
     )
 
 
+def _npc_store_state(
+    body: PlanRequest, plan
+) -> tuple[
+    dict[int, dict[Resource, float]],
+    dict[int, dict[Resource, float]],
+    dict[int, dict[Resource, float]],
+]:
+    """Stocks, capacities and post-conversion net rates for the NPC triggers.
+
+    Only the balancing villages, and only the figures section 7's two triggers
+    measure: the level a store holds now, its cap, and the rate the plan leaves
+    it moving at ONCE THE CONVERSION IS PAID FOR. That last subtraction is what
+    makes the 700,000 crop trigger honest -- crop converted into wood is crop
+    the granary no longer banks, and reading the allocation net alone would
+    report it as still accumulating.
+    """
+    stocks: dict[int, dict[Resource, float]] = {}
+    capacities: dict[int, dict[Resource, float]] = {}
+    nets: dict[int, dict[Resource, float]] = {}
+    for village in body.snapshot:
+        vid = village.village_id
+        reserve = plan.npc.get(vid)
+        if reserve is None:
+            continue
+        # Every material this village converts INTO, summed: one budget funded
+        # them all, so one debit is spread across the feedstock stores.
+        converted = 0.0
+        allocations: dict[Resource, object] = {}
+        for resource in Resource:
+            rp = plan.resource_plans.get(resource)
+            if rp is None:
+                continue
+            allocation = next((v for v in rp.villages if v.village_id == vid), None)
+            if allocation is None:
+                continue
+            allocations[resource] = allocation
+            if resource in MATERIALS:
+                converted += allocation.npc_draw_per_hour
+        for resource in Resource:
+            stocks.setdefault(vid, {})[resource] = float(getattr(village, _STOCK_FIELD[resource]))
+            cap = (
+                village.granary_capacity
+                if resource is Resource.CROP
+                else village.warehouse_capacity
+            )
+            if cap is not None:
+                capacities.setdefault(vid, {})[resource] = float(cap)
+            allocation = allocations.get(resource)
+            net = allocation.net_per_hour if allocation is not None else 0.0
+            nets.setdefault(vid, {})[resource] = net - converted * reserve.share_of(resource)
+    return stocks, capacities, nets
+
+
 def _storage_findings(
     body: PlanRequest,
     plan,
@@ -2177,29 +2510,18 @@ def _storage_findings(
     # starvation and loss totals. Without pruning every firing is real (that is
     # the round-the-clock danger the WINDOW findings report), so all are kept.
     window = dispatch_window if getattr(body, "prune_to_window", False) else None
-    # A village the operator NPCs back to a floor never runs its warehouse down,
-    # so its departures are funded in full. Modelling it as an ordinary store
-    # made every stock-funded route ship a fraction of its cargo and understated
-    # the receivers' whole day. Materials only -- a granary is not NPC-fed.
-    floors: dict[int, dict[Resource, float]] = {}
-    for cfg in body.config:
-        if cfg.stock_floor_fraction is None:
-            continue
-        capacity = next(
-            (v.warehouse_capacity for v in body.snapshot if v.village_id == cfg.village_id), None
-        )
-        if capacity is None:
-            continue  # already refused in _plan_account, which runs first
-        level = cfg.stock_floor_fraction * capacity
-        for resource in MATERIALS:
-            floors.setdefault(cfg.village_id, {})[resource] = level
+    # Section 7's reserves as the two-pass solve sized them, NOT re-derived from
+    # the config here: the replay has to top stores up out of the same budget
+    # the allocation layer spent, or the day picture contradicts the plan it is
+    # built from. The reservoir is finite, so a departure the budget cannot
+    # cover really does leave short -- which is the whole point.
     overflows = simulate_day(
         plan.beat,
         stocks,
         capacities,
         own_rates,
         dispatch_window=window,
-        floors=floors,
+        npc=plan.npc,
         consumption=consumption,
     )
     names = {v.village_id: v.name for v in body.snapshot if v.name}
@@ -2402,6 +2724,34 @@ class DayCheckRequest(PlanRequest):
                 "level -- a profile is defined by its own allocations"
             )
         return value
+
+    @model_validator(mode="after")
+    def _every_segment_states_npc_attendance(self) -> "DayCheckRequest":
+        """The hours live on the segments, so attendance does too.
+
+        `PlanRequest`'s own rule cannot fire here -- `dispatch_window` is
+        refused at the top level -- so this is the same refusal asked of the
+        place that actually knows the hours. Every segment, not just the night
+        one: which profile the operator sleeps through is theirs to say, and a
+        rule that only asked the wrapping segment would be inferring it.
+        """
+        floored = sorted(
+            cfg.village_id
+            for cfg in self.config
+            if cfg.stock_floor_fraction is not None and cfg.stock_floor_fraction > 0.0
+        )
+        if not floored:
+            return self
+        silent = [s.name for s in self.segments if s.npc_attended is None]
+        if silent:
+            raise ValueError(
+                "npc_attended is required on every segment: "
+                + ", ".join(f"village {vid}" for vid in floored)
+                + " has a stock floor, so whether the operator is awake to do the "
+                "NPC trading decides whether each profile's routes are funded. "
+                "Missing on: " + ", ".join(silent)
+            )
+        return self
 
 
 class VillageDayResponse(BaseModel):
@@ -2979,6 +3329,7 @@ async def post_day_check(
     # 09:00-17:00 is not one, and a wrapping window is one whatever it is called.
     night_segment: DaySegmentInput | None = None
     night_overruns: list[NightOverrunResponse] = []
+    npc_reserves: dict[int, NpcReserve] = {}
     for segment in body.segments:
         # Route each profile through the SAME planner /plan and /execute use, so
         # the day picture is built from the real route set -- actual cycles,
@@ -2989,7 +3340,13 @@ async def post_day_check(
         # The profile's own hours go with it: the beat must phase its sends into
         # them, or every firing can land in hours the profile is not running and
         # the route ships nothing at all.
-        per_profile = body.model_copy(update={"allocations": segment.allocations})
+        # Attendance travels with the profile's hours, so each segment's plan is
+        # funded by the trading that actually happens during it. Without this
+        # the night profile would be sized from the day's conversion, which is
+        # the exact mis-funding `npc_attended` exists to prevent.
+        per_profile = body.model_copy(
+            update={"allocations": segment.allocations, "npc_attended": segment.npc_attended}
+        )
         try:
             account = await _plan_account(per_profile, dispatch_window=segment.window)
         except HTTPException as exc:
@@ -3050,8 +3407,19 @@ async def post_day_check(
                 end_minute=segment.window[1],
                 routes=account.plan.beat.routes,
                 manual_rates=manual,
+                # None only where no village declared a floor, in which case no
+                # reserve exists and this decides nothing.
+                npc_attended=bool(segment.npc_attended),
             )
         )
+        # Every segment sizes the same villages' reserves from its own hours, so
+        # the composite takes the ATTENDED ones: a night segment's reserve is
+        # zero by construction, and the replay gates accrual on the segment
+        # anyway. Keeping the day's figures is what lets the replay refill during
+        # the day and not overnight, off one set of reserves.
+        for vid, reserve in account.plan.npc.items():
+            if reserve.allowance_per_day > 0.0 or vid not in npc_reserves:
+                npc_reserves[vid] = reserve
     # Off the event loop for the same reason craft_plan is: pure CPU that must
     # not stall WebSocket frames or stealth-timed game requests. The simulation
     # got much heavier when it became discrete -- a tick per dispatch and per
@@ -3078,6 +3446,11 @@ async def post_day_check(
         # the same spend, or the day view contradicts the plan view it is built
         # from.
         consumption=roles.consumption,
+        # Section 7, threaded for the same reason: a mechanism in one replay and
+        # not the other is how the two endpoints came to answer one account
+        # differently. Finite here as it is there, and accruing only while an
+        # attended profile runs.
+        npc=npc_reserves,
     )
 
     for breach in sorted(breaches, key=lambda b: (b.day, b.minute)):
@@ -3219,6 +3592,11 @@ class _PlannedAccount:
     template. Legitimate and deliberately not a finding -- one of four
     defensive villages always has a wall going up -- but it must not be
     invisible, so the plan hands the page the cell and both figures."""
+
+    npc_triggers: tuple[NpcTrigger, ...] = ()
+    """Section 7's two reporting triggers, as fired. Carried alongside the
+    findings they produced so the page can render a table rather than parse the
+    prose -- and so both come from one evaluation."""
 
     dropped_allocations: list[str] = field(default_factory=list)
     """Human-readable descriptions of explicit allocations that were IGNORED
@@ -3418,19 +3796,21 @@ async def _plan_account(
     # cycle choice below and the scheduler agree on it.
     effective_window = dispatch_window if dispatch_window is not None else body.dispatch_window
 
-    # A stock FLOOR is a level; the allocation layer needs a RATE. Spreading the
-    # floor across the window the profile actually runs is the honest
-    # conversion: 30% of a 1,200,000 warehouse is 360,000, which over a 16-hour
-    # day is 22,500/h of extra supply and over an 8-hour night is 45,000/h.
-    # Materials only -- a granary is not NPC-fed, so crop is never supplemented.
-    if effective_window is None:
-        window_hours = 24.0
-    else:
-        window_hours = _window_minutes(effective_window) / 60.0
+    # Section 7's declaration, and nothing more than a declaration: the buffer
+    # LEVEL per village (only this layer knows the warehouse capacity), whether
+    # the operator is trading during these hours, and any feedstock override.
+    # How much conversion that funds is derived inside `craft_plan`, from what
+    # the first pass says each village retains -- a rate from rates, so no
+    # window length can move it.
+    #
+    # A fraction of 0.0 is no floor at all (`0.0 is None` at every layer), so it
+    # never reaches the policy and never asks the operator for an attendance
+    # declaration it does not need.
     capacities_by_id = {v.village_id: v.warehouse_capacity for v in body.snapshot}
-    supplements: dict[Resource, dict[int, float]] = {}
+    floor_level: dict[int, float] = {}
+    feedstock: dict[int, frozenset[Resource]] = {}
     for cfg in body.config:
-        if cfg.stock_floor_fraction is None:
+        if not cfg.stock_floor_fraction:
             continue
         capacity = capacities_by_id.get(cfg.village_id)
         if capacity is None:
@@ -3439,17 +3819,24 @@ async def _plan_account(
                 detail=(
                     f"{village_label(cfg.village_id, names)}: a stock floor of "
                     f"{cfg.stock_floor_fraction:.0%} was set but this village has no "
-                    f"warehouse capacity in the snapshot, so the floor cannot be "
-                    f"turned into a rate. Fetch capacities first, or clear the floor."
+                    f"warehouse capacity in the snapshot, so the buffer level cannot "
+                    f"be worked out. Fetch capacities first, or clear the floor."
                 ),
             )
-        allowance = cfg.stock_floor_fraction * capacity / window_hours
-        for resource in MATERIALS:
-            if cfg.village_id in productions.get(resource, {}):
-                supplements.setdefault(resource, {})[cfg.village_id] = allowance
+        floor_level[cfg.village_id] = cfg.stock_floor_fraction * capacity
+        if cfg.npc_feedstock is not None:
+            feedstock[cfg.village_id] = frozenset(cfg.npc_feedstock)
+    npc_policy = NpcPolicy(
+        floor_level=floor_level,
+        # No window means a round-the-clock set, which has no night hours to
+        # mis-fund; the validator asks for the flag only when a window is given,
+        # so None here can only be that case.
+        attended=body.npc_attended if body.npc_attended is not None else True,
+        sources=feedstock,
+    )
 
     # Section 2: what each village spends per hour, the operator's own flat
-    # constants. Threaded beside the supplements and for the same reason -- both
+    # constants. Threaded beside the NPC policy and for the same reason -- both
     # are account state the game will not report, not tunables -- and shaped
     # per resource to match. It moves each village's net and nothing else: the
     # cargo stays the gap between the target and the village's own production.
@@ -3477,7 +3864,7 @@ async def _plan_account(
     consumption: dict[Resource, dict[int, float]] = {}
     for vid, per_resource in declared_consumption.items():
         for resource, amount in per_resource.items():
-            # Same gate the supplement uses: a village whose rate for this
+            # Same gate the NPC policy uses: a village whose rate for this
             # resource could not be read is dropped from the resource plan
             # entirely (with an UNREADABLE_RATE finding), so a spend recorded
             # against it would 400 the whole plan over one missing reading.
@@ -3630,20 +4017,23 @@ async def _plan_account(
         # The beat search is pure CPU; off the event loop so it cannot stall
         # WebSocket frames or stealth-timed game requests while the user replans.
         plan = await asyncio.to_thread(
-            craft_plan, villages, productions, allocations, config, supplements, consumption
+            craft_plan, villages, productions, allocations, config, npc_policy, consumption
         )
     except AllocationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    # What the stock floors are actually funding. An allowance nobody drew on
-    # says nothing and is not reported; shipping that DOES exceed production is a
-    # standing dependency on the operator's NPC trading, so it is named.
-    floors = {
-        cfg.village_id: cfg.stock_floor_fraction
-        for cfg in body.config
-        if cfg.stock_floor_fraction is not None
-    }
-    for vid, floor in sorted(floors.items()):
+    # What the NPC conversion is actually funding. An allowance nobody drew on
+    # says nothing and is not reported; a DRAW is a standing dependency on the
+    # operator's trading, so it is named -- and it is read off the emitted plan
+    # rather than off the declaration, because a floor that funded nothing is
+    # not a dependency.
+    #
+    # NPC_CAPACITY_SHORT is not raised here: the allocation layer raises it,
+    # where the allowance and the demand are both in hand. This block used to
+    # carry its predecessor (STOCK_FLOOR_UNSUSTAINABLE), which compared the draw
+    # against the crop surplus after the fact -- the same question asked of the
+    # wrong model, because the allowance IS the feedstock surplus now.
+    for vid, reserve in sorted(plan.npc.items()):
         label = village_label(vid, names)
         drawn: dict[Resource, float] = {}
         for resource in MATERIALS:
@@ -3653,9 +4043,8 @@ async def _plan_account(
             allocation = next((v for v in rp.villages if v.village_id == vid), None)
             if allocation is None:
                 continue
-            beyond = -allocation.ship_per_hour - allocation.own_per_hour
-            if beyond > _MIN_REPORTED_STOCK_DRAW:
-                drawn[resource] = beyond
+            if allocation.npc_draw_per_hour > _MIN_REPORTED_STOCK_DRAW:
+                drawn[resource] = allocation.npc_draw_per_hour
         if not drawn:
             continue
         total_drawn = sum(drawn.values())
@@ -3663,47 +4052,29 @@ async def _plan_account(
         # was saying the same thing twice.
         named = [r.value for r in sorted(drawn)]
         which = " and ".join(filter(None, [", ".join(named[:-1]), named[-1]]))
+        paid_by = " and ".join(r.value for r in reserve.sources) or "nothing"
         extra_findings.append(
             Finding(
                 category=Category.STOCK_FUNDED,
                 message=(
                     f"{label} ships {total_drawn:,.0f}/h of {which} beyond its "
-                    f"production, funded from its stock floor -- keep the warehouse "
-                    f"at least {floor:.0%} full by NPC or these routes under-deliver"
+                    f"production, funded by converting {paid_by} at the NPC merchant "
+                    f"-- keep trading or these routes under-deliver"
                 ),
-                detail=f"{label} -- {total_drawn:,.0f}/h stock-funded",
+                detail=f"{label} -- {total_drawn:,.0f}/h NPC-funded",
                 village=label,
             )
         )
-        # NPC trades crop for materials one for one, so the floor refills no
-        # faster than the crop this village has left after the plan's crop
-        # routes. Beyond that the floor sinks and the routes above go short.
-        crop_plan = plan.resource_plans.get(Resource.CROP)
-        crop_alloc = (
-            next((v for v in crop_plan.villages if v.village_id == vid), None)
-            if crop_plan is not None
-            else None
-        )
-        if crop_alloc is not None:
-            crop_surplus = crop_alloc.own_per_hour + min(0.0, crop_alloc.ship_per_hour)
-        else:
-            crop_surplus = next(
-                (v.crop_per_hour or 0.0 for v in body.snapshot if v.village_id == vid), 0.0
-            )
-        deficit = total_drawn - crop_surplus
-        if deficit > _MIN_REPORTED_STOCK_DRAW:
-            extra_findings.append(
-                Finding(
-                    category=Category.STOCK_FLOOR_UNSUSTAINABLE,
-                    message=(
-                        f"{label}'s stock floor is drawn down {deficit:,.0f}/h faster "
-                        f"than its crop surplus can replenish by NPC; the floor will "
-                        f"not hold and these routes will start arriving short"
-                    ),
-                    detail=f"{label} -- short {deficit:,.0f}/h of crop to refill",
-                    village=label,
-                )
-            )
+
+    # Section 7's two triggers, read off what the plan EMITS rather than off
+    # what it intended: `net_per_hour` is the rate each store moves at once the
+    # routes run, less what the conversion took out of it, so a granary the plan
+    # drains to fund wood is reported as the plan leaves it. Reporting only --
+    # the planner never presses the NPC button.
+    npc_triggers: tuple[NpcTrigger, ...] = ()
+    if plan.npc:
+        npc_triggers = evaluate_triggers(plan.npc, *_npc_store_state(body, plan))
+        extra_findings.extend(trigger_findings(npc_triggers, names))
 
     # How much to trust every merchant figure above. `EUROPE2_TEUTON` is pinned
     # on one end only: the base was re-read off the game on 2026-09-02, while
@@ -3873,6 +4244,7 @@ async def _plan_account(
         extra_findings=extra_findings,
         role_deviations=roles.deviations,
         dropped_allocations=dropped_allocations,
+        npc_triggers=npc_triggers,
     )
 
 
@@ -3958,7 +4330,8 @@ async def post_plan(
             UnallocatedResponse(
                 resource=resource,
                 total_production=rp.total_production,
-                total_supplement=rp.total_supplement,
+                total_npc_allowance=rp.total_npc_allowance,
+                total_npc_draw=rp.total_npc_draw,
                 unallocated=rp.unallocated,
                 remainder_village_id=rp.remainder_village_id,
             )
@@ -3991,7 +4364,8 @@ async def post_plan(
                 village_id=v.village_id,
                 resource=resource,
                 own_per_hour=v.own_per_hour,
-                supplement_per_hour=v.supplement_per_hour,
+                npc_allowance_per_hour=v.npc_allowance_per_hour,
+                npc_draw_per_hour=v.npc_draw_per_hour,
                 target_per_hour=v.target_per_hour,
                 ship_per_hour=v.ship_per_hour,
                 consumption_per_hour=v.consumption_per_hour,
@@ -4014,6 +4388,8 @@ async def post_plan(
         # that named no window gets an empty list instead of a rule it never
         # asked for.
         night_overruns=_night_overrun_rows(plan.beat, config.dispatch_window, names),
+        npc_reserves=_npc_reserve_rows(plan, names),
+        npc_triggers=_npc_trigger_rows(account.npc_triggers, names),
         warnings=[f.message for f in findings],
         # The route count is what lets the headline stop blaming the plan for
         # losses it did not cause -- see _account_headline.
@@ -4552,6 +4928,10 @@ async def post_execute(
             per_segment = body.model_copy(
                 update={
                     "allocations": segment.allocations,
+                    # Attendance is judged the same way: this is the endpoint
+                    # that WRITES, so a night profile must be funded by the
+                    # trading that happens overnight -- none of it.
+                    "npc_attended": segment.npc_attended,
                     # Latency is judged against the profile's own hours: an
                     # 8-hour night cannot be asked to meet a 16-hour day's
                     # target, nor vice versa.

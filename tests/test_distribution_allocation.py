@@ -13,6 +13,7 @@ from travian_api.services.distribution.allocation import (
     Resource,
     resolve_resource,
 )
+from travian_api.services.distribution.findings import Category, Severity
 
 KEEP = Allocation(AllocationMode.KEEP)
 
@@ -203,18 +204,26 @@ class TestDefaultsAndValidation:
         assert plan.is_conserved
 
 
-class TestStockFundedSupply:
-    """A village may ship more than it makes, drawing on a warehouse stock it
-    keeps topped up by NPC trading.
+class TestNpcFundedShipping:
+    """A village may ship more than it makes, by converting at the NPC merchant.
 
     The operator's day profile was refused as over-allocated -- "the remainder
-    village would have to send more than it has" -- while 02 sat on a warehouse
-    it keeps 30% full precisely so that it CAN send more than it makes. The
-    supplement is extra SUPPLY for one resource, never production: every figure
-    that says "production" must keep meaning production.
+    village would have to send more than it has" -- while 02 keeps its warehouse
+    stocked with wood precisely so that it CAN send more than it makes.
+
+    **RE-SEEDED from the previous model, which two of these tests pinned.** It
+    passed ``own + allowance`` in as the village's "available" supply, so the
+    allowance was an ADDEND: 1,000/h produced with a 500/h allowance read as
+    1,500/h available, the remainder target came out at 1,500 - 1,200 = 300,
+    and the village shipped 1,200/h -- 200/h more than it produced -- whether or
+    not anything needed it. Here the allowance is a CAP consumed against unmet
+    demand only, so the same fixture draws exactly the 200/h it is short by,
+    the remainder target lands on 0, and a fixture with nothing short draws
+    nothing at all.
     """
 
-    def _plan(self, supplement=None):
+    def _plan(self, npc_allowance=None):
+        """1,200/h claimed against 1,000/h produced: 200/h of unmet demand."""
         return resolve_resource(
             Resource.LUMBER,
             productions={1: 1000, 2: 0},
@@ -222,24 +231,25 @@ class TestStockFundedSupply:
                 1: Allocation(AllocationMode.REMAINDER),
                 2: Allocation(AllocationMode.ABSOLUTE, 1200),
             },
-            supplement=supplement,
+            npc_allowance=npc_allowance,
         )
 
-    def test_a_supplement_raises_what_the_village_has_available(self):
-        plan = self._plan(supplement={1: 500})
+    def test_the_allowance_is_a_ceiling_and_the_draw_is_what_was_needed(self):
+        plan = self._plan(npc_allowance={1: 500})
         hub = next(v for v in plan.villages if v.village_id == 1)
 
         assert hub.own_per_hour == 1000
-        assert hub.supplement_per_hour == 500
-        assert hub.available_per_hour == 1500
+        assert hub.npc_allowance_per_hour == 500, "the ceiling the operator declared"
+        assert hub.npc_draw_per_hour == pytest.approx(200), "only the shortfall is converted"
 
-    def test_ship_is_the_gap_to_available_so_the_village_can_ship_more_than_it_makes(self):
-        """Known issue #1 in its new form: the cargo is target minus what the
-        village has, and what it has now includes the stock it draws on."""
-        plan = self._plan(supplement={1: 500})
+    def test_ship_is_target_minus_own_minus_draw(self):
+        """Known issue #1 in its new form: the cargo is the gap, and conversion
+        closes part of it rather than adding to what the village has."""
+        plan = self._plan(npc_allowance={1: 500})
         hub = next(v for v in plan.villages if v.village_id == 1)
 
-        assert hub.target_per_hour == pytest.approx(300)  # 1,500 available - 1,200 claimed
+        # 1,000 produced + 200 converted - 1,200 claimed = a target of 0.
+        assert hub.target_per_hour == pytest.approx(0.0)
         assert hub.ship_per_hour == pytest.approx(-1200), "ships 200/h more than it produces"
         assert plan.is_conserved
 
@@ -249,27 +259,28 @@ class TestStockFundedSupply:
         assert without.unallocated == pytest.approx(-200)
         assert any("exceed production" in w for w in without.warnings)
 
-        with_stock = self._plan(supplement={1: 500})
+        with_npc = self._plan(npc_allowance={1: 500})
 
-        assert with_stock.unallocated == pytest.approx(300)
-        assert not any("exceed production" in w for w in with_stock.warnings)
+        assert with_npc.unallocated == pytest.approx(0.0)
+        assert not any("exceed production" in w for w in with_npc.warnings)
 
-    def test_total_production_stays_real_and_the_supplement_is_carried_apart(self):
-        plan = self._plan(supplement={1: 500})
+    def test_total_production_stays_real_and_the_conversion_is_carried_apart(self):
+        plan = self._plan(npc_allowance={1: 500})
 
-        assert plan.total_production == 1000, "production must not be inflated by stock"
-        assert plan.total_supplement == 500
+        assert plan.total_production == 1000, "production must not be inflated by conversion"
+        assert plan.total_npc_allowance == 500
+        assert plan.total_npc_draw == pytest.approx(200)
 
-    @pytest.mark.parametrize("supplement", [None, {}, {1: 0.0}])
-    def test_no_supplement_leaves_every_figure_identical(self, supplement):
-        """Regression guard: the whole existing planner runs with no supplement."""
+    @pytest.mark.parametrize("npc_allowance", [None, {}, {1: 0.0}])
+    def test_no_allowance_leaves_every_figure_identical(self, npc_allowance):
+        """Regression guard: the whole existing planner runs with no conversion,
+        and a declared allowance of 0.0 is the same as none at all."""
         baseline = self._plan()
-        plan = self._plan(supplement=supplement)
+        plan = self._plan(npc_allowance=npc_allowance)
 
         assert plan.total_production == baseline.total_production
-        assert plan.total_supplement == 0
+        assert plan.total_npc_draw == 0
         assert plan.unallocated == baseline.unallocated
-        assert plan.warnings == baseline.warnings
         assert [
             (v.village_id, v.own_per_hour, v.target_per_hour, v.ship_per_hour)
             for v in plan.villages
@@ -278,27 +289,100 @@ class TestStockFundedSupply:
             for v in baseline.villages
         ]
 
-    def test_a_keep_village_with_a_supplement_still_ships_nothing(self):
+    def test_an_allowance_on_a_quiet_village_costs_nothing(self):
+        """The compulsory-supply bug, pinned. Nothing is short here -- 1,000/h
+        against a 600/h claim -- so a 400/h allowance must be drawn at zero and
+        every figure must match a plan that declared no allowance at all."""
+        quiet = resolve_resource(
+            Resource.LUMBER,
+            productions={1: 1000, 2: 0},
+            allocations={
+                1: Allocation(AllocationMode.REMAINDER),
+                2: Allocation(AllocationMode.ABSOLUTE, 600),
+            },
+            npc_allowance={1: 400},
+        )
+        baseline = resolve_resource(
+            Resource.LUMBER,
+            productions={1: 1000, 2: 0},
+            allocations={
+                1: Allocation(AllocationMode.REMAINDER),
+                2: Allocation(AllocationMode.ABSOLUTE, 600),
+            },
+        )
+        hub = next(v for v in quiet.villages if v.village_id == 1)
+
+        assert hub.npc_allowance_per_hour == 400
+        assert hub.npc_draw_per_hour == 0.0
+        assert quiet.total_npc_draw == 0.0
+        assert quiet.unallocated == baseline.unallocated == pytest.approx(400)
+        assert [(v.village_id, v.ship_per_hour) for v in quiet.villages] == [
+            (v.village_id, v.ship_per_hour) for v in baseline.villages
+        ]
+        assert quiet.findings == baseline.findings
+
+    def test_a_keep_village_with_an_allowance_still_ships_nothing(self):
         """Keep means neither send nor receive. The allowance must not turn
-        into an instruction to ship the stock away to the remainder."""
+        into an instruction to convert resources and ship them away."""
         plan = resolve_resource(
             Resource.CLAY,
             productions={1: 1000, 2: 500},
             allocations={2: Allocation(AllocationMode.REMAINDER)},
-            supplement={1: 400},
+            npc_allowance={1: 400},
         )
         kept = next(v for v in plan.villages if v.village_id == 1)
 
+        assert kept.target_per_hour == 1000, "KEEP retains production, not production plus stock"
         assert kept.ship_per_hour == 0
+        assert kept.npc_draw_per_hour == 0.0
         assert plan.is_conserved
 
-    def test_a_supplement_for_an_unknown_village_is_rejected(self):
+    def test_a_quiet_sustain_village_with_an_allowance_still_ships_nothing(self):
+        """The other mode `_explicit_target` had to stop reading as available.
+        Sustain with non-negative production retains production, so a floor
+        cannot turn it into a sender."""
+        plan = resolve_resource(
+            Resource.CLAY,
+            productions={1: 1000, 2: 500},
+            allocations={
+                1: Allocation(AllocationMode.SUSTAIN, 10),
+                2: Allocation(AllocationMode.REMAINDER),
+            },
+            npc_allowance={1: 400},
+        )
+        quiet = next(v for v in plan.villages if v.village_id == 1)
+
+        assert quiet.target_per_hour == 1000
+        assert quiet.ship_per_hour == 0
+        assert quiet.npc_draw_per_hour == 0.0
+
+    def test_a_draw_beyond_the_allowance_is_reported_critical(self):
+        """Fail loudly: 200/h needed, 50/h of feedstock. The plan still emits
+        what the conversion CAN fund, and says it is 150/h short."""
+        plan = self._plan(npc_allowance={1: 50})
+
+        short = [f for f in plan.findings if f.category is Category.NPC_CAPACITY_SHORT]
+        assert len(short) == 1, plan.warnings
+        assert short[0].severity is Severity.CRITICAL
+        assert "150" in short[0].message
+        assert plan.unallocated == pytest.approx(-150)
+
+    def test_an_allowance_for_an_unknown_village_is_rejected(self):
         with pytest.raises(AllocationError, match="no production"):
             resolve_resource(
                 Resource.IRON,
                 productions={1: 100},
                 allocations={},
-                supplement={99: 500},
+                npc_allowance={99: 500},
+            )
+
+    def test_a_negative_allowance_is_rejected(self):
+        with pytest.raises(AllocationError, match="cannot be negative"):
+            resolve_resource(
+                Resource.IRON,
+                productions={1: 100},
+                allocations={},
+                npc_allowance={1: -500},
             )
 
 
@@ -410,10 +494,10 @@ class TestConsumption:
                 consumption={99: 500},
             )
 
-    def test_consumption_composes_with_a_stock_supplement(self):
-        """A stock floor raises what the village can SHIP; consumption lowers
-        what its store keeps. Both at once must not collide: available carries
-        the supplement, so net stays target minus spend."""
+    def test_consumption_composes_with_an_npc_draw(self):
+        """An NPC allowance funds what the SENDER ships; consumption lowers what
+        the receiver's store keeps. Both at once must not collide: the draw
+        belongs to the sender, so the receiver's net stays target minus spend."""
         plan = resolve_resource(
             Resource.LUMBER,
             productions={1: 1000, 2: 0},
@@ -421,10 +505,12 @@ class TestConsumption:
                 1: Allocation(AllocationMode.REMAINDER),
                 2: Allocation(AllocationMode.ABSOLUTE, 1200),
             },
-            supplement={1: 500},
+            npc_allowance={1: 500},
             consumption={2: 1200},
         )
         receiver = next(v for v in plan.villages if v.village_id == 2)
+        sender = next(v for v in plan.villages if v.village_id == 1)
 
         assert receiver.ship_per_hour == pytest.approx(1200)
         assert receiver.net_per_hour == pytest.approx(0.0)
+        assert sender.npc_draw_per_hour == pytest.approx(200)

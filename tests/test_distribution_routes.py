@@ -1229,28 +1229,33 @@ class TestShipOnlyTo:
 
 
 class TestStockFundedSupply:
-    """Stock-funded supply: a village ships more than it makes, from a warehouse
-    it keeps topped up by NPC.
+    """NPC-funded shipping: a village ships more than it makes, by converting.
 
     The operator's spec: "02 always performs NPC trading ... Treat 02's
     warehouses as always at least 30% full, meaning even though the total wood
     account is negative, 02 has extra wood to distribute." The planner refused
     that day profile as over-allocated by 12,210/h of lumber because it drew
-    every village's supply from production alone. `stock_floor_fraction` names
-    the stock; the allowance it funds over the profile window is extra supply
-    of lumber, clay and iron -- never crop, and never production.
+    every village's supply from production alone.
+
+    **RE-SEEDED for section 7.** `stock_floor_fraction` is now the BUFFER LEVEL
+    only, and the conversion rate is derived from the feedstock: this fixture's
+    22,500/h came from `0.30 x 1,200,000 / 16h`, a level divided by a window,
+    which is the bug `TestALevelIsNotARate` in tests/test_distribution_npc.py
+    now pins. The arithmetic that replaced it: 02 retains 20,000/h of crop and
+    draws on no other resource, so 24 x 20,000 = 480,000/day of conversion --
+    20,000/h -- against a 12,000/h wood shortfall. Capacity and window length
+    appear nowhere in that figure.
     """
 
     HUB, NEAR, FAR = 20002, 20011, 20003
-    DAY = [7 * 60, 23 * 60]  # 16 hours: 0.30 x 1,200,000 / 16 = 22,500/h
+    DAY = [7 * 60, 23 * 60]  # 16 hours; the allowance does NOT depend on this
 
     def _payload(self, *, floor=0.30, capacity=1_200_000, hub_crop=20_000.0, near=10_000, far=8000):
         """02 makes 6,000/h of lumber against 18,000/h claimed: short by 12,000.
 
-        A 1,200,000 warehouse kept 30% full is 360,000 in stock, 22,500/h over
-        the 16-hour day -- enough to fund the shortfall with room to spare.
-        Lower the claims below 6,000 and nothing is short, so the allowance goes
-        undrawn.
+        It retains 20,000/h of crop and nothing else, so that is what it can
+        convert -- enough to fund the shortfall with 8,000/h to spare. Lower the
+        claims below 6,000 and nothing is short, so the allowance goes undrawn.
         """
         snapshot = [
             _own_village(
@@ -1276,13 +1281,18 @@ class TestStockFundedSupply:
         config = []
         if floor is not None:
             config.append({"village_id": self.HUB, "stock_floor_fraction": floor})
-        return {
+        payload = {
             "snapshot": snapshot,
             "allocations": allocations,
             "config": config,
             "dispatch_window": self.DAY,
             "prune_to_window": True,
         }
+        if floor:
+            # A floor plus a window has to say whether the operator is trading
+            # during those hours. This is the day profile, so they are.
+            payload["npc_attended"] = True
+        return payload
 
     def _plan(self, **kw):
         return asyncio.run(post_plan(PlanRequest.model_validate(self._payload(**kw))))
@@ -1310,18 +1320,41 @@ class TestStockFundedSupply:
         assert not res.shortfalls
 
     def test_the_reported_production_does_not_move(self):
-        """The stock is supply, not production: inflating the production figure
-        would have the response claim the account makes more than it does."""
+        """Conversion is not production: inflating the production figure would
+        have the response claim the account MAKES what its operator traded for.
+
+        Re-seeded: 20,000/h of retained crop is the allowance (24 x 20,000 =
+        480,000/day), and 12,000/h of it is drawn -- exactly the shortfall.
+        The old figures were a 22,500/h allowance, all of it reported as
+        supply whether anything needed it or not."""
         without = next(
             u for u in self._plan(floor=None).unallocated if u.resource is Resource.LUMBER
         )
         with_floor = next(u for u in self._plan().unallocated if u.resource is Resource.LUMBER)
 
         assert with_floor.total_production == without.total_production == 6000
-        assert with_floor.total_supplement == pytest.approx(22_500)
-        assert without.total_supplement == 0
+        assert with_floor.total_npc_allowance == pytest.approx(20_000)
+        assert with_floor.total_npc_draw == pytest.approx(12_000)
+        assert without.total_npc_allowance == 0
+        assert without.total_npc_draw == 0
 
-    def test_stock_funded_shipping_is_a_visible_dependency(self):
+    def test_the_reserve_is_reported_with_its_own_arithmetic(self):
+        """The page needs the figures, not the prose: what the floor level is,
+        what a day of conversion comes to, which stores pay for it, and which
+        it converts into."""
+        res = self._plan()
+
+        reserve = next(r for r in res.npc_reserves if r.village_id == self.HUB)
+        assert reserve.floor_level == pytest.approx(0.30 * 1_200_000)
+        assert reserve.allowance_per_hour == pytest.approx(20_000)
+        assert reserve.allowance_per_day == pytest.approx(480_000)
+        assert reserve.drawn == [Resource.LUMBER]
+        # Clay and iron are retained at 0/h, so they fund nothing and are not
+        # listed as paying for anything.
+        assert reserve.feedstock == [Resource.CROP]
+        assert reserve.feedstock_shares == [pytest.approx(1.0)]
+
+    def test_npc_funded_shipping_is_a_visible_dependency(self):
         res = self._plan()
 
         funded = self._findings(res, "stock_funded")
@@ -1329,7 +1362,7 @@ class TestStockFundedSupply:
         assert funded[0].severity == "warning"
         assert funded[0].village == "02"
         assert "02 ships 12,000/h of lumber beyond its production" in funded[0].message
-        assert "30% full" in funded[0].message
+        assert "converting crop" in funded[0].message
 
     def test_an_allowance_that_is_not_drawn_on_is_not_reported(self):
         # 1,000 + 2,000 claimed against 6,000 made: production alone covers it.
@@ -1337,23 +1370,29 @@ class TestStockFundedSupply:
         assert not any("exceed production" in w for w in res.warnings)
 
         assert self._findings(res, "stock_funded") == [], res.warnings
-        assert self._findings(res, "stock_floor_unsustainable") == []
+        assert self._findings(res, "npc_capacity_short") == []
 
-    def test_a_floor_drawn_faster_than_the_crop_surplus_will_not_hold(self):
-        """NPC converts crop to materials one for one, so the stock can only be
-        replenished as fast as the village's crop surplus."""
+    def test_a_draw_beyond_the_feedstock_is_critical_and_refuses_the_plan(self):
+        """NPC converts crop to materials one for one, so the conversion can
+        only go as fast as the village's retained crop.
+
+        Re-seeded from STOCK_FLOOR_UNSUSTAINABLE, which asked the same question
+        after the fact and answered it as a WARNING. Same arithmetic, same
+        7,000/h: 12,000/h of wood to fund against 5,000/h of retained crop.
+        The severity is the change -- section 7's rule is to fail loudly."""
         res = self._plan(hub_crop=5000.0)
 
-        unsustainable = self._findings(res, "stock_floor_unsustainable")
-        assert len(unsustainable) == 1, res.warnings
-        assert unsustainable[0].severity == "warning"
-        assert "02's stock floor is drawn down 7,000/h faster" in unsustainable[0].message
-        assert "will not hold" in unsustainable[0].message
+        short = self._findings(res, "npc_capacity_short")
+        assert len(short) == 1, res.warnings
+        assert short[0].severity == "critical"
+        assert "7,000/h short" in short[0].message
+        assert res.feasible is False
+        assert any("7,000" in b for b in res.verdict.blockers), res.verdict.blockers
 
     def test_a_crop_surplus_that_covers_the_draw_is_not_warned_about(self):
         res = self._plan(hub_crop=20_000.0)
 
-        assert self._findings(res, "stock_floor_unsustainable") == [], res.warnings
+        assert self._findings(res, "npc_capacity_short") == [], res.warnings
 
     def test_a_floor_without_a_capacity_reading_is_refused_and_named(self):
         with pytest.raises(HTTPException) as exc:
@@ -1370,7 +1409,7 @@ class TestStockFundedSupply:
 
     def test_the_day_check_honours_the_floor(self):
         """Each profile is planned through `_plan_account`, so the day picture
-        must be built from the same stock-funded routes /plan shows."""
+        must be built from the same NPC-funded routes /plan shows."""
         payload = self._payload()
         body = DayCheckRequest.model_validate(
             {
@@ -1378,7 +1417,12 @@ class TestStockFundedSupply:
                 "config": payload["config"],
                 "prune_to_window": True,
                 "segments": [
-                    {"name": "Day", "window": self.DAY, "allocations": payload["allocations"]}
+                    {
+                        "name": "Day",
+                        "window": self.DAY,
+                        "allocations": payload["allocations"],
+                        "npc_attended": True,
+                    }
                 ],
             }
         )
@@ -1387,6 +1431,59 @@ class TestStockFundedSupply:
 
         assert not any("exceed production" in w for w in res.warnings), res.warnings
         assert any("Day: 02 ships 12,000/h of lumber" in w for w in res.warnings), res.warnings
+
+    def test_the_day_check_refuses_a_segment_that_does_not_state_attendance(self):
+        """The 422 the operator's night profile depends on: a floor with hours
+        and no word on whether anyone is trading during them."""
+        payload = self._payload()
+
+        with pytest.raises(ValidationError, match="npc_attended"):
+            DayCheckRequest.model_validate(
+                {
+                    "snapshot": payload["snapshot"],
+                    "config": payload["config"],
+                    "prune_to_window": True,
+                    "segments": [
+                        {"name": "Day", "window": self.DAY, "allocations": payload["allocations"]}
+                    ],
+                }
+            )
+
+    def test_an_unattended_night_segment_funds_nothing(self):
+        """The operator sleeps through the night window, so the conversion that
+        makes the day profile feasible is simply not happening -- and the plan
+        says so loudly rather than shipping wood nobody converted."""
+        payload = self._payload()
+        night = [23 * 60, 7 * 60]
+        body = DayCheckRequest.model_validate(
+            {
+                "snapshot": payload["snapshot"],
+                "config": payload["config"],
+                "prune_to_window": True,
+                "segments": [
+                    {
+                        "name": "Night",
+                        "window": night,
+                        "allocations": payload["allocations"],
+                        "npc_attended": False,
+                    },
+                    {
+                        "name": "Day",
+                        "window": [7 * 60, 23 * 60],
+                        "allocations": {},
+                        "npc_attended": True,
+                    },
+                ],
+            }
+        )
+
+        res = asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
+
+        assert any(
+            "Night: 02 must ship 12,000/h of lumber beyond its production" in w
+            for w in res.warnings
+        ), res.warnings
+        assert any("only convert 0/h" in w for w in res.warnings), res.warnings
 
 
 class TestTheMerchantModelSaysWhenItIsUnpinned:
@@ -1692,12 +1789,12 @@ class TestConsumptionProfiles:
         for row in res.village_nets:
             assert row.net_per_hour == pytest.approx(
                 row.own_per_hour
-                + row.supplement_per_hour
+                + row.npc_draw_per_hour
                 + row.ship_per_hour
                 - row.consumption_per_hour
             )
             assert row.target_per_hour == pytest.approx(
-                row.own_per_hour + row.supplement_per_hour + row.ship_per_hour
+                row.own_per_hour + row.npc_draw_per_hour + row.ship_per_hour
             )
 
     def test_every_planned_village_and_resource_gets_a_row(self):
