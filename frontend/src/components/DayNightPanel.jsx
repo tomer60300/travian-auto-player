@@ -40,8 +40,10 @@ export default function DayNightPanel({
   profileWindows,
   profileAttendance,
   attendanceRequired,
+  reservedWindow,
   onWindow,
   onAttendance,
+  onReservedWindow,
   onSelectProfile,
 }) {
   const withHours = profileNames.filter((name) => dispatchWindowFor(profileWindows[name]) != null)
@@ -244,6 +246,52 @@ export default function DayNightPanel({
         </table>
       </ScrollableTable>
 
+      {/* The other half of section 7's attendance, and the half that is about
+          the PERSON rather than the profile: when the operator actually sits
+          down at the marketplace. Account-wide, because it is one person at
+          one marketplace -- the answer above is per profile because they are
+          awake for some windows and not others.
+
+          A preference the planner WEIGHS, never a refusal: arrivals avoid it
+          where an alternative exists and the plan says so when the geometry
+          forces one in. So an unset window is silence, and the pair is dropped
+          from the request rather than sent zero-width. */}
+      <div className="border-t-default pt-3 mt-3">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="min-w-[16rem] flex-1">
+            <p className="text-xs font-semibold">Keep arrivals clear of your NPC burst</p>
+            <p className="text-secondary text-xs mt-0.5">
+              The hours you actually sit at the marketplace. Deliveries are steered away from
+              them where a route has an alternative, so a merchant arriving does not compete
+              with the trading you are doing by hand — and the plan says so when the
+              geometry leaves it no choice. Leave both blank to reserve nothing.
+            </p>
+          </div>
+          <span className="flex items-center gap-1 text-xs text-secondary">
+            <input
+              type="time"
+              aria-label="NPC burst window start"
+              className="input-field text-xs py-0.5 px-1 w-auto"
+              value={(reservedWindow ?? ['', ''])[0]}
+              onChange={(e) => onReservedWindow(pairOrNull([e.target.value, (reservedWindow ?? ['', ''])[1]]))}
+            />
+            –
+            <input
+              type="time"
+              aria-label="NPC burst window end"
+              className="input-field text-xs py-0.5 px-1 w-auto"
+              value={(reservedWindow ?? ['', ''])[1]}
+              onChange={(e) => onReservedWindow(pairOrNull([(reservedWindow ?? ['', ''])[0], e.target.value]))}
+            />
+          </span>
+        </div>
+        <p className="text-secondary text-xs mt-1">
+          {dispatchWindowFor(reservedWindow)
+            ? `Arrivals avoid ${reservedWindow[0]}–${reservedWindow[1]} where they can.`
+            : 'Nothing reserved — arrivals may land at any hour.'}
+        </p>
+      </div>
+
       {!attendanceRequired && (
         <p className="text-secondary text-xs mt-2">
           No village keeps an NPC-backed stock floor, so nothing here is required — set a{' '}
@@ -253,6 +301,18 @@ export default function DayNightPanel({
       )}
     </div>
   )
+}
+
+/** A half-typed time pair is not a window.
+ *
+ * Both boxes empty is null, which is how the request says "reserve nothing" --
+ * and the state has to reach null rather than `['', '']`, or clearing one box
+ * would leave a pair the payload has to remember to reject. One box filled is
+ * kept, because the operator is mid-edit and blanking their first entry would
+ * be hostile.
+ */
+function pairOrNull(pair) {
+  return pair[0] || pair[1] ? pair : null
 }
 
 /** A window as one or two arcs of a 24-hour track, in percent.

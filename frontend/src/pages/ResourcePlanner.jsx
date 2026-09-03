@@ -265,6 +265,12 @@ const DEFAULT_WINDOWS = { Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] }
 // server has to read too. Until then it does not follow the operator between
 // origins the way the hours beside it do.
 const LS_NPC_ATTENDED = 'planner_npc_attended'
+// Minutes of the day to keep clear of ARRIVALS, so the operator's manual NPC
+// burst is not competing with merchants landing. Account-wide, because it is
+// one person at one marketplace -- unlike the attendance answer above, which
+// is per profile because the operator is awake for some windows and not
+// others. Owned: nothing in the game states when someone sits down to trade.
+const LS_RESERVED_WINDOW = 'planner_reserved_window'
 
 // Only complete rows go to the backend: a half-typed target would 422 the
 // whole request, and the operator is mid-edit, not in error. Shared by the
@@ -625,6 +631,12 @@ export default function ResourcePlanner() {
   // account does not have. The plan is refused until every profile with hours
   // says, and the Day & night stage is where it says it.
   const [profileAttendance, setProfileAttendance] = useState({})
+  // The NPC burst window, as an `['HH:MM', 'HH:MM']` pair or null for none.
+  // Arrivals avoid it where an alternative exists, and the plan warns when the
+  // geometry forces one into it -- so it is a preference the planner weighs,
+  // never a refusal, which is why an unset one is silence rather than a
+  // zero-width pair.
+  const [reservedWindow, setReservedWindow] = useState(null)
   // Operator alert level for a village's crop stock (e.g. an NPC trigger),
   // below capacity. Cached per account like the Trade Office levels.
   const [cropCeilings, setCropCeilings] = useState({})
@@ -882,6 +894,7 @@ export default function ResourcePlanner() {
       setRoleTemplates({})
       setProfiles({ [DEFAULT_PROFILE]: {} })
       setProfileAttendance({})
+      setReservedWindow(null)
       setForeignTargets([])
       setMayRelay({})
       setMaxBusy({})
@@ -912,6 +925,7 @@ export default function ResourcePlanner() {
     // and the backend's lax `bool` would read a stored "yes" from a
     // hand-edited origin as an attendance nobody declared.
     setProfileAttendance(attendanceMapOnly(loadJson(`${LS_NPC_ATTENDED}::${accountKey}`, {})))
+    setReservedWindow(loadJson(`${LS_RESERVED_WINDOW}::${accountKey}`, null))
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
     setRelayFor(loadJson(`${LS_RELAY_FOR}::${accountKey}`, {}))
@@ -1014,6 +1028,10 @@ export default function ResourcePlanner() {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_NPC_ATTENDED), profileAttendance)
   }, [profileAttendance, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_RESERVED_WINDOW), reservedWindow)
+  }, [reservedWindow, hydratedKey, accountKey, storageKey])
   // A day-check result is a pure function of these inputs; the moment any of
   // them changes it describes a day that will never happen. Without this, the
   // green all-clear banner could sit on screen after the operator changed
@@ -1049,7 +1067,9 @@ export default function ResourcePlanner() {
     merchantModel,
     // Section 7's attendance decides whether a segment's NPC allowance exists
     // at all, so a day computed with the night marked awake is a different day.
+    // The reserved window moves arrival times, and the day check reads them.
     profileAttendance,
+    reservedWindow,
   ])
   // Same rule for the route sheet, with higher stakes: its rows are copied
   // field by field into the game's trade-route dialog. A sheet computed from
@@ -1110,6 +1130,7 @@ export default function ResourcePlanner() {
     profileWindows,
     activeProfile,
     profileAttendance,
+    reservedWindow,
   ])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
@@ -1658,6 +1679,13 @@ export default function ResourcePlanner() {
         attended: attendanceFor(profileAttendance, activeProfile),
         hasWindow: dispatchWindow != null,
       }),
+      // Kept clear of arrivals for the manual NPC burst. Omitted when unset,
+      // and omitted for a zero-width pair: an empty reserved window reserves
+      // nothing, so sending one would only make the request look like it
+      // asked for something.
+      ...(dispatchWindowFor(reservedWindow)
+        ? { reserved_window: dispatchWindowFor(reservedWindow) }
+        : {}),
       // Plan-time, not run-time: with pruning the window is genuinely enforced
       // and the escaping firings are a note about a dependency; without it they
       // are a critical over-delivery. /plan must see it to weigh them.
@@ -1767,6 +1795,7 @@ export default function ResourcePlanner() {
     profileWindows,
     activeProfile,
     profileAttendance,
+    reservedWindow,
     pruneToWindow,
   ])
 
@@ -5185,6 +5214,8 @@ export default function ResourcePlanner() {
             profileWindows={profileWindows}
             profileAttendance={profileAttendance}
             attendanceRequired={attendanceIsRequired}
+            reservedWindow={reservedWindow}
+            onReservedWindow={setReservedWindow}
             onSelectProfile={switchProfile}
             onWindow={(name, pair) =>
               setProfileWindows((prev) => ({ ...prev, [name]: pair }))

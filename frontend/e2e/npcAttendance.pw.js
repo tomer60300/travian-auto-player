@@ -315,6 +315,29 @@ test.describe('NPC attendance', () => {
     expect(await storedAttendance(page)).toEqual({ Night: false, Day: true })
   })
 
+  test('the NPC burst window is reserved, and blank reserves nothing', async ({ page }) => {
+    const sent = await isolate(page)
+    await seed(page, { attendance: { Day: true, Night: false } })
+    await openDayStage(page)
+
+    // Nothing reserved is the resting state, and it is said rather than left
+    // as two empty boxes.
+    await expect(page.getByText(/Nothing reserved/)).toBeVisible()
+    await page.getByRole('button', { name: /^Build plan/ }).click()
+    await expect(page.getByText(/^Routes$/)).toBeVisible()
+    expect(sent.plan[0]).not.toHaveProperty('reserved_window')
+
+    await page.getByRole('button', { name: 'Day & night' }).click()
+    await page.getByLabel('NPC burst window start').fill('20:00')
+    await page.getByLabel('NPC burst window end').fill('21:00')
+    await expect(page.getByText(/Arrivals avoid 20:00–21:00/)).toBeVisible()
+
+    await page.getByRole('button', { name: /^Build plan/ }).click()
+    await expect(page.getByText(/^Routes$/)).toBeVisible()
+    // Minutes past midnight, which is the unit the request carries.
+    expect(sent.plan[sent.plan.length - 1].reserved_window).toEqual([1200, 1260])
+  })
+
   test('the bar states the active profile answer and leads to the editor', async ({ page }) => {
     await isolate(page)
     await seed(page, { attendance: { Day: true, Night: false } })
