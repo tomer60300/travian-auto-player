@@ -324,3 +324,57 @@ class TestASpendPastProductionCannotKillTheRequest:
         result = self._derive_with({"clay": self.OWN + 1})
 
         assert result.unmet == {}
+
+
+class TestARoleTemplateReachesTheSameCrash:
+    """The blast radius of R4-P1-1, which the ledger understated.
+
+    The spend does not have to be typed per village: a role template carries
+    one, and `_resolve_roles` merges it into every village that declares the
+    role. So ONE template one unit past production takes the endpoint down for
+    every village of that role at once -- and section 2's own DEF profile
+    (5,168/h of clay) is one missing template allocation away from exactly
+    that, because a template that states a spend but no clay ALLOCATION leaves
+    its villages in the untouched loop that raised.
+
+    03 and 11 each make 1,750/h of clay, so a `def` template is the whole
+    fixture's clay production against one figure.
+    """
+
+    def _derive_with(self, spend, *, villages=(ARMY, FAR)):
+        return asyncio.run(
+            post_night_profile(
+                _body(
+                    config=[
+                        {"village_id": HUB, "trade_office_level": 19},
+                        *({"village_id": vid, "role": "def"} for vid in villages),
+                    ],
+                    # Consumption only, no clay allocation: the shape section
+                    # 2's profile has, and the shape that reaches the loop.
+                    roles={"def": {"consumption": spend}},
+                ),
+                USER,
+            )
+        )
+
+    OWN = 1750
+
+    @pytest.mark.parametrize("over", [1, 3_418], ids=["one-unit-past", "section-2s-def-figure"])
+    def test_a_template_spend_above_production_still_derives(self, over):
+        result = self._derive_with({"clay": self.OWN + over})
+
+        for vid in (ARMY, FAR):
+            assert result.allocations[Resource.CLAY][vid].value == 0.0
+
+    def test_the_uncovered_part_of_a_template_spend_is_reported(self):
+        """Both villages of the role are short 3,418/h against the hub's own
+        1,750/h of clay, so 5,086/h is what nobody can cover."""
+        result = self._derive_with({"clay": self.OWN + 3_418})
+
+        assert result.unmet[Resource.CLAY] == pytest.approx(5_086.0)
+
+    def test_one_village_of_the_role_is_enough_to_reach_it(self):
+        result = self._derive_with({"clay": self.OWN + 3_418}, villages=(ARMY,))
+
+        assert result.allocations[Resource.CLAY][ARMY].value == 0.0
+        assert result.unmet[Resource.CLAY] == pytest.approx(1_668.0)

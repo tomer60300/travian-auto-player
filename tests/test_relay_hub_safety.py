@@ -446,7 +446,7 @@ def test_a_template_may_overrule_its_own_roles_default() -> None:
 
 
 @pytest.mark.parametrize(
-    ("role", "expected"),
+    ("role", "role_permits"),
     [
         (Role.FEEDER, True),
         (Role.CAPITAL, False),
@@ -456,22 +456,28 @@ def test_a_template_may_overrule_its_own_roles_default() -> None:
     ],
     ids=lambda value: value.value if isinstance(value, Role) else str(value),
 )
-@pytest.mark.parametrize("crop_per_hour", [9000.0, 0.0, -5880.0], ids=str)
+@pytest.mark.parametrize("crop_per_hour", [9000.0, 0.0, -5880.0, None], ids=str)
 def test_the_permission_matrix_ignores_the_crop_sign_entirely(
-    role: Role, expected: bool, crop_per_hour: float | None
+    role: Role, role_permits: bool, crop_per_hour: float | None
 ) -> None:
-    """Every role against every crop SIGN. A rate that could not be read at all
-    is not a sign, and it is refused first -- see the test below.
+    """Every role against every crop sign, the unreadable one included.
 
     The point of declaring a role is that the answer stops depending on the
-    rate: 01 reads -5,880/h and 02 reads +6,000/h, and neither figure is what
+    SIGN: 01 reads -5,880/h and 02 reads +6,000/h, and neither figure is what
     decides whether the profile lets them relay.
+
+    The ``None`` column is the exception, and it was REWRITTEN to the ruling on
+    R4-P2-2: it used to assert that a feeder relays on a rate nobody could
+    read, which is the hole rather than the contract. An unreadable rate is not
+    a sign at all, and a declaration says what a village is FOR without saying
+    what its granary is doing -- so the refusal comes first and every role is a
+    *no* there. The ``may_relay`` dimension of the same rule is the test below.
     """
     village = VillageState(
         MIDPOINT, 0, 0, merchant_count=20, crop_per_hour=crop_per_hour, role=role
     )
 
-    assert _may_relay_through(village) is expected
+    assert _may_relay_through(village) is (role_permits and crop_per_hour is not None)
 
 
 @pytest.mark.parametrize("role", list(Role) + [None], ids=lambda r: r.value if r else "no-role")
