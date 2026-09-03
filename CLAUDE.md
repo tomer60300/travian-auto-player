@@ -99,9 +99,11 @@ Every task MUST follow this exact pipeline. Do not skip steps.
 
 ### Phase 3: Verify
 
-Scope the gate to what you actually changed. The full backend suite takes
-~1 minute in parallel (`-n 8`; measured 2026-08-28: 57s vs 185s serial) — even
-so, running it to verify a Markdown edit verifies nothing and is pure waste.
+Scope the gate to what you actually changed. Budget a couple of minutes for the
+full backend suite in parallel (`-n 8`), not one: measured 2026-09-03 on this
+machine, 107s warm to 199s cold across three runs of 1,911 tests, and 99s over
+2,031 tests later the same day — against 235–240s serial. Even at two minutes,
+running it to verify a Markdown edit verifies nothing and is pure waste.
 
 **Always:**
 1. Backend linting, if any Python changed: `uv run ruff check . && uv run ruff format --check .`
@@ -118,7 +120,9 @@ so, running it to verify a Markdown edit verifies nothing and is pure waste.
    trace dir, scrubbed env and the live-writes pin, so workers cannot collide.
    While iterating, `-m "not slow"` skips the heavy cases: the oracle
    agreement checks, the relabelling permutations, the mutation guards, and
-   every 40-village planner case. Measured 2026-09-01 with `-n 8`: 57s full, 41s skipping slow.
+   every 40-village planner case. Measured 2026-09-03 with `-n 8` over 2,031
+   tests: 99s full, 82s skipping slow — the marker buys less than it looks like
+   it should, because the slow cases run in parallel with everything else.
    Run the full set (still `-n 8`) before committing.
 
 **Frontend changed:**
