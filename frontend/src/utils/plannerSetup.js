@@ -88,6 +88,14 @@
  */
 
 import { RESOURCE_LABEL, ROLE_LABEL } from '../constants/planner'
+// `npc_feedstock`'s own rule, imported rather than restated. The module note
+// above says contract constants live here beside the parser that enforces them,
+// and this is the one exception with a reason: `plannerNpc.js` is the module
+// for that field -- it also builds the request row and the picker's summary
+// from the same list -- so a copy here would be the second definition of a
+// wire format, which is exactly what that note exists to prevent. The
+// dependency runs one way only; nothing in `plannerNpc.js` reads this file.
+import { NPC_FEEDSTOCK_RESOURCES, isFeedstockList } from './plannerNpc'
 import { namesForVillageIds } from './villageRefs'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
@@ -575,7 +583,26 @@ export function isEmptyTemplate(template) {
   if (Object.keys(template.allocations ?? {}).length > 0) return false
   if (Object.keys(template.consumption ?? {}).length > 0) return false
   if (template.may_relay != null) return false
+  // An assumption alone IS a template. It moves no target, no cargo and no
+  // merchant -- but it is the figure section 9's drift check compares reality
+  // against, and an "empty" template is SKIPPED from the request entirely, so
+  // reading it as empty would silently drop the only thing it can do. 0.0 is a
+  // real claim ("this village breaks even") and is checked as one; null means
+  // no assumption, which is not an assumption of zero.
+  if (template.assumed_crop_per_hour != null) return false
   return !template.crop_negative_by_design
+}
+
+/** Is this a usable crop assumption?
+ *
+ * Any finite number, sign included. NEGATIVE IS THE NORMAL CASE on the roles
+ * that matter -- 01 reads -5,880/h and is crop-negative by design -- so a
+ * non-negative rule here would refuse the account's own figures. `null` is not
+ * a rate and is handled by the caller: it means no assumption, and the village
+ * is then not drift-checked at all.
+ */
+export function isAssumedCropRate(value) {
+  return typeof value === 'number' && Number.isFinite(value)
 }
 
 /** The `roles` a plan request carries: a template for every role some village
@@ -610,6 +637,13 @@ export function rolesForRequest(roleTemplates, claimedRoles) {
       consumption: materialSpendOnly(template.consumption) ?? {},
       may_relay: template.may_relay ?? null,
       crop_negative_by_design: Boolean(template.crop_negative_by_design),
+      // Omitted where there is none, and NEVER coerced to 0: the backend reads
+      // a missing figure as "no assumption, do not drift-check this village",
+      // and reads 0 as the claim that it breaks even. Sending 0 for silence
+      // would flag every village on every account that has never typed one.
+      ...(isAssumedCropRate(template.assumed_crop_per_hour)
+        ? { assumed_crop_per_hour: template.assumed_crop_per_hour }
+        : {}),
     }
   }
   return out
@@ -764,6 +798,7 @@ export function buildSetup({
   shipOnlyTo,
   relayFor,
   stockFloors,
+  npcFeedstock,
   consumption,
   villageRoles,
   mayRelay,
@@ -782,6 +817,11 @@ export function buildSetup({
     const allowed = shipOnlyTo?.[village.village_id]
     const forwards = relayFor?.[village.village_id]
     const floor = stockFloors?.[village.village_id]
+    // Only a usable override travels. An empty list is the picker mid-edit,
+    // and "derived" -- the resting state -- is said by leaving the field off.
+    const feedstock = isFeedstockList(npcFeedstock?.[village.village_id])
+      ? npcFeedstock[village.village_id]
+      : null
     const role = villageRoles?.[village.village_id]
     const relay = mayRelay?.[village.village_id]
     // Materials only, so an export can never write a file this same parser
@@ -795,6 +835,7 @@ export function buildSetup({
       allowed == null &&
       !forwards?.length &&
       floor == null &&
+      feedstock == null &&
       role == null &&
       relay == null &&
       !spends
@@ -819,6 +860,12 @@ export function buildSetup({
     // writing it would produce a file this same parser will not read.
     if (forwards?.length) row.relay_for = forwards.map(Number)
     if (floor != null) row.stock_floor_fraction = Number(floor)
+    // Written in the game's own resource order rather than the click order, so
+    // two operators who ticked the same two stores export the same document --
+    // the same reason the request row orders it.
+    if (feedstock != null) {
+      row.npc_feedstock = NPC_FEEDSTOCK_RESOURCES.filter((r) => feedstock.includes(r))
+    }
     // false is written, not dropped: it is the answer that keeps ONE village
     // out of the relay tier its role otherwise permits, which is exactly the
     // asymmetric half of the setting worth carrying.
@@ -1099,6 +1146,17 @@ function parseRoleTemplate(raw, where) {
         `false, or absent to take the role's own answer.`
     )
   }
+  // Refused rather than read as absent, and refused for the sign as much as
+  // the type: a template whose assumption failed to parse would be silently
+  // undrifted, so the one check the figure exists for stops happening while
+  // the file still loads.
+  if (raw.assumed_crop_per_hour != null && !isAssumedCropRate(raw.assumed_crop_per_hour)) {
+    throw new SetupFileError(
+      `${where}.assumed_crop_per_hour is ${JSON.stringify(raw.assumed_crop_per_hour)}; ` +
+        `it must be a number -- negative is normal, since a hammer eats more crop than ` +
+        `it grows -- or absent to make no assumption at all.`
+    )
+  }
   return {
     allocations,
     consumption,
@@ -1108,6 +1166,9 @@ function parseRoleTemplate(raw, where) {
     // kept out of the relay tier.
     may_relay: raw.may_relay ?? null,
     crop_negative_by_design: Boolean(raw.crop_negative_by_design),
+    // null, on the same rule and for a sharper reason: 0.0 is a real claim and
+    // no claim at all is not zero, so the two cannot share a representation.
+    assumed_crop_per_hour: raw.assumed_crop_per_hour ?? null,
   }
 }
 
@@ -1280,6 +1341,35 @@ export function parseSetup(text) {
       }
       parsed.stock_floor_fraction = floor
     }
+    if (row.npc_feedstock != null) {
+      // Refused, not trimmed, and the two ways it can be wrong get different
+      // sentences: an unknown store is a typo, while an EMPTY list is a picker
+      // that was opened and never ticked. Neither is an override, and the
+      // backend refuses both -- so a document carrying one would load cleanly
+      // here and 422 on the next plan.
+      if (!Array.isArray(row.npc_feedstock)) {
+        throw new SetupFileError(`${where} has an npc_feedstock that is not a list of stores.`)
+      }
+      for (const resource of row.npc_feedstock) {
+        if (!NPC_FEEDSTOCK_RESOURCES.includes(resource)) {
+          throw new SetupFileError(
+            `${where}.npc_feedstock names "${resource}"; it must be one of ` +
+              `${NPC_FEEDSTOCK_RESOURCES.join(', ')}.`
+          )
+        }
+      }
+      if (!isFeedstockList(row.npc_feedstock)) {
+        throw new SetupFileError(
+          `${where} has npc_feedstock ${JSON.stringify(row.npc_feedstock)}. It must name at ` +
+            `least one store, each at most once: NPC exchanges one resource for another, so it ` +
+            `can convert from neither nothing nor the same store twice. Remove the field to ` +
+            `let the feedstock be derived, which is the honest default.`
+        )
+      }
+      parsed.npc_feedstock = NPC_FEEDSTOCK_RESOURCES.filter((r) =>
+        row.npc_feedstock.includes(r)
+      )
+    }
     if (row.consumption_per_hour != null) {
       parsed.consumption_per_hour = parseConsumption(
         row.consumption_per_hour,
@@ -1422,6 +1512,7 @@ export function mergeSetup({
   shipOnlyTo,
   relayFor,
   stockFloors,
+  npcFeedstock,
   consumption,
   villageRoles,
   mayRelay,
@@ -1437,6 +1528,7 @@ export function mergeSetup({
   const nextShipOnlyTo = { ...(shipOnlyTo ?? {}) }
   const nextRelayFor = { ...(relayFor ?? {}) }
   const nextStockFloors = { ...(stockFloors ?? {}) }
+  const nextNpcFeedstock = { ...(npcFeedstock ?? {}) }
   const nextConsumption = { ...(consumption ?? {}) }
   const nextVillageRoles = { ...(villageRoles ?? {}) }
   const nextMayRelay = { ...(mayRelay ?? {}) }
@@ -1477,6 +1569,10 @@ export function mergeSetup({
       else delete nextRelayFor[row.village_id]
     }
     if (row.stock_floor_fraction != null) nextStockFloors[row.village_id] = row.stock_floor_fraction
+    // Silence leaves the override on screen alone, the same rule every other
+    // column here follows -- a document that says nothing about the feedstock
+    // is not a document saying "derive it".
+    if (row.npc_feedstock != null) nextNpcFeedstock[row.village_id] = row.npc_feedstock
     // Replaced wholesale where the file has one, not merged per resource: half
     // of an old spend under a new profile is a figure nobody entered, and a
     // stale leftover resource silences a real overflow.
@@ -1536,6 +1632,7 @@ export function mergeSetup({
     shipOnlyTo: nextShipOnlyTo,
     relayFor: nextRelayFor,
     stockFloors: nextStockFloors,
+    npcFeedstock: nextNpcFeedstock,
     consumption: nextConsumption,
     villageRoles: nextVillageRoles,
     mayRelay: nextMayRelay,

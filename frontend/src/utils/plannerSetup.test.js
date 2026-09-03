@@ -1028,12 +1028,14 @@ describe('roles and role templates in the setup file', () => {
       consumption: { lumber: 8372, clay: 5168, iron: 5809 },
       may_relay: null,
       crop_negative_by_design: false,
+      assumed_crop_per_hour: null,
     },
     full_off: {
       allocations: { crop: { mode: 'absolute', value: 8519 } },
       consumption: { lumber: 14751 },
       may_relay: null,
       crop_negative_by_design: true,
+      assumed_crop_per_hour: null,
     },
   }
 
@@ -1260,6 +1262,10 @@ describe('roles and role templates in the setup file', () => {
       consumption: {},
       may_relay: null,
       crop_negative_by_design: false,
+      // Explicitly null, not absent: no assumption is not an assumption of
+      // zero, and reading a missing figure as 0/h would drift-flag every
+      // village on every account that has never typed one.
+      assumed_crop_per_hour: null,
     })
   })
 
@@ -1318,6 +1324,7 @@ describe('mergeSetup with roles', () => {
       consumption: { lumber: 8372 },
       may_relay: null,
       crop_negative_by_design: false,
+      assumed_crop_per_hour: null,
     })
     expect(merged.roles.feeder).toEqual({
       allocations: { lumber: { mode: 'absolute', value: 0 } },
@@ -2356,5 +2363,161 @@ describe('the account-wide merchant levers in the setup file', () => {
     doc.merchant_model = { base_capacity: 2500, bonus_per_to_level: 0.2, merchant_headroom: 1 }
 
     expect(() => roundTrip(doc)).toThrow(/merchant_headroom/)
+  })
+})
+
+// ─── Section 7's feedstock override, and section 9's crop assumption ────────
+//
+// Both fields existed on the backend's models and NEITHER was reachable from
+// this app: `npc_feedstock` on a village config, `assumed_crop_per_hour` on a
+// role template. They are owned state -- the game states neither -- so they
+// travel in the setup document with everything else the operator types.
+
+describe('npc_feedstock, per village', () => {
+  it('writes an override, and reads it back', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      stockFloors: { 20030: 0.3 },
+      npcFeedstock: { 20030: ['clay', 'crop'] },
+      exportedAt: STAMP,
+    })
+
+    expect(doc.villages).toEqual([
+      {
+        village_id: 20030,
+        name: 'Capital',
+        stock_floor_fraction: 0.3,
+        npc_feedstock: ['clay', 'crop'],
+      },
+    ])
+    expect(roundTrip(doc).villages[0].npc_feedstock).toEqual(['clay', 'crop'])
+  })
+
+  // A village the operator has said nothing else about still gets a row when it
+  // carries a feedstock: dropping it would lose the answer entirely.
+  it('is enough on its own to give a village a row', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      npcFeedstock: { 20031: ['crop'] },
+      exportedAt: STAMP,
+    })
+
+    expect(doc.villages).toEqual([
+      { village_id: 20031, name: 'V05', npc_feedstock: ['crop'] },
+    ])
+  })
+
+  // Derived is the resting state, and an absent field is how a document says
+  // so. An empty list would import as an override of nothing.
+  it('drops an empty override on the way out rather than writing one', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 5 },
+      npcFeedstock: { 20030: [] },
+      exportedAt: STAMP,
+    })
+
+    expect(doc.villages[0]).not.toHaveProperty('npc_feedstock')
+  })
+
+  it('refuses an empty list on the way in, as the backend does', () => {
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 5 }, exportedAt: STAMP })
+    doc.villages[0].npc_feedstock = []
+
+    expect(() => roundTrip(doc)).toThrow(/npc_feedstock/)
+  })
+
+  it('refuses anything that is not one of the four stores', () => {
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 5 }, exportedAt: STAMP })
+    doc.villages[0].npc_feedstock = ['gold']
+
+    expect(() => roundTrip(doc)).toThrow(/gold/)
+  })
+
+  it('refuses the same store twice, which is not two feedstocks', () => {
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 5 }, exportedAt: STAMP })
+    doc.villages[0].npc_feedstock = ['clay', 'clay']
+
+    expect(() => roundTrip(doc)).toThrow(/npc_feedstock/)
+  })
+
+  it('merges onto the account, and leaves an unmentioned village alone', () => {
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        npcFeedstock: { 20030: ['clay', 'crop'] },
+        exportedAt: STAMP,
+      })
+    )
+
+    const merged = mergeSetup({
+      setup,
+      villages: VILLAGES,
+      npcFeedstock: { 20032: ['iron'] },
+    })
+
+    expect(merged.npcFeedstock).toEqual({ 20030: ['clay', 'crop'], 20032: ['iron'] })
+  })
+})
+
+describe('assumed_crop_per_hour, per role', () => {
+  it('is a template all by itself, because it raises a real finding', () => {
+    // Not empty: it moves no target and no cargo, but it is the figure the
+    // drift check compares reality against, and a role whose template is
+    // "empty" is SKIPPED from the request entirely.
+    expect(isEmptyTemplate({ assumed_crop_per_hour: -5880 })).toBe(false)
+    // 0.0 is a real claim -- "this village breaks even" -- and is checked as one.
+    expect(isEmptyTemplate({ assumed_crop_per_hour: 0 })).toBe(false)
+    // No assumption is not an assumption of zero.
+    expect(isEmptyTemplate({ assumed_crop_per_hour: null })).toBe(true)
+  })
+
+  it('rides the request, negative figures included', () => {
+    // 01 reads -5,880/h and is crop-negative BY DESIGN, so -5,880 is the right
+    // value to record for it.
+    const sent = rolesForRequest(
+      { full_off: { assumed_crop_per_hour: -5880 }, def: { assumed_crop_per_hour: 0 } },
+      ['full_off', 'def']
+    )
+
+    expect(sent.full_off.assumed_crop_per_hour).toBe(-5880)
+    expect(sent.def.assumed_crop_per_hour).toBe(0)
+  })
+
+  it('is omitted where there is no assumption, never sent as zero', () => {
+    const sent = rolesForRequest({ def: { consumption: { lumber: 8372 } } }, ['def'])
+
+    expect(sent.def).not.toHaveProperty('assumed_crop_per_hour')
+  })
+
+  it('survives the file round trip with its sign', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      roles: { full_off: { allocations: {}, consumption: {}, assumed_crop_per_hour: -5880 } },
+      exportedAt: STAMP,
+    })
+
+    expect(roundTrip(doc).roles.full_off.assumed_crop_per_hour).toBe(-5880)
+  })
+
+  it('reads a document that has no assumption as having none', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      roles: { def: { allocations: {}, consumption: { lumber: 8372 } } },
+      exportedAt: STAMP,
+    })
+
+    expect(roundTrip(doc).roles.def.assumed_crop_per_hour).toBeNull()
+  })
+
+  it('refuses a non-numeric assumption rather than reading it as none', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      roles: { def: { allocations: {}, consumption: {} } },
+      exportedAt: STAMP,
+    })
+    doc.roles.def.assumed_crop_per_hour = 'lots'
+
+    expect(() => roundTrip(doc)).toThrow(/assumed_crop_per_hour/)
   })
 })

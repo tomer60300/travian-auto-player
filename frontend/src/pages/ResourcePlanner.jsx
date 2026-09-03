@@ -101,11 +101,15 @@ import {
   windowDayShare,
 } from '../utils/plannerClock'
 import {
+  NPC_FEEDSTOCK_RESOURCES,
   attendanceFor,
   attendanceMapOnly,
   attendanceRequired as npcAttendanceRequired,
   describeAttendance,
+  describeFeedstock,
+  isFeedstockList,
   npcAttendedField,
+  npcFeedstockField,
   unansweredAttendance,
 } from '../utils/plannerNpc'
 import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from '../utils/villageRefs'
@@ -223,6 +227,12 @@ const LS_CROP_CEILING = 'planner_crop_ceiling'
 const LS_SHIP_ONLY_TO = 'planner_ship_only_to'
 const LS_RELAY_FOR = 'planner_relay_for'
 const LS_STOCK_FLOOR = 'planner_stock_floor'
+// Which of a village's stores NPC may convert FROM, per village:
+// { [village_id]: Resource[] }. Absent is DERIVED -- everything the village is
+// not drawing on -- which is the honest default and what section 7 describes
+// for 02 (clay and crop into wood). Owned, like the stock floor it qualifies:
+// nothing in the game states which store an operator would sell.
+const LS_NPC_FEEDSTOCK = 'planner_npc_feedstock'
 const LS_MAX_BUSY = 'planner_max_busy'
 const LS_CONSUMPTION = 'planner_consumption'
 const LS_VILLAGE_ROLES = 'planner_village_roles'
@@ -629,6 +639,12 @@ export default function ResourcePlanner() {
   // FRACTION (0.3, not 30) so state, file and request agree; the input shows it
   // as a percent. The planner may draw it down as lumber, clay or iron.
   const [stockFloors, setStockFloors] = useState({})
+  // The feedstock override that goes with the floor above. Absent means
+  // derived, which is an ANSWER and not a blank -- so the cell says "derived"
+  // rather than sitting empty, and an empty list (the picker opened and not
+  // yet ticked) is dropped from the request rather than sent as an override of
+  // nothing, which the backend refuses.
+  const [npcFeedstock, setNpcFeedstock] = useState({})
   // The most merchants each village may have underway or returning at once:
   // { [village_id]: number }. Profile section 5 gives the capital one such
   // number and the game states none, so it is owned exactly as the Trade Office
@@ -835,6 +851,7 @@ export default function ResourcePlanner() {
       setTradeOffice({})
       setShipOnlyTo({})
       setStockFloors({})
+      setNpcFeedstock({})
       setVillageRoles({})
       setRoleTemplates({})
       setProfiles({ [DEFAULT_PROFILE]: {} })
@@ -872,6 +889,7 @@ export default function ResourcePlanner() {
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
     setRelayFor(loadJson(`${LS_RELAY_FOR}::${accountKey}`, {}))
     setStockFloors(loadJson(`${LS_STOCK_FLOOR}::${accountKey}`, {}))
+    setNpcFeedstock(loadJson(`${LS_NPC_FEEDSTOCK}::${accountKey}`, {}))
     setMaxBusy(loadJson(`${LS_MAX_BUSY}::${accountKey}`, {}))
     // A role outside the five is dropped on the way in, the same way a stored
     // crop spend is: the backend answers an unknown role with a 422, so a
@@ -960,6 +978,7 @@ export default function ResourcePlanner() {
     tradeOffice,
     shipOnlyTo,
     stockFloors,
+    npcFeedstock,
     maxBusy,
     consumption,
     villageRoles,
@@ -1014,6 +1033,7 @@ export default function ResourcePlanner() {
     tradeOffice,
     shipOnlyTo,
     stockFloors,
+    npcFeedstock,
     maxBusy,
     consumption,
     villageRoles,
@@ -1039,6 +1059,10 @@ export default function ResourcePlanner() {
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_STOCK_FLOOR), stockFloors)
   }, [stockFloors, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_NPC_FEEDSTOCK), npcFeedstock)
+  }, [npcFeedstock, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_MAX_BUSY), maxBusy)
   }, [maxBusy, hydratedKey, accountKey, storageKey])
@@ -1223,6 +1247,7 @@ export default function ResourcePlanner() {
         shipOnlyTo[v.village_id] != null ||
         relayFor[v.village_id]?.length > 0 ||
         stockFloors[v.village_id] != null ||
+        isFeedstockList(npcFeedstock[v.village_id]) ||
         maxBusy[v.village_id] != null ||
         villageRoles[v.village_id] != null ||
         mayRelay[v.village_id] != null ||
@@ -1246,6 +1271,7 @@ export default function ResourcePlanner() {
         shipOnlyTo,
         relayFor,
         stockFloors,
+        npcFeedstock,
         consumption,
         villageRoles,
         mayRelay,
@@ -1270,6 +1296,7 @@ export default function ResourcePlanner() {
     shipOnlyTo,
     relayFor,
     stockFloors,
+    npcFeedstock,
     consumption,
     villageRoles,
     mayRelay,
@@ -1317,6 +1344,7 @@ export default function ResourcePlanner() {
         shipOnlyTo,
         relayFor,
         stockFloors,
+        npcFeedstock,
         consumption,
         villageRoles,
         mayRelay,
@@ -1331,6 +1359,7 @@ export default function ResourcePlanner() {
       setShipOnlyTo(merged.shipOnlyTo)
       setRelayFor(merged.relayFor)
       setStockFloors(merged.stockFloors)
+      setNpcFeedstock(merged.npcFeedstock)
       setMaxBusy(merged.maxBusy)
       setConsumption(merged.consumption)
       setVillageRoles(merged.villageRoles)
@@ -1371,6 +1400,7 @@ export default function ResourcePlanner() {
       shipOnlyTo,
       relayFor,
       stockFloors,
+      npcFeedstock,
       consumption,
       villageRoles,
       mayRelay,
@@ -1479,6 +1509,11 @@ export default function ResourcePlanner() {
         ...(stockFloors[v.village_id] != null
           ? { stock_floor_fraction: stockFloors[v.village_id] }
           : {}),
+        // The feedstock override, dropped when there is none AND when the
+        // picker holds an empty list: absent means "derive it", which is what
+        // almost every village says, and an override of nothing is a statement
+        // NPC cannot carry out -- the backend refuses one.
+        ...npcFeedstockField(npcFeedstock[v.village_id]),
         // Omitted when unset, so a village with no ceiling is byte-identical to
         // before: absent means the fleet, less the account reserve, is the
         // budget. 0 IS sent -- it says every route from this village is a
@@ -1528,6 +1563,7 @@ export default function ResourcePlanner() {
     shipOnlyTo,
     relayFor,
     stockFloors,
+    npcFeedstock,
     maxBusy,
     consumption,
     villageRoles,
@@ -3229,6 +3265,12 @@ export default function ResourcePlanner() {
                   </th>
                   <th
                     className="text-left px-2"
+                    title="Which of this village's stores NPC may convert FROM. Derived by default: everything the village is not drawing on, which is what section 7 describes for the capital — clay and crop into wood. Override it only where you want the conversion to spare a store. Naming a resource the village is already shipping beyond its own production is refused, because NPC cannot convert a resource into itself. Only meaningful where there is a stock floor."
+                  >
+                    NPC converts from
+                  </th>
+                  <th
+                    className="text-left px-2"
                     title="What this village SPENDS per hour — lumber, clay and iron only: the building queue and the troop upkeep. Not the allocation target: the target is the rate that must be HERE (own production plus whatever ships in), so the store nets target − consumption. Nothing in the game reports this, because the statistics page shows materials gross — a village burning lumber still reads positive there. Crop is refused, because the snapshot's crop rate is already net of upkeep; say what a village keeps of its crop with its crop target instead. A village with a role takes its role template's figures for every resource it does not state itself, and the cell says which those are."
                   >
                     Consumption /h
@@ -3609,6 +3651,104 @@ export default function ResourcePlanner() {
                               </span>
                             )}
                           </>
+                        )
+                      })()}
+                    </td>
+                    <td className="px-2">
+                      {/* The feedstock override, and the one control here whose
+                          RESTING STATE is a word rather than a blank. "Derived"
+                          is an answer -- everything the village is not drawing
+                          on, which is what section 7 describes for the capital
+                          -- so an empty-looking box would misrepresent it as
+                          something nobody has decided yet. An empty LIST is a
+                          third thing again: the picker opened and not yet
+                          ticked, which is dropped from the request because NPC
+                          cannot convert from nothing and the backend refuses
+                          one. */}
+                      {(() => {
+                        const chosen = npcFeedstock[v.village_id]
+                        const floor = stockFloors[v.village_id]
+                        const override = isFeedstockList(chosen)
+                        const halfTyped = Array.isArray(chosen) && chosen.length === 0
+                        return (
+                          <details className="text-xs">
+                            <summary
+                              className={`cursor-pointer whitespace-nowrap pointer-coarse:min-h-11 ${
+                                halfTyped
+                                  ? 'text-warning'
+                                  : override
+                                    ? 'text-primary'
+                                    : 'text-secondary'
+                              }`}
+                            >
+                              <span className="sr-only">NPC converts from, for {v.name}: </span>
+                              {describeFeedstock(chosen ?? null)}
+                            </summary>
+                            <div
+                              role="group"
+                              aria-label={`Stores NPC may convert from at ${v.name}`}
+                              className="mt-1"
+                            >
+                              {NPC_FEEDSTOCK_RESOURCES.map((resource) => (
+                                <label
+                                  key={resource}
+                                  className="flex items-center gap-1 whitespace-nowrap"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`NPC may convert ${RESOURCE_LABEL[resource]} at ${v.name}`}
+                                    checked={chosen?.includes(resource) ?? false}
+                                    onChange={(e) =>
+                                      setNpcFeedstock((prev) => {
+                                        const current = prev[v.village_id] ?? []
+                                        return {
+                                          ...prev,
+                                          [v.village_id]: e.target.checked
+                                            ? [...current, resource]
+                                            : current.filter((r) => r !== resource),
+                                        }
+                                      })
+                                    }
+                                  />
+                                  {RESOURCE_LABEL[resource]}
+                                </label>
+                              ))}
+                              {/* Only meaningful alongside a floor, and said
+                                  rather than enforced: the override is owned
+                                  state and may be typed before the floor it
+                                  qualifies, but a village with no floor
+                                  converts nothing whatever this says. */}
+                              {floor == null && (
+                                <p className="text-secondary mt-1 max-w-56">
+                                  No stock floor here, so nothing converts. Set{' '}
+                                  <span className="text-primary">Stock floor %</span> first;
+                                  this only says which stores would pay for it.
+                                </p>
+                              )}
+                              {halfTyped && (
+                                <p className="text-warning mt-1 max-w-56">
+                                  Nothing ticked, so this is not an override yet — the
+                                  feedstock is still derived. NPC exchanges one resource for
+                                  another and cannot convert from nothing.
+                                </p>
+                              )}
+                              {chosen != null && (
+                                <button
+                                  type="button"
+                                  className="underline mt-1"
+                                  onClick={() =>
+                                    setNpcFeedstock((prev) => {
+                                      const next = { ...prev }
+                                      delete next[v.village_id]
+                                      return next
+                                    })
+                                  }
+                                >
+                                  Back to derived
+                                </button>
+                              )}
+                            </div>
+                          </details>
                         )
                       })()}
                     </td>

@@ -4,6 +4,7 @@ import ScrollableTable from './ScrollableTable'
 import {
   CONSUMABLE_RESOURCES,
   VILLAGE_ROLES,
+  isAssumedCropRate,
   isConsumptionRate,
   isEmptyTemplate,
 } from '../utils/plannerSetup'
@@ -146,6 +147,12 @@ export default function RoleTemplates({
                   </th>
                 ))}
                 <th
+                  className="text-right px-2"
+                  title="What you BELIEVE a village of this role nets in crop per hour — your own reading, kept as a flat constant. It moves no target, no cargo and no merchant: the only thing it can do is raise a warning when reality has drifted more than 20% away from it, which is how a hand-maintained profile is caught going stale. Negative is normal on the roles that matter: the Hammer eats more crop than it grows by design. 0 is a real claim (this village breaks even) and is checked as one. Leave it blank to make no assumption, which is not an assumption of zero — the village is simply not checked."
+                >
+                  Assumed crop/h
+                </th>
+                <th
                   className="text-left px-2"
                   title="Whether the planner may route someone else's cargo through these villages. Profile section 5.9: only a feeder relays, the capital included -- it is the hub every feeder ships to and hands off to a relay tier rather than carrying a leg in transit. Override it only for the account whose defensive village sits on the only road to a corner of the map."
                 >
@@ -252,6 +259,56 @@ export default function RoleTemplates({
                         </td>
                       )
                     })}
+                    <td className="text-right px-2">
+                      {/* Section 9's staleness detector, and the one figure in
+                          this table that CHANGES NOTHING. The row says so, in
+                          the cell rather than only in the header tooltip: every
+                          other box here moves cargo, so an operator reading
+                          across would reasonably assume this one does too and
+                          type a target into it.
+
+                          A number input rather than a positive-only one, and
+                          with no `min`: -5,880 is the right value for the
+                          Hammer, so a non-negative bound would refuse the
+                          account's own figure. An emptied box DELETES the
+                          assumption rather than storing 0 -- zero is the claim
+                          "this village breaks even" and is checked as one,
+                          while nothing at all means the village is not checked. */}
+                      {(() => {
+                        const assumed = template?.assumed_crop_per_hour
+                        const bad = assumed != null && !isAssumedCropRate(assumed)
+                        const problem = 'template-assumed-crop-' + role
+                        return (
+                          <>
+                            <input
+                              type="number"
+                              step="1"
+                              aria-label={'Assumed net crop per hour for a ' + ROLE_LABEL[role] + ' village'}
+                              aria-invalid={bad || undefined}
+                              aria-describedby={bad ? problem : undefined}
+                              placeholder="no assumption"
+                              className="input-field w-28 text-right text-xs py-0.5"
+                              value={assumed ?? ''}
+                              onChange={(e) =>
+                                onPatch(role, {
+                                  assumed_crop_per_hour:
+                                    e.target.value === '' ? null : Number(e.target.value),
+                                })
+                              }
+                            />
+                            {bad ? (
+                              <span id={problem} className="block text-warning">
+                                a number, or blank for no assumption
+                              </span>
+                            ) : (
+                              <span className="block text-secondary">
+                                {assumed == null ? 'not checked' : 'checked, ships nothing'}
+                              </span>
+                            )}
+                          </>
+                        )
+                      })()}
+                    </td>
                     <td className="px-2">
                       <select
                         aria-label={'Whether a ' + ROLE_LABEL[role] + ' village may relay'}
@@ -309,6 +366,14 @@ export default function RoleTemplates({
             </tbody>
           </table>
         </ScrollableTable>
+        <p className="text-secondary mt-2 max-w-3xl">
+          <span className="text-primary">Assumed crop/h ships nothing.</span> Section 9 calls
+          these profiles flat constants and expects drift between manual updates, so this is
+          the figure the planner compares the snapshot&apos;s own net crop against — over 20%
+          apart and it raises a warning. What a role should KEEP of its crop is its crop
+          target above; what it spends is refused outright, because the snapshot&apos;s crop
+          rate is already net of upkeep.
+        </p>
         {/* Named in words as well as flagged in the row: the backend
             refuses a role whose template never arrived, and an operator
             who has collapsed this panel needs to know which role it is
