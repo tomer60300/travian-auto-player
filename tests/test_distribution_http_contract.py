@@ -117,6 +117,7 @@ class TestThePlanContract:
             "shortfalls",
             "diagnostics",
             "total_merchants",
+            "village_nets",
         ):
             assert field in body, f"{field} missing from the wire response: {sorted(body)}"
 
@@ -166,6 +167,35 @@ class TestThePlanContract:
         after = with_spend.json()["diagnostics"]["total_loss_per_day"]
         assert before > 0, "the fixture must overflow without a declared spend"
         assert after < before, f"the declared spend never reached the plan: {before} -> {after}"
+
+    def test_the_net_the_grid_reads_travels_over_the_wire(self, client):
+        """R3-D7. The allocation grid reads `village_nets[].net_per_hour` from
+        the JSON instead of recomputing `target - spend` in JavaScript, so the
+        field names and the resource keys are part of the contract. A rename
+        here silently sends the page back to its own arithmetic."""
+        body = _plan_body()
+        body["config"][0]["consumption_per_hour"] = {"lumber": 2000}
+
+        res = client.post("/api/distribution/plan", json=body)
+
+        assert res.status_code == 200, res.text
+        nets = res.json()["village_nets"]
+        assert nets, "the grid has nothing to read"
+        assert set(nets[0]) == {
+            "village_id",
+            "resource",
+            "own_per_hour",
+            "supplement_per_hour",
+            "target_per_hour",
+            "ship_per_hour",
+            "consumption_per_hour",
+            "net_per_hour",
+        }
+        assert {n["resource"] for n in nets} <= {"lumber", "clay", "iron", "crop"}
+        spender = body["config"][0]["village_id"]
+        row = next(n for n in nets if n["village_id"] == spender and n["resource"] == "lumber")
+        assert row["consumption_per_hour"] == pytest.approx(2000)
+        assert row["net_per_hour"] == pytest.approx(row["target_per_hour"] - 2000)
 
     def test_a_consumption_under_an_unknown_resource_is_a_readable_422(self, client):
         body = _plan_body()

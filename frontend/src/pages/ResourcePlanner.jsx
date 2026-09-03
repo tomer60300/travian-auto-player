@@ -2008,6 +2008,22 @@ export default function ResourcePlanner() {
   const planState = planStatus(plan)
   const verdict = planState?.verdict ?? null
   const relays = plan?.relays ?? []
+
+  // The backend's own net per resource per village, so the grid reads the
+  // figure the plan used instead of recomputing `target − spend` here. Two
+  // implementations of one formula drift, and these two could: the planner
+  // drops a declared spend whose rate it cannot read while this page still
+  // holds what the operator typed. `plan` is set to null by any input change
+  // (see the planInputRev effect), so a plan on screen was computed from
+  // exactly these inputs -- there is no stale-figure case to guard against.
+  const planNet = useMemo(() => {
+    const out = {}
+    for (const row of plan?.village_nets ?? []) {
+      if (!out[row.resource]) out[row.resource] = {}
+      out[row.resource][row.village_id] = row
+    }
+    return out
+  }, [plan])
   const relayLegs = relayLegIndex(relays)
 
   // What going live will actually do, derived from the PREVIEW the operator is
@@ -3292,8 +3308,29 @@ export default function ResourcePlanner() {
                         // an operator who enters a consumption profile and
                         // leaves the target at its gross figure SEES the net go
                         // to zero instead of reading the target as a stockpile.
-                        const spent = consumption[v.village_id]?.[resource]
-                        const net = spent == null || after == null ? null : after - spent
+                        //
+                        // Both halves come off the plan once there is one, so
+                        // this line cannot print a spend the net did not use.
+                        // That is the drift worth closing: the planner sets
+                        // aside a declared spend whose rate it cannot read,
+                        // and the page went on showing the figure the operator
+                        // typed as though it had been applied. The local sum is
+                        // the live preview before any plan exists, not a
+                        // fallback for a missing field -- every input change
+                        // clears the plan, so a plan on screen matches these
+                        // inputs exactly.
+                        const declared = consumption[v.village_id]?.[resource]
+                        const planned = planNet[resource]?.[v.village_id]
+                        let spent = null
+                        let net = null
+                        if (declared != null) {
+                          spent = planned ? planned.consumption_per_hour : declared
+                          net = planned
+                            ? planned.net_per_hour
+                            : after == null
+                              ? null
+                              : after - spent
+                        }
                         return (
                           <td key={resource} className="text-right px-3 py-1.5 align-top">
                             {/* A sign change is the story worth telling:

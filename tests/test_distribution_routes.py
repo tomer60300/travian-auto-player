@@ -1639,6 +1639,58 @@ class TestConsumptionProfiles:
                 self._payload(consumption={"lumber": self.BURN, "crop": 9_000})
             )
 
+    def test_the_plan_exposes_the_net_the_grid_used_to_recompute(self):
+        """R3-D7. `VillageAllocation.net_per_hour` had no production reader, so
+        the page redid `target - consumption` in JavaScript. The plan now says
+        it, and every part of the figure travels with it so the grid never has
+        to derive any of it."""
+        res = self._plan(consumption={"lumber": self.BURN}, hub_consumption={"lumber": 15_000})
+
+        army = next(
+            n
+            for n in res.village_nets
+            if n.village_id == self.ARMY and n.resource is Resource.LUMBER
+        )
+        assert army.target_per_hour == pytest.approx(self.BURN)
+        assert army.consumption_per_hour == pytest.approx(self.BURN)
+        assert army.own_per_hour == pytest.approx(0.0)
+        assert army.ship_per_hour == pytest.approx(self.BURN)
+        # Target equals spend, so the store is LEVEL -- the whole point of the
+        # feature, and now a number the page is handed rather than one it works
+        # out for itself.
+        assert army.net_per_hour == pytest.approx(0.0)
+
+        hub = next(
+            n
+            for n in res.village_nets
+            if n.village_id == self.HUB and n.resource is Resource.LUMBER
+        )
+        assert hub.net_per_hour == pytest.approx(hub.target_per_hour - 15_000)
+
+    def test_the_exposed_net_is_the_allocation_layers_own_figure(self):
+        """Not a second implementation of the same sum: every row must equal
+        `VillageAllocation.net_per_hour`, which is what stops the two drifting
+        the way the backend and the grid could."""
+        res = self._plan(consumption={"lumber": self.BURN})
+
+        for row in res.village_nets:
+            assert row.net_per_hour == pytest.approx(
+                row.own_per_hour
+                + row.supplement_per_hour
+                + row.ship_per_hour
+                - row.consumption_per_hour
+            )
+            assert row.target_per_hour == pytest.approx(
+                row.own_per_hour + row.supplement_per_hour + row.ship_per_hour
+            )
+
+    def test_every_planned_village_and_resource_gets_a_row(self):
+        res = self._plan()
+
+        assert {(n.village_id, n.resource) for n in res.village_nets} == {
+            (vid, resource) for resource in Resource for vid in (self.HUB, self.ARMY)
+        }
+
     def test_no_declared_spend_can_be_dropped_for_an_unreadable_rate(self):
         """R3-D8 reported that a spend on a resource with an unreadable rate is
         set aside in silence. R3-D1's ruling closed it, and this is the guard

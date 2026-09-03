@@ -555,6 +555,37 @@ class BudgetResponse(BaseModel):
     )
 
 
+class VillageNetResponse(BaseModel):
+    """What one village's store does per hour for one resource, once the plan runs.
+
+    Every figure here is read straight off :class:`VillageAllocation`, whose
+    ``net_per_hour`` had no production reader at all -- the grid recomputed
+    ``target - consumption`` in JavaScript instead. Two implementations of one
+    formula drift, and these two already could: the planner drops a declared
+    spend whose rate it cannot read, while the page still holds the figure the
+    operator typed, so the page would show a net the plan never used.
+
+    Exposed rather than dropped because P2 (role templates) and P6 (the morning
+    fill floor) both need the net server-side, and because a UI that reads it
+    cannot disagree with the plan it is displaying.
+    """
+
+    village_id: int
+    resource: Resource
+    own_per_hour: float
+    """The village's own production, as the snapshot reported it."""
+    supplement_per_hour: float
+    """Stock-funded supply an NPC-backed warehouse floor makes available."""
+    target_per_hour: float
+    """What must be HERE: own production plus whatever is shipped in."""
+    ship_per_hour: float
+    """The cargo: what must arrive (positive) or leave (negative)."""
+    consumption_per_hour: float
+    """What the village SPENDS, from `VillageConfig.consumption_per_hour`."""
+    net_per_hour: float
+    """target - consumption: the rate the STORE moves at. Zero is level."""
+
+
 def _window_minutes(window: tuple[int, int]) -> int:
     """How many minutes of the day a dispatch window covers.
 
@@ -756,6 +787,15 @@ class PlanResponse(BaseModel):
     )
     verdict: VerdictResponse
     relays: list[RelayResponse]
+    village_nets: list[VillageNetResponse] = Field(
+        default=[],
+        description=(
+            "Per village, per resource: own production, target, cargo, declared "
+            "spend and the resulting net. The allocation grid reads the net from "
+            "here rather than recomputing it, so the page and the plan cannot "
+            "disagree about what a store does."
+        ),
+    )
     # Every finding as prose, in producer order. Kept because it is the contract
     # the UI and the tests were built on -- but a 25-village account put 132
     # lines in here and the operator stopped reading, so `diagnostics` is what
@@ -2877,6 +2917,20 @@ async def post_plan(
                 end_to_end_hours=relay.end_to_end_hours,
             )
             for relay in plan.relays
+        ],
+        village_nets=[
+            VillageNetResponse(
+                village_id=v.village_id,
+                resource=resource,
+                own_per_hour=v.own_per_hour,
+                supplement_per_hour=v.supplement_per_hour,
+                target_per_hour=v.target_per_hour,
+                ship_per_hour=v.ship_per_hour,
+                consumption_per_hour=v.consumption_per_hour,
+                net_per_hour=v.net_per_hour,
+            )
+            for resource, rp in sorted(plan.resource_plans.items(), key=lambda kv: kv[0].value)
+            for v in rp.villages
         ],
         warnings=[f.message for f in findings],
         # The route count is what lets the headline stop blaming the plan for
