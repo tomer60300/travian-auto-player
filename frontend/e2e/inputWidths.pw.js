@@ -218,6 +218,17 @@ async function isolate(page, extra = () => undefined, socket = (ws) => ws.close(
         },
       })
     }
+    if (path.endsWith('/distribution/setup')) {
+      // Nothing saved on the server, which is the resting state for a fresh
+      // account and the one the storage panel renders its invitation for. The
+      // page probes this on arrival, so leaving it to the abort below would
+      // measure the panel's ERROR line instead of the sentence an operator
+      // actually reads.
+      return route.fulfill({
+        status: 404,
+        json: { detail: 'No planner setup is saved for this account.' },
+      })
+    }
     const body = extra(path)
     if (body !== undefined) return route.fulfill({ json: body })
     return route.abort('blockedbyclient')
@@ -293,6 +304,15 @@ async function seed(page) {
           exclude_origins_text: '02, 11, 13',
         },
       ])
+      // Two profiles, so the Day & night table has the pair whose contrast is
+      // the whole point of it -- and the attendance answers that make it a
+      // day/night asymmetry rather than one row twice.
+      set('planner_profiles', { Day: {}, Night: {} })
+      set('planner_npc_attended', { Day: true, Night: false })
+      // Filled, like every other box in this fixture: an empty control
+      // measures as wide as its padding and would let a collapsed column pass.
+      set('planner_reserved_window', ['20:00', '21:00'])
+      set('planner_npc_feedstock', { [defA]: ['clay', 'crop'] })
       set('planner_allocations_v2', null)
     },
     [KEY, SNAPSHOT, DEF_A, DEF_B],
@@ -1117,16 +1137,214 @@ async function openSnapshot(page) {
 
 async function openRoleTemplates(page) {
   await page.goto('/resource-planner')
-  await page.getByRole('button', { name: 'Allocate' }).click()
+  await page.getByRole('button', { name: 'Targets' }).click()
   await page.getByText('Role templates', { exact: true }).click()
   await expect(page.getByLabel('DEF Lumber value')).toBeVisible()
 }
 
 async function openAllocateGrid(page) {
   await page.goto('/resource-planner')
-  await page.getByRole('button', { name: 'Allocate' }).click()
+  await page.getByRole('button', { name: 'Targets' }).click()
   await page.getByRole('button', { name: 'Edit by resource' }).click()
   await expect(page.getByLabel('Lumber mode for 11')).toBeVisible()
+}
+
+/** The whole-day fixture, so the two switch rules and the overrun table are
+ *  on screen with real figures rather than as empty sections. */
+const DAY_CHECK = {
+  villages: [
+    {
+      village_id: DEF_A,
+      village_name: '11',
+      resource: 'crop',
+      daily_net: -12_000,
+      low: 40_000,
+      high: 190_000,
+      settled: false,
+    },
+  ],
+  warnings: ['11 is below the morning floor on clay'],
+  morning_floor: 0.6,
+  pre_night_baseline: 0.25,
+  morning_shortfalls: [
+    {
+      village_id: DEF_A,
+      village_name: '11',
+      resource: 'clay',
+      store: 'warehouse',
+      stock: 168_000,
+      capacity: 400_000,
+      fill: 0.42,
+    },
+  ],
+  pre_night_over_baseline: [
+    {
+      village_id: CAPITAL,
+      village_name: '02',
+      resource: 'iron',
+      store: 'warehouse',
+      stock: 260_000,
+      capacity: 400_000,
+      fill: 0.65,
+    },
+  ],
+  night_overruns: [
+    {
+      origin: CAPITAL,
+      origin_name: '02',
+      destination: DEF_A,
+      destination_name: '11',
+      cycle_hours: 4,
+      last_dispatch_minute: 360,
+      last_dispatch_clock: '06:00',
+      round_trip_minutes: 108,
+      overrun_minutes: 48,
+    },
+  ],
+}
+
+/** A plan with every panel populated, so the Plan stage's tables are measured
+ *  carrying content rather than as empty cards. */
+const PLAN = {
+  rows: [
+    {
+      origin: CAPITAL,
+      origin_name: '02',
+      destination: DEF_A,
+      destination_name: '11',
+      cargo: { lumber: 7920, clay: 5168, iron: 5809, crop: 0 },
+      cycle_hours: 4,
+      dispatch: '08:20',
+      arrival: '09:48',
+      merchants: 3,
+    },
+  ],
+  budgets: [
+    {
+      village_id: CAPITAL,
+      committed: 9,
+      spare: 8,
+      over_budget: true,
+      trade_office_levels_needed: 2,
+      explanation: 'The trip is the cost here, not the Trade Office.',
+      legs: [
+        {
+          destination: '11',
+          per_hour: 7920,
+          distance_fields: 41,
+          one_way_hours: 2.6,
+          cycle_hours: 4,
+          merchants_per_send: 3,
+          sets_in_flight: 2,
+          merchants: 6,
+        },
+      ],
+    },
+  ],
+  shortfalls: [
+    { village_id: DEF_A, village_name: '11', resource: 'crop', per_hour: 2200, reason: 'no origin in range' },
+  ],
+  unallocated: [
+    {
+      resource: 'lumber',
+      total_production: 121_000,
+      total_npc_allowance: 22_000,
+      total_npc_draw: 15_000,
+      unallocated: 3000,
+      remainder_village_id: DEF_B,
+    },
+  ],
+  total_merchants: 14,
+  feasible: false,
+  verdict: {
+    executable: false,
+    clean: false,
+    blockers: ['02 commits 9 merchants against a ceiling of 8'],
+    covers: ['every merchant budget', 'every receiver is routable'],
+    unweighed: ['overflow'],
+    critical_findings: 1,
+  },
+  relays: [],
+  role_deviations: [],
+  village_nets: [
+    {
+      village_id: CAPITAL,
+      resource: 'lumber',
+      own_per_hour: 60_000,
+      npc_allowance_per_hour: 22_000,
+      npc_draw_per_hour: 15_000,
+      target_per_hour: 21_000,
+      ship_per_hour: 0,
+      consumption_per_hour: 0,
+      net_per_hour: 21_000,
+    },
+  ],
+  night_overruns: DAY_CHECK.night_overruns,
+  npc_reserves: [
+    {
+      village_id: CAPITAL,
+      village_name: '02',
+      floor_level: 120_000,
+      allowance_per_day: 528_000,
+      allowance_per_hour: 22_000,
+      feedstock: ['clay', 'crop'],
+      feedstock_shares: [0.6, 0.4],
+      drawn: ['lumber'],
+    },
+  ],
+  npc_triggers: [
+    {
+      village_id: CAPITAL,
+      village_name: '02',
+      kind: 'wood_low',
+      resource: 'lumber',
+      level: 95_000,
+      threshold: 120_000,
+      projected: false,
+    },
+  ],
+  warnings: ['02 is over its merchant ceiling'],
+  diagnostics: {
+    headline: 'One thing needs a decision.',
+    total_loss_per_day: 96_000,
+    loss_by_resource: [{ resource: 'lumber', per_day: 96_000 }],
+    counts: { critical: 1, warning: 0, note: 0 },
+    groups: [
+      {
+        key: 'npc_capacity_short',
+        severity: 'critical',
+        headline: '02 is short 4,000/h of conversion capacity',
+        action: 'Lower its target, or raise the stock floor it converts out of.',
+        count: 1,
+        loss_per_day: 96_000,
+        findings: [],
+      },
+    ],
+  },
+  plan_digest: 'd'.repeat(64),
+}
+
+function plannerRoutes(path) {
+  if (path.endsWith('/distribution/day-check')) return DAY_CHECK
+  if (path.endsWith('/distribution/plan')) return PLAN
+  return undefined
+}
+
+async function openDayNight(page) {
+  await page.goto('/resource-planner')
+  await page.getByRole('button', { name: 'Day & night' }).click()
+  // Run the composite, so the two switch rules and the overrun table are on
+  // screen. Their tables carry no `.input-field`, but they carry pinned
+  // identity columns and a scroll container, which is the other half of what
+  // this file measures.
+  await page.getByRole('button', { name: /^Run \(0 requests\)/ }).click()
+  await expect(page.getByText(/threshold 60%/)).toBeVisible()
+}
+
+async function openPlanStage(page) {
+  await page.goto('/resource-planner')
+  await page.getByRole('button', { name: /^Build plan/ }).click()
+  await expect(page.getByText(/^Routes$/)).toBeVisible()
 }
 
 // ── Off the planner ──────────────────────────────────────────────────
@@ -1333,6 +1551,13 @@ const SURFACES = [
   },
   { name: 'Role templates panel', open: openRoleTemplates },
   { name: 'Allocate grid (Edit by resource)', open: openAllocateGrid },
+  // The two stages this round added. Day & night carries the profile windows,
+  // the attendance selects, the reserved-window pair and the two fill
+  // sections; the Plan stage carries the NPC and totals tables, the sheet, the
+  // overrun table and the whole controlled-run bar, which is the densest
+  // collection of boxes in the app and had never been measured at all.
+  { name: 'Day & night stage (windows + attendance + fills)', open: openDayNight, routes: plannerRoutes },
+  { name: 'Plan stage (NPC + totals + sheet + controlled run)', open: openPlanStage, routes: plannerRoutes },
   // Off the planner. `seed` is the planner's fixture, so these take the plain
   // shell instead and answer their own page's calls.
   {
@@ -1392,6 +1617,14 @@ const PICKERS = [
     column: 'Relays for',
     group: /forwards material to$/,
     filled: /^Relays for, for 02: \S+, \S+$/,
+  },
+  // The third picker, and the one whose RESTING state is a word rather than a
+  // blank: "derived" is an answer, so this column is never empty and its
+  // closed summary has real content to be clipped at every viewport.
+  {
+    column: 'NPC converts from',
+    group: /^Stores NPC may convert from at /,
+    filled: /^NPC converts from, for 02: \w+, \w+$/,
   },
 ]
 

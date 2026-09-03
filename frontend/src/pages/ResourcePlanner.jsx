@@ -475,7 +475,15 @@ function BudgetBar({ budget, cap }) {
   const legs = budget.legs ?? []
   return (
     <div className="flex-1">
-      <div className="flex items-center gap-2">
+      {/* `flex-wrap`, for the reason `BatchSet` above it already has it and
+          measured on the Plan stage the first time that stage was swept: a
+          112px bar, the committed/spare figure, "over by 1 · Trade Office +2
+          would fit" and the "why?" toggle are all `shrink-0`, so at 375 the
+          row ran to x=380 and took the DOCUMENT with it -- 5px of horizontal
+          page scroll, which is item 1 of the UI Definition of Done. Nothing
+          here may shrink (a truncated merchant count is a wrong merchant
+          count), so wrapping is the only answer left. */}
+      <div className="flex flex-wrap items-center gap-2">
         <div
           className="h-2 w-28 rounded bg-black/40 overflow-hidden shrink-0"
           role="img"

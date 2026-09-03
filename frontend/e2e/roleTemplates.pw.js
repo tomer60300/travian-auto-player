@@ -147,7 +147,7 @@ async function seed(page, { snapshot = SNAPSHOT, roles = { [DEF_A]: 'def', [DEF_
 
 async function openPanel(page) {
   await page.goto('/resource-planner')
-  await page.getByRole('button', { name: 'Allocate' }).click()
+  await page.getByRole('button', { name: 'Targets' }).click()
   // The panel is collapsed by default; its own summary is the disclosure.
   await page.getByText('Role templates', { exact: true }).click()
   await expect(page.getByRole('button', { name: 'Clear' })).toHaveCount(0)
@@ -300,7 +300,7 @@ test.describe('role templates, driven', () => {
 
     await page.getByLabel('Lumber spent per hour by a DEF village').fill('')
 
-    await page.getByRole('button', { name: 'Snapshot' }).click()
+    await page.getByRole('button', { name: 'Account' }).click()
     // Both villages claim DEF, and the row is where their names are.
     for (const name of ['11', '13']) {
       await expect(page.getByLabel(`Role for ${name}`)).toHaveAttribute('aria-invalid', 'true')
@@ -399,7 +399,7 @@ test.describe('from the warning to the figures', () => {
     // through the new control: reach the Allocate stage by hand and the row is
     // present, laid out nowhere, and unfocusable.
     await page.goto('/resource-planner')
-    await page.getByRole('button', { name: 'Allocate' }).click()
+    await page.getByRole('button', { name: 'Targets' }).click()
 
     const panel = page.locator('details').filter({ hasText: 'Role templates' })
     await expect(panel).toHaveCount(1)
@@ -506,7 +506,7 @@ test.describe('from the warning to the figures', () => {
     })
 
     // The loop closes: the warning that sent them here is gone.
-    await page.getByRole('button', { name: 'Snapshot' }).click()
+    await page.getByRole('button', { name: 'Account' }).click()
     await expect(page.getByText('no Troops off template yet')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Type the Troops off figures' })).toHaveCount(0)
   })
@@ -560,7 +560,7 @@ test.describe('from the warning to the figures', () => {
     await page.getByRole('button', { name: 'Type the Troops off figures' }).click()
     await expect(page.getByLabel('Troops off Lumber mode')).toBeFocused()
 
-    await page.getByRole('button', { name: 'Snapshot' }).click()
+    await page.getByRole('button', { name: 'Account' }).click()
     await page.getByLabel('Trade Office level for 11').focus()
     await page.getByRole('button', { name: 'Type the Troops off figures' }).click()
 

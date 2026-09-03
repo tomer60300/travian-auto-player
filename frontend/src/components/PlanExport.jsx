@@ -45,9 +45,15 @@ export default function PlanExport({ digest, exporting, conflict, onConfirm, onR
             <span className="text-secondary">— the same twelve the file is named after</span>
           </p>
         </div>
+        {/* No `whitespace-nowrap`, and that is measured rather than stylistic:
+            this label is 46 characters, and held on one line it came to 350px
+            starting at x=41 in a 375 viewport -- 16px of DOCUMENT scroll,
+            which is item 1 of the UI Definition of Done. The card's own
+            `flex-wrap` already gives the button its own line at that width;
+            what it cannot do is make the label narrower than one word. */}
         <button
           type="button"
-          className="btn-primary text-xs py-1.5 whitespace-nowrap"
+          className="btn-primary text-xs py-1.5"
           disabled={exporting || !digest}
           onClick={onConfirm}
         >
