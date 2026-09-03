@@ -110,11 +110,21 @@ class TestStatedInvariantsHoldOnTheAssembledPlan:
         # worth doing), so it is deliberately not checked.
         #
         # Read off the REQUEST, so the exemption is exactly the set the operator
-        # declared and not "whatever the plan happens to have forwarded". No
-        # account in this corpus declares one today, which makes the material
-        # block below the unchanged rule for every one of them -- the exemption
-        # is measured in tests/test_distribution_relay_tier.py and in
-        # test_distribution_optimizer.py's `_material_relay_violations`.
+        # declared and not "whatever the plan happens to have forwarded".
+        #
+        # Exactly one account in this corpus declares one --
+        # `adv-declared-material-relay`, where 9002 relays for 9003 and 9004 --
+        # and it exists so the exemption is exercised rather than merely
+        # written down. Measured: the plan builds all three lumber legs
+        # (9001->9002, 9002->9003, 9002->9004) and reports no violation, while
+        # the same plan read with the declaration stripped reports
+        # "lumber: [9002] both send and receive without being declared relays".
+        # So the exemption is not a silencer here: it turns off for the one
+        # account it is about and the block below is the unchanged rule for
+        # every other account in the corpus. That mutation is pinned as a test
+        # in test_distribution_optimizer.py
+        # (`test_the_amended_rule_still_catches_an_undeclared_material_hub`),
+        # over the same statement of the rule.
         relays = {
             cfg.village_id: set(cfg.relay_for)
             for cfg in account.plan_request.config
