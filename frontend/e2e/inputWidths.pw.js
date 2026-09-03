@@ -1,6 +1,15 @@
 /**
  * Every `.input-field` in the app's dense surfaces, MEASURED.
  *
+ * Every one that is on screen, with the disclosures driven open so that
+ * "on screen" is not a loophole -- `openDisclosures` opens every `<details>`
+ * and asserts that none stayed closed, because nine of the Snapshot stage's 42
+ * controls live behind a per-village Spends summary and the whole
+ * Role-templates panel lives behind one. What is left over is reported by name
+ * on the `census` line rather than implied: on these six surfaces that is one
+ * control, the village-selector `<select>` the shell renders twice and shows
+ * once, at whichever of the two breakpoints is not in force.
+ *
  * `index.css` starts with `@import "tailwindcss"`, so Tailwind's utilities live
  * in `@layer utilities` while the hand-written component classes below are
  * UNLAYERED -- and unlayered normal declarations beat layered ones whatever the
@@ -313,10 +322,29 @@ const MEASURE = () => {
 
   const ctx = document.createElement('canvas').getContext('2d')
   const out = []
+  const skipped = []
   for (const el of document.querySelectorAll('.input-field')) {
-    const rect = el.getBoundingClientRect()
-    if (rect.width === 0 && rect.height === 0) continue
+    // `checkVisibility()`, not `rect.width === 0 && rect.height === 0`.
+    //
+    // A control inside a CLOSED `<details>` has a non-zero rect and mutually
+    // overlapping coordinates -- nine of them on the Snapshot stage, every one
+    // reporting x=1361..1381 inside a cell that ends at 1365 -- so the rect
+    // test measured nine boxes that were not on screen, in a geometry that
+    // means nothing, while skipping one that is real the moment the summary is
+    // opened. Neither direction is a false pass today, but the docstring's
+    // "every `.input-field` ... MEASURED" was untrue in both.
+    //
+    // The disclosures are driven OPEN before this runs (see
+    // `openDisclosures`), so "visible" is not a way of quietly skipping the
+    // controls behind a summary: on every surface here the only thing left in
+    // `skipped` is the village-selector `<select>` that the shell renders twice
+    // and shows once, at whichever of the two breakpoints is not in force.
+    if (!el.checkVisibility()) {
+      skipped.push(labelOf(el))
+      continue
+    }
     const style = getComputedStyle(el)
+    const rect = el.getBoundingClientRect()
     const borders = parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth)
     let needed
     let basis
@@ -395,6 +423,7 @@ const MEASURE = () => {
   const wrappers = []
   const seen = new Set()
   for (const el of document.querySelectorAll('.input-field')) {
+    if (!el.checkVisibility()) continue
     const w = scroller(el)
     if (w == null || seen.has(w)) continue
     seen.add(w)
@@ -506,6 +535,7 @@ const MEASURE = () => {
 
   return {
     controls: out,
+    skipped,
     wrappers,
     pinned,
     tables,
@@ -524,12 +554,6 @@ const MEASURE = () => {
 const isClipped = (c) =>
   c.basis === 'value' ? c.scrollWidth > c.clientWidth : c.width + 1 < c.needed
 
-/** One line per surface: the narrowest control and how much it was short by.
- *
- * `globalThis.process` rather than `process`: eslint gives these files the
- * browser globals (they are `**\/*.js` under frontend/, and only
- * `*.config.js` is configured as Node), so the bare name is a `no-undef`
- * error even though the test body does run in Node. */
 /** What each pinned column costs the strip, or that nothing is pinned here.
  *
  * Printed in BOTH report modes, and printed even when the list is EMPTY: the
@@ -538,11 +562,16 @@ const isClipped = (c) =>
  * file already carried one check that could not fail for any wrapper on any
  * page (`X && !X`) and it stood for weeks. */
 function pinnedRows(measured) {
-  const rows = measured.tables.map(
-    (t) =>
-      `    table  ${t.surface.padEnd(16)} overflow ${String(t.overflow).padStart(5)}px` +
-      ` identity ${t.position}, scrolled to left ${t.pinnedLeft} of container ${t.wrapperLeft},` +
-      ` hint ${t.hasHint ? (t.hintVisible ? 'visible' : 'hidden') : 'absent'}`,
+  const rows = [
+    `    census ${measured.controls.length} measured, ${measured.skipped.length} not on screen` +
+      `${measured.skipped.length ? ': ' + measured.skipped.join(', ') : ''}`,
+  ].concat(
+    measured.tables.map(
+      (t) =>
+        `    table  ${t.surface.padEnd(16)} overflow ${String(t.overflow).padStart(5)}px` +
+        ` identity ${t.position}, scrolled to left ${t.pinnedLeft} of container ${t.wrapperLeft},` +
+        ` hint ${t.hasHint ? (t.hintVisible ? 'visible' : 'hidden') : 'absent'}`,
+    ),
   )
   if (measured.pinned.length === 0) return rows.concat(['    pinned: none at this viewport'])
   return rows.concat(
@@ -555,6 +584,12 @@ function pinnedRows(measured) {
   )
 }
 
+/** One line per surface: the narrowest control and how much it was short by.
+ *
+ * `globalThis.process` rather than `process`: eslint gives these files the
+ * browser globals (they are `**\/*.js` under frontend/, and only
+ * `*.config.js` is configured as Node), so the bare name is a `no-undef`
+ * error even though the test body does run in Node. */
 function report(where, measured) {
   const mode = globalThis.process?.env?.MEASURE
   if (!mode) return
@@ -1003,8 +1038,13 @@ for (const viewport of VIEWPORTS) {
         const measured = await page.evaluate(() => {
           const out = []
           for (const el of document.querySelectorAll('summary')) {
+            // Same rule as the sweep's census, for the same reason: a nested
+            // summary inside a collapsed one has a rect and no geometry worth
+            // asserting on. This test opens exactly the pickers it measures
+            // and leaves the rest of the page as the operator finds it, so it
+            // does NOT call `openDisclosures`.
+            if (!el.checkVisibility()) continue
             const rect = el.getBoundingClientRect()
-            if (rect.width === 0 && rect.height === 0) continue
             let wrapper = null
             for (let node = el.parentElement; node; node = node.parentElement) {
               const overflowX = getComputedStyle(node).overflowX
@@ -1073,6 +1113,49 @@ for (const viewport of VIEWPORTS) {
   })
 }
 
+/**
+ * Every `<details>` on the surface, opened, and the layout let settle.
+ *
+ * `MEASURE` skips anything failing `checkVisibility()`, which is right -- a
+ * control inside a closed summary has a non-zero rect and coordinates that mean
+ * nothing -- but on its own it would turn "not measured because it is
+ * degenerate" into "not measured at all". Nine of the Snapshot stage's 42
+ * `.input-field`s live behind the per-village Spends summary, and the whole
+ * Role-templates panel is behind one on the Allocate-grid surface. So they are
+ * opened, and then they ARE measured, in the geometry they really have.
+ *
+ * Asserted rather than assumed. `expect(...).toHaveCount(0)` on
+ * `details:not([open])` is what catches a disclosure that resists being opened
+ * -- an earlier version of this ran the open loop before the table had
+ * rendered, opened nothing, and reported nine controls as hidden while
+ * claiming to have opened everything.
+ *
+ * Then the wait: revealing a `ScrollableTable` hands its container to a
+ * ResizeObserver for the first time, and the pinning and the hint follow from
+ * that measurement. Waiting for every scroll container's class to AGREE with
+ * its own geometry is the readiness condition, and it is the same claim
+ * `assertFits` then makes -- so a timeout here is a real failure, not a flake.
+ */
+async function openDisclosures(page) {
+  await page.evaluate(() => {
+    for (const d of document.querySelectorAll('details')) d.open = true
+  })
+  await expect(page.locator('details:not([open])')).toHaveCount(0)
+  // Scoped to the containers `ScrollableTable` owns, which are the ones whose
+  // class means anything -- identified by the pinned column inside them. The
+  // first version asked it of every `.overflow-x-auto` on the page, including
+  // the plain ones in the Role-templates panel, Farm lists and Auto-scout that
+  // hold no identity column and are never given the class, so it waited for a
+  // condition that could not become true and timed out on five surfaces.
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('.overflow-x-auto')]
+      .filter((el) => el.querySelector('.sticky-col') != null)
+      .every(
+        (el) => el.scrollWidth > el.clientWidth === el.classList.contains('table-overflowing'),
+      ),
+  )
+}
+
 for (const viewport of VIEWPORTS) {
   test.describe(`every .input-field fits its content at ${viewport.width}px`, () => {
     test.use({ viewport })
@@ -1082,6 +1165,7 @@ for (const viewport of VIEWPORTS) {
         await isolate(page, surface.routes, surface.socket)
         await (surface.seed ?? seed)(page)
         await surface.open(page)
+        await openDisclosures(page)
         const measured = await page.evaluate(MEASURE)
         report(`${viewport.width}px ${surface.name}`, measured)
         assertFits(`${viewport.width}px ${surface.name}`, measured, viewport)
