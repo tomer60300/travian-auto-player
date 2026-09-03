@@ -2952,7 +2952,7 @@ export default function ResourcePlanner() {
                         max="20"
                         aria-label={`Trade Office level for ${v.name}`}
                         placeholder="?"
-                        className="input-field w-16 text-right text-xs py-1"
+                        className="input-field w-20 text-right text-xs py-1"
                         value={tradeOffice[v.village_id] ?? ''}
                         onChange={(e) =>
                           setTradeOffice((prev) => ({
@@ -2982,7 +2982,7 @@ export default function ResourcePlanner() {
                               aria-invalid={invalid || undefined}
                               aria-describedby={invalid ? problemId : undefined}
                               placeholder="none"
-                              className="input-field w-16 text-right text-xs py-1"
+                              className="input-field w-20 text-right text-xs py-1"
                               value={cap ?? ''}
                               onChange={(e) =>
                                 setMaxBusy((prev) => ({
@@ -3109,7 +3109,7 @@ export default function ResourcePlanner() {
                               aria-invalid={invalid || undefined}
                               aria-describedby={invalid ? problemId : undefined}
                               placeholder="none"
-                              className="input-field w-16 text-right text-xs py-1"
+                              className="input-field w-20 text-right text-xs py-1"
                               value={floor == null ? '' : fractionToPercent(floor)}
                               onChange={(e) =>
                                 setStockFloors((prev) => ({
@@ -3358,7 +3358,7 @@ export default function ResourcePlanner() {
                 max={MAX_MERCHANTS_PER_VILLAGE}
                 aria-label="Merchants held in reserve at every village"
                 placeholder={String(DEFAULT_MERCHANT_MODEL.merchant_reserve)}
-                className="input-field w-16 text-right py-1"
+                className="input-field w-20 text-right py-1"
                 value={merchantModel.merchant_reserve ?? ''}
                 onChange={(e) =>
                   setMerchantModel((m) => ({
@@ -3381,7 +3381,7 @@ export default function ResourcePlanner() {
                 max="99"
                 aria-label="Merchant headroom, percent of each village's budget"
                 placeholder={String(DEFAULT_MERCHANT_MODEL.merchant_headroom * 100)}
-                className="input-field w-16 text-right py-1"
+                className="input-field w-20 text-right py-1"
                 value={
                   merchantModel.merchant_headroom == null
                     ? ''
@@ -3562,7 +3562,7 @@ export default function ResourcePlanner() {
                                 min="0"
                                 max="100"
                                 aria-label={`Foreign target ${i + 1} safety margin`}
-                                className="input-field w-16 text-right text-xs py-0.5"
+                                className="input-field w-20 text-right text-xs py-0.5"
                                 value={t.safety_margin_pct}
                                 onChange={(e) => patch('safety_margin_pct', e.target.value)}
                               />

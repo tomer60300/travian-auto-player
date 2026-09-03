@@ -335,6 +335,12 @@ const MEASURE = () => {
       // reach for, and a fix that trades a clipped glyph for an untappable
       // control is not a fix.
       height: Math.round(rect.height * 10) / 10,
+      // The integer pair behind the `value` basis, kept so the assertion can
+      // ask `scrollWidth > clientWidth` directly instead of comparing two
+      // rounded floats. See `assertFits` -- this is the difference between
+      // catching a 1px overflow and absorbing it.
+      clientWidth: el.clientWidth,
+      scrollWidth: el.scrollWidth,
       wrapperClient: wrapper ? wrapper.clientWidth : null,
       wrapperScroll: wrapper ? wrapper.scrollWidth : null,
       wrapperScrollable: wrapper ? wrapper.scrollWidth > wrapper.clientWidth : null,
@@ -349,6 +355,15 @@ const MEASURE = () => {
     pageClientWidth: document.documentElement.clientWidth,
   }
 }
+
+/** Whether one control is narrower than the content it holds.
+ *
+ * Shared by the report and the assertion on purpose: a summary that counted
+ * clips by a different rule than the one that fails the test is a summary that
+ * lies about why the test passed. See `assertFits` for why the `value` basis
+ * gets no tolerance. */
+const isClipped = (c) =>
+  c.basis === 'value' ? c.scrollWidth > c.clientWidth : c.width + 1 < c.needed
 
 /** One line per surface: the narrowest control and how much it was short by.
  *
@@ -367,7 +382,7 @@ function report(where, measured) {
       (c) =>
         `    ${c.surface.padEnd(22)} ${c.tag.padEnd(6)} ${String(c.width).padStart(6)}px` +
         ` for ${String(c.needed).padStart(6)}px h${String(c.height).padStart(5)}` +
-        ` ${c.width + 1 < c.needed ? 'CLIPPED' : 'ok     '} ${c.basis.padEnd(12)} "${c.label}"`,
+        ` ${isClipped(c) ? 'CLIPPED' : 'ok     '} ${c.basis.padEnd(12)} "${c.label}"`,
     )
     console.log(
       `  ${where}: page ${measured.pageClientWidth} client / ${measured.pageScrollWidth} scroll\n` +
@@ -382,7 +397,7 @@ function report(where, measured) {
   }
   const lines = [...bySurface.entries()].map(([surface, c]) => {
     const n = measured.controls.filter((x) => x.surface === surface).length
-    const clipped = measured.controls.filter((x) => x.surface === surface && x.width + 1 < x.needed).length
+    const clipped = measured.controls.filter((x) => x.surface === surface && isClipped(x)).length
     return (
       `    ${surface.padEnd(20)} ${String(n).padStart(3)} controls, ${String(clipped).padStart(3)} clipped` +
       ` | worst ${c.tag} "${c.label}" ${c.width}px for ${c.needed}px` +
@@ -398,15 +413,29 @@ function report(where, measured) {
 /**
  * The three claims, over whatever is on screen.
  *
- * A tolerance of 1px absorbs sub-pixel text rounding only; the defect this
- * guards was 31px on an 83px control, so nothing near the tolerance is
- * interesting.
+ * The 1px tolerance applies to the CANVAS and CLONE bases only. Those are
+ * float measurements of glyph runs, so a pixel of slack absorbs sub-pixel text
+ * rounding and nothing else; the defect this spec was written for was 31px on
+ * an 83px control, so nothing near the tolerance is interesting there.
+ *
+ * The `value` basis gets NO tolerance, because it needs none and because the
+ * pixel it was given is exactly the pixel that hid seven controls. A number
+ * input's `scrollWidth` and `clientWidth` are integers produced by the same
+ * rounding rule, so `scrollWidth > clientWidth` is an exact statement about
+ * whether the box overflows -- and asking it that way, rather than comparing
+ * the two rounded floats, is what makes the 1px case decidable at all: a
+ * 60.8px box reports client 61 / scroll 61 and is NOT clipped, while a 64px
+ * box holding two digits reports client 64 / scroll 65 and is. Seven controls
+ * sat at exactly the second: `Trade Office level`, `Most merchants busy at
+ * once` and `NPC-backed stock floor` on both DEF villages, plus
+ * `Merchant headroom` -- every one of them 64px for 65px, every one of them
+ * passing.
  */
 function assertFits(where, measured, viewport) {
   expect(measured.controls.length, `${where}: nothing measured`).toBeGreaterThan(0)
 
   const clipped = measured.controls
-    .filter((c) => c.width + 1 < c.needed)
+    .filter(isClipped)
     .map((c) => `${c.surface} / ${c.tag} "${c.label}": ${c.width}px for ${c.needed}px of ${c.basis}`)
   expect(clipped, `${where}: controls narrower than their content`).toEqual([])
 
