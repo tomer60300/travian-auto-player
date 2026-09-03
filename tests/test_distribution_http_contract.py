@@ -139,6 +139,41 @@ class TestThePlanContract:
             f"unexpected cargo keys on the wire: {sorted(cargo)}"
         )
 
+    def test_a_declared_consumption_reaches_the_planner_over_the_wire(self, client):
+        """VillageConfig does not forbid extra fields, so a name the backend does
+        not know is DROPPED in silence -- the frontend would go on sending a
+        spend nobody applied, and every consuming village would keep reading as
+        stockpiling its whole allocation. Only a real request can catch that,
+        which is what this file is for.
+
+        Posted twice on one body: the same account with and without the field.
+        The figures must differ, and the direction must be down.
+        """
+        body = _plan_body()
+        without = client.post("/api/distribution/plan", json=body)
+        assert without.status_code == 200, without.text
+
+        spending = _plan_body()
+        # The hub is the crop remainder, so it absorbs the farm's whole surplus
+        # and its granary fills. Say that it spends that surplus.
+        spending["config"][0]["consumption_per_hour"] = {"lumber": 2000, "crop": 11000}
+        with_spend = client.post("/api/distribution/plan", json=spending)
+
+        assert with_spend.status_code == 200, with_spend.text
+        before = without.json()["diagnostics"]["total_loss_per_day"]
+        after = with_spend.json()["diagnostics"]["total_loss_per_day"]
+        assert before > 0, "the fixture must overflow without a declared spend"
+        assert after < before, f"the declared spend never reached the plan: {before} -> {after}"
+
+    def test_a_consumption_under_an_unknown_resource_is_a_readable_422(self, client):
+        body = _plan_body()
+        body["config"][0]["consumption_per_hour"] = {"gold": 500}
+
+        res = client.post("/api/distribution/plan", json=body)
+
+        assert res.status_code == 422, res.text
+        assert "gold" in res.text
+
     def test_a_windowed_plan_round_trips_its_window(self, client):
         res = client.post(
             "/api/distribution/plan",

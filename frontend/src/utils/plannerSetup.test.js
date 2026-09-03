@@ -4,6 +4,8 @@ import {
   SETUP_VERSION,
   SetupFileError,
   buildSetup,
+  declaresConsumption,
+  isConsumptionRate,
   isStockFloorFraction,
   mergeSetup,
   parseSetup,
@@ -676,5 +678,205 @@ describe('isStockFloorFraction', () => {
     for (const bad of [0.96, -0.1, 0.1234, NaN, Infinity, undefined, null, '0.3']) {
       expect(isStockFloorFraction(bad)).toBe(false)
     }
+  })
+})
+
+describe('consumption_per_hour in the setup file', () => {
+  it('writes what a village spends onto its row', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 13 },
+      consumption: { 20030: { lumber: 14751, clay: 10222, iron: 11458, crop: 8519 } },
+      exportedAt: STAMP,
+    })
+    expect(setup.villages).toEqual([
+      {
+        village_id: 20030,
+        name: 'Capital',
+        trade_office_level: 13,
+        consumption_per_hour: { lumber: 14751, clay: 10222, iron: 11458, crop: 8519 },
+      },
+    ])
+  })
+
+  it('carries a village that has only a consumption profile typed', () => {
+    // The whole point of exporting it: a Day/Night pair of consumption profiles
+    // is a hundred hand-typed numbers, and a village with nothing else on it
+    // must not be dropped from the file.
+    const setup = buildSetup({
+      villages: VILLAGES,
+      consumption: { 20031: { crop: 9526 } },
+      exportedAt: STAMP,
+    })
+    expect(setup.villages).toEqual([
+      { village_id: 20031, name: 'V05', consumption_per_hour: { crop: 9526 } },
+    ])
+  })
+
+  it('drops an empty profile rather than writing "spends nothing"', () => {
+    // Unlike ship_only_to, an empty map is not a distinct answer: the backend
+    // reads absent and {} identically, so writing {} would only make a file
+    // that looks like it says something.
+    const setup = buildSetup({
+      villages: VILLAGES,
+      consumption: { 20031: {} },
+      exportedAt: STAMP,
+    })
+    expect(setup.villages).toEqual([])
+  })
+
+  it('survives the round trip unchanged', () => {
+    const consumption = {
+      20030: { lumber: 14751, crop: 8519 },
+      20032: { clay: 5168, iron: 5809 },
+    }
+    const setup = roundTrip(buildSetup({ villages: VILLAGES, consumption, exportedAt: STAMP }))
+    const merged = mergeSetup({ setup, villages: VILLAGES })
+    expect(merged.consumption).toEqual(consumption)
+  })
+
+  it('leaves it absent when the row carries none', () => {
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 13 }, exportedAt: STAMP })
+    )
+    expect('consumption_per_hour' in setup.villages[0]).toBe(false)
+  })
+
+  it('does not overwrite an existing profile when the file row has none', () => {
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 13 }, exportedAt: STAMP })
+    )
+    const merged = mergeSetup({
+      setup,
+      villages: VILLAGES,
+      consumption: { 20030: { lumber: 8372 } },
+    })
+    expect(merged.consumption).toEqual({ 20030: { lumber: 8372 } })
+  })
+
+  it('lets the file win over an existing profile, wholesale', () => {
+    // Wholesale for the same reason a named allocation profile is: half of an
+    // old spend merged into a new one is a figure nobody entered.
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        consumption: { 20030: { lumber: 14751 } },
+        exportedAt: STAMP,
+      })
+    )
+    const merged = mergeSetup({
+      setup,
+      villages: VILLAGES,
+      consumption: { 20030: { lumber: 100, crop: 200 } },
+    })
+    expect(merged.consumption[20030]).toEqual({ lumber: 14751 })
+  })
+
+  it('drops it for a village the account no longer has', () => {
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        consumption: { 20030: { lumber: 1 }, 20031: { crop: 2 } },
+        exportedAt: STAMP,
+      })
+    )
+    const merged = mergeSetup({ setup, villages: [VILLAGES[0]] })
+    expect(merged.consumption).toEqual({ 20030: { lumber: 1 } })
+    expect(merged.report.missingFromAccount.map((v) => v.village_id)).toEqual([20031])
+  })
+
+  it('rejects a consumption that is not a resource map', () => {
+    for (const bad of [5, 'lots', [8372]]) {
+      expect(() =>
+        roundTrip({
+          format: SETUP_FORMAT,
+          version: SETUP_VERSION,
+          villages: [{ village_id: 20030, consumption_per_hour: bad }],
+        })
+      ).toThrow(SetupFileError)
+    }
+  })
+
+  it('rejects a resource the backend does not have', () => {
+    expect(() =>
+      roundTrip({
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20030, consumption_per_hour: { gold: 500 } }],
+      })
+    ).toThrow(/gold/)
+  })
+
+  it('rejects a negative spend, which the backend refuses too', () => {
+    // Not read as extra production: the statistics page reports materials
+    // gross, so a consuming material village reads positive and there is no
+    // sign to invert. A file that says -500 is wrong, not clampable.
+    expect(() =>
+      roundTrip({
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20030, consumption_per_hour: { lumber: -500 } }],
+      })
+    ).toThrow(/-500/)
+  })
+
+  it('rejects a non-numeric spend', () => {
+    expect(() =>
+      roundTrip({
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20030, consumption_per_hour: { crop: 'some' } }],
+      })
+    ).toThrow(SetupFileError)
+  })
+
+  it('rounds a raw-computation float to something an input box can hold', () => {
+    // The same rule the allocation values follow: a /h rate has no sub-unit
+    // precision, and 14750.600918 lands verbatim in the operator's input.
+    const setup = roundTrip({
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 20030, consumption_per_hour: { lumber: 43726.200918351606 } }],
+    })
+    expect(setup.villages[0].consumption_per_hour).toEqual({ lumber: 43726 })
+  })
+
+  it('keeps a declared zero, which says "measured, and it spends nothing"', () => {
+    const setup = roundTrip({
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 20030, consumption_per_hour: { crop: 0 } }],
+    })
+    expect(setup.villages[0].consumption_per_hour).toEqual({ crop: 0 })
+  })
+})
+
+describe('isConsumptionRate', () => {
+  it('accepts zero and any positive rate', () => {
+    expect(isConsumptionRate(0)).toBe(true)
+    expect(isConsumptionRate(14751)).toBe(true)
+  })
+
+  it('refuses a negative, a non-number and an infinity', () => {
+    expect(isConsumptionRate(-1)).toBe(false)
+    expect(isConsumptionRate('14751')).toBe(false)
+    expect(isConsumptionRate(Number.POSITIVE_INFINITY)).toBe(false)
+    expect(isConsumptionRate(Number.NaN)).toBe(false)
+  })
+})
+
+describe('declaresConsumption', () => {
+  it('is false for nothing, and for a map with every box cleared', () => {
+    // The rule the file, the request and the input all have to share: the
+    // backend reads absent and {} identically, so a village mid-edit with
+    // every field emptied must not send a declaration.
+    expect(declaresConsumption(undefined)).toBe(false)
+    expect(declaresConsumption(null)).toBe(false)
+    expect(declaresConsumption({})).toBe(false)
+  })
+
+  it('is true for a single resource, including a declared zero', () => {
+    expect(declaresConsumption({ crop: 9526 })).toBe(true)
+    expect(declaresConsumption({ crop: 0 })).toBe(true)
   })
 })

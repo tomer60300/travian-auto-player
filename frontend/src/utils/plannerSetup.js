@@ -13,13 +13,22 @@
  * per-village rows, because an allocation keyed by village id is just as wrong
  * under the wrong account.
  *
- * The village row also carries two more owned facts, both optional: where a
+ * The village row also carries three more owned facts, all optional: where a
  * village may ship (`ship_only_to`, a list of own village ids; absent means
  * unrestricted and an EMPTY list means no OWN village, for every resource
  * including crop -- foreign tributes keep their own exclusions and a whitelist
- * cannot stop one) and the share of its warehouse it keeps stocked by NPC
+ * cannot stop one), the share of its warehouse it keeps stocked by NPC
  * trading (`stock_floor_fraction`, 0 to 0.95), which the planner may draw down
- * as extra lumber, clay or iron.
+ * as extra lumber, clay or iron, and what it SPENDS per hour
+ * (`consumption_per_hour`, by resource).
+ *
+ * That last one is worth carrying for the same reason the profiles are: it is
+ * the second-largest body of hand-typed numbers in the planner -- a spend
+ * figure per resource per role village -- and it is not derivable from
+ * anything. The game reports materials GROSS, so a village consuming lumber
+ * still reads positive on the statistics page. Losing it to a cleared origin
+ * means every consuming village silently reads as stockpiling its whole
+ * allocation again.
  *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
@@ -49,6 +58,29 @@ export function isStockFloorFraction(value) {
   return Math.abs(permille - Math.round(permille)) < 1e-6
 }
 
+/** Is this a usable consumption rate? What a village spends per hour, so zero
+ * or more and finite. Negative is refused rather than clamped for the reason
+ * the backend refuses it: a rate's sign cannot be read as consumption, because
+ * the game's statistics page reports materials GROSS and a village burning
+ * lumber still shows a positive figure. There is nothing to invert, so a
+ * negative here is a typo and worth stopping for. Shared by the file parser and
+ * the planner's input so the two cannot disagree. */
+export function isConsumptionRate(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/** Has this village had any spend typed at all?
+ *
+ * A map with every box cleared is the same as no map: the backend reads absent
+ * and `{}` identically, so the file, the request and the input must all treat
+ * them the same or one of them starts claiming something the others do not.
+ * Unlike `ship_only_to`, where an empty list IS a distinct answer ("nobody"),
+ * there is no third state to express here.
+ */
+export function declaresConsumption(spent) {
+  return spent != null && Object.keys(spent).length > 0
+}
+
 /** The backend's AllocationMode, which the file must not outrun. */
 export const ALLOCATION_MODES = Object.freeze([
   'keep',
@@ -71,6 +103,7 @@ export function buildSetup({
   cropCeilings,
   shipOnlyTo,
   stockFloors,
+  consumption,
   profiles,
   profileWindows,
   merchantModel,
@@ -83,7 +116,9 @@ export function buildSetup({
     const ceiling = cropCeilings?.[village.village_id]
     const allowed = shipOnlyTo?.[village.village_id]
     const floor = stockFloors?.[village.village_id]
-    if (level == null && ceiling == null && allowed == null && floor == null) continue
+    const spent = consumption?.[village.village_id]
+    const spends = declaresConsumption(spent)
+    if (level == null && ceiling == null && allowed == null && floor == null && !spends) continue
     const row = { village_id: village.village_id, name: village.name ?? '' }
     if (level != null) row.trade_office_level = Number(level)
     if (ceiling != null) row.crop_ceiling = Number(ceiling)
@@ -91,6 +126,11 @@ export function buildSetup({
     // is a different answer from the unrestricted default an absent field means.
     if (allowed != null) row.ship_only_to = allowed.map(Number)
     if (floor != null) row.stock_floor_fraction = Number(floor)
+    if (spends) {
+      row.consumption_per_hour = Object.fromEntries(
+        Object.entries(spent).map(([resource, rate]) => [resource, Number(rate)])
+      )
+    }
     rows.push(row)
   }
   const doc = {
@@ -235,6 +275,40 @@ function parseForeignTargets(raw, where) {
   })
 }
 
+/** Validate one village's `{ resource: rate }` consumption map.
+ *
+ * Rejects rather than repairs, the same discipline the rest of this file
+ * follows: a spend under an unknown resource name would import as silence, and
+ * silence here means the village reads as stockpiling its whole allocation --
+ * which is the exact defect consumption exists to remove.
+ */
+function parseConsumption(raw, where) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new SetupFileError(`${where} is not a map of resource to rate per hour.`)
+  }
+  const out = {}
+  for (const [resource, rate] of Object.entries(raw)) {
+    if (!SETUP_RESOURCES.includes(resource)) {
+      throw new SetupFileError(
+        `${where} has unknown resource "${resource}"; ` +
+          `it must be one of ${SETUP_RESOURCES.join(', ')}.`
+      )
+    }
+    const value = Number(rate)
+    if (!isConsumptionRate(value)) {
+      throw new SetupFileError(
+        `${where}.${resource} is ${rate}; consumption is what a village SPENDS ` +
+          `per hour, so it cannot be negative.`
+      )
+    }
+    // Whole units, as the allocation values are: a /h rate has no sub-unit
+    // precision, and a figure like 14750.600918351606 from a raw computation
+    // lands verbatim in the operator's input box.
+    out[resource] = Math.round(value)
+  }
+  return out
+}
+
 /** Validate a `{ profile: ['HH:MM', 'HH:MM'] }` window map. */
 function parseWindows(raw, where) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -338,6 +412,12 @@ export function parseSetup(text) {
       }
       parsed.stock_floor_fraction = floor
     }
+    if (row.consumption_per_hour != null) {
+      parsed.consumption_per_hour = parseConsumption(
+        row.consumption_per_hour,
+        `${where}.consumption_per_hour`
+      )
+    }
     return parsed
   })
 
@@ -391,6 +471,7 @@ export function mergeSetup({
   cropCeilings,
   shipOnlyTo,
   stockFloors,
+  consumption,
   profiles,
   profileWindows,
   foreignTargets,
@@ -400,6 +481,7 @@ export function mergeSetup({
   const nextCropCeilings = { ...(cropCeilings ?? {}) }
   const nextShipOnlyTo = { ...(shipOnlyTo ?? {}) }
   const nextStockFloors = { ...(stockFloors ?? {}) }
+  const nextConsumption = { ...(consumption ?? {}) }
 
   const missingFromAccount = []
   let loaded = 0
@@ -416,6 +498,12 @@ export function mergeSetup({
     if (row.crop_ceiling != null) nextCropCeilings[row.village_id] = row.crop_ceiling
     if (row.ship_only_to != null) nextShipOnlyTo[row.village_id] = row.ship_only_to
     if (row.stock_floor_fraction != null) nextStockFloors[row.village_id] = row.stock_floor_fraction
+    // Replaced wholesale where the file has one, not merged per resource: half
+    // of an old spend under a new profile is a figure nobody entered, and a
+    // stale leftover resource silences a real overflow.
+    if (row.consumption_per_hour != null) {
+      nextConsumption[row.village_id] = row.consumption_per_hour
+    }
   }
 
   const stillUnknown = []
@@ -456,6 +544,7 @@ export function mergeSetup({
     cropCeilings: nextCropCeilings,
     shipOnlyTo: nextShipOnlyTo,
     stockFloors: nextStockFloors,
+    consumption: nextConsumption,
     profiles: nextProfiles,
     profileWindows: nextWindows,
     merchantModel: setup.merchantModel ?? null,

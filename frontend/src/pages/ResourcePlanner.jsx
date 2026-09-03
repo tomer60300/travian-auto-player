@@ -7,6 +7,8 @@ import api from '../api'
 import {
   SetupFileError,
   buildSetup,
+  declaresConsumption,
+  isConsumptionRate,
   isStockFloorFraction,
   mergeSetup,
   parseSetup,
@@ -115,6 +117,7 @@ const LS_WINDOWS = 'planner_profile_windows'
 const LS_CROP_CEILING = 'planner_crop_ceiling'
 const LS_SHIP_ONLY_TO = 'planner_ship_only_to'
 const LS_STOCK_FLOOR = 'planner_stock_floor'
+const LS_CONSUMPTION = 'planner_consumption'
 // Sensible defaults by convention; anything else starts unset until the
 // operator gives it hours.
 const DEFAULT_WINDOWS = { Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] }
@@ -262,6 +265,19 @@ function errorDetail(err, fallback) {
 
 const fmt = (n) => (n == null ? '—' : Math.round(n).toLocaleString())
 const signed = (n) => (n == null ? '—' : `${n > 0 ? '+' : ''}${Math.round(n).toLocaleString()}`)
+
+// The collapsed summary of a village's spend, in the same register as
+// describeShipOnlyTo above: what it says, not how many fields it has. Declared
+// down here rather than beside it because it reads RESOURCES, RESOURCE_LABEL
+// and fmt -- naming a const above its own declaration is the temporal-dead-zone
+// shape that has taken this page white three times.
+const describeConsumption = (spent) => {
+  if (!declaresConsumption(spent)) return 'none'
+  const declared = RESOURCES.filter((resource) => spent[resource] != null)
+  const total = declared.reduce((sum, resource) => sum + (Number(spent[resource]) || 0), 0)
+  if (declared.length === RESOURCES.length) return `${fmt(total)}/h, all four`
+  return `${fmt(total)}/h · ${declared.map((resource) => RESOURCE_LABEL[resource]).join(', ')}`
+}
 
 /** Net crop, shown with a word as well as a colour.
  *  Design Guideline — Accessibility: never rely on colour alone to convey
@@ -480,6 +496,17 @@ export default function ResourcePlanner() {
   // FRACTION (0.3, not 30) so state, file and request agree; the input shows it
   // as a percent. The planner may draw it down as lumber, clay or iron.
   const [stockFloors, setStockFloors] = useState({})
+  // What each village SPENDS per hour: { [village_id]: { lumber, clay, iron,
+  // crop } }, only the resources the operator has typed. Owned, like the
+  // Trade Office level, and for a harder reason: the game's statistics page
+  // reports materials GROSS, so a village burning 14,751 lumber an hour still
+  // reads positive there and nothing in the snapshot can imply this.
+  //
+  // Kept apart from the allocation TARGET, which is what must arrive. Enter
+  // only the target and the plan assumes the village stockpiles every unit --
+  // which is how an army village came to be reported as losing target x 24 a
+  // day at a cap it never reaches.
+  const [consumption, setConsumption] = useState({})
   // Result of the last setup-file load, kept on screen rather than only in a
   // toast: a file that is missing villages produces a quietly wrong plan, so
   // what it did and did not cover has to stay readable.
@@ -653,6 +680,7 @@ export default function ResourcePlanner() {
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
     setStockFloors(loadJson(`${LS_STOCK_FLOOR}::${accountKey}`, {}))
+    setConsumption(loadJson(`${LS_CONSUMPTION}::${accountKey}`, {}))
     setDayCheck(null)
     setProfiles(loaded)
     setActiveProfile(loaded[storedActive] ? storedActive : Object.keys(loaded)[0])
@@ -698,6 +726,7 @@ export default function ResourcePlanner() {
     tradeOffice,
     shipOnlyTo,
     stockFloors,
+    consumption,
     merchantModel,
   ])
   // Same rule for the route sheet, with higher stakes: its rows are copied
@@ -732,6 +761,7 @@ export default function ResourcePlanner() {
     tradeOffice,
     shipOnlyTo,
     stockFloors,
+    consumption,
     merchantModel,
     foreignTargets,
     snapshot,
@@ -748,6 +778,10 @@ export default function ResourcePlanner() {
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_STOCK_FLOOR), stockFloors)
   }, [stockFloors, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_CONSUMPTION), consumption)
+  }, [consumption, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_PROFILES), profiles)
   }, [profiles, hydratedKey, accountKey, storageKey])
@@ -882,7 +916,8 @@ export default function ResourcePlanner() {
         tradeOffice[v.village_id] != null ||
         cropCeilings[v.village_id] != null ||
         shipOnlyTo[v.village_id] != null ||
-        stockFloors[v.village_id] != null
+        stockFloors[v.village_id] != null ||
+        declaresConsumption(consumption[v.village_id])
     ).length
     const named = Object.entries(profiles).filter(([, a]) => Object.keys(a ?? {}).length)
     if (!typed && !named.length) {
@@ -899,6 +934,7 @@ export default function ResourcePlanner() {
         cropCeilings,
         shipOnlyTo,
         stockFloors,
+        consumption,
         profiles,
         profileWindows,
         merchantModel,
@@ -916,6 +952,7 @@ export default function ResourcePlanner() {
     cropCeilings,
     shipOnlyTo,
     stockFloors,
+    consumption,
     profiles,
     profileWindows,
     merchantModel,
@@ -957,6 +994,7 @@ export default function ResourcePlanner() {
         cropCeilings,
         shipOnlyTo,
         stockFloors,
+        consumption,
         profiles,
         profileWindows,
         foreignTargets,
@@ -966,6 +1004,7 @@ export default function ResourcePlanner() {
       setCropCeilings(merged.cropCeilings)
       setShipOnlyTo(merged.shipOnlyTo)
       setStockFloors(merged.stockFloors)
+      setConsumption(merged.consumption)
       setProfiles(merged.profiles)
       setProfileWindows(merged.profileWindows)
       // Capacity is server-calibrated, so a file that carries a calibration is
@@ -994,6 +1033,7 @@ export default function ResourcePlanner() {
       cropCeilings,
       shipOnlyTo,
       stockFloors,
+      consumption,
       profiles,
       profileWindows,
       foreignTargets,
@@ -1075,6 +1115,13 @@ export default function ResourcePlanner() {
         ...(stockFloors[v.village_id] != null
           ? { stock_floor_fraction: stockFloors[v.village_id] }
           : {}),
+        // An empty map is omitted too: the backend reads absent and {} the
+        // same way, and sending {} would only make the request look like it
+        // declares a spend. A village mid-edit with every box cleared is not
+        // saying it spends nothing.
+        ...(declaresConsumption(consumption[v.village_id])
+          ? { consumption_per_hour: consumption[v.village_id] }
+          : {}),
       })),
       allocations: sendAllocations,
       foreign_targets: usableForeignTargets(foreignTargets, villages),
@@ -1095,6 +1142,7 @@ export default function ResourcePlanner() {
     tradeOffice,
     shipOnlyTo,
     stockFloors,
+    consumption,
     allocations,
     foreignTargets,
     merchantModel,
@@ -1623,6 +1671,22 @@ export default function ResourcePlanner() {
       const per = { ...(prev[resource] ?? {}) }
       per[villageId] = { mode: 'keep', value: 0, ...(per[villageId] ?? {}), ...patch }
       return { ...prev, [resource]: per }
+    })
+  }
+
+  // One resource of one village's spend. An emptied box is DELETED rather than
+  // stored as 0: zero says "measured, and it spends none", which is a claim,
+  // and a village left with no claims at all drops out of the map entirely so
+  // the request and the file both say "nothing declared" rather than "{}".
+  const setSpend = (villageId, resource, raw) => {
+    setConsumption((prev) => {
+      const per = { ...(prev[villageId] ?? {}) }
+      if (raw === '') delete per[resource]
+      else per[resource] = Number(raw)
+      const next = { ...prev }
+      if (Object.keys(per).length) next[villageId] = per
+      else delete next[villageId]
+      return next
     })
   }
 
@@ -2318,7 +2382,8 @@ export default function ResourcePlanner() {
               village's merchant budget without a warning anywhere. Pin the
               identity column and say the rest are there. */}
           <p className="text-secondary text-xs mb-1 sm:hidden">
-            Swipe the table sideways for Merchants, Trade Office, Crop alert, Ships only to and
+            Swipe the table sideways for Merchants, Trade Office, Crop alert, Ships only to,
+            Consumption and
             Stock floor — the village column stays pinned.
           </p>
           <div className="overflow-x-auto">
@@ -2397,6 +2462,12 @@ export default function ResourcePlanner() {
                     title="Share of warehouse capacity this village keeps stocked by NPC trading. The planner may draw it down over the profile window as extra lumber, clay or iron — never crop."
                   >
                     Stock floor %
+                  </th>
+                  <th
+                    className="text-left px-2"
+                    title="What this village SPENDS per hour, by resource — the building queue and the troop upkeep. Not the allocation target, which is what must ARRIVE: the store's net is target + own production − consumption. Nothing in the game reports this, because the statistics page shows materials gross."
+                  >
+                    Consumption /h
                   </th>
                 </tr>
               </thead>
@@ -2563,6 +2634,89 @@ export default function ResourcePlanner() {
                               </span>
                             )}
                           </>
+                        )
+                      })()}
+                    </td>
+                    <td className="px-2">
+                      {/* Owned, like the Trade Office level, and the number the
+                          overflow check was missing. A village told to LAND
+                          14,751 lumber an hour because it BURNS 14,751 was read
+                          as banking all of it, and reported as losing 354,024 a
+                          day at a warehouse cap it never reaches. Blank means
+                          nothing declared and reads muted like the other blanks;
+                          clearing every box is the same as never typing one. */}
+                      {(() => {
+                        const spent = consumption[v.village_id]
+                        return (
+                          <details className="text-xs">
+                            <summary
+                              className={`cursor-pointer whitespace-nowrap pointer-coarse:min-h-11 ${
+                                declaresConsumption(spent) ? 'text-primary' : 'text-secondary'
+                              }`}
+                            >
+                              <span className="sr-only">Spends per hour, for {v.name}: </span>
+                              {describeConsumption(spent)}
+                            </summary>
+                            <div
+                              role="group"
+                              aria-label={`What ${v.name} spends per hour`}
+                              className="mt-1"
+                            >
+                              {RESOURCES.map((resource) => {
+                                const rate = spent?.[resource]
+                                const bad = rate != null && !isConsumptionRate(rate)
+                                const problem = `spend-problem-${v.village_id}-${resource}`
+                                return (
+                                  <label
+                                    key={resource}
+                                    className="flex items-center justify-between gap-2 whitespace-nowrap mt-0.5"
+                                  >
+                                    <span className="text-secondary">
+                                      {RESOURCE_LABEL[resource]}
+                                    </span>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="1"
+                                      aria-label={`${RESOURCE_LABEL[resource]} spent per hour by ${v.name}`}
+                                      aria-invalid={bad || undefined}
+                                      aria-describedby={bad ? problem : undefined}
+                                      placeholder="none"
+                                      className="input-field w-24 text-right text-xs py-1"
+                                      value={rate ?? ''}
+                                      onChange={(e) =>
+                                        setSpend(v.village_id, resource, e.target.value)
+                                      }
+                                    />
+                                    {/* Named, not just coloured: the backend
+                                        refuses a negative spend outright, and a
+                                        rate's sign cannot be read as
+                                        consumption anyway. */}
+                                    {bad && (
+                                      <span id={problem} className="text-warning">
+                                        0 or more
+                                      </span>
+                                    )}
+                                  </label>
+                                )
+                              })}
+                              {declaresConsumption(spent) && (
+                                <button
+                                  type="button"
+                                  className="underline mt-1"
+                                  onClick={() =>
+                                    setConsumption((prev) => {
+                                      const next = { ...prev }
+                                      delete next[v.village_id]
+                                      return next
+                                    })
+                                  }
+                                >
+                                  Clear the profile
+                                </button>
+                              )}
+                            </div>
+                          </details>
                         )
                       })()}
                     </td>
@@ -3103,6 +3257,13 @@ export default function ResourcePlanner() {
                         const after = targetFor(resource, v)
                         const ship = after == null || own == null ? null : after - own
                         const isRest = remainderFor(resource) === v.village_id
+                        // What the store actually does. The top line is what
+                        // must LAND; this subtracts what the village SPENDS, so
+                        // an operator who enters a consumption profile and
+                        // leaves the target at its gross figure SEES the net go
+                        // to zero instead of reading the target as a stockpile.
+                        const spent = consumption[v.village_id]?.[resource]
+                        const net = spent == null || after == null ? null : after - spent
                         return (
                           <td key={resource} className="text-right px-3 py-1.5 align-top">
                             {/* A sign change is the story worth telling:
@@ -3156,6 +3317,29 @@ export default function ResourcePlanner() {
                             >
                               {ship == null ? '—' : Math.abs(ship) < 1 ? '·' : signed(ship)}
                             </div>
+                            {/* Landing − consumption = net. Level is the
+                                intended state for a role village, so it reads
+                                settled; draining is the one that kills troops,
+                                and a store that gains every hour is the one that
+                                overflows. Same three-way grammar the allocation
+                                meter uses. */}
+                            {net != null && (
+                              <div
+                                className={`text-[11px] font-mono ${
+                                  net < -1
+                                    ? 'text-danger'
+                                    : net > 1
+                                      ? 'text-warning'
+                                      : 'text-success'
+                                }`}
+                              >
+                                {`\u2212${fmt(spent)} = `}
+                                {Math.abs(net) < 1 ? '0' : signed(net)}
+                                <span className="ml-1 text-[10px] uppercase font-sans text-secondary">
+                                  net
+                                </span>
+                              </div>
+                            )}
                           </td>
                         )
                       })}
@@ -3178,7 +3362,10 @@ export default function ResourcePlanner() {
                 Top line: retention after distribution (red = still negative; a green arrow
                 marks a village whose crop crosses from starving to surplus — e.g. −2,500/h own
                 +4,000/h shipped → 1,500/h). Bottom line: what ships in (+) or out (−) to make it
-                true. “rest” absorbs whatever the others leave unassigned.
+                true. “rest” absorbs whatever the others leave unassigned. Third line, where a
+                consumption profile is set: what the village spends, and the net its store is
+                left moving at — zero means level, which is what a role village landing exactly
+                what it burns should read as.
               </p>
             </div>
           )}
