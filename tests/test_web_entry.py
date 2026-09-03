@@ -87,7 +87,14 @@ def test_loose_static_files_do_not_count_as_a_frontend_build(tmp_path):
 
 def test_spa_file_serving_rejects_path_traversal():
     """`/../../.env` must not escape the build directory: only api/ and ws/
-    prefixes were filtered, so any readable file on disk could be downloaded."""
+    prefixes were filtered, so any readable file on disk could be downloaded.
+
+    Runs whether or not `static/` has been built. `serve_spa` used to be
+    defined inside `if ui_build_exists(STATIC_DIR)`, so in a fresh clone --
+    where `static/` is a gitignored build output -- the import below raised
+    and this guard went untested on precisely the checkout a reviewer uses.
+    The traversal branch needs no bundle: it rejects before touching disk.
+    """
     import asyncio
 
     from travian_api.web.app import STATIC_DIR, serve_spa
@@ -99,6 +106,7 @@ def test_spa_file_serving_rejects_path_traversal():
 
     served = getattr(response, "path", "")
     assert not str(served).endswith("distribution.py"), "traversal escaped the build directory"
+    assert response.status_code == 404, "an escaping path must be refused, not merely redirected"
 
 
 def test_custom_db_path_parent_directory_is_created(tmp_path):

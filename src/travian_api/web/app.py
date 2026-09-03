@@ -267,49 +267,65 @@ async def serve_ui_not_built(request: Request, full_path: str) -> JSONResponse:
     )
 
 
+# index.html MUST NOT be browser-cached without revalidation. Vite emits
+# asset filenames with content hashes (e.g. ``index-BXYj2OuC.js``) so the
+# hashed chunks themselves are immutable and safely cacheable forever —
+# but index.html is the pointer that tells the browser WHICH hash to
+# fetch. If the browser caches index.html aggressively, a backend deploy
+# leaves running tabs pinned to the old chunk hashes and the user sees
+# "I rebuilt and the fix isn't showing up." Force revalidation per
+# request so a refresh / new tab picks up the new index.
+_SPA_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
+async def serve_spa(request: Request, full_path: str) -> Response:
+    """Catch-all: serve index.html for any non-API path (SPA routing).
+
+    Defined unconditionally, and mounted below only when a build exists.
+    It used to be defined INSIDE that ``if``, which made the containment
+    guard below untestable in exactly the checkout a reviewer clones:
+    ``static/`` is a build output and is gitignored, so
+    ``from ... import serve_spa`` raised ImportError and
+    ``test_spa_file_serving_rejects_path_traversal`` failed for
+    environmental reasons rather than for a traversal. A security guard
+    that is only tested on machines that happen to have run `npm run
+    build` is not tested. Nothing about the traversal check needs a
+    bundle to be present, so nothing about it needs to hide behind one.
+    """
+    # Don't intercept API or WebSocket paths (including the bare roots).
+    if full_path.startswith(("api/", "ws/")) or full_path in ("api", "ws"):
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+
+    # Resolve and verify containment BEFORE serving: a raw request like
+    # /../../.env would otherwise escape the build directory and download
+    # any readable file on disk, .env and key files included.
+    file_path = (STATIC_DIR / full_path).resolve()
+    if not file_path.is_relative_to(STATIC_DIR.resolve()):
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    if file_path.is_file():
+        # Loose static files at the SPA root (favicon.svg, robots.txt,
+        # etc.). The content-hashed assets live under /assets via the
+        # mount above, so anything reaching this branch is rare and
+        # no-cache is the safer default.
+        return FileResponse(file_path, headers=_SPA_NO_CACHE_HEADERS)
+    index = STATIC_DIR / "index.html"
+    if not index.is_file():
+        # Unreachable through the app — the route is only mounted when a
+        # complete build exists — but a direct caller (a test) gets a 404
+        # rather than a FileResponse to a path that does not exist.
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+    # SPA fallback — always serve a fresh index.html (see note above).
+    return FileResponse(index, headers=_SPA_NO_CACHE_HEADERS)
+
+
 # Serve static frontend files if a complete build exists
 if ui_build_exists(STATIC_DIR):
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
-
-    # Catch-all route: serve index.html for any non-API path (SPA routing).
-    #
-    # index.html MUST NOT be browser-cached without revalidation. Vite emits
-    # asset filenames with content hashes (e.g. ``index-BXYj2OuC.js``) so the
-    # hashed chunks themselves are immutable and safely cacheable forever —
-    # but index.html is the pointer that tells the browser WHICH hash to
-    # fetch. If the browser caches index.html aggressively, a backend deploy
-    # leaves running tabs pinned to the old chunk hashes and the user sees
-    # "I rebuilt and the fix isn't showing up." Force revalidation per
-    # request so a refresh / new tab picks up the new index.
-    _SPA_NO_CACHE_HEADERS = {
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "Pragma": "no-cache",
-        "Expires": "0",
-    }
-
-    @app.get("/{full_path:path}")
-    async def serve_spa(request: Request, full_path: str):
-        # Don't intercept API or WebSocket paths (including the bare roots).
-        if full_path.startswith(("api/", "ws/")) or full_path in ("api", "ws"):
-            return JSONResponse({"detail": "Not found"}, status_code=404)
-
-        # Resolve and verify containment BEFORE serving: a raw request like
-        # /../../.env would otherwise escape the build directory and download
-        # any readable file on disk, .env and key files included.
-        file_path = (STATIC_DIR / full_path).resolve()
-        if not file_path.is_relative_to(STATIC_DIR.resolve()):
-            return JSONResponse({"detail": "Not found"}, status_code=404)
-        if file_path.is_file():
-            # Loose static files at the SPA root (favicon.svg, robots.txt,
-            # etc.). The content-hashed assets live under /assets via the
-            # mount above, so anything reaching this branch is rare and
-            # no-cache is the safer default.
-            return FileResponse(file_path, headers=_SPA_NO_CACHE_HEADERS)
-        # SPA fallback — always serve a fresh index.html (see note above).
-        return FileResponse(
-            STATIC_DIR / "index.html",
-            headers=_SPA_NO_CACHE_HEADERS,
-        )
+    app.get("/{full_path:path}")(serve_spa)
 else:
     app.get("/{full_path:path}")(serve_ui_not_built)
 
