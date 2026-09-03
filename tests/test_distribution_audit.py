@@ -734,7 +734,7 @@ def _drop_the_sender_surplus_cap():
     # exclusions the optimizer now honours and the names it labels a shortfall
     # with: a stub that lags behind it fails on arity and stops testing the
     # mutation it exists to test.
-    def patched(plan, villages, geometry, names=None, excluded=None):
+    def patched(plan, villages, geometry, *, names=None, excluded=None):
         surplus = {v.village_id: -v.ship_per_hour for v in plan.senders if v.village_id in villages}
         demand = sorted(
             (v for v in plan.receivers if v.village_id in villages),

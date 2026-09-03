@@ -1039,7 +1039,10 @@ class TestAShortfallSaysWhichCauseItHad:
 
     def test_a_genuine_lack_of_surplus_reads_as_one(self):
         _, shortfalls = _flows_for_resource(
-            self._plan(produced=1000.0, wanted=3000.0), self.VILLAGES, GEOMETRY, self.NAMES
+            self._plan(produced=1000.0, wanted=3000.0),
+            self.VILLAGES,
+            GEOMETRY,
+            names=self.NAMES,
         )
 
         assert len(shortfalls) == 1
@@ -1050,8 +1053,8 @@ class TestAShortfallSaysWhichCauseItHad:
             self._plan(produced=3000.0, wanted=3000.0),
             self.VILLAGES,
             GEOMETRY,
-            self.NAMES,
-            {2: {1}},
+            names=self.NAMES,
+            excluded={2: {1}},
         )
 
         assert len(shortfalls) == 1
@@ -1075,7 +1078,9 @@ class TestAShortfallSaysWhichCauseItHad:
             },
         )
 
-        _, shortfalls = _flows_for_resource(plan, villages, GEOMETRY, self.NAMES, {2: {1}})
+        _, shortfalls = _flows_for_resource(
+            plan, villages, GEOMETRY, names=self.NAMES, excluded={2: {1}}
+        )
 
         assert shortfalls[0].reason == "no village has surplus left to cover this demand"
 
@@ -1089,7 +1094,23 @@ class TestAShortfallSaysWhichCauseItHad:
         }
 
         _, shortfalls = _flows_for_resource(
-            self._plan(produced=3000.0, wanted=3000.0), villages, GEOMETRY, self.NAMES
+            self._plan(produced=3000.0, wanted=3000.0), villages, GEOMETRY, names=self.NAMES
         )
 
         assert shortfalls[0].reason == "no village has surplus left to cover this demand"
+
+    def test_the_old_positional_shape_is_refused_not_misbound(self):
+        """`names` was added AHEAD of the older `excluded`, and both are optional
+        mappings keyed by village id -- so a call written against the old shape
+        passed its exclusion map fourth, bound it to `names`, and planned as if
+        the operator had excluded nothing. No error, no shortfall reason, just a
+        route from an origin the operator ruled out. Keyword-only is what turns
+        that silent misbinding into a TypeError at the call site.
+        """
+        with pytest.raises(TypeError):
+            _flows_for_resource(
+                self._plan(produced=3000.0, wanted=3000.0),
+                self.VILLAGES,
+                GEOMETRY,
+                {2: {1}},  # the OLD position of `excluded`
+            )

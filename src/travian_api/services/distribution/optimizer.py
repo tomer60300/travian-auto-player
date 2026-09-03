@@ -484,6 +484,7 @@ def _flows_for_resource(
     plan: ResourcePlan,
     villages: Mapping[int, VillageState],
     geometry: MapGeometry,
+    *,
     names: Mapping[int, str] | None = None,
     excluded: Mapping[int, set[int]] | None = None,
 ) -> tuple[dict[tuple[int, int], float], list[Shortfall]]:
@@ -493,6 +494,12 @@ def _flows_for_resource(
     surplus, and iterating in a sorted order makes the result deterministic --
     a re-plan on unchanged input must produce an identical route set, or the
     diff against the live configuration is meaningless.
+
+    `names` and `excluded` are keyword-only because `names` was added AHEAD of
+    the older `excluded`: both are optional mappings keyed by village id, so an
+    old-shape call passing the exclusion map fourth bound it to `names` and
+    routed as if nothing were excluded -- no error, just a plan that quietly
+    ignores the operator's list. Keyword-only makes that a TypeError.
     """
     # Merchant-capable only. A route needs merchants at its origin, and Travian
     # grants those through the Marketplace -- so a freshly settled village, or one
@@ -1653,7 +1660,11 @@ def build_plan(
                 )
             )
         flows, resource_shortfalls = _flows_for_resource(
-            plan, villages, geometry, names, excluded_origins_by_destination
+            plan,
+            villages,
+            geometry,
+            names=names,
+            excluded=excluded_origins_by_destination,
         )
         shortfalls.extend(resource_shortfalls)
         assignment[resource] = {key: amount for key, amount in flows.items() if amount > EPSILON}
