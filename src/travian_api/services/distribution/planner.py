@@ -147,6 +147,11 @@ class DistributionPlan:
     rows: tuple[SheetRow, ...] = ()
     merchants_committed: Mapping[int, int] = field(default_factory=dict)
     spare_merchants: Mapping[int, int] = field(default_factory=dict)
+    """The BUDGET each village was planned to, per :meth:`VillageState.merchant_budget`
+    -- its fleet less the account reserve, or its own ``max_busy_merchants``
+    where the operator set a lower one. Named for the fleet figure it used to be
+    and kept that way because it is what the response field is called; read it
+    as the ceiling, not as merchants standing idle in the marketplace."""
     resource_plans: Mapping[Resource, ResourcePlan] = field(default_factory=dict)
     routing: Plan = field(default_factory=Plan)
     beat: Beat = field(default_factory=Beat)
