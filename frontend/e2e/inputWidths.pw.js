@@ -1,5 +1,5 @@
 /**
- * Every `.input-field` in the planner, MEASURED.
+ * Every `.input-field` in the app's dense surfaces, MEASURED.
  *
  * `index.css` starts with `@import "tailwindcss"`, so Tailwind's utilities live
  * in `@layer utilities` while the hand-written component classes below are
@@ -14,8 +14,9 @@
  * client 1122 == scroll 1122.
  *
  * So this spec asserts the thing that was wrong, at the three viewports the UI
- * Definition of Done names, over every surface in the planner that puts an
- * `.input-field` in a table:
+ * Definition of Done names, over the planner's three stages AND the three
+ * pages off it that own dense controls -- the fix was app-wide, so the
+ * measurement has to be:
  *
  *   1. no control is narrower than its own content;
  *   2. a wrapper whose content overflows can actually be scrolled;
@@ -38,11 +39,17 @@
  *     kind of content where scrolling is not an acceptable answer: a spend box
  *     showing "837" of "8372" is not truncated, it is WRONG, and nothing on
  *     screen says so.
- *   * a FREE-TEXT input is measured against its PLACEHOLDER instead, because
- *     its content has no bound -- an ally's village name can be longer than any
- *     column, and scrolling it is what every text field on the web does. What
- *     must fit is the empty state's prompt, or the field cannot even be
- *     identified before it is filled.
+ *   * a FREE-TEXT input is measured against the GREATER of its placeholder and
+ *     its own value, the value capped at 32 characters. Both halves are load
+ *     bearing. The placeholder is what must fit before the field is filled, or
+ *     the field cannot even be identified; the value is what must fit after,
+ *     and measuring the placeholder alone hid a 70px clip in this spec's own
+ *     fixture (`Foreign target 1 name`, 144px for 214px of
+ *     "Rheinbund-Aussenposten") while reporting zero clipped. The cap is why
+ *     the value can be measured at all -- a name field's content has no bound,
+ *     so demanding that a column fit ANY value is unsatisfiable rather than
+ *     strict. It is a stop, not a target: every value seeded here is well
+ *     inside it and so is asserted in full.
  *
  * NO BACKEND AND NO GAME REQUEST, by the two fail-closed mechanisms
  * `roleTemplates.pw.js` documents: `page.route('** /api/**')` answers the two
@@ -107,9 +114,18 @@ const SNAPSHOT = {
   warnings: [],
 }
 
-/** Everything the shell asks for, and a hard stop for anything else. */
-async function isolate(page) {
-  await page.routeWebSocket(/.*/, (ws) => ws.close())
+/**
+ * Everything the shell asks for, and a hard stop for anything else.
+ *
+ * `extra` answers the calls one PAGE makes on top of the shell's two. It is a
+ * function of the pathname rather than a table of URLs because these endpoints
+ * carry query strings and ids (`/buildings?village_id=20002`,
+ * `/farm/lists/1`), and it returns `undefined` for anything it does not
+ * recognise so the abort below stays the default. Fail-closed is the whole
+ * safety model here: there is a live Travian account on this machine.
+ */
+async function isolate(page, extra = () => undefined, socket = (ws) => ws.close()) {
+  await page.routeWebSocket(/.*/, socket)
   await page.route('**/api/**', (route) => {
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/users/me')) {
@@ -123,10 +139,17 @@ async function isolate(page) {
           player_name: PLAYER,
           tribe_id: 1,
           active_village_id: CAPITAL,
-          villages: SNAPSHOT.villages.map((v) => ({ id: v.village_id, name: v.name })),
+          villages: SNAPSHOT.villages.map((v) => ({
+            id: v.village_id,
+            name: v.name,
+            x: v.x,
+            y: v.y,
+          })),
         },
       })
     }
+    const body = extra(path)
+    if (body !== undefined) return route.fulfill({ json: body })
     return route.abort('blockedbyclient')
   })
 }
@@ -194,6 +217,12 @@ async function seed(page) {
  * bounding box but not what the box needed to be.
  */
 const MEASURE = () => {
+  // How much of a free-text VALUE the field is required to fit. See the
+  // text-input branch below for why there is a cap at all. Declared in here
+  // rather than beside the other constants because this function is
+  // serialised into the page and closes over nothing from Node.
+  const TEXT_CAP_CHARS = 32
+
   const scroller = (el) => {
     for (let node = el.parentElement; node; node = node.parentElement) {
       const overflowX = getComputedStyle(node).overflowX
@@ -202,19 +231,48 @@ const MEASURE = () => {
     return null
   }
 
-  // Which of the planner's surfaces this control belongs to, named the way the
-  // operator would name it, so a failure says WHERE.
+  // Which surface this control belongs to, named the way the operator would
+  // name it, so a failure says WHERE.
   const surfaceOf = (el) => {
     const table = el.closest('table')
-    if (table == null) return el.closest('label') ? 'World & merchants' : 'other'
-    const heads = [...table.querySelectorAll('thead th')].map((th) => th.textContent.trim())
-    // Lumber/h first: the Snapshot table has a Role column too, so testing for
-    // "Role" ahead of it filed half the village table under Role templates.
-    if (heads.some((h) => h.startsWith('Lumber/h'))) return 'Snapshot table'
-    if (heads.some((h) => h.startsWith('Role'))) return 'Role templates'
-    if (heads.some((h) => h === 'X') && heads.some((h) => h === 'Y')) return 'Foreign targets'
-    if (heads.some((h) => h.startsWith('Mode'))) return 'Allocate grid'
-    return 'table: ' + heads.slice(0, 3).join('/')
+    if (table != null) {
+      const heads = [...table.querySelectorAll('thead th')].map((th) => th.textContent.trim())
+      // Lumber/h first: the Snapshot table has a Role column too, so testing
+      // for "Role" ahead of it filed half the village table under Role
+      // templates.
+      if (heads.some((h) => h.startsWith('Lumber/h'))) return 'Snapshot table'
+      if (heads.some((h) => h.startsWith('Role'))) return 'Role templates'
+      if (heads.some((h) => h === 'X') && heads.some((h) => h === 'Y')) return 'Foreign targets'
+      if (heads.some((h) => h.startsWith('Mode'))) return 'Allocate grid'
+      return 'table: ' + heads.slice(0, 3).join('/')
+    }
+    // Off the planner there are no tables at these sites: the controls sit in
+    // filter bars, card headers and queue rows. The nearest card's heading is
+    // what the operator reads above them.
+    const heading = el.closest('.card, section, form')?.querySelector('h2, h3, h4')
+    if (heading != null) return heading.textContent.trim().slice(0, 24)
+    return el.closest('label') ? 'World & merchants' : 'other'
+  }
+
+  // An accessible name if the markup has one, and something a human can act on
+  // if it does not. `aria-label` alone reported half the non-planner controls
+  // as "input"/"select", which is not a defect report.
+  const labelOf = (el) => {
+    const aria = el.getAttribute('aria-label')
+    if (aria) return aria
+    const title = el.getAttribute('title')
+    if (title) return title
+    const by = el.getAttribute('aria-labelledby')
+    if (by) {
+      const text = document.getElementById(by)?.textContent?.trim()
+      if (text) return text
+    }
+    const label = el.closest('label')?.textContent?.trim()
+    if (label) return label.slice(0, 32)
+    const prev = el.previousElementSibling?.textContent?.trim()
+    if (prev) return prev.slice(0, 32)
+    if (el.placeholder) return `placeholder "${el.placeholder}"`
+    return el.tagName.toLowerCase()
   }
 
   const ctx = document.createElement('canvas').getContext('2d')
@@ -235,13 +293,30 @@ const MEASURE = () => {
       clone.remove()
       basis = 'options'
     } else if (el.tagName === 'INPUT' && el.type !== 'number') {
+      // The greater of the empty state's prompt and the value actually in the
+      // box, the value capped at TEXT_CAP_CHARS characters.
+      //
+      // The placeholder ALONE is what this measured before, and it hid a real
+      // clip in this spec's own fixture: `Foreign target 1 name` is `w-36`
+      // (144px) and holds the seeded "Rheinbund-Aussenposten", which wants
+      // 214px -- and the spec reported nothing. It is also vacuous for a
+      // free-text input with no placeholder at all, where it reduced to "is
+      // the box wider than its own padding".
+      //
+      // The cap is why a value can be measured at all: a name field's content
+      // has no bound, so demanding a column fit ANY value is unsatisfiable
+      // rather than strict. The cap is a stop, not a target -- every value
+      // this fixture seeds is well inside it, so every one of them is
+      // asserted in full.
       ctx.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`
+      const placeholder = ctx.measureText(el.placeholder ?? '').width
+      const value = ctx.measureText((el.value ?? '').slice(0, TEXT_CAP_CHARS)).width
       needed =
-        ctx.measureText(el.placeholder ?? '').width +
+        Math.max(placeholder, value) +
         parseFloat(style.paddingLeft) +
         parseFloat(style.paddingRight) +
         borders
-      basis = 'placeholder'
+      basis = value > placeholder ? 'value (text)' : 'placeholder'
     } else {
       needed = el.scrollWidth + borders
       basis = 'value'
@@ -249,11 +324,17 @@ const MEASURE = () => {
     const wrapper = scroller(el)
     out.push({
       surface: surfaceOf(el),
-      label: el.getAttribute('aria-label') ?? el.tagName.toLowerCase(),
+      label: labelOf(el),
       tag: el.tagName.toLowerCase(),
       basis,
       width: Math.round(rect.width * 10) / 10,
       needed: Math.round(needed * 10) / 10,
+      // Item 4 of the UI Definition of Done. Not asserted -- these are not all
+      // coarse-pointer viewports -- but reported, because the padding that
+      // makes these boxes 44px tall is the same padding a fix here could
+      // reach for, and a fix that trades a clipped glyph for an untappable
+      // control is not a fix.
+      height: Math.round(rect.height * 10) / 10,
       wrapperClient: wrapper ? wrapper.clientWidth : null,
       wrapperScroll: wrapper ? wrapper.scrollWidth : null,
       wrapperScrollable: wrapper ? wrapper.scrollWidth > wrapper.clientWidth : null,
@@ -276,7 +357,24 @@ const MEASURE = () => {
  * `*.config.js` is configured as Node), so the bare name is a `no-undef`
  * error even though the test body does run in Node. */
 function report(where, measured) {
-  if (!globalThis.process?.env?.MEASURE) return
+  const mode = globalThis.process?.env?.MEASURE
+  if (!mode) return
+  // MEASURE=all prints every control rather than the worst per surface. The
+  // summary answers "did anything break"; this answers "by how much, where",
+  // which is what choosing between two CSS fixes needs.
+  if (mode === 'all') {
+    const rows = measured.controls.map(
+      (c) =>
+        `    ${c.surface.padEnd(22)} ${c.tag.padEnd(6)} ${String(c.width).padStart(6)}px` +
+        ` for ${String(c.needed).padStart(6)}px h${String(c.height).padStart(5)}` +
+        ` ${c.width + 1 < c.needed ? 'CLIPPED' : 'ok     '} ${c.basis.padEnd(12)} "${c.label}"`,
+    )
+    console.log(
+      `  ${where}: page ${measured.pageClientWidth} client / ${measured.pageScrollWidth} scroll\n` +
+        rows.join('\n'),
+    )
+    return
+  }
   const bySurface = new Map()
   for (const c of measured.controls) {
     const worst = bySurface.get(c.surface)
@@ -361,29 +459,190 @@ async function openAllocateGrid(page) {
   await expect(page.getByLabel('Lumber mode for 11')).toBeVisible()
 }
 
+// ── Off the planner ──────────────────────────────────────────────────
+//
+// `.input-field { width: 100% }` was moved into `@layer components` for the
+// planner and shipped to the whole app: 66 of the 111 `.input-field` sites in
+// `src/` carry a width utility, across twelve files, and every one of those
+// utilities went from dead to live in one commit. The planner was the only
+// surface measured.
+//
+// It was also the only surface where that was the whole story. `.input-field`
+// still declares `padding: .75rem 1rem` (32px across) and `font-size: 1rem`
+// UNLAYERED, so on the dense controls off the planner -- which ask for
+// `py-0.5 px-1 text-xs` and got none of it -- a box that used to be 203px
+// wide became the 48px its `w-12` asked for while its glyphs stayed 16px in
+// 32px of padding. 14px left for the number.
+//
+// So the three pages that own those controls are measured here too, by the
+// same rules. Each needs the calls its own page makes, and each needs the
+// interaction that puts the control on screen: a queue row does not exist
+// until a building is added to it, a farm filter bar does not exist until a
+// list with slots is selected, and the scout's loop boxes do not exist until
+// loop mode is ticked. A spec that only measured the default render would
+// have measured none of the seven controls that broke.
+
+/** Buildings enough to populate every category the queue groups by. */
+const BUILDINGS = [
+  { slot_id: 1, name: 'Woodcutter', level: 10 },
+  { slot_id: 2, name: 'Clay Pit', level: 10 },
+  { slot_id: 19, name: 'Barracks', level: 5 },
+  { slot_id: 26, name: 'Main Building', level: 10 },
+  { slot_id: 27, name: 'Warehouse', level: 18 },
+]
+
+function queueRoutes(path) {
+  if (path.endsWith('/buildings/queue')) return []
+  if (path.endsWith('/buildings')) return BUILDINGS
+  return undefined
+}
+
+const FARM_LIST = {
+  id: 1,
+  name: 'Rheinbund raids',
+  owner_village_name: '02',
+  slots_amount: 2,
+  active_slots: 2,
+  total_booty: 41_860,
+}
+
+const FARM_SLOTS = [
+  {
+    id: 11,
+    target_name: 'Rheinbund-Aussenposten',
+    x: -117,
+    y: 143,
+    distance: 34.2,
+    population: 512,
+    is_active: true,
+    resources: 3200,
+    capacity: 3200,
+  },
+  {
+    id: 12,
+    target_name: 'Oase 47',
+    x: -112,
+    y: 139,
+    distance: 29.8,
+    population: 0,
+    is_active: true,
+    resources: 900,
+    capacity: 3200,
+  },
+]
+
+function farmRoutes(path) {
+  if (path.endsWith('/farm/lists')) return [FARM_LIST]
+  if (/\/farm\/lists\/\d+$/.test(path)) return { ...FARM_LIST, slots: FARM_SLOTS }
+  return undefined
+}
+
+/** Signed in, with a village selected, and nothing planner-specific. */
+async function seedShell(page) {
+  await page.addInitScript(() => {
+    localStorage.setItem('token', 'e2e-not-a-real-token')
+  })
+}
+
+async function openBuildQueue(page) {
+  await page.goto('/queue')
+  // A queue row is where `w-12` / `w-14` live, and a row needs an item. The
+  // building name is the click target the operator uses.
+  await page.getByText('Main Building', { exact: true }).click()
+  await expect(page.getByTitle('Target level')).toBeVisible()
+  // The bulk bar is a third site, revealed only by a selection.
+  await page.locator('.checkbox-gold').first().check()
+  await expect(page.getByText('1 selected')).toBeVisible()
+}
+
+async function openFarmFilters(page) {
+  await page.goto('/farm')
+  // The list ROW, not the loop-mode checkbox label that carries the same text.
+  await page.getByRole('cell', { name: /^Rheinbund raids/ }).click()
+  // The filter bar renders only once the selected list has slots.
+  await expect(page.getByText('Max dist:')).toBeVisible()
+  // Filters the operator has actually typed. An empty number box measures as
+  // wide as its own padding and would pass a collapsed column.
+  await page.locator('input[placeholder="any"]').first().fill('120')
+  await page.locator('input[placeholder="any"]').nth(1).fill('500')
+}
+
+/**
+ * The scan the scout page's loop controls sit behind.
+ *
+ * Auto-scout's loop boxes -- the two `w-20 py-1 px-2 text-xs` inputs the
+ * regression clipped -- live in `AutoScoutPanel`, which renders only when
+ * `scanResults.length > 0`, and `scanResults` is set from a WebSocket frame.
+ * So this spec plays the server for `/ws/scout/scan` and answers with the
+ * three frames the page needs: a session, the results, and the end. Nothing
+ * leaves the browser -- Playwright terminates the socket, exactly as
+ * `route.abort` terminates the HTTP calls -- and the frames are the page's
+ * own contract, not the game's.
+ *
+ * Every other socket still closes immediately.
+ */
+const SCAN_TILES = [
+  { x: -117, y: 143, name: 'Rheinbund-Aussenposten', population: 512, player_name: 'Bergvolk' },
+  { x: -112, y: 139, name: 'Oase 47', population: 0, player_name: '' },
+]
+
+function scanSocket(ws) {
+  if (!ws.url().includes('/ws/scout/scan')) return ws.close()
+  ws.onMessage(() => {
+    ws.send(JSON.stringify({ type: 'session_init', session_id: 'e2e-scan' }))
+    ws.send(JSON.stringify({ type: 'complete', tiles: SCAN_TILES, stats: { time_seconds: 1 } }))
+    ws.send(JSON.stringify({ type: 'operation_complete', status: 'completed' }))
+  })
+}
+
+async function openScoutLoop(page) {
+  await page.goto('/scout')
+  await page.getByRole('button', { name: 'Scan Map' }).click()
+  await expect(page.getByText('Loop mode')).toBeVisible()
+  await page.getByLabel('Loop mode').check()
+  // `getByText`, not `getByLabel`: the "Interval (s):" label carries no
+  // `htmlFor` and does not wrap its input, so it names nothing.
+  await expect(page.getByText('Interval (s):')).toBeVisible()
+}
+
 const SURFACES = [
   // The Snapshot stage carries three of the five at once: the village table,
   // the foreign-targets table under it, and the World & merchants bar.
-  ['Snapshot stage (village table + foreign targets + World & merchants)', openSnapshot],
-  ['Role templates panel', openRoleTemplates],
-  ['Allocate grid (Edit by resource)', openAllocateGrid],
+  {
+    name: 'Snapshot stage (village table + foreign targets + World & merchants)',
+    open: openSnapshot,
+  },
+  { name: 'Role templates panel', open: openRoleTemplates },
+  { name: 'Allocate grid (Edit by resource)', open: openAllocateGrid },
+  // Off the planner. `seed` is the planner's fixture, so these take the plain
+  // shell instead and answer their own page's calls.
+  {
+    name: 'Build queue (queue row + bulk bar)',
+    open: openBuildQueue,
+    routes: queueRoutes,
+    seed: seedShell,
+  },
+  {
+    name: 'Farm lists (filter bar + transfer bar)',
+    open: openFarmFilters,
+    routes: farmRoutes,
+    seed: seedShell,
+  },
+  { name: 'Auto-scout (loop mode)', open: openScoutLoop, seed: seedShell, socket: scanSocket },
 ]
 
 for (const viewport of VIEWPORTS) {
   test.describe(`every .input-field fits its content at ${viewport.width}px`, () => {
     test.use({ viewport })
 
-    test.beforeEach(async ({ page }) => {
-      await isolate(page)
-      await seed(page)
-    })
-
-    for (const [name, open] of SURFACES) {
-      test(name, async ({ page }) => {
-        await open(page)
+    for (const surface of SURFACES) {
+      test(surface.name, async ({ page }) => {
+        await isolate(page, surface.routes, surface.socket)
+        await (surface.seed ?? seed)(page)
+        await surface.open(page)
         const measured = await page.evaluate(MEASURE)
-        report(`${viewport.width}px ${name}`, measured)
-        assertFits(`${viewport.width}px ${name}`, measured, viewport)
+        report(`${viewport.width}px ${surface.name}`, measured)
+        assertFits(`${viewport.width}px ${surface.name}`, measured, viewport)
       })
     }
   })

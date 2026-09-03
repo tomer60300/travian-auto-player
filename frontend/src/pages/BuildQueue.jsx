@@ -176,13 +176,13 @@ function QueueItem({ item, onRemove, onChange, onMoveUp, onMoveDown, isFirst, is
           max={30}
           value={item.targetLevel}
           onChange={(e) => onChange({ targetLevel: Math.max(item.currentLevel + 1, Number(e.target.value) || item.currentLevel + 1) })}
-          className="input-field w-12 text-center text-xs py-0.5 px-1"
+          className="input-field w-20 text-center text-xs py-0.5 px-1"
           title="Target level"
         />
         <select
           value={item.priority}
           onChange={(e) => onChange({ priority: Number(e.target.value) })}
-          className="input-field w-12 text-center text-xs py-0.5 px-0.5"
+          className="input-field w-auto text-center text-xs py-0.5 px-0.5"
           title="Priority (1=highest)"
         >
           {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
@@ -281,7 +281,7 @@ function QueuePanel({ items, setItems }) {
           <select
             value={bulkPriority}
             onChange={(e) => setBulkPriority(Number(e.target.value))}
-            className="input-field text-xs w-14 py-0.5 px-1"
+            className="input-field text-xs w-auto py-0.5 px-1"
           >
             {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((p) => (
               <option key={p} value={p}>P{p}</option>

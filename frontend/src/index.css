@@ -328,9 +328,32 @@ h1, h2, h3 {
    `.row-focus` comment), and `.input-field`'s `font-size: 1rem` still beats
    `text-xs`. Anything relying on that is relying on an accident.
 
-   `e2e/inputWidths.pw.js` measures the consequence -- every `.input-field` in
-   the planner against its own content, at 375/768/1440 -- so a regression here
-   is caught as a number rather than as a screenshot nobody can read. */
+   `padding` and `font-size` were then asked for HERE, beside `width`, because
+   the 48 `.input-field` sites carrying a `py-*`/`px-*` or `text-xs` are asking
+   for exactly that. MEASURED and rejected, three times over:
+
+     * it breaks item 4 of the UI Definition of Done. Those controls drop from
+       47.3px tall to 22px at 768/1440 and 27.3px at 375, under the 44px
+       coarse-pointer minimum -- and frontend/CLAUDE.md already says these
+       padding half-steps are load-bearing for that maths. A fix that trades a
+       clipped glyph for an untappable control is not a fix.
+     * it does not even fix 375. The mobile `font-size: 16px !important` below
+       holds the glyphs at 16px while the padding shrinks, so the build queue's
+       Priority select stayed clipped (48px for 53px of options).
+     * the blast radius is 48 sites across 19 files against the 5 the defect
+       actually reached, and it leaves control heights inconsistent inside a
+       single view (Farm lists at 1440: 50px boxes beside 22px ones).
+
+   So the five clipped controls were widened at the site instead -- `w-12`/`w-14`
+   to `w-20`/`w-auto` in BuildQueue, `w-16` to `w-20` in FarmLists -- which is
+   the same one-step-up remedy the planner's own boxes took.
+
+   `e2e/inputWidths.pw.js` measures the consequence -- every `.input-field` on
+   the planner AND on the three pages off it that own dense controls, against
+   its own content, at 375/768/1440 -- so a regression here is caught as a
+   number rather than as a screenshot nobody can read. It is app-wide because
+   this rule is: the first version of this fix was verified on the planner
+   alone and clipped five controls on two other pages. */
 @layer components {
   .input-field { width: 100%; }
 }

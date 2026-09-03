@@ -315,7 +315,17 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
   const startedHereRef = useRef(false)
   const lastScanIdRef = useRef(null)
 
-  useEffect(() => { return () => { mountedRef.current = false } }, [])
+  // Set on mount as well as cleared on unmount. React re-runs an effect's
+  // cleanup and body once on mount in development (StrictMode), and a
+  // cleanup-only version left this ref stuck at `false` from the first
+  // teardown onwards -- so `handleScanMessage`'s `if (!mountedRef.current)`
+  // guard dropped EVERY scan frame and the page sat on "Scanning..." forever
+  // against the dev server. `useResumableOperation` already sets its own
+  // mounted ref on mount for this reason.
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   // Persist to localStorage on change
   useEffect(() => { localStorage.setItem(LS_KEY_ALLIANCES, JSON.stringify(excludeAlliances)) }, [excludeAlliances])
@@ -829,7 +839,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             </div>
             <div className="mb-3">
               <label className="field-label mb-1">Minimum % per resource</label>
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {RESOURCES.map(({ id, label }) => (
                   <label key={id} className="flex flex-col items-center gap-1">
                     <span className="text-xs text-secondary">{label}</span>

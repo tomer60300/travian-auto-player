@@ -3512,11 +3512,17 @@ export default function ResourcePlanner() {
                             className="row-focus touch-target border-t-default hover:bg-white/5 transition-colors"
                           >
                             <td className="py-1 px-2 sticky-col row-focus-edge">
+                              {/* w-56, not w-36: a foreign target is named after
+                                  the ally village it belongs to, and 144px held
+                                  22 characters of "Rheinbund-Aussenposten" in
+                                  214px of glyphs. The width spec measured this
+                                  field against its PLACEHOLDER, so it reported
+                                  nothing at all. */}
                               <input
                                 type="text"
                                 aria-label={`Foreign target ${i + 1} name`}
                                 placeholder="Ally name"
-                                className="input-field w-36 text-xs py-0.5"
+                                className="input-field w-56 text-xs py-0.5"
                                 value={t.name}
                                 onChange={(e) => patch('name', e.target.value)}
                               />
