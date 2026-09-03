@@ -65,6 +65,16 @@ class NightVillage:
     net of upkeep, so subtracting a spend would count the same troops twice.
     """
 
+    max_busy_merchants: int | None = None
+    """The operator's ceiling on merchants underway or returning at once.
+
+    It belongs here for the same reason `production` is netted here: how much a
+    village can SHED overnight is its fleet times what a merchant carries times
+    the trips it can make, and under a cap the fleet that matters is the cap. A
+    derivation that ignored it would hand a capped village a retention it has no
+    way to honour -- which is the defect a declared spend had on this path
+    before, seen from the other side. ``None`` is no ceiling declared."""
+
     def capacity_for(self, resource: Resource) -> int:
         return self.granary_capacity if resource is Resource.CROP else self.warehouse_capacity
 
@@ -162,6 +172,12 @@ def derive_night_profile(
             1 + trade_office_bonus_per_level * v.trade_office_level
         )
         fleet = max(0, v.merchants_total - merchant_reserve)
+        # The operator's cap, where there is one, is what may actually be in the
+        # air -- so it is the fleet this village ships the night with. The
+        # tighter of the two, the same rule `VillageState.merchant_budget`
+        # applies on the plan side: a cap above the fleet is not extra merchants.
+        if v.max_busy_merchants is not None:
+            fleet = min(fleet, v.max_busy_merchants)
         others = [_hours(v, o, speed_fields_per_hour, map_span) for o in villages if o is not v]
         if not others:
             return 0.0

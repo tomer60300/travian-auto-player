@@ -453,8 +453,11 @@ def craft_plan(
     return DistributionPlan(
         rows=rows,
         merchants_committed=dict(routing.merchants_committed),
+        # The budget the plan was actually built to, so `free_merchants` and the
+        # sheet's spare column cannot report room the optimizer was forbidden to
+        # use. Where the operator has capped a village this is that cap.
         spare_merchants={
-            vid: village.spare_merchants(config.merchant_reserve)
+            vid: village.merchant_budget(config.merchant_reserve)
             for vid, village in villages.items()
         },
         resource_plans=resource_plans,

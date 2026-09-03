@@ -164,12 +164,41 @@ class VillageState:
     need not restate what its role already says, and leaves the crop sign to
     decide where there is not."""
 
+    max_busy_merchants: int | None = None
+    """The most merchants this village may have underway or returning at once.
+
+    The operator's own ceiling (profile section 5: "maximum 8 busy at 02",
+    counting the relay leg), which nothing in the game states. It is measured in
+    the unit the plan already commits merchants in -- section 8's
+    ``merchants_per_send x sets_in_flight``, which is
+    :attr:`Route.merchants_committed` -- so it needs no arithmetic of its own,
+    only somewhere to be said.
+
+    A CAP, not a reserve, and the two differ wherever the fleet is not a full
+    20: a village with 19 merchants capped at 8 busy is not the same village as
+    one holding 12 back. ``None`` is every account that has not said, and plans
+    exactly as before."""
+
     @property
     def coords(self) -> tuple[int, int]:
         return (self.x, self.y)
 
     def spare_merchants(self, reserve: int = DEFAULT_MERCHANT_RESERVE) -> int:
+        """What the FLEET can field: the merchants it has, less the reserve."""
         return max(0, self.merchant_count - reserve)
+
+    def merchant_budget(self, reserve: int = DEFAULT_MERCHANT_RESERVE) -> int:
+        """What the PLAN may commit here: the fleet, or the operator's cap.
+
+        The tighter of the two, always. A cap above the fleet is not a promise
+        of merchants the village does not have, and the reserve keeps applying
+        underneath one -- so a 20-merchant village capped at 20 still plans on
+        18.
+        """
+        spare = self.spare_merchants(reserve)
+        if self.max_busy_merchants is None:
+            return spare
+        return min(spare, self.max_busy_merchants)
 
 
 @dataclass(frozen=True)
@@ -1736,7 +1765,12 @@ def build_plan(
     # idle merchants on speed deliberately, so the end-to-end guarantee is
     # per-phase: excess never rises anywhere; the merchant total is minimal here
     # and may rise later, strictly within per-village budgets (§8.3, §14).
-    budgets = {vid: villages[vid].spare_merchants(merchant_reserve) for vid in villages}
+    # The operator's per-village cap is folded in HERE, once, so every reader of
+    # the budget -- the improvement search, the latency pass, the crowding
+    # report, the over-budget record -- is measuring against the same ceiling.
+    # A cap read in some places and not others is a plan that reports itself
+    # inside a budget it broke.
+    budgets = {vid: villages[vid].merchant_budget(merchant_reserve) for vid in villages}
     # The HELD-BACK count is rounded half-up, not the cap truncated. Truncating
     # the cap quietly did the opposite of what this comment used to claim: a
     # budget-1 village got a soft cap of 0 (its every merchant billed as
@@ -1890,22 +1924,28 @@ def build_plan(
     for route in routes:
         routes_by_origin.setdefault(route.origin, []).append(route)
 
+    # Read from `budgets`, not recomputed: the ceiling the search was held to is
+    # the ceiling being reported against, and the Trade Office advice is costed
+    # against the same one. Advising an upgrade that fits the FLEET while the
+    # plan is held to the operator's cap recommends a level that still does not
+    # fit -- and a cap is fixed by carrying more per merchant, so the advice is
+    # genuinely useful here rather than merely well-formed.
     over_budget = tuple(
         OverBudget(
             village_id=vid,
             committed=used,
-            available=villages[vid].spare_merchants(merchant_reserve),
+            available=budgets[vid],
             trade_office_levels_needed=_trade_office_levels_needed(
                 villages[vid],
                 routes_by_origin.get(vid, []),
                 merchant_model,
-                villages[vid].spare_merchants(merchant_reserve),
+                budgets[vid],
                 cycles,
                 max_cycle_by_destination,
             ),
         )
         for vid, used in sorted(committed.items())
-        if used > villages[vid].spare_merchants(merchant_reserve)
+        if used > budgets[vid]
     )
 
     findings.extend(

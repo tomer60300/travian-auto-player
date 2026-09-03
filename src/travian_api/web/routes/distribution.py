@@ -359,6 +359,34 @@ class VillageConfig(BaseModel):
             "breaches the merchant budget invisibly."
         ),
     )
+    max_busy_merchants: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "The most merchants this village may have underway or returning at "
+            "any instant (profile section 5: 'maximum 8 busy at 02', with the "
+            "relay leg counting inside the 8). Operator-owned: nothing in the "
+            "game states a ceiling. "
+            "It is measured in the unit the plan already commits merchants in — "
+            "section 8's merchants-per-send × sets-in-flight — so a route eight "
+            "fields away on a 1h cycle with a 2h round trip bills 2 sets, and "
+            "both sets count. "
+            "A CAP, not a reserve. `merchant_reserve` holds N merchants back at "
+            "EVERY village, so reaching 8 busy at one village that way costs "
+            "every other village the same 12 — and the two are not even the same "
+            "number off a full fleet: 19 merchants less a reserve of 12 is 7, "
+            "where the cap says 8. "
+            "The fleet still applies underneath: the budget is the tighter of "
+            "this and merchants_total − merchant_reserve, so a cap at or above "
+            "the fleet changes nothing and is not a promise of merchants the "
+            "village does not have. A cap ABOVE `merchants_total` is refused "
+            "rather than clamped — a ceiling the village cannot reach is a "
+            "data-entry error, and clamping it silently would leave the "
+            "operator's figure and the plan describing different accounts. "
+            "0 grounds the village, which is an answer. None means no ceiling "
+            "declared, which plans exactly as before."
+        ),
+    )
     stock_floor_fraction: float | None = Field(
         default=None,
         ge=0.0,
@@ -592,6 +620,62 @@ class PlanRequest(BaseModel):
             raise ValueError("map_span must be odd: a world is centred on 0|0")
         return value
 
+    @model_validator(mode="after")
+    def _merchant_caps_are_reachable(self) -> "PlanRequest":
+        """A merchant ceiling above the village's own fleet is a typo.
+
+        Cross-checked against the snapshot because the bound is per village and
+        `VillageConfig` cannot see it. Refused rather than clamped: clamped, "02
+        may run 30 busy" is accepted and planned as 18, so the operator's file
+        and the plan describe different accounts with nothing saying which is
+        being obeyed. Naming the village is the whole of the message's value --
+        the figure is one cell in a 26-row table.
+
+        Here rather than in a handler so ONE rule covers all four planning paths
+        (`/plan`, `/day-check`, `/execute`, `/night-profile` all carry this
+        model), the same reason the crop spend and the template's remainder are
+        refused at the schema. Repeated per handler it would be forgotten by
+        one, which is exactly how `/night-profile` came to ignore a declared
+        spend.
+
+        Skipped on an empty snapshot: there is nothing to check against, and the
+        handlers answer that with "fetch account state first", which is the more
+        useful of the two things to say.
+        """
+        if not self.snapshot:
+            return self
+        fleets = {v.village_id: v.merchants_total for v in self.snapshot}
+        names = {v.village_id: v.name for v in self.snapshot if v.name}
+        unreachable: list[str] = []
+        unknown: list[int] = []
+        for entry in self.config:
+            if entry.max_busy_merchants is None:
+                continue
+            if entry.village_id not in fleets:
+                unknown.append(entry.village_id)
+                continue
+            fleet = fleets[entry.village_id]
+            if entry.max_busy_merchants > fleet:
+                unreachable.append(
+                    f"{village_label(entry.village_id, names)} is capped at "
+                    f"{entry.max_busy_merchants} busy merchants but fields {fleet}"
+                )
+        if unknown:
+            raise ValueError(
+                "a merchant cap was set for "
+                + ", ".join(f"village {vid}" for vid in sorted(unknown))
+                + ", which the snapshot does not contain. Clear the cap, or fetch "
+                "fresh state if the village was settled after the snapshot."
+            )
+        if unreachable:
+            raise ValueError(
+                "; ".join(unreachable)
+                + ". A ceiling the village cannot reach plans as its fleet, so the "
+                "figure on screen would not be the one in force -- correct the cap, "
+                "or fetch fresh state if merchants have been trained since."
+            )
+        return self
+
     min_send_fill: float = Field(
         default=MIN_SEND_FILL,
         ge=0,
@@ -715,7 +799,15 @@ class BudgetLegResponse(BaseModel):
 class BudgetResponse(BaseModel):
     village_id: int
     committed: int
-    spare: int
+    spare: int = Field(
+        description=(
+            "The budget this plan was built to: `merchants_total − "
+            "merchant_reserve`, or the village's own `max_busy_merchants` where "
+            "that is lower. The tighter of the two, because reporting room the "
+            "optimizer was forbidden to use would make `free` a number nothing "
+            "can be spent on."
+        )
+    )
     free: int
     over_budget: bool
     trade_office_levels_needed: int | None = None
@@ -1789,21 +1881,41 @@ def _explain_over_budget(
     trade_office_level: int,
     capacity: int,
     upgrade: int | None,
+    *,
+    max_busy: int | None,
+    fleet_spare: int,
 ) -> str:
     """Say why the merchants ran out, in terms that suggest what to do.
 
-    'over by 2' is true and useless. A village can overrun its merchants for two
-    quite different reasons and the fix is different for each: when the trip is
+    'over by 2' is true and useless. A village can overrun its merchants for
+    three quite different reasons and the fix differs for each: when the trip is
     long, merchants are tied up in transit and only a shorter haul or a smaller
     load helps; when the Trade Office is low, each merchant carries little and
-    the upgrade is the answer. So this names whichever dominates rather than
+    the upgrade is the answer; and when the OPERATOR capped the village, the
+    ceiling is theirs to move. So this names whichever dominates rather than
     stating the arithmetic back.
+
+    That third case is why ``max_busy`` and ``fleet_spare`` are both here.
+    "02 needs 16 merchants but has 8" reads as a fact about the fleet, and the
+    fleet has 20 — so the operator goes looking at the Trade Office and the map
+    for a number they typed themselves. The decision of which is binding is
+    made here rather than at the call site, so there is one place the wording
+    can be wrong.
     """
     if not legs:
         return f"{label} is over its merchant budget, but no route explains it — this is a bug."
 
     worst = legs[0]
-    parts = [f"{label} needs {committed} merchants but has {spare}."]
+    # `spare` is already the tighter of the two (see `merchant_budget`), so the
+    # cap binds exactly when it is not looser than what the fleet could field.
+    capped = max_busy is not None and max_busy <= fleet_spare
+    if capped:
+        parts = [
+            f"{label} needs {committed} merchants but you capped it at {max_busy} busy "
+            f"at once; its fleet could otherwise spare {fleet_spare}."
+        ]
+    else:
+        parts = [f"{label} needs {committed} merchants but has {spare}."]
 
     # The two factors multiply, so explain both rather than declaring a winner:
     # merchants = (cargo / capacity, rounded up) x (round trip / cycle, rounded
@@ -1832,6 +1944,12 @@ def _explain_over_budget(
             "not short of carrying capacity. Ship less from here, send it somewhere "
             "nearer, or consume the surplus locally."
         )
+    # Said last, and only where the ceiling is the operator's: it is the one fix
+    # that needs no Trade Office, no re-routing and no game action at all, so
+    # leaving it unsaid sends them to the expensive options first. The figure is
+    # what this plan actually wants, not a round number.
+    if capped:
+        parts.append(f"Raising {label}'s cap to {committed} would fit this plan as it stands.")
     return " ".join(parts)
 
 
@@ -1995,6 +2113,9 @@ async def post_night_profile(
             detail="No villages in the snapshot; fetch account state first.",
         )
     trade_office = {c.village_id: c.trade_office_level for c in body.config}
+    max_busy = {
+        c.village_id: c.max_busy_merchants for c in body.config if c.max_busy_merchants is not None
+    }
 
     # An unreadable crop balance must stop the derivation, not pass as zero.
     # `crop_per_hour or 0.0` made a village whose balance could not be read look
@@ -2077,6 +2198,12 @@ async def post_night_profile(
             y=v.y,
             merchants_total=v.merchants_total,
             trade_office_level=trade_office.get(v.village_id, 0),
+            # Section 5's ceiling on merchants in the air. The night sizes each
+            # village's export by what its fleet can actually carry in the hours
+            # it has, so a capped village must be sized by the cap or it is
+            # handed a retention it cannot honour -- the same defect a declared
+            # spend had on this path, from the other side.
+            max_busy_merchants=max_busy.get(v.village_id),
             warehouse_capacity=v.warehouse_capacity,
             granary_capacity=v.granary_capacity,
             # Net of what the village spends, MATERIALS only. A village that
@@ -2626,6 +2753,12 @@ async def _plan_account(
     # Warnings are read by a person: name villages the way they do, never by id.
     names = {v.village_id: v.name for v in body.snapshot if v.name}
     trade_office = {c.village_id: c.trade_office_level for c in body.config}
+    # Read straight off the config, the way `trade_office` is: the cap is owned
+    # per village and no role template carries one, so there is nothing to
+    # merge. The schema has already refused a cap above the village's fleet.
+    max_busy = {
+        c.village_id: c.max_busy_merchants for c in body.config if c.max_busy_merchants is not None
+    }
     # Checked before the roles are resolved, so an empty snapshot is reported as
     # the empty snapshot it is rather than as a role naming a village that is
     # not in it. Every snapshot entry becomes a village state below, so this is
@@ -2657,6 +2790,10 @@ async def _plan_account(
             # a village with no role is the whole of today's behaviour.
             role=roles.of_village.get(v.village_id),
             may_relay=roles.may_relay.get(v.village_id),
+            # Section 5's own ceiling. Carried on the village so every reader
+            # of the merchant budget takes it from the same place, the way the
+            # Trade Office level and the relay permission travel.
+            max_busy_merchants=max_busy.get(v.village_id),
         )
         for v in body.snapshot
     }
@@ -3278,6 +3415,8 @@ async def post_plan(
                         trade_office.get(vid, 0),
                         config.merchant_model.capacity(trade_office.get(vid, 0)),
                         upgrades.get(vid),
+                        max_busy=villages[vid].max_busy_merchants,
+                        fleet_spare=villages[vid].spare_merchants(config.merchant_reserve),
                     )
                     if vid in over
                     else None
