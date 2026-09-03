@@ -185,6 +185,35 @@ def _relay_tier_account():
     return villages, plans
 
 
+def _tier_account_with_wood_to_spare(relay_for):
+    """:func:`_relay_tier_account`'s shape with the leftover left unclaimed.
+
+    Village 2 holds no lumber target of its own here, so nothing soaks up 1's
+    surplus and the tier can over-collect if its arithmetic lets it. That is the
+    regime a duplicate downstream shows up in: with the REMAINDER hub of
+    ``_relay_tier_account`` the surplus runs out at exactly the tier's honest
+    size, which masks the over-collection and leaves only whichever downstream
+    the duplicate stole from short.
+    """
+    villages, _ = _relay_tier_account()
+    villages = {
+        vid: (replace(v, relay_for=relay_for) if v.relay_for else v) for vid, v in villages.items()
+    }
+    plans = {
+        Resource.LUMBER: resolve_resource(
+            Resource.LUMBER,
+            {1: 20_000.0, 2: 0.0, 3: 0.0, 4: 0.0},
+            {
+                1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                2: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                3: Allocation(AllocationMode.ABSOLUTE, 5_000.0),
+                4: Allocation(AllocationMode.ABSOLUTE, 5_000.0),
+            },
+        )
+    }
+    return villages, plans
+
+
 def _material_relay_violations(plan, villages) -> list[str]:
     """Every breach of the AMENDED no-waterfall rule for lumber, clay and iron.
 
@@ -341,6 +370,85 @@ class TestStructuralInvariants:
         assert violations, "the amended rule no longer notices an undeclared material hub"
         assert "[2]" in violations[0]
         assert "lumber" in violations[0]
+
+    @pytest.mark.parametrize("relay_for", [(3, 3, 4), (4, 4, 3)], ids=["3-twice", "4-twice"])
+    def test_a_downstream_named_twice_is_still_sized_once(self, relay_for):
+        """The tier's own arithmetic, belt to the schema's braces.
+
+        ``/plan`` refuses a duplicate outright and all four request paths share
+        that refusal, so this is the layer underneath: ``_relay_tier_flows``
+        sizes the collecting leg from the sum of its downstreams' unmet gaps and
+        forwards each one ``min(gap, collected)``, never decrementing the gap.
+        A village named twice therefore contributed its gap twice AND was
+        forwarded twice.
+
+        Measured before the fix on this fixture, with ``relay_for=(3, 3, 4)``:
+        the collecting leg came in at 15,000/h rather than 10,000/h and village
+        3 was handed 10,000/h against a 5,000/h target. Both orderings are run
+        because the forward loop walks its downstreams in need-then-coordinate
+        order, and which one the duplicate steals from depends on that order.
+        """
+        villages, plans = _tier_account_with_wood_to_spare(relay_for)
+
+        plan = build_plan(
+            villages,
+            plans,
+            GEOMETRY,
+            MODEL,
+            excluded_origins_by_destination=_TIER_EXCLUSIONS,
+        )
+
+        landed: dict[int, float] = {}
+        for route in plan.routes:
+            rate = route.cargo_per_hour.get(Resource.LUMBER, 0.0)
+            if rate:
+                landed[route.destination] = landed.get(route.destination, 0.0) + rate
+        assert landed[3] == pytest.approx(5_000.0), (
+            f"village 3 landed {landed[3]:,.0f}/h against its 5,000/h target"
+        )
+        assert landed[4] == pytest.approx(5_000.0), (
+            f"village 4 landed {landed[4]:,.0f}/h against its 5,000/h target"
+        )
+        assert landed[2] == pytest.approx(10_000.0), (
+            f"the collecting leg carries {landed[2]:,.0f}/h for a 10,000/h tier"
+        )
+        assert plan.shortfalls == ()
+
+    @pytest.mark.parametrize("relay_for", [(3, 4), (3, 3, 4), (4, 4, 3)])
+    def test_a_relay_forwards_exactly_what_it_collects(self, relay_for):
+        """Conservation per resource at the hub, on the declared tier itself.
+
+        The function's own rule is "a relay keeps nothing: anything it banked
+        would be an allocation nobody gave it". Asserted here rather than left
+        to the docstring, because the fix that makes a duplicate harmless is two
+        halves and the first is not sufficient: decrementing the unmet gap
+        without also sizing the collecting leg from what can be forwarded leaves
+        the relay collecting 15,000/h, forwarding 10,000/h and banking 5,000/h
+        of an allocation nobody gave it. The hub holds no lumber target of its
+        own here, so equality is the whole claim.
+        """
+        villages, plans = _tier_account_with_wood_to_spare(relay_for)
+
+        plan = build_plan(
+            villages,
+            plans,
+            GEOMETRY,
+            MODEL,
+            excluded_origins_by_destination=_TIER_EXCLUSIONS,
+        )
+
+        for resource in MATERIALS:
+            for hub in (vid for vid, v in villages.items() if v.relay_for):
+                inbound = sum(
+                    r.cargo_per_hour.get(resource, 0.0) for r in plan.routes if r.destination == hub
+                )
+                outbound = sum(
+                    r.cargo_per_hour.get(resource, 0.0) for r in plan.routes if r.origin == hub
+                )
+                assert inbound == pytest.approx(outbound), (
+                    f"relay {hub} collects {inbound:,.0f}/h of {resource.value} and forwards "
+                    f"{outbound:,.0f}/h -- it banks the difference"
+                )
 
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
     def test_merchant_arithmetic_matches_the_cost_model(self, village_count):

@@ -771,6 +771,16 @@ def _relay_tier_flows(
     open question -- which relay serves which defensive village -- is answered
     by the operator's own ``relay_for`` lists.
 
+    **Each gap is sized ONCE.** A village named twice in one list, or claimed by
+    two different relays, is still one village with one gap: ``unmet`` is
+    decremented as the forward loop runs and the downstream set is a set. Both
+    are refused at the schema too (see
+    ``_relay_tier_is_one_hop_of_non_role_villages``), so this is the layer that
+    keeps the arithmetic honest rather than the layer that tells the operator.
+    Without it the collecting leg was drawn from an inflated total, the repeated
+    village was shipped its whole target once per mention, and the downstream it
+    displaced was reported unreachable with the whitelist as the reason.
+
     **The source is chosen the way every other origin is.** A relay becomes an
     ordinary receiver of the aggregated demand and the greedy rule picks its
     nearest sender with surplus left, honouring ``ship_only_to`` /
@@ -824,8 +834,20 @@ def _relay_tier_flows(
         # Largest gap first, then coordinates, exactly as the direct pass orders
         # its receivers -- so a relay that cannot collect enough serves the
         # village in most need, and the choice does not depend on village ids.
+        #
+        # A SET, and filtered on what is still unmet rather than on membership:
+        # both halves of "sized once" live here. A village named twice in one
+        # list is one downstream, and `unmet` is decremented as the forward loop
+        # runs, so a village an earlier relay already covered no longer asks for
+        # anything. Without them `wanted` is inflated by every repeat, the
+        # collecting leg is drawn that much bigger, and the forward loop hands
+        # the same village its whole target once per mention.
         downstream = sorted(
-            (vid for vid in relay_for[relay] if vid in unmet and vid not in relays),
+            {
+                vid
+                for vid in relay_for[relay]
+                if unmet.get(vid, 0.0) > EPSILON and vid not in relays
+            },
             key=lambda vid: (-unmet[vid], villages[vid].coords),
         )
         wanted = sum(unmet[vid] for vid in downstream)
@@ -863,7 +885,21 @@ def _relay_tier_flows(
             forwarded = min(unmet[vid], collected)
             relay_flows[(relay, vid)] = relay_flows.get((relay, vid), 0.0) + forwarded
             collected -= forwarded
+            unmet[vid] -= forwarded
             covered[vid] = covered.get(vid, 0.0) + forwarded
+        # The "keeps nothing" rule, enforced rather than described. `wanted` is
+        # the sum of exactly these downstreams' remaining gaps and the loop
+        # above hands each one `min(gap, collected)`, so everything collected
+        # goes out again -- and if some later change breaks that agreement the
+        # relay would quietly accumulate an allocation nobody gave it, which is
+        # invisible in the route list and shows up days later as a full
+        # warehouse. Cheap: once per relay per resource.
+        if collected > EPSILON:
+            raise AssertionError(
+                f"relay {relay} collected {collected:,.0f}/h of {plan.resource.value} more "
+                f"than its downstreams can take; the tier's collecting leg is sized from "
+                f"gaps it cannot forward"
+            )
 
     if not covered:
         return {}, list(shortfalls)

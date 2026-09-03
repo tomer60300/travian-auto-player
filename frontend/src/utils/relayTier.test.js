@@ -99,6 +99,34 @@ describe('relayTierProblems', () => {
     expect(problems[0]).toContain('One hop only')
   })
 
+  it('names a downstream typed twice in one list', () => {
+    // A duplicate is one downstream. The tier draws its collecting leg from the
+    // sum of the gaps it forwards, so a village named twice is sized twice --
+    // measured on the backend fixture at 16,744/h against an 8,372/h target,
+    // with the downstream it displaced reported unreachable.
+    const problems = relayTierProblems({ 18: [11, 11, 17] }, VILLAGES, {})
+
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toContain('18')
+    expect(problems[0]).toContain('11')
+    expect(problems[0]).toContain('once')
+  })
+
+  it('names BOTH relays when two of them claim the same downstream', () => {
+    // The same over-ship from the other direction, and neither list is wrong on
+    // its own -- so neither relay identifies which one to edit.
+    const problems = relayTierProblems({ 18: [11], 14: [11] }, VILLAGES, {})
+
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toContain('11')
+    expect(problems[0]).toContain('18')
+    expect(problems[0]).toContain('14')
+  })
+
+  it('says nothing when two relays serve different downstreams', () => {
+    expect(relayTierProblems({ 18: [11, 17], 14: [19] }, VILLAGES, {})).toEqual([])
+  })
+
   it('does not treat a half-typed empty list as a problem', () => {
     // The picker starts one that way between opening and the first tick.
     // `buildPlanPayload` drops it and the file parser refuses it, which are the
@@ -141,6 +169,16 @@ describe('relayTierProblemsByVillage', () => {
 
   it('is empty for a tier with nothing wrong with it', () => {
     expect(relayTierProblemsByVillage(TIER, VILLAGES, {})).toEqual({})
+  })
+
+  it('keys a downstream claimed twice to ONE relay, and names both', () => {
+    // Either list can be edited, so the message names both relays -- but it is
+    // keyed once, or the summary line beside the table would count one problem
+    // as two.
+    const byVillage = relayTierProblemsByVillage({ 18: [11], 14: [11] }, VILLAGES, {})
+
+    expect(Object.keys(byVillage)).toEqual(['14'])
+    expect(byVillage[14][0]).toContain('18')
   })
 })
 

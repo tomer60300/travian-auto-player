@@ -765,7 +765,7 @@ class PlanRequest(BaseModel):
     def _relay_tier_is_one_hop_of_non_role_villages(self) -> "PlanRequest":
         """Profile section 5's tier, refused wherever it cannot mean anything.
 
-        Four ways a ``relay_for`` list is not a declaration, and each is refused
+        Six ways a ``relay_for`` list is not a declaration, and each is refused
         with the villages named rather than dropped. A relay silently ignored is
         the worst of the available outcomes: the operator reads a tier on their
         screen while the plan reports the villages beyond it as unreachable, and
@@ -786,6 +786,25 @@ class PlanRequest(BaseModel):
            makes in ``_crop_shape_ok`` and for the same reason -- a chain puts
            one hub's forward leg behind another's, and the beat's
            collect-then-ship ordering cannot satisfy both.
+        5. **A downstream named twice in one list.** A duplicate is one
+           downstream, and the tier sizes itself from the sum of its
+           downstreams' gaps: named twice, a village contributes its gap twice,
+           the collecting leg is drawn that much bigger, and the forward loop
+           hands it its whole target once for every mention. Measured on the
+           relay-tier fixture: 16,744/h landed against an 8,372/h target while
+           the downstream the duplicate displaced was reported unreachable --
+           and reported it with the WHITELIST as the reason, so nothing on the
+           sheet pointed at the duplicate.
+        6. **One downstream claimed by two relays.** The same over-ship from the
+           other direction, and BOTH relays are named for the same reason the
+           second hop names both: neither list is wrong on its own, so neither
+           identifies which one to edit.
+
+        Rules 5 and 6 are refused here as well as conserved in the solver
+        (``_relay_tier_flows`` decrements each gap as it forwards). Belt and
+        braces, and the two do different jobs: the solver keeps a duplicate from
+        destroying resources, and this keeps the operator from believing a tier
+        they typed twice is a tier twice the size.
 
         Here rather than in a handler so ONE rule covers all four planning paths,
         exactly as the merchant cap above and the crop spend do.
@@ -842,6 +861,33 @@ class PlanRequest(BaseModel):
                     f"{label} is declared as the relay for "
                     + ", ".join(f"{village_label(vid, names)}" for vid in second_hop)
                     + ", which is itself a declared relay -- a relay may not feed a relay"
+                )
+            twice = sorted({vid for vid in declared[relay] if declared[relay].count(vid) > 1})
+            if twice:
+                problems.append(
+                    f"{label} names "
+                    + ", ".join(village_label(vid, names) for vid in twice)
+                    + " more than once in its relay_for. A duplicate is one downstream, and "
+                    "the tier draws its collecting leg from the sum of the gaps it forwards "
+                    "-- so the village would be shipped its whole target once per mention "
+                    "and another downstream would go without"
+                )
+        # Across the lists rather than inside one, so this runs after them: two
+        # relays each naming the same village is the same over-ship, and neither
+        # list is wrong on its own.
+        claimed: dict[int, list[int]] = {}
+        for relay in sorted(declared):
+            for vid in dict.fromkeys(declared[relay]):
+                if vid != relay:
+                    claimed.setdefault(vid, []).append(relay)
+        for vid, owners in sorted(claimed.items()):
+            if len(owners) > 1:
+                problems.append(
+                    f"{village_label(vid, names)} is declared as a downstream of "
+                    + " and ".join(village_label(owner, names) for owner in owners)
+                    + ", and each relay sizes its legs from the whole of that village's gap "
+                    "-- so it would be shipped its target twice while their other "
+                    "downstreams go without. One relay per downstream"
                 )
         if problems:
             raise ValueError(

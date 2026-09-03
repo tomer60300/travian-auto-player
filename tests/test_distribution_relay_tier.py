@@ -42,7 +42,13 @@ from pydantic import ValidationError
 from travian_api.services.distribution.allocation import Resource
 from travian_api.services.distribution.findings import Category, Severity
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY
-from travian_api.web.routes.distribution import PlanRequest, post_plan
+from travian_api.web.routes.distribution import (
+    DayCheckRequest,
+    ExecuteRequest,
+    NightProfileRequest,
+    PlanRequest,
+    post_plan,
+)
 
 USER = SimpleNamespace(id=1)
 
@@ -293,6 +299,68 @@ class TestTheFieldIsRefusedWhenItCannotMeanAnything:
         detail = str(exc.value)
         assert "18" in detail
         assert "14" in detail
+
+    def test_a_downstream_named_twice_in_one_list_is_refused(self):
+        """A duplicate is one downstream, and sizing it twice ships it twice.
+
+        Measured before this refusal existed, on this fixture: ``{18: [11, 11]}``
+        built ``02 -> 18`` at 16,744/h and ``18 -> 11`` at 16,744/h against
+        11's 8,372/h target, 17 got nothing, and the shortfall it was handed
+        blamed 02's ``ship_only_to``.
+        """
+        with pytest.raises(ValidationError) as exc:
+            _request(relays={RELAY_A: [D1, D1], RELAY_B: [D3]})
+
+        detail = str(exc.value)
+        assert "18" in detail
+        assert "11" in detail
+
+    def test_two_relays_may_not_claim_the_same_downstream(self):
+        """The other half of it, and the refusal names the village and BOTH relays.
+
+        Neither list is wrong on its own, so neither relay identifies the fix --
+        exactly the reason the no-second-hop refusal names both villages too.
+        Measured before this existed: 11 landed 16,744/h against an 8,372/h
+        target while 17 and 19 were reported unreachable.
+        """
+        with pytest.raises(ValidationError) as exc:
+            _request(relays={RELAY_A: [D1], RELAY_B: [D1]})
+
+        detail = str(exc.value)
+        assert "11" in detail
+        assert "18" in detail
+        assert "14" in detail
+
+    @pytest.mark.parametrize(
+        "request_type", [PlanRequest, ExecuteRequest, DayCheckRequest, NightProfileRequest]
+    )
+    @pytest.mark.parametrize(
+        "relays",
+        [{RELAY_A: [D1, D1], RELAY_B: [D3]}, {RELAY_A: [D1], RELAY_B: [D1]}],
+        ids=["named-twice", "two-relays-one-downstream"],
+    )
+    def test_both_duplicate_rules_hold_on_all_four_planning_paths(self, request_type, relays):
+        """One validator, four endpoints -- asserted rather than assumed.
+
+        ``/night-profile`` is in this list because it is the endpoint that once
+        ignored ``consumption_per_hour`` altogether while every other path
+        honoured it. A rule that holds on ``/plan`` alone is a rule the operator
+        can walk around by pressing a different button.
+        """
+        payload = _payload(relays=relays)
+        if request_type is DayCheckRequest:
+            # A day-check carries its allocations per segment and refuses them at
+            # the top level, so the payload has to move them across -- otherwise
+            # this case passes on THAT refusal and says nothing about relay_for.
+            payload["segments"] = [
+                {"name": "day", "window": (0, 1439), "allocations": payload.pop("allocations")}
+            ]
+        with pytest.raises(ValidationError) as exc:
+            request_type.model_validate(payload)
+
+        assert "relay" in str(exc.value), (
+            f"{request_type.__name__} refused the payload for some other reason: {exc.value}"
+        )
 
 
 class TestUnsetIsTodaysBehaviour:

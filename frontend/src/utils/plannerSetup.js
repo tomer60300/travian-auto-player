@@ -262,18 +262,19 @@ export const ROLES_THAT_MAY_NOT_RELAY = Object.freeze(
 
 /** Everything wrong with a declared relay tier, BY THE RELAY that has to change.
  *
- * The same four refusals the backend makes at the schema, computed from live
+ * The same six refusals the backend makes at the schema, computed from live
  * state so the operator reads them on the cells they typed instead of on their
  * next plan -- exactly what `unreachableCaps` above does for the merchant cap,
  * and for the same reason: a 422 arriving from a plan call names a village in a
  * 26-row table and nothing on screen points at it.
  *
- * Keyed by the relay rather than returned flat, because the relay's own list is
- * the cell that has to change in every one of the four cases -- including the
+ * Keyed by the relay rather than returned flat, because a relay's own list is
+ * the cell that has to change in every one of the six cases -- including the
  * chain, whose message names two villages but whose fix is to move a downstream
- * off one of their lists. A flat list would have to be attributed back to a cell
- * by matching its prose, which is the kind of thing that works until someone
- * rewords a sentence.
+ * off one of their lists, and the downstream two relays both claim, where
+ * either list will do and the message names both. A flat list would have to be
+ * attributed back to a cell by matching its prose, which is the kind of thing
+ * that works until someone rewords a sentence.
  *
  * `relayFor` is `{ [village_id]: number[] }`, `villageRoles` is
  * `{ [village_id]: role }`. A village with an EMPTY list is deliberately not a
@@ -322,9 +323,43 @@ export function relayTierProblemsByVillage(relayFor, villages, villageRoles) {
           `relay. One hop only — a relay may not feed a relay.`
       )
     }
+    const twice = [...new Set(downstream.filter((vid) => countOf(downstream, vid) > 1))]
+    if (twice.length) {
+      problems.push(
+        `${named(relay)} names ${twice.map(named).join(', ')} more than once. A duplicate ` +
+          `is one downstream, and the tier sizes its legs from the gaps it forwards — so ` +
+          `that village would be shipped its whole target once per mention and another ` +
+          `downstream would go without.`
+      )
+    }
     if (problems.length) out[relay] = problems
   }
+  // Across the lists rather than inside one. Two relays each naming the same
+  // village is the same over-ship as naming it twice in one list, and neither
+  // list is wrong on its own -- so the message names BOTH relays. Keyed to one
+  // of them, not both: either cell can be edited, and keying it twice would
+  // make the count beside the table read one problem as two.
+  const claimedBy = {}
+  for (const relay of [...relays].sort((a, b) => a - b)) {
+    for (const vid of new Set(relayFor[relay] ?? [])) {
+      if (vid !== relay) (claimedBy[vid] ??= []).push(relay)
+    }
+  }
+  for (const [vid, owners] of Object.entries(claimedBy).sort((a, b) => a[0] - b[0])) {
+    if (owners.length < 2) continue
+    const [first] = owners
+    ;(out[first] ??= []).push(
+      `${named(Number(vid))} is a downstream of ${owners.map(named).join(' and ')}, and each ` +
+        `relay sizes its legs from the whole of that village's gap — so it would be shipped ` +
+        `its target twice while their other downstreams go without. One relay per downstream.`
+    )
+  }
   return out
+}
+
+/** How many times *value* appears in *list*. */
+function countOf(list, value) {
+  return list.reduce((total, entry) => (entry === value ? total + 1 : total), 0)
 }
 
 /** The same problems as one flat list, relay order, for a summary line. */
