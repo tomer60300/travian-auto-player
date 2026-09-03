@@ -340,7 +340,7 @@ h1, h2, h3 {
      * it does not even fix 375. The mobile `font-size: 16px !important` below
        holds the glyphs at 16px while the padding shrinks, so the build queue's
        Priority select stayed clipped (48px for 53px of options).
-     * the blast radius is 48 sites across 19 files against the 5 the defect
+     * the blast radius is 48 sites across 7 files against the 5 the defect
        actually reached, and it leaves control heights inconsistent inside a
        single view (Farm lists at 1440: 50px boxes beside 22px ones).
 
