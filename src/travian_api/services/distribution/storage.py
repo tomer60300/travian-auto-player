@@ -344,6 +344,9 @@ def simulate_day(
     in_flight: dict[int, float] = {}
     previous_close: dict[tuple[int, Resource], float] | None = None
     production_steps = len(range(0, MINUTES_PER_DAY, step_minutes))
+    # A flag rather than the `for/else` it looks like: the only reader is the
+    # `if not settled` block far below, which needs `events` -- built from the
+    # loop's own last day -- so an `else:` clause would run before its input.
     settled = False
 
     for _day in range(MAX_SETTLING_DAYS):

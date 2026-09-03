@@ -1690,16 +1690,18 @@ def build_plan(
     # the candidate-set comment in `_relay_scan` for why, and for what KEEP
     # means here.
     #
-    # Cost, measured rather than assumed. Widening the candidates to the whole
-    # account cost +56% of planning time at 40 villages (1.86s -> 2.91s) and
-    # nothing measurable at 20. Narrowing back to the crop plan does NOT simply
-    # undo that: on the synthetic seed-7 account the candidate count halves (21
-    # of 40) but the search finds a different relay set, so the improvement pass
-    # measures 1.48s narrowed against 1.34s widened at 40 villages, and 0.21s
-    # against 0.31s at 20. Runtime here is dominated by which relays are found,
-    # not by how many candidates were scanned, and every figure is well inside
-    # the budget -- so this gate was chosen for correctness, and its performance
-    # is a wash.
+    # The gate was chosen for correctness, and it costs nothing. Measured
+    # 2026-09-03 on this machine by overriding `relay_hub_candidates` below to
+    # the whole account and timing THIS pass alone (median of five runs, warmed):
+    #
+    #   random_account(5), 40 villages: 4.5s over 33 candidates (crop plan)
+    #                                   5.8s over 40 candidates (whole account)
+    #   random_account(7), 21 villages: 0.09s over 19, 0.09s over 21
+    #
+    # So narrowing is ~20% FASTER at 40 villages and a wash at 21 -- not the
+    # direction candidate-count arithmetic predicts, because runtime here is
+    # dominated by which relays the search FINDS and how far it then chases them,
+    # not by how many candidates it scanned.
     crop_plan = resource_plans.get(Resource.CROP)
     relay_hub_candidates = frozenset(
         allocation.village_id

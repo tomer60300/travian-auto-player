@@ -442,8 +442,8 @@ class TestRelayTimingOnlyFiltersAWindowThatIsEnforced:
     WINDOW_NOT_ENFORCEABLE finding). `time_relays` filters each route's sends to
     the window, so handing it a window that is not enforced re-times the hub
     against a schedule nobody runs: the firings it drops are exactly the ones
-    that make the wait short. Measured on this fixture, that reported 44.1h of
-    relay latency where the truthful worst case is ~14h -- and relay latency is
+    that make the wait short. Measured on this fixture, that reported 53.0h of
+    relay latency where the truthful worst case is 13.0h -- and relay latency is
     what the plan tells the operator to buy merchants for.
 
     `_storage_findings` already gates its window on `prune_to_window`; this path

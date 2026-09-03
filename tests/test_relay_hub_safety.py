@@ -197,13 +197,20 @@ _OUTSIDE_THE_CROP_GRAPH = Allocation(AllocationMode.ABSOLUTE, 0.0)
 
 
 def test_a_crop_neutral_village_outside_the_crop_graph_may_relay() -> None:
-    """Hub candidates come from the whole account, not from the crop graph.
+    """Hub candidates come from the crop PLAN, not from the crop flow graph.
 
     Until 2026-09-02 the hub search drew its candidates from the villages that
     already carried crop, so the canonical midway hub -- no crop flow of its own
     -- could never be chosen, while the same village with any flow at all was
-    found at once (the audit's known-defect pair). Solvency and merchants are the
-    guards that matter; carrying crop was never one of them.
+    found at once (the audit's known-defect pair). What this village has is what
+    the gate asks for: a crop instruction from the operator, an allocation whose
+    mode is not KEEP, and no leg. Carrying crop was never the question.
+
+    The gate is not "the whole account" either. `1fce880` reversed that: the
+    2026-09-02 widening let a freshly settled village nobody had said anything
+    about conscript itself as the hub and rewrite every crop route, so consent
+    -- being named in the crop plan -- is what a candidate needs now. Solvency
+    and merchants still decide among the candidates.
     """
     villages, plans = _account(0.0, _OUTSIDE_THE_CROP_GRAPH)
 
