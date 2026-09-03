@@ -43,6 +43,7 @@ from dataclasses import dataclass
 
 from .allocation import Resource, village_label
 from .findings import Category, Finding
+from .night_profile import is_night_window
 from .optimizer import RelayHub, Route
 
 MINUTES_PER_DAY = 24 * 60
@@ -111,6 +112,49 @@ class Beat:
             for minute in scheduled.arrival_minutes
         ]
         return tuple(sorted(arrivals, key=lambda pair: (pair[0], pair[1].route.origin)))
+
+
+def night_overrun_minutes(scheduled: ScheduledRoute, window: tuple[int, int]) -> float:
+    """Minutes past *window*'s end this route's last merchant gets home.
+
+    Section 6: **all night movements must complete before 07:00** -- nothing
+    underway and nothing returning at the switch, so the morning profile starts
+    with a full merchant pool everywhere. In the units this module already
+    works in that is ``last_dispatch + round_trip <= window end``, and the
+    figure returned is by how much it is not. Zero or negative means the road
+    is clear at the switch.
+
+    Three things it is careful about:
+
+    * **The round trip, not the delivery.** A merchant is committed for the
+      whole journey out and back -- which is exactly what
+      ``Route.sets_in_flight`` already prices -- so a delivery that lands at
+      06:00 from an hour away still has merchants on the road until 07:00.
+    * **The LAST firing inside the window.** A route fires 24/N times a day and
+      the binding one is the latest departure the profile actually makes, so
+      this is measured from the largest offset into the window rather than from
+      the placement's first dispatch.
+    * **Unrounded travel.** ``arrival_minutes`` rounds for display; a round trip
+      that misses by forty seconds still leaves a merchant out, so the raw
+      ``one_way_minutes`` is doubled here.
+
+    Firings the profile's hours exclude are not counted. Without pruning those
+    firings really do happen -- Travian fans a repeat interval across the whole
+    day and offers nothing to confine it -- but that is a different and larger
+    problem, already reported as ``WINDOW_NOT_ENFORCEABLE``: a route shipping
+    round the clock is not merely late home.
+    """
+    start, _end = window
+    length = _window_length(window)
+    offsets = [
+        (minute - start) % MINUTES_PER_DAY
+        for minute in scheduled.dispatch_minutes
+        if _in_window(minute, window)
+    ]
+    if not offsets:
+        return 0.0
+    round_trip = 2.0 * scheduled.route.one_way_minutes
+    return max(offsets) + round_trip - length
 
 
 def _circular_gap(a: int, b: int) -> int:
@@ -209,6 +253,13 @@ def build_beat(
             :func:`~.storage.simulate_profile_cycle`). Left None the whole day
             is open, which is what a single round-the-clock route set wants.
 
+            A window that WRAPS past midnight is the overnight profile
+            (:func:`~.night_profile.is_night_window`), and section 6 gives that
+            one an extra rule: every merchant must be home before the window
+            ends. Placements that manage it are preferred, and a route no
+            placement can close is reported as ``NIGHT_OVERRUN`` rather than
+            having a firing quietly dropped to make it fit.
+
     Returns:
         A :class:`Beat`. Every route is always scheduled -- a route that cannot
         be spaced politely still gets a slot, with a warning naming it.
@@ -219,6 +270,10 @@ def build_beat(
         raise ValueError("step_minutes must be at least 1")
     if dispatch_window is not None and _window_length(dispatch_window) == 0:
         raise ValueError("dispatch_window is zero-width: no minute of the day is inside it")
+    # Section 6's closing deadline applies to the overnight profile only. Bound
+    # once, so the placement search and the finding below cannot disagree about
+    # which profile they are scheduling.
+    night = is_night_window(dispatch_window)
 
     scheduled: list[ScheduledRoute] = []
     findings: list[Finding] = []
@@ -357,7 +412,7 @@ def build_beat(
         )
 
         best_minute = base
-        best_score: tuple[int, int, int, float, int] | None = None
+        best_score: tuple[int, float, int, int, float, int] | None = None
         # Sorted once per route rather than inside the offset sweep below.
         taken_sorted = sorted(taken)
         for offset in range(0, span, step_minutes):
@@ -397,9 +452,25 @@ def build_beat(
             # real one. A candidate with no firing at all scores 0 here and loses
             # on `sends` regardless.
             stale = _staleness(firing, inbound) if firing else 0.0
-            # Order of preference: send at all, then clear the reserved window,
-            # then MEET the arrival-gap target, then ship soon after collecting,
-            # then widen the spacing further.
+            # Section 6: on the overnight profile every merchant must be home
+            # before the switch, so a phase that manages it beats one that does
+            # not. Zero for every other profile, which leaves their ordering --
+            # and their placements -- byte-identical.
+            #
+            # Ranked BELOW `sends` on purpose. Dropping a firing would get the
+            # merchants home, and it is the one fix that is not allowed: the
+            # cargo was sized for the firings the plan counted, so trimming one
+            # under-delivers silently, and refusing beats under-delivering. If
+            # no phase with the full send count can close the night, the finding
+            # below says so and the operator changes the route.
+            #
+            # Ranked ABOVE the reserved window because the two are different
+            # kinds of thing: the NPC slot is a preference ("avoided when an
+            # alternative exists"), an empty road at 07:00 is a requirement.
+            home = -max(0.0, night_overrun_minutes(candidate, dispatch_window)) if night else 0.0
+            # Order of preference: send at all, then be home by the switch, then
+            # clear the reserved window, then MEET the arrival-gap target, then
+            # ship soon after collecting, then widen the spacing further.
             #
             # The gap term saturates at the target deliberately. Ranking raw
             # staleness above raw gap made the target unenforceable for relay
@@ -409,7 +480,7 @@ def build_beat(
             # where the previous scheduler kept them 15 apart. Saturating means
             # a few minutes of extra staleness can never buy a collision, while
             # beyond the target staleness is still free to choose.
-            score = (sends, -clear, min(gap, min_arrival_gap_minutes), -stale, gap)
+            score = (sends, home, -clear, min(gap, min_arrival_gap_minutes), -stale, gap)
             if best_score is None or score > best_score:
                 best_score, best_minute = score, candidate.dispatch_minute
 
@@ -514,8 +585,37 @@ def build_beat(
                     )
                 )
 
-        # score is (sends, -clear, saturated_gap, -stale, gap); spacing is last.
-        achieved = best_score[4] if best_score else MINUTES_PER_DAY
+        # Section 6's closing deadline, measured on the placement that was
+        # actually chosen. Reported and never fixed by trimming: the phase search
+        # above already preferred every phase that closes the night, so reaching
+        # here means no phase does, and the remaining fixes are all changes to
+        # the ROUTE (a shorter cycle, a nearer source) rather than to its slot.
+        if night:
+            overrun = night_overrun_minutes(placement, dispatch_window)
+            if overrun > 0:
+                last = max(
+                    placement.dispatch_minutes,
+                    key=lambda m: (m - dispatch_window[0]) % MINUTES_PER_DAY,
+                )
+                round_trip = 2.0 * route.one_way_minutes
+                findings.append(
+                    Finding(
+                        category=Category.NIGHT_OVERRUN,
+                        message=(
+                            f"route {leg} last leaves at {last // 60:02d}:{last % 60:02d} and "
+                            f"its merchants are not home for another {round_trip:.0f} min, "
+                            f"{overrun:.0f} min past the end of the night profile — so the "
+                            f"morning starts with merchants still on the road. Shorten the "
+                            f"{route.cycle_hours}h cycle, ship from a nearer village, or move "
+                            f"its last dispatch earlier"
+                        ),
+                        detail=f"{leg} — {overrun:.0f} min past the switch",
+                        village=village_label(route.origin, names),
+                    )
+                )
+
+        # score is (sends, home, -clear, saturated_gap, -stale, gap); spacing is last.
+        achieved = best_score[5] if best_score else MINUTES_PER_DAY
         if achieved < min_arrival_gap_minutes:
             destination = village_label(route.destination, names)
             findings.append(
@@ -531,7 +631,7 @@ def build_beat(
                     village=destination,
                 )
             )
-        if reserved_window is not None and best_score and best_score[1] < 0:
+        if reserved_window is not None and best_score and best_score[2] < 0:
             findings.append(
                 Finding(
                     category=Category.RESERVED_WINDOW,

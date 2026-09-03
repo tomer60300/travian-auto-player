@@ -21,6 +21,7 @@ from .allocation import EPSILON, Allocation, Resource, ResourcePlan, resolve_res
 from .findings import Category, Finding, Severity
 from .geometry import MapGeometry
 from .merchants import CEIL_DUST_TOLERANCE, DAILY_BEAT_CYCLES, MerchantModel
+from .night_profile import is_night_window
 from .optimizer import (
     DEFAULT_MERCHANT_HEADROOM,
     DEFAULT_MERCHANT_RESERVE,
@@ -387,6 +388,18 @@ def craft_plan(
         resource_plans[resource] = plan
         findings.extend(plan.findings)
 
+    # Section 6: the standing latency target is a DAY rule and does not apply
+    # inside the night window. Overnight nothing is spent, so a delivery nobody
+    # is waiting for costs nothing by being six hours old -- and the pass that
+    # enforces the target buys speed with merchants (shorter cycles, more sets
+    # in flight), which is the opposite of what the night needs: every merchant
+    # has to be home by 07:00. What bounds a night cycle instead is getting home
+    # and not overflowing, both of which the beat and the replay measure.
+    #
+    # None is exactly "no target": it also skips `_spend_idle_merchants_on_latency`
+    # and the LATENCY findings, which is the whole of what the rule is.
+    latency_target = None if is_night_window(config.dispatch_window) else config.max_latency_hours
+
     routing = build_plan(
         villages,
         resource_plans,
@@ -395,7 +408,7 @@ def craft_plan(
         merchant_reserve=config.merchant_reserve,
         merchant_headroom=config.merchant_headroom,
         cycles=config.cycles,
-        max_latency_hours=config.max_latency_hours,
+        max_latency_hours=latency_target,
         min_send_fill=config.min_send_fill,
         max_improve_passes=config.max_improve_passes,
         max_relay_hops=config.max_relay_hops,
@@ -430,7 +443,9 @@ def craft_plan(
     relays = time_relays(
         beat, routing.relays, config.dispatch_window if config.prune_to_window else None
     )
-    findings.extend(relay_findings(relays, names, config.max_latency_hours, villages))
+    # The same target, so the end-to-end relay figure cannot be judged against a
+    # rule the legs themselves were exempt from.
+    findings.extend(relay_findings(relays, names, latency_target, villages))
 
     rows = tuple(
         SheetRow(

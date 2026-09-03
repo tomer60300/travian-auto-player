@@ -16,7 +16,7 @@ import logging
 import random
 import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -58,6 +58,7 @@ from travian_api.services.distribution.night_profile import (
     MATERIALS,
     NightVillage,
     derive_night_profile,
+    is_night_window,
 )
 from travian_api.services.distribution.optimizer import (
     DEFAULT_MERCHANT_HEADROOM,
@@ -76,7 +77,7 @@ from travian_api.services.distribution.planner import (
     blockers,
     craft_plan,
 )
-from travian_api.services.distribution.roles import Role
+from travian_api.services.distribution.roles import Role, keeps_a_morning_floor
 from travian_api.services.distribution.route_revert import describe, plan_revert
 from travian_api.services.distribution.run_history import (
     AccountRollup,
@@ -84,9 +85,13 @@ from travian_api.services.distribution.run_history import (
     RunSummary,
     summarise_runs,
 )
-from travian_api.services.distribution.schedule import MINUTES_PER_DAY
+from travian_api.services.distribution.schedule import MINUTES_PER_DAY, night_overrun_minutes
 from travian_api.services.distribution.storage import (
+    FillAtSwitch,
     ProfileSegment,
+    morning_floor_shortfalls,
+    night_state_findings,
+    pre_night_overfills,
     relay_buffer_findings,
     simulate_day,
     simulate_profile_cycle,
@@ -1301,6 +1306,121 @@ def _verdict_response(verdict: Verdict) -> VerdictResponse:
     )
 
 
+class NightOverrunResponse(BaseModel):
+    """A night route whose merchants are still out when the day profile starts.
+
+    Section 6: all night movements must complete before 07:00, so the morning
+    profile starts with a full merchant pool everywhere. This is every route
+    that does not manage it, with the arithmetic shown rather than asserted --
+    the last departure the profile makes, the round trip that follows it, and by
+    how much the two overrun the window.
+
+    Only ever populated for the overnight profile. The rule is the night's: by
+    day nothing says a merchant may not be on the road at the switch.
+    """
+
+    origin: int
+    origin_name: str
+    destination: int
+    destination_name: str
+    cycle_hours: int
+    last_dispatch_minute: int = Field(
+        description=(
+            "Minutes past midnight of the LAST departure inside the profile's "
+            "hours, which is the firing the deadline binds on. A route fires "
+            "24/N times a day and the others all have more room."
+        )
+    )
+    last_dispatch_clock: str
+    round_trip_minutes: float = Field(
+        description=(
+            "Out and back, unrounded. A merchant is committed for the whole "
+            "journey -- which is what `sets_in_flight` already prices -- so a "
+            "delivery landing at 06:00 from an hour out still has merchants on "
+            "the road at 07:00."
+        )
+    )
+    overrun_minutes: float = Field(
+        description="How far past the window's end the last merchant gets home."
+    )
+
+
+class FillAtSwitchResponse(BaseModel):
+    """One store's level at a profile boundary, against its capacity.
+
+    Section 6's two state rules read the same record from either end of the
+    night: 60% of both stores at 07:00 (a floor the plan must achieve), and no
+    more than 25% at 23:00 (an assumption the operator establishes by hand).
+    """
+
+    village_id: int
+    village_name: str
+    resource: Resource
+    store: str = Field(
+        description=(
+            "`granary` for crop, `warehouse` for a material -- the store the "
+            "operator reads the bar off. Each material has its own bar against "
+            "the warehouse's capacity, which is why a row is per resource "
+            "rather than per store: 80% clay and 10% iron is not 60% of a "
+            "warehouse, because nothing can be built with clay alone."
+        )
+    )
+    stock: float
+    capacity: int
+    fill: float = Field(description="`stock / capacity`, as a fraction rather than a percentage.")
+
+
+def _fill_rows(
+    fills: Sequence[FillAtSwitch], names: Mapping[int, str]
+) -> list[FillAtSwitchResponse]:
+    return [
+        FillAtSwitchResponse(
+            village_id=fill.village_id,
+            village_name=village_label(fill.village_id, names),
+            resource=fill.resource,
+            store="granary" if fill.resource is Resource.CROP else "warehouse",
+            stock=fill.stock,
+            capacity=fill.capacity,
+            fill=fill.fraction,
+        )
+        for fill in fills
+    ]
+
+
+def _night_overrun_rows(
+    beat, window: tuple[int, int] | None, names: Mapping[int, str]
+) -> list[NightOverrunResponse]:
+    """Section 6's completion rule, measured on the beat that was built.
+
+    Empty for the day profile and for a round-the-clock set, which have no
+    switch to be ready for. The overrun itself comes from the same pure function
+    the beat scores its placements with, so the table and the finding cannot
+    disagree about a number.
+    """
+    if not is_night_window(window):
+        return []
+    rows: list[NightOverrunResponse] = []
+    for scheduled in beat.routes:
+        overrun = night_overrun_minutes(scheduled, window)
+        if overrun <= 0:
+            continue
+        last = max(scheduled.dispatch_minutes, key=lambda m: (m - window[0]) % MINUTES_PER_DAY)
+        rows.append(
+            NightOverrunResponse(
+                origin=scheduled.route.origin,
+                origin_name=village_label(scheduled.route.origin, names),
+                destination=scheduled.route.destination,
+                destination_name=village_label(scheduled.route.destination, names),
+                cycle_hours=scheduled.route.cycle_hours,
+                last_dispatch_minute=last,
+                last_dispatch_clock=_clock(last),
+                round_trip_minutes=2.0 * scheduled.route.one_way_minutes,
+                overrun_minutes=overrun,
+            )
+        )
+    return sorted(rows, key=lambda row: (-row.overrun_minutes, row.origin, row.destination))
+
+
 class PlanResponse(BaseModel):
     rows: list[SheetRowResponse]
     budgets: list[BudgetResponse]
@@ -1335,6 +1455,17 @@ class PlanResponse(BaseModel):
             "disagree about what a store does. OWN villages only -- a foreign "
             "tribute is a sink with no store, and it appears in `shortfalls` "
             "instead."
+        ),
+    )
+    night_overruns: list[NightOverrunResponse] = Field(
+        default=[],
+        description=(
+            "Routes whose merchants are still on the road when the night "
+            "profile ends (section 6). Empty for the day profile and for a "
+            "round-the-clock set, which have no switch to be ready for; empty "
+            "too for a night whose road is clear, which is the point. Each row "
+            "also appears in `diagnostics` as a `night_overrun` finding -- this "
+            "is the same fact with the arithmetic in fields instead of prose."
         ),
     )
     # Every finding as prose, in producer order. Kept because it is the contract
@@ -2286,6 +2417,52 @@ class VillageDayResponse(BaseModel):
 class DayCheckResponse(BaseModel):
     villages: list[VillageDayResponse]
     warnings: list[str]
+    morning_floor: float = Field(
+        default=DEFAULT_TARGET_FILL,
+        description=(
+            "The fraction of both stores every role village must have reached "
+            "at the morning switch (section 6: 60%). The same figure the night "
+            "derivation uses as its ceiling, deliberately -- 'never overflow "
+            "during the night, never arrive empty at morning' is one statement "
+            "seen from either side."
+        ),
+    )
+    pre_night_baseline: float = Field(
+        default=DEFAULT_BASELINE_FILL,
+        description=(
+            "The fraction the night profile ASSUMES each store is down to at "
+            "the day-to-night switch (section 6: 25%). The operator spends the "
+            "stores down by hand, so this is a trusted starting condition and "
+            "never a constraint the plan is refused for missing."
+        ),
+    )
+    morning_shortfalls: list[FillAtSwitchResponse] = Field(
+        default=[],
+        description=(
+            "Role villages -- DEF and both OFF, capital excluded -- below "
+            "`morning_floor` on a store when the day profile takes over, "
+            "emptiest first. Measured on a repeating day of the composite "
+            "replay, so it is where the plan LEAVES them rather than where the "
+            "snapshot found them."
+        ),
+    )
+    pre_night_over_baseline: list[FillAtSwitchResponse] = Field(
+        default=[],
+        description=(
+            "Role villages above `pre_night_baseline` on a store when the night "
+            "profile takes over, fullest first. A finding and not a refusal: "
+            "the manual spend-down is the operator's action, and the planner is "
+            "not in the room when it happens."
+        ),
+    )
+    night_overruns: list[NightOverrunResponse] = Field(
+        default=[],
+        description=(
+            "Routes of the overnight profile whose merchants are still on the "
+            "road at the switch (section 6). Empty when every night movement "
+            "closes, and empty when no segment is an overnight one."
+        ),
+    )
 
 
 def _clock(minute: int) -> str:
@@ -2314,14 +2491,26 @@ class NightProfileRequest(PlanRequest):
             "The one number the account cannot supply, and the one everything else "
             "rests on: measured from the baseline the operator RE-ESTABLISHES each "
             "night, a profile holds for weeks, while one measured from whatever a "
-            "snapshot caught goes stale within the hour."
+            "snapshot caught goes stale within the hour. "
+            "An ASSUMPTION THE OPERATOR OWNS, never a constraint this endpoint "
+            "enforces: section 6's spend-down at the switch is a manual action, so "
+            "a snapshot that disagrees is reported (see `warnings`, and "
+            "/day-check's `pre_night_over_baseline`) and the derivation still "
+            "obeys the number it was given."
         ),
     )
     target_fill: float = Field(
         default=DEFAULT_TARGET_FILL,
         gt=0.0,
         le=1.0,
-        description="How full a store may be at dawn, as a fraction.",
+        description=(
+            "How full a store may be at dawn, as a fraction. Read as a CEILING "
+            "here -- the room between the baseline and this is what the night has "
+            "to fill -- and as section 6's morning FLOOR by /day-check, which "
+            "checks every role village reached it on both stores at 07:00. One "
+            "number, because 'never overflow during the night, never arrive empty "
+            "at morning' is one statement seen from either side."
+        ),
     )
 
     @field_validator("target_fill")
@@ -2784,6 +2973,12 @@ async def post_day_check(
             names[-(index + 1)] = target.name
 
     segments: list[ProfileSegment] = []
+    # Section 6's rules are the overnight profile's, so the loop below keeps
+    # which segment that is and the beat it was actually given. Derived from the
+    # window rather than from the name: a profile called "Night" that runs
+    # 09:00-17:00 is not one, and a wrapping window is one whatever it is called.
+    night_segment: DaySegmentInput | None = None
+    night_overruns: list[NightOverrunResponse] = []
     for segment in body.segments:
         # Route each profile through the SAME planner /plan and /execute use, so
         # the day picture is built from the real route set -- actual cycles,
@@ -2844,6 +3039,10 @@ async def post_day_check(
             else:
                 manual.setdefault(funder, {})[Resource.CROP] = -owed_by_hand
 
+        if is_night_window(segment.window):
+            night_segment = segment
+            night_overruns = _night_overrun_rows(account.plan.beat, segment.window, names)
+
         segments.append(
             ProfileSegment(
                 name=segment.name,
@@ -2863,6 +3062,10 @@ async def post_day_check(
     # composite needs it for the same reason /plan does, and needs the SAME
     # figure -- one simulation given a parameter and not the other is how the
     # two endpoints came to answer one account differently before.
+    # Bound once: the replay needs the declared spend and section 6's checks
+    # below need the declared ROLES, and resolving twice in one handler invites
+    # the two halves of one answer to be computed from different resolutions.
+    roles = _resolve_roles(body)
     trajectories, breaches = await asyncio.to_thread(
         simulate_profile_cycle,
         segments,
@@ -2874,7 +3077,7 @@ async def post_day_check(
         # them: the composite replay and the per-profile plans have to be given
         # the same spend, or the day view contradicts the plan view it is built
         # from.
-        consumption=_resolve_roles(body).consumption,
+        consumption=roles.consumption,
     )
 
     for breach in sorted(breaches, key=lambda b: (b.day, b.minute)):
@@ -2897,6 +3100,47 @@ async def post_day_check(
             )
         else:
             warnings.append(f"{label}: {breach.resource.value} runs dry {when}")
+
+    # ── Section 6: the state the night hands over, at both ends of it ───────
+    #
+    # Read off the SAME replay the breaches above come from, deliberately. "No
+    # overflow, either direction, at any point in the night" is already what a
+    # `capacity` and an `empty` breach say, with the profile that was running
+    # attached; a second simulator to answer the fill questions would be a
+    # second answer to those as well.
+    #
+    # Role villages only, and narrower than the relay rule's "role village":
+    # section 6 names DEF and both OFF and excludes the capital, which is the
+    # storage and NPC hub and is drawn down on purpose.
+    floor_villages = [vid for vid, role in roles.of_village.items() if keeps_a_morning_floor(role)]
+    morning_short: tuple[FillAtSwitch, ...] = ()
+    pre_night_over: tuple[FillAtSwitch, ...] = ()
+    if night_segment is not None and floor_villages:
+        pre_night_over = pre_night_overfills(
+            trajectories, capacities, floor_villages, night_segment.name
+        )
+        # Whichever profile takes over at the night's last minute -- 07:00 on the
+        # operator's own pair. Found by the minute rather than by position or by
+        # name: `segments` need not be given in clock order, and an hour with no
+        # profile at all is legal (the day check simulates it on production
+        # alone), in which case nothing hands over and the floor cannot be
+        # measured. Said out loud rather than skipped, because a silent skip
+        # reads as "the floor was met".
+        morning = next((s for s in body.segments if s.window[0] == night_segment.window[1]), None)
+        if morning is None:
+            warnings.append(
+                f"no profile starts at {_clock(night_segment.window[1])}, where "
+                f"{night_segment.name} ends, so the morning fill floor could not be "
+                f"measured -- those hours run on production alone. Give the morning "
+                f"profile the night's end as its start."
+            )
+        else:
+            morning_short = morning_floor_shortfalls(
+                trajectories, capacities, floor_villages, morning.name
+            )
+    warnings.extend(
+        f.message for f in night_state_findings(morning_short, pre_night_over, names=names)
+    )
 
     # `settled` is one flag for the whole day, so an unsettled run marks every
     # row without saying which store is responsible -- and low/high then
@@ -2927,6 +3171,11 @@ async def post_day_check(
             )
 
     return DayCheckResponse(
+        morning_floor=DEFAULT_TARGET_FILL,
+        pre_night_baseline=DEFAULT_BASELINE_FILL,
+        morning_shortfalls=_fill_rows(morning_short, names),
+        pre_night_over_baseline=_fill_rows(pre_night_over, names),
+        night_overruns=night_overruns,
         villages=[
             VillageDayResponse(
                 village_id=t.village_id,
@@ -3760,6 +4009,11 @@ async def post_plan(
             # is reported as a shortfall, which is about the obligation.
             if v.village_id >= 0
         ],
+        # Section 6's closing rule as a table rather than as prose. The window
+        # comes off the config the plan was actually built with, so a payload
+        # that named no window gets an empty list instead of a rule it never
+        # asked for.
+        night_overruns=_night_overrun_rows(plan.beat, config.dispatch_window, names),
         warnings=[f.message for f in findings],
         # The route count is what lets the headline stop blaming the plan for
         # losses it did not cause -- see _account_headline.

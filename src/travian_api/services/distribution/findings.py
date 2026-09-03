@@ -101,6 +101,12 @@ class Category(StrEnum):
     # tier that delivers and then sheds what lands afterwards.
     RELAY_BUFFER = "relay_buffer"
     RELAY_BUFFER_TIGHT = "relay_buffer_tight"
+    # Section 6's three night rules. NIGHT_OVERRUN is about the ROUTE SET (a
+    # merchant still on the road when the day profile takes over), the other two
+    # about the STATE the night hands over, at either end of it.
+    NIGHT_OVERRUN = "night_overrun"
+    MORNING_FLOOR = "morning_floor"
+    PRE_NIGHT_BASELINE = "pre_night_baseline"
 
 
 @dataclass(frozen=True)
@@ -162,6 +168,24 @@ _SPECS: Mapping[Category, _Spec] = {
             "each batch is smaller, or raise the store to hold a whole batch."
         ),
     ),
+    Category.NIGHT_OVERRUN: _Spec(
+        # Among the criticals, just after the overflow pair. It destroys nothing
+        # directly, but the whole morning profile is planned on a merchant pool
+        # that is not there -- so every figure on the day sheet is wrong at
+        # 07:00, which is worse than one store shedding a batch.
+        order=2.7,
+        severity=Severity.CRITICAL,
+        subject="route",
+        headline="{count} {subject} still have merchants on the road when the night ends",
+        action=(
+            "Section 6 requires the night to CLOSE: nothing underway or returning at "
+            "07:00, so the morning profile starts with a full pool everywhere. Each line "
+            "gives the overrun. Shorten the cycle so the last send leaves earlier, ship "
+            "from a nearer village, or phase the route so its last dispatch is a whole "
+            "round trip inside the window. Not fixable by dropping a firing: the cargo "
+            "was sized for the ones the plan counted, so trimming one under-delivers."
+        ),
+    ),
     Category.OVER_ALLOCATED: _Spec(
         order=3,
         severity=Severity.CRITICAL,
@@ -196,6 +220,40 @@ _SPECS: Mapping[Category, _Spec] = {
             "days is a horizon rather than a forecast -- fields, troops and targets all "
             "move before then -- so this is worth a plan, not an emergency: give the "
             "{resource} somewhere to go, raise the store, or spend it in-village."
+        ),
+    ),
+    Category.MORNING_FLOOR: _Spec(
+        # A WARNING: the plan runs, and a village waking at 40% is short of a
+        # target rather than losing anything. What it costs is a morning of
+        # building and training, which is the operator's call to weigh -- and
+        # the granary side of it has STARVATION above for the case where the
+        # store actually empties.
+        order=9.6,
+        severity=Severity.WARNING,
+        subject="store",
+        headline="{count} {subject} wake below the morning fill floor",
+        action=(
+            "Section 6 asks every role village -- DEF and both OFF, capital excluded -- to "
+            "be at 60% on warehouse AND granary at 07:00, so the day starts able to build "
+            "and train without waiting for a delivery. Each line gives the measured "
+            "percentage. Raise the night's share for those villages, draw on a nearer "
+            "supplier, or lower the floor if the account cannot fund it."
+        ),
+    ),
+    Category.PRE_NIGHT_BASELINE: _Spec(
+        # Beside the morning floor: the two describe the same night from its two
+        # ends, and reading them apart made the pair look like separate subjects.
+        order=9.7,
+        severity=Severity.WARNING,
+        subject="store",
+        headline="{count} {subject} start the night fuller than the profile assumes",
+        action=(
+            "The night is sized from the baseline the operator RE-ESTABLISHES by hand at "
+            "the switch -- spend the stores down so no role village is above 25% -- and "
+            "the room between that and the morning target is what the profile ships. A "
+            "store starting higher has less room than was reserved for it, so the cargo "
+            "arrives at a cap. Spend it down before the switch, or raise the baseline the "
+            "profile is derived from so the arithmetic matches the account."
         ),
     ),
     Category.UNALLOCATED: _Spec(

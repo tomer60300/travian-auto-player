@@ -48,6 +48,7 @@ from enum import StrEnum
 
 from .allocation import MATERIALS, Resource, village_label
 from .findings import Category, Finding
+from .night_profile import DEFAULT_BASELINE_FILL, DEFAULT_TARGET_FILL
 from .optimizer import RelayHub
 from .schedule import MINUTES_PER_DAY, Beat, ScheduledRoute
 
@@ -983,6 +984,24 @@ class VillageTrajectory:
     high: float
     settled: bool
 
+    segment_opening: Mapping[str, float] = field(default_factory=dict)
+    """This store's level as each profile took over, on the measured day.
+
+    The hand-over stock, keyed by profile name. ``low``/``high`` say how far the
+    store swings and ``daily_net`` where it is heading, but section 6 asks two
+    questions neither can answer: is this village at 60% of both stores when the
+    day profile takes over at 07:00, and was it below 25% when the night one
+    did at 23:00? Both are the level at one named minute, so the replay records
+    it rather than a second simulation being written to find out.
+
+    Sampled BEFORE the boundary minute's own dispatches, arrivals and
+    production, so it is the stock the outgoing profile finished with. The
+    distinction is not academic for the morning: a night route landing at 07:00
+    sharp would otherwise count toward a floor the plan is supposed to have
+    reached without it -- and a route still delivering at the switch is already
+    a ``NIGHT_OVERRUN``, which is the finding that case belongs to.
+    """
+
 
 def simulate_profile_cycle(
     segments: Sequence[ProfileSegment],
@@ -1100,8 +1119,17 @@ def simulate_profile_cycle(
     # Tick on the production grid plus every event minute, so a dispatch or an
     # arrival lands on the minute it happens instead of being rounded into a
     # step. Ticking every minute would cost 1,440 x max_days x stores instead.
+    #
+    # Every profile boundary is a tick too, so `segment_opening` is sampled at
+    # the minute the hand-over happens rather than at whichever grid step
+    # precedes it. On the operator's own 07:00/23:00 pair those land on the
+    # 5-minute grid anyway; a profile starting at 07:01 would not.
+    starts = {segment.start_minute: segment.name for segment in segments}
     ticks = sorted(
-        set(range(0, MINUTES_PER_DAY, step_minutes)) | set(departures) | set(arrivals_at)
+        set(range(0, MINUTES_PER_DAY, step_minutes))
+        | set(departures)
+        | set(arrivals_at)
+        | set(starts)
     )
 
     level: dict[tuple[int, Resource], float] = {}
@@ -1138,6 +1166,8 @@ def simulate_profile_cycle(
     highs: dict[tuple[int, Resource], float] = {}
     in_flight: dict[int, float] = {}
     day_nets: dict[tuple[int, Resource], float] = {}
+    # profile name -> store -> level as that profile took over, measured day.
+    openings: dict[str, dict[tuple[int, Resource], float]] = {}
     settled_day = -1
 
     # A store that BEGINS the day above its alert level never "crosses" it --
@@ -1217,6 +1247,10 @@ def simulate_profile_cycle(
             highs = dict(level)
             nominal.clear()  # exactly one day's worth, this day's
         for position, minute in enumerate(ticks):
+            # The hand-over stock, before this minute's own events: what the
+            # profile taking over at this minute starts from.
+            if measuring and minute in starts:
+                openings[starts[minute]] = dict(level)
             # Dispatch: the origin parts with the cargo now, under whichever
             # profile is running now.
             for index in departures.get(minute, ()):
@@ -1278,7 +1312,191 @@ def simulate_profile_cycle(
             low=lows.get((vid, resource), level.get((vid, resource), 0.0)),
             high=highs.get((vid, resource), level.get((vid, resource), 0.0)),
             settled=settled_day >= 0,
+            segment_opening={
+                name: per_store[(vid, resource)]
+                for name, per_store in openings.items()
+                if (vid, resource) in per_store
+            },
         )
         for (vid, resource) in sorted(level)
     ]
     return trajectories, breaches
+
+
+@dataclass(frozen=True)
+class FillAtSwitch:
+    """One store's level at a profile boundary, against its capacity.
+
+    Section 6 asks two questions about the night and both are the same shape:
+    a named store, a named minute, and a fraction to compare. So one record
+    answers both, and the two producers below differ only in which boundary
+    they read and which way the comparison runs.
+    """
+
+    village_id: int
+    resource: Resource
+    stock: float
+    capacity: int
+    fraction: float
+    """``stock / capacity``. Carried rather than recomputed by every reader, so
+    the percentage the operator is shown is the one that was compared."""
+
+
+def morning_floor_shortfalls(
+    trajectories: Sequence[VillageTrajectory],
+    capacities: Mapping[int, Mapping[Resource, int]],
+    floor_villages: Collection[int],
+    morning_profile: str,
+    floor: float = DEFAULT_TARGET_FILL,
+) -> tuple[FillAtSwitch, ...]:
+    """Role villages that wake below the morning fill floor. Section 6.
+
+    "At 07:00, every role village (DEF + OFF; capital excluded) must be at 60%
+    capacity on both warehouse and granary." Read off the composite replay's
+    hand-over stock, so this is the level at the switch on a REPEATING day
+    rather than whatever the snapshot happened to catch.
+
+    Per resource, not per store, and that is the honest reading of "both
+    warehouse and granary": in Travian each material has its own bar against
+    the warehouse's capacity, so a village at 80% clay and 10% iron is not at
+    60% of its warehouse -- it cannot build with clay alone. Reporting the
+    resource is also what makes the finding actionable, since the fix is a
+    bigger share of that one resource.
+
+    ``floor_villages`` is who holds the floor, decided by the caller from the
+    declared roles (:func:`~.roles.keeps_a_morning_floor`). Passed in rather
+    than inferred, for the reason roles exist at all: nothing in a snapshot
+    says a village is the Hammer, and the crop-sign inference that used to
+    stand in for it is wrong precisely on the villages this rule is about.
+
+    A store whose capacity was never read is skipped rather than assumed: every
+    figure here is a fraction OF the capacity, and inventing one decides whether
+    a village is reported.
+    """
+    wanted = set(floor_villages)
+    found: list[FillAtSwitch] = []
+    for trajectory in trajectories:
+        if trajectory.village_id not in wanted:
+            continue
+        capacity = capacities.get(trajectory.village_id, {}).get(trajectory.resource)
+        if not capacity:
+            continue
+        stock = trajectory.segment_opening.get(morning_profile)
+        if stock is None:
+            continue  # the replay never handed over to a profile by that name
+        # In resource units, and tolerant, for the reason CROSSING_TOLERANCE
+        # exists: the replay accumulates production in fractional steps, so a
+        # store standing exactly on its floor lands a few nano-resources under
+        # it and would be reported as short of a target it met.
+        if stock < floor * capacity - CROSSING_TOLERANCE:
+            found.append(
+                FillAtSwitch(
+                    village_id=trajectory.village_id,
+                    resource=trajectory.resource,
+                    stock=stock,
+                    capacity=capacity,
+                    fraction=stock / capacity,
+                )
+            )
+    return tuple(
+        sorted(found, key=lambda fill: (fill.fraction, fill.village_id, fill.resource.value))
+    )
+
+
+def pre_night_overfills(
+    trajectories: Sequence[VillageTrajectory],
+    capacities: Mapping[int, Mapping[Resource, int]],
+    floor_villages: Collection[int],
+    night_profile: str,
+    baseline: float = DEFAULT_BASELINE_FILL,
+) -> tuple[FillAtSwitch, ...]:
+    """Role villages that start the night fuller than the profile assumes.
+
+    The mirror of :func:`morning_floor_shortfalls`, and deliberately NOT a
+    constraint. At the day-to-night switch the operator spends the stores down
+    by hand so no role village is above the baseline, and the derivation is
+    entitled to start from that -- every night ceiling is the room between the
+    baseline and the target. It is an assumption the OPERATOR OWNS; the planner
+    is not in the room when the spending happens and cannot make it happen.
+
+    What it can do is notice the disagreement, because the consequence is real:
+    a store starting higher has less room than the night reserved for it, so
+    the cargo sized for that room arrives at a cap. Hence a finding, never a
+    refusal.
+    """
+    wanted = set(floor_villages)
+    found: list[FillAtSwitch] = []
+    for trajectory in trajectories:
+        if trajectory.village_id not in wanted:
+            continue
+        capacity = capacities.get(trajectory.village_id, {}).get(trajectory.resource)
+        if not capacity:
+            continue
+        stock = trajectory.segment_opening.get(night_profile)
+        if stock is None:
+            continue
+        if stock > baseline * capacity + CROSSING_TOLERANCE:
+            found.append(
+                FillAtSwitch(
+                    village_id=trajectory.village_id,
+                    resource=trajectory.resource,
+                    stock=stock,
+                    capacity=capacity,
+                    fraction=stock / capacity,
+                )
+            )
+    return tuple(
+        sorted(found, key=lambda fill: (-fill.fraction, fill.village_id, fill.resource.value))
+    )
+
+
+def night_state_findings(
+    morning_short: Sequence[FillAtSwitch],
+    pre_night_over: Sequence[FillAtSwitch],
+    floor: float = DEFAULT_TARGET_FILL,
+    baseline: float = DEFAULT_BASELINE_FILL,
+    names: Mapping[int, str] | None = None,
+) -> tuple[Finding, ...]:
+    """Prose for both ends of the night, from the two computed lists.
+
+    Shaped like :func:`storage_findings`: the arithmetic is done and this only
+    decides what a person reads, so the wording cannot drift from the figure it
+    describes. Both thresholds are stated in every line, because "10%" means
+    nothing without the number it fell short of.
+    """
+    findings: list[Finding] = []
+    for fill in morning_short:
+        label = village_label(fill.village_id, names)
+        store = _store_name(fill.resource)
+        findings.append(
+            Finding(
+                category=Category.MORNING_FLOOR,
+                message=(
+                    f"{label}: {fill.resource.value} is {fill.fraction:.0%} of its {store} "
+                    f"at the morning switch, under the {floor:.0%} floor -- it wakes with "
+                    f"{fill.stock:,.0f} of {fill.capacity:,} and has to wait for a "
+                    f"delivery before it can spend"
+                ),
+                detail=f"{label} {fill.resource.value} - {fill.fraction:.0%} of {store}",
+                village=label,
+                resource=fill.resource,
+            )
+        )
+    for fill in pre_night_over:
+        label = village_label(fill.village_id, names)
+        store = _store_name(fill.resource)
+        findings.append(
+            Finding(
+                category=Category.PRE_NIGHT_BASELINE,
+                message=(
+                    f"{label}: {fill.resource.value} is {fill.fraction:.0%} of its {store} "
+                    f"as the night starts, above the {baseline:.0%} baseline the profile "
+                    f"assumes -- the room reserved to fill it is not there, so the night's "
+                    f"cargo arrives at a cap"
+                ),
+                detail=f"{label} {fill.resource.value} - {fill.fraction:.0%} of {store}",
+                village=label,
+                resource=fill.resource,
+            )
+        )
+    return tuple(findings)

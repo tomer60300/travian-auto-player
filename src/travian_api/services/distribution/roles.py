@@ -78,3 +78,24 @@ def default_may_relay(role: Role) -> bool:
     no way to reach this decision from the page alone.
     """
     return role is Role.FEEDER
+
+
+def keeps_a_morning_floor(role: Role) -> bool:
+    """Must a village of this role be at the morning fill floor at 07:00?
+
+    Section 6: "every role village (DEF + OFF; capital excluded) must be at 60%
+    capacity on both warehouse and granary." So this is a NARROWER set than the
+    "role village" of :func:`default_may_relay`, which counts the capital in --
+    and the difference is deliberate rather than an inconsistency to tidy away.
+    The relay rule is about a village having a job that a leg in transit
+    interferes with, which the capital does; the morning floor is about waking
+    up able to train and build, which is what DEF and the two OFF roles are
+    FOR.
+
+    The capital is excluded because it is the storage and NPC hub: its stores
+    are drawn down on purpose, and a floor under them would report the hub doing
+    its job as a defect. A feeder is excluded because it holds nothing by design
+    -- it grows resources and moves them on, so 60% of its warehouse is cargo
+    sitting where it is not wanted.
+    """
+    return role in (Role.DEF, Role.TROOPS_OFF, Role.FULL_OFF)

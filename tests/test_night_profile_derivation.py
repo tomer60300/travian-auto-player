@@ -354,10 +354,22 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
     ship its whole production anyway -- exactly the retention
     ``NightVillage.max_busy_merchants`` says it exists to prevent. The gap was
     the fleet's as well as the cap's, and predates the cap.
+
+    RE-SEEDED for the 25%/60% fills (2026-09-03). The tighter room between
+    baseline and target moves every ceiling here, and on the crop side it moved
+    the SHAPE and not just the figures: at 50% of the granary the hub was forced
+    to shed 10,000/h and the army's 20,000/h deficit needed a draw, while at 35%
+    it sheds 25,000/h and covers the whole deficit on its own -- so the crop
+    draw and the return visit to the forced senders, which are what two of these
+    tests are about, stopped happening at all. The army's deficit is 35,000/h
+    here for exactly that reason: it keeps 10,000/h outstanding after the forced
+    pass, which is the situation the tests were written to exercise. Everything
+    asserted below is recomputed from the new ceilings, not adjusted until it
+    passed.
     """
 
     # FAR makes 40,000 lumber into a 1,200,000 warehouse, so the night's own
-    # ceiling (75,000/h) is no constraint and the day plan's 6,000 is what it
+    # ceiling (52,500/h) is no constraint and the day plan's 6,000 is what it
     # would keep. Four fields from its nearest neighbour at Trade Office 10 it
     # turns round 12 times in the window, so its shed limit is 202,500/h with
     # the fleet free, 22,500/h held to two merchants and nothing at all at
@@ -376,7 +388,7 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
                 to=19,
                 cap=hub_cap,
             ),
-            _village(ARMY, "army", 2, 0, crop=-20_000.0, lumber=2_000.0),
+            _village(ARMY, "army", 2, 0, crop=-35_000.0, lumber=2_000.0),
             _village(FAR, "far", 6, 0, crop=5_000.0, lumber=40_000.0, wh=1_200_000, cap=cap),
         ]
 
@@ -403,16 +415,18 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
         # 22,500/h is all two merchants move in the window, so the other
         # 17,500 stays here instead of being promised to the hub.
         assert profile.allocations[Resource.LUMBER][FAR].value == 17_500.0
-        # And the 11,500/h the cap put out of reach is reported.
-        assert profile.unmet[Resource.LUMBER] == pytest.approx(23_200.0)
+        # And the 22,500/h the cap put out of reach is reported: the hub wants
+        # 40,000 of lumber it does not make, plus the 5,000 the army needs
+        # delivered to reach its 7,000 ceiling from a production of 2,000.
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(22_500.0)
 
     def test_a_cap_of_zero_draws_nothing_and_reports_the_gap(self):
         profile = self._derive(cap=0)
 
         assert profile.allocations[Resource.LUMBER][FAR].value == 40_000.0
         assert profile.drawn_in[Resource.LUMBER] == []
-        # Reported, never hidden: the demand the cap put out of reach.
-        assert profile.unmet[Resource.LUMBER] == pytest.approx(45_700.0)
+        # Reported, never hidden: the whole 45,000/h the cap put out of reach.
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(45_000.0)
 
     def test_the_crop_draw_honours_the_cap_too(self):
         # Materials and crop draw down separate branches, so one fix does not
@@ -427,9 +441,12 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
         give. It is still bounded by what the village can move: at zero the hub
         keeps every unit it makes, and the army's deficit is reported instead.
         """
-        assert self._derive().allocations[Resource.CROP][HUB].value == 45_000.0
+        # 35,000 off the forced pass (its 35% ceiling), then 5,000 more on the
+        # return visit -- all that is left of the army's deficit once FAR's own
+        # 5,000 has been drawn.
+        assert self._derive().allocations[Resource.CROP][HUB].value == 30_000.0
 
         grounded = self._derive(hub_cap=0)
 
         assert grounded.allocations[Resource.CROP][HUB].value == 60_000.0
-        assert grounded.unmet[Resource.CROP] == pytest.approx(15_000.0)
+        assert grounded.unmet[Resource.CROP] == pytest.approx(30_000.0)

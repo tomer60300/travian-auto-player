@@ -40,8 +40,76 @@ from dataclasses import dataclass, field
 # import keeps resolving.
 from .allocation import MATERIALS, Allocation, AllocationMode, Resource
 
-DEFAULT_TARGET_FILL = 0.80
-DEFAULT_BASELINE_FILL = 0.30
+DEFAULT_TARGET_FILL = 0.60
+"""How full a store may be at dawn, and the FLOOR it must reach.
+
+One number doing two jobs, which is why it is one number. The derivation reads
+it as a ceiling -- the room a store has to fill is what bounds how much may be
+shipped into it overnight -- and section 6 reads the same figure as a floor
+every role village must have reached by 07:00. They are the same statement seen
+from either side: "never overflow during the night, never arrive empty at
+morning". Two constants could disagree; this one cannot.
+
+Settled at 0.60 by the operator on 2026-09-03. It was 0.80 while the question
+was open, and the extra 20 points of room is cargo the night ships into a store
+that has to hold it -- so the pair was the unsafe direction to guess.
+"""
+
+DEFAULT_BASELINE_FILL = 0.25
+"""How full each store is when the operator goes to bed.
+
+An ASSUMPTION THE OPERATOR OWNS, not something the planner enforces. At the
+day->night switch they spend the stores down by hand so no role village is above
+this fraction, and the derivation is entitled to start from it: every night
+ceiling is the room between here and :data:`DEFAULT_TARGET_FILL`.
+
+What the planner may do is notice a disagreement. A snapshot showing a role
+village above this at the switch means the room reserved to fill it is not
+there, so the night ships into a store that cannot hold it -- reported as a
+finding (``Category.PRE_NIGHT_BASELINE``) and never as a refusal, because the
+manual spend-down is the operator's action and the planner is not in the room
+when it happens.
+
+Settled at 0.25 by the operator on 2026-09-03, from 0.30.
+"""
+
+NIGHT_WINDOW: tuple[int, int] = (23 * 60, 7 * 60)
+"""Section 6's night hours, as minutes past midnight: 23:00 to 07:00.
+
+Start-inclusive and end-exclusive, the same convention every other window in
+the planner uses, so the minutes in it are exactly the firings a plan counts.
+"""
+
+MORNING_MINUTE: int = NIGHT_WINDOW[1]
+"""When the day profile takes over, and the deadline the night has.
+
+Two rules land on this minute. Every night movement must be COMPLETE by it --
+no merchant underway or returning -- so the morning profile starts with a full
+pool everywhere; and every role village must be at
+:data:`DEFAULT_TARGET_FILL` on both stores by it.
+"""
+
+
+def is_night_window(window: tuple[int, int] | None) -> bool:
+    """Is this profile the overnight one, which section 6's rules govern?
+
+    A window that WRAPS past midnight, rather than an equality test against
+    :data:`NIGHT_WINDOW`. Two reasons, and the second is the real one:
+
+    * A day's profiles do not overlap, so at most one of them can span
+      midnight, and that one is the overnight profile by construction. The test
+      is therefore structural rather than a magic number an operator has to
+      match to the minute -- 22:45 to 07:15 is still the night.
+    * The rules exist because nothing is SPENT overnight. That is what makes
+      latency the wrong measure (a delivery nobody is waiting for costs nothing
+      by being six hours old) and what makes the closing deadline the right one
+      (the pool has to be whole when spending resumes). Both follow from the
+      operator being asleep, which is the wrapping window and not the clock.
+
+    ``None`` is a round-the-clock route set, which has no switch to be ready
+    for and so keeps the day's rules.
+    """
+    return window is not None and window[0] > window[1]
 
 
 @dataclass(frozen=True)

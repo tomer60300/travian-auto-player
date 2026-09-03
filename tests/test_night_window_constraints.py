@@ -1,0 +1,582 @@
+"""Section 6: the night is a closed window, and the morning starts full.
+
+Four rules the operator settled, and each of them was previously a note in a
+docstring rather than something the planner could fail:
+
+* The pre-night baseline is **25%** and the morning target **60%** -- not the
+  30/80 pair the derivation defaulted to while the question was open.
+* **All night movements complete before 07:00.** No merchant underway or
+  returning at the switch, so the morning profile starts with a full pool
+  everywhere. A route that cannot manage it is refused by name with its
+  overrun, never quietly trimmed to fit.
+* Because of that, the standing **2-hour latency target does not apply inside
+  the night window.** Night cycle length is bounded by getting home and by not
+  overflowing, not by how fresh a delivery is while nobody is spending it.
+* At 07:00 every role village -- DEF and both OFF roles, the capital excluded
+  -- must be at **60% on both stores**. A plan that lands one below it says so
+  with the measured percentage.
+
+The pre-night 25% is the one rule that is NOT enforced: the operator spends the
+stores down by hand at the switch, so the planner treats it as a trusted
+starting condition and reports a snapshot that disagrees rather than refusing.
+"""
+
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from travian_api.services.distribution.allocation import (
+    Allocation,
+    AllocationMode,
+    Resource,
+)
+from travian_api.services.distribution.findings import Category, Severity
+from travian_api.services.distribution.geometry import MapGeometry
+from travian_api.services.distribution.merchants import EUROPE2_TEUTON
+from travian_api.services.distribution.night_profile import (
+    DEFAULT_BASELINE_FILL,
+    DEFAULT_TARGET_FILL,
+    MORNING_MINUTE,
+    NIGHT_WINDOW,
+    NightVillage,
+    derive_night_profile,
+    is_night_window,
+)
+from travian_api.services.distribution.optimizer import Route, VillageState
+from travian_api.services.distribution.planner import PlannerConfig, craft_plan
+from travian_api.services.distribution.roles import Role, keeps_a_morning_floor
+from travian_api.services.distribution.schedule import (
+    ScheduledRoute,
+    build_beat,
+    night_overrun_minutes,
+)
+from travian_api.services.distribution.storage import (
+    ProfileSegment,
+    morning_floor_shortfalls,
+    night_state_findings,
+    pre_night_overfills,
+    simulate_profile_cycle,
+)
+from travian_api.web.routes.distribution import DayCheckRequest, post_day_check
+
+USER = SimpleNamespace(id=1)
+DAY_WINDOW = (7 * 60, 23 * 60)
+HUB, ARMY, FAR = 1, 2, 3
+
+
+# ── The fill fractions ───────────────────────────────────────────────────────
+
+
+class TestTheFillFractionsAreTwentyFiveAndSixty:
+    """Settled 2026-09-03. The register carried 25/60 vs 30/80 as open for days
+    and the code kept the pair that was never chosen."""
+
+    def test_the_pre_night_baseline_is_a_quarter(self):
+        assert DEFAULT_BASELINE_FILL == 0.25
+
+    def test_the_morning_target_is_three_fifths(self):
+        assert DEFAULT_TARGET_FILL == 0.60
+
+    def test_the_ceiling_is_the_room_between_them(self):
+        """A receiver is given what it can still hold, which IS the ceiling:
+        (0.60 - 0.25) x 160,000 over 8 hours is 7,000/h. Under 30/80 the same
+        village was handed 10,000/h, and the extra 3,000 an hour is 24,000 the
+        night ships into a store with no room for it."""
+        village = NightVillage(
+            village_id=ARMY,
+            name="03",
+            x=1,
+            y=0,
+            merchants_total=20,
+            trade_office_level=0,
+            warehouse_capacity=160_000,
+            granary_capacity=160_000,
+            production={Resource.LUMBER: 0.0, Resource.CROP: 0.0},
+        )
+        hub = NightVillage(
+            village_id=HUB,
+            name="02",
+            x=0,
+            y=0,
+            merchants_total=20,
+            trade_office_level=0,
+            warehouse_capacity=1_200_000,
+            granary_capacity=800_000,
+            production={Resource.LUMBER: 40_000.0, Resource.CROP: 0.0},
+        )
+
+        profile = derive_night_profile(
+            [hub, village],
+            window_hours=8.0,
+            speed_fields_per_hour=12.0,
+            map_span=401,
+            # Far above anything the store can hold, so the answer is the
+            # ceiling and nothing else.
+            day_retention={Resource.LUMBER: {ARMY: 999_999.0}},
+            hub_id=HUB,
+        )
+
+        assert profile.allocations[Resource.LUMBER][ARMY].value == 7_000.0
+
+
+# ── The night window, and what identifies it ─────────────────────────────────
+
+
+class TestWhichProfileIsTheNight:
+    def test_the_nights_hours_are_23_to_07(self):
+        assert NIGHT_WINDOW == (23 * 60, 7 * 60)
+        assert MORNING_MINUTE == 7 * 60
+
+    def test_a_window_that_wraps_past_midnight_is_the_night(self):
+        assert is_night_window(NIGHT_WINDOW)
+        assert is_night_window((22 * 60, 6 * 60))
+
+    def test_the_day_and_the_round_the_clock_set_are_not(self):
+        assert not is_night_window(DAY_WINDOW)
+        assert not is_night_window(None)
+
+
+# ── Everything home before 07:00 ─────────────────────────────────────────────
+
+
+def _leg(one_way: float, cycle: int = 24, origin: int = 2, destination: int = 1) -> Route:
+    return Route(
+        origin=origin,
+        destination=destination,
+        cargo_per_hour={Resource.CROP: 1_000.0},
+        cycle_hours=cycle,
+        merchants_per_send=1,
+        sets_in_flight=1,
+        one_way_minutes=one_way,
+    )
+
+
+def _overruns(beat):
+    return [f for f in beat.findings if f.category is Category.NIGHT_OVERRUN]
+
+
+class TestEveryNightMovementFinishesBeforeDawn:
+    """`last_dispatch + round_trip <= 07:00`, derived from the beat.
+
+    The night window is 480 minutes, so a 24h route -- one firing -- has room
+    for a round trip of exactly 480 minutes and not a minute more.
+    """
+
+    def test_a_round_trip_that_lands_exactly_at_dawn_is_accepted(self):
+        # 240 min out, 240 min back: leaves at 23:00, home at 07:00 sharp.
+        beat = build_beat((_leg(240.0),), dispatch_window=NIGHT_WINDOW)
+
+        (placed,) = beat.routes
+        assert placed.dispatch_minute == 23 * 60, (
+            "the only phase that fits is the window's first minute, and the beat "
+            "must choose it rather than merely tolerate it"
+        )
+        assert night_overrun_minutes(placed, NIGHT_WINDOW) == pytest.approx(0.0)
+        assert not _overruns(beat), (
+            f"a round trip that just fits is not an overrun: {beat.warnings}"
+        )
+
+    def test_a_round_trip_one_minute_too_long_is_refused(self):
+        beat = build_beat((_leg(240.5),), dispatch_window=NIGHT_WINDOW)
+
+        assert _overruns(beat), f"481 min of round trip does not fit 480: {beat.warnings}"
+
+    def test_the_refusal_names_the_route_and_the_overrun_in_minutes(self):
+        beat = build_beat((_leg(245.0),), dispatch_window=NIGHT_WINDOW)
+
+        (finding,) = _overruns(beat)
+        assert finding.severity is Severity.CRITICAL
+        assert "10 min" in finding.message, finding.message
+        assert "2" in finding.detail and "1" in finding.detail
+        # And what would fix it, so the operator is not left holding a number.
+        assert "cycle" in finding.action
+        assert "nearer" in finding.action
+
+    def test_nothing_is_trimmed_to_make_it_fit(self):
+        """Refusing beats under-delivering. A 4h cycle fires twice in the night
+        and the plan sized the cargo for two firings, so dropping one to get the
+        merchants home would silently halve the delivery."""
+        beat = build_beat((_leg(200.0, cycle=4),), dispatch_window=NIGHT_WINDOW)
+
+        (placed,) = beat.routes
+        inside = [m for m in placed.dispatch_minutes if m >= 23 * 60 or m < 7 * 60]
+        assert len(inside) == 2, "both in-window firings must survive"
+        assert _overruns(beat), "and the overrun they cause must be reported instead"
+
+    def test_the_beat_phases_the_route_to_get_home_where_it_can(self):
+        """Reshaped, not merely reported. A reserved window covering every
+        arrival that fits pulls the placement late unless getting home outranks
+        keeping the NPC slot clear -- measured as a route phased to 06:00 and
+        home at 08:00, for the sake of an arrival slot."""
+        beat = build_beat(
+            (_leg(60.0),),
+            dispatch_window=NIGHT_WINDOW,
+            # Covers 00:00-06:00, i.e. every arrival a fitting phase produces.
+            reserved_window=(0, 6 * 60),
+        )
+
+        (placed,) = beat.routes
+        assert not _overruns(beat), (
+            f"the route is placed at {placed.dispatch_minute} and does not get home: "
+            f"{beat.warnings}"
+        )
+
+    def test_the_day_profile_keeps_no_such_deadline(self):
+        """Nothing says a merchant may not be underway at 23:00. The rule is the
+        night's, and applying it to the day would refuse most of the sheet."""
+        beat = build_beat((_leg(245.0),), dispatch_window=DAY_WINDOW)
+
+        assert not _overruns(beat), f"the day has no completion rule: {beat.warnings}"
+
+    def test_a_round_the_clock_set_keeps_no_such_deadline(self):
+        beat = build_beat((_leg(245.0),))
+
+        assert not _overruns(beat)
+
+
+# ── The latency target is a day rule ─────────────────────────────────────────
+
+
+def _two_villages():
+    villages = {
+        1: VillageState(village_id=1, x=0, y=0, merchant_count=20, trade_office_level=0),
+        2: VillageState(village_id=2, x=60, y=0, merchant_count=20, trade_office_level=0),
+    }
+    productions = {Resource.LUMBER: {1: 4_000.0, 2: 0.0}}
+    allocations = {
+        Resource.LUMBER: {
+            1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+            2: Allocation(AllocationMode.REMAINDER),
+        }
+    }
+    return villages, productions, allocations
+
+
+def _config(window):
+    return PlannerConfig(
+        geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+        merchant_model=EUROPE2_TEUTON,
+        dispatch_window=window,
+    )
+
+
+class TestTheLatencyTargetDoesNotBindAtNight:
+    """60 fields at 12 fields/h is five hours one way, so every cycle misses a
+    2h target. By day that is worth saying; overnight nothing is being spent,
+    so freshness costs nothing and the target is simply the wrong rule."""
+
+    def test_it_still_binds_in_the_day_window(self):
+        villages, productions, allocations = _two_villages()
+
+        plan = craft_plan(villages, productions, allocations, _config(DAY_WINDOW))
+
+        assert [f for f in plan.findings if f.category is Category.LATENCY], (
+            f"a 5h haul misses a 2h target and the day must report it: {plan.warnings}"
+        )
+
+    def test_it_does_not_bind_in_the_night_window(self):
+        villages, productions, allocations = _two_villages()
+
+        plan = craft_plan(villages, productions, allocations, _config(NIGHT_WINDOW))
+
+        assert not [f for f in plan.findings if f.category is Category.LATENCY], (
+            f"section 6 suspends the latency rule overnight: {plan.warnings}"
+        )
+
+    def test_it_still_binds_round_the_clock(self):
+        villages, productions, allocations = _two_villages()
+
+        plan = craft_plan(villages, productions, allocations, _config(None))
+
+        assert [f for f in plan.findings if f.category is Category.LATENCY]
+
+
+# ── The morning floor, on both stores, for the role villages only ────────────
+
+
+def _still_life(stocks, capacities, floor_villages=(HUB, ARMY, FAR)):
+    """A day where nothing moves, so 07:00 holds exactly what was seeded.
+
+    Zero production and no routes: the point under test is which stores are
+    measured at the switch and against what, not the simulation's arithmetic.
+    """
+    night = ProfileSegment(name="Night", start_minute=23 * 60, end_minute=7 * 60)
+    day = ProfileSegment(name="Day", start_minute=7 * 60, end_minute=23 * 60)
+    trajectories, _ = simulate_profile_cycle(
+        [night, day],
+        own_rates={vid: {resource: 0.0 for resource in Resource} for vid in stocks},
+        stocks=stocks,
+        capacities=capacities,
+    )
+    return trajectories, morning_floor_shortfalls(
+        trajectories, capacities, floor_villages, morning_profile="Day"
+    )
+
+
+def _stores(*, crop, material, capacity=100_000):
+    return (
+        {
+            Resource.CROP: int(crop * capacity),
+            Resource.LUMBER: int(material * capacity),
+            Resource.CLAY: int(material * capacity),
+            Resource.IRON: int(material * capacity),
+        },
+        {resource: capacity for resource in Resource},
+    )
+
+
+class TestTheMorningFloorIsOnBothStores:
+    def test_a_granary_below_the_floor_is_reported(self):
+        stocks, caps = _stores(crop=0.10, material=0.90)
+        _, short = _still_life({ARMY: stocks}, {ARMY: caps})
+
+        assert {s.resource for s in short} == {Resource.CROP}
+        (crop,) = short
+        assert crop.fraction == pytest.approx(0.10)
+
+    def test_a_warehouse_below_the_floor_is_reported(self):
+        stocks, caps = _stores(crop=0.90, material=0.10)
+        _, short = _still_life({ARMY: stocks}, {ARMY: caps})
+
+        assert {s.resource for s in short} == {Resource.LUMBER, Resource.CLAY, Resource.IRON}
+
+    def test_both_stores_below_the_floor_report_both(self):
+        stocks, caps = _stores(crop=0.10, material=0.10)
+        _, short = _still_life({ARMY: stocks}, {ARMY: caps})
+
+        assert {s.resource for s in short} == set(Resource)
+
+    def test_a_village_at_the_floor_exactly_is_not_reported(self):
+        stocks, caps = _stores(crop=0.60, material=0.60)
+        _, short = _still_life({ARMY: stocks}, {ARMY: caps})
+
+        assert not short, "60% IS the floor, and a floor is met by standing on it"
+
+    def test_the_finding_carries_the_measured_percentage(self):
+        stocks, caps = _stores(crop=0.10, material=0.90)
+        _, short = _still_life({ARMY: stocks}, {ARMY: caps})
+
+        findings = night_state_findings(short, (), names={ARMY: "03"})
+
+        (finding,) = findings
+        assert finding.category is Category.MORNING_FLOOR
+        assert "10%" in finding.message, finding.message
+        assert "60%" in finding.message
+        assert "granary" in finding.message
+        assert finding.village == "03"
+
+
+class TestOnlyRoleVillagesHoldTheFloor:
+    def test_the_def_and_off_roles_hold_it(self):
+        assert keeps_a_morning_floor(Role.DEF)
+        assert keeps_a_morning_floor(Role.TROOPS_OFF)
+        assert keeps_a_morning_floor(Role.FULL_OFF)
+
+    def test_the_capital_is_exempt(self):
+        """Section 6 names DEF and OFF and excludes the capital by name: it is
+        the storage and NPC hub, so its stores are drawn down deliberately."""
+        assert not keeps_a_morning_floor(Role.CAPITAL)
+
+    def test_a_feeder_is_exempt(self):
+        assert not keeps_a_morning_floor(Role.FEEDER)
+
+    def test_an_exempt_village_below_the_floor_produces_nothing(self):
+        stocks, caps = _stores(crop=0.05, material=0.05)
+        _, short = _still_life({HUB: stocks}, {HUB: caps}, floor_villages=())
+
+        assert not short
+
+
+# ── No overflow, either direction, at any point in the night ─────────────────
+
+
+class TestNoOverflowEitherDirectionDuringTheNight:
+    """The rule needs no new simulator: `simulate_profile_cycle` already
+    replays the beat against real capacity and names the profile that was
+    running, in both directions -- a store hitting its cap and a store running
+    dry. These pin that the composite really answers the night's question, so
+    nobody writes a second replay to ask it again.
+
+    Worth knowing where this does NOT hold: `simulate_day`, which `/plan` uses,
+    reports only waste that survives to a SETTLED day, by its own documented
+    contract. A batch that overflows on the first night and never again is
+    invisible there while the composite reports it at 01:00 on day 0. That gap
+    is real and is queued separately (P17); nothing here changes that contract.
+    """
+
+    @staticmethod
+    def _landing(crop_per_hour, dispatch_minute):
+        return ScheduledRoute(
+            route=Route(
+                origin=FAR,
+                destination=ARMY,
+                cargo_per_hour={Resource.CROP: crop_per_hour},
+                cycle_hours=24,
+                merchants_per_send=1,
+                sets_in_flight=1,
+                one_way_minutes=0.0,
+            ),
+            dispatch_minute=dispatch_minute,
+        )
+
+    def test_a_batch_that_overflows_at_01_00_is_reported_against_the_night(self):
+        # 60,000 lands at 01:00 on a granary holding 90,000 of 100,000. The day
+        # profile spends it back down, so this overflows once and never again --
+        # a transient, and the night is exactly when it happens.
+        night = ProfileSegment(
+            name="Night",
+            start_minute=23 * 60,
+            end_minute=7 * 60,
+            routes=(self._landing(60_000 / 24, 60),),
+        )
+        day = ProfileSegment(name="Day", start_minute=7 * 60, end_minute=23 * 60)
+
+        _, breaches = simulate_profile_cycle(
+            [night, day],
+            own_rates={ARMY: {Resource.CROP: -2_500.0}, FAR: {Resource.CROP: 0.0}},
+            stocks={ARMY: {Resource.CROP: 90_000}, FAR: {Resource.CROP: 1_000_000}},
+            capacities={ARMY: {Resource.CROP: 100_000}, FAR: {Resource.CROP: 2_000_000}},
+        )
+
+        overflow = [b for b in breaches if b.kind == "capacity" and b.village_id == ARMY]
+        assert overflow, f"10,000 crop is destroyed at 01:00: {breaches}"
+        assert overflow[0].segment == "Night"
+        assert overflow[0].minute == 60
+
+    def test_a_granary_emptying_overnight_is_reported_against_the_night(self):
+        # The other direction, which the operator named in the same breath.
+        # Nothing arrives and the army eats 5,000/h into a 20,000 stock, so it
+        # is dry four hours into the night.
+        night = ProfileSegment(name="Night", start_minute=23 * 60, end_minute=7 * 60)
+        day = ProfileSegment(name="Day", start_minute=7 * 60, end_minute=23 * 60)
+
+        _, breaches = simulate_profile_cycle(
+            [night, day],
+            own_rates={ARMY: {Resource.CROP: -5_000.0}},
+            stocks={ARMY: {Resource.CROP: 20_000}},
+            capacities={ARMY: {Resource.CROP: 100_000}},
+        )
+
+        dry = [b for b in breaches if b.kind == "empty"]
+        assert dry, f"a granary at 20,000 losing 5,000/h does not last the night: {breaches}"
+        assert dry[0].segment == "Night"
+
+
+# ── The pre-night 25% is an assumption, not a gate ───────────────────────────
+
+
+class TestThePreNightBaselineIsTrusted:
+    def test_a_role_village_above_the_baseline_at_the_switch_is_reported(self):
+        stocks, caps = _stores(crop=0.40, material=0.10)
+        night = ProfileSegment(name="Night", start_minute=23 * 60, end_minute=7 * 60)
+        day = ProfileSegment(name="Day", start_minute=7 * 60, end_minute=23 * 60)
+        trajectories, _ = simulate_profile_cycle(
+            [night, day],
+            own_rates={ARMY: {resource: 0.0 for resource in Resource}},
+            stocks={ARMY: stocks},
+            capacities={ARMY: caps},
+        )
+
+        over = pre_night_overfills(trajectories, {ARMY: caps}, (ARMY,), night_profile="Night")
+
+        assert {o.resource for o in over} == {Resource.CROP}
+        findings = night_state_findings((), over, names={ARMY: "03"})
+        (finding,) = findings
+        assert finding.category is Category.PRE_NIGHT_BASELINE
+        assert finding.severity is Severity.WARNING, (
+            "the operator spends the stores down by hand; a snapshot that "
+            "disagrees is a finding, never a refusal"
+        )
+        assert "40%" in finding.message
+        assert "25%" in finding.message
+
+    def test_a_village_at_or_below_the_baseline_is_silent(self):
+        stocks, caps = _stores(crop=0.25, material=0.10)
+        night = ProfileSegment(name="Night", start_minute=23 * 60, end_minute=7 * 60)
+        trajectories, _ = simulate_profile_cycle(
+            [night],
+            own_rates={ARMY: {resource: 0.0 for resource in Resource}},
+            stocks={ARMY: stocks},
+            capacities={ARMY: caps},
+        )
+
+        assert not pre_night_overfills(trajectories, {ARMY: caps}, (ARMY,), night_profile="Night")
+
+
+# ── Through the endpoint the page calls ──────────────────────────────────────
+
+
+def _day_check_body(*, crop_stock, material_stock):
+    def village(vid, name, x, y):
+        return {
+            "village_id": vid,
+            "name": name,
+            "x": x,
+            "y": y,
+            "merchants_total": 20,
+            "merchants_free": 20,
+            "lumber_per_hour": 0,
+            "clay_per_hour": 0,
+            "iron_per_hour": 0,
+            "crop_per_hour": 0,
+            "crop_stock": crop_stock,
+            "lumber_stock": material_stock,
+            "clay_stock": material_stock,
+            "iron_stock": material_stock,
+            "granary_capacity": 100_000,
+            "warehouse_capacity": 100_000,
+        }
+
+    return DayCheckRequest.model_validate(
+        {
+            "snapshot": [village(HUB, "02", 0, 0), village(ARMY, "03", 1, 0)],
+            "config": [
+                {"village_id": HUB, "role": "capital"},
+                {"village_id": ARMY, "role": "troops_off"},
+            ],
+            "roles": {"capital": {}, "troops_off": {}},
+            "segments": [
+                {"name": "Day", "window": [7 * 60, 23 * 60], "allocations": {}},
+                {"name": "Night", "window": [23 * 60, 7 * 60], "allocations": {}},
+            ],
+        }
+    )
+
+
+class TestTheDayCheckReportsTheNightState:
+    def test_a_role_village_short_at_dawn_is_reported_with_its_percentage(self):
+        body = _day_check_body(crop_stock=10_000, material_stock=90_000)
+
+        res = asyncio.run(post_day_check(body, USER))
+
+        assert res.morning_floor == 0.60
+        assert res.pre_night_baseline == 0.25
+        rows = [r for r in res.morning_shortfalls if r.village_id == ARMY]
+        assert [r.resource for r in rows] == [Resource.CROP]
+        assert rows[0].fill == pytest.approx(0.10)
+        assert rows[0].store == "granary"
+        assert any("10%" in w and "03" in w for w in res.warnings), res.warnings
+
+    def test_the_capital_is_not_reported_however_empty_it_is(self):
+        body = _day_check_body(crop_stock=1_000, material_stock=1_000)
+
+        res = asyncio.run(post_day_check(body, USER))
+
+        assert not [r for r in res.morning_shortfalls if r.village_id == HUB], (
+            "the capital is the storage hub and is excluded by name"
+        )
+
+    def test_a_role_village_over_the_baseline_at_the_switch_is_a_finding_not_a_refusal(self):
+        # 40% crop against the 25% baseline; the materials are under it, so the
+        # granary is the only store that has more in it than the night reserved
+        # room for -- and the endpoint answers rather than refusing.
+        body = _day_check_body(crop_stock=40_000, material_stock=10_000)
+
+        res = asyncio.run(post_day_check(body, USER))
+
+        rows = [r for r in res.pre_night_over_baseline if r.village_id == ARMY]
+        assert [r.resource for r in rows] == [Resource.CROP]
+        assert rows[0].fill == pytest.approx(0.40)
+        assert rows[0].store == "granary"
+        assert any("25%" in w and "40%" in w for w in res.warnings), res.warnings
