@@ -294,17 +294,25 @@ function parseConsumption(raw, where) {
           `it must be one of ${SETUP_RESOURCES.join(', ')}.`
       )
     }
-    const value = Number(rate)
-    if (!isConsumptionRate(value)) {
+    // The RAW value, before any coercion. `Number(null)` is 0, `Number([1])`
+    // is 1 and `Number('')` is 0, so coercing first defeated the
+    // `typeof === 'number'` half of the shared predicate and imported three
+    // malformed shapes as confident declarations -- while the planner's input
+    // tests the raw value, so parser and input disagreed about the same file.
+    if (!isConsumptionRate(rate)) {
       throw new SetupFileError(
-        `${where}.${resource} is ${rate}; consumption is what a village SPENDS ` +
-          `per hour, so it cannot be negative.`
+        typeof rate === 'number' && Number.isFinite(rate)
+          ? `${where}.${resource} is ${rate}; consumption is what a village ` +
+            `SPENDS per hour, so it cannot be negative.`
+          : `${where}.${resource} is ${JSON.stringify(rate)}, which is not a ` +
+            `number; consumption is a flat rate per hour.`
       )
     }
     // Whole units, as the allocation values are: a /h rate has no sub-unit
     // precision, and a figure like 14750.600918351606 from a raw computation
-    // lands verbatim in the operator's input box.
-    out[resource] = Math.round(value)
+    // lands verbatim in the operator's input box. Rounded only after the raw
+    // value has been accepted.
+    out[resource] = Math.round(rate)
   }
   return out
 }

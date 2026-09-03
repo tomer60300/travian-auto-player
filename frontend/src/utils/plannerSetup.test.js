@@ -825,9 +825,45 @@ describe('consumption_per_hour in the setup file', () => {
       roundTrip({
         format: SETUP_FORMAT,
         version: SETUP_VERSION,
-        villages: [{ village_id: 20030, consumption_per_hour: { crop: 'some' } }],
+        villages: [{ village_id: 20030, consumption_per_hour: { lumber: 'some' } }],
       })
     ).toThrow(SetupFileError)
+  })
+
+  it('rejects a malformed spend instead of coercing it into a claim', () => {
+    // `Number(null)` is 0, `Number([1])` is 1 and `Number('')` is 0, so
+    // coercing before validating turned three malformed files into confident
+    // declarations -- and a declared 0 is not silence, it is the claim
+    // "measured, and it spends none". Each of these must reach the operator as
+    // a file error, not as a number the file never contained.
+    for (const bad of [null, [1], '']) {
+      expect(() =>
+        roundTrip({
+          format: SETUP_FORMAT,
+          version: SETUP_VERSION,
+          villages: [{ village_id: 20030, consumption_per_hour: { lumber: bad } }],
+        })
+      ).toThrow(SetupFileError)
+    }
+  })
+
+  it('says which thing is wrong: a type is not a sign', () => {
+    // One message for two faults told the operator that `"some"` "cannot be
+    // negative", which is both untrue and unactionable.
+    expect(() =>
+      roundTrip({
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20030, consumption_per_hour: { lumber: 'some' } }],
+      })
+    ).toThrow(/is not a number/)
+    expect(() =>
+      roundTrip({
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20030, consumption_per_hour: { lumber: -500 } }],
+      })
+    ).toThrow(/cannot be negative/)
   })
 
   it('rounds a raw-computation float to something an input box can hold', () => {
