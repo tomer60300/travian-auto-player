@@ -75,6 +75,28 @@ export function villageNetIndex(plan) {
   return out
 }
 
+/** How much NPC conversion this plan actually SPENDS at each village, /h.
+ *
+ * A sum of the server's own per-resource draws, never a re-derivation, and
+ * never the allowance: `npc_allowance_per_hour` is a CEILING -- what the
+ * village retains of the resources it is not shipping -- and nothing is obliged
+ * to use any of it. A village whose floor funded no cargo appears here as 0,
+ * which is the honest figure and the one the NPC panel leads with; showing its
+ * ceiling in that column would claim it converted 22,000/h when it converted
+ * nothing.
+ *
+ * A Map rather than an object so a numeric village id stays numeric: every
+ * other index in this file is keyed off `village_nets` too, and the panel looks
+ * these up by the id on an `npc_reserves` row.
+ */
+export function npcDrawByVillage(plan) {
+  const out = new Map()
+  for (const row of plan?.village_nets ?? []) {
+    out.set(row.village_id, (out.get(row.village_id) ?? 0) + (row.npc_draw_per_hour ?? 0))
+  }
+  return out
+}
+
 /** The three lines one Allocate cell prints, from ONE source.
  *
  * `planned` is the plan's row for this village and resource, from
@@ -114,13 +136,19 @@ export function planCellFigures({ planned, own, localTarget, declaredSpend }) {
       // when it drew nothing. (Was `supplement_per_hour` until NPC balancing
       // split the two; reading the old name silently annotated every cell 0.)
       supplement: planned.npc_draw_per_hour ?? 0,
+      // The ceiling beside the draw, so the cell can say "15,000/h of 22,000/h
+      // available" rather than leaving the operator to wonder whether the
+      // supplement was all there was. Carried as a SEPARATE field for the
+      // reason the comment above gives: the two are different quantities, and
+      // one field would eventually be read as the other.
+      allowance: planned.npc_allowance_per_hour ?? 0,
     }
   }
   const ship = localTarget == null || own == null ? null : localTarget - own
-  // No plan, no supplement: the floor is a rate only the planner can work out
-  // (it spreads a warehouse LEVEL across the window the profile runs), so the
-  // live preview cannot show one and must not imply it has.
-  const preview = { target: localTarget, ship, supplement: 0 }
+  // No plan, no supplement AND no ceiling: both are rates only the planner can
+  // work out (it reads a warehouse LEVEL against what the village retains), so
+  // the live preview cannot show either and must not imply it has one.
+  const preview = { target: localTarget, ship, supplement: 0, allowance: 0 }
   if (declaredSpend == null) return { ...preview, spent: null, net: null }
   return {
     ...preview,

@@ -4,6 +4,7 @@ import {
   METER_TONE,
   allocationMeterSeverity,
   planCellFigures,
+  npcDrawByVillage,
   villageNetIndex,
   withEditedAllocation,
 } from './plannerAllocation'
@@ -142,6 +143,9 @@ describe('planCellFigures', () => {
       spent: 4_000,
       net: 16_000,
       supplement: 15_000,
+      // The ceiling, beside the draw and never instead of it. Zero here
+      // because this fixture's plan row states no allowance.
+      allowance: 0,
     })
     expect(figures.target - figures.spent).toBe(figures.net)
   })
@@ -201,9 +205,11 @@ describe('planCellFigures', () => {
       ship: 7_000,
       spent: 4_000,
       net: 8_000,
-      // The floor is a warehouse LEVEL spread across the profile's hours,
-      // which only the planner works out -- so the preview cannot show one.
+      // The floor is a warehouse LEVEL read against what the village retains,
+      // which only the planner works out -- so the preview shows neither the
+      // draw nor the ceiling, and must not imply it has one.
       supplement: 0,
+      allowance: 0,
     })
   })
 
@@ -329,5 +335,89 @@ describe('withEditedAllocation', () => {
         patch: { value: 7 },
       })[20011]
     ).toEqual({ mode: 'keep', value: 7 })
+  })
+})
+
+// ─── The NPC ceiling and the NPC draw are different quantities ─────────────
+//
+// `npc_allowance_per_hour` is what a village COULD convert; `npc_draw_per_hour`
+// is what this plan spends. Presenting the first as the second claims a village
+// drew 20,000/h when it drew nothing, which is the mistake `planCellFigures`
+// already avoids for the cell annotation -- these two readers must not
+// reintroduce it.
+
+describe('npcDrawByVillage', () => {
+  it('totals the draw across resources, per village', () => {
+    const plan = {
+      village_nets: [
+        { village_id: 1, resource: 'lumber', npc_draw_per_hour: 1000, npc_allowance_per_hour: 9000 },
+        { village_id: 1, resource: 'clay', npc_draw_per_hour: 500, npc_allowance_per_hour: 9000 },
+        { village_id: 2, resource: 'iron', npc_draw_per_hour: 0, npc_allowance_per_hour: 7000 },
+      ],
+    }
+
+    expect(npcDrawByVillage(plan).get(1)).toBe(1500)
+    // Zero, not the 7,000 ceiling: a floor on a village that needs nothing
+    // draws nothing, and the ceiling is not a supply.
+    expect(npcDrawByVillage(plan).get(2)).toBe(0)
+  })
+
+  it('is empty with no plan, rather than throwing', () => {
+    expect(npcDrawByVillage(null).size).toBe(0)
+    expect(npcDrawByVillage({}).size).toBe(0)
+  })
+})
+
+describe('planCellFigures carries the ceiling as well as the draw', () => {
+  it('reports both, and never substitutes one for the other', () => {
+    const figures = planCellFigures({
+      planned: {
+        target_per_hour: 20_000,
+        ship_per_hour: 0,
+        consumption_per_hour: 4000,
+        net_per_hour: 16_000,
+        npc_draw_per_hour: 15_000,
+        npc_allowance_per_hour: 22_000,
+      },
+      own: 5000,
+      localTarget: 5000,
+      declaredSpend: 4000,
+    })
+
+    expect(figures.supplement).toBe(15_000)
+    expect(figures.allowance).toBe(22_000)
+  })
+
+  it('reports a ceiling with nothing drawn against it', () => {
+    const figures = planCellFigures({
+      planned: {
+        target_per_hour: 5000,
+        ship_per_hour: 0,
+        consumption_per_hour: 0,
+        net_per_hour: 5000,
+        npc_draw_per_hour: 0,
+        npc_allowance_per_hour: 22_000,
+      },
+      own: 5000,
+      localTarget: 5000,
+      declaredSpend: null,
+    })
+
+    expect(figures.supplement).toBe(0)
+    expect(figures.allowance).toBe(22_000)
+  })
+
+  // The live preview cannot know either figure: the floor is a rate only the
+  // planner works out, so claiming a ceiling here would be an invention.
+  it('has no ceiling in the live preview, the same way it has no draw', () => {
+    const figures = planCellFigures({
+      planned: null,
+      own: 5000,
+      localTarget: 8000,
+      declaredSpend: null,
+    })
+
+    expect(figures.supplement).toBe(0)
+    expect(figures.allowance).toBe(0)
   })
 })

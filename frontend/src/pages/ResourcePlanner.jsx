@@ -51,9 +51,12 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import DayNightPanel from '../components/DayNightPanel'
 import FullDayCheck from '../components/FullDayCheck'
+import NightOverrunTable from '../components/NightOverrunTable'
+import NpcBalancePanel from '../components/NpcBalancePanel'
 import PlanDiagnostics from '../components/PlanDiagnostics'
 import RoleTemplates from '../components/RoleTemplates'
 import ScrollableTable from '../components/ScrollableTable'
+import UnallocatedPanel from '../components/UnallocatedPanel'
 import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
 import useLogStore from '../stores/logStore'
@@ -91,6 +94,7 @@ import {
 import {
   METER_TONE,
   allocationMeterSeverity,
+  npcDrawByVillage,
   planCellFigures,
   villageNetIndex,
   withEditedAllocation,
@@ -2671,6 +2675,11 @@ export default function ResourcePlanner() {
   // screen was computed from exactly these inputs -- there is no stale-figure
   // case to guard against.
   const planNet = useMemo(() => villageNetIndex(plan), [plan])
+  // What the plan actually converted at each village, summed off the server's
+  // own per-resource draws. Never the allowance: that is a ceiling on what the
+  // village COULD convert, and a floor on a village that needs nothing draws
+  // none of it.
+  const planNpcDraw = useMemo(() => npcDrawByVillage(plan), [plan])
   const relayLegs = relayLegIndex(relays)
 
   // What going live will actually do, derived from the PREVIEW the operator is
@@ -4531,7 +4540,14 @@ export default function ResourcePlanner() {
                           // what was typed: the planner sets aside a declared
                           // spend whose rate it cannot read, and showing the typed
                           // figure claimed it had been applied.
-                          const { target: after, ship, spent, net, supplement } = planCellFigures({
+                          const {
+                            target: after,
+                            ship,
+                            spent,
+                            net,
+                            supplement,
+                            allowance,
+                          } = planCellFigures({
                             planned: planNet[resource]?.[v.village_id],
                             own,
                             localTarget: targetFor(resource, v),
@@ -4558,12 +4574,24 @@ export default function ResourcePlanner() {
                                    20,000/h retention against 5,000/h of own
                                    production and no cargo, and only the stock
                                    floor explains the other 15,000. */
+                                /* The ceiling is named beside the draw where
+                                   there is one, and never instead of it: the
+                                   supplement is what the plan SPENT, and an
+                                   operator reading "22,000/h" would otherwise
+                                   have no way to tell a village that converted
+                                   everything available from one that converted
+                                   two thirds of it. */
                                 title={
                                   own == null
                                     ? 'own production unknown'
                                     : supplement > 0
-                                      ? `own ${fmt(own)}/h + ${fmt(supplement)}/h drawn from the stock floor`
-                                      : `own ${fmt(own)}/h`
+                                      ? `own ${fmt(own)}/h + ${fmt(supplement)}/h drawn` +
+                                        (allowance > supplement
+                                          ? ` of ${fmt(allowance)}/h the stock floor could convert`
+                                          : ' from the stock floor')
+                                      : allowance > 0
+                                        ? `own ${fmt(own)}/h · the stock floor could have converted ${fmt(allowance)}/h and none was needed`
+                                        : `own ${fmt(own)}/h`
                                 }
                               >
                                 {after == null ? (
@@ -5157,6 +5185,21 @@ export default function ResourcePlanner() {
                 </details>
               )}
 
+              {/* What the account had to give, before what it will do with
+                  it. `unallocated` was computed on every plan and rendered
+                  nowhere, so the only slack figure on screen was the Targets
+                  grid's own live derivation -- right while typing, and not
+                  what the plan used. */}
+              <UnallocatedPanel rows={plan.unallocated ?? []} villages={villages} />
+
+              {/* Section 7, once the two-pass solve has sized it. Renders
+                  nothing for an account that declares no floor. */}
+              <NpcBalancePanel
+                reserves={plan.npc_reserves ?? []}
+                triggers={plan.npc_triggers ?? []}
+                drawByVillage={planNpcDraw}
+              />
+
               <div className="card p-4">
                 <h3 className="font-semibold mb-2">Merchant budget</h3>
                 <div className="space-y-1">
@@ -5355,6 +5398,21 @@ export default function ResourcePlanner() {
                   </div>
                 )}
               </div>
+
+              {/* Section 6's deadline, against THIS profile's routes. The
+                  same rows the full-day check reports for the composite, so
+                  one table renders both -- two would be two chances to
+                  describe the same fact differently. Only ever populated for
+                  an overnight profile: by day nothing says a merchant may not
+                  be on the road at the switch. */}
+              {plan.night_overruns?.length > 0 && (
+                <div className="card p-4">
+                  <NightOverrunTable
+                    rows={plan.night_overruns}
+                    emptyNote="Every movement closes before the window ends."
+                  />
+                </div>
+              )}
 
               <div className="card p-4">
                 <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
