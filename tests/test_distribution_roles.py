@@ -40,6 +40,7 @@ from travian_api.web.routes.distribution import (
     RoleTemplate,
     _resolve_roles,
     post_day_check,
+    post_execute,
     post_night_profile,
     post_plan,
 )
@@ -661,9 +662,26 @@ class TestRolesReachEveryPlanningPath:
             if row.village_id == DEF[0] and row.resource is Resource.LUMBER
         ]
         assert lumber, "the defensive village has no lumber trajectory"
-        assert lumber[0].daily_net == pytest.approx(0.0, abs=PROFILE_DEF["lumber"])
+        # A UNIT of tolerance on a DAILY net, not the template's whole hourly
+        # figure: `abs=PROFILE_DEF["lumber"]` was 8,372 against a number that
+        # must be zero, so the assertion passed at about 65% template strength
+        # -- it would have held while the day check applied a third of the
+        # profile. A day's rounding is well under one unit.
+        assert lumber[0].daily_net == pytest.approx(0.0, abs=1.0)
 
     def test_the_execute_dry_run_plans_from_the_same_templates(self):
+        """Driven, not merely parsed.
+
+        This used to assert only that `ExecuteRequest` had accepted the role
+        and the template -- which is pydantic's own contract, tested above, and
+        says nothing about whether /execute PLANS from them. `/execute`
+        recomputes the plan server-side from the same inputs precisely because
+        it must not trust client-sent rows, so the template has to reach the
+        cargo of the routes a live run would create.
+
+        A dry run issues ZERO game requests and resolves no session (it is
+        auth-only, like /plan), so the whole path is exercised offline.
+        """
         body = ExecuteRequest.model_validate(
             _payload(roles={"def": _def_template()}) | {"dry_run": True, "max_routes_per_run": 50}
         )
@@ -672,6 +690,25 @@ class TestRolesReachEveryPlanningPath:
         assert body.roles[Role.DEF].consumption[Resource.LUMBER] == pytest.approx(
             PROFILE_DEF["lumber"]
         )
+
+        res = asyncio.run(post_execute(body, USER))
+
+        assert res.dry_run
+        # The capital's leg into 11, whose cargo is the template's retention
+        # MINUS what 11 makes: 8,372 - 1,500 lumber, 5,168 - 1,400 clay,
+        # 5,809 - 1,300 iron. The cargo is the GAP, not the target, so these
+        # figures are the template arriving at the game's own route dialog.
+        into_11 = [
+            a
+            for a in res.actions
+            if a.destination == DEF[0] and a.origin == CAPITAL and a.status == "would_create"
+        ]
+        assert into_11, [(a.origin, a.destination, a.status) for a in res.actions]
+        assert dict(into_11[0].cargo) == {
+            Resource.CLAY: 3768,
+            Resource.IRON: 4509,
+            Resource.LUMBER: 6872,
+        }
 
     def test_the_night_derivation_reads_the_template(self):
         """Both halves: the template's day retention feeds the night ceiling,
