@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from travian_api.services.building_service import BuildingService
 from travian_api.services.distribution.allocation import Resource
+from travian_api.web.routes import distribution as dist
 from travian_api.web.routes.distribution import (
     DayCheckRequest,
     ExecuteRequest,
@@ -22,6 +23,7 @@ from travian_api.web.routes.distribution import (
     NightProfileRequest,
     PlanRequest,
     VillageConfig,
+    VillageSnapshot,
     get_snapshot,
     post_day_check,
     post_plan,
@@ -1636,6 +1638,50 @@ class TestConsumptionProfiles:
             PlanRequest.model_validate(
                 self._payload(consumption={"lumber": self.BURN, "crop": 9_000})
             )
+
+    def test_no_declared_spend_can_be_dropped_for_an_unreadable_rate(self):
+        """R3-D8 reported that a spend on a resource with an unreadable rate is
+        set aside in silence. R3-D1's ruling closed it, and this is the guard
+        that keeps it closed.
+
+        The reason is structural, so it is asserted rather than argued: the
+        three material rates are plain floats in `VillageSnapshot`, so
+        `productions` always holds every village for them, and `crop_per_hour`
+        -- the ONE nullable rate, and the case the reviewer reproduced -- can no
+        longer be declared as a spend at all.
+
+        If P14 makes a material rate nullable, this test fails, and the silent
+        drop below `_declared_consumption` must then be given the voice D8 asked
+        for before that change can land.
+        """
+        for resource in (Resource.LUMBER, Resource.CLAY, Resource.IRON):
+            annotation = VillageSnapshot.model_fields[f"{resource.value}_per_hour"].annotation
+            assert annotation is float, (
+                f"{resource.value}_per_hour became nullable: a declared spend can now be "
+                f"dropped in silence again, so R3-D8 is reopened"
+            )
+        assert VillageSnapshot.model_fields["crop_per_hour"].annotation == float | None
+        assert Resource.CROP in VillageConfig.model_fields["consumption_per_hour"].description
+
+    def test_every_declared_spend_reaches_the_planner(self, monkeypatch):
+        """The same closure, observed instead of reasoned: what the operator
+        typed is what `craft_plan` is handed, with nothing filtered out."""
+        seen = {}
+        real = dist.craft_plan
+
+        def spy(villages, productions, allocations, config, supplements, consumption):
+            seen["consumption"] = consumption
+            return real(villages, productions, allocations, config, supplements, consumption)
+
+        monkeypatch.setattr(dist, "craft_plan", spy)
+        payload = self._payload(consumption={"lumber": self.BURN, "clay": 250, "iron": 125})
+        asyncio.run(post_plan(PlanRequest.model_validate(payload)))
+
+        assert seen["consumption"] == {
+            Resource.LUMBER: {self.ARMY: self.BURN},
+            Resource.CLAY: {self.ARMY: 250.0},
+            Resource.IRON: {self.ARMY: 125.0},
+        }
 
     def test_the_field_binds_all_four_planning_paths(self):
         """The standing rule, made checkable.

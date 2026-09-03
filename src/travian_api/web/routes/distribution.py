@@ -2383,6 +2383,17 @@ async def _plan_account(
             # resource could not be read is dropped from the resource plan
             # entirely (with an UNREADABLE_RATE finding), so a spend recorded
             # against it would 400 the whole plan over one missing reading.
+            #
+            # It cannot currently fire, and that is worth knowing rather than
+            # rediscovering: `crop_per_hour` is the only nullable rate in the
+            # snapshot, and a crop spend is refused at the schema, so every
+            # surviving spend names a material whose rate is a plain float.
+            # Kept as the gate for whoever makes a material rate nullable --
+            # and R3-D8 is the finding they must answer first, because a spend
+            # dropped HERE would be dropped in silence and leave the village
+            # reported as stockpiling everything that lands on it.
+            # tests/test_distribution_routes.py has the two guards that fail
+            # the moment that becomes possible.
             if vid in productions.get(resource, {}):
                 consumption.setdefault(resource, {})[vid] = amount
 
