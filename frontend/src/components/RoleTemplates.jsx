@@ -1,3 +1,4 @@
+import ScrollableTable from './ScrollableTable'
 import {
   CONSUMABLE_RESOURCES,
   VILLAGE_ROLES,
@@ -68,7 +69,16 @@ export default function RoleTemplates({
           villages cannot say, so it stays the Rest radio in{' '}
           <span className="text-primary">Edit by resource</span>.
         </p>
-        <div className="overflow-x-auto mt-2">
+        {/* 1839px of columns — the widest table in the app, and it overflows
+            its container by 717px even at 1440. The role name is pinned so a
+            spend figure typed into row four is attributable to row four, and
+            the hint names what is off to the right; it had neither before,
+            because `.sticky-col` was gated on `max-width: 640px` and this
+            panel never carried a hint at all. */}
+        <ScrollableTable
+          className="mt-2"
+          hint="Scroll the table sideways for each resource's target and spend/h, Relay and Crop-negative by design — the role column stays pinned."
+        >
           <table className="w-full text-xs">
             <thead className="text-secondary uppercase">
               <tr>
@@ -237,7 +247,7 @@ export default function RoleTemplates({
               })}
             </tbody>
           </table>
-        </div>
+        </ScrollableTable>
         {/* Named in words as well as flagged in the row: the backend
             refuses a role whose template never arrived, and an operator
             who has collapsed this panel needs to know which role it is

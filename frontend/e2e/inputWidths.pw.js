@@ -427,6 +427,7 @@ const MEASURE = () => {
   // strip, and `.sticky-col` is inert wherever the table fits.
   const pinned = []
   for (const th of document.querySelectorAll('thead th.sticky-col')) {
+    if (!th.checkVisibility()) continue
     if (getComputedStyle(th).position !== 'sticky') continue
     const table = th.closest('table')
     const wrapper = scroller(table)
@@ -446,6 +447,54 @@ const MEASURE = () => {
     })
   }
 
+  // Fourth pass: an overflowing dense table must PIN its identity column, and
+  // must say that it scrolls.
+  //
+  // `.sticky-col` used to be gated on `@media (max-width: 640px)`, on the
+  // stated grounds that "at desktop widths the table does not overflow". False
+  // at both other viewports: the Snapshot table's intrinsic width is 1408px in
+  // a 470px container at 768 and a 1122px container at 1440, so the identity
+  // cell was `position: static` and scrolled to left -688 -- off screen -- while
+  // the four hand-typed columns stayed on it. A Trade Office level typed one
+  // row off breaches that village's merchant budget with nothing on screen
+  // saying so. The `sm:hidden` swipe hint was gone at those widths too, so
+  // there was not even a warning that the columns existed.
+  //
+  // Three claims, asked of the geometry rather than of a breakpoint:
+  //   * an overflowing table's identity column computes to `sticky`;
+  //   * scrolled to the end, that cell is still inside its own container;
+  //   * a scroll hint is visible exactly when the table overflows -- not
+  //     only when it is narrow, and not when there is nothing to scroll.
+  const tables = []
+  for (const table of document.querySelectorAll('table')) {
+    const wrapper = scroller(table)
+    if (wrapper == null) continue
+    const head = table.querySelector('thead th.sticky-col')
+    if (head == null) continue
+    // A table inside a CLOSED `<details>` still reports a scrollWidth and a
+    // clientWidth -- the Role-templates panel reads 1546px of overflow while
+    // collapsed -- but a ResizeObserver is not delivered for a
+    // `content-visibility: hidden` subtree, so nothing has measured it and
+    // nothing should assert on it. `checkVisibility` is the question
+    // `rect.width === 0 && rect.height === 0` was standing in for.
+    if (!head.checkVisibility()) continue
+    const cell = table.querySelector('tbody .sticky-col')
+    const hint = wrapper.parentElement?.querySelector(':scope > .scroll-hint') ?? null
+    const before = wrapper.scrollLeft
+    wrapper.scrollLeft = wrapper.scrollWidth
+    const pinnedLeft = cell ? Math.round(cell.getBoundingClientRect().left) : null
+    wrapper.scrollLeft = before
+    tables.push({
+      surface: surfaceOf(head),
+      overflow: wrapper.scrollWidth - wrapper.clientWidth,
+      position: getComputedStyle(head).position,
+      wrapperLeft: Math.round(wrapper.getBoundingClientRect().left),
+      pinnedLeft,
+      hasHint: hint != null,
+      hintVisible: hint != null && hint.checkVisibility(),
+    })
+  }
+
   // And the page itself: does the BODY slide sideways? Same method as the
   // wrappers -- ask by moving it -- because the two questions have different
   // answers and only one of them is a defect. A container that scrolls is the
@@ -459,6 +508,7 @@ const MEASURE = () => {
     controls: out,
     wrappers,
     pinned,
+    tables,
     pageScrollWidth: document.documentElement.scrollWidth,
     pageClientWidth: document.documentElement.clientWidth,
     pageScrollReached: pageReached,
@@ -488,12 +538,20 @@ const isClipped = (c) =>
  * file already carried one check that could not fail for any wrapper on any
  * page (`X && !X`) and it stood for weeks. */
 function pinnedRows(measured) {
-  if (measured.pinned.length === 0) return ['    pinned: none at this viewport']
-  return measured.pinned.map(
-    (p) =>
-      `    pinned ${p.surface.padEnd(16)} ${p.width}px of a ${p.strip}px strip` +
-      ` -> ${p.left}px left, narrowest scrolling column ${p.narrowest}px` +
-      ` ${p.left < p.narrowest ? 'CROWDED' : 'ok'}`,
+  const rows = measured.tables.map(
+    (t) =>
+      `    table  ${t.surface.padEnd(16)} overflow ${String(t.overflow).padStart(5)}px` +
+      ` identity ${t.position}, scrolled to left ${t.pinnedLeft} of container ${t.wrapperLeft},` +
+      ` hint ${t.hasHint ? (t.hintVisible ? 'visible' : 'hidden') : 'absent'}`,
+  )
+  if (measured.pinned.length === 0) return rows.concat(['    pinned: none at this viewport'])
+  return rows.concat(
+    measured.pinned.map(
+      (p) =>
+        `    pinned ${p.surface.padEnd(16)} ${p.width}px of a ${p.strip}px strip` +
+        ` -> ${p.left}px left, narrowest scrolling column ${p.narrowest}px` +
+        ` ${p.left < p.narrowest ? 'CROWDED' : 'ok'}`,
+    ),
   )
 }
 
@@ -607,6 +665,41 @@ function assertFits(where, measured, viewport) {
         ` and its narrowest scrolling column is ${p.narrowest}px`,
     )
   expect(crowded, `${where}: a pinned column leaves no room for any scrolling column`).toEqual([])
+
+  // The other half of the same hazard: a table wide enough to hide its
+  // identity column must pin it and must admit that it scrolls. Asked of the
+  // measured overflow, not of a breakpoint -- `.sticky-col` and the swipe hint
+  // were both gated on `max-width: 640px` / `sm:hidden` while the Snapshot
+  // table overflowed by 938px at 768 and 286px at 1440.
+  const unpinned = measured.tables
+    .filter((t) => t.overflow > 0 && t.position !== 'sticky')
+    .map((t) => `${t.surface}: overflows by ${t.overflow}px, identity column is position: ${t.position}`)
+  expect(unpinned, `${where}: an overflowing table does not pin its identity column`).toEqual([])
+
+  // Pinning that does not hold. `position: sticky` with no scrollport, or a
+  // `left` offset against the wrong containing block, reports as sticky and
+  // still slides away -- so this asks where the cell LANDED after the
+  // container was scrolled to its end.
+  const slipped = measured.tables
+    .filter((t) => t.overflow > 0 && t.pinnedLeft != null && t.pinnedLeft < t.wrapperLeft - 1)
+    .map(
+      (t) =>
+        `${t.surface}: scrolled to the end, the identity cell sits at left ${t.pinnedLeft}` +
+        ` while its container starts at ${t.wrapperLeft}`,
+    )
+  expect(slipped, `${where}: the identity column scrolled out of its own container`).toEqual([])
+
+  // And the hint, in BOTH directions: absent where the table scrolls is the
+  // defect above; present where it does not is a table claiming to hide
+  // columns it is showing.
+  const misannounced = measured.tables
+    .filter((t) => t.hintVisible !== t.overflow > 0)
+    .map(
+      (t) =>
+        `${t.surface}: overflow ${t.overflow}px but the scroll hint is` +
+        ` ${t.hasHint ? (t.hintVisible ? 'visible' : 'hidden') : 'absent'}`,
+    )
+  expect(misannounced, `${where}: a table's scroll hint does not match its overflow`).toEqual([])
 
   // The same item, asked of the DOCUMENT. This used to be printed and not
   // asserted, on the stated grounds that the app "inflates it whatever the

@@ -457,29 +457,44 @@ h1, h2, h3 {
 }
 .row-focus:focus-within .row-focus-edge { border-left-color: var(--md-primary); }
 
-/* ── Wide-table mobile ergonomics ──
-   A dense editor table (village × mode/value/ship/rest) cannot fit a 390px
-   viewport. Rather than clip it, the row's identity column is pinned while the
-   rest scrolls horizontally, so an edited field is always attributable to the
-   right village. Opaque background + z-index so scrolled cells pass underneath,
-   not through.
+/* ── Wide-table ergonomics ──
+   A dense editor table (village × mode/value/ship/rest) does not fit its
+   container at any viewport this app is used at. Rather than clip it, the row's
+   identity column is pinned while the rest scrolls horizontally, so an edited
+   field is always attributable to the right village. Opaque background +
+   z-index so scrolled cells pass underneath, not through.
 
-   Deliberately scoped to narrow viewports: at desktop widths the table does not
-   overflow, so pinning there would only add a permanent hairline and — because
-   the opaque background must win over the row tint — drop the identity cell out
-   of the hover/selected highlight used to confirm batch-apply targets. */
-@media (max-width: 640px) {
-  .sticky-col {
-    position: sticky;
-    left: 0;
-    z-index: 2;
-    background-color: var(--bg-card);
-    /* Hairline separator marks where the pinned column ends and the scrolling
-       region begins — the cue that more columns exist off to the right. */
-    box-shadow: 1px 0 0 var(--border);
-  }
-  thead .sticky-col { z-index: 3; }
+   Gated on the container's MEASURED overflow — `ScrollableTable` puts
+   `.table-overflowing` on it when `scrollWidth > clientWidth` — and not on a
+   viewport width. It used to be `@media (max-width: 640px)`, whose comment
+   claimed "at desktop widths the table does not overflow". That was false at
+   both other viewports and the cost was a data-entry hazard, not a cosmetic
+   one. Measured: the Snapshot table's intrinsic width is 1408px, in a 470px
+   container at 768 and a 1122px container at 1440. At 768 the identity cell was
+   `position: static` and scrolled to left -688, off screen, while the four
+   hand-typed columns stayed on it — and the `sm:hidden` swipe hint was gone
+   too, so the operator scrolled 938px with no village pinned and no warning
+   that the columns existed. Role templates is worse: 1839px intrinsic, 717px
+   of overflow even at 1440.
+
+   The old comment's own two objections are answered by the same measurement
+   rather than dismissed. A permanent hairline: the class is absent whenever the
+   table fits, which is what the foreign-targets table and the Allocate grid do
+   at 1440, so nothing is marked that does not need marking. The identity cell
+   sitting out of the row tint: it always did at 375, and the compensation is
+   already designed — `.row-focus-edge` colours the pinned cell's LEFT BORDER on
+   focus-within (see `.row-focus` above), which an opaque background cannot
+   cover. That is why the pair exists. */
+.table-overflowing .sticky-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background-color: var(--bg-card);
+  /* Hairline separator marks where the pinned column ends and the scrolling
+     region begins — the cue that more columns exist off to the right. */
+  box-shadow: 1px 0 0 var(--border);
 }
+.table-overflowing thead .sticky-col { z-index: 3; }
 
 /* Touch targets on coarse pointers, without inflating the desktop layout.
    Text/select controls get the 44px comfortable size (WCAG 2.5.5); the per-row

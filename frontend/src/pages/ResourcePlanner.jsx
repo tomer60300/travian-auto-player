@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import PlanDiagnostics from '../components/PlanDiagnostics'
 import RoleTemplates from '../components/RoleTemplates'
+import ScrollableTable from '../components/ScrollableTable'
 import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
 import useLogStore from '../stores/logStore'
@@ -2824,21 +2825,19 @@ export default function ResourcePlanner() {
           )}
 
           {/* Same rule as the Allocate grid, and for higher stakes: the four
-              hand-typed columns are the RIGHTMOST of ten, so on a phone the
-              village name is off-screen exactly while a Trade Office level is
-              being typed — and a level typed one row off breaches that
-              village's merchant budget without a warning anywhere. Pin the
-              identity column and say the rest are there. */}
-          <p className="text-secondary text-xs mb-1 sm:hidden">
-            {/* In the SAME order as the columns. Listing Consumption before
-                Stock floor described a table that does not exist, which is
-                worse than no hint: the reader counts across to the wrong
-                column and types a figure into it. */}
-            Swipe the table sideways for Merchants, Trade Office, Crop alert, Ships only to,
-            Relays for, Stock
-            floor and Consumption — the village column stays pinned.
-          </p>
-          <div className="relative overflow-x-auto">
+              hand-typed columns are the RIGHTMOST of ten, so the village name
+              is off-screen exactly while a Trade Office level is being typed —
+              and a level typed one row off breaches that village's merchant
+              budget without a warning anywhere. Pin the identity column and
+              say the rest are there.
+
+              The hint names the columns in the SAME order they appear. Listing
+              Consumption before Stock floor described a table that does not
+              exist, which is worse than no hint: the reader counts across to
+              the wrong column and types a figure into it. */}
+          <ScrollableTable
+            hint="Scroll the table sideways for Merchants, Trade Office, Crop alert, Ships only to, Relays for, Stock floor and Consumption — the village column stays pinned."
+          >
             <table className="w-full text-sm">
               <thead className="text-secondary text-xs uppercase">
                 <tr>
@@ -3433,7 +3432,7 @@ export default function ResourcePlanner() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollableTable>
           {rowFilter && (
             <p className="text-xs text-secondary mt-2">
               Showing {visibleVillages.length} of {health.total} villages.{' '}
@@ -3618,11 +3617,9 @@ export default function ResourcePlanner() {
               </p>
             ) : (
               <>
-                <p className="text-secondary text-xs mb-1 sm:hidden">
-                  Swipe sideways for the coordinates, crop owed, margin and route flag — the name
-                  column stays pinned.
-                </p>
-                <div className="relative overflow-x-auto">
+                <ScrollableTable
+                  hint="Scroll sideways for the coordinates, crop owed, margin, cadence, excluded origins and route flag — the name column stays pinned."
+                >
                   <table className="w-full text-xs">
                     <thead className="text-secondary uppercase">
                       <tr>
@@ -3829,7 +3826,7 @@ export default function ResourcePlanner() {
                       })}
                     </tbody>
                   </table>
-                </div>
+                </ScrollableTable>
               </>
             )}
           </div>
@@ -4373,16 +4370,16 @@ export default function ResourcePlanner() {
                     </div>
                   </div>
                 </div>
-                {/* On a phone this editor is wider than the viewport. The village
-                    column is pinned (see .sticky-col) so every field stays
-                    attributable to the right village while the rest scrolls, and
-                    the hint below tells the operator the extra columns exist —
-                    clipping them silently is how the wrong village gets edited. */}
-                <p className="text-secondary text-xs mb-1 sm:hidden">
-                  Swipe the table sideways for Mode, Value, Ship/h and Rest — the village column
-                  stays pinned.
-                </p>
-                <div className="relative overflow-x-auto">
+                {/* Wider than its container at 375 and 768, and not at 1440 —
+                    `ScrollableTable` measures that rather than guessing. The
+                    village column is pinned (see .table-overflowing
+                    .sticky-col) so every field stays attributable to the right
+                    village while the rest scrolls, and the hint tells the
+                    operator the extra columns exist: clipping them silently is
+                    how the wrong village gets edited. */}
+                <ScrollableTable
+                  hint="Scroll the table sideways for Mode, Value, Ship/h and Rest — the village column stays pinned."
+                >
                   <table className="w-full text-xs">
                     <thead className="text-secondary uppercase">
                       <tr>
@@ -4544,7 +4541,7 @@ export default function ResourcePlanner() {
                       })}
                     </tbody>
                   </table>
-                </div>
+                </ScrollableTable>
               </div>
             )
             })}
