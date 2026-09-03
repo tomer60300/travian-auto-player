@@ -95,7 +95,10 @@ Every task MUST follow this exact pipeline. Do not skip steps.
 ### Phase 2: Implement
 1. Write the code following all Code Quality Rules below.
 2. Keep diffs minimal. Only touch files directly related to the task.
-3. If the task requires frontend changes, rebuild: `cd frontend && npm run build`
+3. Do NOT build the frontend. On this repo a build IS a production deploy: `npm run build`
+   writes `src/travian_api/web/static`, which the server on :80 serves directly, and that
+   directory is untracked — so there is nothing to revert to. Frontend verification is eslint
+   plus vitest (Phase 3 step 5). Deploying is a separate, explicit step the operator authorises.
 
 ### Phase 3: Verify
 
@@ -126,7 +129,8 @@ running it to verify a Markdown edit verifies nothing and is pure waste.
    Run the full set (still `-n 8`) before committing.
 
 **Frontend changed:**
-5. `cd frontend && npx eslint . --max-warnings=20 && npm test && npm run build`
+5. `cd frontend && npx eslint . --max-warnings=20 && npm test`
+   No build: see the Phase 2 note — building deploys to :80.
 
 **Docs, comments or CI YAML only:** none of the above apply beyond a sanity
 read. Do not run the test suite.

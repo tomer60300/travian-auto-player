@@ -61,10 +61,11 @@ set before committing.
 
 ### Frontend Tests
 ```bash
-cd travian-auto-player/frontend && npx eslint . --max-warnings=20 && npm test && npm run build
+cd travian-auto-player/frontend && npx eslint . --max-warnings=20 && npm test
 ```
 
-`npm test` is vitest (`vitest run`). Note that `npm run build` writes into
-`src/travian_api/web/static`, which the production server on :80 serves
-directly -- there is no staging step, so a build is a deploy. Leave it out of
-a Red-Green cycle and run it once at the end.
+`npm test` is vitest (`vitest run`). The gate stops there: `npm run build`
+writes into `src/travian_api/web/static`, which the production server on :80
+serves directly, and that directory is untracked -- there is no staging step
+and nothing to revert to, so a build is a deploy. Never run it as part of
+verification; deploying is a separate step the operator authorises.
