@@ -23,7 +23,9 @@ ARMY = 2
 FAR = 3
 
 
-def _village(vid, name, x, y, *, crop=0.0, lumber=0.0, wh=160_000, gr=160_000, to=10, merch=20):
+def _village(
+    vid, name, x, y, *, crop=0.0, lumber=0.0, wh=160_000, gr=160_000, to=10, merch=20, cap=None
+):
     return NightVillage(
         village_id=vid,
         name=name,
@@ -34,6 +36,7 @@ def _village(vid, name, x, y, *, crop=0.0, lumber=0.0, wh=160_000, gr=160_000, t
         warehouse_capacity=wh,
         granary_capacity=gr,
         production={Resource.CROP: crop, Resource.LUMBER: lumber},
+        max_busy_merchants=cap,
     )
 
 
@@ -338,3 +341,95 @@ class TestAMaterialSpendLargerThanProduction:
             f"the profile claims {claimed:,.0f}/h out of {produced:,.0f}/h and "
             f"reports only {profile.unmet[Resource.LUMBER]:,.0f}/h unmet"
         )
+
+
+class TestTheCapBoundsWhatADrawnInVillageMayShip:
+    """A retention below production is a promise to ship the difference.
+
+    ``shed_limit`` prices that promise -- fleet x what a merchant carries x the
+    trips it fits in the window -- and under a cap the fleet that matters is the
+    cap. The FORCED sender was held to it from the start, through ``capped()``;
+    the two DRAW passes and the return visit to the forced senders were not, so
+    a village capped at nothing was handed a retention of nothing and told to
+    ship its whole production anyway -- exactly the retention
+    ``NightVillage.max_busy_merchants`` says it exists to prevent. The gap was
+    the fleet's as well as the cap's, and predates the cap.
+    """
+
+    # FAR makes 40,000 lumber into a 1,200,000 warehouse, so the night's own
+    # ceiling (75,000/h) is no constraint and the day plan's 6,000 is what it
+    # would keep. Four fields from its nearest neighbour at Trade Office 10 it
+    # turns round 12 times in the window, so its shed limit is 202,500/h with
+    # the fleet free, 22,500/h held to two merchants and nothing at all at
+    # zero -- three answers either side of the 34,000/h the draw wants of it.
+    def _account(self, cap, hub_cap):
+        return [
+            _village(
+                HUB,
+                "hub",
+                0,
+                0,
+                crop=60_000.0,
+                lumber=-40_000.0,
+                wh=1_200_000,
+                gr=800_000,
+                to=19,
+                cap=hub_cap,
+            ),
+            _village(ARMY, "army", 2, 0, crop=-20_000.0, lumber=2_000.0),
+            _village(FAR, "far", 6, 0, crop=5_000.0, lumber=40_000.0, wh=1_200_000, cap=cap),
+        ]
+
+    def _derive(self, *, cap=None, hub_cap=None):
+        return derive_night_profile(
+            self._account(cap, hub_cap),
+            window_hours=8.0,
+            map_span=401,
+            speed_fields_per_hour=12.0,
+            day_retention={Resource.LUMBER: {ARMY: 7_700.0, FAR: 6_000.0}},
+            hub_id=HUB,
+            consumer_ids=[ARMY],
+        )
+
+    def test_with_the_fleet_free_the_draw_is_what_it_always_was(self):
+        profile = self._derive()
+
+        assert profile.drawn_in[Resource.LUMBER] == [FAR]
+        assert profile.allocations[Resource.LUMBER][FAR].value == 6_000.0
+
+    def test_a_material_draw_stops_at_what_the_cap_can_carry(self):
+        profile = self._derive(cap=2)
+
+        # 22,500/h is all two merchants move in the window, so the other
+        # 17,500 stays here instead of being promised to the hub.
+        assert profile.allocations[Resource.LUMBER][FAR].value == 17_500.0
+        # And the 11,500/h the cap put out of reach is reported.
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(23_200.0)
+
+    def test_a_cap_of_zero_draws_nothing_and_reports_the_gap(self):
+        profile = self._derive(cap=0)
+
+        assert profile.allocations[Resource.LUMBER][FAR].value == 40_000.0
+        assert profile.drawn_in[Resource.LUMBER] == []
+        # Reported, never hidden: the demand the cap put out of reach.
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(45_700.0)
+
+    def test_the_crop_draw_honours_the_cap_too(self):
+        # Materials and crop draw down separate branches, so one fix does not
+        # imply the other.
+        assert self._derive().allocations[Resource.CROP][FAR].value == 0.0
+        assert self._derive(cap=0).allocations[Resource.CROP][FAR].value == 5_000.0
+
+    def test_coming_back_to_a_forced_sender_stays_inside_its_cap(self):
+        """The second crop pass takes MORE off a village already shedding.
+
+        It exists because a ceiling is not a floor under what a village may
+        give. It is still bounded by what the village can move: at zero the hub
+        keeps every unit it makes, and the army's deficit is reported instead.
+        """
+        assert self._derive().allocations[Resource.CROP][HUB].value == 45_000.0
+
+        grounded = self._derive(hub_cap=0)
+
+        assert grounded.allocations[Resource.CROP][HUB].value == 60_000.0
+        assert grounded.unmet[Resource.CROP] == pytest.approx(15_000.0)

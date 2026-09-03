@@ -244,7 +244,12 @@ def derive_night_profile(
                     break
                 own = by_id[vid].production.get(resource, 0.0)
                 keep = day.get(vid, own)
-                give = min(own - keep, demand)
+                # Never more than it can carry. A retention below production is
+                # a promise to ship the difference, and `shed_limit` is what
+                # that promise costs -- the bound `capped()` already puts under
+                # a FORCED sender, and the draw is the same promise made for a
+                # different reason.
+                give = min(own - keep, demand, shed_limit(by_id[vid]))
                 if give <= 0:
                     continue
                 entries[vid] = Allocation(
@@ -314,7 +319,10 @@ def derive_night_profile(
             own = by_id[vid].production.get(Resource.CROP, 0.0)
             if own <= 0:
                 continue
-            give = min(own, demand)
+            # Bounded by what it can move, as the material draw above is.
+            give = min(own, demand, shed_limit(by_id[vid]))
+            if give <= 0:
+                continue
             crop[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=float(round(own - give)))
             demand -= give
             drawn_crop.append(vid)
@@ -329,7 +337,11 @@ def derive_night_profile(
             if demand <= 0:
                 break
             held = crop[vid].value
-            give = min(held, demand)
+            own = by_id[vid].production.get(Resource.CROP, 0.0)
+            # Down to retaining nothing, never below -- and never past what it
+            # can ship. The forced pass already booked `own - held` of its shed
+            # limit, so only the rest of that limit is still available here.
+            give = min(held, demand, shed_limit(by_id[vid]) - (own - held))
             if give <= 0:
                 continue
             crop[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=float(held - give))
