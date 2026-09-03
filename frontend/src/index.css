@@ -55,6 +55,13 @@
   --elevation-2: 0 2px 4px rgba(103,80,164,0.1), 0 8px 24px rgba(103,80,164,0.08);
   --elevation-2-border: rgba(103,80,164,0.12);
   --elevation-2-hover: 0 4px 8px rgba(103,80,164,0.14), 0 12px 32px rgba(103,80,164,0.1);
+
+  /* Keyboard focus inside a dense editor ROW: which row am I typing in?
+     An rgba literal per theme, like the elevation tokens above and for the
+     same reason -- a wash needs an alpha, and `var(--md-primary)` is a hex
+     that cannot carry one. 10% of the primary reads on the light card
+     without competing with the 2px focus ring on the control itself. */
+  --row-focus: rgba(103,80,164,0.10);
 }
 
 /* Dark Theme */
@@ -105,6 +112,10 @@
   --elevation-2: 0 2px 4px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.2);
   --elevation-2-border: rgba(208,188,255,0.12);
   --elevation-2-hover: 0 4px 8px rgba(0,0,0,0.35), 0 12px 32px rgba(0,0,0,0.25);
+
+  /* 15% in dark: the same tint has to lift off a #2B2930 card rather than
+     sit on a near-white one, and the dark primary is a pale lilac. */
+  --row-focus: rgba(208,188,255,0.15);
 }
 
 /* ── Base Styles ── */
@@ -347,6 +358,29 @@ h1, h2, h3 {
    the semantic classes above — a bare `border-warning` would render colorless. */
 .border-warning { border-color: var(--warning); }
 .border-info { border-color: var(--info); }
+
+/* Keyboard focus on a dense editor row, as a pair: the row takes a tint and
+   its identity cell takes a left edge, so the row being typed into is
+   identifiable from either end of a table wider than the viewport.
+
+   Written as real CSS rather than consumed through `focus-within:` and
+   `group-focus-within:` variants, because a Tailwind variant can only wrap a
+   utility Tailwind itself generates -- so a semantic class reached that way
+   renders colourless, the same trap the `.border-info` comment above records.
+   The alternative was `bg-violet-400/15` and `border-l-violet-400`, which are
+   fixed values that do not flip with `[data-theme]`. The row's own hairline is
+   `.border-t-default`, not `border-t border-default`: `.border-default` is a
+   full-box SHORTHAND and, being later in this file than the Tailwind import,
+   its four widths would beat a bare `border-t` and outline every row.
+
+   Not a focus INDICATOR: the control keeps its own 2px `:focus-visible` ring
+   (WCAG 2.4.7). This answers a different question -- which of twenty-six
+   village rows the focused control belongs to. */
+.row-focus:focus-within { background-color: var(--row-focus); }
+.row-focus-edge {
+  border-left: 2px solid transparent;
+}
+.row-focus:focus-within .row-focus-edge { border-left-color: var(--md-primary); }
 
 /* ── Wide-table mobile ergonomics ──
    A dense editor table (village × mode/value/ship/rest) cannot fit a 390px

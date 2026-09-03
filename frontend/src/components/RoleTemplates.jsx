@@ -99,9 +99,9 @@ export default function RoleTemplates({
                 return (
                   <tr
                     key={role}
-                    className="group touch-target border-t border-gray-800 focus-within:bg-violet-400/15 transition-colors"
+                    className="row-focus touch-target border-t-default transition-colors"
                   >
-                    <td className="py-1 px-2 sticky-col whitespace-nowrap border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
+                    <td className="py-1 px-2 sticky-col whitespace-nowrap row-focus-edge">
                       {ROLE_LABEL[role]}
                       <span className="block text-secondary">
                         {claiming === 0

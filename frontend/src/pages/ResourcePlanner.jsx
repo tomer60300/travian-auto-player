@@ -2763,9 +2763,9 @@ export default function ResourcePlanner() {
                 {visibleVillages.map((v) => (
                   <tr
                     key={v.village_id}
-                    className="group touch-target border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors"
+                    className="row-focus touch-target border-t-default hover:bg-white/5 transition-colors"
                   >
-                    <td className="py-1.5 px-2 sticky-col border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
+                    <td className="py-1.5 px-2 sticky-col row-focus-edge">
                       {v.name}{' '}
                       <span className="text-secondary text-xs">
                         ({v.x}|{v.y})
@@ -3298,9 +3298,9 @@ export default function ResourcePlanner() {
                         return (
                           <tr
                             key={i}
-                            className="group touch-target border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors"
+                            className="row-focus touch-target border-t-default hover:bg-white/5 transition-colors"
                           >
-                            <td className="py-1 px-2 sticky-col border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
+                            <td className="py-1 px-2 sticky-col row-focus-edge">
                               <input
                                 type="text"
                                 aria-label={`Foreign target ${i + 1} name`}
@@ -4051,11 +4051,11 @@ export default function ResourcePlanner() {
                         return (
                           <tr
                             key={v.village_id}
-                            className={`group touch-target border-t border-gray-800 hover:bg-white/5 focus-within:bg-violet-400/15 transition-colors ${
+                            className={`row-focus touch-target border-t-default hover:bg-white/5 transition-colors ${
                               isSelected(resource, v.village_id) ? 'bg-violet-400/10' : ''
                             }`}
                           >
-                            <td className="text-center px-2 border-l-2 border-l-transparent group-focus-within:border-l-violet-400">
+                            <td className="text-center px-2 row-focus-edge">
                               <input
                                 type="checkbox"
                                 aria-label={`Select ${v.name} for batch edit`}
@@ -4107,7 +4107,7 @@ export default function ResourcePlanner() {
                               {deviates && (
                                 <span
                                   id={deviationId}
-                                  className="block text-info text-[11px] mt-0.5 whitespace-nowrap"
+                                  className="block text-info text-xs mt-0.5 whitespace-nowrap"
                                 >
                                   {'\u2260 '}
                                   {ROLE_LABEL[role]}:{' '}
