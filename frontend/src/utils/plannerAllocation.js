@@ -108,7 +108,12 @@ export function planCellFigures({ planned, own, localTarget, declaredSpend }) {
       // enough on its own: a floored KEEP village reads 20,000/h retention
       // against 5,000/h of own production with no cargo, and nothing but the
       // stock floor accounts for the other 15,000.
-      supplement: planned.supplement_per_hour ?? 0,
+      // `npc_draw_per_hour` is what the plan actually SPENT against the floor,
+      // not `npc_allowance_per_hour`, which is only the ceiling it could have
+      // spent. Naming the ceiling here would claim a village drew 20,000/h
+      // when it drew nothing. (Was `supplement_per_hour` until NPC balancing
+      // split the two; reading the old name silently annotated every cell 0.)
+      supplement: planned.npc_draw_per_hour ?? 0,
     }
   }
   const ship = localTarget == null || own == null ? null : localTarget - own

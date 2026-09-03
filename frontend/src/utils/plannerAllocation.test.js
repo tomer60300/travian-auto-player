@@ -99,15 +99,26 @@ describe('villageNetIndex', () => {
 
 describe('planCellFigures', () => {
   // The stock-floor case from R4-P2-1, in the operator's own numbers: 02 makes
-  // 5,000/h of lumber, keeps its own production, and a 30% floor on a 1,200,000
-  // warehouse over a 16h day is 22,500/h of supplement -- of which the plan
-  // ships 15,000 out. KEEP's plan target INCLUDES the supplement; the page's
-  // local derivation cannot know about it.
+  // 5,000/h of lumber, keeps its own production, and the plan has it DRAW
+  // 15,000/h more against its floor by NPC-trading crop for wood. KEEP's plan
+  // target INCLUDES that draw; the page's local derivation cannot know about it.
+  //
+  // RE-SEEDED with NPC balancing. Two changes, and the second matters more:
+  //  * the field is `npc_draw_per_hour` -- what the plan actually SPENT --
+  //    rather than the old `supplement_per_hour`. Reading the retired name
+  //    silently annotated every cell 0/h.
+  //  * the old rationale here derived 22,500/h from "a 30% floor on a 1,200,000
+  //    warehouse over a 16h day". That is the level-as-rate bug three reviewers
+  //    converged on: it makes a SHORTER window claim MORE. A draw is a rate
+  //    built from rates -- bounded by what 02 retains of the resources it is
+  //    not drawing on -- so neither capacity nor window length appears in it.
+  // The figures below are unchanged and still self-consistent
+  // (target - spent = net), because the defect was in the explanation.
   const floored = {
     village_id: 2,
     resource: 'lumber',
     own_per_hour: 5_000,
-    supplement_per_hour: 15_000,
+    npc_draw_per_hour: 15_000,
     target_per_hour: 20_000,
     ship_per_hour: 0,
     consumption_per_hour: 4_000,
