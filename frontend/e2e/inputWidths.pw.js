@@ -392,6 +392,11 @@ const MEASURE = () => {
     // nothing. Every control on these surfaces is named now (the sidebar
     // village selector was the last one), so this branch is the guard rather
     // than the normal case -- and when it does fire it points at a place.
+    // Proven by taking the name back off both renders of that selector, at
+    // 375: the visible one reports `UNNAMED select in DIV.min-h-screen >
+    // HEADER.top-bar > DIV.mobile-only` and the census's leftover reports
+    // `UNNAMED select in ASIDE.sidebar > DIV.flex > DIV.flex-1` -- the double
+    // render round 10 confirmed, told apart by where each one is.
     const path = []
     for (let node = el.parentElement; node != null && path.length < 3; node = node.parentElement) {
       path.unshift(node.classList[0] ? `${node.tagName}.${node.classList[0]}` : node.tagName)
@@ -946,10 +951,13 @@ function assertFits(where, measured, viewport) {
   //
   // Vacuous today by construction, and said out loud rather than left to be
   // discovered: every `.input-field`-bearing table on these six surfaces is
-  // wired. Proven to fire by injection, the same way `crowded` and `offset`
-  // are -- stripping `sticky-col` off the Snapshot table's header in the page
-  // produces "Snapshot table: 1151px of overflow over editable controls,
-  // pinning nothing".
+  // wired. Proven to fire by injection, the same way `offset` is -- stripping
+  // `sticky-col` off the two Snapshot-surface `thead` cells in the page
+  // produces, at 375:
+  //   Snapshot table: 1151px of overflow over editable controls, pinning
+  //     nothing
+  //   Foreign targets: 672px of overflow over editable controls, pinning
+  //     nothing
   const unwired = measured.tables
     .filter((t) => t.overflow > 0 && t.dense && t.position == null)
     .map(
@@ -970,6 +978,36 @@ function assertFits(where, measured, viewport) {
         ` while its container starts at ${t.wrapperLeft}`,
     )
   expect(slipped, `${where}: the identity column scrolled out of its own container`).toEqual([])
+
+  // The other side of the same question, and nothing was asking it. `slipped`
+  // tests `pinnedLeft < wrapperLeft - 1` only, and `crowded` reads header
+  // WIDTHS rather than offsets, so a pinned column parked at a wrong POSITIVE
+  // offset passed every clause in this file: injecting
+  // `.table-overflowing .sticky-col { left: 400px }` fired nothing, while on
+  // screen the identity column sits 400px into the strip permanently covering
+  // four scrolling columns -- worse than not pinning at all, because the
+  // columns it hides are hidden at every scroll position including zero.
+  //
+  // `left: 0` is the only offset that means "hold it at the edge of the
+  // scrollport", so the claim is equality rather than a bound: scrolled to the
+  // end, the pinned cell's left edge IS the container's left edge.
+  //
+  // Proven on that injection rather than assumed, at 375:
+  //   Snapshot table: the identity cell is pinned 221px into its own
+  //     container (cell at 262, container starts at 41)
+  //   Foreign targets: pinned 132px in (cell at 173, container at 41)
+  // 221 rather than 400 because a sticky offset is clamped by the cell's own
+  // containing block -- which is exactly why the clause reports the DISTANCE
+  // it measured rather than the offset somebody wrote.
+  const offset = measured.tables
+    .filter((t) => t.overflow > 0 && t.pinnedLeft != null && t.pinnedLeft > t.wrapperLeft + 1)
+    .map(
+      (t) =>
+        `${t.surface}: the identity cell is pinned ${t.pinnedLeft - t.wrapperLeft}px into its own` +
+        ` container (cell at ${t.pinnedLeft}, container starts at ${t.wrapperLeft}), covering the` +
+        ' columns it is supposed to sit beside',
+    )
+  expect(offset, `${where}: the identity column is pinned inside the scrolling strip`).toEqual([])
 
   // The pinned cell has to be the cell that carries the focus edge. index.css
   // justifies pinning partly on that pair -- the pinned cell cannot show the
@@ -1029,7 +1067,10 @@ function assertFits(where, measured, viewport) {
   // last scrolling column, and how many there are. Adding a column moves all
   // four together, which is what the enumeration could not do.
   const contradicted = measured.tables
-    .filter((t) => t.hintVisible)
+    // Same scope as `misannounced`, and for the same reason: with nothing
+    // pinned there is no pinned column for the words to name, and the table
+    // is `unwired`'s business rather than this clause's.
+    .filter((t) => t.position != null && t.hintVisible)
     .filter(
       (t) =>
         !t.hintText.includes(t.pinnedLabel) ||
@@ -1091,10 +1132,31 @@ async function openAllocateGrid(page) {
 // ── Off the planner ──────────────────────────────────────────────────
 //
 // `.input-field { width: 100% }` was moved into `@layer components` for the
-// planner and shipped to the whole app: 66 of the 111 `.input-field` sites in
-// `src/` carry a width utility, across thirteen files, and every one of those
-// utilities went from dead to live in one commit. The planner was the only
-// surface measured.
+// planner and shipped to the whole app: 66 of the 111 `.input-field` LINES in
+// `src/` also name a width utility, across thirteen files, and every one of
+// those utilities went from dead to live in one commit. The planner was the
+// only surface measured.
+//
+// The method is stated because the figures are not reproducible without it,
+// and round 10 read them as off by two on the strength of a different one.
+// Line-based, counting `w-*` and `w-full` and not `max-w-*`, from
+// frontend/:
+//
+//   grep -rh 'input-field' src --include=*.jsx --include=*.js | wc -l
+//     -> 111
+//   grep -rh 'input-field' src --include=*.jsx --include=*.js \
+//     | grep -cE '(^|[^-a-zA-Z])w-'
+//     -> 66, in 13 files
+//
+// Counted per OCCURRENCE rather than per line it is 112, because one line in
+// `VillageSelector.jsx` carries two class strings -- the `compact` ternary --
+// and 68 of 112 if `max-w-*` counts as a width, which is the only reading
+// that reaches 68 and is where round 10's number comes from. Both are true
+// statements about different questions; neither is a correction of the other.
+// `grep -rl` gives the 19 files that contain `.input-field` at all, which is
+// a third question again, and `index.css`'s "48 sites across 7 files" is a
+// fourth (the sites asking for a `py-*`/`px-*`/`text-xs`). Do not reconcile
+// them.
 //
 // It was also the only surface where that was the whole story. `.input-field`
 // still declares `padding: .75rem 1rem` (32px across) and `font-size: 1rem`
@@ -1460,10 +1522,21 @@ for (const viewport of VIEWPORTS) {
  * rendered, opened nothing, and reported nine controls as hidden while
  * claiming to have opened everything.
  *
- * Then the wait: revealing a `ScrollableTable` hands its container to a
- * ResizeObserver for the first time, and the pinning and the hint follow from
- * that measurement. Waiting for every scroll container's class to AGREE with
- * its own geometry is the readiness condition, and it is the same claim
+ * Then the wait, and it is a wait for VISIBILITY as well as agreement.
+ * Agreement alone was not a sound readiness gate: `ScrollableTable` measures
+ * synchronously in its layout effect at mount, hidden or not, and a table
+ * inside a closed `<details>` reports a real `scrollWidth` and `clientWidth`
+ * -- so it arrives already classed from a measurement of a
+ * `content-visibility: hidden` subtree. Measured on the Allocate-grid surface
+ * before this runs: `overflow 1546px visible=false inClosedDetails=true
+ * cls="relative overflow-x-auto table-overflowing mt-2"`. Harmless in effect,
+ * because the closed and open numbers agree at 1546px and it even avoids a
+ * shift when the panel opens -- but it means the class could satisfy this
+ * condition before the reveal had been measured at all, which is a gate that
+ * passes on the wrong evidence.
+ *
+ * `checkVisibility()` is the part a hidden subtree cannot fake, so it is in
+ * the condition. Agreement is still the other half, and it is the same claim
  * `assertFits` then makes -- so a timeout here is a real failure, not a flake.
  */
 async function openDisclosures(page) {
@@ -1481,7 +1554,11 @@ async function openDisclosures(page) {
     [...document.querySelectorAll('.overflow-x-auto')]
       .filter((el) => el.querySelector('.sticky-col') != null)
       .every(
-        (el) => el.scrollWidth > el.clientWidth === el.classList.contains('table-overflowing'),
+        (el) =>
+          // ON SCREEN first. Without this the condition is satisfiable by a
+          // class set from a hidden measurement -- see the docstring.
+          el.checkVisibility() &&
+          el.scrollWidth > el.clientWidth === el.classList.contains('table-overflowing'),
       ),
   )
 }
