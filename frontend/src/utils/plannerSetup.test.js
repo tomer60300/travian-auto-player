@@ -16,6 +16,7 @@ import {
   resolveRoleAllocation,
   resolveRoleSpend,
   roleDeviates,
+  rolesForRequest,
   setupFilename,
   setupMatchesAccount,
   stripStoredCropSpends,
@@ -1578,5 +1579,68 @@ describe('allocationsForRequest', () => {
     )
 
     expect(sent.iron['20013']).toEqual({ mode: 'absolute', value: 5809 })
+  })
+})
+
+describe('rolesForRequest', () => {
+  const DEF = {
+    allocations: { lumber: { mode: 'absolute', value: 8372 } },
+    consumption: { lumber: 8372, clay: 5168, iron: 5809 },
+    may_relay: null,
+    crop_negative_by_design: false,
+  }
+
+  it('skips a claimed role that has no template, so the plan is refused', () => {
+    // Sending `{}` for it made the backend's "no role template was sent for
+    // ..." 422 unreachable from the page: four villages set to DEF before the
+    // panel was filled planned at HTTP 200 with target 1,500 and spend 0 --
+    // a tenth of what those villages need, reported as feasible with an empty
+    // `role_deviations` to say nothing was overridden.
+    expect(rolesForRequest({}, new Set(['def']))).toEqual({})
+    expect(rolesForRequest({ def: null }, new Set(['def']))).toEqual({})
+  })
+
+  it('still sends a template that is only half typed', () => {
+    // A template is a template from the moment the operator gives a role any
+    // figure at all -- the same key the panel's "no template yet" warning
+    // reads. Refusing a half-typed one would refuse an account mid-edit.
+    expect(rolesForRequest({ def: { allocations: {} } }, new Set(['def']))).toEqual({
+      def: { allocations: {}, consumption: {}, may_relay: null, crop_negative_by_design: false },
+    })
+  })
+
+  it('sends only the roles some village actually claims', () => {
+    const sent = rolesForRequest({ def: DEF, feeder: DEF }, new Set(['def']))
+
+    expect(Object.keys(sent)).toEqual(['def'])
+  })
+
+  it('drops a crop spend an older build could have stored', () => {
+    // The backend 422s a template's crop spend, and the editor no longer shows
+    // one -- so a stored figure would refuse every plan over a number the
+    // operator cannot find.
+    const sent = rolesForRequest(
+      { def: { ...DEF, consumption: { ...DEF.consumption, crop: 2200 } } },
+      new Set(['def'])
+    )
+
+    expect(sent.def.consumption).toEqual({ lumber: 8372, clay: 5168, iron: 5809 })
+  })
+
+  it('spells out all four halves of a template rather than spreading it', () => {
+    // So a template carrying an unknown key cannot smuggle it into a request,
+    // and one carrying none still arrives complete.
+    const sent = rolesForRequest(
+      { feeder: { allocations: DEF.allocations, may_relay: true, nonsense: 1 } },
+      new Set(['feeder'])
+    )
+
+    expect(Object.keys(sent.feeder).sort()).toEqual([
+      'allocations',
+      'consumption',
+      'crop_negative_by_design',
+      'may_relay',
+    ])
+    expect(sent.feeder.may_relay).toBe(true)
   })
 })
