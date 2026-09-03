@@ -214,6 +214,38 @@ def _tier_account_with_wood_to_spare(relay_for):
     return villages, plans
 
 
+def _tier_account_where_the_relay_grows_its_own():
+    """The relay is a feeder: it forwards 1's lumber AND ships its own to 7.
+
+    Which is the operator's real account -- 18 and 14 are feeders that grow
+    lumber -- and the shape the acceptance fixture cannot see, because
+    ``wood_only_snapshot()`` zeroes every non-capital's production.
+    """
+    villages = {
+        1: VillageState(village_id=1, x=0, y=0, merchant_count=20, crop_per_hour=0.0),
+        2: VillageState(
+            village_id=2, x=2, y=0, merchant_count=20, crop_per_hour=0.0, relay_for=(3, 4)
+        ),
+        3: VillageState(village_id=3, x=6, y=0, merchant_count=20, crop_per_hour=0.0),
+        4: VillageState(village_id=4, x=2, y=4, merchant_count=20, crop_per_hour=0.0),
+        7: VillageState(village_id=7, x=2, y=-5, merchant_count=20, crop_per_hour=0.0),
+    }
+    plans = {
+        Resource.LUMBER: resolve_resource(
+            Resource.LUMBER,
+            {1: 20_000.0, 2: 6_000.0, 3: 0.0, 4: 0.0, 7: 0.0},
+            {
+                1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                2: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                3: Allocation(AllocationMode.ABSOLUTE, 5_000.0),
+                4: Allocation(AllocationMode.ABSOLUTE, 5_000.0),
+                7: Allocation(AllocationMode.ABSOLUTE, 6_000.0),
+            },
+        )
+    }
+    return villages, plans
+
+
 # Villages 1 and 5 could both feed the relay, and neither may reach the
 # downstream directly. 1 is a field nearer.
 _TWO_SOURCE_EXCLUSIONS = {3: {1, 5}}
@@ -487,6 +519,39 @@ class TestStructuralInvariants:
                     f"relay {hub} collects {inbound:,.0f}/h of {resource.value} and forwards "
                     f"{outbound:,.0f}/h -- it banks the difference"
                 )
+
+    def test_the_relays_own_material_is_not_a_leg_of_the_tier(self):
+        """Reachable on the real account, and invisible to the fixture.
+
+        The relay here is a feeder: it forwards village 1's lumber to 3 and 4,
+        and ships its OWN 6,000/h to 7. Measured before the fix, the reported
+        hub read ``destinations=(3, 4, 7)`` -- a leg of a delivery it is not
+        part of, and one whose dispatch ``relay_buffer_findings`` then reads as
+        a "forward send" of the pass-through.
+        """
+        villages, plans = _tier_account_where_the_relay_grows_its_own()
+
+        plan = build_plan(
+            villages,
+            plans,
+            GEOMETRY,
+            MODEL,
+            excluded_origins_by_destination={3: {1}, 4: {1}},
+        )
+
+        # Not vacuous: all three legs out of the relay really were built.
+        out_of_relay = {
+            route.destination
+            for route in plan.routes
+            if route.origin == 2 and route.cargo_per_hour.get(Resource.LUMBER, 0.0) > 0
+        }
+        assert out_of_relay == {3, 4, 7}, f"the fixture built {sorted(out_of_relay)}"
+
+        lumber = [relay for relay in plan.relays if relay.resource is Resource.LUMBER]
+        assert [relay.hub for relay in lumber] == [2]
+        assert lumber[0].destinations == (3, 4), (
+            f"the tier claims {lumber[0].destinations}; 7 is the relay's own lumber"
+        )
 
     def test_the_tier_prefers_a_source_that_can_afford_the_collecting_leg(self):
         """The tier is built outside the improvement search, so it must not

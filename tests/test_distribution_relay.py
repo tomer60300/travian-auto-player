@@ -74,6 +74,44 @@ class TestFindingTheHubs:
         ]
         assert relay_hubs(legs) == ()
 
+    def test_a_declared_material_relay_forwards_only_to_its_declared_downstreams(self):
+        """Section 5's tier is a DECLARATION, so its legs are the declared ones.
+
+        A relay village also ships material of its own -- 18 and 14 are feeders
+        that grow lumber -- and an outbound leg that is not one of the
+        downstreams the operator named is not part of the delivery. Reporting it
+        as one claims a leg of a delivery it isn't, and hands
+        ``relay_buffer_findings`` an unrelated dispatch to read as a "forward
+        send", which is what turns a CRITICAL relay-buffer finding into a
+        WARNING.
+
+        Crop is untouched -- a crop hub is SEARCHED, not declared, so there is
+        no list to check it against.
+        """
+        legs = [
+            _route(22, 2, resource=Resource.LUMBER),
+            _route(2, 17, resource=Resource.LUMBER),
+            _route(2, 18, resource=Resource.LUMBER),
+            # 2's own lumber, to a village nobody named.
+            _route(2, 7, resource=Resource.LUMBER),
+        ]
+
+        hubs = relay_hubs(legs, material_relays={2: (17, 18)})
+
+        assert len(hubs) == 1
+        assert hubs[0].destinations == (17, 18), (
+            f"the tier claims {hubs[0].destinations}, which includes a leg nobody declared"
+        )
+
+    def test_a_declared_relay_with_no_declared_leg_built_is_not_a_relay(self):
+        """Every outbound leg is the relay's own. There is no delivery to report."""
+        legs = [
+            _route(22, 2, resource=Resource.LUMBER),
+            _route(2, 7, resource=Resource.LUMBER),
+        ]
+
+        assert relay_hubs(legs, material_relays={2: (17,)}) == ()
+
     def test_a_mixed_cargo_leg_counts_for_its_crop(self):
         """Routes merge all four resources into one row, so a relay leg can
         arrive carrying lumber as well. What makes it a relay is the crop."""

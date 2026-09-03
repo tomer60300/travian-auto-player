@@ -360,18 +360,32 @@ def _cycles_for(
 
 
 def relay_hubs(
-    routes: Iterable[Route], *, material_relays: Collection[int] = ()
+    routes: Iterable[Route], *, material_relays: Mapping[int, Sequence[int]] | None = None
 ) -> tuple[RelayHub, ...]:
     """The relay hubs in *routes*, worst end-to-end first.
 
     Crop always, because the optimizer may reroute a crop flow through a sub-hub
     (profile section 3.5). Materials only at a village the operator DECLARED as
-    a relay, which is what ``material_relays`` carries: absent it, a material
-    arriving somewhere that also ships that material out is two independent
-    flows, and reporting it as a relay would invent a dependency the plan does
-    not have. That is not merely a display choice -- the beat phases a hub's
-    forward sends after its collecting arrivals, and doing that to two unrelated
-    flows would constrain a schedule for no reason.
+    a relay, which is what ``material_relays`` carries -- the ``relay_for`` map
+    itself, relay to downstreams. Absent it, a material arriving somewhere that
+    also ships that material out is two independent flows, and reporting it as a
+    relay would invent a dependency the plan does not have. That is not merely a
+    display choice -- the beat phases a hub's forward sends after its collecting
+    arrivals, and doing that to two unrelated flows would constrain a schedule
+    for no reason.
+
+    **The downstreams, not merely the relay.** A material relay's forward legs
+    are the ones going to villages it was declared the relay FOR. A declared
+    relay may also ship material of its own -- 18 and 14 are feeders that grow
+    lumber -- and an outbound leg to a village nobody named is not part of the
+    delivery. Sweeping it in claimed a leg of a delivery it isn't, and handed
+    :func:`~.storage.relay_buffer_findings` an unrelated dispatch to read as a
+    "forward send", which is what downgrades a CRITICAL relay-buffer finding to
+    a WARNING.
+
+    The collecting side cannot be narrowed the same way and is not: which source
+    feeds a relay is the solver's choice, not the operator's, so there is no
+    declared list to check an inbound leg against.
 
     So ``material_relays`` empty reproduces the crop-only behaviour exactly,
     which is every account that declares no tier.
@@ -380,7 +394,7 @@ def relay_hubs(
     all day. :func:`~.schedule.time_relays` replaces them with what the finished
     beat will really do -- and must, because inside a profile window it will not.
     """
-    declared = frozenset(material_relays)
+    declared: Mapping[int, Sequence[int]] = material_relays or {}
     hubs = []
     # Crop first, then the materials in the game's order, so the pre-tier output
     # is untouched and a declared tier's rows sort after it inside a tie.
@@ -401,14 +415,27 @@ def relay_hubs(
                 continue
             collecting = inbound[hub]
             feeders = {route.origin for route in collecting}
-            forwarding = [route for route in outbound[hub] if route.destination not in feeders]
+            # A crop hub's onward legs are whatever the search built, because
+            # nobody declared them. A material relay's are the ones it was
+            # declared the relay FOR -- everything else out of that village is
+            # its own material going somewhere the tier says nothing about.
+            onward = None if resource is Resource.CROP else frozenset(declared.get(hub, ()))
+            forwarding = [
+                route
+                for route in outbound[hub]
+                if route.destination not in feeders
+                and (onward is None or route.destination in onward)
+            ]
             if not forwarding:
                 # Every onward leg goes straight back to a village that feeds
-                # this one. That is a two-way pair, not a relay: no schedule can
-                # satisfy "ship after you collect" at both ends at once, and the
-                # optimizer refuses to create one. It holds for a declared
-                # material tier identically -- see `_relay_tier_flows`, which
-                # will not name a downstream that supplies its own relay.
+                # this one, or -- for a material relay -- to a village nobody
+                # declared. The first is a two-way pair, not a relay: no
+                # schedule can satisfy "ship after you collect" at both ends at
+                # once, and the optimizer refuses to create one. It holds for a
+                # declared material tier identically -- see `_relay_tier_flows`,
+                # which will not name a downstream that supplies its own relay.
+                # The second is a relay whose declared legs the plan did not
+                # need to build, so there is no delivery to report.
                 continue
             hubs.append(
                 RelayHub(
