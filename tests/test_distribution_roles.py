@@ -405,6 +405,68 @@ class TestACropSpendIsRefusedInATemplateToo:
                 model.model_validate(body)
 
 
+class TestARemainderIsRefusedInATemplate:
+    """Manager ruling #4 at the schema: REMAINDER stays per village.
+
+    Exactly one village per resource absorbs the slack -- a profile shared by
+    four defensive villages cannot say which, so a template carrying remainder
+    fans it out to every village of the role and the allocation layer then
+    refuses the whole plan with a 400 that names VILLAGES ("got 02, 11, 13, 17,
+    19"). The operator reads that as five bad cells and has to work back to the
+    one template that wrote them.
+
+    Refused at the schema for the reason the crop spend is: one rule for all
+    four planning paths, and the error's own location names the role.
+    """
+
+    def test_the_schema_refuses_it(self):
+        with pytest.raises(ValidationError, match="per village"):
+            RoleTemplate.model_validate(
+                {"allocations": {"lumber": {"mode": "remainder", "value": 0}}}
+            )
+
+    def test_the_message_names_the_resource_it_was_written_on(self):
+        with pytest.raises(ValidationError) as caught:
+            RoleTemplate.model_validate(
+                {
+                    "allocations": {
+                        "clay": {"mode": "remainder"},
+                        "iron": {"mode": "remainder"},
+                    }
+                }
+            )
+
+        detail = str(caught.value)
+        assert "clay" in detail and "iron" in detail, detail
+        # The Rest radio is where the answer belongs, so the message has to
+        # point at it rather than only forbid the mode.
+        assert "Rest" in detail, detail
+
+    def test_the_other_four_modes_are_accepted(self):
+        for mode, value in (("keep", 0), ("absolute", 8372), ("percentage", 12), ("sustain", 120)):
+            template = RoleTemplate.model_validate(
+                {"allocations": {"lumber": {"mode": mode, "value": value}}}
+            )
+            assert template.allocations[Resource.LUMBER].value == pytest.approx(value)
+
+    def test_it_is_refused_on_every_request_model(self):
+        for model in (PlanRequest, DayCheckRequest, ExecuteRequest, NightProfileRequest):
+            body = _payload(
+                roles={"def": _def_template(allocations={"lumber": {"mode": "remainder"}})}
+            )
+            if model is not PlanRequest:
+                body.pop("allocations")
+            with pytest.raises(ValidationError, match="per village"):
+                model.model_validate(body)
+
+    def test_a_per_village_remainder_is_untouched(self):
+        """The template is the only place it is refused. The capital absorbs the
+        slack in every fixture here, and must go on doing so."""
+        res = _plan(roles={"def": _def_template()})
+
+        assert res.feasible
+
+
 class TestADesignedDeficitIsANoteNotACritical:
     """Sections 9.1-9.2 at the endpoint: 01 and 03 drain crop on purpose.
 

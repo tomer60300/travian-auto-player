@@ -219,9 +219,49 @@ class RoleTemplate(BaseModel):
             "resource -- the same target an explicit per-village allocation "
             "sets, so a role is a way of saying it once rather than a second "
             "kind of number. Resources absent here fall through to whatever the "
-            "village itself declares, and to KEEP if neither does."
+            "village itself declares, and to KEEP if neither does. "
+            "REMAINDER IS REFUSED: exactly one village per resource absorbs the "
+            "slack, so a profile shared by four villages cannot say which -- set "
+            "it per village instead."
         ),
     )
+
+    @field_validator("allocations")
+    @classmethod
+    def _remainder_is_per_village(
+        cls, value: dict[Resource, AllocationInput]
+    ) -> dict[Resource, AllocationInput]:
+        """Exactly one village per resource absorbs the slack, so a shared
+        profile cannot say which.
+
+        Refused at the schema, like the crop spend above and for the same
+        reason: ONE rule covers `/plan`, `/day-check`, `/execute` and
+        `/night-profile`, and the error's own location names the role.
+
+        Left to resolution, a template's remainder fans out to every village of
+        the role and the allocation layer refuses the plan with a 400 naming
+        VILLAGES -- "got 02, 11, 13, 17, 19" for a single mistyped template.
+        The operator reads five bad cells and has to work back to the one
+        profile that wrote them.
+        """
+        fanned = sorted(
+            resource.value
+            for resource, alloc in value.items()
+            if alloc.mode is AllocationMode.REMAINDER
+        )
+        if fanned:
+            raise ValueError(
+                "a role template's allocations cannot use remainder ("
+                + ", ".join(fanned)
+                + "): remainder stays per village. Exactly one village per "
+                "resource absorbs the slack, and a profile shared by four "
+                "villages cannot say which one -- set it on the village itself "
+                "with the Rest radio. Every other mode is a figure each village "
+                "of the role can hold independently, which is what makes it "
+                "shareable."
+            )
+        return value
+
     consumption: dict[Resource, float] = Field(
         default={},
         description=(

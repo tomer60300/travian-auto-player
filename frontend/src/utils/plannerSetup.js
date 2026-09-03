@@ -111,6 +111,24 @@ export const ALLOCATION_MODES = Object.freeze([
   'sustain',
   'remainder',
 ])
+/** The modes a ROLE TEMPLATE may carry: every one except remainder.
+ *
+ * Exactly one village per resource absorbs the slack, and a profile shared by
+ * four defensive villages cannot say which -- so remainder stays per village,
+ * set by the Rest radio. It is refused rather than dropped: left to the backend
+ * a template's remainder fanned out to every village of the role, and the plan
+ * came back as a 400 naming VILLAGES ("got 02, 11, 13, 17, 19") for one
+ * mistyped template. Five bad cells to work back from, when the file says which
+ * one wrote them.
+ *
+ * The backend's `RoleTemplate.allocations` validator refuses the same mode, so
+ * the file and the request cannot disagree. Every other mode is a figure each
+ * village of the role can hold independently, which is what makes a profile
+ * shareable at all.
+ */
+export const TEMPLATE_ALLOCATION_MODES = Object.freeze(
+  ALLOCATION_MODES.filter((mode) => mode !== 'remainder')
+)
 export const SETUP_RESOURCES = Object.freeze(['lumber', 'clay', 'iron', 'crop'])
 
 /** The resources a village may DECLARE a spend for. Crop is absent, and that
@@ -604,10 +622,23 @@ function parseRoleTemplate(raw, where) {
     if (!alloc || typeof alloc !== 'object') {
       throw new SetupFileError(`${where}.allocations.${resource} is not an allocation.`)
     }
-    if (!ALLOCATION_MODES.includes(alloc.mode)) {
+    // A separate message from the unknown-mode one, because "unknown mode
+    // remainder" would be a lie: remainder is a mode the planner uses on every
+    // account. What the operator needs is where to say it instead.
+    if (alloc.mode === 'remainder') {
+      throw new SetupFileError(
+        `${where}.allocations.${resource} uses remainder, which a role template ` +
+          `refuses: remainder stays per village. Exactly one village per ` +
+          `resource absorbs the slack, and a profile shared by four villages ` +
+          `cannot say which one -- set it on the village itself with the Rest ` +
+          `radio, and give the template one of ` +
+          `${TEMPLATE_ALLOCATION_MODES.join(', ')}.`
+      )
+    }
+    if (!TEMPLATE_ALLOCATION_MODES.includes(alloc.mode)) {
       throw new SetupFileError(
         `${where}.allocations.${resource} has mode "${alloc.mode ?? 'nothing'}"; ` +
-          `it must be one of ${ALLOCATION_MODES.join(', ')}.`
+          `it must be one of ${TEMPLATE_ALLOCATION_MODES.join(', ')}.`
       )
     }
     const value = alloc.value == null ? 0 : Number(alloc.value)

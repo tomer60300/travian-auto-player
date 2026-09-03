@@ -1151,6 +1151,44 @@ describe('roles and role templates in the setup file', () => {
     expect(() => roundTrip(doc)).toThrow(/hoard/)
   })
 
+  it('rejects remainder in a template, and points at the Rest radio', () => {
+    // Ruling #4: exactly one village per resource absorbs the slack, so a
+    // profile shared by four defensive villages cannot say which. Left to the
+    // backend it fanned out to every village of the role and the plan came
+    // back as a 400 naming VILLAGES ("got 02, 11, 13, 17, 19") for one mistyped
+    // template -- five bad cells to work back from.
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { def: { allocations: { lumber: { mode: 'remainder', value: 0 } } } },
+    }
+
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+    expect(() => roundTrip(doc)).toThrow(/remainder/)
+    expect(() => roundTrip(doc)).toThrow(/per village/)
+    expect(() => roundTrip(doc)).toThrow(/Rest/)
+    // And the refusal must not enumerate remainder as a valid correction, the
+    // way the unknown-resource message once offered crop.
+    expect(() => roundTrip(doc)).toThrow(/keep, absolute, percentage, sustain/)
+  })
+
+  it('still accepts remainder on a per-village allocation', () => {
+    // The template is the only place it is refused; a profile's own map is
+    // where the slack destination is actually recorded.
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      profiles: { Day: { lumber: { 20030: { mode: 'remainder', value: 0 } } } },
+    }
+
+    expect(roundTrip(doc).profiles.Day.lumber['20030']).toEqual({
+      mode: 'remainder',
+      value: 0,
+    })
+  })
+
   it('rejects an unknown resource in a template allocation', () => {
     const doc = {
       format: SETUP_FORMAT,
