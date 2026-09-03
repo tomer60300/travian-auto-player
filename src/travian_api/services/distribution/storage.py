@@ -33,7 +33,7 @@ Pure functions over already-fetched state. Nothing here spends a game request.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -482,6 +482,7 @@ def storage_findings(
     overflows: Sequence[OverflowEvent],
     warn_hours: float = DEFAULT_WARN_HOURS,
     names: Mapping[int, str] | None = None,
+    crop_negative_by_design: Collection[int] = (),
 ) -> tuple[Finding, ...]:
     """Structured store findings. Starvation first: it destroys troops, not surplus.
 
@@ -491,6 +492,17 @@ def storage_findings(
     costing 22,224/day -- and emitting both made half of a 132-line warning list
     a restatement of the other half. The overflow line strictly dominates: it
     says the cap is reached AND what that costs.
+
+    ``crop_negative_by_design`` names the villages the operator has declared
+    permanently crop-negative (profile sections 9.1-9.2: the Hammer and the
+    troops-only village eat more than they grow, every day, on purpose). Their
+    countdown is reported as a NOTE instead of a CRITICAL -- the same fact, the
+    same figures, without the claim that something is going wrong. It is a
+    downgrade and never a suppression: the hours of cover are the one number
+    review R7 exists to produce, and they say how long the granary lasts if the
+    deliveries stop. Empty by default, so nothing declared plans exactly as
+    before, and only the villages named are affected -- an undeclared village
+    draining at the same rate keeps its CRITICAL.
     """
     overflowing = {(event.village_id, event.resource) for event in overflows}
     findings: list[Finding] = []
@@ -512,6 +524,26 @@ def storage_findings(
     ):
         if (status.hours_remaining or 0.0) < warn_hours:
             label = village_label(status.village_id, names)
+            if status.village_id in crop_negative_by_design:
+                # Same facts, different tense. "Runs out in 17.0h" describes an
+                # accident; "drains by design, 17.0h in store" describes the
+                # arrangement AND still hands over the 17 hours, which is what
+                # the operator has to act inside either way.
+                findings.append(
+                    Finding(
+                        category=Category.STARVATION_BY_DESIGN,
+                        message=(
+                            f"{label}: {status.resource.value} drains at "
+                            f"{status.net_per_hour:+,.0f}/h by design; "
+                            f"{status.hours_remaining:.1f}h in store "
+                            f"({status.stock:,} left)"
+                        ),
+                        detail=f"{label} — {status.hours_remaining:.1f}h of cover",
+                        village=label,
+                        resource=status.resource,
+                    )
+                )
+                continue
             findings.append(
                 Finding(
                     category=Category.STARVATION,

@@ -63,6 +63,7 @@ class Category(StrEnum):
     """
 
     STARVATION = "starvation"
+    STARVATION_BY_DESIGN = "starvation_by_design"
     OVERFLOW_STRUCTURAL = "overflow_structural"
     OVERFLOW_BURST = "overflow_burst"
     OVERFLOW_PROJECTED = "overflow_projected"
@@ -420,6 +421,22 @@ _SPECS: Mapping[Category, _Spec] = {
         action=(
             "A truncated search overstates how many villages are over budget, so the "
             "merchant figures may be pessimistic. Raise max_improve_passes and re-plan."
+        ),
+    ),
+    Category.STARVATION_BY_DESIGN: _Spec(
+        # First among the notes, and for the same reason STARVATION leads the
+        # criticals: it is the only note carrying a countdown on something that
+        # cannot be re-grown. The severity moved; the urgency of reading it did
+        # not.
+        order=29,
+        severity=Severity.NOTE,
+        subject="store",
+        headline="{count} {subject} drain {resource} by design",
+        action=(
+            "Declared crop-negative: the troops eat more than the fields grow and the "
+            "difference is shipped in, which is how an army village works rather than a "
+            "fault to fix. The hours of cover on each line are still the number to act "
+            "inside -- they say how long the granary lasts if the deliveries stop."
         ),
     ),
     Category.STORE_FILLING: _Spec(

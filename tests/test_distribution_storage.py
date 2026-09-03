@@ -704,3 +704,141 @@ class TestConsumptionAcrossTheProfileDay:
 
         assert now_rows == was_rows
         assert now_breaches == was_breaches
+
+
+class TestADesignedCropDeficitIsNotAnEmergency:
+    """Profile sections 9.1-9.2: 01 and 03 are permanently crop-negative.
+
+    That is not a fault to be fixed, it is how a hammer works -- the troops eat
+    more than the village grows and the difference is shipped in every day. The
+    countdown is still the number that matters (review R7 exists because the
+    profile's own arithmetic made a draining store read as "no problem"), but
+    reporting it as CRITICAL says "resources or troops are being destroyed" of
+    an account running exactly as designed, and a critical signal that cries
+    wolf is worth less than none. On the operator's own account that was two of
+    the twenty-seven reds.
+
+    Severity belongs to the CATEGORY in this codebase and never to the
+    individual finding -- whether a fact is worth interrupting someone over
+    cannot depend on which village it is about. So the downgrade is a second
+    category rather than a per-finding severity, and every village WITHOUT the
+    declaration keeps the CRITICAL it has today.
+    """
+
+    HAMMER, ORDINARY = 1, 2
+    NAMES = {HAMMER: "01", ORDINARY: "17"}
+
+    def _draining(self, vid: int):
+        # -5,880/h is village 01's live reading; 100,000 in the granary is 17h.
+        return store_status(vid, Resource.CROP, 100_000, 400_000, -5_880)
+
+    def test_without_the_declaration_it_is_still_critical(self):
+        """The control. A village nobody described is a village nobody has
+        accounted for, and an emptying granary there is an emergency."""
+        findings = storage_findings(
+            [self._draining(self.ORDINARY)], [], warn_hours=24.0, names=self.NAMES
+        )
+
+        assert [f.category for f in findings] == [Category.STARVATION]
+        assert findings[0].severity is Severity.CRITICAL
+
+    def test_declaring_it_by_design_makes_it_a_note(self):
+        findings = storage_findings(
+            [self._draining(self.HAMMER)],
+            [],
+            warn_hours=24.0,
+            names=self.NAMES,
+            crop_negative_by_design={self.HAMMER},
+        )
+
+        assert [f.category for f in findings] == [Category.STARVATION_BY_DESIGN]
+        assert findings[0].severity is Severity.NOTE
+
+    def test_the_note_still_carries_the_hours_of_cover(self):
+        """The whole point of R7, and the reason this is a downgrade rather than
+        a suppression: -5,880/h with 100,000 in store is seventeen hours, and
+        seventeen hours is what the operator has to act inside. A silenced
+        finding would take that number away with the red."""
+        finding = storage_findings(
+            [self._draining(self.HAMMER)],
+            [],
+            warn_hours=24.0,
+            names=self.NAMES,
+            crop_negative_by_design={self.HAMMER},
+        )[0]
+
+        assert "01" in finding.message
+        assert "17.0h" in finding.message, finding.message
+        assert "5,880" in finding.message, finding.message
+        assert "by design" in finding.message
+        assert "17.0h" in finding.detail, finding.detail
+
+    def test_a_declared_village_and_an_undeclared_one_are_reported_apart(self):
+        """Both drain at the same rate with the same cover, so nothing but the
+        declaration separates them -- which is exactly what has to separate
+        them."""
+        findings = storage_findings(
+            [self._draining(self.HAMMER), self._draining(self.ORDINARY)],
+            [],
+            warn_hours=24.0,
+            names=self.NAMES,
+            crop_negative_by_design={self.HAMMER},
+        )
+
+        by_village = {f.village: f for f in findings}
+        assert by_village["01"].severity is Severity.NOTE
+        assert by_village["17"].severity is Severity.CRITICAL
+
+    def test_the_note_does_not_reach_the_accounts_loss_total(self):
+        """A NOTE that still summed into "this account loses N a day" would have
+        moved the headline instead of the severity."""
+        diagnostics = summarise(
+            list(
+                storage_findings(
+                    [self._draining(self.HAMMER)],
+                    [],
+                    warn_hours=24.0,
+                    names=self.NAMES,
+                    crop_negative_by_design={self.HAMMER},
+                )
+            )
+        )
+
+        assert diagnostics.total_loss_per_day == 0.0
+        assert diagnostics.counts.get("critical", 0) == 0
+
+    def test_a_designed_deficit_does_not_silence_an_overflow_at_the_same_village(self):
+        """Only the crop countdown is declared away. A hammer whose warehouse is
+        losing lumber is still losing lumber, and the declaration says nothing
+        about that."""
+        overflow = simulate_day(
+            build_beat(()),
+            stocks={self.HAMMER: {Resource.LUMBER: 399_000}},
+            capacities={self.HAMMER: {Resource.LUMBER: 400_000}},
+            net_per_hour={self.HAMMER: {Resource.LUMBER: 1_000.0}},
+        )
+
+        findings = storage_findings(
+            [self._draining(self.HAMMER)],
+            overflow,
+            warn_hours=24.0,
+            names=self.NAMES,
+            crop_negative_by_design={self.HAMMER},
+        )
+
+        categories = [f.category for f in findings]
+        assert Category.STARVATION_BY_DESIGN in categories
+        assert Category.OVERFLOW_STRUCTURAL in categories
+
+    def test_nothing_declared_is_the_default(self):
+        """The parameter is optional and its absence must mean the old
+        behaviour, because three callers pass it and a fourth (storage_warnings)
+        does not."""
+        assert (
+            storage_warnings([self._draining(self.HAMMER)], [], warn_hours=24.0, names=self.NAMES)[
+                0
+            ]
+            == storage_findings(
+                [self._draining(self.HAMMER)], [], warn_hours=24.0, names=self.NAMES
+            )[0].message
+        )
