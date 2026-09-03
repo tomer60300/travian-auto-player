@@ -33,7 +33,12 @@ from travian_api.services.distribution.allocation import (
 )
 from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import EUROPE2_TEUTON
-from travian_api.services.distribution.optimizer import VillageState, build_plan
+from travian_api.services.distribution.optimizer import (
+    VillageState,
+    _may_relay_through,
+    build_plan,
+)
+from travian_api.services.distribution.roles import Role, default_may_relay
 
 GEOMETRY = MapGeometry(span=401, speed_fields_per_hour=12.0)
 MODEL = EUROPE2_TEUTON
@@ -334,3 +339,144 @@ def test_a_village_with_no_merchants_is_never_a_relay_hub() -> None:
         f"village {MIDPOINT} has no merchants and was still made a relay hub -- "
         f"the plan carries a leg nobody can send"
     )
+
+
+# -- Declared roles supersede the crop-sign inference (profile section 5.9) --
+#
+# Everything above is an INFERENCE from the one figure the snapshot carries.
+# It is the best answer available while nothing has been declared, and it stays
+# exactly as it is for that case. Once the operator says what a village is FOR,
+# the inference is no longer the best answer available:
+#
+# * Section 5.9 says a ROLE village may not relay -- not because its granary is
+#   falling, but because it has a job that a pass-through leg interferes with.
+#   A solvent DEF village is still refused.
+# * Sections 9.1-9.2 say 01 and 03 are crop-negative BY DESIGN, so a negative
+#   crop sign has stopped being evidence of anything unplanned. The sign cannot
+#   decide a question the operator has already answered.
+#
+# So the declaration is consulted first and the sign is the fallback. The
+# fallback is not weakened; it is scoped to the case it was inferred for.
+
+
+def _declared(villages, vid, role, may_relay=None):
+    return {**villages, vid: dataclasses.replace(villages[vid], role=role, may_relay=may_relay)}
+
+
+@pytest.mark.parametrize(
+    "role",
+    [Role.CAPITAL, Role.TROOPS_OFF, Role.FULL_OFF, Role.DEF],
+    ids=lambda role: role.value,
+)
+def test_a_role_village_never_relays_however_solvent_it_is(role: Role) -> None:
+    """The crop sign says yes and the role says no, so the role wins.
+
+    This is the exact fixture of ``test_the_midpoint_is_genuinely_the_hub_relay_wants``:
+    1,200/h of crop, chosen as the hub on geometry alone. Declaring what the
+    village is for takes it out of the running.
+    """
+    villages, plans = _account(1200.0, Allocation(AllocationMode.ABSOLUTE, 0.0))
+
+    plan = build_plan(
+        _declared(villages, MIDPOINT, role), plans, GEOMETRY, MODEL, max_latency_hours=None
+    )
+
+    assert MIDPOINT not in _relay_hubs(plan), (
+        f"village {MIDPOINT} is declared {role.value} and was still made to forward "
+        f"someone else's crop; section 5.9 says a role village may not relay"
+    )
+
+
+def test_the_capital_does_not_relay_either() -> None:
+    """Profile inconsistency #9, resolved deliberately rather than by default.
+
+    Section 5 makes the capital the hub every feeder ships to AND says the
+    onward distribution is drawn from a relay tier around it -- so the capital
+    hands off, it does not itself carry a pass-through leg. Read the other way
+    the capital would be every relay's first choice (it is the most central
+    village on the account by construction) and the tier the profile asks for
+    would never be built.
+    """
+    assert default_may_relay(Role.CAPITAL) is False
+
+
+def test_a_feeder_relays_even_when_its_crop_is_negative() -> None:
+    """The other direction, which is the one with teeth.
+
+    ``-3037/h`` is the live hammer village the crop-sign rule was written for,
+    and with nothing declared it is refused (see
+    ``test_a_crop_negative_village_is_never_a_relay_hub``). A FEEDER is a
+    village whose whole job is to move resources on; if the operator says this
+    one is a feeder then the negative sign is a fact about its troops rather
+    than a veto on its purpose, and the plan must take the declaration.
+    """
+    villages, plans = _account(-3037.0, _SUSTAIN)
+
+    plan = build_plan(
+        _declared(villages, MIDPOINT, Role.FEEDER), plans, GEOMETRY, MODEL, max_latency_hours=None
+    )
+
+    assert MIDPOINT in _relay_hubs(plan), (
+        f"village {MIDPOINT} is declared a feeder and was still refused as a hub "
+        f"on the strength of a crop sign the operator has already accounted for"
+    )
+
+
+def test_a_template_may_overrule_its_own_roles_default() -> None:
+    """``may_relay`` is the field; the role only supplies its default.
+
+    Without this the five roles would be five hard-wired answers, and the one
+    account that needs a DEF village to relay -- a defensive village sitting on
+    the only road to a corner of the map -- would have no way to say so short
+    of lying about what the village is.
+    """
+    villages, plans = _account(1200.0, Allocation(AllocationMode.ABSOLUTE, 0.0))
+
+    plan = build_plan(
+        _declared(villages, MIDPOINT, Role.DEF, may_relay=True),
+        plans,
+        GEOMETRY,
+        MODEL,
+        max_latency_hours=None,
+    )
+
+    assert MIDPOINT in _relay_hubs(plan), (
+        "an explicit may_relay=True on the template was ignored in favour of the role's own default"
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        (Role.FEEDER, True),
+        (Role.CAPITAL, False),
+        (Role.TROOPS_OFF, False),
+        (Role.FULL_OFF, False),
+        (Role.DEF, False),
+    ],
+    ids=lambda value: value.value if isinstance(value, Role) else str(value),
+)
+@pytest.mark.parametrize("crop_per_hour", [9000.0, 0.0, -5880.0, None], ids=str)
+def test_the_permission_matrix_ignores_the_crop_sign_entirely(
+    role: Role, expected: bool, crop_per_hour: float | None
+) -> None:
+    """Every role against every crop sign, the unreadable one included.
+
+    The point of declaring a role is that the answer stops depending on the
+    rate: 01 reads -5,880/h and 02 reads +6,000/h, and neither figure is what
+    decides whether the profile lets them relay.
+    """
+    village = VillageState(
+        MIDPOINT, 0, 0, merchant_count=20, crop_per_hour=crop_per_hour, role=role
+    )
+
+    assert _may_relay_through(village) is expected
+
+
+@pytest.mark.parametrize("crop_per_hour", [9000.0, 0.0, -5880.0, None], ids=str)
+def test_without_a_role_the_crop_sign_still_decides(crop_per_hour: float | None) -> None:
+    """The fallback, stated as a matrix beside the roles that supersede it, so
+    that scoping the inference cannot quietly become removing it."""
+    village = VillageState(MIDPOINT, 0, 0, merchant_count=20, crop_per_hour=crop_per_hour)
+
+    assert _may_relay_through(village) is (crop_per_hour is not None and crop_per_hour >= 0.0)

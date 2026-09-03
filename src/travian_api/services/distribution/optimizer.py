@@ -72,6 +72,7 @@ from .allocation import EPSILON, AllocationMode, Resource, ResourcePlan, village
 from .findings import Category, Finding
 from .geometry import MapGeometry
 from .merchants import DAILY_BEAT_CYCLES, MerchantModel, cheapest_cycle, cycle_sweep
+from .roles import Role, default_may_relay
 
 DEFAULT_MERCHANT_RESERVE = 2
 
@@ -143,12 +144,23 @@ class VillageState:
     trade_office_level: int = 0
     name: str = ""
     # The village's OWN crop production, before any allocation. Carried solely
-    # so relay can refuse a hub that cannot survive its inbound leg slipping:
-    # a village whose troops eat more than it grows drains while it forwards,
-    # and a relay leg turns a slow loss into a dead village. ``None`` means the
-    # rate could not be read, which is NOT the same as zero -- see
+    # so relay can refuse a hub that cannot survive its inbound leg slipping,
+    # WHERE NOTHING WAS DECLARED: a village whose troops eat more than it grows
+    # drains while it forwards, and a relay leg turns a slow loss into a dead
+    # village. ``None`` means the rate could not be read, which is NOT the same
+    # as zero. Superseded by ``role`` once there is one -- see
     # :func:`_may_relay_through`.
     crop_per_hour: float | None = None
+
+    role: Role | None = None
+    """What this village is FOR, when the operator has said. ``None`` is the
+    account nobody has described yet, and every decision that reads this must
+    keep working on it -- see :func:`_may_relay_through`."""
+
+    may_relay: bool | None = None
+    """Whether this village may forward someone else's cargo, overriding its
+    role's default. ``None`` takes :func:`~.roles.default_may_relay`, so a role
+    village need not restate what its role already says."""
 
     @property
     def coords(self) -> tuple[int, int]:
@@ -704,12 +716,26 @@ def _crowding_findings(
 def _may_relay_through(village: VillageState) -> bool:
     """May *village* be made to forward someone else's crop?
 
-    Only if it is not losing crop of its own. The danger is asymmetric, and that
-    asymmetry is the entire rule: a hub with non-negative production cannot be
-    harmed by relaying, because if the leg refilling it is late it simply
-    forwards less. A hub already eating into its granary -- troops consuming more
-    than the fields grow -- funds the relay from a balance that is falling, and a
-    slipped inbound leg becomes an empty granary and starving troops.
+    The declared answer first. A village with a ``role`` has been described by
+    the operator, and profile section 5.9 answers this for each kind directly:
+    a feeder moves resources on, every other role has a job that a leg in
+    transit interferes with (see :func:`~.roles.default_may_relay`, which also
+    carries why the capital is a *no*). ``may_relay`` on the role's template
+    overrides that default; ``None`` means the role's own answer stands.
+
+    The rule below is what to do when nothing has been declared -- which is
+    most accounts, and stays exactly as it was. It is an INFERENCE, and the
+    role case is not a special exemption from it but the reason it was ever
+    needed: with no vocabulary for "01 is crop-negative by design", the sign of
+    a crop rate was the only evidence available.
+
+    Failing a declaration, then: only if it is not losing crop of its own. The
+    danger is asymmetric, and that asymmetry is the entire rule: a hub with
+    non-negative production cannot be harmed by relaying, because if the leg
+    refilling it is late it simply forwards less. A hub already eating into its
+    granary -- troops consuming more than the fields grow -- funds the relay
+    from a balance that is falling, and a slipped inbound leg becomes an empty
+    granary and starving troops.
 
     Observed on a live account before this existed: two of seven night chains
     forwarded through villages at -3,037/h and -874/h. The second held 32,597
@@ -724,6 +750,15 @@ def _may_relay_through(village: VillageState) -> bool:
     breaks even holds its own when a refill is late, so excluding it would cost
     the canonical midway hub for no gain in safety.
     """
+    if village.role is not None:
+        # Resolved here rather than only at the edge, so a ``VillageState``
+        # carrying a role and no explicit permission cannot leak ``None`` into a
+        # boolean question: an unresolved role would read as "may not relay" by
+        # accident, which is the right answer four times out of five and
+        # therefore the hardest kind of bug to notice.
+        if village.may_relay is None:
+            return default_may_relay(village.role)
+        return village.may_relay
     return village.crop_per_hour is not None and village.crop_per_hour >= 0.0
 
 
@@ -1377,11 +1412,14 @@ def _improve_flows(
         # (merchant_count == 0) are excluded, because including a sink let the
         # search adopt an impossible sink->sink leg (zero distance between two
         # co-located tributes costs zero merchants), emitting a route whose
-        # origin is a negative foreign id. And a hub must be solvent in crop (see
-        # :func:`_may_relay_through`): relaying through a village already losing
-        # crop turns a slow deficit into a dead village the first time its refill
-        # slips, and an unreadable rate is refused there too -- unknown is not
-        # zero. Computed once per scan, not per edge.
+        # origin is a negative foreign id. And a hub must be PERMITTED to relay
+        # (see :func:`_may_relay_through`): where the operator declared a role,
+        # that role says so directly (profile section 5.9 -- only a feeder
+        # forwards); where nothing was declared the village must be solvent in
+        # crop, because relaying through one already losing crop turns a slow
+        # deficit into a dead village the first time its refill slips, and an
+        # unreadable rate is refused there too -- unknown is not zero. Computed
+        # once per scan, not per edge.
         hubs = sorted(
             vid
             for vid in relay_hub_candidates
