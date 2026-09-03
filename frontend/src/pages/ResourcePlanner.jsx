@@ -4113,7 +4113,12 @@ export default function ResourcePlanner() {
                                   {ROLE_LABEL[role]}:{' '}
                                   {MODES.find((m) => m.value === fromRole.mode)?.label ??
                                     fromRole.mode}{' '}
-                                  {fmt(fromRole.value)}
+                                  {/* `?? 0` for the same reason `roleDeviates`
+                                      reads it that way: an absent value IS
+                                      zero to the backend, so naming it as an
+                                      em-dash would print a figure the plan
+                                      does not have. */}
+                                  {fmt(fromRole.value ?? 0)}
                                 </span>
                               )}
                             </td>

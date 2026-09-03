@@ -211,7 +211,16 @@ export function resolveRoleSpend(template, resource, spend) {
 export function roleDeviates(template, resource, allocation) {
   const stated = template?.allocations?.[resource]
   if (stated == null || allocation == null) return false
-  return stated.mode !== allocation.mode || Number(stated.value) !== Number(allocation.value)
+  // `?? 0` on BOTH sides, because `Number(undefined)` is NaN and NaN !== NaN:
+  // an allocation missing `value` read as a deviation on every render, and the
+  // backend would never report it -- `AllocationInput.value` defaults to 0.0,
+  // so `{mode: 'keep'}` and `{mode: 'keep', value: 0}` are one allocation
+  // there. A cell marked "different from DEF" over a figure the plan agrees
+  // with is the confidently-wrong mark this predicate exists to avoid.
+  return (
+    stated.mode !== allocation.mode ||
+    Number(stated.value ?? 0) !== Number(allocation.value ?? 0)
+  )
 }
 
 /** One village's spend as the plan will APPLY it, and where each figure came

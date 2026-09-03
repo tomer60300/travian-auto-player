@@ -1107,6 +1107,26 @@ describe('roles and role templates in the setup file', () => {
     expect(() => roundTrip(doc)).toThrow(SetupFileError)
   })
 
+  it('rejects a template that is not an object at all', () => {
+    // Every other branch of `parseRoleTemplate` has a test; this one did not,
+    // and it is the branch a hand-edited file hits first. `null` and a bare
+    // number would both read `raw.allocations` as undefined and import as an
+    // empty template -- a role with a profile of nothing, which plans its
+    // villages as keeping their own production while the file looked loaded.
+    for (const bad of [null, 42, 'def', ['def'], true]) {
+      const doc = {
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [],
+        roles: { def: bad },
+      }
+      expect(() => roundTrip(doc), JSON.stringify(bad)).toThrow(SetupFileError)
+      expect(() => roundTrip(doc), JSON.stringify(bad)).toThrow(/is not a role template/)
+      // Named by its key, so the operator knows which of five to look at.
+      expect(() => roundTrip(doc), JSON.stringify(bad)).toThrow(/def/)
+    }
+  })
+
   it('rejects a template keyed by a role name that is not one of the five', () => {
     const doc = {
       format: SETUP_FORMAT,
@@ -1371,6 +1391,25 @@ describe('roleDeviates', () => {
 
   it('is false with no template at all, which is a village with no role', () => {
     expect(roleDeviates(undefined, 'lumber', { mode: 'absolute', value: 1 })).toBe(false)
+  })
+
+  it('reads an absent value as the zero the backend reads it as', () => {
+    // `Number(undefined)` is NaN and NaN !== NaN, so an allocation missing
+    // `value` on either side read as a deviation the backend would never
+    // report: `AllocationInput.value` defaults to 0.0, so `{mode: 'keep'}` and
+    // `{mode: 'keep', value: 0}` are the same allocation there. The grid would
+    // have marked the cell and named a figure the plan agrees with.
+    expect(roleDeviates({ allocations: { lumber: { mode: 'keep' } } }, 'lumber', {
+      mode: 'keep',
+      value: 0,
+    })).toBe(false)
+    expect(roleDeviates(TEMPLATE, 'lumber', { mode: 'absolute' })).toBe(true)
+    expect(
+      roleDeviates({ allocations: { lumber: { mode: 'absolute' } } }, 'lumber', {
+        mode: 'absolute',
+        value: 0,
+      })
+    ).toBe(false)
   })
 })
 
