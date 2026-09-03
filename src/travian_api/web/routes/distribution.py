@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from travian_api.exceptions import ActivityBudgetExhausted, NetworkError, TravianError
@@ -40,6 +41,7 @@ from travian_api.services.distribution.execution_trace import (
     ExecutionTrace,
     read_inventories,
 )
+from travian_api.services.distribution.export import plan_digest, render_plan_yaml
 from travian_api.services.distribution.findings import (
     Category,
     Diagnostics,
@@ -85,7 +87,11 @@ from travian_api.services.distribution.planner import (
     blockers,
     craft_plan,
 )
-from travian_api.services.distribution.roles import Role, keeps_a_morning_floor
+from travian_api.services.distribution.roles import (
+    Role,
+    crop_drift_findings,
+    keeps_a_morning_floor,
+)
 from travian_api.services.distribution.route_revert import describe, plan_revert
 from travian_api.services.distribution.run_history import (
     AccountRollup,
@@ -328,6 +334,34 @@ class RoleTemplate(BaseModel):
             "rather than carrying a leg in transit. Set it only for the account "
             "whose defensive village sits on the only road to a corner of the "
             "map; unset, the role speaks for itself."
+        ),
+    )
+    assumed_crop_per_hour: float | None = Field(
+        default=None,
+        description=(
+            "What a village of this role is BELIEVED to net in crop per hour -- "
+            "the operator's own reading, kept as a flat constant beside the rest "
+            "of the profile. Section 9: 'Consumption profiles are flat "
+            "constants. Drift is expected between manual updates. Flag any "
+            "village whose actual net crop deviates >20% from its assumed "
+            "profile.' This is that assumption, and the check compares it "
+            "against the snapshot's `crop_per_hour` -- which is already net of "
+            "troop upkeep, so the two are the same quantity. "
+            "NOT AN INSTRUCTION. It moves no target, no cargo and no merchant: "
+            "what a village should KEEP of its crop is the template's crop "
+            "ALLOCATION, and what it spends is refused outright (a declared "
+            "crop spend would subtract the same troops twice). The only thing "
+            "this figure can do is raise a `crop_profile_drift` WARNING when "
+            "reality has moved more than 20% away from it. "
+            "MAY BE NEGATIVE, and usually is on the roles that matter: 01 reads "
+            "-5,880/h and is crop-negative BY DESIGN, so -5,880 is the right "
+            "value to record for it and a village sitting on its own figure "
+            "stays silent however deep the deficit. 0.0 is a real claim -- "
+            "'this village breaks even' -- and is checked as one. "
+            "None means no assumption, which is not an assumption of zero: the "
+            "village is simply not checked, because reading a missing figure as "
+            "0/h would flag every village on every account that has never typed "
+            "one."
         ),
     )
     crop_negative_by_design: bool = Field(
@@ -1725,6 +1759,22 @@ class PlanResponse(BaseModel):
     # the page actually renders.
     warnings: list[str]
     diagnostics: DiagnosticsResponse
+    plan_digest: str = Field(
+        default="",
+        description=(
+            "sha256 of this whole response, with this field excluded. THIS "
+            "PLAN'S IDENTITY, and the thing `/plan/yaml` demands back before it "
+            "will render a document: section 10's order is readable plan first, "
+            "the operator confirms, and only then is the YAML generated -- so "
+            "the export has to be able to tell that the plan it re-computes is "
+            "still the one that was read. Over the response rather than the "
+            "request, because two requests differing only in a field the "
+            "planner ignores are the same plan and must digest the same. It is "
+            "not stable across releases and is not meant to be: a planner "
+            "change that moves a cargo figure SHOULD move the digest, since the "
+            "plan the operator read no longer exists."
+        ),
+    )
 
 
 class DaySegmentInput(BaseModel):
@@ -2239,6 +2289,13 @@ class _ResolvedRoles:
     crop_negative_by_design: frozenset[int]
     """Villages whose granary countdown is a NOTE rather than a CRITICAL."""
 
+    assumed_crop: dict[int, float]
+    """What each village's role BELIEVES it nets in crop per hour (section 9).
+
+    Only the villages whose template states a figure. A village absent here has
+    no assumption and cannot drift -- deliberately not defaulted to 0.0, which
+    is a claim of its own ("breaks even") and would flag the whole account."""
+
     deviations: list[RoleDeviationResponse]
     """Cells where an explicit allocation overrode a template."""
 
@@ -2374,6 +2431,15 @@ def _resolve_roles(body: PlanRequest) -> _ResolvedRoles:
         crop_negative_by_design=frozenset(
             vid for vid, role in of_village.items() if body.roles[role].crop_negative_by_design
         ),
+        # Section 9's assumption, per village that has one. `is not None`
+        # rather than a truth test: 0.0 is the claim "this village breaks
+        # even", and reading it as "nothing declared" would silence the one
+        # assumption a village can drift furthest from.
+        assumed_crop={
+            vid: body.roles[role].assumed_crop_per_hour
+            for vid, role in sorted(of_village.items())
+            if body.roles[role].assumed_crop_per_hour is not None
+        },
         deviations=deviations,
     )
 
@@ -4076,6 +4142,22 @@ async def _plan_account(
         npc_triggers = evaluate_triggers(plan.npc, *_npc_store_state(body, plan))
         extra_findings.extend(trigger_findings(npc_triggers, names))
 
+    # Section 9's staleness check on the operator's own crop constants, read
+    # against the snapshot the plan was built from. It changes nothing about the
+    # plan -- it is a WARNING about the FIGURES, and never a blocker, because
+    # drift between manual updates is what the spec says to expect. Emitted here
+    # so all three planning paths through `_plan_account` (/plan, /day-check,
+    # /execute) raise it from one call, beside the merchant-calibration nag
+    # below, which is the other "how much to trust the numbers" finding.
+    extra_findings.extend(
+        crop_drift_findings(
+            roles.assumed_crop,
+            {v.village_id: v.crop_per_hour for v in body.snapshot},
+            roles.of_village,
+            names,
+        )
+    )
+
     # How much to trust every merchant figure above. `EUROPE2_TEUTON` is pinned
     # on one end only: the base was re-read off the game on 2026-09-02, while
     # the +20%-per-level bonus is carried over from the profile and has never
@@ -4248,19 +4330,15 @@ async def _plan_account(
     )
 
 
-@router.post("/plan", response_model=PlanResponse)
-async def post_plan(
-    body: PlanRequest,
-    _user: User = Depends(get_current_user),
-):
-    """Compute a plan. Costs **zero** game requests.
+def _plan_response(account: _PlannedAccount) -> PlanResponse:
+    """The plan as the operator reads it, digest included.
 
-    The caller supplies the snapshot it already fetched, so tuning allocation
-    targets is free and the planner stays pure. Deliberately auth-only: a
-    Travian-session dependency would auto-reconnect (real login traffic) or 403
-    for a computation that never touches the game.
+    Extracted from `/plan` so `/plan/yaml` renders the SAME response rather
+    than assembling a second one: the YAML's whole claim is that it describes
+    what was shown, and two assemblers of one response drift -- which is the
+    argument `VillageNetResponse` and `RoleDeviationResponse` both already make
+    about recomputing a figure in a second place.
     """
-    account = await _plan_account(body)
     plan = account.plan
     names = account.names
     trade_office = account.trade_office
@@ -4271,7 +4349,7 @@ async def post_plan(
     upgrades = {o.village_id: o.trade_office_levels_needed for o in plan.over_budget}
     over = {o.village_id for o in plan.over_budget}
 
-    return PlanResponse(
+    response = PlanResponse(
         rows=[
             SheetRowResponse(
                 origin=row.origin,
@@ -4394,6 +4472,145 @@ async def post_plan(
         # The route count is what lets the headline stop blaming the plan for
         # losses it did not cause -- see _account_headline.
         diagnostics=_diagnostics_response(summarise(findings, routes_planned=len(plan.rows))),
+    )
+    # Applied last and computed over the response with this field excluded,
+    # which is the only self-consistent way to put a hash of a thing inside it.
+    return response.model_copy(
+        update={
+            "plan_digest": plan_digest(response.model_dump(mode="json", exclude={"plan_digest"}))
+        }
+    )
+
+
+@router.post("/plan", response_model=PlanResponse)
+async def post_plan(
+    body: PlanRequest,
+    _user: User = Depends(get_current_user),
+):
+    """Compute a plan. Costs **zero** game requests.
+
+    The caller supplies the snapshot it already fetched, so tuning allocation
+    targets is free and the planner stays pure. Deliberately auth-only: a
+    Travian-session dependency would auto-reconnect (real login traffic) or 403
+    for a computation that never touches the game.
+    """
+    return _plan_response(await _plan_account(body))
+
+
+class PlanYamlRequest(PlanRequest):
+    """The plan request, plus the digest of the plan the operator confirmed.
+
+    Section 10's order -- readable plan first, operator confirms, then generate
+    the YAML -- only means something if the file describes the plan that was
+    READ. See :func:`post_plan_yaml` for why that is enforced with a digest
+    rather than by trusting a posted plan.
+    """
+
+    expected_plan_digest: str = Field(
+        min_length=64,
+        max_length=64,
+        description=(
+            "`plan_digest` from the `/plan` response the operator confirmed. "
+            "REQUIRED, and not defaulted to 'whatever comes out': it is the "
+            "confirmation step itself, in machine-readable form. A digest that "
+            "does not match what this request re-plans to comes back 409 with "
+            "both digests named -- never a document, because a document "
+            "describing a plan nobody read is worse than no document at all."
+        ),
+    )
+
+    @field_validator("expected_plan_digest")
+    @classmethod
+    def _digest_is_a_sha256(cls, value: str) -> str:
+        # Refused as malformed rather than reported as a mismatch: a 409 says
+        # "the plan moved", which would send the operator re-reading a plan
+        # that never moved at all over a mistyped token.
+        text = value.lower()
+        if any(char not in "0123456789abcdef" for char in text):
+            raise ValueError(
+                "expected_plan_digest must be the 64-character hex plan_digest from a "
+                "/plan response"
+            )
+        return text
+
+
+@router.post(
+    "/plan/yaml",
+    response_class=PlainTextResponse,
+    responses={
+        200: {
+            "content": {"application/yaml": {}},
+            "description": "The confirmed plan as a YAML document.",
+        },
+        409: {"description": "The plan moved since it was read; nothing was rendered."},
+    },
+)
+async def post_plan_yaml(
+    body: PlanYamlRequest,
+    _user: User = Depends(get_current_user),
+):
+    """Render an already-confirmed plan as YAML. Costs **zero** game requests.
+
+    Profile section 10 fixes the order: readable plan first, the operator
+    confirms, and only then is the YAML generated. So this endpoint's one job is
+    to guarantee that the file describes the plan that was READ -- and there are
+    only two ways to do that, because nothing on this server holds a computed
+    plan. `/plan` is pure and stateless on purpose (that is what makes tuning a
+    target free), so there is no plan to fetch by id.
+
+    **Not by trusting a posted plan.** `/execute` recomputes rather than trust
+    client-sent rows, and the reason is stated at :class:`_PlannedAccount`: it
+    must act on exactly the plan `/plan` would display for the same inputs. The
+    argument is stronger for a document the operator keeps as the record of a
+    decision, not weaker -- a stale browser tab, or a hand-edited body, would
+    produce an authoritative-looking file describing a plan the planner never
+    produced, and nothing in it would say so.
+
+    **So it re-plans, and the digest is what stops that being silent.** The
+    planner is a pure function of the request with no clock and no randomness in
+    it, so the same inputs reproduce the same plan; `/plan` returns
+    `plan_digest` over the response it showed, and this endpoint re-computes,
+    re-digests, and refuses with **409** -- naming both digests -- unless they
+    agree. The document therefore either IS the plan that was confirmed, or it
+    does not exist. A caller that reads a 200 has a file it can trust; a caller
+    that reads a 409 knows exactly what happened and can re-read the plan.
+
+    Nothing here is logged. The document is the operator's village names,
+    coordinates and topology -- their own data, fine in a file they download and
+    not something to write into a server log.
+    """
+    account = await _plan_account(body)
+    response = _plan_response(account)
+    if response.plan_digest != body.expected_plan_digest:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"this plan is not the one that was confirmed: the request re-plans to "
+                f"{response.plan_digest} and the confirmation names "
+                f"{body.expected_plan_digest}. Nothing was rendered -- a YAML file "
+                f"describing a plan nobody read is worse than no file. Re-read /plan and "
+                f"confirm the digest it returns."
+            ),
+        )
+    document = render_plan_yaml(
+        # The planning inputs only. `expected_plan_digest` is deliberately
+        # excluded: what lands in the file is then a valid /plan body verbatim,
+        # which is what lets the operator replay this plan a month later.
+        inputs=body.model_dump(mode="json", exclude={"expected_plan_digest"}),
+        plan=response.model_dump(mode="json"),
+        digest=response.plan_digest,
+    )
+    return PlainTextResponse(
+        content=document,
+        media_type="application/yaml",
+        headers={
+            # Named for the plan rather than for the moment, so two downloads of
+            # one plan are one file and a diff between two plans is a diff.
+            "Content-Disposition": (
+                f'attachment; filename="distribution-plan-{response.plan_digest[:12]}.yaml"'
+            ),
+            "X-Plan-Digest": response.plan_digest,
+        },
     )
 
 

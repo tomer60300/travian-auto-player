@@ -31,7 +31,12 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from travian_api.services.distribution.allocation import Resource
-from travian_api.services.distribution.roles import Role
+from travian_api.services.distribution.findings import Category, Severity
+from travian_api.services.distribution.roles import (
+    CROP_DRIFT_THRESHOLD,
+    Role,
+    crop_drift_findings,
+)
 from travian_api.web.routes.distribution import (
     DayCheckRequest,
     ExecuteRequest,
@@ -929,3 +934,126 @@ class TestNothingDeclaredPlansExactlyAsBefore:
 
     def test_no_role_means_no_deviations_to_mark(self):
         assert _plan(explicit_def=True, config=_config(def_role=None)).role_deviations == []
+
+
+class TestTheCropProfileDriftFlag:
+    """Section 9's staleness detector on the operator's own flat constants.
+
+    > Consumption profiles are flat constants. Drift is expected between manual
+    > updates. Flag any village whose actual net crop deviates >20% from its
+    > assumed profile.
+
+    Read together with the paragraph beside it -- "01 and 03 are permanently
+    crop-negative by design ... do not treat starvation as an error state" --
+    this is a check on the FIGURES, not on the account. So the arithmetic has to
+    survive an assumed figure of -5,880/h, and a village sitting exactly where
+    its profile says it sits has to stay silent however negative that is.
+    """
+
+    @staticmethod
+    def _drift(assumed, reads, *, role=Role.FULL_OFF):
+        return crop_drift_findings({1: assumed}, {1: reads}, {1: role}, {1: "01"})
+
+    def test_inside_the_threshold_is_silent(self):
+        assert self._drift(-5_880.0, -6_000.0) == []
+
+    def test_outside_it_fires_with_the_percentage(self):
+        """53% is |-9,000 - (-5,880)| / |-5,880|, and the percentage is the point."""
+        finding = self._drift(-5_880.0, -9_000.0)[0]
+
+        assert finding.category is Category.CROP_PROFILE_DRIFT
+        assert finding.severity is Severity.WARNING
+        assert finding.village == "01"
+        assert finding.resource is Resource.CROP
+        assert finding.loss_per_day == 0.0
+        assert "01" in finding.message
+        assert "-5,880" in finding.message, finding.message
+        assert "-9,000" in finding.message, finding.message
+        assert "53%" in finding.message, finding.message
+        assert "53%" in finding.detail, finding.detail
+
+    def test_exactly_twenty_percent_is_inside(self):
+        """The spec says "deviates >20%", so the boundary itself is not drift.
+
+        -5,880 x 1.2 = -7,056, and 1,000 x 1.2 = 1,200: both directions of the
+        boundary, because a percentage of a negative figure is where this check
+        goes wrong.
+        """
+        assert self._drift(-5_880.0, -7_056.0) == []
+        assert self._drift(1_000.0, 1_200.0) == []
+        assert self._drift(1_000.0, 800.0) == []
+
+    def test_an_assumed_zero_is_not_divided_by(self):
+        """A profile stating 0/h claims the village breaks even, which is a claim.
+
+        There is no percentage against zero, so the finding says so and gives
+        the gap instead of printing an infinity or quietly dividing by an
+        epsilon.
+        """
+        assert self._drift(0.0, 0.0) == []
+
+        finding = self._drift(0.0, -5_880.0)[0]
+        assert "0/h" in finding.message, finding.message
+        assert "-5,880" in finding.message, finding.message
+        assert "%" not in finding.message, finding.message
+        assert "inf" not in finding.message.lower(), finding.message
+
+    def test_a_sign_flip_is_named_and_not_only_measured(self):
+        """-5,880 and +5,880 are the same magnitude and opposite facts.
+
+        A check comparing magnitudes reports 0% here, which is the one drift
+        that matters most: the village has stopped needing crop shipped to it.
+        """
+        finding = self._drift(-5_880.0, 5_880.0)[0]
+
+        assert "200%" in finding.message, finding.message
+        assert "sign" in finding.message.lower(), finding.message
+
+    def test_negative_by_design_and_not_drifted_stays_silent(self):
+        """01 reads -5,880/h by design. Sitting on its own figure is not drift."""
+        assert self._drift(-5_880.0, -5_880.0) == []
+        assert (
+            crop_drift_findings(
+                {1: -5_880.0, 3: -12_526.0},
+                {1: -5_880.0, 3: -12_526.0},
+                {1: Role.FULL_OFF, 3: Role.TROOPS_OFF},
+                {1: "01", 3: "03"},
+            )
+            == []
+        )
+
+    def test_a_village_with_no_assumption_is_not_checked(self):
+        """No figure is not a figure of zero, which would fire on the account."""
+        assert crop_drift_findings({}, {1: -9_000.0}, {1: Role.FULL_OFF}, {1: "01"}) == []
+
+    def test_an_unreadable_rate_is_not_drift(self):
+        """`crop_per_hour=None` is the no-crop-balance snapshot; UNREADABLE_RATE
+        already reports it, and a missing reading is not a stale figure."""
+        assert self._drift(-5_880.0, None) == []
+
+    def test_the_threshold_is_a_named_constant(self):
+        assert CROP_DRIFT_THRESHOLD == 0.20
+
+    def test_it_reaches_the_plan_as_a_warning_and_never_a_blocker(self):
+        """The four DEF villages read 1,200/h; the profile claims 100/h."""
+        drifted = _plan(roles={"def": _def_template(assumed_crop_per_hour=100.0)})
+        agreed = _plan(roles={"def": _def_template(assumed_crop_per_hour=1_200.0)})
+
+        fired = [
+            f
+            for group in drifted.diagnostics.groups
+            for f in group.findings
+            if f.category == "crop_profile_drift"
+        ]
+        assert len(fired) == 4, [f.message for f in fired]
+        assert {f.severity for f in fired} == {"warning"}
+        assert not any("crop" in b and "drift" in b for b in drifted.verdict.blockers)
+        assert drifted.feasible == agreed.feasible
+        assert drifted.verdict.critical_findings == agreed.verdict.critical_findings
+        assert [r.model_dump() for r in drifted.rows] == [r.model_dump() for r in agreed.rows]
+
+    def test_no_assumed_figure_in_the_template_leaves_the_plan_untouched(self):
+        assert (
+            _plan(roles={"def": _def_template()}).model_dump()
+            == _plan(roles={"def": _def_template(assumed_crop_per_hour=None)}).model_dump()
+        )

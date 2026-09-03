@@ -99,6 +99,12 @@ class Category(StrEnum):
     RESERVED_WINDOW = "reserved_window"
     MANUAL_TRANSFER = "manual_transfer"
     WHITELIST_VS_TRIBUTE = "whitelist_vs_tribute"
+    # Section 9's staleness check on the operator's hand-maintained figures --
+    # about the PROFILE, never about the account, which is why it is named for
+    # the profile rather than for the crop. STARVATION and
+    # STARVATION_BY_DESIGN say whether a granary is emptying; this one says
+    # whether the constant the plan was sized from still describes the village.
+    CROP_PROFILE_DRIFT = "crop_profile_drift"
     UNREADABLE_RATE = "unreadable_rate"
     SEARCH_TRUNCATED = "search_truncated"
     STORE_FILLING = "store_filling"
@@ -341,6 +347,27 @@ _SPECS: Mapping[Category, _Spec] = {
             "These routes only deliver while the warehouse stays at its floor. That is an "
             "operator promise, not a fact of the account -- keep NPC trading, or the cargo "
             "arrives short with nothing in the plan to say why."
+        ),
+    ),
+    Category.CROP_PROFILE_DRIFT: _Spec(
+        # Immediately before MERCHANT_MODEL_UNCALIBRATED, which is the other
+        # "how much to trust the numbers above" finding: that one says the
+        # merchant capacities rest on an unmeasured bonus, this one says the
+        # crop figures rest on a reading somebody took by hand. Crop reads
+        # first because it moves CARGO -- every route sized off a stale net
+        # crop ships the wrong amount -- where the bonus moves merchant counts.
+        order=10.4,
+        severity=Severity.WARNING,
+        subject="village",
+        headline="{count} {subject} read a different net {resource} than their profile assumes",
+        action=(
+            "Section 9: consumption profiles are flat constants, so drift between manual "
+            "updates is EXPECTED. This is a prompt to re-read the game, never a refusal and "
+            "never a claim that the account is unhealthy -- 01 and 03 are permanently "
+            "crop-negative BY DESIGN, and theirs are the figures that move fastest, because "
+            "the army that eats the fields keeps growing. Each line gives the assumed "
+            "figure, what the village actually reads and how far apart they are: update the "
+            "role's assumed_crop_per_hour, and whatever crop targets were sized from it."
         ),
     ),
     Category.MERCHANT_MODEL_UNCALIBRATED: _Spec(
