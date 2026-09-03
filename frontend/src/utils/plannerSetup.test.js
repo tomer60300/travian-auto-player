@@ -10,6 +10,7 @@ import {
   materialSpendOnly,
   mergeSetup,
   parseSetup,
+  roleDeviates,
   setupFilename,
   setupMatchesAccount,
 } from './plannerSetup'
@@ -213,7 +214,11 @@ describe('profiles in the setup file', () => {
       merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
       exportedAt: STAMP,
     })
-    expect(setup.version).toBe(2)
+    // 3 since the role templates landed. Pinned to a literal on purpose: the
+    // version has to rise whenever a field is added, so that an older build
+    // refuses a file it would otherwise half-load, and a literal is what makes
+    // forgetting the bump a failing test rather than a tautology.
+    expect(setup.version).toBe(3)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -984,5 +989,334 @@ describe('declaresConsumption', () => {
   it('is true for a single resource, including a declared zero', () => {
     expect(declaresConsumption({ iron: 9526 })).toBe(true)
     expect(declaresConsumption({ iron: 0 })).toBe(true)
+  })
+})
+
+describe('roles and role templates in the setup file', () => {
+  // Section 1 assigns a role to every village and section 2 gives ONE profile
+  // for FOUR defensive villages, so a role template is the largest saving in
+  // hand-typed state this file has ever carried: five profiles instead of
+  // twenty-six allocations plus six spend maps. It is also the state that hurts
+  // most to lose -- a cleared origin takes the roles with it, and the plan then
+  // reads four defensive villages as keeping their own production, which is a
+  // tenth of what they need, without saying anything is wrong.
+  const TEMPLATES = {
+    def: {
+      allocations: {
+        lumber: { mode: 'absolute', value: 8372 },
+        clay: { mode: 'absolute', value: 5168 },
+        iron: { mode: 'absolute', value: 5809 },
+        crop: { mode: 'absolute', value: 2200 },
+      },
+      consumption: { lumber: 8372, clay: 5168, iron: 5809 },
+      may_relay: null,
+      crop_negative_by_design: false,
+    },
+    full_off: {
+      allocations: { crop: { mode: 'absolute', value: 8519 } },
+      consumption: { lumber: 14751 },
+      may_relay: null,
+      crop_negative_by_design: true,
+    },
+  }
+
+  it('writes the per-village role and the templates', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      villageRoles: { 20031: 'def', 20032: 'feeder' },
+      roles: TEMPLATES,
+      exportedAt: STAMP,
+    })
+
+    expect(setup.villages).toEqual([
+      { village_id: 20031, name: 'V05', role: 'def' },
+      { village_id: 20032, name: 'V16', role: 'feeder' },
+    ])
+    expect(setup.roles).toEqual(TEMPLATES)
+  })
+
+  it('omits the roles field entirely when there are none', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 5 },
+      exportedAt: STAMP,
+    })
+
+    expect('roles' in setup).toBe(false)
+    expect(setup.villages[0].role).toBeUndefined()
+  })
+
+  it('survives the round trip unchanged', () => {
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        villageRoles: { 20030: 'capital', 20031: 'def', 20032: 'def' },
+        roles: TEMPLATES,
+        exportedAt: STAMP,
+      })
+    )
+    const merged = mergeSetup({ setup, villages: VILLAGES })
+
+    expect(merged.villageRoles).toEqual({ 20030: 'capital', 20031: 'def', 20032: 'def' })
+    expect(merged.roles).toEqual(TEMPLATES)
+  })
+
+  it('is a version 3 file, and a version 2 one simply has no roles', () => {
+    // The guard has to bite in the other direction too: a build that cannot
+    // read roles must refuse a file that has them, or it loads the villages,
+    // drops their profiles and plans a different account in silence.
+    expect(SETUP_VERSION).toBe(3)
+    const older = {
+      format: SETUP_FORMAT,
+      version: 2,
+      villages: [{ village_id: 20030, trade_office_level: 3 }],
+    }
+    const parsed = roundTrip(older)
+    expect(parsed.roles).toEqual({})
+    expect(parsed.villages[0].role).toBeUndefined()
+  })
+
+  it('rejects a role name the backend does not have', () => {
+    // "hammer" is what the operator calls village 01 in conversation and is not
+    // one of the five. Dropped rather than refused, it would be a village with
+    // no profile at all -- and the backend answers an unknown role with a 422,
+    // so accepting it here would only move the failure somewhere less
+    // explicable.
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 20030, role: 'hammer' }],
+    }
+
+    expect(() => roundTrip(doc)).toThrow(/hammer/)
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+  })
+
+  it('rejects a template keyed by a role name that is not one of the five', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { hammer: { allocations: {} } },
+    }
+
+    expect(() => roundTrip(doc)).toThrow(/hammer/)
+  })
+
+  it('rejects a crop spend in a template, and says where the figure belongs', () => {
+    // The backend's 422, mirrored: the snapshot's crop rate is already net of
+    // upkeep, so a declared crop spend subtracts the same troops twice. Section
+    // 2 lists a crop figure per role village, which is exactly why this is the
+    // field an operator reaches for -- so the message has to name the
+    // alternative rather than only refuse.
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { def: { consumption: { crop: 2200 } } },
+    }
+
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+    expect(() => roundTrip(doc)).toThrow(/already net of troop upkeep/)
+    expect(() => roundTrip(doc)).toThrow(/crop allocation target/)
+  })
+
+  it('rejects a negative spend in a template', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { def: { consumption: { lumber: -500 } } },
+    }
+
+    expect(() => roundTrip(doc)).toThrow(/cannot be negative/)
+  })
+
+  it('rejects an allocation mode a template cannot have', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { def: { allocations: { lumber: { mode: 'hoard', value: 1 } } } },
+    }
+
+    expect(() => roundTrip(doc)).toThrow(/hoard/)
+  })
+
+  it('rejects an unknown resource in a template allocation', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { def: { allocations: { gold: { mode: 'absolute', value: 1 } } } },
+    }
+
+    expect(() => roundTrip(doc)).toThrow(/gold/)
+  })
+
+  it('rounds a template allocation to whole units, as a per-village one is', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { def: { allocations: { lumber: { mode: 'absolute', value: 8371.6009 } } } },
+    }
+
+    expect(roundTrip(doc).roles.def.allocations.lumber).toEqual({
+      mode: 'absolute',
+      value: 8372,
+    })
+  })
+
+  it('defaults the optional halves of a template rather than leaving them undefined', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { feeder: {} },
+    }
+
+    expect(roundTrip(doc).roles.feeder).toEqual({
+      allocations: {},
+      consumption: {},
+      may_relay: null,
+      crop_negative_by_design: false,
+    })
+  })
+
+  it('keeps a may_relay override of false, which is not the same as unset', () => {
+    // Unset means "take the role's own answer" and is what almost every
+    // template says; an explicit false on a FEEDER is the one account that
+    // wants its feeders left out of the relay tier, and coercing the two
+    // together would lose that.
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { feeder: { may_relay: false }, def: { may_relay: true } },
+    }
+    const parsed = roundTrip(doc)
+
+    expect(parsed.roles.feeder.may_relay).toBe(false)
+    expect(parsed.roles.def.may_relay).toBe(true)
+  })
+
+  it('rejects a may_relay that is not a boolean or unset', () => {
+    for (const bad of ['yes', 1, 0]) {
+      const doc = {
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [],
+        roles: { def: { may_relay: bad } },
+      }
+      expect(() => roundTrip(doc)).toThrow(SetupFileError)
+    }
+  })
+})
+
+describe('mergeSetup with roles', () => {
+  it('replaces a role the file names and leaves the others alone', () => {
+    // The same rule the profiles follow, for the same reason: half of an old
+    // defensive profile merged into a new one is a distribution nobody
+    // designed.
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { def: { consumption: { lumber: 8372 } } },
+    }
+    const merged = mergeSetup({
+      setup: roundTrip(doc),
+      villages: VILLAGES,
+      roles: {
+        def: { consumption: { lumber: 1, clay: 2 }, crop_negative_by_design: true },
+        feeder: { allocations: { lumber: { mode: 'absolute', value: 0 } } },
+      },
+    })
+
+    expect(merged.roles.def).toEqual({
+      allocations: {},
+      consumption: { lumber: 8372 },
+      may_relay: null,
+      crop_negative_by_design: false,
+    })
+    expect(merged.roles.feeder).toEqual({
+      allocations: { lumber: { mode: 'absolute', value: 0 } },
+    })
+  })
+
+  it('drops a role for a village the account no longer has', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 99999, role: 'def' }],
+    }
+    const merged = mergeSetup({ setup: roundTrip(doc), villages: VILLAGES })
+
+    expect(merged.villageRoles).toEqual({})
+    expect(merged.report.missingFromAccount.map((v) => v.village_id)).toEqual([99999])
+  })
+
+  it('does not clear a role the file row is silent about', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [{ village_id: 20030, trade_office_level: 4 }],
+    }
+    const merged = mergeSetup({
+      setup: roundTrip(doc),
+      villages: VILLAGES,
+      villageRoles: { 20030: 'capital' },
+    })
+
+    expect(merged.villageRoles).toEqual({ 20030: 'capital' })
+  })
+
+  it('reports the roles it loaded, so a partial file is visible', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [],
+      roles: { def: {}, capital: {} },
+    }
+    const merged = mergeSetup({ setup: roundTrip(doc), villages: VILLAGES })
+
+    expect(merged.report.rolesLoaded).toEqual(['capital', 'def'])
+  })
+})
+
+describe('roleDeviates', () => {
+  // The allocation grid marks a cell where an explicit value differs from the
+  // role's template. It must be the same predicate the backend reports the
+  // deviation with, or the grid marks a cell the plan did not -- worse than
+  // marking none, because it is confidently wrong.
+  const TEMPLATE = { allocations: { lumber: { mode: 'absolute', value: 8372 } } }
+
+  it('is false when the village says nothing', () => {
+    expect(roleDeviates(TEMPLATE, 'lumber', undefined)).toBe(false)
+  })
+
+  it('is false when the village says the same thing', () => {
+    expect(roleDeviates(TEMPLATE, 'lumber', { mode: 'absolute', value: 8372 })).toBe(false)
+  })
+
+  it('is true on a different value, and on a different mode', () => {
+    expect(roleDeviates(TEMPLATE, 'lumber', { mode: 'absolute', value: 12000 })).toBe(true)
+    expect(roleDeviates(TEMPLATE, 'lumber', { mode: 'percentage', value: 8372 })).toBe(true)
+  })
+
+  it('is true for an explicit keep, which is a different answer from the template', () => {
+    // In the planner KEEP means "hold your own production", so it overrides the
+    // template rather than falling through to it -- and the backend reports it
+    // as a deviation.
+    expect(roleDeviates(TEMPLATE, 'lumber', { mode: 'keep', value: 0 })).toBe(true)
+  })
+
+  it('is false for a resource the template has no opinion about', () => {
+    expect(roleDeviates(TEMPLATE, 'clay', { mode: 'absolute', value: 5168 })).toBe(false)
+  })
+
+  it('is false with no template at all, which is a village with no role', () => {
+    expect(roleDeviates(undefined, 'lumber', { mode: 'absolute', value: 1 })).toBe(false)
   })
 })

@@ -35,15 +35,30 @@
  * double-counts the same troops. What a village should keep of its crop is
  * said with its crop allocation TARGET instead.
  *
+ * Version 3 carries the ROLES: which of profile section 1's five kinds each
+ * village is, and one template per role. That is the largest saving in typed
+ * state the file has ever held and the worst to lose -- section 2.1 gives ONE
+ * profile for FOUR defensive villages, so five templates stand in for
+ * twenty-six allocations and six spend maps, and a cleared origin leaves the
+ * plan reading those four villages as keeping their own production, a tenth of
+ * what they need, with nothing on screen to say so. A role name outside the
+ * five is refused rather than dropped, because the backend answers an unknown
+ * role with a 422 and a role dropped here would leave the village with no
+ * profile at all.
+ *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
  */
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 2
-/** Versions this build can read. A v1 file simply carries no profiles, so
- * refusing it would strand every export written before profiles travelled. */
-export const READABLE_VERSIONS = Object.freeze([1, 2])
+export const SETUP_VERSION = 3
+/** Versions this build can read. A v1 file simply carries no profiles and a v2
+ * one no roles, so refusing either would strand every export written before
+ * those travelled. The version still has to rise when a field is added, and in
+ * the other direction: a build that cannot read roles must REFUSE a file that
+ * has them, or it loads the villages, drops their profiles and plans a
+ * different account without saying so. */
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
@@ -106,6 +121,39 @@ export const SETUP_RESOURCES = Object.freeze(['lumber', 'clay', 'iron', 'crop'])
  * file, the input and the request cannot disagree. */
 export const CONSUMABLE_RESOURCES = Object.freeze(['lumber', 'clay', 'iron'])
 
+/** The five kinds of village in profile section 1, and the backend's `Role`.
+ *
+ * A closed set, so a name that is not one of them is an error rather than a
+ * dropped key: "hammer" is what the operator calls village 01 in conversation,
+ * and importing it as silence would leave that village with no profile at all
+ * while the file looked like it had loaded. */
+export const VILLAGE_ROLES = Object.freeze([
+  'capital',
+  'troops_off',
+  'full_off',
+  'def',
+  'feeder',
+])
+
+/** Does this village's own allocation differ from what its role's template says?
+ *
+ * The same question the backend answers with `role_deviations`, asked here so
+ * the allocation grid can mark the cell while the operator is still editing and
+ * no plan exists yet. Kept as one exported predicate rather than inlined,
+ * because a grid that marks a cell the plan did not is worse than one that
+ * marks none: it is confidently wrong.
+ *
+ * A resource the template has no opinion about cannot deviate. An explicit
+ * `keep` DOES deviate, and deliberately: in the planner keep means "hold your
+ * own production", which is a different answer from the template's rather than
+ * an absence of one, so it overrides and the backend reports it.
+ */
+export function roleDeviates(template, resource, allocation) {
+  const stated = template?.allocations?.[resource]
+  if (stated == null || allocation == null) return false
+  return stated.mode !== allocation.mode || Number(stated.value) !== Number(allocation.value)
+}
+
 /** A spend map with everything undeclarable dropped, or null when nothing
  * declarable is left.
  *
@@ -136,6 +184,8 @@ export function buildSetup({
   shipOnlyTo,
   stockFloors,
   consumption,
+  villageRoles,
+  roles,
   profiles,
   profileWindows,
   merchantModel,
@@ -148,12 +198,23 @@ export function buildSetup({
     const ceiling = cropCeilings?.[village.village_id]
     const allowed = shipOnlyTo?.[village.village_id]
     const floor = stockFloors?.[village.village_id]
+    const role = villageRoles?.[village.village_id]
     // Materials only, so an export can never write a file this same parser
     // refuses to read back -- a crop figure saved by an older build would do
     // exactly that.
     const spends = materialSpendOnly(consumption?.[village.village_id])
-    if (level == null && ceiling == null && allowed == null && floor == null && !spends) continue
+    if (
+      level == null &&
+      ceiling == null &&
+      allowed == null &&
+      floor == null &&
+      role == null &&
+      !spends
+    ) {
+      continue
+    }
     const row = { village_id: village.village_id, name: village.name ?? '' }
+    if (role != null) row.role = String(role)
     if (level != null) row.trade_office_level = Number(level)
     if (ceiling != null) row.crop_ceiling = Number(ceiling)
     // An empty list is written, not dropped: it says "ships to nobody", which
@@ -176,6 +237,12 @@ export function buildSetup({
   // profiles to give. An empty object would import as "replace everything with
   // nothing", which is the opposite of what an operator loading a file wants.
   if (profiles && Object.keys(profiles).length) doc.profiles = profiles
+  // The role templates, on the same rule and for a sharper reason: five
+  // templates stand in for twenty-six allocations and six spend maps (section
+  // 2.1's one profile for four defensive villages), so losing them to a cleared
+  // origin makes the plan read four defensive villages as keeping their own
+  // production -- a tenth of what they need -- with nothing on screen to say so.
+  if (roles && Object.keys(roles).length) doc.roles = roles
   if (profileWindows && Object.keys(profileWindows).length) {
     doc.profile_windows = profileWindows
   }
@@ -360,6 +427,71 @@ function parseConsumption(raw, where) {
   return out
 }
 
+/** Validate one role's template: its profile, its spend and its two flags.
+ *
+ * Allocations are keyed by RESOURCE alone, not by resource and village: a
+ * template is one profile applied to every village of the role, which is the
+ * whole point of it. Otherwise the same discipline as `parseProfile` -- the
+ * mode must be one the backend has, the value is rounded to whole units
+ * because a `/h` rate has no sub-unit precision and a raw computation's
+ * 8371.6009 lands verbatim in the operator's input box.
+ *
+ * The optional halves are DEFAULTED rather than left undefined, so the shape
+ * the page holds is the shape the file gives it and a template can be rendered
+ * without every reader guarding for absence.
+ */
+function parseRoleTemplate(raw, where) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new SetupFileError(`${where} is not a role template.`)
+  }
+  const allocations = {}
+  for (const [resource, alloc] of Object.entries(raw.allocations ?? {})) {
+    if (!SETUP_RESOURCES.includes(resource)) {
+      throw new SetupFileError(
+        `${where}.allocations has unknown resource "${resource}"; ` +
+          `it must be one of ${SETUP_RESOURCES.join(', ')}.`
+      )
+    }
+    if (!alloc || typeof alloc !== 'object') {
+      throw new SetupFileError(`${where}.allocations.${resource} is not an allocation.`)
+    }
+    if (!ALLOCATION_MODES.includes(alloc.mode)) {
+      throw new SetupFileError(
+        `${where}.allocations.${resource} has mode "${alloc.mode ?? 'nothing'}"; ` +
+          `it must be one of ${ALLOCATION_MODES.join(', ')}.`
+      )
+    }
+    const value = alloc.value == null ? 0 : Number(alloc.value)
+    if (!Number.isFinite(value)) {
+      throw new SetupFileError(`${where}.allocations.${resource} has a non-numeric value.`)
+    }
+    allocations[resource] = { mode: alloc.mode, value: Math.round(value) }
+  }
+  // Reuses the per-village spend parser, so the crop refusal and the negative
+  // refusal are stated once. A template is the second door onto the same
+  // mistake -- section 2 lists a crop figure per role village, so it is the
+  // field an operator reaches for -- and two doors with one rule behind them is
+  // the only arrangement that cannot drift.
+  const consumption =
+    raw.consumption == null ? {} : parseConsumption(raw.consumption, `${where}.consumption`)
+  if (raw.may_relay != null && typeof raw.may_relay !== 'boolean') {
+    throw new SetupFileError(
+      `${where}.may_relay is ${JSON.stringify(raw.may_relay)}; it must be true, ` +
+        `false, or absent to take the role's own answer.`
+    )
+  }
+  return {
+    allocations,
+    consumption,
+    // null rather than undefined, and distinct from false: unset means "take
+    // the role's own answer", which is what almost every template says, while
+    // an explicit false on a feeder is the one account that wants its feeders
+    // kept out of the relay tier.
+    may_relay: raw.may_relay ?? null,
+    crop_negative_by_design: Boolean(raw.crop_negative_by_design),
+  }
+}
+
 /** Validate a `{ profile: ['HH:MM', 'HH:MM'] }` window map. */
 function parseWindows(raw, where) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -421,6 +553,17 @@ export function parseSetup(text) {
       throw new SetupFileError(`${where} has no usable village_id.`)
     }
     const parsed = { village_id: id, name: typeof row.name === 'string' ? row.name : '' }
+    if (row.role != null) {
+      if (!VILLAGE_ROLES.includes(row.role)) {
+        throw new SetupFileError(
+          `${where} has role "${row.role}"; it must be one of ` +
+            `${VILLAGE_ROLES.join(', ')}. The backend answers an unknown role with ` +
+            `a 422, and a role dropped here would leave the village with no ` +
+            `profile at all.`
+        )
+      }
+      parsed.role = row.role
+    }
     if (row.trade_office_level != null) {
       const level = Number(row.trade_office_level)
       if (!Number.isInteger(level) || level < 0 || level > MAX_TRADE_OFFICE_LEVEL) {
@@ -482,6 +625,21 @@ export function parseSetup(text) {
       profiles[name] = parseProfile(alloc, `profiles["${name}"]`)
     }
   }
+  const roles = {}
+  if (raw.roles != null) {
+    if (typeof raw.roles !== 'object' || Array.isArray(raw.roles)) {
+      throw new SetupFileError('The file has a roles field that is not a map of templates.')
+    }
+    for (const [name, template] of Object.entries(raw.roles)) {
+      if (!VILLAGE_ROLES.includes(name)) {
+        throw new SetupFileError(
+          `The file has a template for role "${name}", which is not one of ` +
+            `${VILLAGE_ROLES.join(', ')}.`
+        )
+      }
+      roles[name] = parseRoleTemplate(template, `roles["${name}"]`)
+    }
+  }
   const profileWindows =
     raw.profile_windows == null ? {} : parseWindows(raw.profile_windows, 'profile_windows')
 
@@ -504,7 +662,7 @@ export function parseSetup(text) {
       ? null
       : parseForeignTargets(raw.foreign_targets, "foreign_targets")
 
-  return { ...raw, villages, profiles, profileWindows, merchantModel, foreignTargets }
+  return { ...raw, villages, roles, profiles, profileWindows, merchantModel, foreignTargets }
 }
 
 /** Apply a parsed setup over the current maps, and say exactly what happened.
@@ -523,6 +681,8 @@ export function mergeSetup({
   shipOnlyTo,
   stockFloors,
   consumption,
+  villageRoles,
+  roles,
   profiles,
   profileWindows,
   foreignTargets,
@@ -533,6 +693,7 @@ export function mergeSetup({
   const nextShipOnlyTo = { ...(shipOnlyTo ?? {}) }
   const nextStockFloors = { ...(stockFloors ?? {}) }
   const nextConsumption = { ...(consumption ?? {}) }
+  const nextVillageRoles = { ...(villageRoles ?? {}) }
 
   const missingFromAccount = []
   let loaded = 0
@@ -545,6 +706,9 @@ export function mergeSetup({
       continue
     }
     loaded += 1
+    // Silence is not a clear: a row that says nothing about the role leaves the
+    // one on screen alone, the same rule every other column here follows.
+    if (row.role != null) nextVillageRoles[row.village_id] = row.role
     if (row.trade_office_level != null) nextTradeOffice[row.village_id] = row.trade_office_level
     if (row.crop_ceiling != null) nextCropCeilings[row.village_id] = row.crop_ceiling
     if (row.ship_only_to != null) nextShipOnlyTo[row.village_id] = row.ship_only_to
@@ -590,12 +754,25 @@ export function mergeSetup({
     nextWindows[name] = pair
   }
 
+  // A role the file names replaces the template on screen wholesale, on the
+  // same rule the profiles follow and for the same reason: half of an old
+  // defensive profile merged into a new one is a distribution nobody designed.
+  // Roles the file does not mention are left exactly as they are.
+  const nextRoles = { ...(roles ?? {}) }
+  const rolesLoaded = []
+  for (const [name, template] of Object.entries(setup.roles ?? {})) {
+    nextRoles[name] = template
+    rolesLoaded.push(name)
+  }
+
   return {
     tradeOffice: nextTradeOffice,
     cropCeilings: nextCropCeilings,
     shipOnlyTo: nextShipOnlyTo,
     stockFloors: nextStockFloors,
     consumption: nextConsumption,
+    villageRoles: nextVillageRoles,
+    roles: nextRoles,
     profiles: nextProfiles,
     profileWindows: nextWindows,
     merchantModel: setup.merchantModel ?? null,
@@ -608,6 +785,7 @@ export function mergeSetup({
       missingFromAccount,
       stillUnknown,
       profilesLoaded,
+      rolesLoaded: rolesLoaded.sort(),
       profileVillagesDropped: [...droppedVillages].sort((a, b) => a - b),
     },
   }
