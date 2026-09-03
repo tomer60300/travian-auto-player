@@ -107,3 +107,7 @@ scout-results*.md
 .server-*.log
 .server-*.log.err
 .playwright-mcp/
+
+# The travian-reviewer agent deliberately does not read these, and they are not
+# part of its review logic — see review-data/_out-of-scope/README.md. Kept local.
+.claude/agents/review-data/_out-of-scope/
