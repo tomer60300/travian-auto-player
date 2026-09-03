@@ -383,8 +383,13 @@ class VillageConfig(BaseModel):
             "rather than clamped — a ceiling the village cannot reach is a "
             "data-entry error, and clamping it silently would leave the "
             "operator's figure and the plan describing different accounts. "
-            "0 grounds the village, which is an answer. None means no ceiling "
-            "declared, which plans exactly as before."
+            "0 does NOT withdraw the village from the plan. This budget is "
+            "soft, as every merchant budget here is: its routes are still "
+            "built and costed, and every one of them becomes a budget breach "
+            "-- which is what marks the village `over_budget`, refuses the "
+            "sheet and blocks `/execute`. Use `ship_only_to` to stop a village "
+            "shipping. None means no ceiling declared, which plans exactly as "
+            "before."
         ),
     )
     stock_floor_fraction: float | None = Field(

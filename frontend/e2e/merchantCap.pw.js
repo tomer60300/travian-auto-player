@@ -158,12 +158,32 @@ test.describe('the merchant cap, driven', () => {
     expect(await stored(page, 'planner_max_busy')).toEqual({})
   })
 
-  test('a cap of 0 is stored, because it says the village sends nothing', async ({ page }) => {
+  test('a cap of 0 is stored, because it says every route from here breaches', async ({
+    page,
+  }) => {
+    // Not "the village sends nothing", which is what four surfaces used to
+    // claim: the budget is soft, so the routes are still planned and each one
+    // becomes a breach that refuses the sheet.
     await openTable(page)
 
     await page.getByLabel('Most merchants busy at once for 02').fill('0')
 
     expect(await stored(page, 'planner_max_busy')).toEqual({ [CAPITAL]: 0 })
+  })
+
+  test('the column says what a cap of 0 does, not that it grounds the village', async ({
+    page,
+  }) => {
+    // The tooltip is the only place the page explains the field, so a
+    // falsehood here is the one the operator reads.
+    await openTable(page)
+
+    const title = await page
+      .getByRole('columnheader', { name: 'Max busy' })
+      .getAttribute('title')
+
+    expect(title).not.toContain('grounds')
+    expect(title).toContain('breach')
   })
 
   test('a cap past the village fleet is marked invalid and names the fleet', async ({ page }) => {

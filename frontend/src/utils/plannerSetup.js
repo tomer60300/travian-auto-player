@@ -63,7 +63,9 @@
  * makes the plan over-provision, which is safe, while a dropped CAP makes the
  * plan commit sixteen merchants at a village the operator holds to eight and
  * report the sheet as feasible. So the version rises for it, and a build that
- * cannot read one refuses the file rather than half-loading it.
+ * cannot read one refuses the file rather than half-loading it. A cap of 0 is
+ * carried like any other figure: it makes every route from that village a
+ * budget breach, and does not withdraw the village from the plan.
  *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
@@ -95,10 +97,12 @@ export const MAX_MERCHANTS_PER_VILLAGE = 20
 /** Is this a usable ceiling on busy merchants?
  *
  * A whole count of merchants, from 0 to the 20 a village can ever hold. Zero is
- * accepted because it says something ("this village sends nothing"), the same
- * way a Trade Office level of 0 is an answer rather than a blank. Shared by the
- * file parser and the planner's input so the two cannot disagree about what a
- * valid cap is.
+ * accepted because it says something -- "every route from this village is a
+ * budget breach" -- the same way a Trade Office level of 0 is an answer rather
+ * than a blank. It does NOT say the village sends nothing: the budget is soft,
+ * so the routes are still planned and the breaches are what refuse the sheet.
+ * Shared by the file parser and the planner's input so the two cannot disagree
+ * about what a valid cap is.
  */
 export function isMaxBusyMerchants(value) {
   if (typeof value !== 'number' || !Number.isInteger(value)) return false
@@ -647,8 +651,9 @@ export function buildSetup({
     const row = { village_id: village.village_id, name: village.name ?? '' }
     if (role != null) row.role = String(role)
     if (level != null) row.trade_office_level = Number(level)
-    // 0 is written, not dropped: it says this village sends nothing, which is
-    // an answer, and dropping it puts the village's whole fleet back to work.
+    // 0 is written, not dropped: it says every route from this village is a
+    // budget breach, which is an answer, and dropping it puts the village's
+    // whole fleet back to work.
     if (cap != null) row.max_busy_merchants = Number(cap)
     if (ceiling != null) row.crop_ceiling = Number(ceiling)
     // An empty list is written, not dropped: it says "ships to nobody", which

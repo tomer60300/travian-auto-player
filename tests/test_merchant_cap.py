@@ -185,7 +185,8 @@ class TestTheBudgetIsTheTighterOfTheFleetAndTheCap:
 
         assert village.merchant_budget(reserve=2) == 18
 
-    def test_a_cap_of_zero_grounds_the_village(self):
+    def test_a_cap_of_zero_is_a_budget_of_zero(self):
+        """Which is NOT the same as grounding the village -- see below."""
         village = VillageState(village_id=1, x=0, y=0, merchant_count=20, max_busy_merchants=0)
 
         assert village.merchant_budget(reserve=2) == 0
@@ -338,7 +339,7 @@ class TestTheSchemaGuardsTheCap:
             VillageConfig(village_id=HUB, max_busy_merchants=-1)
 
     def test_zero_is_accepted_because_it_means_something(self):
-        """ "This village sends nothing" is an answer, not a mistake."""
+        """ "Every route from here is a budget breach" is an answer, not a typo."""
         assert VillageConfig(village_id=HUB, max_busy_merchants=0).max_busy_merchants == 0
 
     def test_a_cap_above_the_villages_own_merchants_is_refused(self):
@@ -430,6 +431,46 @@ class TestTheSchemaGuardsTheCap:
             with pytest.raises(ValidationError, match="21") as caught:
                 model.model_validate(body)
             assert "02" in str(caught.value), model.__name__
+
+
+class TestACapOfZeroDoesNotGroundTheVillage:
+    """It was documented as doing exactly that, in four places. It does not.
+
+    The merchant budget is SOFT everywhere in this optimizer: exceeding it is
+    costed, recorded as `over_budget` and refused at `/execute`, never routed
+    around. A cap is one more budget, so 0 does not withdraw the village from
+    the plan -- its routes are built and every one of them becomes a breach.
+
+    Saying otherwise sent the operator looking for a village that had quietly
+    stopped shipping, and it is the wording that was wrong rather than the
+    mechanism: a hard exclusion is a different lever (`ship_only_to` is the one
+    that exists) and inventing a second one here would make 0 the only figure
+    in the field that changes what the planner IS rather than what it may spend.
+    """
+
+    def test_the_routes_survive_and_every_one_of_them_is_a_breach(self):
+        res = _plan(caps={HUB: 0})
+
+        assert [r.origin for r in res.rows].count(HUB) == 1, "the route is still planned"
+        hub = _budget(res, HUB)
+        assert (hub.committed, hub.spare, hub.free, hub.over_budget) == (16, 0, -16, True)
+
+    def test_the_sheet_is_refused_rather_than_replanned_without_the_village(self):
+        res = _plan(caps={HUB: 0})
+
+        assert res.feasible is False
+        assert res.verdict.blockers, "refused with nothing to tell the operator"
+
+    def test_the_schema_says_what_zero_does_rather_than_what_it_does_not(self):
+        """The falsehood was in prose, so prose is what has to be pinned.
+
+        Four surfaces said "0 grounds the village" -- this one, the Max busy
+        column's tooltip, the setup file's own notes and a Playwright title.
+        """
+        description = VillageConfig.model_fields["max_busy_merchants"].description
+
+        assert "grounds" not in description, description
+        assert "breach" in description, description
 
 
 class TestTheExplanationNamesWhatIsActuallyBinding:

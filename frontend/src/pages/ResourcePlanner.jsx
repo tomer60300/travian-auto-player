@@ -1280,7 +1280,8 @@ export default function ResourcePlanner() {
           : {}),
         // Omitted when unset, so a village with no ceiling is byte-identical to
         // before: absent means the fleet, less the account reserve, is the
-        // budget. 0 IS sent -- it grounds the village, which is an answer.
+        // budget. 0 IS sent -- it says every route from this village is a
+        // budget breach, which is an answer.
         ...(maxBusy[v.village_id] != null
           ? { max_busy_merchants: Number(maxBusy[v.village_id]) }
           : {}),
@@ -2825,7 +2826,7 @@ export default function ResourcePlanner() {
                   <th className="text-right px-2">Trade Office</th>
                   <th
                     className="text-right px-2"
-                    title="The most merchants this village may have underway or RETURNING at once (profile section 5: “maximum 8 busy at 02”). A ceiling on the plan, not merchants held back: the account-wide reserve below holds some idle at EVERY village, and off a full fleet the two are not even the same figure — 19 merchants less a reserve of 12 is 7, where a cap of 8 is 8. Blank means no ceiling, so the budget is the fleet less the reserve. 0 grounds the village."
+                    title="The most merchants this village may have underway or RETURNING at once (profile section 5: “maximum 8 busy at 02”). A ceiling on the plan, not merchants held back: the account-wide reserve below holds some idle at EVERY village, and off a full fleet the two are not even the same figure — 19 merchants less a reserve of 12 is 7, where a cap of 8 is 8. Blank means no ceiling, so the budget is the fleet less the reserve. 0 does not stop the village shipping: its routes are still planned, and every one of them becomes a budget breach that refuses the sheet. To stop it shipping, restrict Ships only to instead."
                   >
                     Max busy
                   </th>

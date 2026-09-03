@@ -2124,7 +2124,7 @@ describe('the merchant cap in the setup file', () => {
     expect(setup.villages[0].max_busy_merchants).toBe(8)
   })
 
-  it('keeps a cap of 0, which says "this village sends nothing"', () => {
+  it('keeps a cap of 0, which says "every route from here is a breach"', () => {
     // The same rule a Trade Office level of 0 follows: an answer, not a blank.
     // Dropped, the village goes back to shipping with its whole fleet.
     const setup = buildSetup({ villages: VILLAGES, maxBusy: { 20032: 0 }, exportedAt: STAMP })
