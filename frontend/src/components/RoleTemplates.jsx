@@ -119,7 +119,7 @@ export default function RoleTemplates({
                           <div className="flex items-center gap-1">
                             <select
                               aria-label={ROLE_LABEL[role] + ' ' + RESOURCE_LABEL[resource] + ' mode'}
-                              className="input-field text-xs py-0.5"
+                              className="input-field w-auto text-xs py-0.5"
                               value={alloc.mode}
                               onChange={(e) =>
                                 onAllocation(role, resource, {
@@ -136,7 +136,7 @@ export default function RoleTemplates({
                             <input
                               type="number"
                               aria-label={ROLE_LABEL[role] + ' ' + RESOURCE_LABEL[resource] + ' value'}
-                              className="input-field w-20 text-right text-xs py-0.5"
+                              className="input-field w-24 text-right text-xs py-0.5"
                               disabled={alloc.mode === 'keep'}
                               value={alloc.value ?? 0}
                               onChange={(e) =>
@@ -163,7 +163,7 @@ export default function RoleTemplates({
                             aria-invalid={bad || undefined}
                             aria-describedby={bad ? problem : undefined}
                             placeholder="none"
-                            className="input-field w-20 text-right text-xs py-0.5"
+                            className="input-field w-24 text-right text-xs py-0.5"
                             value={rate ?? ''}
                             onChange={(e) => onSpend(role, resource, e.target.value)}
                           />
@@ -178,7 +178,7 @@ export default function RoleTemplates({
                     <td className="px-2">
                       <select
                         aria-label={'Whether a ' + ROLE_LABEL[role] + ' village may relay'}
-                        className="input-field text-xs py-0.5"
+                        className="input-field w-auto text-xs py-0.5"
                         value={
                           template?.may_relay == null
                             ? ''

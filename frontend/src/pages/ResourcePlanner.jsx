@@ -448,7 +448,7 @@ function BatchSet({ count, onApply }) {
       <span className="text-secondary">Set checked</span>
       <select
         aria-label="Batch mode"
-        className="input-field text-xs py-0.5"
+        className="input-field w-auto text-xs py-0.5"
         value={mode}
         onChange={(e) => setMode(e.target.value)}
       >
@@ -2394,7 +2394,7 @@ export default function ResourcePlanner() {
         <span className="text-secondary uppercase">Plan profile</span>
         <select
           aria-label="Allocation profile"
-          className="input-field text-xs py-1"
+          className="input-field w-auto text-xs py-1"
           value={activeProfile}
           onChange={(e) => switchProfile(e.target.value)}
         >
@@ -2854,7 +2854,7 @@ export default function ResourcePlanner() {
                               aria-label={`Role for ${v.name}`}
                               aria-invalid={missing || undefined}
                               aria-describedby={missing ? problemId : undefined}
-                              className="input-field text-xs py-1"
+                              className="input-field w-auto text-xs py-1"
                               value={role ?? ''}
                               onChange={(e) =>
                                 setVillageRoles((prev) => {
@@ -2956,7 +2956,7 @@ export default function ResourcePlanner() {
                         min="0"
                         aria-label={`Crop stock alert level for ${v.name}`}
                         placeholder="none"
-                        className="input-field w-24 text-right text-xs py-1"
+                        className="input-field w-28 text-right text-xs py-1"
                         value={cropCeilings[v.village_id] ?? ''}
                         onChange={(e) =>
                           setCropCeilings((prev) => ({
@@ -3468,7 +3468,7 @@ export default function ResourcePlanner() {
                               <input
                                 type="number"
                                 aria-label={`Foreign target ${i + 1} x coordinate`}
-                                className="input-field w-16 text-right text-xs py-0.5"
+                                className="input-field w-20 text-right text-xs py-0.5"
                                 value={t.x}
                                 onChange={(e) => patch('x', e.target.value)}
                               />
@@ -3477,7 +3477,7 @@ export default function ResourcePlanner() {
                               <input
                                 type="number"
                                 aria-label={`Foreign target ${i + 1} y coordinate`}
-                                className="input-field w-16 text-right text-xs py-0.5"
+                                className="input-field w-20 text-right text-xs py-0.5"
                                 value={t.y}
                                 onChange={(e) => patch('y', e.target.value)}
                               />
@@ -4224,7 +4224,7 @@ export default function ResourcePlanner() {
                             <td className="px-2">
                               <select
                                 aria-label={`${RESOURCE_LABEL[resource]} mode for ${v.name}`}
-                                className="input-field text-xs py-0.5"
+                                className="input-field w-auto text-xs py-0.5"
                                 value={a.mode === 'remainder' ? 'keep' : a.mode}
                                 onChange={(e) =>
                                   setAllocation(resource, v.village_id, { mode: e.target.value })
