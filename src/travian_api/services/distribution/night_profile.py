@@ -73,7 +73,10 @@ class NightProfile:
     unmet: dict[Resource, float] = field(default_factory=dict)
     """Demand no village could cover, per hour. Reported, never hidden."""
     residual_trimmed: float = 0.0
-    """Crop per hour taken back to absorb integer rounding. See below."""
+    """Crop per hour taken back off the largest share to stop the retentions
+    claiming more than the account produces. A unit or two is the rounding of
+    each retention to a whole number; more than that is a real deficit, and
+    whatever the largest share could not cover lands in `unmet` instead."""
 
 
 def _wrapped_fields(dx: float, dy: float, map_span: int) -> float:
@@ -319,6 +322,7 @@ def derive_night_profile(
     produced = sum(v.production.get(Resource.CROP, 0.0) for v in villages)
     claimed = sum(a.value for a in crop.values())
     residual = produced - tribute_per_hour - claimed
+    over_claimed = 0.0
     if residual < 0 and demand <= 0:
         largest = max(crop, key=lambda vid: crop[vid].value)
         # Never more than that entry actually holds. The trim builds another
@@ -332,9 +336,21 @@ def derive_night_profile(
                 mode=AllocationMode.ABSOLUTE, value=crop[largest].value - taken
             )
             profile.residual_trimmed = float(taken)
+        # And what the clamp could NOT take is reported, not dropped. The gap is
+        # only rounding when it is a unit or two; a crop-negative village that no
+        # caller named a consumer is clamped to zero retention here, so the gap
+        # can be that village's whole deficit -- 20,000/h against a 5,000/h share
+        # to take it from, or against nothing at all when every retention is
+        # already zero. Silently discarding it returned a profile that still
+        # claimed more crop than the account makes while reporting no shortfall.
+        # Reported rather than raised: the demand is real and the profile is
+        # usable, and `unmet` is exactly the channel for demand nobody covered.
+        over_claimed = max(0.0, -residual - taken)
 
     profile.allocations[Resource.CROP] = crop
     profile.forced_senders[Resource.CROP] = sorted(forced_crop)
     profile.drawn_in[Resource.CROP] = drawn_crop
-    profile.unmet[Resource.CROP] = max(0.0, demand)
+    # Disjoint by construction: the trim above only runs when `demand <= 0`, so
+    # at most one of the two terms is ever non-zero.
+    profile.unmet[Resource.CROP] = max(0.0, demand) + over_claimed
     return profile

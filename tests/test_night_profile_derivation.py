@@ -206,3 +206,63 @@ class TestTheLibraryContractSurvivesANegativeProducer:
 
         for vid, allocation in profile.allocations[Resource.CROP].items():
             assert allocation.value >= 0.0, (vid, allocation)
+
+
+class TestAProfileNeverQuietlyOverClaimsTheAccount:
+    """The residual trim is clamped to what the largest share holds, and what it
+    could not take used to vanish.
+
+    `residual_trimmed` then under-reported (5,000 taken against a 20,000 gap),
+    the returned profile still claimed more crop than the account makes, and
+    with nothing to trim at all -- every retention already zero -- the gap was
+    recorded nowhere. Folding the untaken remainder into `unmet` keeps the one
+    identity that makes the profile checkable: what the retentions claim plus
+    what is reported unmet equals what the account produces, so `unmet` is
+    exactly the gap in the profile handed back.
+
+    Reached through the library contract, not the route: `post_night_profile`
+    classifies a crop-negative village as a consumer first, and a consumer's
+    deficit goes through `demand` where it is already reported.
+    """
+
+    def _two_villages(self, hub_crop: float):
+        return [
+            _village(HUB, "hub", 0, 0, crop=hub_crop),
+            _village(ARMY, "army", 2, 0, crop=-20_000.0),
+        ]
+
+    def _derive_pair(self, hub_crop: float):
+        return derive_night_profile(
+            self._two_villages(hub_crop),
+            window_hours=8.0,
+            map_span=401,
+            speed_fields_per_hour=12.0,
+            day_retention={},
+            hub_id=HUB,
+            consumer_ids=[],
+        )
+
+    def test_the_part_of_the_gap_the_trim_could_not_take_is_reported(self):
+        profile = self._derive_pair(hub_crop=5_000.0)
+
+        assert profile.residual_trimmed == 5_000.0, "the trim takes all the hub holds"
+        assert profile.unmet[Resource.CROP] == 15_000.0
+
+    def test_a_gap_with_nothing_left_to_trim_is_reported_in_full(self):
+        profile = self._derive_pair(hub_crop=0.0)
+
+        assert profile.residual_trimmed == 0.0, "there was nothing to take"
+        assert profile.unmet[Resource.CROP] == 20_000.0
+
+    @pytest.mark.parametrize("hub_crop", [0.0, 5_000.0, 20_000.0, 60_000.0])
+    def test_what_is_claimed_plus_what_is_unmet_is_what_is_produced(self, hub_crop):
+        villages = self._two_villages(hub_crop)
+        profile = self._derive_pair(hub_crop)
+
+        claimed = sum(a.value for a in profile.allocations[Resource.CROP].values())
+        produced = sum(v.production[Resource.CROP] for v in villages)
+
+        assert claimed - profile.unmet[Resource.CROP] <= produced + 1.0, (
+            f"the profile claims {claimed:,.0f}/h out of {produced:,.0f}/h and "
+            f"reports only {profile.unmet[Resource.CROP]:,.0f}/h unmet"
+        )

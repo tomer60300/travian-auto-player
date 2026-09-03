@@ -1761,10 +1761,18 @@ async def post_night_profile(
                 f"quietly leaving a receiver unfed."
             )
     if profile.residual_trimmed:
+        # Not "integer rounding": the canonical fixture trims 10,001/h, which no
+        # rounding of whole-number retentions can account for. Rounding is a unit
+        # or two; anything larger is a village losing crop or a forced sender
+        # shedding past what is needed, and saying "rounding" told the operator to
+        # ignore a five-figure figure.
         warnings.append(
-            f"Trimmed {profile.residual_trimmed:,.0f} crop/h from the largest "
-            f"share to absorb integer rounding, so the allocation cannot read as "
-            f"claiming more than the account produces."
+            f"Trimmed {profile.residual_trimmed:,.0f} crop/h off the largest "
+            f"share so the allocation cannot claim more than the account "
+            f"produces. A unit or two is each retention rounded to a whole "
+            f"number; more than that is a real gap — a village losing crop that "
+            f"nothing named a consumer, or a forced sender shedding past what "
+            f"its neighbours need."
         )
 
     return NightProfileResponse(
