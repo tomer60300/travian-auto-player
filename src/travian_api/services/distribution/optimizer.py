@@ -716,7 +716,16 @@ def _crowding_findings(
 def _may_relay_through(village: VillageState) -> bool:
     """May *village* be made to forward someone else's crop?
 
-    The declared answer first. A village with a ``role`` has been described by
+    An unreadable rate is refused before anything else is consulted. A
+    declaration says what a village is FOR; it does not say what its granary is
+    doing, so it cannot answer a question about a balance nobody could read.
+    With the role consulted first the refusal was bypassed entirely -- a feeder,
+    or any template carrying ``may_relay: true``, forwarded someone else's crop
+    out of an unknown balance, which is the optimistic reading of an unparsed
+    rate in the one place this codebase has never taken it (see the ``None``
+    paragraph below).
+
+    The declared answer next. A village with a ``role`` has been described by
     the operator, and profile section 5.9 answers this for each kind directly:
     a feeder moves resources on, every other role has a job that a leg in
     transit interferes with (see :func:`~.roles.default_may_relay`, which also
@@ -750,6 +759,8 @@ def _may_relay_through(village: VillageState) -> bool:
     breaks even holds its own when a refill is late, so excluding it would cost
     the canonical midway hub for no gain in safety.
     """
+    if village.crop_per_hour is None:
+        return False
     if village.role is not None:
         # Resolved here rather than only at the edge, so a ``VillageState``
         # carrying a role and no explicit permission cannot leak ``None`` into a
@@ -759,7 +770,7 @@ def _may_relay_through(village: VillageState) -> bool:
         if village.may_relay is None:
             return default_may_relay(village.role)
         return village.may_relay
-    return village.crop_per_hour is not None and village.crop_per_hour >= 0.0
+    return village.crop_per_hour >= 0.0
 
 
 # Levels of crop relay permitted. 1 allows village -> sub-hub -> destination;

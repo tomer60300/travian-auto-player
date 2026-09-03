@@ -456,11 +456,12 @@ def test_a_template_may_overrule_its_own_roles_default() -> None:
     ],
     ids=lambda value: value.value if isinstance(value, Role) else str(value),
 )
-@pytest.mark.parametrize("crop_per_hour", [9000.0, 0.0, -5880.0, None], ids=str)
+@pytest.mark.parametrize("crop_per_hour", [9000.0, 0.0, -5880.0], ids=str)
 def test_the_permission_matrix_ignores_the_crop_sign_entirely(
     role: Role, expected: bool, crop_per_hour: float | None
 ) -> None:
-    """Every role against every crop sign, the unreadable one included.
+    """Every role against every crop SIGN. A rate that could not be read at all
+    is not a sign, and it is refused first -- see the test below.
 
     The point of declaring a role is that the answer stops depending on the
     rate: 01 reads -5,880/h and 02 reads +6,000/h, and neither figure is what
@@ -471,6 +472,33 @@ def test_the_permission_matrix_ignores_the_crop_sign_entirely(
     )
 
     assert _may_relay_through(village) is expected
+
+
+@pytest.mark.parametrize("role", list(Role) + [None], ids=lambda r: r.value if r else "no-role")
+@pytest.mark.parametrize("may_relay", [None, True, False], ids=str)
+def test_an_unreadable_crop_rate_is_refused_whatever_was_declared(
+    role: Role | None, may_relay: bool | None
+) -> None:
+    """R4-P2-2, and the manager's ruling on P2's sixth question.
+
+    A declaration says what a village is FOR; it does not say what its granary
+    is doing. With a role set the predicate returned the declared answer
+    without ever reaching the ``None`` refusal, so a feeder -- or any role whose
+    template says ``may_relay: true`` -- was made to forward someone else's
+    crop out of a granary balance nobody could read. That is the optimistic
+    reading of an unparsed rate, in the one place this codebase has always
+    refused to take it: the relay hub whose slipped inbound leg starves troops.
+
+    Unreachable through the endpoint today (an unreadable rate drops the village
+    from the crop plan, and hub candidates come from the crop plan), which is
+    exactly what H1 was: a library-contract hole reached by a caller doing
+    nothing wrong.
+    """
+    village = VillageState(
+        MIDPOINT, 0, 0, merchant_count=20, crop_per_hour=None, role=role, may_relay=may_relay
+    )
+
+    assert _may_relay_through(village) is False
 
 
 @pytest.mark.parametrize("crop_per_hour", [9000.0, 0.0, -5880.0, None], ids=str)
