@@ -784,7 +784,7 @@ async function openAllocateGrid(page) {
 //
 // `.input-field { width: 100% }` was moved into `@layer components` for the
 // planner and shipped to the whole app: 66 of the 111 `.input-field` sites in
-// `src/` carry a width utility, across twelve files, and every one of those
+// `src/` carry a width utility, across thirteen files, and every one of those
 // utilities went from dead to live in one commit. The planner was the only
 // surface measured.
 //
@@ -955,7 +955,12 @@ const SURFACES = [
     seed: seedShell,
   },
   {
-    name: 'Farm lists (filter bar + transfer bar)',
+    // The second bar is Loop Send Mode, not the transfer bar: the transfer
+    // selects only render once a slot is TICKED, and `openFarmFilters` selects
+    // a list without ticking anything, so they have never been measured here.
+    // The two boxes this surface really adds are the loop interval and
+    // duration in section 3.
+    name: 'Farm lists (filter bar + Loop Send Mode)',
     open: openFarmFilters,
     routes: farmRoutes,
     seed: seedShell,
