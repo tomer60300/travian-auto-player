@@ -300,12 +300,28 @@ class TestTheCapBindsThePlan:
         budgets map -- but worth pinning, because a crowding warning quoting the
         fleet's 18 while the plan was held to 8 would be arithmetic nobody can
         follow.
+
+        It said "of its 12 MERCHANTS", though, which this test used to pin: the
+        village fields 20 and the 12 is the operator's own ceiling. On
+        `/day-check`, which carries no `budgets` field, this warning is the only
+        surface the breach has, so the figure has to say whose it is.
         """
         res = _plan(caps={HUB: 12})
 
         hub = _budget(res, HUB)
         assert (hub.committed, hub.spare) == (16, 12)
-        crowded = [w for w in res.warnings if "of its 12" in w]
+        crowded = [w for w in res.warnings if "of the 12 you allow" in w]
+        assert crowded, [w for w in res.warnings if "merchants" in w]
+        assert not [w for w in res.warnings if "of its 12 merchants" in w], (
+            "02 fields 20 merchants; 12 is the cap"
+        )
+
+    def test_an_uncapped_village_is_still_crowded_against_its_own_merchants(self):
+        """The negative control: no cap, so the budget is the fleet's and the
+        wording is word for word what it always was."""
+        res = _plan(merchant_reserve=6)
+
+        crowded = [w for w in res.warnings if "of its 14 merchants" in w]
         assert crowded, [w for w in res.warnings if "merchants" in w]
 
 

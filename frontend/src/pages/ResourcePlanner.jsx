@@ -354,8 +354,13 @@ function CropCell({ village }) {
 /** Merchant budget as a bar plus the numbers.
  *  Design Guideline — Charts: a chart supplements the data, it does not replace
  *  it, so committed/spare stay readable as text for screen readers. */
-function BudgetBar({ budget }) {
+function BudgetBar({ budget, cap }) {
   const spare = Math.max(budget.spare, 1)
+  // "of 8 merchants" claims the village HAS 8. Where the operator's own cap is
+  // what set the budget it is their figure, not the fleet's -- the same test
+  // the backend's crowding warning applies, which also keeps this honest if
+  // the Max busy cell has been edited since the plan was built.
+  const allowed = cap != null && cap === budget.spare
   const usedPct = Math.min(100, Math.round((budget.committed / spare) * 100))
   // Over-budget villages open by default. "over by 2" says what happened but
   // not what to do about it, and the same excess means different things when
@@ -368,7 +373,11 @@ function BudgetBar({ budget }) {
         <div
           className="h-2 w-28 rounded bg-black/40 overflow-hidden shrink-0"
           role="img"
-          aria-label={`${budget.committed} of ${budget.spare} merchants committed`}
+          aria-label={
+            allowed
+              ? `${budget.committed} committed of the ${budget.spare} merchants you allow`
+              : `${budget.committed} of ${budget.spare} merchants committed`
+          }
         >
           <div
             className={`h-full ${budget.over_budget ? 'bg-red-500' : 'bg-emerald-500'}`}
@@ -4584,7 +4593,7 @@ export default function ResourcePlanner() {
                           {villages.find((v) => v.village_id === b.village_id)?.name ??
                             b.village_id}
                         </span>
-                        <BudgetBar budget={b} />
+                        <BudgetBar budget={b} cap={maxBusy[b.village_id]} />
                       </div>
                     ))}
                 </div>

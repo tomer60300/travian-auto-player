@@ -761,19 +761,30 @@ def _crowding_findings(
             continue
 
         _, idle = best
+        # "of its 8 merchants" claims the village HAS 8. Where the operator's
+        # own cap is what set the budget it is their figure, not the fleet's --
+        # village 26 fields 19 and was told it commits 12 "of its 8". On
+        # `/day-check`, which carries no `budgets` field, this warning is the
+        # only surface the breach has, so the number has to say whose it is.
+        cap = villages[vid].max_busy_merchants
+        ceiling = (
+            f"the {hard} you allow" if cap is not None and cap == hard else f"its {hard} merchants"
+        )
         findings.append(
             Finding(
                 category=Category.MERCHANTS_CROWDED,
                 message=(
-                    f"{village_label(vid, names)} commits {used} of its {budgets.get(vid, 0)} "
-                    f"merchants, past the {soft} it should keep clear, while "
+                    f"{village_label(vid, names)} commits {used} of {ceiling}, past the "
+                    f"{soft} it should keep clear, while "
                     f"{village_label(idle, names)} uses {committed[idle]} of "
                     f"{budgets.get(idle, 0)} and is no further from "
                     f"{village_label(strained, names)}"
                 ),
                 detail=(
-                    f"{village_label(vid, names)} {used}/{budgets.get(vid, 0)} vs "
-                    f"{village_label(idle, names)} {committed[idle]}/{budgets.get(idle, 0)}"
+                    f"{village_label(vid, names)} {used}/{hard}"
+                    + (" (your cap)" if cap is not None and cap == hard else "")
+                    + f" vs {village_label(idle, names)} {committed[idle]}/"
+                    f"{budgets.get(idle, 0)}"
                 ),
                 village=village_label(vid, names),
             )
