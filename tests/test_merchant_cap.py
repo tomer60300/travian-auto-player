@@ -433,6 +433,35 @@ class TestTheSchemaGuardsTheCap:
             assert "02" in str(caught.value), model.__name__
 
 
+class TestTheReserveIsBoundedLikeTheCap:
+    """The account-wide twin of the cap, and it had no ceiling at all.
+
+    A reserve of 50 holds back merchants no village has: every budget goes to 0,
+    every village lands over budget, and the request is still ACCEPTED -- while
+    a CAP of 50 is refused by name. The same 20 bounds both, because it is
+    Travian's own ceiling on merchants in one village; a reserve past it cannot
+    describe any account that exists.
+
+    Exposed by P3 rather than introduced by it: the field was always on
+    `PlanRequest` and the page had never sent it.
+    """
+
+    def test_a_reserve_past_what_a_village_can_hold_is_refused(self):
+        with pytest.raises(ValidationError, match="20"):
+            PlanRequest.model_validate(_payload(merchant_reserve=21))
+
+    def test_the_bound_itself_is_accepted(self):
+        """Holding all 20 back is a legible answer: nothing ships tonight."""
+        request = PlanRequest.model_validate(_payload(merchant_reserve=20))
+
+        assert request.merchant_reserve == 20
+
+    def test_the_reserve_that_took_the_whole_account_over_budget_is_gone(self):
+        """What the missing bound actually did, on the fixture that showed it."""
+        with pytest.raises(ValidationError):
+            PlanRequest.model_validate(_payload(merchant_reserve=50))
+
+
 class TestACapOfZeroDoesNotGroundTheVillage:
     """It was documented as doing exactly that, in four places. It does not.
 

@@ -2325,6 +2325,16 @@ describe('the account-wide merchant levers in the setup file', () => {
     expect(() => roundTrip(doc)).toThrow(/merchant_reserve/)
   })
 
+  it('refuses a reserve past the 20 merchants a village can hold', () => {
+    // The backend's `le=20`, and the same MAX_MERCHANTS_PER_VILLAGE the cap is
+    // bounded by: a reserve of 50 holds back merchants no village has, taking
+    // every budget to 0 while the request still reads as valid.
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.merchant_model = { base_capacity: 2500, bonus_per_to_level: 0.2, merchant_reserve: 21 }
+
+    expect(() => roundTrip(doc)).toThrow(/merchant_reserve/)
+  })
+
   it('refuses a headroom of 1, which would hold every merchant back', () => {
     // The backend's `lt=1.0`: at 1 the whole budget is held clear and every
     // route is billed as crowding, which is not a plan.

@@ -599,7 +599,21 @@ class PlanRequest(BaseModel):
     trade_office_bonus_per_level: float = Field(
         default=EUROPE2_TEUTON.bonus_per_trade_office_level, ge=0
     )
-    merchant_reserve: int = Field(default=2, ge=0)
+    merchant_reserve: int = Field(
+        default=2,
+        ge=0,
+        le=20,
+        description=(
+            "Merchants held idle at EVERY village, so a shipment can be sent by "
+            "hand without waiting for a route home. Bounded by the 20 a village "
+            "can ever hold, the same ceiling `max_busy_merchants` is checked "
+            "against: a reserve past it holds back merchants no village has, "
+            "which took every budget to 0 and every village over budget while "
+            "the request still read as valid. To hold ONE village down, cap it "
+            "with `max_busy_merchants` instead -- this costs every village the "
+            "same merchants."
+        ),
+    )
     merchant_headroom: float = Field(
         default=DEFAULT_MERCHANT_HEADROOM,
         ge=0.0,

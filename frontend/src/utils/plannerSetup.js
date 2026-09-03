@@ -1144,10 +1144,13 @@ export function parseSetup(text) {
     // default in would make an old file look like a decision.
     if (m.merchant_reserve != null) {
       const reserve = Number(m.merchant_reserve)
-      if (!Number.isInteger(reserve) || reserve < 0) {
+      // Bounded above by the 20 a village can ever hold, matching the
+      // backend's `le=20` and the cap's own ceiling: a reserve past it holds
+      // back merchants no village has, taking every budget to 0.
+      if (!Number.isInteger(reserve) || reserve < 0 || reserve > MAX_MERCHANTS_PER_VILLAGE) {
         throw new SetupFileError(
           `merchant_model.merchant_reserve is ${JSON.stringify(m.merchant_reserve)}; ` +
-            `it must be a whole number of merchants, zero or more.`
+            `it must be a whole number of merchants, from 0 to ${MAX_MERCHANTS_PER_VILLAGE}.`
         )
       }
       merchantModel.merchant_reserve = reserve
