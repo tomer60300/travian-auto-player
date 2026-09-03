@@ -223,9 +223,19 @@ class VillageConfig(BaseModel):
     consumption_per_hour: dict[Resource, float] | None = Field(
         default=None,
         description=(
-            "What this village SPENDS per hour, by resource — the building queue "
-            "and the troop upkeep. Materials and crop alike, entered as flat "
-            "constants and kept up to date by hand. "
+            "What this village SPENDS per hour — LUMBER, CLAY and IRON only, "
+            "the building queue and the troop upkeep, entered as flat constants "
+            "and kept up to date by hand. "
+            "CROP IS REFUSED: `crop_per_hour` in the snapshot is already NET of "
+            "upkeep (it is derived from the village's own crop balance, not from "
+            "the gross statistics column), so a declared crop spend subtracts "
+            "the same troops a second time. Materials are the opposite case — "
+            "the statistics page reports them GROSS, so a village burning lumber "
+            "still reads positive and nothing in the game states the spend. To "
+            "say what a village should KEEP of its crop, set its crop allocation "
+            "target: an absolute target is retention above break-even, so 0 "
+            "holds a crop-negative village level and a positive figure lets it "
+            "accumulate. "
             "This is NOT the allocation target, and the three figures are all "
             "different: the TARGET is the rate that must be here (own production "
             "plus whatever is shipped in), the CARGO is target − own production "
@@ -242,6 +252,38 @@ class VillageConfig(BaseModel):
             "crop-drift check is what catches a profile that has gone stale."
         ),
     )
+
+    @field_validator("consumption_per_hour")
+    @classmethod
+    def _consumption_is_materials_only(
+        cls, value: dict[Resource, float] | None
+    ) -> dict[Resource, float] | None:
+        """Crop cannot be declared, because the snapshot already nets it.
+
+        Refused here rather than in `_declared_consumption` so that ONE rule
+        covers every planning path: `/plan`, `/day-check`, `/execute` and
+        `/night-profile` all carry this model, and a check further in would
+        have to be repeated in each of the four -- which is exactly how
+        `/night-profile` came to ignore the field altogether.
+
+        Not clamped and not trimmed. A crop figure in a profile means the
+        operator believes it is being applied, and on the account that prompted
+        this it deleted a real 204,456/day overflow at village 01 by
+        double-counting the same troops.
+        """
+        if value and Resource.CROP in value:
+            raise ValueError(
+                "consumption_per_hour cannot include crop: the snapshot's "
+                "crop_per_hour is already net of troop upkeep, so a declared "
+                "crop spend subtracts the same troops twice and hides a real "
+                "overflow. Declare lumber, clay and iron only (the statistics "
+                "page reports those gross), and say what the village should "
+                "keep of its crop with its crop allocation target instead -- an "
+                "absolute target is retention, so 0 holds a crop-negative "
+                "village level."
+            )
+        return value
+
     ship_only_to: list[int] | None = Field(
         default=None,
         description=(

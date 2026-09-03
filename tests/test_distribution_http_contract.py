@@ -154,9 +154,11 @@ class TestThePlanContract:
         assert without.status_code == 200, without.text
 
         spending = _plan_body()
-        # The hub is the crop remainder, so it absorbs the farm's whole surplus
-        # and its granary fills. Say that it spends that surplus.
-        spending["config"][0]["consumption_per_hour"] = {"lumber": 2000, "crop": 11000}
+        # The hub is the material remainder, so it absorbs the account's whole
+        # lumber surplus and its warehouse fills. Say that it spends that
+        # surplus. Materials only: the crop half of this figure was refused by
+        # the ruling on R3-D1, because the snapshot already nets crop.
+        spending["config"][0]["consumption_per_hour"] = {"lumber": 2000}
         with_spend = client.post("/api/distribution/plan", json=spending)
 
         assert with_spend.status_code == 200, with_spend.text
@@ -173,6 +175,19 @@ class TestThePlanContract:
 
         assert res.status_code == 422, res.text
         assert "gold" in res.text
+
+    def test_a_crop_consumption_is_a_readable_422_over_the_wire(self, client):
+        """R3-D1's ruling, at the endpoint the frontend actually posts to. The
+        operator has to be told WHY, because their spec lists a crop figure per
+        role village and the answer is to enter it as a target instead."""
+        body = _plan_body()
+        body["config"][0]["consumption_per_hour"] = {"lumber": 2000, "crop": 11000}
+
+        res = client.post("/api/distribution/plan", json=body)
+
+        assert res.status_code == 422, res.text
+        assert "already net" in res.text
+        assert "allocation target" in res.text
 
     def test_a_windowed_plan_round_trips_its_window(self, client):
         res = client.post(

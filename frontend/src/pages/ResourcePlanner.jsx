@@ -5,11 +5,13 @@ import useGameStore from '../stores/gameStore'
 import useLogStore from '../stores/logStore'
 import api from '../api'
 import {
+  CONSUMABLE_RESOURCES,
   SetupFileError,
   buildSetup,
   declaresConsumption,
   isConsumptionRate,
   isStockFloorFraction,
+  materialSpendOnly,
   mergeSetup,
   parseSetup,
   setupFilename,
@@ -273,9 +275,13 @@ const signed = (n) => (n == null ? '—' : `${n > 0 ? '+' : ''}${Math.round(n).t
 // shape that has taken this page white three times.
 const describeConsumption = (spent) => {
   if (!declaresConsumption(spent)) return 'none'
-  const declared = RESOURCES.filter((resource) => spent[resource] != null)
+  // Materials only: crop cannot be declared, because the snapshot's crop rate
+  // is already net of upkeep. Reading RESOURCES here would have summarised a
+  // crop figure the planner refuses to accept.
+  const declared = CONSUMABLE_RESOURCES.filter((resource) => spent[resource] != null)
+  if (!declared.length) return 'none'
   const total = declared.reduce((sum, resource) => sum + (Number(spent[resource]) || 0), 0)
-  if (declared.length === RESOURCES.length) return `${fmt(total)}/h, all four`
+  if (declared.length === CONSUMABLE_RESOURCES.length) return `${fmt(total)}/h, all three`
   return `${fmt(total)}/h · ${declared.map((resource) => RESOURCE_LABEL[resource]).join(', ')}`
 }
 
@@ -680,7 +686,17 @@ export default function ResourcePlanner() {
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
     setStockFloors(loadJson(`${LS_STOCK_FLOOR}::${accountKey}`, {}))
-    setConsumption(loadJson(`${LS_CONSUMPTION}::${accountKey}`, {}))
+    // Crop is dropped on the way in. An earlier build let one be typed, and
+    // the input no longer shows a crop box -- so a stored crop figure could be
+    // neither seen nor cleared while still riding along on every request and
+    // 422-ing the plan over a number the operator cannot find.
+    setConsumption(
+      Object.fromEntries(
+        Object.entries(loadJson(`${LS_CONSUMPTION}::${accountKey}`, {}))
+          .map(([vid, spent]) => [vid, materialSpendOnly(spent)])
+          .filter(([, spent]) => spent)
+      )
+    )
     setDayCheck(null)
     setProfiles(loaded)
     setActiveProfile(loaded[storedActive] ? storedActive : Object.keys(loaded)[0])
@@ -2465,7 +2481,7 @@ export default function ResourcePlanner() {
                   </th>
                   <th
                     className="text-left px-2"
-                    title="What this village SPENDS per hour, by resource — the building queue and the troop upkeep. Not the allocation target: the target is the rate that must be HERE (own production plus whatever ships in), so the store nets target − consumption. Nothing in the game reports this, because the statistics page shows materials gross — a village burning lumber still reads positive there."
+                    title="What this village SPENDS per hour — lumber, clay and iron only: the building queue and the troop upkeep. Not the allocation target: the target is the rate that must be HERE (own production plus whatever ships in), so the store nets target − consumption. Nothing in the game reports this, because the statistics page shows materials gross — a village burning lumber still reads positive there. Crop is refused, because the snapshot's crop rate is already net of upkeep; say what a village keeps of its crop with its crop target instead."
                   >
                     Consumption /h
                   </th>
@@ -2662,7 +2678,7 @@ export default function ResourcePlanner() {
                               aria-label={`What ${v.name} spends per hour`}
                               className="mt-1"
                             >
-                              {RESOURCES.map((resource) => {
+                              {CONSUMABLE_RESOURCES.map((resource) => {
                                 const rate = spent?.[resource]
                                 const bad = rate != null && !isConsumptionRate(rate)
                                 const problem = `spend-problem-${v.village_id}-${resource}`
@@ -2700,6 +2716,17 @@ export default function ResourcePlanner() {
                                   </label>
                                 )
                               })}
+                              {/* There is no Crop box, and the reason has to be
+                                  here rather than only in a tooltip: the
+                                  operator's own profile lists a crop figure per
+                                  role village, so its absence reads as an
+                                  oversight unless the alternative is named. */}
+                              <p className="text-secondary mt-1 max-w-56">
+                                No crop: the snapshot&apos;s crop rate is already net of upkeep, so
+                                a declared crop spend would subtract the same troops twice. Set the
+                                crop <span className="text-primary">target</span> instead — 0 holds
+                                a crop-negative village level.
+                              </p>
                               {declaresConsumption(spent) && (
                                 <button
                                   type="button"

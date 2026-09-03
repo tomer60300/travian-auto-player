@@ -390,10 +390,13 @@ def _consumption(rng: random.Random, snapshot: list[VillageSnapshot]) -> dict[in
     The operator's own flat constants, and a dimension the audit needs: the
     storage replays subtract it, so without it every oracle-agreement run
     checks only the zero case. Deliberately spans both sides of production --
-    section 9 is explicit that two of the account's villages are permanently
-    crop-negative by design -- so the draining branch is exercised on a village
-    whose production reads POSITIVE, which is the case that misclassifies if
-    the sign is taken off production instead of the net.
+    a share of 1.4 spends more than the village makes -- so the draining branch
+    is exercised on a village whose production reads POSITIVE, which is the case
+    that misclassifies if the sign is taken off production instead of the net.
+
+    MATERIALS only, matching the schema: crop is refused because the snapshot's
+    `crop_per_hour` is net of upkeep already (R3-D1), so a generated crop spend
+    would 422 two fifths of these seeds rather than exercise anything.
     """
     if rng.random() < 0.6:
         return {}  # most accounts declare nothing, which must stay the quiet path
@@ -402,7 +405,7 @@ def _consumption(rng: random.Random, snapshot: list[VillageSnapshot]) -> dict[in
         if rng.random() < 0.5:
             continue
         per = {}
-        for resource in Resource:
+        for resource in MATERIALS:
             rate = _rate(village, resource)
             if rate is None:
                 continue  # an unreadable rate sits its resource out entirely

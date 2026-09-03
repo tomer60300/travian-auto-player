@@ -7,6 +7,7 @@ import {
   declaresConsumption,
   isConsumptionRate,
   isStockFloorFraction,
+  materialSpendOnly,
   mergeSetup,
   parseSetup,
   setupFilename,
@@ -686,7 +687,7 @@ describe('consumption_per_hour in the setup file', () => {
     const setup = buildSetup({
       villages: VILLAGES,
       tradeOffice: { 20030: 13 },
-      consumption: { 20030: { lumber: 14751, clay: 10222, iron: 11458, crop: 8519 } },
+      consumption: { 20030: { lumber: 14751, clay: 10222, iron: 11458 } },
       exportedAt: STAMP,
     })
     expect(setup.villages).toEqual([
@@ -694,7 +695,7 @@ describe('consumption_per_hour in the setup file', () => {
         village_id: 20030,
         name: 'Capital',
         trade_office_level: 13,
-        consumption_per_hour: { lumber: 14751, clay: 10222, iron: 11458, crop: 8519 },
+        consumption_per_hour: { lumber: 14751, clay: 10222, iron: 11458 },
       },
     ])
   })
@@ -705,11 +706,11 @@ describe('consumption_per_hour in the setup file', () => {
     // must not be dropped from the file.
     const setup = buildSetup({
       villages: VILLAGES,
-      consumption: { 20031: { crop: 9526 } },
+      consumption: { 20031: { iron: 9526 } },
       exportedAt: STAMP,
     })
     expect(setup.villages).toEqual([
-      { village_id: 20031, name: 'V05', consumption_per_hour: { crop: 9526 } },
+      { village_id: 20031, name: 'V05', consumption_per_hour: { iron: 9526 } },
     ])
   })
 
@@ -727,7 +728,7 @@ describe('consumption_per_hour in the setup file', () => {
 
   it('survives the round trip unchanged', () => {
     const consumption = {
-      20030: { lumber: 14751, crop: 8519 },
+      20030: { lumber: 14751, iron: 8519 },
       20032: { clay: 5168, iron: 5809 },
     }
     const setup = roundTrip(buildSetup({ villages: VILLAGES, consumption, exportedAt: STAMP }))
@@ -767,7 +768,7 @@ describe('consumption_per_hour in the setup file', () => {
     const merged = mergeSetup({
       setup,
       villages: VILLAGES,
-      consumption: { 20030: { lumber: 100, crop: 200 } },
+      consumption: { 20030: { lumber: 100, iron: 200 } },
     })
     expect(merged.consumption[20030]).toEqual({ lumber: 14751 })
   })
@@ -776,7 +777,7 @@ describe('consumption_per_hour in the setup file', () => {
     const setup = roundTrip(
       buildSetup({
         villages: VILLAGES,
-        consumption: { 20030: { lumber: 1 }, 20031: { crop: 2 } },
+        consumption: { 20030: { lumber: 1 }, 20031: { iron: 2 } },
         exportedAt: STAMP,
       })
     )
@@ -805,6 +806,75 @@ describe('consumption_per_hour in the setup file', () => {
         villages: [{ village_id: 20030, consumption_per_hour: { gold: 500 } }],
       })
     ).toThrow(/gold/)
+  })
+
+  it('refuses a crop spend, because the backend refuses it too', () => {
+    // The snapshot's `crop_per_hour` is already NET of upkeep, so a declared
+    // crop spend subtracts the same troops twice. The file format must not
+    // accept what the backend 422s, or an import succeeds and every plan from
+    // it fails.
+    for (const bad of [{ crop: 8519 }, { crop: 0 }, { lumber: 100, crop: 8519 }]) {
+      expect(() =>
+        roundTrip({
+          format: SETUP_FORMAT,
+          version: SETUP_VERSION,
+          villages: [{ village_id: 20030, consumption_per_hour: bad }],
+        })
+      ).toThrow(SetupFileError)
+    }
+  })
+
+  it('tells the operator why crop is refused and what to do instead', () => {
+    // "unknown resource crop" would be a lie -- crop is a resource the planner
+    // knows well. The message has to name the target as the answer.
+    expect(() =>
+      roundTrip({
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20030, consumption_per_hour: { crop: 8519 } }],
+      })
+    ).toThrow(/already net/)
+    expect(() =>
+      roundTrip({
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20030, consumption_per_hour: { crop: 8519 } }],
+      })
+    ).toThrow(/target/)
+  })
+
+  it('does not export a crop spend an older build left in local state', () => {
+    // The input no longer offers crop, so a figure saved by an earlier build
+    // can be neither seen nor cleared -- and writing it would produce a file
+    // this same parser refuses to read back.
+    const setup = buildSetup({
+      villages: VILLAGES,
+      consumption: { 20030: { lumber: 100, crop: 200 } },
+      exportedAt: STAMP,
+    })
+    expect(setup.villages[0].consumption_per_hour).toEqual({ lumber: 100 })
+  })
+
+  it('drops a row whose only declared spend was crop', () => {
+    // Not written as `{}`: an empty profile is the same as no profile, and a
+    // row carrying nothing else has no reason to be in the file at all.
+    const setup = buildSetup({
+      villages: VILLAGES,
+      consumption: { 20030: { crop: 200 } },
+      exportedAt: STAMP,
+    })
+    expect(setup.villages).toEqual([])
+  })
+
+  it('keeps only the materials of a stale spend map', () => {
+    expect(materialSpendOnly({ lumber: 1, clay: 2, iron: 3, crop: 4 })).toEqual({
+      lumber: 1,
+      clay: 2,
+      iron: 3,
+    })
+    expect(materialSpendOnly({ crop: 4 })).toBeNull()
+    expect(materialSpendOnly({})).toBeNull()
+    expect(materialSpendOnly(undefined)).toBeNull()
   })
 
   it('rejects a negative spend, which the backend refuses too', () => {
@@ -881,9 +951,9 @@ describe('consumption_per_hour in the setup file', () => {
     const setup = roundTrip({
       format: SETUP_FORMAT,
       version: SETUP_VERSION,
-      villages: [{ village_id: 20030, consumption_per_hour: { crop: 0 } }],
+      villages: [{ village_id: 20030, consumption_per_hour: { lumber: 0 } }],
     })
-    expect(setup.villages[0].consumption_per_hour).toEqual({ crop: 0 })
+    expect(setup.villages[0].consumption_per_hour).toEqual({ lumber: 0 })
   })
 })
 
@@ -912,7 +982,7 @@ describe('declaresConsumption', () => {
   })
 
   it('is true for a single resource, including a declared zero', () => {
-    expect(declaresConsumption({ crop: 9526 })).toBe(true)
-    expect(declaresConsumption({ crop: 0 })).toBe(true)
+    expect(declaresConsumption({ iron: 9526 })).toBe(true)
+    expect(declaresConsumption({ iron: 0 })).toBe(true)
   })
 })

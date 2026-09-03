@@ -1593,11 +1593,16 @@ class TestConsumptionProfiles:
 
     def test_r7_still_fires_when_the_village_really_is_draining(self):
         """Section 9: 01 is permanently crop-negative by design and starving.
-        Consumption must not be able to hide that -- the whole point of R7 is
-        that a store emptying gets a countdown, and a village spending more than
-        lands is emptying however positive its production reads."""
-        payload = self._payload(consumption={"crop": 9_000})
-        payload["snapshot"][1]["crop_per_hour"] = 1_000.0
+        The whole point of R7 is that a store emptying gets a countdown.
+
+        This case used to declare `consumption={"crop": 9_000}` against a
+        positive crop reading, which the ruling on R3-D1 now refuses: the
+        snapshot's `crop_per_hour` is NET of upkeep already, so the drain IS
+        the reading. Restated against the field that carries it -- a negative
+        net crop -- which is the shape a real starving village arrives in.
+        """
+        payload = self._payload()
+        payload["snapshot"][1]["crop_per_hour"] = -8_000.0
         payload["snapshot"][1]["crop_stock"] = 20_000
 
         res = asyncio.run(post_plan(PlanRequest.model_validate(payload)))
@@ -1605,6 +1610,36 @@ class TestConsumptionProfiles:
         starving = [w for w in res.warnings if "runs out" in w and w.startswith("01:")]
         assert starving, f"no starvation warning in {res.warnings}"
         assert "crop" in starving[0]
+
+    def test_a_crop_spend_is_refused_because_the_snapshot_already_nets_it(self):
+        """The ruling on R3-D1. `crop_per_hour` is derived by
+        `get_all_villages_net_crop` and is net of upkeep by construction, so a
+        declared crop spend subtracts the same troops twice -- which deleted a
+        REAL 204,456/day overflow on the operator's own account.
+
+        Refused at the schema, so it cannot reach any planning path.
+        """
+        with pytest.raises(ValidationError) as exc:
+            PlanRequest.model_validate(self._payload(consumption={"crop": 9_000}))
+
+        detail = str(exc.value)
+        assert "already net" in detail
+        assert "crop_ceiling" not in detail  # points at the TARGET, not the alert
+        assert "target" in detail
+
+    def test_a_crop_spend_beside_a_material_one_is_still_refused(self):
+        """No partial acceptance: a map with one bad key is a map the operator
+        must correct, not one the planner silently trims."""
+        with pytest.raises(ValidationError):
+            PlanRequest.model_validate(
+                self._payload(consumption={"lumber": self.BURN, "crop": 9_000})
+            )
+
+    def test_a_crop_spend_of_zero_is_refused_too(self):
+        """Zero is a claim, not silence -- and the claim is still about a figure
+        the snapshot already applied."""
+        with pytest.raises(ValidationError):
+            PlanRequest.model_validate(self._payload(consumption={"crop": 0}))
 
     def test_an_absent_consumption_is_byte_for_byte_the_old_plan(self):
         """The regression guard for every account that declares nothing."""

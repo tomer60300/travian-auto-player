@@ -20,7 +20,7 @@
  * cannot stop one), the share of its warehouse it keeps stocked by NPC
  * trading (`stock_floor_fraction`, 0 to 0.95), which the planner may draw down
  * as extra lumber, clay or iron, and what it SPENDS per hour
- * (`consumption_per_hour`, by resource).
+ * (`consumption_per_hour`, by resource -- LUMBER, CLAY and IRON only).
  *
  * That last one is worth carrying for the same reason the profiles are: it is
  * the second-largest body of hand-typed numbers in the planner -- a spend
@@ -29,6 +29,11 @@
  * still reads positive on the statistics page. Losing it to a cleared origin
  * means every consuming village silently reads as stockpiling its whole
  * allocation again.
+ *
+ * Crop is the exception and is REFUSED, matching the backend's 422: the
+ * snapshot's crop rate is already net of upkeep, so a declared crop spend
+ * double-counts the same troops. What a village should keep of its crop is
+ * said with its crop allocation TARGET instead.
  *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
@@ -90,6 +95,33 @@ export const ALLOCATION_MODES = Object.freeze([
   'remainder',
 ])
 export const SETUP_RESOURCES = Object.freeze(['lumber', 'clay', 'iron', 'crop'])
+
+/** The resources a village may DECLARE a spend for. Crop is absent, and that
+ * absence is the whole rule: the snapshot's `crop_per_hour` is already net of
+ * troop upkeep (it comes from the village's crop balance, not the gross
+ * statistics column), so a declared crop spend subtracts the same troops twice.
+ * Materials are the opposite case -- reported GROSS, so a village burning
+ * lumber still reads positive and nothing in the game states the spend.
+ * The backend refuses a crop key with a 422; this is the same list, so the
+ * file, the input and the request cannot disagree. */
+export const CONSUMABLE_RESOURCES = Object.freeze(['lumber', 'clay', 'iron'])
+
+/** A spend map with everything undeclarable dropped, or null when nothing
+ * declarable is left.
+ *
+ * Only crop is ever dropped, and only because an older build could store one:
+ * the input no longer offers it, so such a figure can be neither seen nor
+ * cleared, while still being POSTed on every plan and 422'd on a number the
+ * operator cannot find. Returning null rather than `{}` keeps "declared
+ * nothing" one state, as `declaresConsumption` requires. */
+export function materialSpendOnly(spent) {
+  if (!declaresConsumption(spent)) return null
+  const out = {}
+  for (const resource of CONSUMABLE_RESOURCES) {
+    if (spent[resource] != null) out[resource] = Number(spent[resource])
+  }
+  return Object.keys(out).length ? out : null
+}
 /** Travian's repeat interval, which is a closed set of the divisors of 24. */
 export const TRAVIAN_REPEAT_INTERVALS = Object.freeze([1, 2, 3, 4, 6, 8, 12, 24])
 
@@ -116,8 +148,10 @@ export function buildSetup({
     const ceiling = cropCeilings?.[village.village_id]
     const allowed = shipOnlyTo?.[village.village_id]
     const floor = stockFloors?.[village.village_id]
-    const spent = consumption?.[village.village_id]
-    const spends = declaresConsumption(spent)
+    // Materials only, so an export can never write a file this same parser
+    // refuses to read back -- a crop figure saved by an older build would do
+    // exactly that.
+    const spends = materialSpendOnly(consumption?.[village.village_id])
     if (level == null && ceiling == null && allowed == null && floor == null && !spends) continue
     const row = { village_id: village.village_id, name: village.name ?? '' }
     if (level != null) row.trade_office_level = Number(level)
@@ -126,11 +160,7 @@ export function buildSetup({
     // is a different answer from the unrestricted default an absent field means.
     if (allowed != null) row.ship_only_to = allowed.map(Number)
     if (floor != null) row.stock_floor_fraction = Number(floor)
-    if (spends) {
-      row.consumption_per_hour = Object.fromEntries(
-        Object.entries(spent).map(([resource, rate]) => [resource, Number(rate)])
-      )
-    }
+    if (spends) row.consumption_per_hour = spends
     rows.push(row)
   }
   const doc = {
@@ -292,6 +322,19 @@ function parseConsumption(raw, where) {
       throw new SetupFileError(
         `${where} has unknown resource "${resource}"; ` +
           `it must be one of ${SETUP_RESOURCES.join(', ')}.`
+      )
+    }
+    // A separate message from the unknown-resource one, because "unknown
+    // resource crop" would be a lie: crop is a resource the planner knows
+    // well, and the operator's own spec lists a crop figure per role village.
+    // What they need is where to put it instead.
+    if (!CONSUMABLE_RESOURCES.includes(resource)) {
+      throw new SetupFileError(
+        `${where} declares ${resource}, which the planner refuses: the ` +
+          `snapshot's crop rate is already net of troop upkeep, so a declared ` +
+          `crop spend subtracts the same troops twice. Declare ` +
+          `${CONSUMABLE_RESOURCES.join(', ')} only, and say what the village ` +
+          `should keep of its crop with its crop allocation target instead.`
       )
     }
     // The RAW value, before any coercion. `Number(null)` is 0, `Number([1])`
