@@ -17,6 +17,12 @@
  * between operating systems. A run on another OS diffs on font rendering alone, which is why
  * this is not in CI -- `maxDiffPixelRatio` absorbs run-to-run noise, not a different platform.
  *
+ * Not every spec here is a visual one. `roleTemplates.pw.js` drives the Role-templates
+ * panel's change handlers -- which `renderToString` cannot reach, because it runs no
+ * events -- and asserts on stored state rather than on pixels, so the platform-suffixed
+ * baseline reasoning above does not apply to it. It mocks every `/api` call and aborts
+ * anything it did not anticipate, so it needs no backend either.
+ *
  * Note the `.pw.js` suffix on specs, and `testMatch` below. It is not decoration: vitest's
  * default include pattern is `**\/*.{test,spec}.?(c|m)[jt]s?(x)`, so a conventionally-named
  * `*.spec.js` under frontend/ would be collected by `npm test` and fail there for want of
