@@ -893,8 +893,14 @@ class TestPlanDiagnostics:
                     )
 
 
-def _own_village(vid, name, x, y, *, lumber=0.0, crop=0.0, merchants=20):
-    return {
+def _own_village(vid, name, x, y, *, lumber=0.0, crop=0.0, merchants=20, **overrides):
+    """One snapshot row. ``**overrides`` matches the file's other three builders.
+
+    It was the only one without them, so a caller wanting a warehouse capacity
+    had to reach into the returned dict and mutate it -- which reads as if the
+    capacity were being corrected rather than supplied.
+    """
+    base = {
         "village_id": vid,
         "name": name,
         "x": x,
@@ -906,6 +912,8 @@ def _own_village(vid, name, x, y, *, lumber=0.0, crop=0.0, merchants=20):
         "iron_per_hour": 0,
         "crop_per_hour": crop,
     }
+    base.update(overrides)
+    return base
 
 
 def _findings(res, category):
@@ -1216,10 +1224,17 @@ class TestStockFundedSupply:
         Lower the claims below 6,000 and nothing is short, so the allowance goes
         undrawn.
         """
-        hub = _own_village(self.HUB, "02", 0, 0, lumber=6000, crop=hub_crop, merchants=200)
-        hub["warehouse_capacity"] = capacity
         snapshot = [
-            hub,
+            _own_village(
+                self.HUB,
+                "02",
+                0,
+                0,
+                lumber=6000,
+                crop=hub_crop,
+                merchants=200,
+                warehouse_capacity=capacity,
+            ),
             _own_village(self.NEAR, "11", -5, 0),
             _own_village(self.FAR, "03", 5, 0),
         ]

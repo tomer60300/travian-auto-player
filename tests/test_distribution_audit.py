@@ -46,6 +46,7 @@ from travian_api.services.distribution.optimizer import VillageState
 from travian_api.services.distribution.schedule import ScheduledRoute
 from travian_api.services.distribution.storage import simulate_day, simulate_profile_cycle
 from travian_api.web.routes import distribution as dist
+from travian_api.web.routes.distribution import PlanResponse
 
 USER = SimpleNamespace(id=1)
 
@@ -96,11 +97,17 @@ def _storage_inputs(body):
 # response out, always. Several audits below replan the exact same account --
 # an unpermuted seed reused across test classes, mostly -- so memoise on the
 # request's own JSON rather than repeat a multi-second solve for input this
-# module already solved once. A hashing mistake here would show up immediately:
-# the strict-xfail relabelling tests below assert original and relabelled plans
-# DIFFER, so two distinct requests colliding on one cache entry turns an xfail
-# into an xpass and fails the suite.
-_post_plan_cache: dict[str, object] = {}
+# module already solved once.
+#
+# The key is the WHOLE request (`model_dump_json`), which is what makes a
+# collision impossible rather than merely unlikely: two requests share an entry
+# only if they are byte-identical, in which case sharing is correct. That
+# argument is now the only one available. The comment here used to say a
+# collision would "turn an xfail into an xpass and fail the suite", which was
+# true while the relabelling tests asserted the plans DIFFER; they now assert
+# the plans MATCH, so a collision would pass silently and the suite could not
+# catch what the key has to guarantee.
+_post_plan_cache: dict[str, PlanResponse] = {}
 
 
 @contextlib.contextmanager
@@ -447,16 +454,26 @@ class TestPlanArithmetic:
 
 
 class TestKnownDefects:
-    """Bugs this audit found. Each is an xfail on the behaviour that is right,
-    so the day one is fixed the test says so instead of staying quiet."""
+    """Bugs this audit found, each now a passing regression guard.
+
+    They were `xfail(strict=True)` on the behaviour that is right, so that the
+    day one was fixed the test said so instead of staying quiet. Every one of
+    them has since been fixed and every marker is gone; the per-test docstring
+    records what was wrong and when it was resolved, which is the part worth
+    keeping -- a guard whose subject nobody remembers is the first one somebody
+    deletes as redundant.
+    """
 
     def test_a_crop_neutral_midway_village_can_act_as_a_relay_hub(self) -> None:
         """Resolved 2026-09-02. _relay_scan drew hub candidates from the crop flow
         graph alone, so a crop-neutral midway village -- the canonical hub of
         profile section 8.5 -- could never be chosen, while the same village given
         a 100/h flow was found at once (the test below). Candidates now come from
-        every merchant-capable, crop-solvent village of the account, and the
-        midway village is chosen on its geometry."""
+        every village the operator put in the crop plan -- an allocation, even one
+        that leaves no flow, which is what this midway village has -- and the
+        midway village is chosen on its geometry. (Between 2026-09-02 and
+        2026-09-03 the set was every village of the account, which conscripted
+        villages nobody had allocated crop; see `relay_hub_candidates`.)"""
         account = next(a for a in adversarial_accounts() if a.name == "adv-relay-shape")
 
         result = _post_plan(account.plan_request)
@@ -526,7 +543,7 @@ class TestKnownDefects:
         assert events[0].net_gain_per_day == pytest.approx(24_000.0, abs=1.0)
         assert events[0].wasted_per_day == pytest.approx(24_000.0, abs=1.0)
 
-    @pytest.mark.parametrize("seed", [55, 3, 5, 6, 9, 29])
+    @pytest.mark.parametrize("seed", [55, 0, 3, 5, 6, 8, 9, 29])
     def test_relabelling_does_not_change_the_plan(self, seed: int) -> None:
         """RESOLVED 2026-09-02. Renumber the villages and the plan is the same.
 
@@ -539,6 +556,12 @@ class TestKnownDefects:
         the first leg in id order that had an improving hub. 29 of 30 seeds are
         now invariant; seed 29 joins the parametrisation as one that used to
         differ. For the thirtieth see the co-located test below.
+
+        Seeds 0 and 8 were dropped from the list on 2026-09-02 and are back:
+        both still hold (verified 2026-09-03, 25 and 15 villages), and a test
+        whose whole subject is WHICH seeds hold must not quietly shrink its
+        sample. Two more plans cost ~4s here, most of it shared with the seed-0
+        account other tests in this module already plan.
         """
         account = random_account(seed, with_profiles=False)
         mapping = id_permutation(account.plan_request, seed + 1_000)
@@ -554,9 +577,12 @@ class TestKnownDefects:
         Seed 20 puts two villages on tile (-8, -40). Coordinates cannot order
         what shares them, so which of the two serves a given demand is decided by
         the id and relabelling can still swap them: 98 routes against 97, the
-        same work split differently between the pair. The COST is invariant -- 322
-        merchants either way -- because the two are interchangeable by
-        construction.
+        same work split differently between the pair. The cost is invariant here
+        -- 322 merchants either way -- ON THE SEEDS SAMPLED, and not by
+        construction: two villages on one tile are interchangeable in DISTANCE
+        and nothing else, so a different surplus, Trade Office or merchant count
+        makes the pair a real choice. Seed 37 is the counter-example, in the test
+        below.
 
         This cannot happen on a real account: Travian permits one village per
         tile, so coordinates are a total order there and the property above holds
@@ -577,6 +603,39 @@ class TestKnownDefects:
         assert original.total_merchants == relabelled.total_merchants, (
             "co-located villages are interchangeable, so the plan's COST must not "
             "depend on which of them was picked"
+        )
+
+    def test_co_located_villages_can_move_the_cost_as_well_as_the_split(self) -> None:
+        """The other half of the limit above, which the seed-20 case understated.
+
+        Seed 20's pair happens to be interchangeable in cost, and reading that
+        as "co-located villages are always interchangeable" is wrong: sharing a
+        tile makes two villages identical in DISTANCE and in nothing else.
+        Seed 37 puts V25 and V37 on tile (1|4) with different shapes, and the
+        merchant total moves 206/207 across labellings (measured 2026-09-03:
+        207 on one of six permutations). Moving one of them off the tile
+        restores invariance outright -- 211 on all seven labellings -- which is
+        what pins the tile, and not the ids, as the cause.
+
+        Asserted as a RANGE rather than as equality: this is the documented
+        boundary of the geographic tie-breaks, so the test must fail if the
+        spread grows, not if it exists.
+        """
+        account = random_account(37, with_profiles=False)
+        coords = [(v.x, v.y) for v in account.plan_request.snapshot]
+        assert len(coords) != len(set(coords)), (
+            "seed 37 no longer has two villages on one tile, so it no longer "
+            "demonstrates the limit -- find another seed that does, or delete this"
+        )
+
+        totals = {_post_plan(account.plan_request).total_merchants}
+        for k in range(6):
+            mapping = id_permutation(account.plan_request, 3_700 + k)
+            totals.add(_post_plan(permute_ids(account.plan_request, mapping)).total_merchants)
+
+        assert max(totals) - min(totals) <= 1, (
+            f"the cost spread across labellings grew past the one merchant a "
+            f"co-located pair explains: {sorted(totals)}"
         )
 
     def test_relabelling_does_not_change_what_the_plan_costs(self) -> None:

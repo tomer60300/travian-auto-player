@@ -30,6 +30,24 @@ from travian_api.services.distribution.planner import PlannerConfig, craft_plan
 GEOMETRY = MapGeometry(span=401, speed_fields_per_hour=12.0)
 
 
+def _craft(villages, productions, allocations, *, banned):
+    """Plan *villages*, with the crop obligation at 9 banned to *banned* or open.
+
+    The three fixtures below differ only in their villages and their numbers,
+    and this tail was copied out three times -- including the clause that
+    encodes what "no exclusion" means. `{9: set(banned)} if banned else {}` is
+    the whole contract that `None` and `[]` are both "unrestricted", and three
+    copies is three places to get it wrong.
+    """
+    config = PlannerConfig(
+        geometry=GEOMETRY,
+        merchant_model=EUROPE2_TEUTON,
+        max_latency_hours=None,
+        excluded_origins_by_destination={9: set(banned)} if banned else {},
+    )
+    return craft_plan(villages, productions, allocations, config)
+
+
 def _plan(*, banned=None):
     """Two villages with spare crop, one target. `2` is far, `3` is near."""
     villages = {
@@ -45,13 +63,7 @@ def _plan(*, banned=None):
             9: Allocation(mode=AllocationMode.ABSOLUTE, value=12_000.0),
         }
     }
-    config = PlannerConfig(
-        geometry=GEOMETRY,
-        merchant_model=EUROPE2_TEUTON,
-        max_latency_hours=None,
-        excluded_origins_by_destination={9: set(banned)} if banned else {},
-    )
-    return craft_plan(villages, productions, allocations, config)
+    return _craft(villages, productions, allocations, banned=banned)
 
 
 def _origins_to(plan, destination):
@@ -109,13 +121,7 @@ def _crosswise_plan(*, banned=None):
             9: Allocation(mode=AllocationMode.ABSOLUTE, value=6_000.0),
         }
     }
-    config = PlannerConfig(
-        geometry=GEOMETRY,
-        merchant_model=EUROPE2_TEUTON,
-        max_latency_hours=None,
-        excluded_origins_by_destination={9: set(banned)} if banned else {},
-    )
-    return craft_plan(villages, productions, allocations, config)
+    return _craft(villages, productions, allocations, banned=banned)
 
 
 def _relay_plan(*, banned=None):
@@ -149,13 +155,7 @@ def _relay_plan(*, banned=None):
             9: Allocation(mode=AllocationMode.ABSOLUTE, value=500.0),
         }
     }
-    config = PlannerConfig(
-        geometry=GEOMETRY,
-        merchant_model=EUROPE2_TEUTON,
-        max_latency_hours=None,
-        excluded_origins_by_destination={9: set(banned)} if banned else {},
-    )
-    return craft_plan(villages, productions, allocations, config)
+    return _craft(villages, productions, allocations, banned=banned)
 
 
 class TestTheImprovementSearchCannotUndoTheBan:

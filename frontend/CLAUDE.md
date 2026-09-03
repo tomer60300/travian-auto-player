@@ -17,10 +17,15 @@
 
 ## Design System
 
-Single source of truth: `frontend/src/index.css` (1302 lines). It already defines a complete
+Single source of truth: `frontend/src/index.css`. It already defines a complete
 Material Design 3 token set — do not introduce a second one. Tokens are declared as CSS custom
-properties on `:root` (index.css:8-58) and re-declared under `[data-theme="dark"]`
-(index.css:61-108), then exposed to JSX through semantic utility classes (index.css:322-410).
+properties on the `:root` block at the top of the file and re-declared under `[data-theme="dark"]`
+immediately below it, then exposed to JSX through the semantic utility classes under the
+`── Utility Colors ──` section header.
+
+Cited by SELECTOR and section header, never by line number, and with no line count: the
+previous version of this file gave line numbers that the same branch's own CSS edits
+invalidated, so every citation pointed a few lines off and the count was 16 short.
 
 There is **no `@theme` block** in index.css, so Tailwind's own palette is not wired to these
 tokens. `text-gray-400` and `var(--text-secondary)` are unrelated values and only one of them
@@ -76,7 +81,7 @@ target maths — leave them alone, but do not add new ones. New layout spacing u
 
 ### Typography scale
 
-Family: `'Roboto', system-ui, sans-serif` (index.css:110-119). Body `line-height: 1.5`;
+Family: `'Roboto', system-ui, sans-serif` (the `body` rule). Body `line-height: 1.5`;
 `h1, h2, h3` are weight 500, `line-height: 1.3`, `letter-spacing: -0.01em`.
 
 | Step | Size | Use |
@@ -116,12 +121,14 @@ neutral-black in dark:
 
 ### Motion
 
-- Easing: `--md-easing: cubic-bezier(0.2, 0, 0, 1)` (index.css:152). The only easing curve.
+- Easing: `--md-easing: cubic-bezier(0.2, 0, 0, 1)` (its own one-line `:root` rule, just
+  below the typography block). The only easing curve.
 - `200ms` standard state change (colour, border, background)
 - `300ms` large or expressive transitions (size, layout, elevation)
 - `150ms` enter animations (`.animate-slide-in`)
 - `0.8s linear infinite` spinner · `2s ease-in-out infinite` status pulse
-- `@media (prefers-reduced-motion: reduce)` (index.css:1296) already collapses every animation
+- `@media (prefers-reduced-motion: reduce)`, the last block in the file, already collapses
+  every animation
   and transition to `0.01ms` globally. Never add an animation that bypasses it — no JS-driven
   `requestAnimationFrame` tween without a reduced-motion guard.
 
@@ -163,7 +170,8 @@ against the running app, not against the diff.
 2. **Keyboard** — every interactive element is reachable by Tab, in an order that matches the
    visual order, and operable by Enter/Space. A visible focus state on each one
    (`outline: 2px solid var(--md-primary); outline-offset: 2px`, as `.btn-primary:focus-visible`
-   does at index.css:199). No `outline: none` without a replacement indicator.
+   and `.input-field:focus-visible` both do). No `outline: none` without a replacement
+   indicator.
 3. **Contrast** — meets WCAG AA: 4.5:1 for text under 18.66px/24px, 3:1 for larger text and for
    the non-text boundary of a control. Verify in **both** themes; a token pair that passes in
    light can fail in dark.

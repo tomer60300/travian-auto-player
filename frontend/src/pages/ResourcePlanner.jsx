@@ -2445,7 +2445,7 @@ export default function ResourcePlanner() {
                         type="number"
                         min="0"
                         aria-label={`Crop stock alert level for ${v.name}`}
-                        placeholder="—"
+                        placeholder="none"
                         className="input-field w-24 text-right text-xs py-1"
                         value={cropCeilings[v.village_id] ?? ''}
                         onChange={(e) =>
@@ -2541,7 +2541,7 @@ export default function ResourcePlanner() {
                               aria-label={`NPC-backed stock floor for ${v.name}, percent of warehouse`}
                               aria-invalid={invalid || undefined}
                               aria-describedby={invalid ? problemId : undefined}
-                              placeholder="—"
+                              placeholder="none"
                               className="input-field w-16 text-right text-xs py-1"
                               value={floor == null ? '' : fractionToPercent(floor)}
                               onChange={(e) =>

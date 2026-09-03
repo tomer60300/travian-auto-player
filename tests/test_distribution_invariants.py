@@ -7,8 +7,11 @@ the 2026-09-02 review, where a sweep of 42 synthetic accounts found zero
 violations -- this pins that result so it stays true.
 
 A plan the endpoint REFUSES (an AllocationError, or a 4xx) is a legitimate
-outcome and passes trivially: the invariants are about any plan that is
-produced, not about every request producing one.
+outcome for the account that is BUILT to be refused, and only for that one: the
+invariants are about any plan that is produced, but "produced no plan" must not
+be a way to satisfy them. Which accounts may be refused is named in
+``REFUSED_BY_DESIGN`` and asserted per account, so a regression that 400s every
+request fails this file instead of passing it by vacuity.
 """
 
 from __future__ import annotations
@@ -25,9 +28,8 @@ from tests.distribution_synthetic import (
     random_account,
 )
 from travian_api.services.distribution.allocation import AllocationError, Resource
+from travian_api.services.distribution.night_profile import MATERIALS
 from travian_api.web.routes import distribution as dist
-
-MATERIALS = (Resource.LUMBER, Resource.CLAY, Resource.IRON)
 
 
 def _plan_uncached(request):
@@ -41,17 +43,11 @@ def _plan_uncached(request):
         return None
 
 
-# Six tests share one plan per account. Planning a 40-village account is the
-# expensive part, and re-planning it per assertion cost 138s for this file
-# alone; the determinism test below is the one place that must NOT read this.
-_PLANS: dict[str, object] = {}
-
-
-def _plan(request):
-    key = request.model_dump_json()
-    if key not in _PLANS:
-        _PLANS[key] = _plan_uncached(request)
-    return _PLANS[key]
+# Accounts the endpoint is EXPECTED to refuse. Everything else in the corpus
+# must produce a plan, and that is asserted per account rather than left to a
+# bare `if plan is None: return` -- with only the early return, a regression
+# that refused every request left this whole file green.
+REFUSED_BY_DESIGN = frozenset({"adv-negative-absolute-target"})
 
 
 # Sized deliberately. Planning a large synthetic account costs seconds, so this
@@ -92,7 +88,15 @@ class TestStatedInvariantsHoldOnTheAssembledPlan:
         shows everything wrong with it at once, and so the account is planned
         once instead of once per invariant -- planning is the expensive part.
         """
-        plan = _plan(account.plan_request)
+        plan = _plan_uncached(account.plan_request)
+        expected_refusal = account.name in REFUSED_BY_DESIGN
+        assert (plan is None) == expected_refusal, f"{account.name}: " + (
+            "the endpoint refused an account it is supposed to plan -- the "
+            "invariants below then pass by vacuity"
+            if plan is None
+            else "planned an account listed as refused by design; if that is now "
+            "correct, take it out of REFUSED_BY_DESIGN"
+        )
         if plan is None:
             return  # refused by design; nothing to check
         bad: list[str] = []
@@ -153,14 +157,16 @@ def test_the_same_request_always_produces_the_same_sheet(account):
     """Determinism on identical input. (Invariance under RELABELLING is a
     separate, known-open property -- see TestKnownDefects in the audit.)
 
-    A smaller corpus than the invariants above: this needs a second, deliberately
-    uncached plan per account, which doubles its cost.
+    A smaller corpus than the invariants above: this needs TWO plans per
+    account, which doubles its cost.
     """
-    first = _plan(account.plan_request)
+    first = _plan_uncached(account.plan_request)
     second = _plan_uncached(account.plan_request)
-    if first is None or second is None:
-        assert first is None and second is None, "refusal must itself be deterministic"
-        return
+    # Not "both None passes": every determinism seed is a random account the
+    # endpoint plans, so a pair of refusals here is a regression, not agreement.
+    assert first is not None and second is not None, (
+        f"{account.name}: the endpoint refused a request it plans today"
+    )
 
     def signature(plan):
         return sorted(

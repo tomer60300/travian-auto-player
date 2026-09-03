@@ -1,13 +1,13 @@
 /**
- * TEMPLATE — visual regression, one route, three viewports.
+ * Visual regression on the login page, three viewports.
  *
- * Playwright is NOT installed in this project (see the header of ../playwright.config.js for the
- * reasoning and the four commands that turn this on). This file exists to be copied: it is the
- * shape a layout lock should take here, and it runs as-is the moment the dep is added.
+ * Why /login: it is the only page that renders without auth, so this spec needs no fixture, no
+ * token and no backend. It is also the shape to copy for a second route -- an authed one needs
+ * a storageState fixture, which is the piece this file does not carry.
  *
- * Why /login is the template route: it is the only page that renders without auth, so a spec
- * against it needs no fixture, no token, and no backend. Copy this file per route; an authed
- * route needs a storageState fixture, which is the one extra piece this template does not carry.
+ * (The header said TEMPLATE and "Playwright is NOT installed in this project" in the same commit
+ * that installed Playwright, committed four baselines, and rewrote ../playwright.config.js to
+ * say the opposite. The dependency is real; see that config's header for the commands.)
  *
  * What a visual regression test is for: catching the layout you did not mean to change. It is not
  * a substitute for the accessibility and Core Web Vitals checks in the UI Definition of Done —
