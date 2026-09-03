@@ -158,9 +158,11 @@ class VillageState:
     keep working on it -- see :func:`_may_relay_through`."""
 
     may_relay: bool | None = None
-    """Whether this village may forward someone else's cargo, overriding its
-    role's default. ``None`` takes :func:`~.roles.default_may_relay`, so a role
-    village need not restate what its role already says."""
+    """Whether this village may forward someone else's cargo, overriding both
+    its role's default and the crop-sign inference. ``None`` takes
+    :func:`~.roles.default_may_relay` where there is a role, so a role village
+    need not restate what its role already says, and leaves the crop sign to
+    decide where there is not."""
 
     @property
     def coords(self) -> tuple[int, int]:
@@ -725,12 +727,18 @@ def _may_relay_through(village: VillageState) -> bool:
     rate in the one place this codebase has never taken it (see the ``None``
     paragraph below).
 
-    The declared answer next. A village with a ``role`` has been described by
-    the operator, and profile section 5.9 answers this for each kind directly:
-    a feeder moves resources on, every other role has a job that a leg in
-    transit interferes with (see :func:`~.roles.default_may_relay`, which also
-    carries why the capital is a *no*). ``may_relay`` on the role's template
-    overrides that default; ``None`` means the role's own answer stands.
+    The declared answer next, and ``may_relay`` is the most specific form of
+    it: merged per VILLAGE over its role template's, so it can arrive with no
+    role at all -- the account whose one defensive village sits on the only
+    road to a corner of the map wants that village relaying, not all four.
+    Read before the role, because a role supplies a DEFAULT and this is a
+    statement about this village.
+
+    Then the role. A village with one has been described by the operator, and
+    profile section 5.9 answers this for each kind directly: a feeder moves
+    resources on, every other role has a job that a leg in transit interferes
+    with (see :func:`~.roles.default_may_relay`, which also carries why the
+    capital is a *no*).
 
     The rule below is what to do when nothing has been declared -- which is
     most accounts, and stays exactly as it was. It is an INFERENCE, and the
@@ -761,15 +769,19 @@ def _may_relay_through(village: VillageState) -> bool:
     """
     if village.crop_per_hour is None:
         return False
+    # The explicit answer before the role's, and before the inference. It is
+    # merged per VILLAGE, so it can arrive without a role at all -- and the
+    # crop-sign rule below is the fallback for a village nothing has been
+    # declared about, which an explicit permission is not.
+    if village.may_relay is not None:
+        return village.may_relay
     if village.role is not None:
         # Resolved here rather than only at the edge, so a ``VillageState``
         # carrying a role and no explicit permission cannot leak ``None`` into a
         # boolean question: an unresolved role would read as "may not relay" by
         # accident, which is the right answer four times out of five and
         # therefore the hardest kind of bug to notice.
-        if village.may_relay is None:
-            return default_may_relay(village.role)
-        return village.may_relay
+        return default_may_relay(village.role)
     return village.crop_per_hour >= 0.0
 
 

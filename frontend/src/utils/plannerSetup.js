@@ -46,6 +46,15 @@
  * role with a 422 and a role dropped here would leave the village with no
  * profile at all.
  *
+ * Version 4 adds `may_relay` to the village row: whether THIS village may
+ * forward someone else's cargo, over its role template's answer. Per village
+ * because the case is singular -- the account whose one defensive village sits
+ * on the only road to a corner of the map wants that village relaying, not all
+ * four of them. `false` is written rather than dropped, because keeping one
+ * village out of a tier its role permits is the asymmetric half worth carrying.
+ * The version rises for it: a v3 build would drop the field in silence, and a
+ * relay permission lost that way is a route set the operator never sees change.
+ *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
  */
@@ -53,14 +62,14 @@
 import { RESOURCE_LABEL, ROLE_LABEL } from '../constants/planner'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 3
+export const SETUP_VERSION = 4
 /** Versions this build can read. A v1 file simply carries no profiles and a v2
- * one no roles, so refusing either would strand every export written before
- * those travelled. The version still has to rise when a field is added, and in
+ * one no roles and a v3 one no per-village relay answer, so refusing any of
+ * them would strand every export written before those travelled. The version still has to rise when a field is added, and in
  * the other direction: a build that cannot read roles must REFUSE a file that
  * has them, or it loads the villages, drops their profiles and plans a
  * different account without saying so. */
-export const READABLE_VERSIONS = Object.freeze([1, 2, 3])
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
@@ -449,6 +458,7 @@ export function buildSetup({
   stockFloors,
   consumption,
   villageRoles,
+  mayRelay,
   roles,
   profiles,
   profileWindows,
@@ -463,6 +473,7 @@ export function buildSetup({
     const allowed = shipOnlyTo?.[village.village_id]
     const floor = stockFloors?.[village.village_id]
     const role = villageRoles?.[village.village_id]
+    const relay = mayRelay?.[village.village_id]
     // Materials only, so an export can never write a file this same parser
     // refuses to read back -- a crop figure saved by an older build would do
     // exactly that.
@@ -473,6 +484,7 @@ export function buildSetup({
       allowed == null &&
       floor == null &&
       role == null &&
+      relay == null &&
       !spends
     ) {
       continue
@@ -485,6 +497,10 @@ export function buildSetup({
     // is a different answer from the unrestricted default an absent field means.
     if (allowed != null) row.ship_only_to = allowed.map(Number)
     if (floor != null) row.stock_floor_fraction = Number(floor)
+    // false is written, not dropped: it is the answer that keeps ONE village
+    // out of the relay tier its role otherwise permits, which is exactly the
+    // asymmetric half of the setting worth carrying.
+    if (relay != null) row.may_relay = Boolean(relay)
     if (spends) row.consumption_per_hour = spends
     rows.push(row)
   }
@@ -876,6 +892,15 @@ export function parseSetup(text) {
         return id
       })
     }
+    if (row.may_relay != null) {
+      if (typeof row.may_relay !== 'boolean') {
+        throw new SetupFileError(
+          `${where} has may_relay ${JSON.stringify(row.may_relay)}; it must be true, ` +
+            `false, or absent to take the role template's answer.`
+        )
+      }
+      parsed.may_relay = row.may_relay
+    }
     if (row.stock_floor_fraction != null) {
       const floor = Number(row.stock_floor_fraction)
       if (!isStockFloorFraction(floor)) {
@@ -963,6 +988,7 @@ export function mergeSetup({
   stockFloors,
   consumption,
   villageRoles,
+  mayRelay,
   roles,
   profiles,
   profileWindows,
@@ -975,6 +1001,7 @@ export function mergeSetup({
   const nextStockFloors = { ...(stockFloors ?? {}) }
   const nextConsumption = { ...(consumption ?? {}) }
   const nextVillageRoles = { ...(villageRoles ?? {}) }
+  const nextMayRelay = { ...(mayRelay ?? {}) }
 
   const missingFromAccount = []
   let loaded = 0
@@ -990,6 +1017,7 @@ export function mergeSetup({
     // Silence is not a clear: a row that says nothing about the role leaves the
     // one on screen alone, the same rule every other column here follows.
     if (row.role != null) nextVillageRoles[row.village_id] = row.role
+    if (row.may_relay != null) nextMayRelay[row.village_id] = row.may_relay
     if (row.trade_office_level != null) nextTradeOffice[row.village_id] = row.trade_office_level
     if (row.crop_ceiling != null) nextCropCeilings[row.village_id] = row.crop_ceiling
     if (row.ship_only_to != null) nextShipOnlyTo[row.village_id] = row.ship_only_to
@@ -1053,6 +1081,7 @@ export function mergeSetup({
     stockFloors: nextStockFloors,
     consumption: nextConsumption,
     villageRoles: nextVillageRoles,
+    mayRelay: nextMayRelay,
     roles: nextRoles,
     profiles: nextProfiles,
     profileWindows: nextWindows,

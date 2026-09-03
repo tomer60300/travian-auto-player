@@ -434,6 +434,21 @@ class VillageConfig(BaseModel):
             )
         return value
 
+    may_relay: bool | None = Field(
+        default=None,
+        description=(
+            "Whether THIS village may forward someone else's cargo, overriding "
+            "its role's template per village. None takes the template's answer, "
+            "and then the role's own (`default_may_relay`). "
+            "Per village because the case is singular: the account whose "
+            "DEFENSIVE village sits on the only road to a corner of the map wants "
+            "that ONE village relaying, not all four of them -- and taking it out "
+            "of the role to say so would cost it the profile's four targets and "
+            "its spend as well. A village with no role may be told too: the "
+            "alternative is a field accepted and silently ignored on the one "
+            "village kind that has no template to fall back on."
+        ),
+    )
     ship_only_to: list[int] | None = Field(
         default=None,
         description=(
@@ -1477,8 +1492,10 @@ class _ResolvedRoles:
     because ``crop_per_hour`` is already net of upkeep."""
 
     may_relay: dict[int, bool | None]
-    """Per village, the template's override; ``None`` leaves the role's own
-    answer to :func:`~services.distribution.roles.default_may_relay`."""
+    """Per village: its own answer over its role template's. ``None`` leaves the
+    role's own answer to
+    :func:`~services.distribution.roles.default_may_relay`, and for a village
+    with no role at all leaves the crop-sign inference in place."""
 
     crop_negative_by_design: frozenset[int]
     """Villages whose granary countdown is a NOTE rather than a CRITICAL."""
@@ -1506,7 +1523,10 @@ def _resolve_roles(body: PlanRequest) -> _ResolvedRoles:
     template's -- so it overrides, and is reported as the deviation it is.
 
     Consumption merges the same way and separately: a village may state its own
-    spend for one resource and take the rest of its role's.
+    spend for one resource and take the rest of its role's. So does
+    ``may_relay``, and per village rather than only per role because the case is
+    singular -- one defensive village on the only road to a corner of the map,
+    not the four the profile covers.
 
     A role naming a template that is not in ``roles`` is refused (422), not
     ignored. Ignored, four defensive villages revert to keeping their own
@@ -1590,11 +1610,28 @@ def _resolve_roles(body: PlanRequest) -> _ResolvedRoles:
             {resource: float(rate) for resource, rate in cfg.consumption_per_hour.items()}
         )
 
+    # The template's answer first, then the village's over it -- the same
+    # village-wins merge the consumption above does, and per village for the
+    # same reason. The case the override exists for is singular (one defensive
+    # village on the only road to a corner of the map), so putting it on the
+    # template alone handed the permission to all four.
+    #
+    # A village with NO role is merged in too. It has no template to fall back
+    # on, so the alternative is a field accepted and silently ignored; the
+    # predicate reads an explicit answer ahead of the crop-sign inference,
+    # which is what the inference has always been the fallback FOR.
+    may_relay: dict[int, bool | None] = {
+        vid: body.roles[role].may_relay for vid, role in of_village.items()
+    }
+    for cfg in body.config:
+        if cfg.may_relay is not None:
+            may_relay[cfg.village_id] = cfg.may_relay
+
     return _ResolvedRoles(
         of_village=of_village,
         allocations=allocations,
         consumption=consumption,
-        may_relay={vid: body.roles[role].may_relay for vid, role in of_village.items()},
+        may_relay=may_relay,
         crop_negative_by_design=frozenset(
             vid for vid, role in of_village.items() if body.roles[role].crop_negative_by_design
         ),

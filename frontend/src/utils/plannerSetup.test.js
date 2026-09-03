@@ -225,11 +225,12 @@ describe('profiles in the setup file', () => {
       merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
       exportedAt: STAMP,
     })
-    // 3 since the role templates landed. Pinned to a literal on purpose: the
-    // version has to rise whenever a field is added, so that an older build
-    // refuses a file it would otherwise half-load, and a literal is what makes
-    // forgetting the bump a failing test rather than a tautology.
-    expect(setup.version).toBe(3)
+    // 4 since the per-village `may_relay` landed (3 was the role templates).
+    // Pinned to a literal on purpose: the version has to rise whenever a field
+    // is added, so that an older build refuses a file it would otherwise
+    // half-load, and a literal is what makes forgetting the bump a failing
+    // test rather than a tautology.
+    expect(setup.version).toBe(4)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -1072,11 +1073,13 @@ describe('roles and role templates in the setup file', () => {
     expect(merged.roles).toEqual(TEMPLATES)
   })
 
-  it('is a version 3 file, and a version 2 one simply has no roles', () => {
-    // The guard has to bite in the other direction too: a build that cannot
-    // read roles must refuse a file that has them, or it loads the villages,
-    // drops their profiles and plans a different account in silence.
-    expect(SETUP_VERSION).toBe(3)
+  it('is a version 4 file, and every older one simply carries less', () => {
+    // Rewritten from "is a version 3 file" when the per-village `may_relay`
+    // landed: the contract is the RULE, not the number -- the version rises
+    // whenever a field is added, so that a build which cannot read the new one
+    // refuses a file it would otherwise half-load rather than dropping the
+    // field and planning a different account in silence.
+    expect(SETUP_VERSION).toBe(4)
     const older = {
       format: SETUP_FORMAT,
       version: 2,
@@ -1085,6 +1088,7 @@ describe('roles and role templates in the setup file', () => {
     const parsed = roundTrip(older)
     expect(parsed.roles).toEqual({})
     expect(parsed.villages[0].role).toBeUndefined()
+    expect(parsed.villages[0].may_relay).toBeUndefined()
   })
 
   it('rejects a role name the backend does not have', () => {
@@ -1813,5 +1817,80 @@ describe('stripUnknownRoles', () => {
       expect(stripped.templates).toEqual({})
       expect(stripped.droppedFrom).toEqual([])
     }
+  })
+})
+
+describe('may_relay in the setup file', () => {
+  it('carries a per-village relay answer both ways', () => {
+    // Per village, not per role: the account this exists for has ONE defensive
+    // village on the only road to a corner of the map, and putting the
+    // override on the template would hand the permission to all four.
+    const setup = buildSetup({
+      villages: VILLAGES,
+      mayRelay: { 20031: true, 20032: false },
+      exportedAt: STAMP,
+    })
+
+    expect(setup.villages).toHaveLength(2)
+    expect(setup.villages.find((v) => v.village_id === 20031).may_relay).toBe(true)
+    // false is WRITTEN, not dropped: keeping one village out of a tier its
+    // role permits is the asymmetric half of the setting worth carrying, and
+    // an absent field means "take the template's answer" instead.
+    expect(setup.villages.find((v) => v.village_id === 20032).may_relay).toBe(false)
+  })
+
+  it('leaves a village out where it says nothing about relaying', () => {
+    expect(buildSetup({ villages: VILLAGES, mayRelay: {}, exportedAt: STAMP }).villages).toEqual([])
+  })
+
+  it('reads it back over the map on screen, per village', () => {
+    const doc = {
+      format: SETUP_FORMAT,
+      version: SETUP_VERSION,
+      villages: [
+        { village_id: 20031, may_relay: true },
+        { village_id: 20032, may_relay: false },
+      ],
+    }
+    const merged = mergeSetup({
+      setup: parseSetup(JSON.stringify(doc)),
+      villages: VILLAGES,
+      mayRelay: { 20030: true },
+    })
+
+    // Silence is not a clear: 20030 said nothing in the file and keeps what it
+    // had, the rule every other column here follows.
+    expect(merged.mayRelay).toEqual({ 20030: true, 20031: true, 20032: false })
+  })
+
+  it('rejects a relay answer that is not a boolean', () => {
+    // "yes" and 1 are the two shapes a hand-edited file arrives in, and both
+    // would coerce to true -- so a village told "no" in words would relay.
+    for (const bad of ['yes', 1, {}]) {
+      const doc = {
+        format: SETUP_FORMAT,
+        version: SETUP_VERSION,
+        villages: [{ village_id: 20031, may_relay: bad }],
+      }
+      expect(() => parseSetup(JSON.stringify(doc))).toThrow(SetupFileError)
+      expect(() => parseSetup(JSON.stringify(doc))).toThrow(/may_relay/)
+    }
+  })
+
+  it('survives a round trip', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      villageRoles: { 20031: 'def' },
+      mayRelay: { 20031: true },
+      exportedAt: STAMP,
+    })
+    const back = parseSetup(JSON.stringify(setup))
+
+    expect(back.villages[0]).toEqual({
+      village_id: 20031,
+      name: 'V05',
+      role: 'def',
+      may_relay: true,
+    })
   })
 })

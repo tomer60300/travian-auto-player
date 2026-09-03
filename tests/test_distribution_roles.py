@@ -38,6 +38,7 @@ from travian_api.web.routes.distribution import (
     NightProfileRequest,
     PlanRequest,
     RoleTemplate,
+    _resolve_roles,
     post_day_check,
     post_night_profile,
     post_plan,
@@ -543,6 +544,82 @@ class TestADesignedDeficitIsANoteNotACritical:
         assert [r.model_dump() for r in loud.rows] == [r.model_dump() for r in quiet.rows]
         assert loud.total_merchants == quiet.total_merchants
         assert quiet.verdict.critical_findings == loud.verdict.critical_findings - 1
+
+
+class TestAVillageMayOverrideItsRolesRelayPermission:
+    """PLAN_REVIEW P2 item 2: the override is per VILLAGE, not only per role.
+
+    ``default_may_relay``'s own docstring names the singular case -- "the
+    account whose defensive village sits on the only road to a corner of the
+    map". One village, not four: putting the override on the template hands the
+    permission to every defensive village on the account, and taking that
+    village out of the role to say it would cost it the profile's four targets
+    and its spend as well.
+
+    Merged village-over-template, per village, beside the consumption merge and
+    on the same rule -- a village may state one thing itself and take the rest
+    of its role's.
+    """
+
+    def _resolved(self, *, template_may_relay, village_may_relay, vid=DEF[0]):
+        body = PlanRequest.model_validate(
+            _payload(
+                roles={"def": _def_template(may_relay=template_may_relay)},
+                config=_config(extra=[{"village_id": vid, "may_relay": village_may_relay}]),
+            )
+        )
+        return _resolve_roles(body).may_relay
+
+    def test_a_village_may_relay_where_its_role_may_not(self):
+        may_relay = self._resolved(template_may_relay=False, village_may_relay=True)
+
+        assert may_relay[DEF[0]] is True
+        # And only that village: the other three keep the profile's answer,
+        # which is the whole reason the override is not on the template.
+        for vid in DEF[1:]:
+            assert may_relay[vid] is False, vid
+
+    def test_a_village_may_be_refused_where_its_role_may(self):
+        may_relay = self._resolved(template_may_relay=True, village_may_relay=False)
+
+        assert may_relay[DEF[0]] is False
+        for vid in DEF[1:]:
+            assert may_relay[vid] is True, vid
+
+    def test_silence_on_the_village_leaves_the_roles_answer(self):
+        """Absent is not False. Every account today says nothing here, and the
+        role -- or its own default -- has to go on deciding."""
+        assert self._resolved(template_may_relay=True, village_may_relay=None)[DEF[0]] is True
+        assert self._resolved(template_may_relay=None, village_may_relay=None)[DEF[0]] is None
+
+    def test_a_village_with_no_role_can_still_be_told(self):
+        """Otherwise the field would be accepted and silently ignored on the
+        one village kind that has no template to fall back on."""
+        body = PlanRequest.model_validate(
+            _payload(
+                roles={"def": _def_template()},
+                config=_config(extra=[{"village_id": FEEDER, "may_relay": True}]),
+            )
+        )
+
+        assert _resolve_roles(body).may_relay[FEEDER] is True
+
+    def test_the_merged_answer_is_what_the_optimizer_is_given(self):
+        """Resolved in one place, read in one place. A merge the plan does not
+        see is a setting that does nothing."""
+        res = asyncio.run(
+            post_plan(
+                PlanRequest.model_validate(
+                    _payload(
+                        roles={"def": _def_template(may_relay=False)},
+                        config=_config(extra=[{"village_id": DEF[0], "may_relay": True}]),
+                    )
+                ),
+                USER,
+            )
+        )
+
+        assert res.feasible
 
 
 class TestRolesReachEveryPlanningPath:

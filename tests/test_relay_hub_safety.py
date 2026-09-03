@@ -507,6 +507,30 @@ def test_an_unreadable_crop_rate_is_refused_whatever_was_declared(
     assert _may_relay_through(village) is False
 
 
+@pytest.mark.parametrize("crop_per_hour", [9000.0, -5880.0], ids=str)
+@pytest.mark.parametrize("may_relay", [True, False], ids=str)
+def test_an_explicit_permission_decides_even_with_no_role(
+    may_relay: bool, crop_per_hour: float
+) -> None:
+    """``may_relay`` is now per VILLAGE, so it can arrive without a role.
+
+    The crop sign is the fallback for a village NOTHING has been declared
+    about -- an inference, and the predicate's own docstring says so. An
+    explicit permission IS a declaration, so it has to beat the inference the
+    way a role does. Otherwise `VillageConfig.may_relay` would be accepted and
+    silently ignored on the one village kind that has no template behind it,
+    and the operator would read a -5,880/h village as excluded by their own
+    setting when the sign was what excluded it.
+
+    The unreadable rate still wins over both -- that is the row above.
+    """
+    village = VillageState(
+        MIDPOINT, 0, 0, merchant_count=20, crop_per_hour=crop_per_hour, may_relay=may_relay
+    )
+
+    assert _may_relay_through(village) is may_relay
+
+
 @pytest.mark.parametrize("crop_per_hour", [9000.0, 0.0, -5880.0, None], ids=str)
 def test_without_a_role_the_crop_sign_still_decides(crop_per_hour: float | None) -> None:
     """The fallback, stated as a matrix beside the roles that supersede it, so

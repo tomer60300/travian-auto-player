@@ -144,6 +144,7 @@ const LS_SHIP_ONLY_TO = 'planner_ship_only_to'
 const LS_STOCK_FLOOR = 'planner_stock_floor'
 const LS_CONSUMPTION = 'planner_consumption'
 const LS_VILLAGE_ROLES = 'planner_village_roles'
+const LS_MAY_RELAY = 'planner_may_relay'
 const LS_ROLE_TEMPLATES = 'planner_role_templates'
 // Sensible defaults by convention; anything else starts unset until the
 // operator gives it hours.
@@ -519,6 +520,14 @@ export default function ResourcePlanner() {
   // spend, whether the optimizer may relay through it, and how loud a designed
   // crop deficit is reported.
   const [villageRoles, setVillageRoles] = useState({})
+  // Whether ONE village may forward someone else's cargo, over its role
+  // template's answer: { [village_id]: boolean }. Per village because the case
+  // is singular -- the account this exists for has one defensive village on the
+  // only road to a corner of the map, and putting the override on the template
+  // would hand the permission to all four. No input for it yet; it arrives from
+  // the setup file, which is why the page has to carry it rather than let the
+  // parser's answer fall on the floor.
+  const [mayRelay, setMayRelay] = useState({})
   // One profile per role: { [role]: { allocations, consumption, may_relay,
   // crop_negative_by_design } }. Section 2.1 gives ONE profile for FOUR
   // defensive villages, so this is where those four numbers are typed -- once.
@@ -690,6 +699,7 @@ export default function ResourcePlanner() {
       setRoleTemplates({})
       setProfiles({ [DEFAULT_PROFILE]: {} })
       setForeignTargets([])
+      setMayRelay({})
       setActiveProfile(DEFAULT_PROFILE)
       setMerchantModel(DEFAULT_MERCHANT_MODEL)
       setSelected({})
@@ -727,6 +737,7 @@ export default function ResourcePlanner() {
       loadJson(`${LS_VILLAGE_ROLES}::${accountKey}`, {}),
       loadJson(`${LS_ROLE_TEMPLATES}::${accountKey}`, {})
     )
+    setMayRelay(loadJson(`${LS_MAY_RELAY}::${accountKey}`, {}))
     setVillageRoles(roles.villageRoles)
     setRoleTemplates(roles.templates)
     setRolesDropped(roles)
@@ -790,6 +801,7 @@ export default function ResourcePlanner() {
     stockFloors,
     consumption,
     villageRoles,
+    mayRelay,
     roleTemplates,
     merchantModel,
   ])
@@ -827,6 +839,7 @@ export default function ResourcePlanner() {
     stockFloors,
     consumption,
     villageRoles,
+    mayRelay,
     roleTemplates,
     merchantModel,
     foreignTargets,
@@ -852,6 +865,9 @@ export default function ResourcePlanner() {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_VILLAGE_ROLES), villageRoles)
   }, [villageRoles, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_MAY_RELAY), mayRelay)
+  }, [mayRelay, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_ROLE_TEMPLATES), roleTemplates)
@@ -992,6 +1008,7 @@ export default function ResourcePlanner() {
         shipOnlyTo[v.village_id] != null ||
         stockFloors[v.village_id] != null ||
         villageRoles[v.village_id] != null ||
+        mayRelay[v.village_id] != null ||
         declaresConsumption(consumption[v.village_id])
     ).length
     const named = Object.entries(profiles).filter(([, a]) => Object.keys(a ?? {}).length)
@@ -1012,6 +1029,7 @@ export default function ResourcePlanner() {
         stockFloors,
         consumption,
         villageRoles,
+        mayRelay,
         roles: roleTemplates,
         profiles,
         profileWindows,
@@ -1033,6 +1051,7 @@ export default function ResourcePlanner() {
     stockFloors,
     consumption,
     villageRoles,
+    mayRelay,
     roleTemplates,
     profiles,
     profileWindows,
@@ -1077,6 +1096,7 @@ export default function ResourcePlanner() {
         stockFloors,
         consumption,
         villageRoles,
+        mayRelay,
         roles: roleTemplates,
         profiles,
         profileWindows,
@@ -1089,6 +1109,7 @@ export default function ResourcePlanner() {
       setStockFloors(merged.stockFloors)
       setConsumption(merged.consumption)
       setVillageRoles(merged.villageRoles)
+      setMayRelay(merged.mayRelay)
       setRoleTemplates(merged.roles)
       setProfiles(merged.profiles)
       setProfileWindows(merged.profileWindows)
@@ -1123,6 +1144,7 @@ export default function ResourcePlanner() {
       stockFloors,
       consumption,
       villageRoles,
+      mayRelay,
       roleTemplates,
       profiles,
       profileWindows,
@@ -1201,6 +1223,10 @@ export default function ResourcePlanner() {
         // to before. A role sent WITHOUT its template is a 422, which is why
         // `sendRoles` above carries every role some village claims.
         ...(villageRoles[v.village_id] != null ? { role: villageRoles[v.village_id] } : {}),
+        // Omitted when unset, so an undeclared village's row is unchanged:
+        // absent means "take the role template's answer", and on a village
+        // with no role at all leaves the crop-sign inference in place.
+        ...(mayRelay[v.village_id] != null ? { may_relay: mayRelay[v.village_id] } : {}),
         // Both omitted when unset, so an ordinary village's row is byte-identical
         // to before: absent means "unrestricted" and "no floor" on the backend.
         // An EMPTY ship_only_to list is sent, because it means "nobody".
@@ -1241,6 +1267,7 @@ export default function ResourcePlanner() {
     stockFloors,
     consumption,
     villageRoles,
+    mayRelay,
     roleTemplates,
     allocations,
     foreignTargets,
