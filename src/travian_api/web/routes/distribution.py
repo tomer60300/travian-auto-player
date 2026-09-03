@@ -16,7 +16,7 @@ import logging
 import random
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -75,6 +75,7 @@ from travian_api.services.distribution.planner import (
     blockers,
     craft_plan,
 )
+from travian_api.services.distribution.roles import Role
 from travian_api.services.distribution.route_revert import describe, plan_revert
 from travian_api.services.distribution.run_history import (
     AccountRollup,
@@ -195,10 +196,119 @@ class AllocationInput(BaseModel):
     value: float = 0.0
 
 
+class RoleTemplate(BaseModel):
+    """One profile, applied to every village of one role.
+
+    Profile section 2.1 gives ONE consumption profile for FOUR defensive
+    villages. Typed per village that is four copies of the same four numbers,
+    which is four chances for them to drift apart, and the operator maintains
+    those villages as one thing. So a role's profile is written once here and
+    every village of that role takes it.
+
+    A default, never a cage: an explicit per-village allocation overrides this
+    one PER RESOURCE (so changing a village's lumber does not revert its clay),
+    and the plan reports the deviation as :class:`RoleDeviationResponse` so the
+    grid can mark the cell rather than silently showing a figure that differs
+    from the profile the operator believes is running.
+    """
+
+    allocations: dict[Resource, AllocationInput] = Field(
+        default={},
+        description=(
+            "What a village of this role must end up holding per hour, per "
+            "resource -- the same target an explicit per-village allocation "
+            "sets, so a role is a way of saying it once rather than a second "
+            "kind of number. Resources absent here fall through to whatever the "
+            "village itself declares, and to KEEP if neither does."
+        ),
+    )
+    consumption: dict[Resource, float] = Field(
+        default={},
+        description=(
+            "What a village of this role SPENDS per hour -- LUMBER, CLAY and "
+            "IRON only. Section 2 calls its figures consumption targets, so the "
+            "spend travels with the profile: a template carrying only the "
+            "retention would leave the operator restating the same numbers "
+            "under a second heading. "
+            "CROP IS REFUSED for the reason `VillageConfig.consumption_per_hour` "
+            "refuses it -- the snapshot's `crop_per_hour` is already net of "
+            "upkeep, so a declared crop spend subtracts the same troops twice. "
+            "Say what a village of this role should KEEP of its crop with the "
+            "template's crop ALLOCATION instead: an absolute target is retention "
+            "above break-even, so 0 holds a crop-negative village level."
+        ),
+    )
+
+    @field_validator("consumption")
+    @classmethod
+    def _consumption_is_materials_only(cls, value: dict[Resource, float]) -> dict[Resource, float]:
+        """The P1 ruling, restated here because a template is a second door.
+
+        Refused at the schema rather than during resolution so that ONE rule
+        covers every planning path: `/plan`, `/day-check`, `/execute` and
+        `/night-profile` all carry this model. A check further in would have to
+        be repeated in each of the four, which is exactly how `/night-profile`
+        came to ignore the per-village field altogether.
+        """
+        if Resource.CROP in value:
+            raise ValueError(
+                "a role template's consumption cannot include crop: the "
+                "snapshot's crop_per_hour is already net of troop upkeep, so a "
+                "declared crop spend subtracts the same troops twice and hides a "
+                "real overflow. Declare lumber, clay and iron only, and say what "
+                "villages of this role should keep of their crop with the "
+                "template's crop allocation instead -- an absolute target is "
+                "retention, so 0 holds a crop-negative village level."
+            )
+        return value
+
+    may_relay: bool | None = Field(
+        default=None,
+        description=(
+            "Whether villages of this role may forward someone else's cargo. "
+            "None takes the role's own answer, which is what profile section 5.9 "
+            "says: a feeder may relay and no other role may, the capital "
+            "included -- section 5 makes it the hub every feeder ships to AND "
+            "draws the onward relays from its neighbour set, so it hands off "
+            "rather than carrying a leg in transit. Set it only for the account "
+            "whose defensive village sits on the only road to a corner of the "
+            "map; unset, the role speaks for itself."
+        ),
+    )
+    crop_negative_by_design: bool = Field(
+        default=False,
+        description=(
+            "This role's villages eat more crop than they grow, on purpose "
+            "(sections 9.1-9.2: the Hammer and the troops-only village). Their "
+            "granary countdown is then reported as a NOTE rather than a "
+            "CRITICAL -- the same rate and the same hours of cover, without the "
+            "claim that something has gone wrong. A downgrade and never a "
+            "suppression: the hours say how long the granary lasts if the "
+            "deliveries stop, which is the one figure worth acting on either "
+            "way."
+        ),
+    )
+
+
 class VillageConfig(BaseModel):
     """Operator-owned state the game will not tell us."""
 
     village_id: int
+    role: Role | None = Field(
+        default=None,
+        description=(
+            "What this village is FOR (profile section 1). Operator-owned: "
+            "nothing in the game says a village is the Hammer. Its "
+            "`PlanRequest.roles` template then supplies this village's "
+            "allocations and spend for everything it does not state itself, and "
+            "the role decides whether it may relay and how loud a designed crop "
+            "deficit is. A role named here with no template in `roles` is "
+            "refused rather than ignored: ignoring it plans four defensive "
+            "villages as keeping their own production, which is a tenth of what "
+            "they need, and calls it feasible. None means nothing declared, "
+            "which plans exactly as before."
+        ),
+    )
     trade_office_level: int = Field(
         default=0,
         ge=0,
@@ -382,6 +492,18 @@ class PlanRequest(BaseModel):
     snapshot: list[VillageSnapshot]
     foreign_targets: list[ForeignTarget] = []
     config: list[VillageConfig] = []
+    roles: dict[Role, RoleTemplate] = Field(
+        default={},
+        description=(
+            "One profile per role, applied to every village that declares it "
+            "(profile section 2.1: one profile, four defensive villages). Keyed "
+            "by the role, so a template cannot exist for a name that is not one "
+            "of the five. Empty means nothing declared, which plans exactly as "
+            "before -- and a template no village claims is harmless, so a setup "
+            "file may carry the whole account's profiles whatever this snapshot "
+            "happens to contain."
+        ),
+    )
     # resource -> village_id -> allocation
     allocations: dict[Resource, dict[int, AllocationInput]] = {}
     merchant_base_capacity: int = Field(default=EUROPE2_TEUTON.base_capacity, gt=0)
@@ -586,6 +708,30 @@ class VillageNetResponse(BaseModel):
     """target - consumption: the rate the STORE moves at. Zero is level."""
 
 
+class RoleDeviationResponse(BaseModel):
+    """One cell where a village was given a target its role's template did not.
+
+    A template is a default and overriding it is legitimate -- one of four
+    defensive villages always has a wall going up. What is not legitimate is
+    overriding it invisibly: the operator reads the role's profile, the plan
+    ships something else, and nothing on the page says which. So every override
+    is named with both figures, and the allocation grid marks the cell.
+
+    Reported by the server rather than left to the page to work out, because the
+    resolution is the server's: two implementations of one merge rule drift, and
+    a grid that marked the wrong cell would be worse than one that marked none.
+    """
+
+    village_id: int
+    village_name: str
+    role: Role
+    resource: Resource
+    template_allocation: AllocationInput
+    """What the role said this village should hold."""
+    village_allocation: AllocationInput
+    """What the village was given instead, and what the plan actually used."""
+
+
 def _window_minutes(window: tuple[int, int]) -> int:
     """How many minutes of the day a dispatch window covers.
 
@@ -787,6 +933,16 @@ class PlanResponse(BaseModel):
     )
     verdict: VerdictResponse
     relays: list[RelayResponse]
+    role_deviations: list[RoleDeviationResponse] = Field(
+        default=[],
+        description=(
+            "Cells where a village was given a target its role's template did "
+            "not. Empty for an account that declares no roles, and empty for one "
+            "whose explicit figures agree with its templates -- an account that "
+            "spelled its profile out before templates existed must not light up "
+            "with deviations it does not have."
+        ),
+    )
     village_nets: list[VillageNetResponse] = Field(
         default=[],
         description=(
@@ -1261,26 +1417,147 @@ _RATE_FIELD = {
 }
 
 
-def _declared_consumption(config: Sequence[VillageConfig]) -> dict[int, dict[Resource, float]]:
-    """What each village spends per hour, village-major. Operator-declared.
+@dataclass(frozen=True)
+class _ResolvedRoles:
+    """Everything a declared role decides, resolved once per request."""
 
-    One reader for three callers: the storage replays want it per village
-    (their stores are keyed that way), the allocation layer wants it per
-    resource beside ``supplements``, and the night derivation nets it off
-    ``NightVillage.production``. Built from the same config every time, so they
-    cannot disagree about what the operator typed.
+    of_village: dict[int, Role]
+    """Which role each village that declared one has. Villages absent from this
+    are the whole of today's accounts and every rule below leaves them alone."""
 
-    Crop never appears here -- ``VillageConfig`` refuses it, because
-    ``crop_per_hour`` is already net of upkeep.
+    allocations: dict[Resource, dict[int, AllocationInput]]
+    """The request's own allocations with each role's template filled in where
+    the village said nothing. What the optimizer is actually given."""
+
+    consumption: dict[int, dict[Resource, float]]
+    """What each village spends per hour, village-major: its own figures over
+    its role's, per resource. Crop never appears -- both schemas refuse it,
+    because ``crop_per_hour`` is already net of upkeep."""
+
+    may_relay: dict[int, bool | None]
+    """Per village, the template's override; ``None`` leaves the role's own
+    answer to :func:`~services.distribution.roles.default_may_relay`."""
+
+    crop_negative_by_design: frozenset[int]
+    """Villages whose granary countdown is a NOTE rather than a CRITICAL."""
+
+    deviations: list[RoleDeviationResponse]
+    """Cells where an explicit allocation overrode a template."""
+
+
+def _resolve_roles(body: PlanRequest) -> _ResolvedRoles:
+    """Apply the role templates to the villages that declared a role.
+
+    ONE reader for all four planning paths, and the only place the merge rule
+    lives. `/plan`, `/day-check` and `/execute` reach it through
+    ``_plan_account``; `/night-profile` calls it itself, because it does not
+    share ``_plan_account`` -- which is precisely how it came to ignore a
+    declared spend (R3-D2). Pure, cheap and idempotent, so a caller that needs
+    two of the six fields asks twice rather than threading a tuple around.
+
+    The merge is per RESOURCE and the village wins. Overriding a defensive
+    village's lumber must not revert its clay and iron to whatever it produces,
+    and taking it out of the role to change one number would lose it the relay
+    rule and the designed-deficit reading along with the other three figures.
+    An explicit KEEP counts as a statement, because in this module KEEP means
+    "hold your own production" and that is a different answer from the
+    template's -- so it overrides, and is reported as the deviation it is.
+
+    Consumption merges the same way and separately: a village may state its own
+    spend for one resource and take the rest of its role's.
+
+    A role naming a template that is not in ``roles`` is refused (422), not
+    ignored. Ignored, four defensive villages revert to keeping their own
+    production -- a tenth of what they need -- and the plan reads as feasible.
     """
-    out: dict[int, dict[Resource, float]] = {}
-    for cfg in config:
+    names = {v.village_id: v.name for v in body.snapshot if v.name}
+    own_ids = {v.village_id for v in body.snapshot}
+    of_village: dict[int, Role] = {}
+    undeclared: list[tuple[int, Role]] = []
+    unknown: list[int] = []
+    for cfg in body.config:
+        if cfg.role is None:
+            continue
+        if cfg.village_id not in own_ids:
+            unknown.append(cfg.village_id)
+            continue
+        if cfg.role not in body.roles:
+            undeclared.append((cfg.village_id, cfg.role))
+            continue
+        of_village[cfg.village_id] = cfg.role
+    if unknown:
+        # The same refusal `ship_only_to` and `consumption_per_hour` get, and
+        # needed in its own right: a role carrying no spend would otherwise slip
+        # past their checks entirely, and a chiefed village still holding a role
+        # means the profile the operator is reading names a village the plan
+        # does not contain.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "a role was declared for "
+                + ", ".join(f"village {vid}" for vid in sorted(unknown))
+                + ", which the snapshot does not contain. Clear the role, or fetch "
+                "fresh state if the village was settled after the snapshot."
+            ),
+        )
+    if undeclared:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "no role template was sent for "
+                + ", ".join(
+                    f"{village_label(vid, names)} (role {role.value})" for vid, role in undeclared
+                )
+                + ". A role decides that village's targets, its spend and whether it "
+                "may relay, so planning without the template would plan a different "
+                "account -- add the template, or clear the role."
+            ),
+        )
+
+    allocations: dict[Resource, dict[int, AllocationInput]] = {
+        resource: dict(per_village) for resource, per_village in body.allocations.items()
+    }
+    consumption: dict[int, dict[Resource, float]] = {}
+    deviations: list[RoleDeviationResponse] = []
+    for vid, role in sorted(of_village.items()):
+        template = body.roles[role]
+        for resource, allocation in template.allocations.items():
+            stated = allocations.get(resource, {}).get(vid)
+            if stated is None:
+                allocations.setdefault(resource, {})[vid] = allocation
+                continue
+            if stated != allocation:
+                deviations.append(
+                    RoleDeviationResponse(
+                        village_id=vid,
+                        village_name=village_label(vid, names),
+                        role=role,
+                        resource=resource,
+                        template_allocation=allocation,
+                        village_allocation=stated,
+                    )
+                )
+        if template.consumption:
+            consumption[vid] = {
+                resource: float(rate) for resource, rate in template.consumption.items()
+            }
+    for cfg in body.config:
         if not cfg.consumption_per_hour:
             continue
-        out[cfg.village_id] = {
-            resource: float(amount) for resource, amount in cfg.consumption_per_hour.items()
-        }
-    return out
+        consumption.setdefault(cfg.village_id, {}).update(
+            {resource: float(rate) for resource, rate in cfg.consumption_per_hour.items()}
+        )
+
+    return _ResolvedRoles(
+        of_village=of_village,
+        allocations=allocations,
+        consumption=consumption,
+        may_relay={vid: body.roles[role].may_relay for vid, role in of_village.items()},
+        crop_negative_by_design=frozenset(
+            vid for vid, role in of_village.items() if body.roles[role].crop_negative_by_design
+        ),
+        deviations=deviations,
+    )
 
 
 def _storage_findings(
@@ -1310,7 +1587,13 @@ def _storage_findings(
     # target reads as permanent accumulation, so an army village told to land
     # what it burns is reported as filling up and then as losing target x 24 a
     # day at a cap it never actually reaches.
-    consumption = _declared_consumption(body.config)
+    #
+    # Read through the roles, so a village takes its role's spend where it
+    # states none of its own -- the same figure the allocation layer was given,
+    # from the same resolver, because a replay netting a different spend from
+    # the one the plan was built with reports overflows that plan never had.
+    roles = _resolve_roles(body)
+    consumption = roles.consumption
 
     # Net rate per village per resource AFTER the plan: own production plus what
     # arrives minus what leaves minus what is spent. That is what the store
@@ -1382,7 +1665,14 @@ def _storage_findings(
         consumption=consumption,
     )
     names = {v.village_id: v.name for v in body.snapshot if v.name}
-    return list(storage_findings(statuses, overflows, names=names))
+    return list(
+        storage_findings(
+            statuses,
+            overflows,
+            names=names,
+            crop_negative_by_design=roles.crop_negative_by_design,
+        )
+    )
 
 
 def _budget_legs(
@@ -1682,7 +1972,12 @@ async def post_night_profile(
     # Refused for a village the snapshot does not contain, word for word as
     # `_plan_account` does it: this endpoint answered such a body with a
     # cheerful 200 and a profile that silently ignored the figure.
-    declared_consumption = _declared_consumption(body.config)
+    #
+    # Through the roles for the same reason: the templates carry both halves of
+    # section 2's profile, and this endpoint reads the day RETENTION as well as
+    # the spend, so both have to be resolved before the derivation sees them.
+    roles = _resolve_roles(body)
+    declared_consumption = roles.consumption
     unknown_consumers = sorted(set(declared_consumption) - {v.village_id for v in body.snapshot})
     if unknown_consumers:
         raise HTTPException(
@@ -1731,7 +2026,7 @@ async def post_night_profile(
     # allocations already record.
     hub = None
     for resource in MATERIALS:
-        for vid, alloc in (body.allocations.get(resource) or {}).items():
+        for vid, alloc in (roles.allocations.get(resource) or {}).items():
             if alloc.mode is AllocationMode.REMAINDER:
                 hub = vid
                 break
@@ -1786,7 +2081,7 @@ async def post_night_profile(
         Resource.CROP: "crop_per_hour",
     }
     day_retention: dict[Resource, dict[int, float]] = {}
-    for resource, per in body.allocations.items():
+    for resource, per in roles.allocations.items():
         own_rates = {
             v.village_id: rate
             for v in body.snapshot
@@ -2108,7 +2403,11 @@ async def post_day_check(
         stocks,
         capacities,
         body.crop_ceilings,
-        consumption=_declared_consumption(body.config),
+        # Role templates resolved, exactly as each segment's own plan resolved
+        # them: the composite replay and the per-profile plans have to be given
+        # the same spend, or the day view contradicts the plan view it is built
+        # from.
+        consumption=_resolve_roles(body).consumption,
     )
 
     for breach in sorted(breaches, key=lambda b: (b.day, b.minute)):
@@ -2199,6 +2498,12 @@ class _PlannedAccount:
     busy merchants, unfunded tributes. Named for what it is, because a bare
     `findings` reads like the whole list and is not."""
 
+    role_deviations: list[RoleDeviationResponse] = field(default_factory=list)
+    """Cells where an explicit per-village allocation overrode its role's
+    template. Legitimate and deliberately not a finding -- one of four
+    defensive villages always has a wall going up -- but it must not be
+    invisible, so the plan hands the page the cell and both figures."""
+
     dropped_allocations: list[str] = field(default_factory=list)
     """Human-readable descriptions of explicit allocations that were IGNORED
     because the village's rate could not be read. A dry run or /plan shows them
@@ -2242,6 +2547,21 @@ async def _plan_account(
     # Warnings are read by a person: name villages the way they do, never by id.
     names = {v.village_id: v.name for v in body.snapshot if v.name}
     trade_office = {c.village_id: c.trade_office_level for c in body.config}
+    # Checked before the roles are resolved, so an empty snapshot is reported as
+    # the empty snapshot it is rather than as a role naming a village that is
+    # not in it. Every snapshot entry becomes a village state below, so this is
+    # the same condition the check on `villages` used to make.
+    if not body.snapshot:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Snapshot is empty — fetch account state first.",
+        )
+    # Profile section 1: what each village is FOR, and the template that goes
+    # with it. Resolved once, here, because the role decides three separate
+    # things and they must all read the same answer -- the targets and spend
+    # handed to the allocation layer, whether the optimizer may relay through
+    # the village, and how loud its designed crop deficit is.
+    roles = _resolve_roles(body)
     villages = {
         v.village_id: VillageState(
             village_id=v.village_id,
@@ -2250,18 +2570,17 @@ async def _plan_account(
             merchant_count=v.merchants_total,
             trade_office_level=trade_office.get(v.village_id, 0),
             name=v.name,
-            # Carried so relay can refuse a hub that is losing crop. Passed
-            # through as-is, None included: an unreadable rate must not be
-            # rounded to a safe-looking zero.
+            # Carried so relay can refuse a hub that is losing crop, WHERE
+            # nothing was declared. Passed through as-is, None included: an
+            # unreadable rate must not be rounded to a safe-looking zero.
             crop_per_hour=v.crop_per_hour,
+            # And the declaration that supersedes it (section 5.9). `None` for
+            # a village with no role is the whole of today's behaviour.
+            role=roles.of_village.get(v.village_id),
+            may_relay=roles.may_relay.get(v.village_id),
         )
         for v in body.snapshot
     }
-    if not villages:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Snapshot is empty — fetch account state first.",
-        )
 
     # Foreign tributes join the plan as crop SINKS. Negative ids keep them
     # clearly apart from real villages (which are always positive) so a target
@@ -2404,7 +2723,11 @@ async def _plan_account(
     # ship_only_to is: a figure attached to an id that is not being planned is a
     # typo or a chiefed village, and either way the operator's declared spend is
     # not reaching the plan they are reading.
-    declared_consumption = _declared_consumption(body.config)
+    #
+    # Role templates are already folded in (see `_resolve_roles`): a village
+    # takes its role's spend for every resource it does not state itself, so
+    # section 2's four defensive figures are typed once.
+    declared_consumption = roles.consumption
     unknown_consumers = sorted(set(declared_consumption) - own_ids)
     if unknown_consumers:
         raise HTTPException(
@@ -2513,7 +2836,11 @@ async def _plan_account(
                 for vid, item in per_village.items()
                 if item.mode is not AllocationMode.KEEP
             }
-            for resource, per_village in body.allocations.items()
+            # The RESOLVED set: each role's template filled in wherever the
+            # village named no target of its own, so section 2.1's one profile
+            # reaches all four of its villages. An explicit entry is left exactly
+            # as it was and reported as a deviation instead.
+            for resource, per_village in roles.allocations.items()
         }
         if foreign_ids:
             # The tribute is a fixed retention target at the sink: it must end up
@@ -2809,6 +3136,7 @@ async def _plan_account(
         foreign_ids=foreign_ids,
         config=config,
         extra_findings=extra_findings,
+        role_deviations=roles.deviations,
         dropped_allocations=dropped_allocations,
     )
 
@@ -2918,6 +3246,7 @@ async def post_plan(
             )
             for relay in plan.relays
         ],
+        role_deviations=account.role_deviations,
         village_nets=[
             VillageNetResponse(
                 village_id=v.village_id,
