@@ -56,7 +56,7 @@ export default function SetupStorage({
         <button
           type="button"
           className="btn-primary btn-sm"
-          disabled={busy}
+          disabled={Boolean(busy)}
           onClick={onSave}
         >
           {busy === 'saving' ? 'Saving…' : 'Save setup to server'}
@@ -68,7 +68,7 @@ export default function SetupStorage({
           // state is still offered: the probe may have failed for a reason
           // that has since gone away, and refusing the button would leave the
           // operator with no way to find out.
-          disabled={busy || status.state === 'none'}
+          disabled={Boolean(busy) || status.state === 'none'}
           onClick={onLoad}
         >
           {busy === 'loading' ? 'Loading…' : 'Load setup from server'}
@@ -76,7 +76,7 @@ export default function SetupStorage({
         <button
           type="button"
           className="btn-secondary btn-sm"
-          disabled={busy || status.state === 'none'}
+          disabled={Boolean(busy) || status.state === 'none'}
           onClick={onForget}
         >
           {busy === 'forgetting' ? 'Forgetting…' : 'Forget the saved setup'}

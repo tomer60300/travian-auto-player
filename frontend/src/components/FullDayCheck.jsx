@@ -263,9 +263,11 @@ function FillSection({ title, threshold, rows, direction, clear, explain }) {
                     {RESOURCE_LABEL[row.resource] ?? row.resource} · {row.store}
                   </span>
                 </span>
-                <span className={`font-mono shrink-0 ${direction === 'below' ? 'text-warning' : 'text-warning'}`}>
-                  {pct(row.fill)}
-                </span>
+                {/* Both directions are a warning and neither is a failure:
+                    a store below the morning floor is a plan that under-
+                    delivered, and one above the night baseline is a manual
+                    spend-down the operator has not done yet. */}
+                <span className="font-mono shrink-0 text-warning">{pct(row.fill)}</span>
               </div>
               <FillBar fill={row.fill} threshold={threshold} direction={direction} />
               <div className="text-secondary text-[11px] font-mono">
