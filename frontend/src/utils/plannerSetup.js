@@ -364,6 +364,58 @@ export function stripStoredCropSpends(stored) {
   return { consumption, droppedFrom }
 }
 
+/** Rehydrate the stored roles and templates, and say what was dropped.
+ *
+ * The same shape and the same discipline as `stripStoredCropSpends`: a role
+ * outside the five HAS to go, because the backend answers an unknown one with a
+ * 422 and a stale name from a future build would refuse every plan over a value
+ * the selector cannot show. What was missing was the RECEIPT.
+ *
+ * The consequence is larger than the crop spend's. A dropped role takes that
+ * village's targets AND its spend with it -- section 2.1's one profile stands
+ * in for four defensive villages, so the plan silently reads them as keeping
+ * their own production, a tenth of what they need, and calls it feasible. The
+ * file-import path raises a loud `SetupFileError` for the very same name.
+ *
+ * A template for a role no village claims is NOT dropped: that is a file being
+ * complete, and the backend accepts it. Only a key outside the five goes, and
+ * it is reported under its own heading -- a template lost while its villages
+ * keep their role is the case where the next plan is refused rather than
+ * quietly wrong, which is a different sentence for the operator to read.
+ *
+ * The note clears itself on the next hydration, because the stripped maps are
+ * what get saved back.
+ */
+export function stripUnknownRoles(storedRoles, storedTemplates) {
+  const villageRoles = {}
+  const templates = {}
+  const droppedFrom = []
+  const droppedNames = new Set()
+  const droppedTemplates = new Set()
+  if (storedRoles && typeof storedRoles === 'object') {
+    for (const [villageId, role] of Object.entries(storedRoles)) {
+      if (VILLAGE_ROLES.includes(role)) villageRoles[villageId] = role
+      else {
+        droppedFrom.push(villageId)
+        droppedNames.add(String(role))
+      }
+    }
+  }
+  if (storedTemplates && typeof storedTemplates === 'object') {
+    for (const [role, template] of Object.entries(storedTemplates)) {
+      if (VILLAGE_ROLES.includes(role)) templates[role] = template
+      else droppedTemplates.add(role)
+    }
+  }
+  return {
+    villageRoles,
+    templates,
+    droppedFrom,
+    droppedNames: [...droppedNames].sort(),
+    droppedTemplates: [...droppedTemplates].sort(),
+  }
+}
+
 /** The collapsed summary of one village's spend, for the setup table's cell.
  *
  * What it says, not how many fields it has. Materials only: crop cannot be

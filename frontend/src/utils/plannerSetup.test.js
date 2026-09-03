@@ -22,6 +22,7 @@ import {
   setupFilename,
   setupMatchesAccount,
   stripStoredCropSpends,
+  stripUnknownRoles,
 } from './plannerSetup'
 import { withEditedAllocation } from './plannerAllocation'
 
@@ -1756,5 +1757,61 @@ describe('describeSpendSource', () => {
     // using.
     expect(describeSpendSource({ fromRole: [], overridden: [] }, undefined)).toBeNull()
     expect(describeSpendSource({ fromRole: [], overridden: ['lumber'] }, 'def')).toBeNull()
+  })
+})
+
+describe('stripUnknownRoles', () => {
+  it('drops a role outside the five and says which villages lost one', () => {
+    // The receipt `stripStoredCropSpends` already gives, for a larger
+    // consequence: a dropped role takes that village's targets AND its spend,
+    // so four defensive villages silently revert to keeping their own
+    // production -- a tenth of what they need -- and the plan reads feasible.
+    const stripped = stripUnknownRoles(
+      { 20011: 'def', 20013: 'hammer', 20017: 'hammer' },
+      { def: { allocations: {} } }
+    )
+
+    expect(stripped.villageRoles).toEqual({ 20011: 'def' })
+    expect(stripped.droppedFrom).toEqual(['20013', '20017'])
+    expect(stripped.droppedNames).toEqual(['hammer'])
+  })
+
+  it('drops a template keyed by a name that is not one of the five', () => {
+    const stripped = stripUnknownRoles({}, { def: { allocations: {} }, hammer: {} })
+
+    expect(Object.keys(stripped.templates)).toEqual(['def'])
+    expect(stripped.droppedTemplates).toEqual(['hammer'])
+  })
+
+  it('keeps a template no village claims', () => {
+    // A file being complete, not an error -- the backend accepts it.
+    const stripped = stripUnknownRoles({}, { capital: { allocations: {} } })
+
+    expect(stripped.templates).toEqual({ capital: { allocations: {} } })
+    expect(stripped.droppedTemplates).toEqual([])
+  })
+
+  it('reports each unknown name once however many villages carried it', () => {
+    const stripped = stripUnknownRoles({ 1: 'hammer', 2: 'hammer', 3: 'sitter' }, {})
+
+    expect(stripped.droppedNames).toEqual(['hammer', 'sitter'])
+    expect(stripped.droppedFrom).toHaveLength(3)
+  })
+
+  it('reports nothing for state this build wrote', () => {
+    const stripped = stripUnknownRoles({ 20011: 'def' }, { def: {} })
+
+    expect(stripped.droppedFrom).toEqual([])
+    expect(stripped.droppedNames).toEqual([])
+    expect(stripped.droppedTemplates).toEqual([])
+  })
+
+  it('survives absent or malformed storage', () => {
+    for (const bad of [null, undefined, 'nonsense', 42]) {
+      const stripped = stripUnknownRoles(bad, bad)
+      expect(stripped.villageRoles).toEqual({})
+      expect(stripped.templates).toEqual({})
+      expect(stripped.droppedFrom).toEqual([])
+    }
   })
 })

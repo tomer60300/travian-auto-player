@@ -26,6 +26,7 @@ import {
   setupFilename,
   setupMatchesAccount,
   stripStoredCropSpends,
+  stripUnknownRoles,
 } from '../utils/plannerSetup'
 import {
   METER_TONE,
@@ -534,6 +535,12 @@ export default function ResourcePlanner() {
   // once: the stripped map is what gets saved back, so the next hydration has
   // nothing to strip.
   const [cropSpendsDropped, setCropSpendsDropped] = useState([])
+  // The same receipt for a role or a template key outside the five, dropped on
+  // the way in for the same reason (the backend 422s an unknown role) and with
+  // a larger consequence: a dropped role takes four villages' targets and their
+  // spend, and the plan then reads them as keeping their own production without
+  // saying so. Reported once -- the stripped maps are what get saved back.
+  const [rolesDropped, setRolesDropped] = useState(null)
   const [pasteOpen, setPasteOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
   const setupFileRef = useRef(null)
@@ -691,6 +698,7 @@ export default function ResourcePlanner() {
       // against, so it cannot outlive that account.
       setSetupReport(null)
       setCropSpendsDropped([])
+      setRolesDropped(null)
       setHydratedKey(null)
       return
     }
@@ -710,20 +718,18 @@ export default function ResourcePlanner() {
     // crop spend is: the backend answers an unknown role with a 422, so a
     // stale one from a future build would 422 every plan over a value the
     // selector cannot show.
-    setVillageRoles(
-      Object.fromEntries(
-        Object.entries(loadJson(`${LS_VILLAGE_ROLES}::${accountKey}`, {})).filter(([, role]) =>
-          VILLAGE_ROLES.includes(role)
-        )
-      )
+    //
+    // And said out loud, on the same standard and for a larger consequence: a
+    // dropped role takes that village's targets AND its spend, so four
+    // defensive villages silently revert to keeping their own production --
+    // a tenth of what they need -- while the plan reads feasible.
+    const roles = stripUnknownRoles(
+      loadJson(`${LS_VILLAGE_ROLES}::${accountKey}`, {}),
+      loadJson(`${LS_ROLE_TEMPLATES}::${accountKey}`, {})
     )
-    setRoleTemplates(
-      Object.fromEntries(
-        Object.entries(loadJson(`${LS_ROLE_TEMPLATES}::${accountKey}`, {})).filter(([role]) =>
-          VILLAGE_ROLES.includes(role)
-        )
-      )
-    )
+    setVillageRoles(roles.villageRoles)
+    setRoleTemplates(roles.templates)
+    setRolesDropped(roles)
     // Crop is dropped on the way in. An earlier build let one be typed, and
     // the input no longer shows a crop box -- so a stored crop figure could be
     // neither seen nor cleared while still riding along on every request and
@@ -2590,6 +2596,34 @@ export default function ResourcePlanner() {
               upkeep. Set what {cropSpendsDropped.length > 1 ? 'they should' : 'it should'} keep
               with its crop allocation instead; an overflow that figure was hiding will show up
               on the next plan.
+            </div>
+          )}
+
+          {/* The same receipt for a stored role or template key outside the
+              five. Two sentences rather than one, because the two drops leave
+              the account in different states: a village that lost its role
+              plans QUIETLY WRONG (it reverts to keeping its own production),
+              while a village that kept its role and lost its template is
+              REFUSED by the backend until one is typed. `role="status"`, like
+              the crop note: nothing is broken, and it is history by the time
+              it is read. */}
+          {rolesDropped && rolesDropped.droppedFrom.length > 0 && (
+            <div className="mb-3 text-xs text-warning" role="status">
+              A saved role ({rolesDropped.droppedNames.join(', ')}) is not one of this
+              build&rsquo;s five and was dropped for{' '}
+              {namesForVillageIds(rolesDropped.droppedFrom.map(Number), villages)} — the backend
+              refuses an unknown role, so it would have failed every plan. Set{' '}
+              {rolesDropped.droppedFrom.length > 1 ? 'their roles' : 'its role'} again in the
+              table below; until then {rolesDropped.droppedFrom.length > 1 ? 'they keep' : 'it keeps'}{' '}
+              only its own production, with no template targets and no spend.
+            </div>
+          )}
+          {rolesDropped && rolesDropped.droppedTemplates.length > 0 && (
+            <div className="mb-3 text-xs text-warning" role="status">
+              A saved role template ({rolesDropped.droppedTemplates.join(', ')}) is not one of
+              this build&rsquo;s five roles and was dropped. Any village still holding that role
+              has no profile, and the plan will refuse it rather than read the village as keeping
+              its own production.
             </div>
           )}
 
