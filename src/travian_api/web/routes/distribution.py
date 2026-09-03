@@ -2598,6 +2598,7 @@ async def _plan_account(
             key=lambda r: r.origin,
         ):
             label = village_label(row.origin, names)
+            merchants = f"{row.merchants} merchant{'' if row.merchants == 1 else 's'}"
             extra_findings.append(
                 Finding(
                     category=Category.WHITELIST_VS_TRIBUTE,
@@ -2605,10 +2606,10 @@ async def _plan_account(
                         f"{label} is restricted by ship_only_to, but the plan still "
                         f"supplies the tribute {target.name} ({target.x}|{target.y}) from "
                         f"it -- {row.one_way_minutes / 60.0:.1f}h each way on "
-                        f"{row.merchants} merchants. A whitelist covers own villages "
+                        f"{merchants}. A whitelist covers own villages "
                         f"only; put {label} in that target's exclude_origins to keep it off"
                     ),
-                    detail=f"{label} -> {target.name} — {row.merchants} merchants",
+                    detail=f"{label} -> {target.name} — {merchants}",
                     village=label,
                     resource=Resource.CROP,
                 )

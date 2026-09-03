@@ -377,8 +377,12 @@ _SPECS: Mapping[Category, _Spec] = {
     Category.WHITELIST_VS_TRIBUTE: _Spec(
         order=18.5,
         severity=Severity.WARNING,
-        subject="tribute",
-        headline="{count} {subject} are supplied from a village restricted by ship_only_to",
+        # The HAUL, not the tribute: one finding is emitted per (origin, target)
+        # row, so two restricted origins feeding ONE tribute counted as "2
+        # tributes" and sent the operator looking for a second target that does
+        # not exist. What there are two of is expensive hauls.
+        subject="haul",
+        headline="{count} {subject} leave a village restricted by ship_only_to for a tribute",
         action=(
             "`ship_only_to` restricts a village's OWN destinations only -- a foreign "
             "target is governed by its own `exclude_origins`, so no whitelist can stop "

@@ -114,6 +114,32 @@ class TestAggregation:
         assert group.headline == lone.message
         assert "1 village" not in group.headline
 
+    def test_two_restricted_hauls_to_one_tribute_do_not_read_as_two_tributes(self):
+        """One finding is emitted per (origin, tribute) row, so the subject has
+        to be the haul.
+
+        With "tribute" as the subject, N restricted origins feeding the SAME
+        target announced N tributes -- sending the operator to look through the
+        foreign-target list for a second obligation that is not there. What
+        there are two of is expensive hauls out of one restricted village each.
+        """
+        group = summarise(
+            [
+                Finding(
+                    category=Category.WHITELIST_VS_TRIBUTE,
+                    message=f"{origin} is restricted by ship_only_to, but ... Ally-Keep ...",
+                    detail=f"{origin} -> Ally-Keep — 4 merchants",
+                    village=origin,
+                    resource=Resource.CROP,
+                )
+                for origin in ("03", "11")
+            ]
+        ).groups[0]
+
+        assert group.count == 2
+        assert "2 hauls" in group.headline, group.headline
+        assert "tributes" not in group.headline, group.headline
+
     def test_different_resources_do_not_merge(self):
         """Clay and crop have different fixes and wildly different costs."""
         result = summarise(

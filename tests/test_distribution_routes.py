@@ -1113,6 +1113,30 @@ class TestShipOnlyTo:
         assert "Ally-Keep" in flagged[0].message
         assert "03" in flagged[0].message, "the restricted origin must be named"
 
+    def test_a_one_merchant_haul_is_not_reported_as_one_merchants(self):
+        """This finding is the operator's only sight of a rule the village picker
+        cannot show them, and the canonical case is a single merchant.
+
+        Asserted on both the message and the detail, because the detail is what
+        the grouped headline quotes as "worst: ...".
+        """
+        body = _plan_request(
+            {"crop": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}},
+            crop=3000.0,
+        )
+        body.foreign_targets = [
+            ForeignTarget(name="Ally-Keep", x=40, y=40, crop_per_hour=500.0, route_eligible=True)
+        ]
+        body.config = [VillageConfig(village_id=20003, ship_only_to=[])]
+
+        res = asyncio.run(post_plan(body))
+
+        flagged = _findings(res, "whitelist_vs_tribute")
+        assert len(flagged) == 1
+        assert [row.merchants for row in res.rows if row.destination < 0] == [1]
+        assert "on 1 merchant." in flagged[0].message, flagged[0].message
+        assert flagged[0].detail.endswith("1 merchant"), flagged[0].detail
+
     def test_an_unrestricted_village_feeding_a_tribute_is_not_reported(self):
         """No whitelist, nothing surprising -- and a finding raised on every
         tribute would be noise in a list the operator already stopped reading
