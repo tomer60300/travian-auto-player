@@ -823,8 +823,15 @@ export default function ResourcePlanner() {
   // The two numbers the account cannot supply: how empty the stores actually
   // are at bedtime, and how full they may be at dawn. Everything else the
   // derivation needs it works out for itself.
-  const [baselineFill, setBaselineFill] = useState(30)
-  const [targetFill, setTargetFill] = useState(80)
+  // Section 6's figures, and the same pair the server measures against
+  // (`DEFAULT_BASELINE_FILL` 0.25 / `DEFAULT_TARGET_FILL` 0.60): the operator
+  // spends role villages down to 25% at the day->night switch, and every one of
+  // them must be at 60% on both stores by 07:00. These were 30/80, which made
+  // the derivation aim at one pair while the full-day check graded against the
+  // other -- a night that does not exist. The disagreement note below stays,
+  // because it still earns its place the moment either box is edited.
+  const [baselineFill, setBaselineFill] = useState(25)
+  const [targetFill, setTargetFill] = useState(60)
   const [deriving, setDeriving] = useState(false)
   const [derived, setDerived] = useState(null)
   // Destinations the reconciler must leave alone. Its rule -- active,
