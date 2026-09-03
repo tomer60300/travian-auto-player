@@ -1,4 +1,56 @@
+/** The distribution planner, staged.
+ *
+ * ─── The information architecture, and why it is this one ──────────────────
+ *
+ * The organising idea: **each stage answers exactly one question, and the
+ * questions are in the order a plan is actually assembled.** Nothing is grouped
+ * by which endpoint it talks to or by what kind of widget it is.
+ *
+ *   1. **Account** — *what the game says, plus what only you can say about each
+ *      village.* The snapshot's facts, and the owned columns beside them: role,
+ *      Trade Office, merchant cap, shipping whitelist, relay tier, stock floor,
+ *      NPC feedstock, consumption. One row per village, because every one of
+ *      those is a fact about THAT village. Setup storage lives here too — this
+ *      is the stage whose contents are hand-typed and therefore the stage worth
+ *      saving.
+ *   2. **Roles** — *what each KIND of village is for.* Section 2.1 gives one
+ *      consumption profile for four defensive villages, so the profile is typed
+ *      once. Promoted out of a collapsed disclosure inside Allocate: a village's
+ *      targets are resolved FROM its role, so the role's figures cannot be a
+ *      footnote to the grid that displays their consequences.
+ *   3. **Targets** — *what each village must end up holding per hour.* The
+ *      per-resource editor, the by-village result, and the night derivation that
+ *      fills them in.
+ *   4. **Day & night** — *the whole day, window by window.* Which hours each
+ *      profile owns, **who is at the marketplace during them** (section 7), the
+ *      25%/60% state pair at the two switches (section 6), and the composite
+ *      replay that answers what one profile leaves the next.
+ *   5. **Plan** — *what it will do, and the record of it.* The sheet, the
+ *      merchant budget, what section 7's balancing came to, the findings, then
+ *      confirm-then-export (section 10) and execution.
+ *
+ * Three things had no home before, and each one has exactly one now, which is
+ * the test the staging was designed against:
+ *
+ *   * **`npc_attended`** is a property of a WINDOW, not of a village and not of
+ *     the account — so it belongs on stage 4 beside the hours, and nowhere else.
+ *     It was previously unaskable, and the plan came back 422.
+ *   * **The 25%/60% pair** describes the state of the stores at the two
+ *     switches. It is stage 4 for the same reason.
+ *   * **The confirmed plan's digest** is the identity of one plan, so the export
+ *     that demands it back sits with the plan it identifies, on stage 5.
+ *
+ * What deliberately did NOT move: the profile selector and the active profile's
+ * hours stay in the global bar above the stage nav, because they scope every
+ * stage below it — the sheet on stage 5 is the sheet for one profile, and the
+ * operator has to be able to see and change which one without leaving it. The
+ * attendance ANSWER is edited on stage 4 only, and the bar carries a badge that
+ * states it in words and jumps there; one editor, one indicator.
+ */
+
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import DayNightPanel from '../components/DayNightPanel'
+import FullDayCheck from '../components/FullDayCheck'
 import PlanDiagnostics from '../components/PlanDiagnostics'
 import RoleTemplates from '../components/RoleTemplates'
 import ScrollableTable from '../components/ScrollableTable'
@@ -43,6 +95,19 @@ import {
   villageNetIndex,
   withEditedAllocation,
 } from '../utils/plannerAllocation'
+import {
+  MINUTES_IN_DAY,
+  dispatchWindowFor,
+  windowDayShare,
+} from '../utils/plannerClock'
+import {
+  attendanceFor,
+  attendanceMapOnly,
+  attendanceRequired as npcAttendanceRequired,
+  describeAttendance,
+  npcAttendedField,
+  unansweredAttendance,
+} from '../utils/plannerNpc'
 import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from '../utils/villageRefs'
 import { planStatus, relayLegIndex } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
@@ -87,7 +152,6 @@ const MAX_ROUTES_PER_RUN = 3
 // chunk of five at roughly 40-70 seconds — comfortably inside one request, which
 // is the whole reason the sweep is chunked at all.
 const SWEEP_VILLAGES_PER_CHUNK = 5
-const MINUTES_IN_DAY = 1440
 // Travian's repeat interval is a closed set of the divisors of 24. Offering
 // anything else would plan a cadence the create payload cannot express.
 const TRAVIAN_REPEAT_INTERVALS = [1, 2, 3, 4, 6, 8, 12, 24]
@@ -167,10 +231,18 @@ const LS_ROLE_TEMPLATES = 'planner_role_templates'
 // Sensible defaults by convention; anything else starts unset until the
 // operator gives it hours.
 const DEFAULT_WINDOWS = { Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] }
-const hhmmToMinutes = (t) => {
-  const [h, m] = String(t).split(':').map(Number)
-  return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null
-}
+// Who is at the marketplace during each profile's hours: { [profile]: boolean }.
+// Section 7's `npc_attended`, and the one answer this page could not give at
+// all -- a stock floor plus a day/night profile came back 422 with no control
+// on screen to fix it. Kept per PROFILE because it is a property of a window:
+// this operator is awake for the day and asleep through the night, so the two
+// profiles carry opposite answers and neither is a default.
+//
+// NOT in the setup document, and that is a real gap rather than a decision:
+// the document has no field for it, and adding one means a version bump the
+// server has to read too. Until then it does not follow the operator between
+// origins the way the hours beside it do.
+const LS_NPC_ATTENDED = 'planner_npc_attended'
 
 // Only complete rows go to the backend: a half-typed target would 422 the
 // whole request, and the operator is mid-edit, not in error. Shared by the
@@ -522,6 +594,13 @@ export default function ResourcePlanner() {
   // profiles are separate plans, but the account lives through all of them
   // every day -- the windows are what lets the full-day check line them up.
   const [profileWindows, setProfileWindows] = useState({})
+  // Section 7's `npc_attended`, per profile. Three states, and the third is
+  // load-bearing: absent means UNANSWERED, which is neither true nor false --
+  // a guessed true funds night routes out of trading nobody is doing, and a
+  // guessed false withdraws the day's allowance and reports shortfalls the
+  // account does not have. The plan is refused until every profile with hours
+  // says, and the Day & night stage is where it says it.
+  const [profileAttendance, setProfileAttendance] = useState({})
   // Operator alert level for a village's crop stock (e.g. an NPC trigger),
   // below capacity. Cached per account like the Trade Office levels.
   const [cropCeilings, setCropCeilings] = useState({})
@@ -759,6 +838,7 @@ export default function ResourcePlanner() {
       setVillageRoles({})
       setRoleTemplates({})
       setProfiles({ [DEFAULT_PROFILE]: {} })
+      setProfileAttendance({})
       setForeignTargets([])
       setMayRelay({})
       setMaxBusy({})
@@ -783,6 +863,11 @@ export default function ResourcePlanner() {
     setTradeOffice(loadJson(`${LS_TRADE_OFFICE}::${accountKey}`, {}))
     setForeignTargets(loadJson(`${LS_FOREIGN}::${accountKey}`, []))
     setProfileWindows(loadJson(`${LS_WINDOWS}::${accountKey}`, {}))
+    // Filtered to real booleans on the way in, the same discipline `mayRelay`
+    // takes and for the same reason: this map goes straight into the request,
+    // and the backend's lax `bool` would read a stored "yes" from a
+    // hand-edited origin as an attendance nobody declared.
+    setProfileAttendance(attendanceMapOnly(loadJson(`${LS_NPC_ATTENDED}::${accountKey}`, {})))
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
     setRelayFor(loadJson(`${LS_RELAY_FOR}::${accountKey}`, {}))
@@ -845,6 +930,10 @@ export default function ResourcePlanner() {
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey) saveJson(storageKey(LS_WINDOWS), profileWindows)
   }, [profileWindows, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_NPC_ATTENDED), profileAttendance)
+  }, [profileAttendance, hydratedKey, accountKey, storageKey])
   // A day-check result is a pure function of these inputs; the moment any of
   // them changes it describes a day that will never happen. Without this, the
   // green all-clear banner could sit on screen after the operator changed
@@ -877,6 +966,9 @@ export default function ResourcePlanner() {
     mayRelay,
     roleTemplates,
     merchantModel,
+    // Section 7's attendance decides whether a segment's NPC allowance exists
+    // at all, so a day computed with the night marked awake is a different day.
+    profileAttendance,
   ])
   // Same rule for the route sheet, with higher stakes: its rows are copied
   // field by field into the game's trade-route dialog. A sheet computed from
@@ -905,6 +997,18 @@ export default function ResourcePlanner() {
     // the sheet is on screen -- so without these the operator reads "Send at
     // 08:20", moves the window, and the sheet still says 08:20 while a live
     // run would create the route at a different hour.
+    //
+    // profileAttendance is here because it MOVES CARGO: the active profile's
+    // `npc_attended` rides in the payload, and false zeroes the conversion
+    // allowance -- so a route set built while it said "awake" prescribes
+    // deliveries nothing funds.
+    //
+    // And every one of these sentences is above the array rather than inside
+    // it, which is now a rule and not a habit: `depOrder.js` guards this hook
+    // by TEXT-scanning everything between `}, [` and `]`, comments included, so
+    // any prose in there naming a `const` declared further down the file reads
+    // as a forward reference. A dumb scan cannot silently skip what a clever
+    // regex fails to match, which is exactly why it is dumb.
   }, [
     allocations,
     tradeOffice,
@@ -920,6 +1024,7 @@ export default function ResourcePlanner() {
     snapshot,
     profileWindows,
     activeProfile,
+    profileAttendance,
   ])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
@@ -966,6 +1071,36 @@ export default function ResourcePlanner() {
   // Memoised so it does not become a fresh array on every render, which would
   // re-run the plan callback and the totals memo for no reason.
   const villages = useMemo(() => snapshot?.villages ?? [], [snapshot])
+
+  // ── Section 7: who is trading, and whether anyone has to say ──────────
+  //
+  // Declared HERE, above every callback that reads them, for the reason the
+  // dependency-array comments below give twice over: naming a value declared
+  // further down the component evaluates it in its temporal dead zone, which
+  // has crashed this page into the error boundary twice.
+  //
+  // The backend's own predicate for "an answer is required" is a
+  // `stock_floor_fraction` above zero on any village, so it is imported rather
+  // than restated -- one rule, checked on the cell that sets it and on the
+  // button that sends it.
+  const attendanceIsRequired = useMemo(() => npcAttendanceRequired(stockFloors), [stockFloors])
+  const profilesWithHours = useMemo(
+    () =>
+      Object.keys(profiles).filter(
+        (name) => dispatchWindowFor(profileWindows[name] ?? DEFAULT_WINDOWS[name] ?? null) != null
+      ),
+    [profiles, profileWindows]
+  )
+  // Every profile that owes an answer and has not given one. Empty unless a
+  // floor is declared: an account with no NPC floor is asked nothing.
+  const attendanceOwed = useMemo(
+    () => (attendanceIsRequired ? unansweredAttendance(profilesWithHours, profileAttendance) : []),
+    [attendanceIsRequired, profilesWithHours, profileAttendance]
+  )
+  // The one profile `/plan` and `/night-profile` actually send, which is the
+  // gate a single-window build has to pass. The whole-day paths check the
+  // list above instead, because they send every segment.
+  const activeAttendanceOwed = attendanceOwed.includes(activeProfile)
 
   const fetchSnapshot = async () => {
     // The account can change mid-request (switch/disconnect); a response that
@@ -1284,15 +1419,24 @@ export default function ResourcePlanner() {
     // through windowFor(), which is declared further down: naming it in the
     // dependency array below would evaluate it in its temporal dead zone.
     const hours = profileWindows[activeProfile] ?? DEFAULT_WINDOWS[activeProfile] ?? null
-    const from = hours && hhmmToMinutes(hours[0])
-    const to = hours && hhmmToMinutes(hours[1])
     // A zero-width or unparseable window is sent as null, not as a broken pair:
     // the backend rejects start === end, and an all-day profile needs no phasing.
-    const dispatchWindow = from == null || to == null || from === to ? null : [from, to]
+    // `dispatchWindowFor` collapses all three unusable shapes to null, which is
+    // the reading the request already had -- it just had its own copy of it.
+    const dispatchWindow = dispatchWindowFor(hours)
 
     return {
       snapshot: villages,
       dispatch_window: dispatchWindow,
+      // Section 7, and the field that used to be unsendable: whether the
+      // operator is at the marketplace during THESE hours. Omitted when the
+      // profile runs round the clock (no night hours to mis-fund) and when
+      // nothing has been answered -- `buildPlan` refuses to send in that case,
+      // so the backend's 422 is a backstop rather than the path.
+      ...npcAttendedField({
+        attended: attendanceFor(profileAttendance, activeProfile),
+        hasWindow: dispatchWindow != null,
+      }),
       // Plan-time, not run-time: with pruning the window is genuinely enforced
       // and the escaping firings are a note about a dependency; without it they
       // are a critical over-delivery. /plan must see it to weigh them.
@@ -1395,6 +1539,7 @@ export default function ResourcePlanner() {
     snapshot,
     profileWindows,
     activeProfile,
+    profileAttendance,
     pruneToWindow,
   ])
 
@@ -1413,6 +1558,18 @@ export default function ResourcePlanner() {
       toast.error(
         'Snapshot is stale — fetch fresh state, or tick “plan from this stale snapshot anyway”.'
       )
+      return
+    }
+    // Section 7's attendance, refused here rather than by the backend. The 422
+    // names village ids and a profile the operator cannot see from the button
+    // they pressed; this names the profile and the stage that answers it.
+    if (activeAttendanceOwed) {
+      toast.error(
+        `${activeProfile} runs a window and a village here keeps an NPC-backed stock ` +
+          `floor, so the plan needs to know whether you are trading during those hours. ` +
+          `Answer it under Day & night.`
+      )
+      setStage('day')
       return
     }
     // Guard against the account changing mid-request: a plan built from
@@ -1441,6 +1598,9 @@ export default function ResourcePlanner() {
     // Read by the live freshness guard above.
     snapshotFetchedAt,
     useStaleSnapshot,
+    // Read by the attendance guard above.
+    activeAttendanceOwed,
+    activeProfile,
   ])
 
   // Every profile with hours, as the segment list the backend plans one by
@@ -1455,14 +1615,23 @@ export default function ResourcePlanner() {
     // is no eslint-disable to hide the next mistake behind.
     const segments = []
     const skipped = []
+    const unanswered = []
     for (const name of Object.keys(profiles)) {
       const w = profileWindows[name] ?? DEFAULT_WINDOWS[name] ?? null
-      const start = w && hhmmToMinutes(w[0])
-      const end = w && hhmmToMinutes(w[1])
-      if (start == null || end == null || start === end) {
+      const pair = dispatchWindowFor(w)
+      if (pair == null) {
         skipped.push(name)
         continue
       }
+      const [start, end] = pair
+      // Section 7: on a segmented request attendance is required on EVERY
+      // segment as soon as any village keeps a stock floor, and it is a
+      // property of the segment's hours -- so it is collected here rather
+      // than taken from whichever profile happens to be selected. Named back
+      // to the caller, which refuses to send: a 422 listing village ids does
+      // not lead anyone to the profile that is silent.
+      const attended = attendanceFor(profileAttendance, name)
+      if (attended === null) unanswered.push(name)
       const per = profiles[name] ?? {}
       const sendAllocations = {}
       for (const resource of RESOURCES) {
@@ -1474,10 +1643,19 @@ export default function ResourcePlanner() {
         }
         if (Object.keys(usable).length) sendAllocations[resource] = usable
       }
-      segments.push({ name, window: [start, end], allocations: sendAllocations })
+      segments.push({
+        name,
+        window: [start, end],
+        allocations: sendAllocations,
+        // A segment always carries its answer where there is one. `null` is
+        // omitted rather than sent, because the field's own third state is
+        // what the backend refuses on -- and it refuses naming the villages,
+        // which is why the caller checks `unanswered` first.
+        ...(attended === null ? {} : { npc_attended: attended }),
+      })
     }
-    return { segments, skipped }
-  }, [profiles, profileWindows, villageRoles])
+    return { segments, skipped, unanswered }
+  }, [profiles, profileWindows, villageRoles, profileAttendance])
 
   // Reads the local trace files the app wrote on previous live runs. Costs
   // nothing against the game, so it is safe to call whenever the operator opens
@@ -1547,7 +1725,7 @@ export default function ResourcePlanner() {
   const buildExecutePayload = useCallback(() => {
     const base = buildPlanPayload()
     if (!wholeDay) return base
-    const { segments, skipped } = buildSegments()
+    const { segments, skipped, unanswered } = buildSegments()
     if (!segments.length) {
       throw new Error('No profile has hours set — give each profile its window first')
     }
@@ -1556,9 +1734,24 @@ export default function ResourcePlanner() {
         `Whole-day execution needs hours on every profile — missing: ${skipped.join(', ')}`
       )
     }
-    const { allocations: _a, dispatch_window: _w, ...rest } = base
+    // Thrown rather than sent, and before anything is written: a whole-day run
+    // creates real routes, and a segment with no attendance answer is refused
+    // by the backend naming village ids the operator cannot act on from here.
+    if (attendanceIsRequired && unanswered.length) {
+      throw new Error(
+        `Whole-day execution needs to know who is trading in every window — ` +
+          `${unanswered.join(', ')} has not said. Answer it under Day & night.`
+      )
+    }
+    // Three fields move to the segments, not two. `npc_attended` is the third
+    // and it was the one left behind: the segments each carry their own, and
+    // the per-segment value is what the backend applies -- so a top-level one
+    // is a claim about hours this request no longer has. That is precisely the
+    // shape `/execute` forbids unknown fields over: a parameter that looks
+    // like it says something and is discarded.
+    const { allocations: _a, dispatch_window: _w, npc_attended: _n, ...rest } = base
     return { ...rest, segments, prune_to_window: true }
-  }, [buildPlanPayload, buildSegments, wholeDay])
+  }, [buildPlanPayload, buildSegments, wholeDay, attendanceIsRequired])
 
   // Execute the plan as trade routes. dryRun previews (zero game requests);
   // live requires an explicit confirm and only works once the backend's
@@ -1718,14 +1911,11 @@ export default function ResourcePlanner() {
   // How much of the day the active profile owns. A profile covering most of it
   // is one the operator is awake for, which is exactly when "nothing is spent"
   // stops being true.
-  const profileDayShare = useMemo(() => {
-    const hours = profileWindows[activeProfile] ?? DEFAULT_WINDOWS[activeProfile] ?? null
-    if (!hours) return 1
-    const from = hhmmToMinutes(hours[0])
-    const to = hhmmToMinutes(hours[1])
-    if (from == null || to == null || from === to) return 1
-    return (((to - from) % MINUTES_IN_DAY) + MINUTES_IN_DAY) % MINUTES_IN_DAY / MINUTES_IN_DAY
-  }, [profileWindows, activeProfile])
+  const profileDayShare = useMemo(
+    () =>
+      windowDayShare(profileWindows[activeProfile] ?? DEFAULT_WINDOWS[activeProfile] ?? null) ?? 1,
+    [profileWindows, activeProfile]
+  )
 
   // ── Night profile ───────────────────────────────────────────────────────
   // At night nothing is spent, so everything that arrives stays and the store
@@ -1741,6 +1931,15 @@ export default function ResourcePlanner() {
   // the numbers land in the table they are already looking at. Costs nothing, so
   // it can be redone freely while they settle on a baseline.
   const buildNightProfile = useCallback(async () => {
+    // Same single-window rule as `buildPlan`: `/night-profile` carries the plan
+    // request, so it carries the attendance requirement with it.
+    if (activeAttendanceOwed) {
+      toast.error(
+        `${activeProfile} needs an answer for who is trading before its allowance can ` +
+          `be sized. Answer it under Day & night.`
+      )
+      return
+    }
     setDeriving(true)
     try {
       const res = await api.post('/distribution/night-profile', {
@@ -1773,7 +1972,15 @@ export default function ResourcePlanner() {
     } finally {
       setDeriving(false)
     }
-  }, [buildPlanPayload, baselineFill, targetFill, setAllocations, toast])
+  }, [
+    buildPlanPayload,
+    baselineFill,
+    targetFill,
+    setAllocations,
+    toast,
+    activeAttendanceOwed,
+    activeProfile,
+  ])
 
   // ── Reconciliation sweep ────────────────────────────────────────────────
   // Switching profiles drops some villages as origins entirely, and those are
@@ -2192,9 +2399,19 @@ export default function ResourcePlanner() {
   const runDayCheck = async () => {
     const requestedFor = accountKey
     const requestedRev = dayCheckInputRev.current
-    const { segments, skipped } = buildSegments()
+    const { segments, skipped, unanswered } = buildSegments()
     if (!segments.length) {
       toast.error('No profile has hours set — give each profile its window first')
+      return
+    }
+    // Every segment, not just the selected profile: the backend requires an
+    // answer on each one as soon as a floor is declared, and a day simulated
+    // with the night marked awake is a different day.
+    if (attendanceIsRequired && unanswered.length) {
+      toast.error(
+        `The full day needs to know who is trading in every window — ` +
+          `${unanswered.join(', ')} has not said. Answer it in the table above.`
+      )
       return
     }
     setDayChecking(true)
@@ -2214,6 +2431,12 @@ export default function ResourcePlanner() {
       const {
         allocations: _perProfileAllocations,
         dispatch_window: _perProfileWindow,
+        // And the attendance, for the same reason as the two above it: the
+        // hours live on the segments, so the question about those hours does
+        // too. The backend refuses a top-level window here outright and
+        // ignores a top-level attendance, which is worse -- a field that
+        // reads as an answer and is thrown away.
+        npc_attended: _perProfileAttendance,
         ...planInputs
       } = buildPlanPayload()
       const res = await api.post('/distribution/day-check', {
@@ -2289,6 +2512,17 @@ export default function ResourcePlanner() {
       delete next[activeProfile]
       return next
     })
+    // The attendance answer belongs to the profile, exactly as its hours do,
+    // and orphaning it has the sharper consequence: a future profile reusing
+    // the name would inherit an "awake" nobody declared for it, which is the
+    // one value the field exists to stop being guessed.
+    setProfileAttendance((prev) => {
+      if (!(activeProfile in prev)) return prev
+      const next = { ...prev }
+      next[name] = next[activeProfile]
+      delete next[activeProfile]
+      return next
+    })
     setActiveProfile(name)
   }
 
@@ -2305,6 +2539,12 @@ export default function ResourcePlanner() {
       return next
     })
     setProfileWindows((prev) => {
+      if (!(activeProfile in prev)) return prev
+      const next = { ...prev }
+      delete next[activeProfile]
+      return next
+    })
+    setProfileAttendance((prev) => {
       if (!(activeProfile in prev)) return prev
       const next = { ...prev }
       delete next[activeProfile]
@@ -2341,9 +2581,13 @@ export default function ResourcePlanner() {
     else toast.error('Could not reach the clipboard — select the text and copy it manually')
   }
 
+  // One stage per question, in the order a plan is assembled. See the
+  // information-architecture note at the top of this file for why these five
+  // and not the three they replaced.
   const stages = [
-    { id: 'snapshot', label: 'Snapshot' },
-    { id: 'allocate', label: 'Allocate' },
+    { id: 'snapshot', label: 'Account' },
+    { id: 'allocate', label: 'Targets' },
+    { id: 'day', label: 'Day & night' },
     { id: 'plan', label: 'Plan' },
   ]
 
@@ -2571,6 +2815,26 @@ export default function ResourcePlanner() {
             }
           />
         </span>
+        {/* One editor, one indicator. The answer belongs to a window and is
+            edited on the Day & night stage beside the hours it describes; here
+            it is only stated -- in words, because a badge whose meaning is its
+            colour tells the operator nothing about which half of the day they
+            are looking at. Shown only where it is required, so an account with
+            no NPC floor is not asked a question it does not have. */}
+        {attendanceIsRequired && (
+          <button
+            type="button"
+            className={`text-xs px-2 py-0.5 rounded border pointer-coarse:min-h-11 ${
+              activeAttendanceOwed
+                ? 'border-warning text-warning'
+                : 'border-default text-secondary hover:text-primary'
+            }`}
+            onClick={() => setStage('day')}
+          >
+            NPC: {describeAttendance(attendanceFor(profileAttendance, activeProfile))}
+            {activeAttendanceOwed ? ' — answer it' : ''}
+          </button>
+        )}
         <span className="text-secondary">
           each profile builds its own routes — switching is free (no request)
         </span>
@@ -4031,7 +4295,6 @@ export default function ResourcePlanner() {
             {[
               ['village', 'Result by village'],
               ['edit', 'Edit by resource'],
-              ['fullday', 'Full day (all profiles)'],
             ].map(([key, label]) => (
               <button
                 key={key}
@@ -4249,137 +4512,6 @@ export default function ResourcePlanner() {
                 consumption profile is set: what the village spends, and the net its store is
                 left moving at — zero means level, which is what a role village landing exactly
                 what it burns should read as.
-              </p>
-            </div>
-          )}
-
-          {allocView === 'fullday' && (
-            <div className="card p-4">
-              <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
-                <div>
-                  <h3 className="font-semibold">The whole day, every profile in its hours</h3>
-                  <p className="text-secondary text-xs mt-0.5">
-                    Profiles are planned separately, but the account lives through all of them:
-                    what Day ships decides the stock Night starts from. This simulates the
-                    composite — net rates per window, production always on — and answers
-                    questions like “does 02 cross its crop alert at night?” with an hour on it.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  className="btn-primary text-xs py-1.5"
-                  disabled={dayChecking}
-                  onClick={runDayCheck}
-                >
-                  {dayChecking ? 'Simulating…' : dayCheck ? 'Re-run (0 requests)' : 'Run (0 requests)'}
-                </button>
-              </div>
-
-              {dayCheck?.skipped?.length > 0 && (
-                <p className="text-warning text-xs mb-2">
-                  Skipped {dayCheck.skipped.join(', ')} — no hours set. Give each profile its
-                  window in the bar above.
-                </p>
-              )}
-
-              {dayCheck?.warnings?.length > 0 && (
-                <div className="mb-3">
-                  <p className="text-xs text-warning font-semibold">
-                    ⚠ Warnings ({dayCheck.warnings.length})
-                  </p>
-                  <ul className="text-xs text-warning list-disc list-inside space-y-0.5">
-                    {dayCheck.warnings.map((w, i) => (
-                      <li key={i}>{w}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {dayCheck && dayCheck.warnings.length === 0 && (
-                <p className="text-success text-xs mb-3">
-                  No store crosses its cap, alert level or zero across the full day.
-                </p>
-              )}
-
-              {dayCheck && (
-                <table className="w-full text-xs">
-                  <thead className="text-secondary uppercase">
-                    <tr>
-                      <th className="text-left py-1 px-2">Village</th>
-                      <th className="text-right px-2">
-                        <span className="inline-flex items-center gap-1">
-                          <ResourceIcon resource="crop" />
-                          Crop now
-                        </span>
-                      </th>
-                      <th className="text-right px-2">Day swing (low → high)</th>
-                      <th className="text-right px-2">Drift/day</th>
-                      <th className="text-right px-2" title="Your alert level from the Snapshot tab">
-                        Alert at
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dayCheck.villages
-                      .filter((t) => t.resource === 'crop')
-                      .map((t) => {
-                        const ceiling = Number(cropCeilings[t.village_id]) || null
-                        const nearAlert = ceiling != null && t.high >= ceiling
-                        return (
-                          <tr
-                            key={t.village_id}
-                            className={`border-t border-gray-800 ${nearAlert ? 'bg-red-500/10' : ''}`}
-                          >
-                            <td className="py-1 px-2">{t.village_name}</td>
-                            <td className="text-right px-2 font-mono text-secondary">
-                              {fmt(
-                                villages.find((v) => v.village_id === t.village_id)?.crop_stock ?? 0
-                              )}
-                            </td>
-                            <td className="text-right px-2 font-mono">
-                              {fmt(t.low)} → {fmt(t.high)}
-                              {!t.settled && (
-                                <span
-                                  className="text-warning ml-1"
-                                  title="Still drifting at the simulation horizon — the drift column is the story"
-                                >
-                                  ↗
-                                </span>
-                              )}
-                            </td>
-                            <td
-                              className={`text-right px-2 font-mono ${
-                                // Either direction of drift needs attention:
-                                // up walks into the cap or the alert, down
-                                // walks toward an empty granary. Green would
-                                // read as "fine" about a village slowly
-                                // starving.
-                                Math.abs(t.daily_net) < 1
-                                  ? 'text-secondary/60'
-                                  : 'text-warning'
-                              }`}
-                            >
-                              {signed(t.daily_net)}
-                            </td>
-                            <td className="text-right px-2 font-mono text-secondary">
-                              {ceiling != null ? fmt(ceiling) : '—'}
-                            </td>
-                          </tr>
-                        )
-                      })}
-                  </tbody>
-                </table>
-              )}
-              {!dayCheck && !dayChecking && (
-                <p className="text-secondary text-xs italic">
-                  Not run yet. It costs no game requests — everything comes from the snapshot you
-                  already hold.
-                </p>
-              )}
-              <p className="text-secondary text-[11px] mt-2">
-                Cargo is counted when it <em>lands</em>, not when it leaves: a batch a day-profile
-                route dispatches at 22:00 is credited to whichever profile owns the hour it
-                actually arrives in. Each profile’s routes fire on their own schedule inside its
-                hours, so an overflow caused by a hand-off between profiles shows up here.
               </p>
             </div>
           )}
@@ -4622,6 +4754,44 @@ export default function ResourcePlanner() {
               </div>
             )
             })}
+        </div>
+      )}
+
+      {stage === 'day' && villages.length > 0 && (
+        <div className="space-y-4">
+          {/* Section 6 and section 7 together, because they are one question
+              asked twice: which hours each profile owns, and what is true of
+              the account during them. The attendance answer is EDITED here and
+              nowhere else -- the bar above only states it and links back. */}
+          <DayNightPanel
+            profileNames={profileNames}
+            activeProfile={activeProfile}
+            profileWindows={profileWindows}
+            profileAttendance={profileAttendance}
+            attendanceRequired={attendanceIsRequired}
+            onSelectProfile={switchProfile}
+            onWindow={(name, pair) =>
+              setProfileWindows((prev) => ({ ...prev, [name]: pair }))
+            }
+            onAttendance={(name, value) =>
+              setProfileAttendance((prev) => {
+                const next = { ...prev }
+                // Unanswered is the ABSENCE of a key, not a stored null: the
+                // map goes into the request, and a null would have to be
+                // filtered out of it somewhere else instead.
+                if (value == null) delete next[name]
+                else next[name] = value
+                return next
+              })
+            }
+          />
+          <FullDayCheck
+            dayCheck={dayCheck}
+            dayChecking={dayChecking}
+            onRun={runDayCheck}
+            cropCeilings={cropCeilings}
+            villages={villages}
+          />
         </div>
       )}
 
