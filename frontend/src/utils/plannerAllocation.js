@@ -16,6 +16,8 @@
  * A unit of tolerance, because targets are derived in floating point from
  * percentages and a sub-1/h residue is rounding, not an over-allocation.
  */
+import { resolveRoleAllocation } from './plannerSetup'
+
 export const METER_TOLERANCE = 1
 
 export function allocationMeterSeverity(slack, hasRemainder) {
@@ -34,6 +36,26 @@ export const METER_TONE = {
   over: 'text-danger',
   settled: 'text-success',
   unassigned: 'text-warning',
+}
+
+/** One resource's per-village map after the operator edits ONE cell.
+ *
+ * The seed is the allocation the cell is SHOWING -- `resolveRoleAllocation`'s
+ * answer, its role's template included -- and never a `keep` literal. A
+ * templated village has no own entry, so a literal seed turned a `{value: N}`
+ * patch into `{mode: 'keep', value: N}`: typing 12,000 over a DEF village's
+ * template-shown 8,372 flipped the mode to Keep own, disabled the box at
+ * 12,000, marked the cell as a deviation, and sent a KEEP the backend resolves
+ * to "hold your own production" -- so the village retained its own 1,500/h
+ * while still spending the template's 8,372. Neither figure the operator saw.
+ *
+ * Resolved against `perVillage` rather than the render-time map, because two
+ * edits batched into one update must both land: the second reads the first's
+ * entry here, and would read the pre-edit one from a closure.
+ */
+export function withEditedAllocation({ perVillage, villageId, template, resource, patch }) {
+  const shown = resolveRoleAllocation(template, resource, perVillage?.[villageId])
+  return { ...perVillage, [villageId]: { ...shown, ...patch } }
 }
 
 /** The plan's own per-village figures, indexed the way the grid reads them:

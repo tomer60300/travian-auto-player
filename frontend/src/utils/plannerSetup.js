@@ -204,6 +204,72 @@ export function materialSpendOnly(spent) {
   return Object.keys(out).length ? out : null
 }
 
+/** The `allocations` a plan request carries, from the profile on screen.
+ *
+ * Every explicit allocation is sent, readable rate or not: filtering the
+ * unreadable ones hid them from the backend's UNREADABLE_RATE critical, so the
+ * plan read "Ready to run" while silently planning without an allocation the
+ * operator wrote.
+ *
+ * Two things are dropped. A village the snapshot no longer has, because the
+ * backend 400s an unknown id. And a KEEP on a village with NO role, because
+ * there an absent entry resolves to exactly the same thing -- but a KEEP on a
+ * village WITH a role is a statement: the alternative to the template is not
+ * "nothing", it is "hold your own production". Dropped, the template would fill
+ * straight back in and the grid would show Keep own while the plan shipped the
+ * profile.
+ *
+ * A resource left with nothing usable is omitted rather than sent empty, so an
+ * untouched account's request is byte-identical to one from before roles.
+ */
+export function allocationsForRequest(allocations, villageRoles, villageIds) {
+  const own = new Set((villageIds ?? []).map(Number))
+  const out = {}
+  for (const [resource, per] of Object.entries(allocations ?? {})) {
+    const usable = {}
+    for (const [vid, a] of Object.entries(per)) {
+      if (a.mode === 'keep' && villageRoles?.[Number(vid)] == null) continue
+      if (!own.has(Number(vid))) continue
+      usable[vid] = a
+    }
+    if (Object.keys(usable).length) out[resource] = usable
+  }
+  return out
+}
+
+/** The `roles` a plan request carries: a template for every role some village
+ *  claims, and nothing else.
+ *
+ * A role whose template is ABSENT is skipped, which is the whole point. Sending
+ * `{}` for it made the backend's "no role template was sent for ..." 422
+ * unreachable from the page: four villages set to DEF before the panel was
+ * filled in planned at HTTP 200 with target 1,500 and spend 0 -- a tenth of
+ * what those villages need, reported as feasible. Skipping it puts the refusal
+ * back in front of the operator, naming the villages and the role.
+ *
+ * A template that IS present but half typed is sent whole, with its four
+ * halves spelled out rather than spread: a template is a template from the
+ * moment the operator gives a role any figure at all, and the page's own
+ * "no template yet" warning reads the same key. Its crop spend is dropped on
+ * the way out, because the backend refuses one and a template stored by an
+ * older build could still carry it -- which would 422 every plan over a figure
+ * the editor no longer shows.
+ */
+export function rolesForRequest(roleTemplates, claimedRoles) {
+  const out = {}
+  for (const role of claimedRoles ?? []) {
+    const template = roleTemplates?.[role]
+    if (template == null) continue
+    out[role] = {
+      allocations: template.allocations ?? {},
+      consumption: materialSpendOnly(template.consumption) ?? {},
+      may_relay: template.may_relay ?? null,
+      crop_negative_by_design: Boolean(template.crop_negative_by_design),
+    }
+  }
+  return out
+}
+
 /** Rehydrate a stored consumption map, and say whose crop figure was dropped.
  *
  * The strip itself is `materialSpendOnly` applied village by village; what this

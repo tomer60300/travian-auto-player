@@ -5,6 +5,7 @@ import {
   allocationMeterSeverity,
   planCellFigures,
   villageNetIndex,
+  withEditedAllocation,
 } from './plannerAllocation'
 
 describe('allocationMeterSeverity', () => {
@@ -208,5 +209,114 @@ describe('planCellFigures', () => {
     })
     expect(unknown.ship).toBeNull()
     expect(unknown.net).toBeNull()
+  })
+})
+
+describe('withEditedAllocation', () => {
+  // Profile section 2.1's defensive template, and the village that showed the
+  // defect: 11 produces 1,500 lumber an hour and its role says hold 8,372.
+  const DEF_TEMPLATE = {
+    allocations: {
+      lumber: { mode: 'absolute', value: 8372 },
+      clay: { mode: 'absolute', value: 5168 },
+    },
+  }
+
+  it('seeds a templated cell from the figure the cell is showing', () => {
+    // The trace: a templated village has NO own entry, so seeding the merge
+    // from a `keep` literal turned a value-only patch into a KEEP. The mode
+    // flipped to "Keep own", the box disabled at 12,000, the cell was marked a
+    // deviation, and the request carried a KEEP -- which the backend resolves
+    // to "hold your own production", so village 11 retained 1,500/h while
+    // still spending the template's 8,372. Neither figure was ever on screen.
+    const per = withEditedAllocation({
+      perVillage: {},
+      villageId: 20011,
+      template: DEF_TEMPLATE,
+      resource: 'lumber',
+      patch: { value: 12_000 },
+    })
+
+    expect(per[20011]).toEqual({ mode: 'absolute', value: 12_000 })
+  })
+
+  it('keeps a mode-only patch on the template value it was showing', () => {
+    // The mirror case: changing only the mode must not silently zero the
+    // figure beside it, which a `value: 0` seed would.
+    const per = withEditedAllocation({
+      perVillage: {},
+      villageId: 20011,
+      template: DEF_TEMPLATE,
+      resource: 'lumber',
+      patch: { mode: 'percentage' },
+    })
+
+    expect(per[20011]).toEqual({ mode: 'percentage', value: 8372 })
+  })
+
+  it('takes the village entry over the template where it has one', () => {
+    const per = withEditedAllocation({
+      perVillage: { 20011: { mode: 'sustain', value: 120 } },
+      villageId: 20011,
+      template: DEF_TEMPLATE,
+      resource: 'lumber',
+      patch: { value: 130 },
+    })
+
+    expect(per[20011]).toEqual({ mode: 'sustain', value: 130 })
+  })
+
+  it('falls through to keep where neither the village nor a role says anything', () => {
+    // The untemplated account, which is every account today: an empty cell
+    // edited to absolute 4,000 must read exactly that.
+    expect(
+      withEditedAllocation({
+        perVillage: {},
+        villageId: 20011,
+        template: undefined,
+        resource: 'lumber',
+        patch: { mode: 'absolute', value: 4_000 },
+      })[20011]
+    ).toEqual({ mode: 'absolute', value: 4_000 })
+    expect(
+      withEditedAllocation({
+        perVillage: {},
+        villageId: 20011,
+        template: undefined,
+        resource: 'lumber',
+        patch: { value: 4_000 },
+      })[20011]
+    ).toEqual({ mode: 'keep', value: 4_000 })
+  })
+
+  it('leaves every other village of the resource alone', () => {
+    const per = withEditedAllocation({
+      perVillage: {
+        20002: { mode: 'remainder', value: 0 },
+        20013: { mode: 'absolute', value: 5168 },
+      },
+      villageId: 20011,
+      template: DEF_TEMPLATE,
+      resource: 'lumber',
+      patch: { value: 12_000 },
+    })
+
+    expect(per[20002]).toEqual({ mode: 'remainder', value: 0 })
+    expect(per[20013]).toEqual({ mode: 'absolute', value: 5168 })
+  })
+
+  it('reads a resource the template has no opinion about as keep', () => {
+    // Per RESOURCE, like every other reader here: the DEF profile above says
+    // nothing about iron, so an iron edit starts from the village's own
+    // production rather than from its clay figure.
+    expect(
+      withEditedAllocation({
+        perVillage: {},
+        villageId: 20011,
+        template: DEF_TEMPLATE,
+        resource: 'iron',
+        patch: { value: 7 },
+      })[20011]
+    ).toEqual({ mode: 'keep', value: 7 })
   })
 })

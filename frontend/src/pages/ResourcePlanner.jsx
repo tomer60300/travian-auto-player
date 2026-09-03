@@ -9,17 +9,18 @@ import {
   CONSUMABLE_RESOURCES,
   SetupFileError,
   VILLAGE_ROLES,
+  allocationsForRequest,
   buildSetup,
   declaresConsumption,
   describeConsumption,
   isConsumptionRate,
   isStockFloorFraction,
-  materialSpendOnly,
   mergeSetup,
   parseSetup,
   resolveRoleAllocation,
   resolveRoleSpend,
   roleDeviates,
+  rolesForRequest,
   setupFilename,
   setupMatchesAccount,
   stripStoredCropSpends,
@@ -29,6 +30,7 @@ import {
   allocationMeterSeverity,
   planCellFigures,
   villageNetIndex,
+  withEditedAllocation,
 } from '../utils/plannerAllocation'
 import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from '../utils/villageRefs'
 import { planStatus, relayLegIndex } from '../utils/plannerFindings'
@@ -1137,46 +1139,20 @@ export default function ResourcePlanner() {
   )
 
   const buildPlanPayload = useCallback(() => {
-    // Every explicit allocation is sent, readable rate or not. Filtering the
-    // unreadable ones here hid them from the backend's UNREADABLE_RATE critical
-    // finding -- the plan showed "Ready to run" while silently planning without
-    // an allocation the operator wrote. The backend drops what it cannot use,
-    // says so as a CRITICAL finding, and refuses a live run over it.
-    const sendAllocations = {}
-    for (const [resource, per] of Object.entries(allocations)) {
-      const usable = {}
-      for (const [vid, a] of Object.entries(per)) {
-        // A keep is silence for an ordinary village -- the backend resolves an
-        // absent entry to exactly the same thing -- but on a village with a
-        // ROLE it is a statement: the alternative to the template is not
-        // "nothing", it is "hold your own production". Dropped here, the
-        // template would fill straight back in and the grid would show Keep own
-        // while the plan shipped the profile.
-        if (a.mode === 'keep' && villageRoles[Number(vid)] == null) continue
-        if (!villages.some((x) => x.village_id === Number(vid))) continue
-        usable[vid] = a
-      }
-      if (Object.keys(usable).length) sendAllocations[resource] = usable
-    }
-    // Every claimed role's template, with its crop spend dropped: the backend
-    // refuses one (the snapshot's crop rate is already net of upkeep) and a
-    // template stored by an older build could still carry one, which would 422
-    // every plan over a figure the editor no longer shows. The four halves are
-    // spelled out rather than spread, so a template that was only half typed
-    // still reaches the backend as a complete one.
+    // Both maps are built by tested utils rather than inline here: the seed and
+    // the skip rules are the two places a wrong request came from, and neither
+    // was reachable from a test while it lived in the page.
+    const sendAllocations = allocationsForRequest(
+      allocations,
+      villageRoles,
+      villages.map((v) => v.village_id)
+    )
+    // A role a village claims but nobody has given a template to is SKIPPED, so
+    // the backend's 422 reaches the operator naming the villages and the role.
     const claimed = new Set(
       villages.map((v) => villageRoles[v.village_id]).filter((role) => role != null)
     )
-    const sendRoles = {}
-    for (const role of claimed) {
-      const template = roleTemplates[role] ?? {}
-      sendRoles[role] = {
-        allocations: template.allocations ?? {},
-        consumption: materialSpendOnly(template.consumption) ?? {},
-        may_relay: template.may_relay ?? null,
-        crop_negative_by_design: Boolean(template.crop_negative_by_design),
-      }
-    }
+    const sendRoles = rolesForRequest(roleTemplates, claimed)
     // The active profile's own hours. Without them the optimizer phases each
     // route's send time anywhere in its cycle, so a profile that runs only part
     // of the day gets sheet rows -- and, via /execute, REAL routes -- that fire
@@ -1783,12 +1759,22 @@ export default function ResourcePlanner() {
     return found ? Number(found[0]) : null
   }
 
+  // One cell of the Allocate grid. The merge lives in `withEditedAllocation`,
+  // where it can be tested: seeded from a `keep` literal here, a value-only
+  // patch on a TEMPLATED village (which has no own entry) flipped the mode to
+  // Keep own and sent it, so the village retained its own 1,500/h while
+  // spending its role's 8,372.
   const setAllocation = (resource, villageId, patch) => {
-    setAllocations((prev) => {
-      const per = { ...(prev[resource] ?? {}) }
-      per[villageId] = { mode: 'keep', value: 0, ...(per[villageId] ?? {}), ...patch }
-      return { ...prev, [resource]: per }
-    })
+    setAllocations((prev) => ({
+      ...prev,
+      [resource]: withEditedAllocation({
+        perVillage: prev[resource] ?? {},
+        villageId,
+        template: roleTemplates[villageRoles[villageId]],
+        resource,
+        patch,
+      }),
+    }))
   }
 
   // One resource of one village's spend. An emptied box is DELETED rather than

@@ -4,6 +4,7 @@ import {
   SETUP_VERSION,
   SetupFileError,
   KEEP_ALLOCATION,
+  allocationsForRequest,
   buildSetup,
   declaresConsumption,
   describeConsumption,
@@ -19,6 +20,7 @@ import {
   setupMatchesAccount,
   stripStoredCropSpends,
 } from './plannerSetup'
+import { withEditedAllocation } from './plannerAllocation'
 
 const VILLAGES = [
   { village_id: 20030, name: 'Capital' },
@@ -1503,5 +1505,78 @@ describe('describeConsumption', () => {
 
   it('reads a declared zero as a declaration', () => {
     expect(describeConsumption({ iron: 0 })).toBe('0/h · Iron')
+  })
+})
+
+describe('allocationsForRequest', () => {
+  const OWN = [20002, 20011, 20013]
+
+  it('carries the edited figure a templated cell wrote, not a keep', () => {
+    // The payload half of the data-loss trace. `withEditedAllocation` is the
+    // store half; composing the two is the whole path from a keystroke to the
+    // request, and it is the composition that went wrong: the store held
+    // `{keep, 12000}`, this map sent it (the village HAS a role, so a keep is a
+    // statement here and is not dropped), and the backend resolved KEEP to
+    // "hold your own production" -- 1,500/h at village 11, while the role's
+    // 8,372/h spend went on being applied.
+    const edited = withEditedAllocation({
+      perVillage: {},
+      villageId: 20011,
+      template: { allocations: { lumber: { mode: 'absolute', value: 8372 } } },
+      resource: 'lumber',
+      patch: { value: 12_000 },
+    })
+
+    const sent = allocationsForRequest({ lumber: edited }, { 20011: 'def' }, OWN)
+
+    expect(sent.lumber['20011']).toEqual({ mode: 'absolute', value: 12_000 })
+  })
+
+  it('drops a keep on a village with no role, and sends one on a village with', () => {
+    const sent = allocationsForRequest(
+      {
+        lumber: {
+          20002: { mode: 'keep', value: 0 },
+          20011: { mode: 'keep', value: 0 },
+        },
+      },
+      { 20011: 'def' },
+      OWN
+    )
+
+    // Silence for the ordinary village; a statement for the templated one --
+    // dropped, the template would fill straight back in.
+    expect(sent.lumber).toEqual({ 20011: { mode: 'keep', value: 0 } })
+  })
+
+  it('drops a village the snapshot no longer has', () => {
+    // A chiefed or renamed village would 400 the whole request.
+    const sent = allocationsForRequest(
+      { lumber: { 20011: { mode: 'absolute', value: 1 }, 29999: { mode: 'absolute', value: 2 } } },
+      {},
+      OWN
+    )
+
+    expect(Object.keys(sent.lumber)).toEqual(['20011'])
+  })
+
+  it('omits a resource left with nothing usable rather than sending it empty', () => {
+    // So an untouched account's request is byte-identical to a pre-roles one.
+    expect(allocationsForRequest({ lumber: { 20002: { mode: 'keep' } } }, {}, OWN)).toEqual({})
+    expect(allocationsForRequest({}, {}, OWN)).toEqual({})
+  })
+
+  it('sends an allocation whose rate the snapshot could not read', () => {
+    // Filtering those hid them from the backend's UNREADABLE_RATE critical, so
+    // the plan read "Ready to run" while planning without an allocation the
+    // operator wrote. Nothing here looks at production at all -- which is the
+    // point, pinned so a future filter cannot creep back in.
+    const sent = allocationsForRequest(
+      { iron: { 20013: { mode: 'absolute', value: 5809 } } },
+      {},
+      OWN
+    )
+
+    expect(sent.iron['20013']).toEqual({ mode: 'absolute', value: 5809 })
   })
 })
