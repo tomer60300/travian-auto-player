@@ -543,6 +543,46 @@ class TestTheExplanationNamesWhatIsActuallyBinding:
         assert explanation is not None
         assert "capped" not in explanation, explanation
 
+    def test_a_cap_level_with_the_fleets_own_spare_is_not_what_binds(self):
+        """20 merchants, a reserve of 8 and a cap of 12 are one ceiling, not two.
+
+        On equality the two figures coincide, so "you capped it at 12 busy at
+        once; its fleet could otherwise spare 12" blamed the operator for a
+        limit the RESERVE imposed -- and then offered raising the cap to 16,
+        which under that reserve buys nothing at all. The case that existed put
+        a cap of 20 against a spare of 2, strict inequality, so it never came
+        near this.
+        """
+        res = _plan(caps={HUB: 12}, merchant_reserve=8)
+
+        explanation = _budget(res, HUB).explanation
+        assert explanation is not None
+        assert "capped" not in explanation, explanation
+        assert "needs 16 merchants but has 12" in explanation, explanation
+
+    def test_no_cap_is_offered_that_the_request_layer_would_refuse(self):
+        """ "Raising 02's cap to 48" -- and 02 fields 20 merchants.
+
+        A cap above `merchants_total` is a data-entry error refused by name at
+        the schema, so advising one sends the operator round a loop: follow the
+        advice, get a 422. Where no reachable cap fits, the haul is what has to
+        move, and that is worth saying instead.
+        """
+        big = [
+            _village(HUB, "02", 0, 0, lumber=60_000),
+            _village(NEAR, "03", 2, 0, clay=3_000),
+            _village(FAR, "05", 10, 0),
+        ]
+
+        explanation = _budget(_plan(caps={HUB: 8}, snapshot=big), HUB).explanation
+
+        assert "Raising" not in explanation, explanation
+        assert "48" in explanation, "what the plan wants is still worth saying"
+        assert "20" in explanation, "and the fleet that cannot reach it"
+
+    def test_a_reachable_cap_is_still_offered_as_the_fix_it_is(self):
+        assert "Raising 02's cap to 16" in _budget(_plan(caps={HUB: 8}), HUB).explanation
+
     def test_the_trade_office_advice_still_applies_under_a_cap(self):
         """A cap is on merchants, and a Trade Office level is what one carries.
 
@@ -582,8 +622,12 @@ class TestTheExplanationNamesWhatIsActuallyBinding:
         """Driven directly, so the two branches are pinned without a fixture."""
         legs = _budget(_plan(caps={HUB: 8}), HUB).legs
 
-        capped = _explain_over_budget("02", 16, 8, legs, 0, 2500, None, max_busy=8, fleet_spare=18)
-        fleet = _explain_over_budget("02", 16, 2, legs, 0, 2500, None, max_busy=None, fleet_spare=2)
+        capped = _explain_over_budget(
+            "02", 16, 8, legs, 0, 2500, None, max_busy=8, merchants_total=20, fleet_spare=18
+        )
+        fleet = _explain_over_budget(
+            "02", 16, 2, legs, 0, 2500, None, max_busy=None, merchants_total=20, fleet_spare=2
+        )
 
         assert "capped it at 8 busy" in capped, capped
         assert "needs 16 merchants but has 2" in fleet, fleet

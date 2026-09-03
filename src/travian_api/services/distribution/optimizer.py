@@ -481,15 +481,20 @@ class OverBudget:
 def merchant_ceiling_clause(max_busy: int | None, fleet_spare: int | None) -> str | None:
     """ "you capped it at N busy at once; its fleet could otherwise spare M".
 
-    ``None`` when the cap is not what binds -- unset, or looser than what the
-    fleet could field, in which case the fleet is the story and saying
+    ``None`` when the cap is not what binds -- unset, or no tighter than what
+    the fleet could field, in which case the fleet is the story and saying
     otherwise blames the operator for the geometry.
+
+    STRICTLY tighter, because on equality the two ceilings are the same number:
+    20 merchants, a reserve of 8 and a cap of 12 produced "you capped it at 12
+    busy at once; its fleet could otherwise spare 12", which blames the
+    operator for a limit the reserve imposed.
 
     One function because two surfaces render it: the budget explanation on
     `/plan` and the blockers `/execute` refuses with. A cap explained two ways
     is a cap the operator has to reconcile.
     """
-    if max_busy is None or fleet_spare is None or max_busy > fleet_spare:
+    if max_busy is None or fleet_spare is None or max_busy >= fleet_spare:
         return None
     return (
         f"you capped it at {max_busy} busy at once; its fleet could otherwise spare {fleet_spare}"

@@ -1913,6 +1913,7 @@ def _explain_over_budget(
     upgrade: int | None,
     *,
     max_busy: int | None,
+    merchants_total: int,
     fleet_spare: int | None,
 ) -> str:
     """Say why the merchants ran out, in terms that suggest what to do.
@@ -1977,8 +1978,21 @@ def _explain_over_budget(
     # that needs no Trade Office, no re-routing and no game action at all, so
     # leaving it unsaid sends them to the expensive options first. The figure is
     # what this plan actually wants, not a round number.
+    #
+    # And only where the figure is one the request layer would ACCEPT. A cap
+    # above `merchants_total` is refused by name -- "capped at 48 busy
+    # merchants but fields 20" -- so offering it sent the operator round a
+    # loop: follow the advice, get a 422. Where none fits, the haul is what has
+    # to move, and the two figures are still worth stating.
     if clause is not None:
-        parts.append(f"Raising {label}'s cap to {committed} would fit this plan as it stands.")
+        if committed <= merchants_total:
+            parts.append(f"Raising {label}'s cap to {committed} would fit this plan as it stands.")
+        else:
+            parts.append(
+                f"No cap fits this plan: it wants {committed} merchants and {label} fields "
+                f"{merchants_total}, so a cap that high would be refused. The haul from here "
+                f"has to shrink."
+            )
     return " ".join(parts)
 
 
@@ -3445,6 +3459,7 @@ async def post_plan(
                         config.merchant_model.capacity(trade_office.get(vid, 0)),
                         upgrades.get(vid),
                         max_busy=villages[vid].max_busy_merchants,
+                        merchants_total=villages[vid].merchant_count,
                         fleet_spare=villages[vid].spare_merchants(config.merchant_reserve),
                     )
                     if vid in over
