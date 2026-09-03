@@ -24,6 +24,7 @@ from travian_api.web.routes.exec_sessions import router as exec_sessions_router
 from travian_api.web.routes.farm import router as farm_router
 from travian_api.web.routes.farm_builder import router as farm_builder_router
 from travian_api.web.routes.military import router as military_router
+from travian_api.web.routes.planner_setup import router as planner_setup_router
 from travian_api.web.routes.queue import router as queue_router
 from travian_api.web.routes.recon import router as recon_router
 from travian_api.web.routes.reports import router as reports_router
@@ -222,6 +223,7 @@ app.include_router(travian_auth_router)
 app.include_router(villages_router)
 app.include_router(buildings_router)
 app.include_router(military_router)
+app.include_router(planner_setup_router)
 app.include_router(reports_router)
 app.include_router(video_router)
 app.include_router(farm_router)
