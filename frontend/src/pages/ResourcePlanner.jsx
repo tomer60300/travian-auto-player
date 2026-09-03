@@ -56,6 +56,7 @@ import NpcBalancePanel from '../components/NpcBalancePanel'
 import PlanDiagnostics from '../components/PlanDiagnostics'
 import PlanExport from '../components/PlanExport'
 import RoleTemplates from '../components/RoleTemplates'
+import SetupStorage from '../components/SetupStorage'
 import ScrollableTable from '../components/ScrollableTable'
 import UnallocatedPanel from '../components/UnallocatedPanel'
 import { useToast } from '../components/Toast'
@@ -719,6 +720,13 @@ export default function ResourcePlanner() {
   // spend, and the plan then reads them as keeping their own production without
   // saying so. Reported once -- the stripped maps are what get saved back.
   const [rolesDropped, setRolesDropped] = useState(null)
+  // Whether a setup is saved on the SERVER for this account, and when.
+  // Four states, and the two in the middle are the point: `none` is the
+  // server's 404 -- nothing has ever been saved, which is an invitation to
+  // import a file -- and it is not the same as a saved document that happens
+  // to be empty, which is a decision to leave the account undescribed.
+  const [serverSetup, setServerSetup] = useState({ state: 'unknown' })
+  const [setupBusy, setSetupBusy] = useState(null)
   const [pasteOpen, setPasteOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
   const setupFileRef = useRef(null)
@@ -886,6 +894,7 @@ export default function ResourcePlanner() {
       setSetupReport(null)
       setCropSpendsDropped([])
       setRolesDropped(null)
+      setServerSetup({ state: 'unknown' })
       setHydratedKey(null)
       return
     }
@@ -955,6 +964,41 @@ export default function ResourcePlanner() {
     setPlan(null)
     setSetupReport(null)
     setHydratedKey(accountKey)
+  }, [accountKey])
+
+  // Ask the server whether a setup is saved, on arriving at an account.
+  //
+  // Zero game requests, and the whole reason it is automatic: an operator
+  // reaching this app on a fourth origin needs to know a saved copy EXISTS
+  // without first guessing that it might. A 404 is the answer "nothing has
+  // ever been saved here" and is recorded as such rather than as a failure --
+  // it is the state that invites importing a file.
+  useEffect(() => {
+    if (!accountKey) return undefined
+    let current = true
+    setServerSetup({ state: 'checking' })
+    api
+      .get('/distribution/setup', { params: { account_key: accountKey } })
+      .then((res) => {
+        if (!current) return
+        setServerSetup({ state: 'saved', savedAt: res.data.saved_at })
+      })
+      .catch((err) => {
+        if (!current) return
+        if (err.response?.status === 404) {
+          setServerSetup({ state: 'none' })
+          return
+        }
+        setServerSetup({
+          state: 'error',
+          message: errorDetail(err, 'the request failed'),
+        })
+      })
+    // Cancelled on an account switch rather than compared afterwards: this
+    // effect re-runs per account, so the flag is the account check.
+    return () => {
+      current = false
+    }
   }, [accountKey])
 
   useEffect(() => {
@@ -1256,10 +1300,22 @@ export default function ResourcePlanner() {
   // in localStorage, which is per ORIGIN — the same app on :80, on :8001, on
   // the LAN address and over Tailscale keeps four separate copies. Exporting
   // them makes the typing survive that, and every rebuild.
-  const exportSetup = useCallback(() => {
+  // ONE document, for the file and for the server alike.
+  //
+  // Not two builders and not two formats: the server stores exactly what the
+  // file export writes, validates it with the plan request's own rules, and
+  // returns it byte for byte -- so a document can move between the two paths
+  // and `parseSetup` reads either. A second shape here is how the two would
+  // drift into disagreeing about what an empty relay list means.
+  //
+  // Returns null with a toast where there is nothing to write, because "you
+  // have saved nothing" and "you saved a blank sheet" are different states the
+  // server itself distinguishes, and writing the second by accident would
+  // destroy the first.
+  const setupDocument = useCallback(() => {
     if (!villages.length) {
-      toast.error('Fetch account state first, so the file records village names too')
-      return
+      toast.error('Fetch account state first, so the setup records village names too')
+      return null
     }
     const typed = villages.filter(
       (v) =>
@@ -1278,12 +1334,14 @@ export default function ResourcePlanner() {
     const templated = Object.keys(roleTemplates).length
     if (!typed && !named.length && !templated) {
       toast.error('Nothing typed yet — fill in a Trade Office level, crop alert or allocation first')
-      return
+      return null
     }
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-    downloadJson(
-      setupFilename(playerName, stamp),
-      buildSetup({
+    const parts = []
+    if (typed) parts.push(`${typed} village(s)`)
+    if (named.length) parts.push(`${named.length} profile(s)`)
+    if (templated) parts.push(`${templated} role template(s)`)
+    return {
+      document: buildSetup({
         account: accountKey,
         villages,
         tradeOffice,
@@ -1302,13 +1360,9 @@ export default function ResourcePlanner() {
         merchantModel,
         foreignTargets,
         exportedAt: new Date().toISOString(),
-      })
-    )
-    const parts = []
-    if (typed) parts.push(`${typed} village(s)`)
-    if (named.length) parts.push(`${named.length} profile(s)`)
-    if (templated) parts.push(`${templated} role template(s)`)
-    toast.success(`Saved ${parts.join(' and ')} — keep the file, load it after a rebuild`)
+      }),
+      summary: parts.join(' and '),
+    }
   }, [
     villages,
     tradeOffice,
@@ -1327,30 +1381,42 @@ export default function ResourcePlanner() {
     merchantModel,
     foreignTargets,
     accountKey,
-    playerName,
     toast,
   ])
 
-  const applySetupText = useCallback(
-    (text) => {
+  const exportSetup = useCallback(() => {
+    const built = setupDocument()
+    if (!built) return
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    downloadJson(setupFilename(playerName, stamp), built.document)
+    toast.success(`Saved ${built.summary} — keep the file, load it after a rebuild`)
+  }, [setupDocument, playerName, toast])
+
+  // Apply an already-PARSED setup over what is on screen.
+  //
+  // Split out of the file path so the server path is the same path: a document
+  // loaded from the store goes through `parseSetup` and this merge exactly as
+  // a file does, so the load report, the account check, the crop-spend refusal
+  // and the relay-tier rules all behave identically. The store keeps the
+  // document verbatim, which means one written by a NEWER build can come back
+  // out of it -- and `parseSetup` is the only thing that knows to refuse that
+  // rather than half-load it.
+  //
+  // `where` names the source in the messages, because "this file was exported
+  // from a different account" is the wrong sentence about a server document.
+  const applyParsedSetup = useCallback(
+    (setup, where) => {
       if (!villages.length) {
-        toast.error('Fetch account state first — a file cannot be matched to villages without it')
+        toast.error(`Fetch account state first — a ${where} cannot be matched to villages without it`)
         return
       }
-      let setup
-      try {
-        setup = parseSetup(text)
-      } catch (err) {
-        toast.error(err instanceof SetupFileError ? err.message : 'Could not read that file')
-        return
-      }
-      // A file from another account would apply its levels to whatever village
-      // happens to share an id, which is a silently wrong plan rather than a
-      // visible error. Refuse unless the operator insists.
+      // A document from another account would apply its levels to whatever
+      // village happens to share an id, which is a silently wrong plan rather
+      // than a visible error. Refuse unless the operator insists.
       if (!setupMatchesAccount(setup, accountKey)) {
         const proceed = window.confirm(
-          `This file was exported from a different account:\n\n` +
-            `  file:    ${setup.account}\n  current: ${accountKey}\n\n` +
+          `This ${where} was saved from a different account:\n\n` +
+            `  ${where}: ${setup.account}\n  current: ${accountKey}\n\n` +
             `Village ids are per-account, so loading it can attach the wrong ` +
             `Trade Office levels to the wrong villages. Load it anyway?`
         )
@@ -1397,7 +1463,9 @@ export default function ResourcePlanner() {
       // operator sees rather than whichever profile happened to be selected.
       const [first] = merged.report.profilesLoaded
       if (first) setActiveProfile(first)
-      setSetupReport(merged.report)
+      // The source travels with the report: it is rendered as a sentence, and
+      // "from the setup file" is the wrong sentence about a server document.
+      setSetupReport({ ...merged.report, source: where })
       setPasteOpen(false)
       setPasteText('')
       // The plan was built from the old values, so it no longer describes the
@@ -1411,7 +1479,7 @@ export default function ResourcePlanner() {
       if (merged.report.rolesLoaded.length) {
         parts.push(`role(s) ${merged.report.rolesLoaded.join(', ')}`)
       }
-      toast.success(`Loaded ${parts.join(' and ') || 'nothing'} from the setup file`)
+      toast.success(`Loaded ${parts.join(' and ') || 'nothing'} from the ${where}`)
     },
     [
       villages,
@@ -1433,6 +1501,108 @@ export default function ResourcePlanner() {
       toast,
     ]
   )
+
+  const applySetupText = useCallback(
+    (text) => {
+      let setup
+      try {
+        setup = parseSetup(text)
+      } catch (err) {
+        toast.error(err instanceof SetupFileError ? err.message : 'Could not read that file')
+        return
+      }
+      applyParsedSetup(setup, 'setup file')
+    },
+    [applyParsedSetup, toast]
+  )
+
+  // ── The setup, on the server ────────────────────────────────────────
+  //
+  // Three calls, and the interesting one is the 404: it means nothing has ever
+  // been saved for this account, which is not an error and is not the same as
+  // a saved document that happens to be empty. Reported as the state it is.
+  const saveSetupToServer = useCallback(async () => {
+    const built = setupDocument()
+    if (!built) return
+    setSetupBusy('saving')
+    try {
+      const res = await api.put('/distribution/setup', built.document, {
+        params: { account_key: accountKey },
+      })
+      setServerSetup({ state: 'saved', savedAt: res.data.saved_at })
+      toast.success(`Saved ${built.summary} to the server — every origin reads this one`)
+    } catch (err) {
+      // `errorDetail` already handles both shapes the store answers with: a
+      // plain sentence for the cross-row refusals, and a Pydantic field-error
+      // list for everything the schema catches.
+      toast.error(errorDetail(err, 'The server refused this setup'))
+    } finally {
+      setSetupBusy(null)
+    }
+  }, [setupDocument, accountKey, toast])
+
+  const loadSetupFromServer = useCallback(async () => {
+    setSetupBusy('loading')
+    try {
+      const res = await api.get('/distribution/setup', {
+        params: { account_key: accountKey },
+      })
+      setServerSetup({ state: 'saved', savedAt: res.data.saved_at })
+      // Through `parseSetup` and the same merge a file takes. The document
+      // came back verbatim, so this is where a newer build's version gets
+      // refused rather than half-loaded.
+      let setup
+      try {
+        setup = parseSetup(JSON.stringify(res.data.setup))
+      } catch (err) {
+        toast.error(
+          err instanceof SetupFileError
+            ? `The saved setup cannot be read: ${err.message}`
+            : 'The saved setup could not be read'
+        )
+        return
+      }
+      applyParsedSetup(setup, 'saved setup')
+    } catch (err) {
+      if (err.response?.status === 404) {
+        setServerSetup({ state: 'none' })
+        toast.error('Nothing is saved on the server for this account yet')
+        return
+      }
+      toast.error(errorDetail(err, 'Could not read the saved setup'))
+    } finally {
+      setSetupBusy(null)
+    }
+  }, [accountKey, applyParsedSetup, toast])
+
+  const forgetServerSetup = useCallback(async () => {
+    if (
+      !window.confirm(
+        'Delete the setup saved on the server for this account?\n\n' +
+          'What is on screen stays, and so does any file you exported. Only the ' +
+          'shared copy every origin reads is removed.'
+      )
+    ) {
+      return
+    }
+    setSetupBusy('forgetting')
+    try {
+      await api.delete('/distribution/setup', { params: { account_key: accountKey } })
+      setServerSetup({ state: 'none' })
+      toast.success('The saved setup is gone from the server')
+    } catch (err) {
+      if (err.response?.status === 404) {
+        // Already the state it wanted to reach, so it is recorded rather than
+        // reported as a failure.
+        setServerSetup({ state: 'none' })
+        toast.error('Nothing was saved on the server for this account')
+        return
+      }
+      toast.error(errorDetail(err, 'Could not delete the saved setup'))
+    } finally {
+      setSetupBusy(null)
+    }
+  }, [accountKey, toast])
 
   const onSetupFileChosen = useCallback(
     (event) => {
@@ -3098,19 +3268,6 @@ export default function ResourcePlanner() {
                 ? 'Reading…'
                 : `Read Trade Office from game (~${villages.length * 2} requests)`}
             </button>
-            <button className="btn-secondary btn-sm" onClick={exportSetup}>
-              Save setup to file
-            </button>
-            <button className="btn-secondary btn-sm" onClick={() => setupFileRef.current?.click()}>
-              Load setup from file
-            </button>
-            <button
-              className="btn-secondary btn-sm"
-              onClick={() => setPasteOpen((v) => !v)}
-              aria-expanded={pasteOpen}
-            >
-              {pasteOpen ? 'Cancel paste' : 'Paste setup'}
-            </button>
             <input
               ref={setupFileRef}
               type="file"
@@ -3118,8 +3275,24 @@ export default function ResourcePlanner() {
               className="hidden"
               onChange={onSetupFileChosen}
             />
-            <span className="text-secondary text-xs">0 Travian requests</span>
           </div>
+
+          {/* Where the typed setup lives. The file buttons moved in here with
+              the server ones rather than staying in the row above: they answer
+              one question -- where does this survive -- and split across two
+              places the operator would reasonably think the file WAS the
+              server copy. */}
+          <SetupStorage
+            status={serverSetup}
+            busy={setupBusy}
+            onSave={saveSetupToServer}
+            onLoad={loadSetupFromServer}
+            onForget={forgetServerSetup}
+            onExportFile={exportSetup}
+            onImportFile={() => setupFileRef.current?.click()}
+            onPaste={() => setPasteOpen((v) => !v)}
+            pasteOpen={pasteOpen}
+          />
 
           {pasteOpen && (
             <div className="mb-3">
@@ -3145,7 +3318,8 @@ export default function ResourcePlanner() {
           {setupReport && (
             <div className="mb-3 text-xs space-y-1">
               <div className="text-success">
-                Loaded {setupReport.loaded} village(s) from the setup file.
+                Loaded {setupReport.loaded} village(s) from the{' '}
+                {setupReport.source ?? 'setup file'}.
               </div>
               {setupReport.missingFromAccount.length > 0 && (
                 <div className="text-warning">
