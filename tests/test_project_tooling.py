@@ -81,10 +81,11 @@ class TestTheStopHookRunsTheSuiteTheProjectActuallyUses:
         assert _test_gate().PYTEST_COMMAND == _MANDATED_PYTEST
 
     def test_its_timeout_is_above_the_real_runtime(self):
-        """The gate shipped with `timeout=120` against a ~185s serial suite, so
-        it blocked on its own timeout on every stop and never once reported a
-        test result. Parallel runs measure 60-85s here; the bound has to leave
-        room for a cold `uv sync` on a loaded machine."""
+        """The gate shipped with `timeout=120`, below the runtime however the
+        suite was run, so it blocked on its own timeout on every stop and never
+        once reported a test result. Measured 2026-09-03 over 1,911 tests:
+        serial 240s, `-n 8` between 107s warm and 199s cold. The bound has to
+        leave room for that plus a cold `uv sync` on a loaded machine."""
         assert _test_gate().TIMEOUT_SECONDS >= 300
 
     def test_it_does_not_fall_back_to_another_pytest(self):

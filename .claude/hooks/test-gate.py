@@ -22,7 +22,10 @@ import os
 #   install may point at a different checkout. That has already produced test
 #   results describing the wrong source tree.
 # * `-n 8` -- every worker gets its own tmp DB, tmp trace dir, scrubbed env and
-#   the live-writes pin, so they cannot collide. Serial is ~185s; -n 8 is ~60-85s.
+#   the live-writes pin, so they cannot collide. Measured 2026-09-03 on this
+#   machine over the 1,911-test suite: serial 240s, `-n 8` between 107s warm and
+#   199s cold across three runs. The "~60-85s" this used to claim has not
+#   reproduced, so budget a couple of minutes rather than one.
 # * no `-x` -- with xdist, `-x` stops the run at the first failure any worker
 #   happens to reach, which hides the rest of the picture the gate exists to show.
 PYTEST_COMMAND = [
@@ -40,9 +43,10 @@ PYTEST_COMMAND = [
 ]
 
 # Comfortably above the real runtime rather than under it. The previous 120s sat
-# BELOW the ~185s serial runtime, so the gate blocked on its own timeout on every
-# single stop and never once reported a test result. -n 8 measures 60-85s on this
-# machine; 600s leaves room for a cold `uv sync` and a loaded machine.
+# BELOW the runtime however the suite was run, so the gate blocked on its own
+# timeout on every single stop and never once reported a test result. Measured
+# 2026-09-03, `-n 8` ran between 107s and 199s; 600s leaves room for that plus a
+# cold `uv sync` on a loaded machine.
 TIMEOUT_SECONDS = 600
 
 

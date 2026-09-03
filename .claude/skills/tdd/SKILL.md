@@ -54,7 +54,8 @@ cd travian-auto-player && uv run --extra dev --extra web pytest -q -n 8 --tb=sho
 install the extras and falls through to a global pytest whose editable install
 may point at a different checkout, which has already produced results
 describing the wrong source tree. `-n 8` is safe here (per-worker tmp DB, tmp
-trace dir, scrubbed env) and takes the suite from ~185s serial to ~60-85s.
+trace dir, scrubbed env). Measured 2026-09-03 over 1,911 tests: serial 240s,
+`-n 8` between 107s warm and 199s cold -- budget a couple of minutes, not one.
 While iterating inside one Red-Green cycle, add `-m "not slow"`; run the full
 set before committing.
 
