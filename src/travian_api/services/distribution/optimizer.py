@@ -753,9 +753,13 @@ def _relay_tier_flows(
     relay_for: Mapping[int, Sequence[int]],
     villages: Mapping[int, VillageState],
     geometry: MapGeometry,
+    merchant_model: MerchantModel,
+    budgets: Mapping[int, int],
+    cycles: Sequence[int],
     *,
     names: Mapping[int, str] | None = None,
     excluded: Mapping[int, set[int]] | None = None,
+    max_cycle: Mapping[int, int] | None = None,
 ) -> tuple[dict[tuple[int, int], float], list[Shortfall]]:
     """Build section 5's two legs for whatever the direct pass could not reach.
 
@@ -787,6 +791,28 @@ def _relay_tier_flows(
     ``exclude_origins`` through *excluded*. Hard-coding "the capital" was the
     alternative and is worse twice over: it needs a role to be declared before a
     tier can work, and it would ship from a village that has nothing left.
+
+    **...but it prices the merchants first, because nothing downstream will.**
+    Distance alone put a capped village over its budget while an affordable
+    source of the same cargo stood one field further out -- measured at 4
+    merchants committed against a cap of 2, with the plan reported infeasible.
+    Every other flow in the plan gets a second chance at that: ``over_delta`` is
+    the first key :func:`_improve_flows` minimises. The tier's legs are merged
+    in AFTER the search, deliberately, so this is the only place the cap can be
+    consulted at all.
+
+    So the sort key is ``(merchants over budget, distance, coordinates)``.
+    Distance still decides between two sources that can both afford the leg,
+    which is what keeps the operator's own tier building the same legs it did.
+    The excess is priced with :func:`_route_for_pair` -- the plan's own
+    arithmetic, not a second formula -- against what this resource's direct
+    legs already spend at that village. That is an UNDER-estimate on a
+    multi-resource account, because pair-merging is not done yet and the other
+    resources' legs are not visible from inside the per-resource loop. It is a
+    preference and not a guarantee: every candidate still contributes its
+    surplus until the demand is met, so this can only reorder candidates and
+    never create a shortfall. A breach that survives it is still reported by
+    ``over_budget``, which remains the authority.
 
     **Surplus is what the direct pass did not spend.** Recomputed here from the
     resource plan and the seeded flows rather than threaded out of
@@ -826,6 +852,28 @@ def _relay_tier_flows(
         if origin in surplus:
             surplus[origin] -= amount
 
+    # What this resource's direct legs already bill each candidate source, so a
+    # collecting leg is weighed against the room actually left rather than
+    # against the whole budget. Once per resource, not once per relay: the
+    # direct pass is finished by the time this runs and nothing below changes
+    # it.
+    def leg_merchants(origin: int, destination: int, rate: float) -> int:
+        return _route_for_pair(
+            origin,
+            destination,
+            {plan.resource: rate},
+            villages,
+            geometry,
+            merchant_model,
+            cycles,
+            max_cycle,
+        ).merchants_committed
+
+    spent: dict[int, int] = {}
+    for (origin, destination), amount in flows.items():
+        if origin in surplus and amount > EPSILON:
+            spent[origin] = spent.get(origin, 0) + leg_merchants(origin, destination, amount)
+
     relay_flows: dict[tuple[int, int], float] = {}
     covered: dict[int, float] = {}
     for relay in sorted(relays):
@@ -854,6 +902,18 @@ def _relay_tier_flows(
         if wanted <= EPSILON:
             continue
         banned = (excluded or {}).get(relay, frozenset())
+
+        def over_budget(vid: int, relay: int = relay, wanted: float = wanted) -> int:
+            """Merchants this source would commit beyond its remaining budget.
+
+            Priced on what it could contribute if it went first, which is the
+            only size that is defined before the order is known. Zero for every
+            source that can afford the leg, so distance decides between them.
+            """
+            room = budgets.get(vid, 0) - spent.get(vid, 0)
+            cost = leg_merchants(vid, relay, min(surplus[vid], wanted))
+            return max(0, cost - room)
+
         sources = sorted(
             (
                 vid
@@ -865,6 +925,7 @@ def _relay_tier_flows(
                 and vid not in downstream
             ),
             key=lambda vid: (
+                over_budget(vid),
                 geometry.distance(villages[vid].coords, villages[relay].coords),
                 villages[vid].coords,
             ),
@@ -2044,6 +2105,17 @@ def build_plan(
     # The tier's own edges, kept OUT of the improvement search on purpose (see
     # where they are merged in below).
     tier: Assignment = {}
+    # The operator's per-village cap is folded in HERE, once, so every reader of
+    # the budget -- the declared tier's source choice, the improvement search,
+    # the latency pass, the crowding report, the over-budget record -- is
+    # measuring against the same ceiling. A cap read in some places and not
+    # others is a plan that reports itself inside a budget it broke.
+    #
+    # Computed before the resource loop rather than after it because the tier is
+    # built INSIDE that loop and has to consult it: the tier is the one part of
+    # the plan the improvement search never revisits, so a source it picks
+    # blind to the cap is a source that ships.
+    budgets = {vid: villages[vid].merchant_budget(merchant_reserve) for vid in villages}
 
     for resource in sorted(resource_plans, key=lambda r: r.value):
         plan = resource_plans[resource]
@@ -2081,8 +2153,12 @@ def build_plan(
                 relay_for,
                 villages,
                 geometry,
+                merchant_model,
+                budgets,
+                cycles,
                 names=names,
                 excluded=excluded_origins_by_destination,
+                max_cycle=max_cycle_by_destination,
             )
             if tier_flows:
                 tier[resource] = tier_flows
@@ -2095,12 +2171,7 @@ def build_plan(
     # idle merchants on speed deliberately, so the end-to-end guarantee is
     # per-phase: excess never rises anywhere; the merchant total is minimal here
     # and may rise later, strictly within per-village budgets (§8.3, §14).
-    # The operator's per-village cap is folded in HERE, once, so every reader of
-    # the budget -- the improvement search, the latency pass, the crowding
-    # report, the over-budget record -- is measuring against the same ceiling.
-    # A cap read in some places and not others is a plan that reports itself
-    # inside a budget it broke.
-    budgets = {vid: villages[vid].merchant_budget(merchant_reserve) for vid in villages}
+    #
     # The HELD-BACK count is rounded half-up, not the cap truncated. Truncating
     # the cap quietly did the opposite of what this comment used to claim: a
     # budget-1 village got a soft cap of 0 (its every merchant billed as

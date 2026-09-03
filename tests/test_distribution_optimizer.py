@@ -214,6 +214,44 @@ def _tier_account_with_wood_to_spare(relay_for):
     return villages, plans
 
 
+# Villages 1 and 5 could both feed the relay, and neither may reach the
+# downstream directly. 1 is a field nearer.
+_TWO_SOURCE_EXCLUSIONS = {3: {1, 5}}
+
+
+def _tier_account_with_two_possible_sources(cap):
+    """One relay, two villages that could feed it, and a cap on the nearer one.
+
+    1 sits one field from the relay and 5 sits sqrt(2) fields away, so distance
+    alone always picks 1. ``cap`` is 1's ``max_busy_merchants``: below what the
+    collecting leg costs, the tier's own choice puts the plan over budget while
+    an affordable source of the same cargo stood one field further out.
+    """
+    villages = {
+        1: VillageState(
+            village_id=1, x=0, y=0, merchant_count=20, crop_per_hour=0.0, max_busy_merchants=cap
+        ),
+        2: VillageState(
+            village_id=2, x=1, y=0, merchant_count=20, crop_per_hour=0.0, relay_for=(3,)
+        ),
+        3: VillageState(village_id=3, x=4, y=0, merchant_count=20, crop_per_hour=0.0),
+        5: VillageState(village_id=5, x=0, y=1, merchant_count=20, crop_per_hour=0.0),
+    }
+    plans = {
+        Resource.LUMBER: resolve_resource(
+            Resource.LUMBER,
+            {1: 10_000.0, 2: 0.0, 3: 0.0, 5: 10_000.0},
+            {
+                1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                2: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                3: Allocation(AllocationMode.ABSOLUTE, 10_000.0),
+                5: Allocation(AllocationMode.ABSOLUTE, 0.0),
+            },
+        )
+    }
+    return villages, plans
+
+
 def _material_relay_violations(plan, villages) -> list[str]:
     """Every breach of the AMENDED no-waterfall rule for lumber, clay and iron.
 
@@ -449,6 +487,69 @@ class TestStructuralInvariants:
                     f"relay {hub} collects {inbound:,.0f}/h of {resource.value} and forwards "
                     f"{outbound:,.0f}/h -- it banks the difference"
                 )
+
+    def test_the_tier_prefers_a_source_that_can_afford_the_collecting_leg(self):
+        """The tier is built outside the improvement search, so it must not
+        hand the search's own first objective away.
+
+        ``is_feasible`` is "no village over budget and nothing short", and
+        ``over_delta`` is the first key the improvement search minimises -- but
+        the search never sees the tier's legs, so whatever the tier chooses is
+        what ships. Choosing purely by distance therefore spends merchants a
+        village does not have while an affordable source of the same cargo, one
+        field further out, costs the plan nothing extra.
+
+        Measured before the fix: village 1 capped at 2 busy still took the whole
+        collecting leg at 4 merchants, and the plan came back over budget and
+        infeasible on a fixture where village 5 could have carried it for the
+        same merchant cost.
+        """
+        villages, plans = _tier_account_with_two_possible_sources(cap=2)
+
+        plan = build_plan(
+            villages,
+            plans,
+            GEOMETRY,
+            MODEL,
+            excluded_origins_by_destination=_TWO_SOURCE_EXCLUSIONS,
+        )
+
+        assert plan.over_budget == (), "the tier put a capped village over budget: " + ", ".join(
+            f"{b.village_id} commits {b.committed} of {b.available}" for b in plan.over_budget
+        )
+        assert plan.shortfalls == ()
+        assert plan.is_feasible
+        collecting = {
+            route.origin
+            for route in plan.routes
+            if route.destination == 2 and route.cargo_per_hour.get(Resource.LUMBER, 0.0) > 0
+        }
+        assert collecting == {5}, f"the collecting leg was drawn from {sorted(collecting)}"
+
+    def test_an_uncapped_tier_still_draws_from_its_nearest_source(self):
+        """Distance is still the rule; the budget term only breaks the deadlock.
+
+        Without this the fix could have reordered every tier on every account
+        and passed the case above by accident. With both sources affordable the
+        nearer one wins, which is what the greedy direct pass does too.
+        """
+        villages, plans = _tier_account_with_two_possible_sources(cap=None)
+
+        plan = build_plan(
+            villages,
+            plans,
+            GEOMETRY,
+            MODEL,
+            excluded_origins_by_destination=_TWO_SOURCE_EXCLUSIONS,
+        )
+
+        collecting = {
+            route.origin
+            for route in plan.routes
+            if route.destination == 2 and route.cargo_per_hour.get(Resource.LUMBER, 0.0) > 0
+        }
+        assert collecting == {1}, f"the collecting leg was drawn from {sorted(collecting)}"
+        assert plan.is_feasible
 
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
     def test_merchant_arithmetic_matches_the_cost_model(self, village_count):
