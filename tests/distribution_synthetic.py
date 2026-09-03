@@ -964,6 +964,52 @@ def adversarial_accounts() -> list[Account]:
         )
     )
 
+    # 18. Profile section 5's DECLARED material relay tier. The one shape in
+    #     this corpus where a material village legitimately both sends and
+    #     receives, which is what the amended no-waterfall invariant exists to
+    #     allow -- without an account like this every assertion about the
+    #     exemption passes by vacuity.
+    #
+    #     V01 holds all the lumber and may ship to V02 only (`ship_only_to`), so
+    #     V03 and V04 are out of its reach and the plan is infeasible with a
+    #     shortfall each. V02 is declared their relay, and forwards.
+    tier = [
+        _snap(1, 0, 0, lumber=20_000.0, clay=0.0, iron=0.0, crop=1000.0, stock=100_000),
+        _snap(2, 3, 0, lumber=0.0, clay=0.0, iron=0.0, crop=1000.0, stock=100_000),
+        _snap(3, 6, 0, lumber=0.0, clay=0.0, iron=0.0, crop=1000.0, stock=100_000),
+        _snap(4, 3, 4, lumber=0.0, clay=0.0, iron=0.0, crop=1000.0, stock=100_000),
+    ]
+    out.append(
+        Account(
+            name="adv-declared-material-relay",
+            seed=-18,
+            plan_request=PlanRequest(
+                snapshot=tier,
+                config=[
+                    VillageConfig(village_id=tier[0].village_id, ship_only_to=[tier[1].village_id]),
+                    VillageConfig(
+                        village_id=tier[1].village_id,
+                        relay_for=[tier[2].village_id, tier[3].village_id],
+                    ),
+                    VillageConfig(village_id=tier[2].village_id),
+                    VillageConfig(village_id=tier[3].village_id),
+                ],
+                allocations={
+                    Resource.LUMBER: {
+                        **_absolute(tier[0].village_id, 0.0),
+                        **_absolute(tier[2].village_id, 5000.0),
+                        **_absolute(tier[3].village_id, 5000.0),
+                        tier[1].village_id: AllocationInput(mode=AllocationMode.REMAINDER),
+                    }
+                },
+            ),
+            intent={
+                "boundary": "a declared one-hop material relay: V02 forwards V01's lumber "
+                "to V03 and V04, which V01's whitelist puts out of its own reach"
+            },
+        )
+    )
+
     return out
 
 

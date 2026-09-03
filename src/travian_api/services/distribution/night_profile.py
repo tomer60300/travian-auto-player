@@ -35,9 +35,11 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .allocation import Allocation, AllocationMode, Resource
+# MATERIALS moved to `allocation` once four modules needed it; imported here
+# both because this module uses it and so the older `night_profile.MATERIALS`
+# import keeps resolving.
+from .allocation import MATERIALS, Allocation, AllocationMode, Resource
 
-MATERIALS = (Resource.LUMBER, Resource.CLAY, Resource.IRON)
 DEFAULT_TARGET_FILL = 0.80
 DEFAULT_BASELINE_FILL = 0.30
 

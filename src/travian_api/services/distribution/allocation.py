@@ -39,6 +39,18 @@ class Resource(StrEnum):
     CROP = "crop"
 
 
+MATERIALS = (Resource.LUMBER, Resource.CLAY, Resource.IRON)
+"""The three resources that are not crop, in the game's own order.
+
+Here rather than in one of the modules that needs it, because four of them now
+do -- the night profile, the optimizer's relay tier, the storage replay and the
+web layer -- and each of the rules involved is a rule about "a material, not
+crop": a granary is not NPC-fed, crop consumption is already net of upkeep, and
+crop may relay through a sub-hub where a material may only cross a DECLARED one.
+``night_profile.MATERIALS`` re-exports this so the older import keeps working.
+"""
+
+
 class AllocationMode(StrEnum):
     PERCENTAGE = "percentage"
     """Share of total account production of this resource, 0-100."""

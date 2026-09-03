@@ -101,14 +101,44 @@ class TestStatedInvariantsHoldOnTheAssembledPlan:
             return  # refused by design; nothing to check
         bad: list[str] = []
 
-        # The netting invariant from allocation.py: a village is a sender OR a
-        # receiver of lumber, clay or iron. Crop is exempt by design -- relay
-        # hubs receive and forward it -- so it is deliberately not checked.
+        # The netting invariant from allocation.py, AMENDED for profile section
+        # 5's declared relay tier: a village is a sender OR a receiver of
+        # lumber, clay or iron -- EXCEPT a village the operator named with
+        # `relay_for`, which forwards the capital's material on, and which may
+        # neither be fed by nor feed another relay. Crop is exempt entirely by
+        # design (relay hubs receive and forward it wherever the search finds it
+        # worth doing), so it is deliberately not checked.
+        #
+        # Read off the REQUEST, so the exemption is exactly the set the operator
+        # declared and not "whatever the plan happens to have forwarded". No
+        # account in this corpus declares one today, which makes the material
+        # block below the unchanged rule for every one of them -- the exemption
+        # is measured in tests/test_distribution_relay_tier.py and in
+        # test_distribution_optimizer.py's `_material_relay_violations`.
+        relays = {
+            cfg.village_id: set(cfg.relay_for)
+            for cfg in account.plan_request.config
+            if cfg.relay_for
+        }
         for res in MATERIALS:
-            senders = {r.origin for r in plan.rows if r.cargo.get(res, 0) > 0}
-            receivers = {r.destination for r in plan.rows if r.cargo.get(res, 0) > 0}
-            if senders & receivers:
-                bad.append(f"{res.value}: {sorted(senders & receivers)} both send and receive")
+            edges = {(r.origin, r.destination) for r in plan.rows if r.cargo.get(res, 0) > 0}
+            senders = {origin for origin, _ in edges}
+            receivers = {destination for _, destination in edges}
+            forwarding = senders & receivers
+            undeclared = sorted(forwarding - set(relays))
+            if undeclared:
+                bad.append(
+                    f"{res.value}: {undeclared} both send and receive without being declared relays"
+                )
+            for hub in sorted(forwarding & set(relays)):
+                upstream = {o for o, d in edges if d == hub}
+                downstream = {d for o, d in edges if o == hub}
+                second_hop = (upstream | downstream) & set(relays)
+                if second_hop:
+                    bad.append(
+                        f"{res.value}: relay {hub} is chained to relay(s) "
+                        f"{sorted(second_hop)} -- one hop only"
+                    )
 
         for res in (*MATERIALS, Resource.CROP):
             pairs = {(r.origin, r.destination) for r in plan.rows if r.cargo.get(res, 0) > 0}

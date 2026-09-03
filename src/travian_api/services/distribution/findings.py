@@ -92,6 +92,15 @@ class Category(StrEnum):
     TRIBUTE_SPLIT = "tribute_split"
     SUSTAIN_NOOP = "sustain_noop"
     RELAY = "relay"
+    # A declared material relay whose warehouse cannot absorb the pass-through,
+    # in the two outcomes that are genuinely different things. TWO categories
+    # and not one with two severities, because severity belongs to the category
+    # here (see the module docstring, and `Finding.severity`, which reads it from
+    # `_SPECS`) -- the same reason STARVATION and STARVATION_BY_DESIGN are two.
+    # RELAY_BUFFER is cargo destroyed before anything was forwarded; _TIGHT is a
+    # tier that delivers and then sheds what lands afterwards.
+    RELAY_BUFFER = "relay_buffer"
+    RELAY_BUFFER_TIGHT = "relay_buffer_tight"
 
 
 @dataclass(frozen=True)
@@ -484,11 +493,44 @@ _SPECS: Mapping[Category, _Spec] = {
         order=34,
         severity=Severity.NOTE,
         subject="relay",
-        headline="{count} {subject} carry crop through a hub instead of direct",
+        # Groups are keyed by (category, resource), so this renders the resource
+        # that is actually being relayed. It said "crop" until profile section
+        # 5's DECLARED material tier existed, and a lumber pass-through reported
+        # as a crop relay is a line the operator cannot reconcile with the sheet.
+        headline="{count} {subject} carry {resource} through a hub instead of direct",
         action=(
             "Two rows on the sheet, one delivery: the hub forwards what it collects. The "
             "second leg is only as full as the first one made it, so creating one without "
             "the other ships nothing useful."
+        ),
+    ),
+    Category.RELAY_BUFFER: _Spec(
+        # Alongside the overflow criticals it belongs with: this IS a store
+        # filling, and the resources are destroyed the same way. It reads after
+        # them because it names a cause the generic overflow lines cannot.
+        order=2.5,
+        severity=Severity.CRITICAL,
+        subject="relay",
+        headline="{count} {subject} fill with {resource} before they forward any of it",
+        action=(
+            "A relay's warehouse has to hold the pass-through between collecting and "
+            "forwarding, and this one is full before its onward leg has sent anything -- so "
+            "the cargo beyond the cap is destroyed at the relay, not late. Shorten the "
+            "COLLECTING leg's cycle so each batch is smaller, raise the relay's warehouse, "
+            "or move those downstream villages to a relay that can hold them."
+        ),
+    ),
+    Category.RELAY_BUFFER_TIGHT: _Spec(
+        # Beside RELAY_LATENCY, which is the other "the tier works, but not
+        # comfortably" finding about the same two legs.
+        order=12.5,
+        severity=Severity.WARNING,
+        subject="relay",
+        headline="{count} {subject} run out of {resource} headroom later in the day",
+        action=(
+            "The relay does forward before it fills, so the tier is delivering -- but its "
+            "warehouse tops out afterwards and sheds whatever lands next. Shorten the "
+            "collecting leg's cycle, or raise the relay's warehouse."
         ),
     ),
 }

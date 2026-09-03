@@ -13,12 +13,25 @@ resource:
 * **#2, two-way pairs** -- a village cannot be both sender and receiver of the
   same resource, so ``A -> B`` and ``B -> A`` for iron cannot both exist.
 * **waterfall for W/C/I** -- for the same reason a village that nets as a
-  receiver of lumber cannot also send lumber, so ``A -> B -> C`` cannot form.
-  Crop is deliberately exempt: relay through a sub-hub is permitted there, and
-  restricting the relay move to crop is what keeps this true for the rest.
+  receiver of lumber cannot also send lumber, so ``A -> B -> C`` cannot form
+  *by netting alone*. Crop is deliberately exempt: relay through a sub-hub is
+  permitted there, and restricting the relay MOVE to crop is what keeps the
+  searched plan free of material chains.
+
+  **Amended for profile section 5's declared tier.** The rule is now: no
+  material village both sends and receives EXCEPT a village the operator
+  DECLARED as a relay (``VillageState.relay_for``), and no relay feeds a relay.
+  Section 5 states that 02 holds the reserved wood, may reach only its own
+  neighbours, and hands the onward distribution to a tier drawn from that
+  neighbour set -- so the one hop is the operator's instruction, not a search
+  result, and :func:`_relay_tier_flows` builds its two legs by construction
+  outside the improvement search. Where nothing is declared the old rule holds
+  unchanged and for the old reason.
 
 Both are asserted as invariants in the tests rather than defended with runtime
-checks, because the property comes from the data model, not from vigilance here.
+checks, because the property comes from the data model, not from vigilance here
+-- and the declared exception is enforced at the schema, where the operator can
+be told which village and which role made their declaration impossible.
 
 Three stages, per profile section 14 (``cluster -> assign -> improve``):
 
@@ -58,9 +71,15 @@ Three stages, per profile section 14 (``cluster -> assign -> improve``):
    pooling several senders needs a compound move each step of which is
    break-even, which first-improvement cannot cross.
 
+5. **Declared material relay** -- :func:`_relay_tier_flows`, which is not part
+   of the search at all. Whatever the direct pass could not reach is served over
+   two legs through the villages the operator named, and the result is merged
+   into the assignment after :func:`_improve_flows` has finished. It runs on
+   materials only, because crop already has the searched relay above.
+
 What it still does *not* do is claim global optimality (the problem is NP-hard,
-section 14) or relay materials. A village over its merchant budget is reported,
-never hidden.
+section 14) or DISCOVER a material relay -- a material hop has to be declared.
+A village over its merchant budget is reported, never hidden.
 """
 
 from __future__ import annotations
@@ -68,7 +87,7 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .allocation import EPSILON, AllocationMode, Resource, ResourcePlan, village_label
+from .allocation import EPSILON, MATERIALS, AllocationMode, Resource, ResourcePlan, village_label
 from .findings import Category, Finding
 from .geometry import MapGeometry
 from .merchants import DAILY_BEAT_CYCLES, MerchantModel, cheapest_cycle, cycle_sweep
@@ -164,6 +183,22 @@ class VillageState:
     need not restate what its role already says, and leaves the crop sign to
     decide where there is not."""
 
+    relay_for: tuple[int, ...] | None = None
+    """Villages this one forwards the capital's MATERIAL on to (section 5's tier).
+
+    Declared, never discovered. Section 5 does not ask the planner to find a
+    relay tier; it says one exists, constrains where it is drawn from (02's own
+    neighbour set) and forbids a role village from being in it. So this is the
+    operator's sentence, and the planner builds the two legs by construction --
+    ``source -> this village`` sized to the sum of these downstreams' unmet
+    material demand, and ``this village -> each downstream`` sized to that
+    downstream's own gap. Nothing searches for a material hub.
+
+    ``None`` -- every account today -- plans exactly as before, and the
+    no-waterfall rule holds for materials by construction as it always did. A
+    tuple rather than a list because :class:`VillageState` is frozen and hashed.
+    """
+
     max_busy_merchants: int | None = None
     """The most merchants this village may have underway or returning at once.
 
@@ -235,7 +270,7 @@ class Route:
 
 @dataclass(frozen=True)
 class RelayHub:
-    """A village the plan routes crop THROUGH, and what that costs in time.
+    """A village the plan routes a resource THROUGH, and what that costs in time.
 
     The unit is the hub, not a path. Given two origins shipping crop in and two
     destinations being forwarded to, the finished flow graph proves that the hub
@@ -259,16 +294,27 @@ class RelayHub:
 
     hub: int
     origins: tuple[int, ...]
-    """Villages shipping crop into the hub."""
+    """Villages shipping the resource into the hub."""
 
     destinations: tuple[int, ...]
-    """Villages the hub forwards crop on to."""
+    """Villages the hub forwards it on to."""
 
     collect_hours: float
     """Longest from production at any origin to arrival at the hub."""
 
     forward_hours: float
     """Longest from arrival at the hub to arrival at any destination."""
+
+    resource: Resource = Resource.CROP
+    """Which resource is being relayed through this hub.
+
+    Crop by default because for a long time crop was the only answer: netting
+    left every village a sender or a receiver of a material and never both, so
+    a material hub could not be expressed. Section 5's DECLARED tier is the
+    exception, and a village can be a hub for a material and for crop at once --
+    two different pools of cargo, two different waits -- so the resource is part
+    of the hub's identity rather than a property of the village.
+    """
 
     @property
     def end_to_end_hours(self) -> float:
@@ -313,53 +359,73 @@ def _cycles_for(
     return allowed or [min(cycles)]
 
 
-def relay_hubs(routes: Iterable[Route]) -> tuple[RelayHub, ...]:
+def relay_hubs(
+    routes: Iterable[Route], *, material_relays: Collection[int] = ()
+) -> tuple[RelayHub, ...]:
     """The relay hubs in *routes*, worst end-to-end first.
 
-    Crop only. Materials are forbidden from chaining A->B->C (profile section
-    3.5), so a material arriving somewhere that also ships that material out is
-    two independent flows; reporting it as a relay would invent a dependency the
-    plan does not have.
+    Crop always, because the optimizer may reroute a crop flow through a sub-hub
+    (profile section 3.5). Materials only at a village the operator DECLARED as
+    a relay, which is what ``material_relays`` carries: absent it, a material
+    arriving somewhere that also ships that material out is two independent
+    flows, and reporting it as a relay would invent a dependency the plan does
+    not have. That is not merely a display choice -- the beat phases a hub's
+    forward sends after its collecting arrivals, and doing that to two unrelated
+    flows would constrain a schedule for no reason.
+
+    So ``material_relays`` empty reproduces the crop-only behaviour exactly,
+    which is every account that declares no tier.
 
     The hours here are estimated from cycle lengths, which assumes a route fires
     all day. :func:`~.schedule.time_relays` replaces them with what the finished
     beat will really do -- and must, because inside a profile window it will not.
     """
-    crop = [
-        r
-        for r in routes
-        if r.cargo_per_hour.get(Resource.CROP, 0.0) > EPSILON and r.origin != r.destination
-    ]
-    inbound: dict[int, list[Route]] = {}
-    outbound: dict[int, list[Route]] = {}
-    for route in crop:
-        inbound.setdefault(route.destination, []).append(route)
-        outbound.setdefault(route.origin, []).append(route)
-
+    declared = frozenset(material_relays)
     hubs = []
-    for hub in sorted(set(inbound) & set(outbound)):
-        collecting = inbound[hub]
-        feeders = {route.origin for route in collecting}
-        forwarding = [route for route in outbound[hub] if route.destination not in feeders]
-        if not forwarding:
-            # Every onward leg goes straight back to a village that feeds this
-            # one. That is a two-way pair, not a relay: no schedule can satisfy
-            # "ship after you collect" at both ends at once, and the optimizer
-            # refuses to create one.
-            continue
-        hubs.append(
-            RelayHub(
-                hub=hub,
-                origins=tuple(sorted(feeders)),
-                destinations=tuple(sorted({route.destination for route in forwarding})),
-                collect_hours=max(route.latency_hours for route in collecting),
-                forward_hours=max(route.latency_hours for route in forwarding),
+    # Crop first, then the materials in the game's order, so the pre-tier output
+    # is untouched and a declared tier's rows sort after it inside a tie.
+    for resource in (Resource.CROP, *MATERIALS):
+        carrying = [
+            r
+            for r in routes
+            if r.cargo_per_hour.get(resource, 0.0) > EPSILON and r.origin != r.destination
+        ]
+        inbound: dict[int, list[Route]] = {}
+        outbound: dict[int, list[Route]] = {}
+        for route in carrying:
+            inbound.setdefault(route.destination, []).append(route)
+            outbound.setdefault(route.origin, []).append(route)
+
+        for hub in sorted(set(inbound) & set(outbound)):
+            if resource is not Resource.CROP and hub not in declared:
+                continue
+            collecting = inbound[hub]
+            feeders = {route.origin for route in collecting}
+            forwarding = [route for route in outbound[hub] if route.destination not in feeders]
+            if not forwarding:
+                # Every onward leg goes straight back to a village that feeds
+                # this one. That is a two-way pair, not a relay: no schedule can
+                # satisfy "ship after you collect" at both ends at once, and the
+                # optimizer refuses to create one. It holds for a declared
+                # material tier identically -- see `_relay_tier_flows`, which
+                # will not name a downstream that supplies its own relay.
+                continue
+            hubs.append(
+                RelayHub(
+                    hub=hub,
+                    origins=tuple(sorted(feeders)),
+                    destinations=tuple(sorted({route.destination for route in forwarding})),
+                    collect_hours=max(route.latency_hours for route in collecting),
+                    forward_hours=max(route.latency_hours for route in forwarding),
+                    resource=resource,
+                )
             )
-        )
-    # Worst first, as every other finding list is ordered. The village id only
-    # breaks exact ties, and only for display: nothing about the plan depends on
-    # this order.
-    return tuple(sorted(hubs, key=lambda relay: (-relay.end_to_end_hours, relay.hub)))
+    # Worst first, as every other finding list is ordered. The village id and
+    # then the resource only break exact ties, and only for display: nothing
+    # about the plan depends on this order.
+    return tuple(
+        sorted(hubs, key=lambda relay: (-relay.end_to_end_hours, relay.hub, relay.resource.value))
+    )
 
 
 def _named(village_ids: Iterable[int], names: Mapping[int, str]) -> str:
@@ -394,12 +460,15 @@ def relay_findings(
         hub = village_label(relay.hub, names)
         origins = _named(relay.origins, names)
         destinations = _named(relay.destinations, names)
-        # Named only when known. An absent villages map means the caller had no
-        # production to give, which is not the same as a hub that grows nothing.
+        # Named only when known, and only for CROP: the figure is the hub's own
+        # crop balance, which is what the relay-solvency floor is about. Printing
+        # it beside a lumber pass-through would answer a question nobody asked
+        # -- a declared material relay's own risk is its WAREHOUSE holding the
+        # pass-through, which is `RELAY_BUFFER`, not its granary.
         own = None if villages is None else villages.get(relay.hub)
         margin = (
             ""
-            if own is None or own.crop_per_hour is None
+            if relay.resource is not Resource.CROP or own is None or own.crop_per_hour is None
             else f", growing {own.crop_per_hour:+,.0f}/h of its own"
         )
         over_target = (
@@ -407,7 +476,8 @@ def relay_findings(
         )
         if over_target:
             message = (
-                f"crop relayed through {hub} takes up to {relay.end_to_end_hours:.1f}h "
+                f"{relay.resource.value} relayed through {hub} takes up to "
+                f"{relay.end_to_end_hours:.1f}h "
                 f"end-to-end against a {max_latency_hours:.0f}h target: at worst "
                 f"{relay.collect_hours:.1f}h in from {origins}, then "
                 f"{relay.forward_hours:.1f}h waiting there and travelling on to "
@@ -415,15 +485,18 @@ def relay_findings(
             )
         else:
             message = (
-                f"{hub} relays crop: it forwards to {destinations} what it collects from "
-                f"{origins}, so those rows are legs of one delivery taking up to "
-                f"{relay.end_to_end_hours:.1f}h{margin}"
+                f"{hub} relays {relay.resource.value}: it forwards to {destinations} what it "
+                f"collects from {origins}, so those rows are legs of one delivery taking up "
+                f"to {relay.end_to_end_hours:.1f}h{margin}"
             )
         findings.append(
             Finding(
                 category=Category.RELAY_LATENCY if over_target else Category.RELAY,
-                message=message,
                 detail=f"via {hub} — {relay.end_to_end_hours:.1f}h",
+                message=message,
+                # Grouped by resource, so a declared material tier and a crop
+                # sub-hub read as two subjects rather than one mixed count.
+                resource=relay.resource,
                 village=hub,
             )
         )
@@ -666,6 +739,153 @@ def _flows_for_resource(
                 )
             )
     return flows, shortfalls
+
+
+# ---------------------------------------------------------------------------
+# The DECLARED material relay tier (profile section 5)
+# ---------------------------------------------------------------------------
+
+
+def _relay_tier_flows(
+    plan: ResourcePlan,
+    flows: Mapping[tuple[int, int], float],
+    shortfalls: Sequence[Shortfall],
+    relay_for: Mapping[int, Sequence[int]],
+    villages: Mapping[int, VillageState],
+    geometry: MapGeometry,
+    *,
+    names: Mapping[int, str] | None = None,
+    excluded: Mapping[int, set[int]] | None = None,
+) -> tuple[dict[tuple[int, int], float], list[Shortfall]]:
+    """Build section 5's two legs for whatever the direct pass could not reach.
+
+    Returns ``(relay_flows, shortfalls)`` -- the tier's own edges, and the
+    shortfall list with everything the tier now covers removed. Both are empty
+    of change when nothing was declared or nothing was short, which is what
+    keeps an undeclared account byte-identical.
+
+    **Sized by construction, never searched.** The forward leg to each
+    downstream carries that downstream's own unmet gap; the collecting leg into
+    each relay carries the sum of its downstreams' gaps. There is no hub search
+    and no objective term: section 5 already decided the shape, and the only
+    open question -- which relay serves which defensive village -- is answered
+    by the operator's own ``relay_for`` lists.
+
+    **The source is chosen the way every other origin is.** A relay becomes an
+    ordinary receiver of the aggregated demand and the greedy rule picks its
+    nearest sender with surplus left, honouring ``ship_only_to`` /
+    ``exclude_origins`` through *excluded*. Hard-coding "the capital" was the
+    alternative and is worse twice over: it needs a role to be declared before a
+    tier can work, and it would ship from a village that has nothing left.
+
+    **Surplus is what the direct pass did not spend.** Recomputed here from the
+    resource plan and the seeded flows rather than threaded out of
+    :func:`_flows_for_resource`, so that function's signature -- and the audit's
+    mutation stub that mirrors it -- stay as they are.
+
+    Three things it will not do, each of which would break the one-hop rule the
+    schema also enforces (belt and braces: the schema refuses the declaration,
+    this refuses the edge):
+
+    * draw a collecting leg from a village that is itself a declared relay --
+      that is a relay feeding a relay;
+    * name a downstream that is a declared relay, for the same reason;
+    * create a two-way pair, where the collect leg's source is also a
+      downstream. "Ship after you collect" is then unsatisfiable at both ends
+      at once, which is the same refusal :func:`relay_hubs` and
+      ``_crop_shape_ok`` make on the crop side.
+    """
+    relays = frozenset(relay_for)
+    unmet = {
+        s.village_id: s.per_hour
+        for s in shortfalls
+        if s.resource is plan.resource and s.per_hour > EPSILON
+    }
+    if not unmet:
+        return {}, list(shortfalls)
+
+    # What the direct pass left on the shelf, per sender. Merchant-capable only,
+    # for the reason `_flows_for_resource` filters on it: a village with no
+    # Marketplace has a real surplus and no way to move any of it.
+    surplus: dict[int, float] = {
+        v.village_id: -v.ship_per_hour
+        for v in plan.senders
+        if v.village_id in villages and villages[v.village_id].merchant_count > 0
+    }
+    for (origin, _destination), amount in flows.items():
+        if origin in surplus:
+            surplus[origin] -= amount
+
+    relay_flows: dict[tuple[int, int], float] = {}
+    covered: dict[int, float] = {}
+    for relay in sorted(relays):
+        if relay not in villages or villages[relay].merchant_count <= 0:
+            continue
+        # Largest gap first, then coordinates, exactly as the direct pass orders
+        # its receivers -- so a relay that cannot collect enough serves the
+        # village in most need, and the choice does not depend on village ids.
+        downstream = sorted(
+            (vid for vid in relay_for[relay] if vid in unmet and vid not in relays),
+            key=lambda vid: (-unmet[vid], villages[vid].coords),
+        )
+        wanted = sum(unmet[vid] for vid in downstream)
+        if wanted <= EPSILON:
+            continue
+        banned = (excluded or {}).get(relay, frozenset())
+        sources = sorted(
+            (
+                vid
+                for vid, left in surplus.items()
+                if left > EPSILON
+                and vid != relay
+                and vid not in banned
+                and vid not in relays
+                and vid not in downstream
+            ),
+            key=lambda vid: (
+                geometry.distance(villages[vid].coords, villages[relay].coords),
+                villages[vid].coords,
+            ),
+        )
+        collected = 0.0
+        for source in sources:
+            if collected >= wanted - EPSILON:
+                break
+            taken = min(surplus[source], wanted - collected)
+            relay_flows[(source, relay)] = relay_flows.get((source, relay), 0.0) + taken
+            surplus[source] -= taken
+            collected += taken
+        # Hand on exactly what arrived, in need order. A relay keeps nothing:
+        # anything it banked would be an allocation nobody gave it.
+        for vid in downstream:
+            if collected <= EPSILON:
+                break
+            forwarded = min(unmet[vid], collected)
+            relay_flows[(relay, vid)] = relay_flows.get((relay, vid), 0.0) + forwarded
+            collected -= forwarded
+            covered[vid] = covered.get(vid, 0.0) + forwarded
+
+    if not covered:
+        return {}, list(shortfalls)
+
+    # A partly-served shortfall shrinks to what is still missing and keeps its
+    # original reason: the whitelist really is still why the rest cannot land.
+    remaining: list[Shortfall] = []
+    for s in shortfalls:
+        if s.resource is not plan.resource or s.village_id not in covered:
+            remaining.append(s)
+            continue
+        left = s.per_hour - covered[s.village_id]
+        if left > EPSILON:
+            remaining.append(
+                Shortfall(
+                    village_id=s.village_id,
+                    resource=s.resource,
+                    per_hour=left,
+                    reason=s.reason,
+                )
+            )
+    return relay_flows, remaining
 
 
 # ---------------------------------------------------------------------------
@@ -1779,6 +1999,15 @@ def build_plan(
     names = {vid: village.name for vid, village in villages.items() if village.name}
     assignment: Assignment = {}
     shortfalls: list[Shortfall] = []
+    # Profile section 5's DECLARED tier, read off the villages the way the
+    # merchant cap and the relay permission are: one place, so the flow builder,
+    # the hub report and the beat all consult the same lists.
+    relay_for: dict[int, tuple[int, ...]] = {
+        vid: village.relay_for for vid, village in villages.items() if village.relay_for
+    }
+    # The tier's own edges, kept OUT of the improvement search on purpose (see
+    # where they are merged in below).
+    tier: Assignment = {}
 
     for resource in sorted(resource_plans, key=lambda r: r.value):
         plan = resource_plans[resource]
@@ -1804,6 +2033,23 @@ def build_plan(
             names=names,
             excluded=excluded_origins_by_destination,
         )
+        # Section 5's tier, over whatever the direct pass could not reach. Only
+        # materials: crop already relays through a sub-hub wherever the search
+        # finds it worth doing, and giving crop a declared tier as well would
+        # mean two mechanisms answering one question.
+        if relay_for and resource in MATERIALS:
+            tier_flows, resource_shortfalls = _relay_tier_flows(
+                plan,
+                flows,
+                resource_shortfalls,
+                relay_for,
+                villages,
+                geometry,
+                names=names,
+                excluded=excluded_origins_by_destination,
+            )
+            if tier_flows:
+                tier[resource] = tier_flows
         shortfalls.extend(resource_shortfalls)
         assignment[resource] = {key: amount for key, amount in flows.items() if amount > EPSILON}
 
@@ -1881,6 +2127,31 @@ def build_plan(
                 detail=f"stopped after {max_improve_passes} passes",
             )
         )
+    # The declared tier joins the plan HERE, after the search, and that is the
+    # whole of why Design B is a fraction of Design A's risk.
+    #
+    # `_improve_flows`' one move is a 2x2 swap, which preserves every origin's
+    # outflow and every destination's inflow -- that conservation is what makes
+    # the no-two-way-pair and no-waterfall rules survive it. It is also blind to
+    # relay shape for anything but crop (`_crop_shape_ok` is consulted on crop
+    # edges alone), so a material tier seeded into the assignment could be
+    # rewired by an ordinary swap into a self-loop or a chain, and the objective
+    # would not know it had done anything wrong. Keeping the tier out means the
+    # search's objective is untouched, the crop relay mover is untouched, and
+    # the two legs section 5 dictates are the two legs that get built.
+    #
+    # What the search consequently does not do is PRICE the tier's merchants,
+    # and that is honest rather than convenient: the tier's shape is the
+    # operator's declaration, so there is no alternative assignment the search
+    # could have preferred. The merchants are still counted -- `committed` below
+    # is built from the finished route list -- so the per-village cap is
+    # measured against the collecting legs too (section 5: "the relay leg counts
+    # inside the 8"), and a breach is reported.
+    for resource, legs in tier.items():
+        into = assignment.setdefault(resource, {})
+        for key, amount in legs.items():
+            into[key] = into.get(key, 0.0) + amount
+
     pair_cargo = _merge_pair_cargo(assignment)
 
     # A route can only originate at a real village that can staff merchants. This
@@ -1945,7 +2216,7 @@ def build_plan(
     # The relays are carried, not reported. Their end-to-end figure depends on
     # when each leg actually fires, which only the beat knows -- so the planner
     # re-times them and reports them there, once, with the real number.
-    relays = relay_hubs(routes)
+    relays = relay_hubs(routes, material_relays=relay_for)
 
     if max_latency_hours is not None:
         for route in sorted(

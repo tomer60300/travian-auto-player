@@ -260,9 +260,29 @@ def test_golden_plan_respects_the_structural_invariants(case, default_plan):
     villages, plans, _geometry, _model = case
     plan = default_plan
 
-    # No two-way pair (issue #2), and no relay of a MATERIAL: the no-waterfall
-    # rule is W/C/I only. Crop relay is permitted (profile 3.5) and is how the
-    # optimizer lifts load off villages that cannot staff their own haul.
+    # No two-way pair (issue #2), and no relay of a MATERIAL -- the second of
+    # those AMENDED for profile section 5's declared relay tier.
+    #
+    # The rule used to be "no material village both sends and receives", and it
+    # held by construction: netting leaves each village a sender or a receiver
+    # of a material, and the relay MOVE is crop-only (profile 3.5, which is how
+    # the optimizer lifts load off villages that cannot staff their own haul).
+    # Section 5 adds a declared exception -- a village the operator names with
+    # `relay_for` forwards the capital's material on -- so the rule is now "no
+    # material village both sends and receives EXCEPT a declared relay, and no
+    # relay feeds a relay".
+    #
+    # This fixture declares no relay, which is the whole point of it: the
+    # exemption set is empty, so the assertion below is byte-for-byte the one it
+    # has always been, and the frozen account is still the guard that says an
+    # undeclared tier changes nothing. The exemption itself is measured in
+    # tests/test_distribution_optimizer.py (`_material_relay_violations`, driven
+    # both ways) and end to end in tests/test_distribution_relay_tier.py.
+    declared_relays = {vid for vid, village in villages.items() if village.relay_for}
+    assert declared_relays == set(), (
+        "the golden account declares a relay tier; it is the no-tier regression "
+        "guard and must not acquire one"
+    )
     materials = {Resource.LUMBER, Resource.CLAY, Resource.IRON}
     sends: dict[int, set] = {}
     receives: dict[int, set] = {}
@@ -275,7 +295,11 @@ def test_golden_plan_respects_the_structural_invariants(case, default_plan):
     for (origin, destination), resources in carried.items():
         assert not (resources & carried.get((destination, origin), set()))
     for vid in villages:
-        assert not (sends.get(vid, set()) & receives.get(vid, set()))
+        forwarding = sends.get(vid, set()) & receives.get(vid, set())
+        assert not forwarding or vid in declared_relays, (
+            f"village {vid} both sends and receives {sorted(r.value for r in forwarding)} "
+            f"without being a declared relay"
+        )
 
     # Conservation: inflow minus outflow equals what each village's allocation
     # asked for. Stated on the net so a relay hub -- which forwards cargo it did

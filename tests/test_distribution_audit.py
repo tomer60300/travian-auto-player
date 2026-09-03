@@ -39,7 +39,7 @@ from tests.distribution_synthetic import (
     profile_windows,
     random_account,
 )
-from travian_api.services.distribution import optimizer
+from travian_api.services.distribution import optimizer, schedule
 from travian_api.services.distribution.allocation import Resource
 from travian_api.services.distribution.merchants import RouteCost
 from travian_api.services.distribution.optimizer import VillageState
@@ -436,6 +436,76 @@ class TestPlanArithmetic:
         assert breach_segment(120.0) == "night"
         assert breach_segment(8 * 60.0) == "day"
 
+    def test_a_declared_material_relay_forwards_after_it_collects(self) -> None:
+        """Collect-then-ship, for the resource profile section 5's tier moves.
+
+        The beat's ordering machinery was crop-only in three places, and it
+        could be: netting leaves every village a sender or a receiver of a
+        material, so no material could produce a hub and no material forward leg
+        could have an inbound to wait for. A DECLARED tier makes one real, and a
+        forward leg placed with no regard for its inbound ships out of the
+        relay's own warehouse while the collecting leg merely refills what just
+        left -- the same defect the crop ordering exists to prevent, with a
+        warehouse instead of a granary, and invisible at both ends of the tier.
+
+        Measured on the real firing minutes rather than on the hub report,
+        because the hub report is derived from the same beat and would agree with
+        it whatever the beat did.
+
+        Two assertions, because the established crop-side formulation is not
+        sharp enough on its own here. "The worst wait is under one cycle" (which
+        is how tests/test_distribution_planner.py states it, on 4h cycles) is
+        satisfied by a beat that forwards 45 minutes into a 60-minute cycle --
+        measured, that is exactly what this account's tier does with the
+        ordering removed. So the second assertion is the physical one: a forward
+        send must not leave while the batch it exists to carry is still IN THE
+        AIR. Anything dispatched in that window is provably carrying the relay's
+        own stock, which is the whole defect.
+        """
+        account = next(a for a in adversarial_accounts() if a.name == "adv-declared-material-relay")
+
+        result = _post_plan(account.plan_request)
+
+        rows = {(r.origin, r.destination): r for r in result.rows}
+        relay = account.plan_request.snapshot[1].village_id
+        source = account.plan_request.snapshot[0].village_id
+        collect = rows.get((source, relay))
+        assert collect is not None, f"no collecting leg was built: {sorted(rows)}"
+        forwards = [row for (origin, _d), row in rows.items() if origin == relay]
+        assert forwards, f"no forward leg was built: {sorted(rows)}"
+
+        def firings(row, arrival):
+            step = row.cycle_hours * 60
+            clock = row.arrival if arrival else row.dispatch
+            hours, minutes = clock.split(":")
+            start = int(hours) * 60 + int(minutes)
+            return [(start + offset) % 1440 for offset in range(0, 1440, step)]
+
+        departures = firings(collect, arrival=False)
+        arrivals = firings(collect, arrival=True)
+        # The sheet states both clocks and not the trip, so the trip is their
+        # difference -- which is also the only figure an operator reading the
+        # sheet has, so it is the right one to hold the plan to.
+        travel = (arrivals[0] - departures[0]) % 1440
+        assert travel > 0, "the collecting leg reached the sheet with no travel time"
+        for row in forwards:
+            sends = firings(row, arrival=False)
+            worst = max(min((d - a) % 1440 for a in arrivals) for d in sends)
+            assert worst < row.cycle_hours * 60, (
+                f"relay {relay} waits {worst} min after collecting before forwarding to "
+                f"{row.destination}, which is a whole {row.cycle_hours}h cycle -- it is "
+                f"shipping from its own warehouse"
+            )
+            in_flight = [
+                send for send in sends if any((send - out) % 1440 < travel for out in departures)
+            ]
+            assert not in_flight, (
+                f"relay {relay} forwards to {row.destination} at {sorted(in_flight)}, while "
+                f"the batch it is meant to carry is still {travel} min in the air from "
+                f"{sorted(departures)[:4]} -- so it is shipping its own warehouse and the "
+                f"collecting leg only refills what just left"
+            )
+
     def test_the_day_check_hands_the_simulation_the_real_travel_times(self) -> None:
         """The seam between the beat and the storage replay.
 
@@ -811,6 +881,39 @@ def _let_a_receiver_exceed_its_capacity():
 
 
 @contextlib.contextmanager
+def _order_the_beat_for_crop_only():
+    """Collect-then-ship goes back to being crop-only, as it was before the tier.
+
+    The exact regression profile section 5's tier introduces the risk of: a
+    declared material relay's forward leg is then phased with no regard for its
+    inbound, so it ships out of the relay's own warehouse and the collecting leg
+    refills what just left. Injected by narrowing the resource set the beat
+    orders on, which is the one line that made it general.
+    """
+    real = schedule.Resource
+
+    class _CropOnly:
+        """Stands in for the Resource enum, offering only crop to iterate.
+
+        The beat derives its hub sets by iterating `Resource`, so a stand-in
+        that yields crop alone reproduces the pre-tier code exactly without
+        touching anything else -- including the attribute access
+        (`Resource.CROP`) the same function makes.
+        """
+
+        CROP = real.CROP
+
+        def __iter__(self):
+            return iter((real.CROP,))
+
+    schedule.Resource = _CropOnly()
+    try:
+        yield
+    finally:
+        schedule.Resource = real
+
+
+@contextlib.contextmanager
 def _credit_an_arrival_at_its_dispatch_minute():
     """Cargo lands the minute it leaves, so it is attributed to the wrong profile.
 
@@ -844,6 +947,9 @@ class TestTheGuardsActuallyGuard:
         "arrival": lambda: (
             TestPlanArithmetic().test_an_arrival_lands_after_the_trip_not_when_it_was_sent()
         ),
+        "relay_order": lambda: (
+            TestPlanArithmetic().test_a_declared_material_relay_forwards_after_it_collects()
+        ),
     }
 
     MUTATIONS = {
@@ -852,6 +958,7 @@ class TestTheGuardsActuallyGuard:
         "budget": _inflate_the_merchant_budget,
         "overflow": _let_a_receiver_exceed_its_capacity,
         "arrival": _credit_an_arrival_at_its_dispatch_minute,
+        "relay_order": _order_the_beat_for_crop_only,
     }
 
     @pytest.mark.slow

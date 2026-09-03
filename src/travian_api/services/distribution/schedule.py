@@ -10,17 +10,29 @@ A route with a 3-hour cycle fires eight times a day. Scheduling therefore works
 on a 1440-minute timeline and places *every* firing, rather than a minute-of-hour
 offset -- a 60-minute table cannot express a multi-hour cycle at all (review R5).
 
-Two things worth knowing about hubs:
+Three things worth knowing about hubs:
 
 * **Collect-then-ship ordering** only matters where a village both receives and
-  forwards a resource. Netting in :mod:`.allocation` rules that out for lumber,
-  clay and iron -- each village is a sender or a receiver of a material, never
-  both -- so no material has an inbound that an outbound must wait for.
-* **Crop is the exception.** :mod:`.optimizer` may route crop through a sub-hub
-  (profile section 3.5, ``MAX_RELAY_HOPS``), so a hub's forward sends are phased
-  after its collecting arrivals, and :func:`time_relays` re-times every hub
-  against the schedule actually built -- including the windowed case, where a
-  cargo landing after the window's last send waits until tomorrow.
+  forwards THE SAME resource. A hub's forward sends are therefore phased after
+  its collecting arrivals of that resource, and :func:`time_relays` re-times
+  every hub against the schedule actually built -- including the windowed case,
+  where a cargo landing after the window's last send waits until tomorrow.
+* **Crop reaches it by search.** :mod:`.optimizer` may route crop through a
+  sub-hub wherever it pays (profile section 3.5, ``MAX_RELAY_HOPS``).
+* **A material reaches it only by declaration.** Netting in :mod:`.allocation`
+  leaves every village a sender or a receiver of a material and never both, so
+  for a long time no material could have an inbound an outbound must wait for,
+  and everything here was written for crop alone. Profile section 5's DECLARED
+  relay tier (``VillageState.relay_for``) is the amendment: 02 hands its
+  reserved wood to a relay drawn from its own neighbour set, which forwards it
+  on. So the ordering, the placement pass and the arrival bookkeeping are all
+  keyed by resource. Absent a declaration nothing changes, because no material
+  produces a hub -- which is what keeps an existing schedule byte-identical.
+
+  It is not cosmetic. A material relay whose forward leg is phased without
+  regard for its inbound ships from the relay's own warehouse, and the
+  collecting leg merely refills what it just sent -- the exact failure the crop
+  ordering exists to prevent, with a warehouse instead of a granary.
 """
 
 from __future__ import annotations
@@ -212,16 +224,40 @@ def build_beat(
     findings: list[Finding] = []
     # Arrivals already claimed, per destination.
     claimed: dict[int, list[int]] = {}
-    # Crop arrivals only, per village: what a relay hub is waiting to forward.
-    crop_arrivals: dict[int, list[float]] = {}
+    # Arrivals per (village, resource): what a relay hub is waiting to forward.
+    # Keyed by resource because a hub forwards a POOL -- a lumber pass-through
+    # is not fed by a crop arrival, and phasing it against one would time the
+    # forward leg off cargo that is not the cargo it carries.
+    relay_arrivals: dict[tuple[int, Resource], list[float]] = {}
 
-    # A village that both receives and sends crop is forwarding it -- the crop
-    # relay the optimizer builds to lift load off villages that cannot staff
-    # their own haul. Its outbound must be scheduled after its inbound lands, or
-    # the route ships from the hub's own granary and the relay only refills it.
-    crop_senders = {r.origin for r in routes if Resource.CROP in r.cargo_per_hour}
-    crop_receivers = {r.destination for r in routes if Resource.CROP in r.cargo_per_hour}
-    relay_hubs = crop_senders & crop_receivers
+    # A village that both receives and sends the same resource is forwarding it.
+    # Its outbound must be scheduled after its inbound lands, or the route ships
+    # from the hub's own store and the relay only refills it.
+    #
+    # Per resource, and this is the generalisation profile section 5's declared
+    # MATERIAL tier needed: until it existed, netting in `.allocation` left every
+    # village a sender or a receiver of a material and never both, so crop was
+    # the only resource that could produce a hub and the three places below were
+    # written for crop alone. A declared relay makes a lumber hub real, and a
+    # forward leg phased with no regard for its inbound would have shipped from
+    # the relay's own warehouse while the collecting leg merely refilled it.
+    #
+    # `hubs_of` is empty for every resource but crop unless a tier is declared,
+    # so an undeclared account is scheduled exactly as before -- including the
+    # partition below, which keeps crop in the layered group whether or not crop
+    # has a hub.
+    hubs_of: dict[Resource, set[int]] = {}
+    for resource in Resource:
+        senders = {r.origin for r in routes if resource in r.cargo_per_hour}
+        receivers = {r.destination for r in routes if resource in r.cargo_per_hour}
+        overlap = senders & receivers
+        if overlap:
+            hubs_of[resource] = overlap
+    # Resources whose graph the ordering pass has to respect. Crop is always in
+    # it -- it may relay by design, and it has always been placed in the layered
+    # group even on a plan with no crop hub, so leaving it in unconditionally is
+    # what makes an undeclared account byte-identical.
+    relayed = {Resource.CROP} | set(hubs_of)
 
     # Deterministic order: the busiest destinations are placed first, while they
     # still have the whole day to spread across.
@@ -237,18 +273,35 @@ def build_beat(
             route.cycle_hours,
         )
 
-    # A crop route out of a hub must be placed after the routes feeding that hub,
-    # or its inbound arrivals are not on the clock yet and collect-then-ship
+    # A route out of a hub must be placed after the routes feeding that hub, or
+    # its inbound arrivals are not on the clock yet and collect-then-ship
     # quietly does nothing. Merely sorting hub-outbound last is not enough: in a
     # chain A -> B -> C -> D every leg is hub-outbound, and the tie-break decides
     # their relative order by destination id, which has nothing to do with the
-    # direction cargo flows. So this is a real topological pass over the crop
+    # direction cargo flows. So this is a real topological pass over the relayed
     # graph, with the ordinary key breaking ties inside each layer.
-    crop_routes = [r for r in routes if Resource.CROP in r.cargo_per_hour]
-    pending = {id(r): r for r in crop_routes}
-    feeders: dict[int, list[Route]] = {}
-    for route in crop_routes:
-        feeders.setdefault(route.destination, []).append(route)
+    #
+    # "Feeds" is per resource: a lumber leg into a village does not make a crop
+    # leg out of it wait, and treating it as though it did would order two
+    # unrelated flows against each other. Only edges of a resource that actually
+    # has a hub constrain anything, so an account with no declared tier gets the
+    # crop graph exactly as before.
+    relay_routes = [r for r in routes if relayed & r.cargo_per_hour.keys()]
+    pending = {id(r): r for r in relay_routes}
+    feeders: dict[tuple[int, Resource], list[Route]] = {}
+    for route in relay_routes:
+        for resource, hubs in hubs_of.items():
+            if resource in route.cargo_per_hour and route.destination in hubs:
+                feeders.setdefault((route.destination, resource), []).append(route)
+
+    def _feeds(route: Route) -> list[Route]:
+        """Routes whose cargo this one forwards, so they must be placed first."""
+        return [
+            feed
+            for resource in route.cargo_per_hour
+            if route.origin in hubs_of.get(resource, ())
+            for feed in feeders.get((route.origin, resource), ())
+        ]
 
     layered: list[Route] = []
     placed_ids: set[int] = set()
@@ -256,29 +309,39 @@ def build_beat(
         ready = [
             route
             for route in pending.values()
-            if all(id(feed) in placed_ids for feed in feeders.get(route.origin, ()))
+            if all(id(feed) in placed_ids for feed in _feeds(route))
         ]
         if not ready:
-            # A cycle in the crop graph (a two-way pair, or a longer loop). No
+            # A cycle in the relayed graph (a two-way pair, or a longer loop). No
             # ordering can satisfy every leg, so fall back to the ordinary key
             # for the remainder and let the staleness warning report the cost
-            # rather than looping here forever.
+            # rather than looping here forever. It applies to a declared
+            # material tier identically: "ship after you collect" is
+            # unsatisfiable at both ends of a 2-cycle whatever the cargo is.
             ready = sorted(pending.values(), key=placement_key)[:1]
         for route in sorted(ready, key=placement_key):
             layered.append(route)
             placed_ids.add(id(route))
             pending.pop(id(route), None)
 
-    non_crop = sorted(
-        (r for r in routes if Resource.CROP not in r.cargo_per_hour), key=placement_key
+    unrelayed = sorted(
+        (r for r in routes if not relayed & r.cargo_per_hour.keys()), key=placement_key
     )
-    ordered = non_crop + layered
+    ordered = unrelayed + layered
 
     for route in ordered:
         cycle_minutes = route.cycle_hours * 60
         taken = claimed.setdefault(route.destination, [])
-        forwards_crop = route.origin in relay_hubs and Resource.CROP in route.cargo_per_hour
-        inbound = crop_arrivals.get(route.origin, []) if forwards_crop else []
+        # Every arrival this route is forwarding, pooled across the resources it
+        # actually carries out of a hub. One list, because the score below wants
+        # the worst wait over all of them: a mixed-cargo forward leg has to be
+        # late for its stalest resource, not for the first one that matched.
+        inbound = [
+            arrival
+            for resource in route.cargo_per_hour
+            if route.origin in hubs_of.get(resource, ())
+            for arrival in relay_arrivals.get((route.origin, resource), ())
+        ]
 
         # Where the phase search starts, and how far it runs. Firing patterns
         # repeat every cycle, so one cycle from midnight covers all of them.
@@ -353,10 +416,12 @@ def build_beat(
         placement = ScheduledRoute(route=route, dispatch_minute=best_minute)
         scheduled.append(placement)
         taken.extend(placement.arrival_minutes)
-        if Resource.CROP in route.cargo_per_hour:
+        for resource in route.cargo_per_hour:
+            if resource not in relayed:
+                continue
             # Only what a send that actually leaves will land: a hub cannot
             # forward cargo from a firing the profile's hours suppress.
-            crop_arrivals.setdefault(route.destination, []).extend(
+            relay_arrivals.setdefault((route.destination, resource), []).extend(
                 arrival
                 for minute, arrival in zip(
                     placement.dispatch_minutes, placement.exact_arrival_minutes
@@ -586,9 +651,20 @@ def time_relays(
                 destinations=relay.destinations,
                 collect_hours=collect_hours,
                 forward_hours=forward_hours,
+                # Carried, not defaulted. Re-timing rebuilds the hub, and a
+                # field left off here took the default -- so every declared
+                # LUMBER relay came back out of the beat claiming to be a crop
+                # one, which then read as "no material relay" to the buffer
+                # check and to the sheet alike.
+                resource=relay.resource,
             )
         )
-    return tuple(sorted(timed, key=lambda relay: (-relay.end_to_end_hours, relay.hub)))
+    # Same order `relay_hubs` produces, resource included: one village can be a
+    # crop sub-hub and a declared material relay at once, so the pair needs a
+    # tie-break that does not depend on which was appended first.
+    return tuple(
+        sorted(timed, key=lambda relay: (-relay.end_to_end_hours, relay.hub, relay.resource.value))
+    )
 
 
 def _in_window(minute: int, window: tuple[int, int]) -> bool:

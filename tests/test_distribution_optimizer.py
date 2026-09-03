@@ -14,6 +14,7 @@ from dataclasses import replace
 import pytest
 
 from travian_api.services.distribution.allocation import (
+    MATERIALS,
     Allocation,
     AllocationMode,
     Resource,
@@ -146,6 +147,94 @@ class TestScalesToAnyAccountSize:
         assert plan.is_feasible
 
 
+# Village 1 may ship to 2 only, so 3 and 4 are out of its reach. Written as the
+# exclusion map the optimizer takes, which is what a `ship_only_to` on village 1
+# resolves to one layer up.
+_TIER_EXCLUSIONS = {3: {1}, 4: {1}}
+
+
+def _relay_tier_account():
+    """Profile section 5's shape, at the smallest size that can express it.
+
+    One village holding all the lumber (1), one it can reach (2), two it cannot
+    (3 and 4), and 2 declared as the relay for both. Deliberately hand-built:
+    ``make_account`` never leaves a material short, so the tier would never
+    engage on one and every assertion about it would pass by vacuity.
+    """
+    villages = {
+        1: VillageState(village_id=1, x=0, y=0, merchant_count=20, crop_per_hour=0.0),
+        2: VillageState(
+            village_id=2, x=3, y=0, merchant_count=20, crop_per_hour=0.0, relay_for=(3, 4)
+        ),
+        3: VillageState(village_id=3, x=6, y=0, merchant_count=20, crop_per_hour=0.0),
+        4: VillageState(village_id=4, x=3, y=4, merchant_count=20, crop_per_hour=0.0),
+    }
+    production = {1: 20_000.0, 2: 0.0, 3: 0.0, 4: 0.0}
+    plans = {
+        Resource.LUMBER: resolve_resource(
+            Resource.LUMBER,
+            production,
+            {
+                1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                3: Allocation(AllocationMode.ABSOLUTE, 5_000.0),
+                4: Allocation(AllocationMode.ABSOLUTE, 5_000.0),
+                2: Allocation(AllocationMode.REMAINDER),
+            },
+        )
+    }
+    return villages, plans
+
+
+def _material_relay_violations(plan, villages) -> list[str]:
+    """Every breach of the AMENDED no-waterfall rule for lumber, clay and iron.
+
+    Shared by the two cases below and by the same check in
+    tests/test_distribution_golden.py, so the invariant has one statement rather
+    than two that can drift apart. Every violation is collected instead of the
+    first being asserted, because a plan that breaks this breaks it structurally
+    and the whole shape is what says how.
+
+    The rule, in full: a material village is a sender or a receiver of that
+    material and never both, EXCEPT a village the operator declared as a relay
+    (``VillageState.relay_for``, profile section 5's tier) -- and a relay may
+    neither be fed by nor feed another relay, because one hop is all the beat's
+    collect-then-ship ordering can place.
+    """
+    relays = {vid for vid, village in villages.items() if village.relay_for}
+    bad: list[str] = []
+    for resource in MATERIALS:
+        edges = {
+            (r.origin, r.destination)
+            for r in plan.routes
+            if r.cargo_per_hour.get(resource, 0.0) > 0
+        }
+        senders = {origin for origin, _ in edges}
+        receivers = {destination for _, destination in edges}
+        forwarding = senders & receivers
+        undeclared = sorted(forwarding - relays)
+        if undeclared:
+            bad.append(
+                f"{resource.value}: {undeclared} both send and receive it without being "
+                f"declared relays"
+            )
+        for hub in sorted(forwarding & relays):
+            upstream = {origin for origin, destination in edges if destination == hub}
+            downstream = {destination for origin, destination in edges if origin == hub}
+            if upstream & relays:
+                bad.append(
+                    f"{resource.value}: relay {hub} is fed by relay(s) "
+                    f"{sorted(upstream & relays)} -- that is a second hop"
+                )
+            if downstream & relays:
+                bad.append(
+                    f"{resource.value}: relay {hub} forwards to relay(s) "
+                    f"{sorted(downstream & relays)} -- that is a second hop"
+                )
+            if hub in upstream or hub in downstream:
+                bad.append(f"{resource.value}: relay {hub} has a self-loop")
+    return bad
+
+
 class TestStructuralInvariants:
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
     def test_never_ships_one_resource_both_ways_between_a_pair(self, village_count):
@@ -165,29 +254,93 @@ class TestStructuralInvariants:
             assert not (resources & back), f"{origin}<->{destination} both ways"
 
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
-    def test_no_village_relays_a_material(self, village_count):
-        """The no-waterfall rule, scoped to W/C/I as profile section 3.5 states.
+    def test_no_village_relays_a_material_unless_it_was_declared_a_relay(self, village_count):
+        """The no-waterfall rule for W/C/I, AMENDED for section 5's declared tier.
 
-        Materials must never chain A->B->C. Crop is explicitly exempt there --
-        relay through a sub-hub is permitted -- and the optimizer's relay move
-        uses that exemption to lift merchant load off villages that cannot staff
-        their own haul. Restricting relay to crop is what keeps this rule true by
-        construction for the other three rather than by a runtime check.
+        It used to read "no material village both sends and receives", full
+        stop, and that was right for as long as a material hop could only come
+        from the search: netting in the allocation layer leaves each village a
+        sender or a receiver of a material, and the relay MOVE is crop-only
+        (section 3.5), so the property held by construction rather than by any
+        runtime check.
+
+        Profile section 5 is the exception, and it is an instruction rather than
+        an optimisation: 02 holds the reserved wood, may reach only its own
+        neighbours, and hands the onward distribution to a tier drawn from that
+        neighbour set. So the rule is now:
+
+            no material village both sends and receives EXCEPT a village the
+            operator DECLARED as a relay, and no relay feeds a relay.
+
+        Renamed rather than deleted, and both halves are asserted. This case
+        declares nothing, so the exemption set is empty and the assertion below
+        is exactly the one it always was -- which is the regression guard that
+        matters, because it is the shape every existing account has.
+        ``TestTheDeclaredRelayTier`` below exercises the exemption itself.
         """
         villages = make_account(village_count, seed=village_count + 11)
         plans, _ = make_plans(villages, seed=village_count + 11)
 
         plan = build_plan(villages, plans, GEOMETRY, MODEL)
 
-        materials = {Resource.LUMBER, Resource.CLAY, Resource.IRON}
-        sends: dict[int, set[Resource]] = {}
-        receives: dict[int, set[Resource]] = {}
-        for route in plan.routes:
-            carried = set(route.cargo_per_hour) & materials
-            sends.setdefault(route.origin, set()).update(carried)
-            receives.setdefault(route.destination, set()).update(carried)
-        for vid in villages:
-            assert not (sends.get(vid, set()) & receives.get(vid, set()))
+        assert _material_relay_violations(plan, villages) == []
+
+    def test_a_declared_relay_is_the_only_village_allowed_to_forward_a_material(self):
+        """The other half of the amended rule, with a tier that actually fires.
+
+        Built deliberately rather than drawn from ``make_account``: the random
+        accounts never leave a material short, so the tier never engages on one
+        and this test would pass by describing nothing. The shape here is
+        section 5's own -- one village holds all the lumber, cannot ship to the
+        two that need it, and forwards through the one it can reach.
+        """
+        villages, plans = _relay_tier_account()
+
+        plan = build_plan(
+            villages,
+            plans,
+            GEOMETRY,
+            MODEL,
+            excluded_origins_by_destination=_TIER_EXCLUSIONS,
+        )
+
+        # Not vacuous: the relay really is forwarding lumber it received.
+        lumber = {
+            (r.origin, r.destination)
+            for r in plan.routes
+            if r.cargo_per_hour.get(Resource.LUMBER, 0.0) > 0
+        }
+        assert (1, 2) in lumber, f"the collecting leg was never built: {sorted(lumber)}"
+        assert {(2, 3), (2, 4)} <= lumber, f"the forward legs were never built: {sorted(lumber)}"
+        assert plan.shortfalls == ()
+
+        assert _material_relay_violations(plan, villages) == []
+
+    def test_the_amended_rule_still_catches_an_undeclared_material_hub(self):
+        """The assertion has to be able to FAIL, or it guards nothing.
+
+        Same plan, read against an account that declares no relay: village 2
+        both sends and receives lumber, and the rule must say so. This is the
+        mutation the rewritten invariant would otherwise have quietly stopped
+        making -- an exemption keyed off the wrong thing (any village that
+        happens to forward, say) reads identically until something is measured
+        against it.
+        """
+        villages, plans = _relay_tier_account()
+        plan = build_plan(
+            villages,
+            plans,
+            GEOMETRY,
+            MODEL,
+            excluded_origins_by_destination=_TIER_EXCLUSIONS,
+        )
+        undeclared = {vid: replace(v, relay_for=None) for vid, v in villages.items()}
+
+        violations = _material_relay_violations(plan, undeclared)
+
+        assert violations, "the amended rule no longer notices an undeclared material hub"
+        assert "[2]" in violations[0]
+        assert "lumber" in violations[0]
 
     @pytest.mark.parametrize("village_count", ACCOUNT_SIZES)
     def test_merchant_arithmetic_matches_the_cost_model(self, village_count):

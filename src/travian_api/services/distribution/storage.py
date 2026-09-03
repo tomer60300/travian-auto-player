@@ -28,6 +28,14 @@ average fits, one delivery does not, and a shorter cycle fixes it. A
 so it never leaves its cap, no schedule can help, and the surplus needs
 somewhere to go. :attr:`OverflowEvent.structural` is which.
 
+A third case reads off the same replay: a village holding cargo it never grew.
+:func:`relay_buffer_findings` asks whether a DECLARED material relay (profile
+section 5) has the warehouse to absorb its pass-through between collecting and
+forwarding. That is the reason material relay was deferred once before -- the
+capital's warehouse is 1,200,000 and a neighbour's is 160,000 -- and it is not
+the same question as either check above, because the cargo at risk is somebody
+else's and its loss is invisible at both ends of the tier.
+
 Pure functions over already-fetched state. Nothing here spends a game request.
 """
 
@@ -37,8 +45,9 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .allocation import Resource, village_label
+from .allocation import MATERIALS, Resource, village_label
 from .findings import Category, Finding
+from .optimizer import RelayHub
 from .schedule import MINUTES_PER_DAY, Beat, ScheduledRoute
 
 # Rates below this are treated as level rather than drifting. Dividing by a rate
@@ -650,6 +659,120 @@ def storage_warnings(
         finding.message
         for finding in storage_findings(statuses, overflows, warn_hours=warn_hours, names=names)
     )
+
+
+def relay_buffer_findings(
+    hubs: Sequence[RelayHub],
+    overflows: Sequence[OverflowEvent],
+    beat: Beat,
+    capacities: Mapping[int, Mapping[Resource, int]],
+    names: Mapping[int, str] | None = None,
+) -> list[Finding]:
+    """Can each declared material relay's WAREHOUSE hold its pass-through?
+
+    This is the check that had material relay deferred once before, and it is
+    not a refinement of the generic overflow report. The capital's warehouse is
+    1,200,000 and a neighbour's is 160,000; hand the neighbour the capital's
+    wood flow and it fills in under 7 hours of an 8-hour night. A relay does not
+    merely receive -- it holds cargo it never grew between collecting and
+    forwarding, and a store that tops out in between destroys the difference.
+
+    Read off the replay rather than re-simulated: :func:`simulate_day` already
+    walks the beat against real capacities and records the minute each store
+    first reached its cap, which is exactly the fact this needs. A second
+    simulation with its own assumptions is how /plan and /day-check came to
+    answer the same account differently once before.
+
+    Severity turns on **whether anything had left yet**, which is the difference
+    between destroyed cargo and a scheduling cost:
+
+    * the store fills before the forward leg's first send -> the relay never
+      passed any of it on, so everything above the cap is destroyed at the
+      relay. :attr:`Category.RELAY_BUFFER`, critical.
+    * it fills after a forward send -> the tier IS delivering, and the warehouse
+      tops out afterwards and sheds what lands next.
+      :attr:`Category.RELAY_BUFFER_TIGHT`, a warning.
+
+    Crop hubs are not this function's business. A granary filling on a relay is
+    the ordinary overflow :func:`storage_findings` already reports, and the crop
+    hub carries its own guard -- :func:`~.optimizer._may_relay_through` refuses
+    a village that is losing crop. The declared material tier had neither.
+    """
+    filled = {
+        (event.village_id, event.resource): event
+        for event in overflows
+        if event.wasted_per_day >= MIN_REPORTED_WASTE
+    }
+    findings: list[Finding] = []
+    for relay in hubs:
+        if relay.resource not in MATERIALS:
+            continue
+        event = filled.get((relay.hub, relay.resource))
+        if event is None:
+            continue
+        hub = village_label(relay.hub, names)
+        # Every minute a forward leg of THIS hub actually dispatches. Taken from
+        # the beat rather than from the hub's `forward_hours`, because the
+        # question is ordering against a concrete minute, not a duration.
+        forwards = sorted(
+            minute
+            for scheduled in beat.routes
+            if scheduled.route.origin == relay.hub
+            and scheduled.route.destination in relay.destinations
+            and relay.resource in scheduled.route.cargo_per_hour
+            for minute in scheduled.dispatch_minutes
+        )
+        first_send = forwards[0] if forwards else None
+        # A structural event has no meaningful minute -- the store is already at
+        # its cap when the day starts and never leaves -- so it cannot have
+        # forwarded anything first, whatever the clock says.
+        before_any_send = event.structural or first_send is None or event.minute <= first_send
+        capacity = capacities.get(relay.hub, {}).get(relay.resource)
+        held = "" if capacity is None else f"{capacity:,}"
+        collected = _named_villages(relay.origins, names)
+        onward = _named_villages(relay.destinations, names)
+        if before_any_send:
+            message = (
+                f"{hub} relays {relay.resource.value} from {collected} to {onward}, and its "
+                f"{held or 'own'} warehouse is full at "
+                f"{event.minute // 60:02d}:{event.minute % 60:02d} before it has forwarded "
+                f"any of it -- {event.wasted_per_day:,.0f}/day is destroyed AT THE RELAY. "
+                f"A relay has to hold the pass-through between collecting and forwarding"
+            )
+            category = Category.RELAY_BUFFER
+        else:
+            message = (
+                f"{hub} relays {relay.resource.value} from {collected} to {onward} and does "
+                f"forward before it fills, but its {held or 'own'} warehouse tops out at "
+                f"{event.minute // 60:02d}:{event.minute % 60:02d} -- after its first send "
+                f"at {first_send // 60:02d}:{first_send % 60:02d} -- and sheds "
+                f"{event.wasted_per_day:,.0f}/day of what lands afterwards"
+            )
+            category = Category.RELAY_BUFFER_TIGHT
+        findings.append(
+            Finding(
+                category=category,
+                message=message,
+                detail=f"{hub} — {event.wasted_per_day:,.0f}/day of {relay.resource.value}",
+                village=hub,
+                resource=relay.resource,
+                loss_per_day=event.wasted_per_day,
+            )
+        )
+    # Worst first, as every other finding list is ordered.
+    return sorted(findings, key=lambda f: (-f.loss_per_day, f.village))
+
+
+def _named_villages(village_ids: Sequence[int], names: Mapping[int, str] | None) -> str:
+    """Village names for a message, abridged once the list stops being readable.
+
+    Same shape as :func:`~.optimizer._named`, kept here rather than imported so
+    this module keeps depending on the optimizer for types only.
+    """
+    labels = [village_label(vid, names) for vid in village_ids]
+    if len(labels) <= 3:
+        return ", ".join(labels)
+    return ", ".join(labels[:3]) + f" and {len(labels) - 3} more"
 
 
 @dataclass(frozen=True)

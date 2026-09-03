@@ -23,11 +23,26 @@ Not yet built, and deliberately not faked:
   via a nearer hub, split cargo across paths. The optimizer sweeps cycles and
   recommends a Trade Office upgrade, then declares infeasibility rather than
   quietly trimming a route to fit.
-* **Crop relay through a sub-hub** (profile 3.5). Netting in ``allocation``
-  leaves each village either a sender or a receiver of a resource, never both,
-  so a relay cannot be expressed. It needs multi-leg flows, not a scheduling
-  change.
 * **NPC, storage safety, apply and monitoring** (profile sections 6-9).
+
+Relay is built, in two forms that answer two different questions:
+
+* **Crop relay through a sub-hub** (profile 3.5) is SEARCHED. ``optimizer``'s
+  relay move reroutes a crop flow through an intermediate village wherever that
+  strictly lowers the objective, and ``schedule`` phases the hub's forward sends
+  after its collecting arrivals.
+* **A one-hop material relay tier** (profile 5) is DECLARED. Netting in
+  ``allocation`` leaves each village either a sender or a receiver of a
+  material, so a material relay cannot arise from the flow graph at all and the
+  search cannot find one -- which is correct, because section 5 does not ask for
+  one to be found: it states that 02 hands its reserved wood to a tier drawn
+  from its own neighbour set, and forbids a role village from being in it. So
+  the operator names the tier (``VillageConfig.relay_for``) and the planner
+  builds its two legs by construction, outside the search. This deliberately
+  AMENDS the no-waterfall invariant for materials, to "no material village both
+  sends and receives except a declared relay, and no relay feeds a relay"; the
+  relay's own warehouse is then checked against the pass-through it has to hold
+  (``storage.relay_buffer_findings``).
 
 Nothing in this package hardcodes an account. Village count grows as the account
 expands -- 22 today, 23 landing -- and every production figure differs between

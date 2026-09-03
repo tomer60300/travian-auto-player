@@ -87,6 +87,7 @@ from travian_api.services.distribution.run_history import (
 from travian_api.services.distribution.schedule import MINUTES_PER_DAY
 from travian_api.services.distribution.storage import (
     ProfileSegment,
+    relay_buffer_findings,
     simulate_day,
     simulate_profile_cycle,
     storage_findings,
@@ -502,6 +503,52 @@ class VillageConfig(BaseModel):
             "supplied from a restricted village. None means unrestricted."
         ),
     )
+    relay_for: list[int] | None = Field(
+        default=None,
+        description=(
+            "Villages this one FORWARDS the capital's lumber, clay and iron on to "
+            "(profile section 5's relay tier). Operator-owned: nothing in the "
+            "game states a tier, and section 5 does not ask the planner to find "
+            "one -- it says one exists, and says where it may be drawn from. "
+            "What it buys: 02 holds the reserved wood and may only reach its own "
+            "neighbours, so with a `ship_only_to` on 02 the defensive villages "
+            "beyond it are simply unreachable and the plan comes back infeasible "
+            "with a shortfall each. Naming a neighbour as their relay gives the "
+            "planner the two legs it cannot invent — 02 → this village sized to "
+            "the sum of these villages' unmet demand, and this village → each of "
+            "them sized to that village's own gap. "
+            "MATERIALS ONLY. Crop already relays through a sub-hub wherever the "
+            "route search finds it worth doing (`max_relay_hops`), and a second, "
+            "declared mechanism for the same resource would be two answers to one "
+            "question. Whether a village may be conscripted as a crop hub is "
+            "`may_relay`, which is a different field answering a different "
+            "question — this one is an instruction, that one is a permission. "
+            "ONE HOP. A village named here may not itself be a relay, and the "
+            "plan is refused rather than truncated: a chain puts one hub's "
+            "forward leg behind another's, which no daily beat can order. "
+            "NOT A ROLE VILLAGE (section 5.9). The capital, the Hammer, the "
+            "troops village and the defensive villages are refused with their "
+            "role named; a feeder or a village with no role declared may relay. "
+            "The relay's merchants for the COLLECTING leg are billed to the "
+            "village that sends it, so at 02 they count inside its "
+            "`max_busy_merchants` — section 5's 'the relay leg counts inside the "
+            "8'. Its warehouse must also hold the pass-through between "
+            "collecting and forwarding, which the plan checks and reports as "
+            "relay_buffer. "
+            "`/night-profile` validates this and derives no tier from it, and "
+            "that is not an oversight: it derives TARGETS -- what each village "
+            "must end up holding -- and a relay holds nothing it forwards, so a "
+            "routing instruction cannot move a single figure it produces. The "
+            "tier appears when those targets are planned, on `/plan`, "
+            "`/day-check` or `/execute`. "
+            "None means no tier declared, which plans exactly as before. An "
+            "EMPTY list is refused rather than read as None: unlike "
+            "`ship_only_to`, where an empty list is the real answer 'ships to "
+            "nobody', there is no reading of 'forwards to nobody' that differs "
+            "from leaving the field off, so accepting it would let a half-typed "
+            "row look like a decision."
+        ),
+    )
 
 
 class ForeignTarget(BaseModel):
@@ -711,6 +758,98 @@ class PlanRequest(BaseModel):
                 + ". A ceiling the village cannot reach plans as its fleet, so the "
                 "figure on screen would not be the one in force -- correct the cap, "
                 "or fetch fresh state if merchants have been trained since."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _relay_tier_is_one_hop_of_non_role_villages(self) -> "PlanRequest":
+        """Profile section 5's tier, refused wherever it cannot mean anything.
+
+        Four ways a ``relay_for`` list is not a declaration, and each is refused
+        with the villages named rather than dropped. A relay silently ignored is
+        the worst of the available outcomes: the operator reads a tier on their
+        screen while the plan reports the villages beyond it as unreachable, and
+        nothing connects the two.
+
+        1. **A downstream the snapshot does not contain.** A typo, or a chiefed
+           village. Same refusal `ship_only_to` and `consumption_per_hour` get.
+        2. **A relay relaying for itself.** There is no leg to build.
+        3. **A role village as the relay** (section 5.9). The role is NAMED,
+           because "18 may not relay" is unanswerable and "18 is your Hammer, so
+           it may not relay" says what to change. Resolved through the same
+           ``role`` the rest of the plan reads, so a village takes its declared
+           role and nothing else. A feeder may relay; so may a village with no
+           role, which is most accounts.
+        4. **A relay feeding a relay.** One hop only, and BOTH villages are
+           named: the fix is to move a downstream, and neither half of the pair
+           identifies which on its own. It is the same refusal the crop side
+           makes in ``_crop_shape_ok`` and for the same reason -- a chain puts
+           one hub's forward leg behind another's, and the beat's
+           collect-then-ship ordering cannot satisfy both.
+
+        Here rather than in a handler so ONE rule covers all four planning paths,
+        exactly as the merchant cap above and the crop spend do.
+
+        `may_relay` is deliberately NOT consulted. It answers a different
+        question -- may the route search conscript this village as a CROP hub --
+        and reading it here would make a permission about one mechanism silently
+        veto an instruction about another. Section 5.9's rule is about the role,
+        so the role is what is checked.
+        """
+        declared = {
+            entry.village_id: entry.relay_for
+            for entry in self.config
+            if entry.relay_for is not None
+        }
+        if not declared:
+            return self
+        names = {v.village_id: v.name for v in self.snapshot if v.name}
+        known = {v.village_id for v in self.snapshot}
+        roles = {entry.village_id: entry.role for entry in self.config if entry.role is not None}
+        problems: list[str] = []
+        for relay in sorted(declared):
+            label = village_label(relay, names)
+            if not declared[relay]:
+                # Refused here rather than with `min_length=1` on the field so
+                # the message names the VILLAGE. Pydantic's own wording gives
+                # the config index -- "config.6.relay_for" -- which is not a
+                # thing the operator can find in a 26-row table.
+                problems.append(
+                    f"{label} is declared as a relay for nobody. Unlike ship_only_to, where "
+                    f"an empty list means 'ships to nobody', there is no reading of "
+                    f"'forwards to nobody' that differs from leaving the field off"
+                )
+                continue
+            missing = sorted(vid for vid in declared[relay] if self.snapshot and vid not in known)
+            if missing:
+                problems.append(
+                    f"{label} is declared as the relay for "
+                    + ", ".join(f"village {vid}" for vid in missing)
+                    + ", which the snapshot does not contain"
+                )
+            if relay in declared[relay]:
+                problems.append(f"{label} is declared as its own relay, which is not a leg")
+            role = roles.get(relay)
+            if role is not None and role is not Role.FEEDER:
+                problems.append(
+                    f"{label} is declared as a relay but its role is {role.value}, and "
+                    f"profile section 5.9 says role villages may not relay -- only a "
+                    f"feeder, or a village with no role declared, may"
+                )
+            second_hop = sorted(vid for vid in declared[relay] if vid in declared and vid != relay)
+            if second_hop:
+                problems.append(
+                    f"{label} is declared as the relay for "
+                    + ", ".join(f"{village_label(vid, names)}" for vid in second_hop)
+                    + ", which is itself a declared relay -- a relay may not feed a relay"
+                )
+        if problems:
+            raise ValueError(
+                "; ".join(problems)
+                + ". The tier is one hop from the village holding the material to the "
+                "village that needs it, drawn from villages that are not role villages "
+                "(profile section 5). Correct relay_for, or clear it and let those "
+                "villages be reported as unreachable."
             )
         return self
 
@@ -1045,20 +1184,33 @@ def _diagnostics_response(diagnostics: Diagnostics) -> DiagnosticsResponse:
 
 
 class RelayResponse(BaseModel):
-    """A village the plan routes crop THROUGH, which the rows cannot show.
+    """A village the plan routes a resource THROUGH, which the rows cannot show.
 
     The sheet lists ``V22 -> V02`` and ``V02 -> V17`` as unrelated lines, so
     without this the operator has no way to know the second row is carrying what
     the first one delivered -- or that the delivery takes both legs' waits.
 
-    Keyed on the hub rather than on a path: the cargo is pooled in the hub's
-    granary, so which origin's crop reaches which destination is not something
-    the plan decided, and reporting every combination as a delivery would invent
-    it (6 real hubs became 41 claimed paths on one audited account).
+    Keyed on the hub AND the resource, never on a path: the cargo is pooled in
+    the hub's store, so which origin's crop reaches which destination is not
+    something the plan decided, and reporting every combination as a delivery
+    would invent it (6 real hubs became 41 claimed paths on one audited
+    account). The resource is part of the key because one village can be a crop
+    sub-hub the search found and a declared material relay at the same time --
+    two pools of cargo, two waits.
     """
 
     hub: int
     hub_name: str
+    resource: Resource = Field(
+        default=Resource.CROP,
+        description=(
+            "What is being relayed. Crop reaches a hub by SEARCH (the optimizer "
+            "reroutes a crop flow through a sub-hub wherever it pays); a "
+            "material reaches one only where the operator declared the village "
+            "with `relay_for` (profile section 5's tier). Defaulted to crop, "
+            "which is what every relay was before that tier existed."
+        ),
+    )
     # Ids and names in parallel, as every other row here does it: the ids join
     # this to the sheet's rows, the names are what the operator reads.
     origins: list[int]
@@ -1881,6 +2033,18 @@ def _storage_findings(
             names=names,
             crop_negative_by_design=roles.crop_negative_by_design,
         )
+    ) + relay_buffer_findings(
+        # Section 5's declared tier, checked on the SAME replay the overflow
+        # findings above come from. A relay holds somebody else's cargo between
+        # collecting and forwarding, and a warehouse that tops out in between
+        # destroys it -- which the generic overflow line reports as the relay's
+        # own problem, naming neither the tier nor the cargo's real owner. This
+        # is the check that had material relay deferred once before.
+        plan.relays,
+        overflows,
+        plan.beat,
+        capacities,
+        names=names,
     )
 
 
@@ -2810,6 +2974,12 @@ async def _plan_account(
     max_busy = {
         c.village_id: c.max_busy_merchants for c in body.config if c.max_busy_merchants is not None
     }
+    # Profile section 5's declared relay tier, read off the config for the same
+    # reason the cap is: no role template carries one, because a tier is a fact
+    # about a village's POSITION -- 18 sits between 02 and 11 -- and not about
+    # the kind of village it is. The schema has already refused an unknown
+    # downstream, a self-reference, a role village and a second hop.
+    relay_for = {c.village_id: tuple(c.relay_for) for c in body.config if c.relay_for is not None}
     # Checked before the roles are resolved, so an empty snapshot is reported as
     # the empty snapshot it is rather than as a role naming a village that is
     # not in it. Every snapshot entry becomes a village state below, so this is
@@ -2845,6 +3015,9 @@ async def _plan_account(
             # of the merchant budget takes it from the same place, the way the
             # Trade Office level and the relay permission travel.
             max_busy_merchants=max_busy.get(v.village_id),
+            # And section 5's tier, on the village for the same reason: the flow
+            # builder, the hub report and the beat all have to read one list.
+            relay_for=relay_for.get(v.village_id),
         )
         for v in body.snapshot
     }
@@ -3506,6 +3679,7 @@ async def post_plan(
             RelayResponse(
                 hub=relay.hub,
                 hub_name=village_label(relay.hub, names),
+                resource=relay.resource,
                 origins=list(relay.origins),
                 origin_names=[village_label(vid, names) for vid in relay.origins],
                 destinations=list(relay.destinations),
