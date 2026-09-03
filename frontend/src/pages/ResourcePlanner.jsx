@@ -16,6 +16,7 @@ import {
   describeConsumption,
   describeSpendSource,
   isConsumptionRate,
+  isEmptyTemplate,
   isMaxBusyMerchants,
   isStockFloorFraction,
   mergeSetup,
@@ -1938,8 +1939,15 @@ export default function ResourcePlanner() {
   // Roles some village claims and nobody has given a profile to. The backend
   // refuses exactly these, so naming them here is the difference between a
   // 422 the operator can act on and one they have to decode.
+  //
+  // `isEmptyTemplate` rather than `== null`, and the SAME predicate
+  // `rolesForRequest` drops a template on: the role key outlives the last
+  // figure in it, so a template emptied box by box was still a template to a
+  // null check -- the request carried `{"def": {"consumption": {}}}`, the
+  // backend accepted it, and this warning stayed silent about the four villages
+  // then planning at their own production.
   const rolesMissingTemplates = VILLAGE_ROLES.filter(
-    (role) => villagesInRole(role) > 0 && roleTemplates[role] == null
+    (role) => villagesInRole(role) > 0 && isEmptyTemplate(roleTemplates[role])
   )
 
   // The allocation the plan will ACTUALLY use for one cell: the village's own

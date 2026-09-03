@@ -10,6 +10,7 @@ import {
   describeConsumption,
   describeSpendSource,
   isConsumptionRate,
+  isEmptyTemplate,
   isMaxBusyMerchants,
   isStockFloorFraction,
   materialSpendOnly,
@@ -1669,6 +1670,57 @@ describe('allocationsForRequest', () => {
   })
 })
 
+describe('isEmptyTemplate', () => {
+  // One predicate, because two readers of "is there a template here" that
+  // disagree is exactly the defect: `rolesForRequest` decides whether the
+  // backend gets the chance to refuse, and the panel's warning decides whether
+  // the operator is told. They have to answer the same question the same way.
+
+  it('calls a missing template empty', () => {
+    expect(isEmptyTemplate(undefined)).toBe(true)
+    expect(isEmptyTemplate(null)).toBe(true)
+    expect(isEmptyTemplate({})).toBe(true)
+  })
+
+  it('calls a template with every box cleared empty', () => {
+    // The shapes the panel's own setters leave behind: a deleted allocation
+    // entry, a deleted spend entry, a `null` written by the relay select's
+    // unset option, and a `false` written by unticking the checkbox.
+    expect(isEmptyTemplate({ allocations: {} })).toBe(true)
+    expect(isEmptyTemplate({ consumption: {} })).toBe(true)
+    expect(isEmptyTemplate({ crop_negative_by_design: false })).toBe(true)
+    expect(isEmptyTemplate({ may_relay: null })).toBe(true)
+    expect(
+      isEmptyTemplate({
+        allocations: {},
+        consumption: {},
+        may_relay: null,
+        crop_negative_by_design: false,
+      })
+    ).toBe(true)
+  })
+
+  it('calls any single surviving figure a template', () => {
+    expect(isEmptyTemplate({ allocations: { lumber: KEEP_ALLOCATION } })).toBe(false)
+    expect(isEmptyTemplate({ consumption: { lumber: 8372 } })).toBe(false)
+    // Zero is a measured claim about a village that spends none, not silence --
+    // the same reason `setTemplateSpend` deletes on an empty string rather than
+    // storing a zero.
+    expect(isEmptyTemplate({ consumption: { lumber: 0 } })).toBe(false)
+    expect(isEmptyTemplate({ crop_negative_by_design: true })).toBe(false)
+    expect(isEmptyTemplate({ may_relay: true })).toBe(false)
+    // And false, which is a refusal rather than an absence.
+    expect(isEmptyTemplate({ may_relay: false })).toBe(false)
+  })
+
+  it('ignores a key the request would not carry anyway', () => {
+    // `rolesForRequest` spells out four halves, so a stray key is dropped on
+    // the way out. A template whose ONLY content is such a key would arrive at
+    // the backend as `{}` -- the state this predicate exists to catch.
+    expect(isEmptyTemplate({ nonsense: 1 })).toBe(true)
+  })
+})
+
 describe('rolesForRequest', () => {
   const DEF = {
     allocations: { lumber: { mode: 'absolute', value: 8372 } },
@@ -1689,11 +1741,67 @@ describe('rolesForRequest', () => {
 
   it('still sends a template that is only half typed', () => {
     // A template is a template from the moment the operator gives a role any
-    // figure at all -- the same key the panel's "no template yet" warning
-    // reads. Refusing a half-typed one would refuse an account mid-edit.
-    expect(rolesForRequest({ def: { allocations: {} } }, new Set(['def']))).toEqual({
-      def: { allocations: {}, consumption: {}, may_relay: null, crop_negative_by_design: false },
+    // figure at all. Refusing a half-typed one would refuse an account
+    // mid-edit, so ONE figure is enough -- here a lumber target and nothing
+    // else, no spend and no relay answer. It used to be asserted with
+    // `{allocations: {}}`, which is not half typed but EMPTY, and pinned the
+    // defect below as if it were the rule.
+    expect(
+      rolesForRequest({ def: { allocations: { lumber: KEEP_ALLOCATION } } }, new Set(['def']))
+    ).toEqual({
+      def: {
+        allocations: { lumber: KEEP_ALLOCATION },
+        consumption: {},
+        may_relay: null,
+        crop_negative_by_design: false,
+      },
     })
+  })
+
+  it('treats an EMPTIED template as absent, whichever box was emptied last', () => {
+    // The key outlives the last figure: every setter writes through
+    // `{...prev, [role]: {...}}` and none deletes the role when the last box is
+    // cleared, so `{"def": {"consumption": {}}}` reached the backend, which
+    // accepted it -- village 11 planned at target 1,500 / spend 0 with an empty
+    // `role_deviations`, and the page's own missing-template warning stayed
+    // silent because it read the same key. An empty template has to be the same
+    // state as no template: refused by the backend's 422, and named on screen.
+    //
+    // One case per way of emptying one, because they leave different shapes
+    // behind. A spend typed and then cleared:
+    expect(rolesForRequest({ def: { consumption: {} } }, new Set(['def']))).toEqual({})
+    // A mode set to absolute and then back to keep, which DELETES the entry:
+    expect(rolesForRequest({ def: { allocations: {} } }, new Set(['def']))).toEqual({})
+    // By-design ticked and then unticked, which stores `false` rather than
+    // removing the key:
+    expect(
+      rolesForRequest({ def: { crop_negative_by_design: false } }, new Set(['def']))
+    ).toEqual({})
+    // And all of them at once, which is what the panel holds after a full edit
+    // has been undone box by box:
+    expect(
+      rolesForRequest(
+        {
+          def: {
+            allocations: {},
+            consumption: {},
+            may_relay: null,
+            crop_negative_by_design: false,
+          },
+        },
+        new Set(['def'])
+      )
+    ).toEqual({})
+  })
+
+  it('sends a template whose only answer is a relay refusal', () => {
+    // `may_relay: false` is not emptiness. Unset means "take the role's own
+    // default", so false is the operator overriding that default -- and for the
+    // account whose defensive village sits on the only road to a corner of the
+    // map, that field is the whole template.
+    const sent = rolesForRequest({ def: { may_relay: false } }, new Set(['def']))
+
+    expect(sent.def.may_relay).toBe(false)
   })
 
   it('sends only the roles some village actually claims', () => {

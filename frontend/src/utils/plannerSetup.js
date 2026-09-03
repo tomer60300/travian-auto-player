@@ -383,6 +383,44 @@ export function allocationsForRequest(allocations, villageRoles, villageIds) {
   return out
 }
 
+/** Does this template say NOTHING -- so that the role having one is a fiction?
+ *
+ * The role key outlives the last figure in it. Every setter in the panel writes
+ * through `{...prev, [role]: {...}}` and not one of them deletes the role when
+ * its last box is cleared, so an emptied template survives as
+ * `{"def": {"consumption": {}}}` -- and that is a template as far as any
+ * `!= null` check can tell. The backend agreed, and planned four defensive
+ * villages at their own 1,500/h with spend 0 and an empty `role_deviations`,
+ * feasible; the page's warning agreed too, and said nothing, because it read
+ * the same key. `Clear` was the only door that reached the 422.
+ *
+ * So the question both readers have to ask is not "is there a key" but "is
+ * there a figure", and they have to ask it the same way -- two predicates that
+ * disagree is the defect, not the mechanism. Answering it here means the plan
+ * is refused where the operator can see why, and the panel names the role.
+ *
+ * Two things count as figures that do not look like ones:
+ *
+ * * `may_relay: false` -- unset means "take the role's own default", so false
+ *   is the operator overriding it. It is the whole template on the account whose
+ *   one defensive village sits on the only road to a corner of the map.
+ * * `consumption: {lumber: 0}` -- zero is a measured claim about a village that
+ *   spends none, which is why `setTemplateSpend` deletes an emptied box rather
+ *   than storing a zero.
+ *
+ * And one that does: `crop_negative_by_design: false`, which is what unticking
+ * the checkbox stores. Absent and false are the same answer there -- the finding
+ * keeps its severity either way -- so the pair cannot be distinguished and false
+ * has to read as silence.
+ */
+export function isEmptyTemplate(template) {
+  if (template == null) return true
+  if (Object.keys(template.allocations ?? {}).length > 0) return false
+  if (Object.keys(template.consumption ?? {}).length > 0) return false
+  if (template.may_relay != null) return false
+  return !template.crop_negative_by_design
+}
+
 /** The `roles` a plan request carries: a template for every role some village
  *  claims, and nothing else.
  *
@@ -393,11 +431,15 @@ export function allocationsForRequest(allocations, villageRoles, villageIds) {
  * what those villages need, reported as feasible. Skipping it puts the refusal
  * back in front of the operator, naming the villages and the role.
  *
- * A template that IS present but half typed is sent whole, with its four
+ * An EMPTIED template is skipped on the same rule and for the same outcome, per
+ * `isEmptyTemplate`: it would arrive as `{}` and be accepted, which is the same
+ * silent plan by another door.
+ *
+ * A template that IS present and half typed is sent whole, with its four
  * halves spelled out rather than spread: a template is a template from the
  * moment the operator gives a role any figure at all, and the page's own
- * "no template yet" warning reads the same key. Its crop spend is dropped on
- * the way out, because the backend refuses one and a template stored by an
+ * "no template yet" warning reads the same predicate. Its crop spend is dropped
+ * on the way out, because the backend refuses one and a template stored by an
  * older build could still carry it -- which would 422 every plan over a figure
  * the editor no longer shows.
  */
@@ -405,7 +447,7 @@ export function rolesForRequest(roleTemplates, claimedRoles) {
   const out = {}
   for (const role of claimedRoles ?? []) {
     const template = roleTemplates?.[role]
-    if (template == null) continue
+    if (isEmptyTemplate(template)) continue
     out[role] = {
       allocations: template.allocations ?? {},
       consumption: materialSpendOnly(template.consumption) ?? {},

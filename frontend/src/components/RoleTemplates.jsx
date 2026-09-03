@@ -2,6 +2,7 @@ import {
   CONSUMABLE_RESOURCES,
   VILLAGE_ROLES,
   isConsumptionRate,
+  isEmptyTemplate,
 } from '../utils/plannerSetup'
 import {
   MODES,
@@ -40,11 +41,16 @@ export default function RoleTemplates({
       <details className="text-xs">
         <summary className="cursor-pointer pointer-coarse:min-h-11 flex items-center flex-wrap gap-x-2">
           <span className="text-primary font-semibold">Role templates</span>
+          {/* Counted on `isEmptyTemplate`, the same predicate the request and
+              the warning below use. On `Object.keys` alone a role emptied box
+              by box read "1 typed" while the warning called it missing, so the
+              panel contradicted itself in two lines. */}
           <span className="text-secondary">
-            one profile per kind of village &mdash; {Object.keys(templates).length}{' '}
+            one profile per kind of village &mdash;{' '}
+            {VILLAGE_ROLES.filter((role) => !isEmptyTemplate(templates[role])).length}{' '}
             typed, covering{' '}
             {VILLAGE_ROLES.reduce(
-              (n, role) => n + (templates[role] ? (roleCounts[role] ?? 0) : 0),
+              (n, role) => n + (isEmptyTemplate(templates[role]) ? 0 : (roleCounts[role] ?? 0)),
               0
             )}{' '}
             village(s)

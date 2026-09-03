@@ -243,6 +243,77 @@ test.describe('role templates, driven', () => {
     await expect(page.getByText('has villages')).toBeVisible()
   })
 
+  // ── An EMPTIED template is not a template ────────────────────────────
+  //
+  // Every setter writes through the role KEY (`{...prev, [role]: {...}}`) and
+  // none of them deletes the role when its last figure goes, so a template the
+  // operator has emptied box by box survives as `{"def": {"consumption": {}}}`.
+  // The backend accepts that -- it is a template, formally -- and plans the four
+  // defensive villages at their own 1,500/h with spend 0 and an empty
+  // `role_deviations`, reported feasible. `Clear` was the only door that led to
+  // the 422; these three are the doors that led past it, and the panel stayed
+  // silent through all of them because its warning read the same key.
+  //
+  // Driven rather than unit-tested because the shape left behind is the SETTER's
+  // doing, and `rolesForRequest` can only be given a shape somebody believed in.
+
+  test('emptying the last spend box warns, the same as never typing one', async ({ page }) => {
+    await openPanel(page)
+    await page.getByLabel('Lumber spent per hour by a DEF village').fill('8372')
+    await expect(page.getByText('has villages')).toHaveCount(0)
+
+    await page.getByLabel('Lumber spent per hour by a DEF village').fill('')
+
+    // The key is still there, and that is the point: what must change is what
+    // the page and the request make of it.
+    expect(await stored(page)).toEqual({ def: { consumption: {} } })
+    await expect(page.getByText('has villages')).toBeVisible()
+    await expect(page.getByText('0 typed, covering 0 village(s)')).toBeVisible()
+  })
+
+  test('setting the last mode back to keep warns, because keep is not a figure', async ({
+    page,
+  }) => {
+    await openPanel(page)
+    await page.getByLabel('DEF Lumber mode').selectOption('absolute')
+    await page.getByLabel('DEF Lumber value').fill('8372')
+    await expect(page.getByText('has villages')).toHaveCount(0)
+
+    await page.getByLabel('DEF Lumber mode').selectOption('keep')
+
+    expect(await stored(page)).toEqual({ def: { allocations: {} } })
+    await expect(page.getByText('has villages')).toBeVisible()
+    await expect(page.getByText('0 typed, covering 0 village(s)')).toBeVisible()
+  })
+
+  test('unticking by-design warns, because false is stored rather than removed', async ({
+    page,
+  }) => {
+    await openPanel(page)
+    await page.getByLabel('A DEF village is crop-negative by design').check()
+    await expect(page.getByText('has villages')).toHaveCount(0)
+
+    await page.getByLabel('A DEF village is crop-negative by design').uncheck()
+
+    expect(await stored(page)).toEqual({ def: { crop_negative_by_design: false } })
+    await expect(page.getByText('has villages')).toBeVisible()
+    await expect(page.getByText('0 typed, covering 0 village(s)')).toBeVisible()
+  })
+
+  test('a relay REFUSAL is a template, so it does not warn', async ({ page }) => {
+    // The boundary of the rule above. Unset means "take the role's own
+    // default", so `may_relay: false` is the operator overriding that default
+    // and the one thing the template says. Treating it as emptiness would
+    // refuse a plan over a template that exists.
+    await openPanel(page)
+
+    await page.getByLabel('Whether a DEF village may relay').selectOption('no')
+
+    expect(await stored(page)).toEqual({ def: { may_relay: false } })
+    await expect(page.getByText('has villages')).toHaveCount(0)
+    await expect(page.getByText('1 typed, covering 2 village(s)')).toBeVisible()
+  })
+
   test('the panel counts the villages a typed template stands in for', async ({ page }) => {
     // The claim of a template is "one profile, four villages", so the count is
     // the number that says whether it is doing that. Rendered from the page's
