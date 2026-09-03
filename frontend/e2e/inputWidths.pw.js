@@ -376,11 +376,21 @@ const MEASURE = () => {
     })
   }
 
+  // And the page itself: does the BODY slide sideways? Same method as the
+  // wrappers -- ask by moving it -- because the two questions have different
+  // answers and only one of them is a defect. A container that scrolls is the
+  // design; a document that scrolls is item 1 of the UI Definition of Done.
+  const pageBefore = document.scrollingElement.scrollLeft
+  document.scrollingElement.scrollLeft = document.documentElement.scrollWidth
+  const pageReached = document.scrollingElement.scrollLeft
+  document.scrollingElement.scrollLeft = pageBefore
+
   return {
     controls: out,
     wrappers,
     pageScrollWidth: document.documentElement.scrollWidth,
     pageClientWidth: document.documentElement.clientWidth,
+    pageScrollReached: pageReached,
   }
 }
 
@@ -485,20 +495,34 @@ function assertFits(where, measured, viewport) {
   // one of these tables wider, so this is the guard on the FIX as much as on the
   // defect -- a column that grew past its container would have traded a
   // collapsed control for a page that scrolls sideways.
-  //
-  // Asserted on the container's own right edge, and NOT on
-  // `document.documentElement.scrollWidth`, which this app inflates whatever the
-  // widths are: measured on the Snapshot stage before any of this changed, the
-  // document reported 874px of scroll at a 375px viewport while `document.body`
-  // reported 375 and not one overflowing element lacked a clipping ancestor.
-  // (Chrome counts layout overflow from inside a nested scroller and from the
-  // decorative `.md3-blur-shape` divs, which are clipped by their own
-  // `overflow-hidden` parent.) A number that reads 874 when nothing is wrong
-  // cannot be the guard on whether something is wrong.
   const escaped = measured.controls
     .filter((c) => c.wrapperRight != null && c.wrapperRight > viewport.width + 1)
     .map((c) => `${c.surface}: container ends at ${c.wrapperRight} in a ${viewport.width} viewport`)
   expect(escaped, `${where}: a scroll container is wider than the viewport`).toEqual([])
+
+  // The same item, asked of the DOCUMENT. This used to be printed and not
+  // asserted, on the stated grounds that the app "inflates it whatever the
+  // widths are" and that no overflowing element lacked a clipping ancestor --
+  // and that was WRONG on both counts. The number was reporting a real escape
+  // the whole time: six `position: absolute` `.sr-only` spans inside the
+  // Snapshot table sat at x=1261 in a 375 viewport, and an `overflow-x: auto`
+  // ancestor does not clip an absolutely positioned box it is not the
+  // containing block for. The document really scrolled -- `scrollLeft` reached
+  // 887 of 1262 -- and the page really slid off, leaving the fixed bars over a
+  // blank field.
+  //
+  // So both halves are asserted, because they say different things: the width
+  // says a scrollable region exists, and `scrollLeft` says a reader can
+  // actually be taken there. `scrollLeft` is the one that cannot be argued
+  // with, which is why it is the one `login.visual.pw.js` reaches for too.
+  expect(
+    measured.pageScrollWidth,
+    `${where}: the document overflows by ${measured.pageScrollWidth - measured.pageClientWidth}px`,
+  ).toBeLessThanOrEqual(measured.pageClientWidth)
+  expect(
+    measured.pageScrollReached,
+    `${where}: the page slid sideways to ${measured.pageScrollReached}px -- only its containers may scroll`,
+  ).toBe(0)
 }
 
 async function openSnapshot(page) {

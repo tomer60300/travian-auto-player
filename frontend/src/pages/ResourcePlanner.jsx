@@ -452,11 +452,16 @@ function BudgetBar({ budget, cap }) {
  *  common allocation does not have to be typed row by row. Select rows with
  *  the checkboxes (or the header select-all); the remainder village keeps its
  *  role. Disabled until at least one village is checked. */
+/** `flex-wrap` for the same reason the two rows that hold this one already
+ * have it: a `w-auto` mode select, a `w-20` value box and an "Apply to N
+ * selected" button come to 344px, which is 10px past what a 375 viewport's
+ * card can give, and without wrapping those 10px became DOCUMENT scroll --
+ * on all four resource cards at once. */
 function BatchSet({ count, onApply }) {
   const [mode, setMode] = useState('keep')
   const [value, setValue] = useState(0)
   return (
-    <div className="flex items-center gap-1 text-xs">
+    <div className="flex flex-wrap items-center gap-1 text-xs">
       <span className="text-secondary">Set checked</span>
       <select
         aria-label="Batch mode"
@@ -2519,7 +2524,7 @@ export default function ResourcePlanner() {
       )}
 
       {stage === 'snapshot' && villages.length > 0 && (
-        <div className="card p-4 overflow-x-auto">
+        <div className="card p-4 relative overflow-x-auto">
           {/* Trade Office and Crop alert below are typed by hand and stored per
               origin, so they do not follow you between :80, :8001, the LAN
               address or Tailscale. Save them once and reload them instead. */}
@@ -2768,7 +2773,7 @@ export default function ResourcePlanner() {
             Swipe the table sideways for Merchants, Trade Office, Crop alert, Ships only to, Stock
             floor and Consumption — the village column stays pinned.
           </p>
-          <div className="overflow-x-auto">
+          <div className="relative overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-secondary text-xs uppercase">
                 <tr>
@@ -3461,7 +3466,7 @@ export default function ResourcePlanner() {
                   Swipe sideways for the coordinates, crop owed, margin and route flag — the name
                   column stays pinned.
                 </p>
-                <div className="overflow-x-auto">
+                <div className="relative overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead className="text-secondary uppercase">
                       <tr>
@@ -3691,7 +3696,12 @@ export default function ResourcePlanner() {
                 </p>
               </div>
 
-              <div className="flex items-end gap-3">
+              {/* flex-wrap: two number boxes, a separator and a
+                  `whitespace-nowrap` button add up to 486px, and without
+                  wrapping that pushed the whole DOCUMENT to 486 in a 375
+                  viewport -- the page slid 111px sideways, which is item 1 of
+                  the UI Definition of Done. */}
+              <div className="flex flex-wrap items-end gap-3">
                 <label className="text-xs">
                   <span className="text-secondary block mb-1">Emptied to</span>
                   <span className="flex items-baseline gap-1">
@@ -3844,7 +3854,7 @@ export default function ResourcePlanner() {
           />
 
           {allocView === 'village' && (
-            <div className="card p-4 overflow-x-auto">
+            <div className="card p-4 relative overflow-x-auto">
               <table className="w-full text-xs">
                 <thead className="text-secondary uppercase">
                   <tr>
@@ -4206,7 +4216,7 @@ export default function ResourcePlanner() {
                   Swipe the table sideways for Mode, Value, Ship/h and Rest — the village column
                   stays pinned.
                 </p>
-                <div className="overflow-x-auto">
+                <div className="relative overflow-x-auto">
                   <table className="w-full text-xs">
                     <thead className="text-secondary uppercase">
                       <tr>
@@ -4614,7 +4624,7 @@ export default function ResourcePlanner() {
                 </div>
               </div>
 
-              <div className="card p-4 overflow-x-auto">
+              <div className="card p-4 relative overflow-x-auto">
                 <div className="flex items-baseline justify-between flex-wrap gap-2 mb-2">
                   <h3 className="font-semibold">
                     Setup sheet <span className="text-secondary">· {activeProfile}</span>
