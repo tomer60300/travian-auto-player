@@ -326,6 +326,7 @@ def craft_plan(
     allocations: Mapping[Resource, Mapping[int, Allocation]],
     config: PlannerConfig,
     supplements: Mapping[Resource, Mapping[int, float]] | None = None,
+    consumption: Mapping[Resource, Mapping[int, float]] | None = None,
 ) -> DistributionPlan:
     """Plan resource distribution for whatever account state is supplied.
 
@@ -342,6 +343,12 @@ def craft_plan(
             state, not a tunable, which is why it sits here and not on
             :class:`PlannerConfig`. The caller converts a stock FLOOR into this
             RATE, because only the caller knows the window it is spread over.
+        consumption: per resource, village id -> what the village SPENDS per
+            hour. Account state for the same reason the supplement is, and the
+            operator's own figure: nothing in the game reports it, because the
+            statistics page shows materials GROSS. It moves each village's
+            ``net_per_hour`` and nothing else -- not the targets, not the
+            remainder, not the cargo.
 
     Returns:
         A :class:`DistributionPlan` carrying the setup sheet, the merchant
@@ -356,6 +363,7 @@ def craft_plan(
     names = {vid: village.name for vid, village in villages.items() if village.name}
 
     stock = supplements or {}
+    spend = consumption or {}
     for resource in sorted(productions, key=lambda r: r.value):
         plan = resolve_resource(
             resource,
@@ -363,6 +371,7 @@ def craft_plan(
             allocations.get(resource, {}),
             names,
             supplement=stock.get(resource),
+            consumption=spend.get(resource),
         )
         resource_plans[resource] = plan
         findings.extend(plan.findings)

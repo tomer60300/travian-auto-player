@@ -16,7 +16,7 @@ import logging
 import random
 import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -218,6 +218,25 @@ class VillageConfig(BaseModel):
             "trading. The planner may draw that stock down over the profile "
             "window as extra supply of lumber, clay and iron -- never crop, "
             "because a granary is not NPC-fed. None means no stock-funded supply."
+        ),
+    )
+    consumption_per_hour: dict[Resource, float] | None = Field(
+        default=None,
+        description=(
+            "What this village SPENDS per hour, by resource — the building queue "
+            "and the troop upkeep, entered as flat constants and kept up to date "
+            "by hand. Materials and crop alike. This is NOT the allocation "
+            "target: the target is what must ARRIVE, and the store's net is "
+            "target + own production − consumption. Enter both and a village told "
+            "to land exactly what it burns reads as level, which is what it is. "
+            "Enter only the target and the plan assumes the village stockpiles "
+            "every unit, which is how an army village came to be reported as "
+            "losing target × 24 a day at a warehouse cap it never reaches. It "
+            "never changes the cargo: a route still carries the gap between the "
+            "target and the village's own production. None means no declared "
+            "spend, which plans exactly as before. A wrong figure now hides a "
+            "real overflow, so keep it current — the crop-drift check is what "
+            "catches a profile that has gone stale."
         ),
     )
     ship_only_to: list[int] | None = Field(
@@ -1157,6 +1176,24 @@ _RATE_FIELD = {
 }
 
 
+def _declared_consumption(config: Sequence[VillageConfig]) -> dict[int, dict[Resource, float]]:
+    """What each village spends per hour, village-major. Operator-declared.
+
+    One reader for two shapes: the storage replays want it per village (their
+    stores are keyed that way) and the allocation layer wants it per resource
+    beside ``supplements``. Built from the same config either way, so the two
+    cannot disagree about what the operator typed.
+    """
+    out: dict[int, dict[Resource, float]] = {}
+    for cfg in config:
+        if not cfg.consumption_per_hour:
+            continue
+        out[cfg.village_id] = {
+            resource: float(amount) for resource, amount in cfg.consumption_per_hour.items()
+        }
+    return out
+
+
 def _storage_findings(
     body: PlanRequest,
     plan,
@@ -1179,9 +1216,16 @@ def _storage_findings(
     # the simulation makes a receiver bank its deliveries twice -- 48,000 a day
     # where 24,000 arrives -- and invent overflows that do not exist.
     own_rates: dict[int, dict[Resource, float]] = {}
+    # What each village spends, which is neither production nor cargo. Both
+    # checks need it and for the same reason: without it a village's allocation
+    # target reads as permanent accumulation, so an army village told to land
+    # what it burns is reported as filling up and then as losing target x 24 a
+    # day at a cap it never actually reaches.
+    consumption = _declared_consumption(body.config)
 
     # Net rate per village per resource AFTER the plan: own production plus what
-    # arrives minus what leaves. That is what the store actually sees.
+    # arrives minus what leaves minus what is spent. That is what the store
+    # actually sees.
     shipped: dict[int, dict[Resource, float]] = {}
     for route in plan.routing.routes:
         for resource, amount in route.cargo_per_hour.items():
@@ -1206,7 +1250,11 @@ def _storage_findings(
                 if resource is Resource.CROP
                 else village.warehouse_capacity
             )
-            net = float(own) + shipped.get(vid, {}).get(resource, 0.0)
+            net = (
+                float(own)
+                + shipped.get(vid, {}).get(resource, 0.0)
+                - consumption.get(vid, {}).get(resource, 0.0)
+            )
             stocks.setdefault(vid, {})[resource] = stock
             own_rates.setdefault(vid, {})[resource] = float(own)
             if cap is not None:
@@ -1236,7 +1284,13 @@ def _storage_findings(
         for resource in MATERIALS:
             floors.setdefault(cfg.village_id, {})[resource] = level
     overflows = simulate_day(
-        plan.beat, stocks, capacities, own_rates, dispatch_window=window, floors=floors
+        plan.beat,
+        stocks,
+        capacities,
+        own_rates,
+        dispatch_window=window,
+        floors=floors,
+        consumption=consumption,
     )
     names = {v.village_id: v.name for v in body.snapshot if v.name}
     return list(storage_findings(statuses, overflows, names=names))
@@ -1914,8 +1968,19 @@ async def post_day_check(
     # got much heavier when it became discrete -- a tick per dispatch and per
     # arrival on top of a 5-minute grid, ~1,800 ticks a day against 96 before --
     # and it measured ~1.9s of uninterruptible work on a 20-village account.
+    # Consumption goes in as a keyword: `step_minutes` is the next positional,
+    # and a spend landing there would silently retime the whole replay. The
+    # composite needs it for the same reason /plan does, and needs the SAME
+    # figure -- one simulation given a parameter and not the other is how the
+    # two endpoints came to answer one account differently before.
     trajectories, breaches = await asyncio.to_thread(
-        simulate_profile_cycle, segments, own_rates, stocks, capacities, body.crop_ceilings
+        simulate_profile_cycle,
+        segments,
+        own_rates,
+        stocks,
+        capacities,
+        body.crop_ceilings,
+        consumption=_declared_consumption(body.config),
     )
 
     for breach in sorted(breaches, key=lambda b: (b.day, b.minute)):
@@ -2201,6 +2266,38 @@ async def _plan_account(
             if cfg.village_id in productions.get(resource, {}):
                 supplements.setdefault(resource, {})[cfg.village_id] = allowance
 
+    # Section 2: what each village spends per hour, the operator's own flat
+    # constants. Threaded beside the supplements and for the same reason -- both
+    # are account state the game will not report, not tunables -- and shaped
+    # per resource to match. It moves each village's net and nothing else: the
+    # cargo stays the gap between the target and the village's own production.
+    #
+    # Refused for a village the snapshot does not contain, the same way
+    # ship_only_to is: a figure attached to an id that is not being planned is a
+    # typo or a chiefed village, and either way the operator's declared spend is
+    # not reaching the plan they are reading.
+    declared_consumption = _declared_consumption(body.config)
+    unknown_consumers = sorted(set(declared_consumption) - own_ids)
+    if unknown_consumers:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "consumption_per_hour names "
+                + ", ".join(f"village {vid}" for vid in unknown_consumers)
+                + ", which the snapshot does not contain. Fix the figure, or fetch "
+                "fresh state if the village was settled after the snapshot."
+            ),
+        )
+    consumption: dict[Resource, dict[int, float]] = {}
+    for vid, per_resource in declared_consumption.items():
+        for resource, amount in per_resource.items():
+            # Same gate the supplement uses: a village whose rate for this
+            # resource could not be read is dropped from the resource plan
+            # entirely (with an UNREADABLE_RATE finding), so a spend recorded
+            # against it would 400 the whole plan over one missing reading.
+            if vid in productions.get(resource, {}):
+                consumption.setdefault(resource, {})[vid] = amount
+
     # A windowed, pruned profile may only use cycles that divide the window.
     #
     # Travian fans "repeat every N hours" into 24/N daily rows and pruning keeps
@@ -2332,7 +2429,7 @@ async def _plan_account(
         # The beat search is pure CPU; off the event loop so it cannot stall
         # WebSocket frames or stealth-timed game requests while the user replans.
         plan = await asyncio.to_thread(
-            craft_plan, villages, productions, allocations, config, supplements
+            craft_plan, villages, productions, allocations, config, supplements, consumption
         )
     except AllocationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

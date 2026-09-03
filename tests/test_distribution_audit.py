@@ -71,10 +71,20 @@ _STOCK = {
 
 
 def _storage_inputs(body):
-    """The stocks, capacities and own rates ``_storage_findings`` would build."""
+    """The stocks, capacities, own rates and spend ``_storage_findings`` builds.
+
+    Consumption comes back alongside them because the replays subtract it: a
+    comparison that fed the oracle a spend the planner never saw (or the
+    reverse) would fail for a reason that has nothing to do with the physics,
+    and one that fed NEITHER would silently check only the zero case."""
     stocks: dict[int, dict[Resource, int]] = {}
     caps: dict[int, dict[Resource, int]] = {}
     own: dict[int, dict[Resource, float]] = {}
+    spend = {
+        cfg.village_id: dict(cfg.consumption_per_hour)
+        for cfg in body.config
+        if cfg.consumption_per_hour
+    }
     for village in body.snapshot:
         for resource in Resource:
             rate = getattr(village, _RATE[resource])
@@ -90,7 +100,7 @@ def _storage_inputs(body):
             )
             if cap is not None:
                 caps.setdefault(vid, {})[resource] = cap
-    return stocks, caps, own
+    return stocks, caps, own, spend
 
 
 # `/plan` is "pure of game I/O" (see its docstring): same request in, same
@@ -153,10 +163,12 @@ class TestOracleAgreement:
         account = random_account(seed, with_profiles=False)
         body = account.plan_request
         planned = asyncio.run(dist._plan_account(body))
-        stocks, caps, own = _storage_inputs(body)
+        stocks, caps, own, spend = _storage_inputs(body)
 
-        produced = simulate_day(planned.plan.beat, stocks, caps, own, step_minutes=1)
-        expected = oracle_day(planned.plan.beat, stocks, caps, own)
+        produced = simulate_day(
+            planned.plan.beat, stocks, caps, own, step_minutes=1, consumption=spend
+        )
+        expected = oracle_day(planned.plan.beat, stocks, caps, own, consumption=spend)
 
         got = {(e.village_id, e.resource): e for e in produced}
         reportable = {key for key, value in expected.items() if value["wasted"] >= 1.0}
@@ -169,16 +181,23 @@ class TestOracleAgreement:
                 assert event.minute == int(mine["first_full"]), key
 
     @pytest.mark.slow
-    @pytest.mark.parametrize("seed", [0, 1, 2])
+    @pytest.mark.parametrize("seed", [0, 1, 2, 8])
     def test_simulate_profile_cycle_matches_the_oracle(self, seed: int) -> None:
         """The composite day: production always on, each profile's routes only
-        inside its own hours, arrivals credited where they land."""
+        inside its own hours, arrivals credited where they land.
+
+        Seed 8 declares consumption where 0-2 do not, so the spend reaches this
+        replay as well as ``simulate_day``'s. A parameter threaded into one
+        simulation and not the other is how /plan and /day-check came to answer
+        the same account differently once before, and the spy below reads what
+        the endpoint actually passed rather than what this test assumes."""
         account = random_account(seed, with_profiles=True)
         captured: dict = {}
         real = dist.simulate_profile_cycle
 
         def spy(segments, own_rates, stocks, caps, ceilings=None, *args, **kwargs):
             captured["args"] = (segments, own_rates, stocks, caps, ceilings)
+            captured["consumption"] = kwargs.get("consumption")
             return real(segments, own_rates, stocks, caps, ceilings, *args, **kwargs)
 
         dist.simulate_profile_cycle = spy
@@ -187,12 +206,22 @@ class TestOracleAgreement:
         finally:
             dist.simulate_profile_cycle = real
         segments, own_rates, stocks, caps, ceilings = captured["args"]
+        spend = captured["consumption"]
+        declared = {c.village_id for c in account.day_request.config if c.consumption_per_hour}
+        assert set(spend or {}) == declared, "the endpoint dropped a declared spend"
 
         trajectories, breaches = simulate_profile_cycle(
-            segments, own_rates, stocks, caps, ceilings, step_minutes=1, max_days=ORACLE_DAYS
+            segments,
+            own_rates,
+            stocks,
+            caps,
+            ceilings,
+            step_minutes=1,
+            max_days=ORACLE_DAYS,
+            consumption=spend,
         )
         rows, oracle_breaches, settled = oracle_profile_cycle(
-            segments, own_rates, stocks, caps, ceilings, max_days=ORACLE_DAYS
+            segments, own_rates, stocks, caps, ceilings, max_days=ORACLE_DAYS, consumption=spend
         )
 
         assert {(t.village_id, t.resource) for t in trajectories} == set(rows)

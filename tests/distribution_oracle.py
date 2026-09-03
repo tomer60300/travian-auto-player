@@ -60,12 +60,30 @@ def _by_minute(firings, position: int) -> dict[int, list[int]]:
     return buckets
 
 
+def _spent(
+    consumption: Mapping[int, Mapping[Resource, float]] | None,
+    vid: int,
+    resource: Resource,
+) -> float:
+    """What this village spends per hour, from the specification.
+
+    Written out here rather than imported: a consuming village's store nets
+    ``production - consumption``, and an oracle that borrowed the planner's own
+    subtraction would agree with it by construction on the very arithmetic it
+    exists to check. Two lookups against a plain mapping is the whole rule.
+    """
+    if not consumption:
+        return 0.0
+    return consumption.get(vid, {}).get(resource, 0.0)
+
+
 def oracle_day(
     beat,
     stocks: Mapping[int, Mapping[Resource, int]],
     capacities: Mapping[int, Mapping[Resource, int]],
     net_per_hour: Mapping[int, Mapping[Resource, float]],
     days: int = 14,
+    consumption: Mapping[int, Mapping[Resource, float]] | None = None,
 ) -> dict[tuple[int, Resource], dict[str, float]]:
     """Replay ``days`` days minute by minute and report the LAST day.
 
@@ -82,13 +100,20 @@ def oracle_day(
     Order within a minute matches the documented contract: production for the
     minute, then arrivals, then departures (cargo landing now is available to a
     route leaving now).
+
+    ``consumption`` is what each village spends per hour. Subtracted from its
+    production, per village per resource, and nowhere else.
     """
     firings = _firings(beat.routes)
     outbound = _by_minute(firings, 0)
     inbound = _by_minute(firings, 1)
+    net = {
+        vid: {resource: rate - _spent(consumption, vid, resource) for resource, rate in per.items()}
+        for vid, per in net_per_hour.items()
+    }
     rates = [
         ((vid, resource), rate / 60.0)
-        for vid, per in net_per_hour.items()
+        for vid, per in net.items()
         for resource, rate in per.items()
         if rate
     ]
@@ -144,8 +169,7 @@ def oracle_day(
             key: {
                 "wasted": amount,
                 "first_full": float(first_full[key]),
-                "net_gain": net_per_hour.get(key[0], {}).get(key[1], 0.0) * 24.0
-                + moved.get(key, 0.0),
+                "net_gain": net.get(key[0], {}).get(key[1], 0.0) * 24.0 + moved.get(key, 0.0),
             }
             for key, amount in wasted.items()
         }
@@ -153,7 +177,7 @@ def oracle_day(
         for vid, per in capacities.items():
             for resource, cap in per.items():
                 key = (vid, resource)
-                gain = net_per_hour.get(vid, {}).get(resource, 0.0) * 24.0 + moved.get(key, 0.0)
+                gain = net.get(vid, {}).get(resource, 0.0) * 24.0 + moved.get(key, 0.0)
                 if gain <= 1.0 or gain - wasted.get(key, 0.0) < 1.0:
                     continue
                 # Projected only within a month of the cap, the contract's other
@@ -178,6 +202,7 @@ def oracle_profile_cycle(
     capacities: Mapping[int, Mapping[Resource, int]],
     ceilings: Mapping[int, float] | None = None,
     max_days: int = 45,
+    consumption: Mapping[int, Mapping[Resource, float]] | None = None,
 ):
     """The same replay, for a day that switches between allocation profiles.
 
@@ -201,10 +226,13 @@ def oracle_profile_cycle(
     outbound = _by_minute(firings, 0)
     inbound = _by_minute(firings, 1)
 
+    # Net of consumption, and the draining flag taken from that net: a village
+    # producing 1,000/h while spending 20,000/h is emptying, however positive
+    # its production reads.
     rates = [
         ((vid, resource), own / 60.0, own < 0)
         for vid, per in own_rates.items()
-        for resource, own in per.items()
+        for resource, own in ((r, rate - _spent(consumption, vid, r)) for r, rate in per.items())
         if own
     ]
     # Which profile owns each minute, and what hand-shipped rate it runs.

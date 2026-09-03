@@ -17,8 +17,10 @@ from travian_api.services.distribution.schedule import build_beat
 from travian_api.services.distribution.storage import (
     DEFAULT_WARN_HOURS,
     OverflowEvent,
+    ProfileSegment,
     Trend,
     simulate_day,
+    simulate_profile_cycle,
     storage_findings,
     storage_warnings,
     store_status,
@@ -555,3 +557,150 @@ class TestStockFloors:
         overflows = self._replay(floors={2: {Resource.LUMBER: 40_000}})
 
         assert not [e for e in overflows if e.village_id == 2]
+
+
+class TestConsumptionIsNotAccumulation:
+    """A village's target is what must LAND; what it SPENDS is a second number.
+
+    Until they were told apart the replay read the surviving one as permanent
+    accumulation, so an army village told to land 5,000/h of lumber -- because
+    it burns 5,000/h -- was modelled as banking 120,000 a day and reported as
+    losing all of it at the warehouse cap. The loss was arithmetic, not a fact
+    about the account: it was always exactly ``target x 24``.
+
+    ``consumption`` is per village per resource, subtracted from that village's
+    own production before the beat is replayed. Absent, every figure here is
+    the pre-consumption one.
+    """
+
+    CAP = 80_000
+
+    def _hourly_route(self, per_hour: float) -> Route:
+        # An hourly cycle so nothing here is a BURST overflow: the batch is one
+        # hour of flow, which is small against the cap. Only the average is
+        # under test.
+        return Route(
+            origin=1,
+            destination=2,
+            cargo_per_hour={Resource.LUMBER: per_hour},
+            cycle_hours=1,
+            merchants_per_send=1,
+            sets_in_flight=1,
+            one_way_minutes=30.0,
+        )
+
+    def _replay(self, *, landing: float, consumption: float | None, stock: int = 40_000):
+        beat = build_beat((self._hourly_route(landing),))
+        return simulate_day(
+            beat,
+            stocks={1: {Resource.LUMBER: 1_000_000}, 2: {Resource.LUMBER: stock}},
+            capacities={1: {Resource.LUMBER: 10_000_000}, 2: {Resource.LUMBER: self.CAP}},
+            # The receiver produces nothing of its own; everything it holds
+            # arrived, and everything it spends is the consumption figure.
+            net_per_hour={1: {Resource.LUMBER: landing}, 2: {Resource.LUMBER: 0.0}},
+            consumption=None if consumption is None else {2: {Resource.LUMBER: consumption}},
+        )
+
+    def test_without_consumption_the_whole_target_reads_as_a_daily_loss(self):
+        """The artifact this feature exists to remove, reproduced first."""
+        events = self._replay(landing=5_000, consumption=None)
+        receiver = next(e for e in events if e.village_id == 2)
+
+        assert receiver.structural
+        assert receiver.wasted_per_day == pytest.approx(5_000 * 24, abs=1.0)
+
+    def test_a_village_spending_exactly_what_lands_reports_nothing(self):
+        """Target equals consumption: the store is level, so there is no
+        overflow to report -- and none is reported, without any check being
+        weakened."""
+        events = self._replay(landing=5_000, consumption=5_000)
+
+        assert [e for e in events if e.village_id == 2] == []
+
+    def test_landing_above_consumption_overflows_at_the_difference(self):
+        """The surplus is real and must still be reported -- at the rate of the
+        surplus, not of the target."""
+        events = self._replay(landing=5_000, consumption=3_000)
+        receiver = next(e for e in events if e.village_id == 2)
+
+        assert receiver.structural
+        assert receiver.wasted_per_day == pytest.approx((5_000 - 3_000) * 24, abs=1.0)
+        assert receiver.net_gain_per_day == pytest.approx((5_000 - 3_000) * 24, abs=1.0)
+
+    def test_spending_more_than_lands_empties_the_store_instead(self):
+        """Section 9: 01 is permanently crop-negative by design. A store that
+        drains is not an overflow, and inventing one would be the same error in
+        the opposite direction."""
+        events = self._replay(landing=5_000, consumption=9_000)
+
+        assert [e for e in events if e.village_id == 2] == []
+
+    @pytest.mark.parametrize("consumption", [None, {}, {2: {}}, {2: {Resource.LUMBER: 0.0}}])
+    def test_no_consumption_leaves_the_replay_identical(self, consumption):
+        beat = build_beat((self._hourly_route(5_000),))
+        args = dict(
+            stocks={1: {Resource.LUMBER: 1_000_000}, 2: {Resource.LUMBER: 40_000}},
+            capacities={1: {Resource.LUMBER: 10_000_000}, 2: {Resource.LUMBER: self.CAP}},
+            net_per_hour={1: {Resource.LUMBER: 5_000}, 2: {Resource.LUMBER: 0.0}},
+        )
+
+        assert simulate_day(beat, **args, consumption=consumption) == simulate_day(beat, **args)
+
+
+class TestConsumptionAcrossTheProfileDay:
+    """The composite replay needs the same second number.
+
+    Both replays, not one: a previous feature was threaded into ``simulate_day``
+    and not into ``simulate_profile_cycle``, so /plan and /day-check answered the
+    same account differently.
+    """
+
+    def _segments(self, per_hour: float) -> list[ProfileSegment]:
+        route = Route(
+            origin=1,
+            destination=2,
+            cargo_per_hour={Resource.CROP: per_hour},
+            cycle_hours=1,
+            merchants_per_send=1,
+            sets_in_flight=1,
+            one_way_minutes=30.0,
+        )
+        beat = build_beat((route,))
+        return [ProfileSegment(name="All day", start_minute=0, end_minute=1439, routes=beat.routes)]
+
+    def _run(self, *, own: float, consumption: float | None, stock: int = 200_000):
+        return simulate_profile_cycle(
+            self._segments(4_000),
+            own_rates={1: {Resource.CROP: 10_000.0}, 2: {Resource.CROP: own}},
+            stocks={1: {Resource.CROP: 2_000_000}, 2: {Resource.CROP: stock}},
+            capacities={1: {Resource.CROP: 5_000_000}, 2: {Resource.CROP: 400_000}},
+            consumption=None if consumption is None else {2: {Resource.CROP: consumption}},
+            step_minutes=5,
+            max_days=6,
+        )
+
+    def test_the_daily_net_drops_by_a_day_of_consumption(self):
+        without, _ = self._run(own=1_000, consumption=None)
+        with_spend, _ = self._run(own=1_000, consumption=2_000)
+
+        was = next(t for t in without if t.village_id == 2)
+        now = next(t for t in with_spend if t.village_id == 2)
+
+        assert now.daily_net == pytest.approx(was.daily_net - 2_000 * 24, abs=50.0)
+
+    def test_a_producing_village_that_overspends_is_reported_as_draining(self):
+        """The subtle one. ``draining`` used to be read off own production, and
+        a village whose production is POSITIVE while its consumption exceeds it
+        is exactly the operator's 01 -- gross positive, net -5,880/h. Reading
+        the sign off production alone would run its granary to zero and call it
+        nothing."""
+        _trajectories, breaches = self._run(own=1_000, consumption=20_000, stock=50_000)
+
+        assert (2, Resource.CROP, "empty") in {(b.village_id, b.resource, b.kind) for b in breaches}
+
+    def test_no_consumption_leaves_the_composite_identical(self):
+        was_rows, was_breaches = self._run(own=1_000, consumption=None)
+        now_rows, now_breaches = self._run(own=1_000, consumption=0.0)
+
+        assert now_rows == was_rows
+        assert now_breaches == was_breaches

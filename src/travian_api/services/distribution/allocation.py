@@ -103,11 +103,38 @@ class VillageAllocation:
     village can ship from it, so the plan may ask it to. Defaults to zero, which
     is the whole existing planner.
     """
+    consumption_per_hour: float = 0.0
+    """What this village SPENDS per hour. Not a claim on the account pool.
+
+    ``target_per_hour`` says what must be here; this says what leaves again
+    through the building queue and the troop upkeep. They were one number, and
+    the surviving meaning was accumulation: an army village told to hold
+    14,751 lumber an hour was modelled as stockpiling all of it, so the plan
+    reported 354,024/day (= 14,751 x 24) lost at its warehouse cap for a
+    village that in fact spends every unit. Defaults to zero, which is the
+    whole existing planner: net then IS the target, exactly as before.
+    """
 
     @property
     def available_per_hour(self) -> float:
         """What the village can actually put on a cart: production plus stock."""
         return self.own_per_hour + self.supplement_per_hour
+
+    @property
+    def net_per_hour(self) -> float:
+        """Rate this village's STORE moves at once the plan runs.
+
+        ``available_per_hour + ship_per_hour`` is ``target_per_hour`` by
+        construction -- closing that gap is the only thing shipping does -- so
+        this is the target less what the village spends. Equal figures leave the
+        store level, which is what an operator entering a consumption profile
+        against a gross target is asking for, and it is the number the overflow
+        and starvation checks need.
+
+        Not a substitute for :attr:`ship_per_hour`, which is the cargo and is
+        unaffected: known issue #1 is still that the sheet must carry the gap.
+        """
+        return self.available_per_hour + self.ship_per_hour - self.consumption_per_hour
 
     @property
     def ship_per_hour(self) -> float:
@@ -190,6 +217,7 @@ def resolve_resource(
     allocations: Mapping[int, Allocation],
     names: Mapping[int, str] | None = None,
     supplement: Mapping[int, float] | None = None,
+    consumption: Mapping[int, float] | None = None,
 ) -> ResourcePlan:
     """Resolve one resource's allocations into per-village shipping rates.
 
@@ -202,6 +230,11 @@ def resolve_resource(
         supplement: village id -> extra supply per hour beyond production, from
             stock the operator keeps topped up. Raises available, never
             production. Materials only in practice -- a granary is not NPC-fed.
+        consumption: village id -> what the village SPENDS per hour. Changes
+            :attr:`VillageAllocation.net_per_hour` and nothing else: it is not a
+            claim on the account pool, so the targets, the remainder and the
+            cargo are all untouched. Absent means zero, which reproduces the
+            pre-consumption planner exactly.
 
     Returns:
         A :class:`ResourcePlan`. Problems that leave the plan usable but wrong
@@ -233,6 +266,24 @@ def resolve_resource(
         raise AllocationError(
             "supplement cannot be negative: "
             + ", ".join(village_label(vid, names) for vid in negative)
+        )
+
+    spend: Mapping[int, float] = consumption or {}
+    unknown_consumption = set(spend) - set(productions)
+    if unknown_consumption:
+        raise AllocationError(
+            "consumption references villages with no production: "
+            + ", ".join(village_label(vid, names) for vid in sorted(unknown_consumption))
+        )
+    # Refused rather than read as extra production. Inferring consumption from a
+    # negative rate was the rejected alternative: the statistics page reports
+    # materials GROSS, so a village consuming lumber still reads positive and
+    # there is no sign anywhere to invert.
+    overspending = sorted(vid for vid, amount in spend.items() if amount < 0)
+    if overspending:
+        raise AllocationError(
+            "consumption cannot be negative: "
+            + ", ".join(village_label(vid, names) for vid in overspending)
         )
 
     remainder_ids = [vid for vid, a in allocations.items() if a.mode is AllocationMode.REMAINDER]
@@ -330,6 +381,7 @@ def resolve_resource(
             own_per_hour=own,
             target_per_hour=targets[vid],
             supplement_per_hour=extra.get(vid, 0.0),
+            consumption_per_hour=spend.get(vid, 0.0),
         )
         for vid, own in sorted(productions.items())
     )

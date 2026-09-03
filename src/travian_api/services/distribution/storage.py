@@ -199,6 +199,40 @@ MAX_SETTLING_DAYS = 14
 MAX_PROJECTION_DAYS = 30
 
 
+def _net_of_consumption(
+    own_per_hour: Mapping[int, Mapping[Resource, float]],
+    consumption: Mapping[int, Mapping[Resource, float]] | None,
+) -> Mapping[int, Mapping[Resource, float]]:
+    """Own production less what the village spends, per village per resource.
+
+    The two replays below both need it and both need it identically -- a
+    parameter threaded into one and not the other is how /plan and /day-check
+    came to answer the same account differently once before.
+
+    Only pairs the caller supplied a production rate for are adjusted. A village
+    whose rate could not be read sits its resource out of the simulation
+    entirely (no stock and no capacity are supplied for it either), so
+    subtracting a spend there would half-simulate a store: a level that only
+    ever falls, against a cap nobody read. The caller reports the unreadable
+    rate instead.
+
+    Returned unchanged when there is nothing to subtract, so the no-consumption
+    path allocates nothing and is byte-for-byte the pre-consumption replay.
+    """
+    if not consumption:
+        return own_per_hour
+    out: dict[int, dict[Resource, float]] = {}
+    for vid, per_resource in own_per_hour.items():
+        spend = consumption.get(vid)
+        if not spend:
+            out[vid] = dict(per_resource)
+            continue
+        out[vid] = {
+            resource: own - spend.get(resource, 0.0) for resource, own in per_resource.items()
+        }
+    return out
+
+
 def simulate_day(
     beat: Beat,
     stocks: Mapping[int, Mapping[Resource, int]],
@@ -207,6 +241,7 @@ def simulate_day(
     step_minutes: int = 5,
     dispatch_window: tuple[int, int] | None = None,
     floors: Mapping[int, Mapping[Resource, float]] | None = None,
+    consumption: Mapping[int, Mapping[Resource, float]] | None = None,
 ) -> tuple[OverflowEvent, ...]:
     """Replay the beat against real capacities until it settles. Issue #12.
 
@@ -234,7 +269,14 @@ def simulate_day(
     ``net_per_hour`` is each village's OWN production. The routes are applied
     here as discrete events, so folding them into the rate as well would count
     every delivery twice.
+
+    ``consumption`` is what each village SPENDS per hour, subtracted from that
+    production. Without it a village's allocation target reads as permanent
+    accumulation, and an army village told to land what it burns is reported as
+    losing ``target x 24`` a day at a cap it never actually reaches. Absent, the
+    rate is production alone and this is the pre-consumption replay exactly.
     """
+    net_per_hour = _net_of_consumption(net_per_hour, consumption)
     # (route index, firing index, resource) -> what actually left the origin.
     firings: list[tuple[int, int, int, int, Resource, float]] = []
 
@@ -648,6 +690,7 @@ def simulate_profile_cycle(
     ceilings: Mapping[int, float] | None = None,
     step_minutes: int = 5,
     max_days: int = 45,
+    consumption: Mapping[int, Mapping[Resource, float]] | None = None,
 ) -> tuple[list[VillageTrajectory], list[TrajectoryBreach]]:
     """Replay a day that switches between allocation profiles.
 
@@ -678,6 +721,12 @@ def simulate_profile_cycle(
     the moment of impact; a store that already starts the day above it is
     reported once as kind "above".
 
+    ``consumption`` is what each village SPENDS per hour, subtracted from
+    ``own_rates`` before anything is replayed -- so the "runs dry" test sees the
+    NET sign. Read off production alone it would miss the operator's own army
+    village, whose lumber and crop both read gross positive while it is in fact
+    5,880/h short: the granary would empty and nothing would say so.
+
     Runs until the daily trajectory repeats (steady state) or ``max_days``.
     A store still drifting at the horizon is reported unsettled with its daily
     net, which is itself the answer: it will cross everything eventually.
@@ -685,6 +734,7 @@ def simulate_profile_cycle(
     if step_minutes < 1:
         raise ValueError(f"step_minutes must be at least 1, got {step_minutes}")
 
+    own_rates = _net_of_consumption(own_rates, consumption)
     ceilings = ceilings or {}
 
     # Every per-store lookup :func:`apply` needs, flattened to a single
@@ -766,9 +816,12 @@ def simulate_profile_cycle(
     # dispatch still debits the origin: the cargo really does leave.
     simulated = set(stocks) | set(own_rates)
 
-    # Production rates in one flat list, in the exact order the nested
-    # own_rates iteration visited them: apply() records the FIRST breach of each
-    # kind, so the order stores are moved in is part of the output.
+    # Own rates -- already net of consumption -- in one flat list, in the exact
+    # order the nested own_rates iteration visited them: apply() records the
+    # FIRST breach of each kind, so the order stores are moved in is part of the
+    # output. The `draining` flag comes from that net sign, not from production,
+    # which is what lets a village producing 1,000/h and spending 20,000/h be
+    # reported as running dry.
     own_flat: list[tuple[tuple[int, Resource], float, bool]] = [
         ((vid, resource), own, own < 0)
         for vid, per in own_rates.items()

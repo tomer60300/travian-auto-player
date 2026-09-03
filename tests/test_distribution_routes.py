@@ -1430,3 +1430,221 @@ class TestTheMerchantModelSaysWhenItIsUnpinned:
         res = self._plan(levels={20003: 13, 20026: 0}, bonus=0.175)
 
         assert not _findings(res, "merchant_model_uncalibrated")
+
+
+class TestConsumptionProfiles:
+    """Section 2: per-village consumption targets, entered as their own number.
+
+    An allocation target was doing two jobs -- what must LAND at a village, and
+    what the village then holds -- and the storage layer read the survivor as
+    permanent accumulation. On the operator's own account that produced
+    6,422,904 resources a day of reported loss and 27 CRITICAL findings, every
+    one of them exactly ``target x 24``: the planner assuming an army village
+    stockpiles what it in fact spends. So `clean` was unreachable while the
+    account ran correctly.
+
+    ``VillageConfig.consumption_per_hour`` is that second number. It changes
+    the store's net and nothing else: the cargo is still target minus own
+    production (spec 2.2, known issue #1).
+
+    Note for whoever lands P9: a WRONG consumption figure now silences a real
+    overflow. The drift flag is its detector -- these findings going quiet is
+    only trustworthy while the declared profile matches the account.
+    """
+
+    HUB, ARMY = 20002, 20001
+    # The army village lands 5,000/h of lumber because it burns 5,000/h.
+    BURN = 5_000.0
+
+    def _payload(self, *, consumption=None, hub_consumption=None, target=BURN, army_own=0.0):
+        snapshot = [
+            _own_village(
+                self.HUB,
+                "02",
+                0,
+                0,
+                lumber=20_000,
+                merchants=200,
+                lumber_stock=2_000_000,
+                warehouse_capacity=5_000_000,
+                granary_capacity=5_000_000,
+            ),
+            _own_village(
+                self.ARMY,
+                "01",
+                4,
+                0,
+                lumber=army_own,
+                lumber_stock=40_000,
+                warehouse_capacity=80_000,
+                granary_capacity=80_000,
+            ),
+        ]
+        config = [{"village_id": self.HUB}, {"village_id": self.ARMY}]
+        if consumption is not None:
+            config[1]["consumption_per_hour"] = consumption
+        if hub_consumption is not None:
+            config[0]["consumption_per_hour"] = hub_consumption
+        return {
+            "snapshot": snapshot,
+            "config": config,
+            "allocations": {
+                "lumber": {
+                    str(self.HUB): {"mode": "remainder"},
+                    str(self.ARMY): {"mode": "absolute", "value": target},
+                }
+            },
+        }
+
+    def _plan(self, **kw):
+        return asyncio.run(post_plan(PlanRequest.model_validate(self._payload(**kw))))
+
+    @staticmethod
+    def _overflow(res, name):
+        return [
+            f
+            for f in _findings(res, "overflow_structural") + _findings(res, "overflow_burst")
+            if f.village == name
+        ]
+
+    def test_without_consumption_the_target_reads_as_a_daily_loss(self):
+        """The artifact, reproduced at the endpoint before it is removed:
+        5,000/h landing becomes 120,000/day 'lost at the store cap'."""
+        res = self._plan()
+        lost = self._overflow(res, "01")
+
+        assert lost, "expected the phantom overflow this feature removes"
+        assert sum(f.loss_per_day for f in lost) == pytest.approx(self.BURN * 24, abs=1.0)
+        assert res.verdict.clean is False
+
+    def test_declaring_the_consumption_silences_it(self):
+        """Target equals consumption: the store is level, so there is no loss to
+        report. Nothing was weakened -- the arithmetic changed.
+
+        Both villages declare, because both genuinely spend: 02 makes 20,000/h,
+        sends 5,000/h on and burns the 15,000/h it keeps. That is the state the
+        operator says the account is in, and `clean` was unreachable while it
+        was in it -- which is the whole complaint this feature answers.
+        """
+        res = self._plan(consumption={"lumber": self.BURN}, hub_consumption={"lumber": 15_000})
+
+        assert self._overflow(res, "01") == []
+        assert self._overflow(res, "02") == []
+        assert res.diagnostics.total_loss_per_day == pytest.approx(0.0)
+        assert res.verdict.clean is True, res.verdict.unweighed
+
+    def test_the_hubs_own_surplus_is_still_reported(self):
+        """Only what is DECLARED goes quiet. 02 keeping 15,000/h it never spends
+        is a real overflow and stays one -- consumption is not a mute button."""
+        res = self._plan(consumption={"lumber": self.BURN})
+
+        assert self._overflow(res, "01") == []
+        hub = self._overflow(res, "02")
+        assert hub, "the remainder village really does accumulate 15,000/h"
+        assert sum(f.loss_per_day for f in hub) == pytest.approx(15_000 * 24, abs=1.0)
+
+    def test_a_real_surplus_still_overflows_at_the_surplus_rate(self):
+        """Over-supply is a genuine finding and must survive, reported at the
+        rate of the SURPLUS rather than of the target."""
+        res = self._plan(target=self.BURN, consumption={"lumber": 3_000})
+        lost = self._overflow(res, "01")
+
+        assert lost, "a village landing more than it spends does overflow"
+        assert sum(f.loss_per_day for f in lost) == pytest.approx((5_000 - 3_000) * 24, abs=1.0)
+
+    def test_the_cargo_is_still_the_gap_not_the_target(self):
+        """Spec 2.2. A consuming village that produces some of its own still
+        receives only the difference."""
+        res = self._plan(army_own=1_200.0, consumption={"lumber": self.BURN})
+        inbound = [r for r in res.rows if r.destination == self.ARMY]
+
+        assert inbound, res.warnings
+        landing = sum(
+            amount / row.cycle_hours
+            for row in inbound
+            for resource, amount in row.cargo.items()
+            if resource is Resource.LUMBER
+        )
+        assert landing == pytest.approx(self.BURN - 1_200.0, rel=0.02)
+
+    def test_r7_still_fires_when_the_village_really_is_draining(self):
+        """Section 9: 01 is permanently crop-negative by design and starving.
+        Consumption must not be able to hide that -- the whole point of R7 is
+        that a store emptying gets a countdown, and a village spending more than
+        lands is emptying however positive its production reads."""
+        payload = self._payload(consumption={"crop": 9_000})
+        payload["snapshot"][1]["crop_per_hour"] = 1_000.0
+        payload["snapshot"][1]["crop_stock"] = 20_000
+
+        res = asyncio.run(post_plan(PlanRequest.model_validate(payload)))
+
+        starving = [w for w in res.warnings if "runs out" in w and w.startswith("01:")]
+        assert starving, f"no starvation warning in {res.warnings}"
+        assert "crop" in starving[0]
+
+    def test_an_absent_consumption_is_byte_for_byte_the_old_plan(self):
+        """The regression guard for every account that declares nothing."""
+        absent = self._plan()
+        empty = self._plan(consumption={})
+
+        assert empty.model_dump() == absent.model_dump()
+
+    def test_a_consumption_for_a_village_not_in_the_snapshot_is_refused(self):
+        payload = self._payload()
+        payload["config"].append({"village_id": 999, "consumption_per_hour": {"lumber": 10}})
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(post_plan(PlanRequest.model_validate(payload)))
+
+        assert exc.value.status_code == 422
+        assert "999" in str(exc.value.detail)
+
+    def test_a_negative_consumption_is_refused(self):
+        """Not read as extra production. Inferring consumption from a rate's
+        sign was the rejected alternative: the statistics page reports materials
+        gross, so a consuming material village reads positive."""
+        with pytest.raises(HTTPException) as exc:
+            self._plan(consumption={"lumber": -500})
+
+        assert exc.value.status_code == 400
+        assert "consumption cannot be negative" in str(exc.value.detail)
+
+    def test_an_unknown_resource_key_is_refused_by_the_schema(self):
+        with pytest.raises(ValidationError):
+            PlanRequest.model_validate(self._payload(consumption={"gold": 500}))
+
+    def test_the_day_check_agrees_with_the_plan_on_a_consuming_village(self):
+        """Both endpoints share `_plan_account`, and the composite replay needs
+        the same second number: a parameter threaded into one simulation and not
+        the other is how the two came to answer the same account differently."""
+        payload = self._payload(
+            consumption={"lumber": self.BURN}, hub_consumption={"lumber": 15_000}
+        )
+        allocations = payload.pop("allocations")
+
+        plan = asyncio.run(
+            post_plan(PlanRequest.model_validate(payload | {"allocations": allocations}))
+        )
+        day = asyncio.run(
+            post_day_check(
+                DayCheckRequest.model_validate(
+                    payload
+                    | {
+                        "prune_to_window": False,
+                        "segments": [
+                            {"name": "All day", "window": [0, 1439], "allocations": allocations}
+                        ],
+                    }
+                )
+            )
+        )
+
+        army = [
+            row
+            for row in day.villages
+            if row.village_id == self.ARMY and row.resource is Resource.LUMBER
+        ]
+        assert army, "the army village has no lumber trajectory"
+        assert army[0].daily_net == pytest.approx(0.0, abs=self.BURN)
+        assert plan.diagnostics.total_loss_per_day == pytest.approx(0.0)
+        assert not [w for w in day.warnings if "hits its store cap" in w and w.startswith("01:")]

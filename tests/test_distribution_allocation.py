@@ -300,3 +300,131 @@ class TestStockFundedSupply:
                 allocations={},
                 supplement={99: 500},
             )
+
+
+class TestConsumption:
+    """What a village SPENDS, kept apart from what it must hold.
+
+    The two were one number, and the storage layer read the surviving one as
+    permanent accumulation: an army village told to hold 14,751 lumber an hour
+    was modelled as stockpiling all of it, so the day plan reported
+    354,024/day (= 14,751 x 24) "lost at the store cap" for a village that in
+    fact spends every unit. Consumption is the second number. It never touches
+    the cargo -- known issue #1 stands, ``ship_per_hour`` is still the gap --
+    and it never touches production.
+    """
+
+    def _plan(self, consumption=None, target=1200.0):
+        return resolve_resource(
+            Resource.LUMBER,
+            productions={1: 1000, 2: 500},
+            allocations={
+                1: Allocation(AllocationMode.ABSOLUTE, target),
+                2: Allocation(AllocationMode.REMAINDER),
+            },
+            consumption=consumption,
+        )
+
+    def test_net_is_the_target_less_what_the_village_spends(self):
+        plan = self._plan(consumption={1: 800})
+        army = next(v for v in plan.villages if v.village_id == 1)
+
+        assert army.target_per_hour == 1200
+        assert army.consumption_per_hour == 800
+        assert army.net_per_hour == pytest.approx(400)
+
+    def test_a_village_spending_exactly_its_target_holds_level(self):
+        """The operator's intent: 01 is told to LAND 14,751/h because it BURNS
+        14,751/h. Its store neither grows nor shrinks."""
+        plan = self._plan(consumption={1: 1200})
+        army = next(v for v in plan.villages if v.village_id == 1)
+
+        assert army.net_per_hour == pytest.approx(0.0)
+
+    def test_spending_more_than_it_lands_drains_the_store(self):
+        plan = self._plan(consumption={1: 2000})
+        army = next(v for v in plan.villages if v.village_id == 1)
+
+        assert army.net_per_hour == pytest.approx(-800)
+
+    def test_the_cargo_does_not_move(self):
+        """Spec 2.2 is already right and must stay right: shipped = target
+        minus own production. Consumption changes the STORE, not the sheet."""
+        baseline = self._plan()
+        consuming = self._plan(consumption={1: 1200})
+
+        army = next(v for v in consuming.villages if v.village_id == 1)
+        was = next(v for v in baseline.villages if v.village_id == 1)
+
+        assert army.ship_per_hour == was.ship_per_hour == pytest.approx(200)
+        assert [v.ship_per_hour for v in consuming.villages] == [
+            v.ship_per_hour for v in baseline.villages
+        ]
+        assert consuming.is_conserved
+
+    def test_production_and_the_remainder_are_untouched(self):
+        """Consumption is not a claim on the account pool. The unallocated
+        figure answers what the targets left over, and spending a resource is a
+        different question from allocating it."""
+        baseline = self._plan()
+        consuming = self._plan(consumption={1: 1200, 2: 400})
+
+        assert consuming.total_production == baseline.total_production
+        assert consuming.unallocated == baseline.unallocated
+        assert consuming.warnings == baseline.warnings
+
+    @pytest.mark.parametrize("consumption", [None, {}, {1: 0.0}])
+    def test_no_consumption_leaves_every_figure_identical(self, consumption):
+        """Regression guard: the whole existing planner runs with none."""
+        baseline = self._plan()
+        plan = self._plan(consumption=consumption)
+
+        assert [
+            (v.village_id, v.own_per_hour, v.target_per_hour, v.ship_per_hour, v.net_per_hour)
+            for v in plan.villages
+        ] == [
+            (v.village_id, v.own_per_hour, v.target_per_hour, v.ship_per_hour, v.net_per_hour)
+            for v in baseline.villages
+        ]
+
+    def test_with_no_consumption_net_is_the_target(self):
+        """The pre-consumption meaning, which is what the storage layer read."""
+        army = next(v for v in self._plan().villages if v.village_id == 1)
+
+        assert army.net_per_hour == pytest.approx(army.target_per_hour)
+
+    def test_negative_consumption_is_rejected(self):
+        """A village cannot spend a negative amount, and reading one as extra
+        production is exactly the inference this design refused to make: the
+        statistics page reports materials gross, so a consuming village reads
+        positive and there is no signal to invert."""
+        with pytest.raises(AllocationError, match="consumption cannot be negative"):
+            self._plan(consumption={1: -500})
+
+    def test_consumption_for_an_unknown_village_is_rejected(self):
+        with pytest.raises(AllocationError, match="no production"):
+            resolve_resource(
+                Resource.IRON,
+                productions={1: 100},
+                allocations={},
+                consumption={99: 500},
+            )
+
+    def test_consumption_composes_with_a_stock_supplement(self):
+        """A stock floor raises what the village can SHIP; consumption lowers
+        what its store keeps. Both at once must not collide: available carries
+        the supplement, so net stays target minus spend."""
+        plan = resolve_resource(
+            Resource.LUMBER,
+            productions={1: 1000, 2: 0},
+            allocations={
+                1: Allocation(AllocationMode.REMAINDER),
+                2: Allocation(AllocationMode.ABSOLUTE, 1200),
+            },
+            supplement={1: 500},
+            consumption={2: 1200},
+        )
+        receiver = next(v for v in plan.villages if v.village_id == 2)
+
+        assert receiver.ship_per_hour == pytest.approx(1200)
+        assert receiver.net_per_hour == pytest.approx(0.0)

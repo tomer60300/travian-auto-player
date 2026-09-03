@@ -384,14 +384,54 @@ def _segments(
 # ---------------------------------------------------------------------------
 
 
+def _consumption(rng: random.Random, snapshot: list[VillageSnapshot]) -> dict[int, dict]:
+    """What some of these villages SPEND per hour, by resource.
+
+    The operator's own flat constants, and a dimension the audit needs: the
+    storage replays subtract it, so without it every oracle-agreement run
+    checks only the zero case. Deliberately spans both sides of production --
+    section 9 is explicit that two of the account's villages are permanently
+    crop-negative by design -- so the draining branch is exercised on a village
+    whose production reads POSITIVE, which is the case that misclassifies if
+    the sign is taken off production instead of the net.
+    """
+    if rng.random() < 0.6:
+        return {}  # most accounts declare nothing, which must stay the quiet path
+    out: dict[int, dict] = {}
+    for village in snapshot:
+        if rng.random() < 0.5:
+            continue
+        per = {}
+        for resource in Resource:
+            rate = _rate(village, resource)
+            if rate is None:
+                continue  # an unreadable rate sits its resource out entirely
+            share = rng.choice([0.0, 0.25, 0.5, 1.0, 1.4])
+            if share:
+                per[resource] = round(abs(rate) * share, 1)
+        if per:
+            out[village.village_id] = per
+    return out
+
+
 def random_account(seed: int, *, with_profiles: bool) -> Account:
     """One seeded random account. Everything derives from *seed*."""
     rng = random.Random(seed)
     count = rng.randint(1, 50)
     spread = rng.choice([12, 40, 90, 190])
     snapshot = [_village(rng, i + 1, spread) for i in range(count)]
+    # Drawn from its OWN stream, keyed off the same seed. Taking these numbers
+    # from `rng` would shift every later draw and re-roll the whole audit
+    # corpus -- different allocations, reserves and latency targets under the
+    # same seed names -- so the new dimension would have silently replaced the
+    # coverage it was meant to add to.
+    consumption = _consumption(random.Random(f"consumption-{seed}"), snapshot)
     config = [
-        VillageConfig(village_id=v.village_id, trade_office_level=rng.randint(0, 20))
+        VillageConfig(
+            village_id=v.village_id,
+            trade_office_level=rng.randint(0, 20),
+            consumption_per_hour=consumption.get(v.village_id),
+        )
         for v in snapshot
     ]
     over_allocate = rng.random() < 0.20
@@ -445,6 +485,7 @@ def random_account(seed: int, *, with_profiles: bool) -> Account:
             "over_allocate": over_allocate,
             "profiles": (day_request and [s.name for s in day_request.segments]) or [],
             "tributes": len(tributes),
+            "consuming": len(consumption),
         },
     )
 
