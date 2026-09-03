@@ -281,6 +281,28 @@ test.describe('role templates, driven', () => {
     await expect(page.getByText('0 typed, covering 0 village(s)')).toBeVisible()
   })
 
+  test('an emptied template also marks the VILLAGE rows that claim the role', async ({ page }) => {
+    // The fourth reader of the same question, and the only surface that names
+    // the village rather than the role. It read `roleTemplates[role] == null`
+    // while the panel, `rolesForRequest` and `rolesMissingTemplates` had all
+    // moved to `isEmptyTemplate` -- so an emptied template left the Snapshot
+    // table saying nothing at all: no `aria-invalid`, no "no DEF template yet",
+    // while the panel two clicks away said "0 typed" and the plan came back
+    // 422. Whichever surface the operator happens to be looking at has to give
+    // them the same answer.
+    await openPanel(page)
+    await page.getByLabel('Lumber spent per hour by a DEF village').fill('8372')
+
+    await page.getByLabel('Lumber spent per hour by a DEF village').fill('')
+
+    await page.getByRole('button', { name: 'Snapshot' }).click()
+    // Both villages claim DEF, and the row is where their names are.
+    for (const name of ['11', '13']) {
+      await expect(page.getByLabel(`Role for ${name}`)).toHaveAttribute('aria-invalid', 'true')
+    }
+    await expect(page.getByText('no DEF template yet')).toHaveCount(2)
+  })
+
   test('setting the last mode back to keep warns, because keep is not a figure', async ({
     page,
   }) => {

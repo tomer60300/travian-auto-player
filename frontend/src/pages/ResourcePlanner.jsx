@@ -2893,7 +2893,16 @@ export default function ResourcePlanner() {
                           field that removes the typing, not decoration. */}
                       {(() => {
                         const role = villageRoles[v.village_id]
-                        const missing = role != null && roleTemplates[role] == null
+                        // `isEmptyTemplate`, the same predicate `rolesForRequest`,
+                        // `rolesMissingTemplates` and the panel's own count use. A
+                        // null check made this the one surface that stayed silent
+                        // about a template emptied box by box: the role key
+                        // outlives its last figure, so `{"def": {"consumption": {}}}`
+                        // read as present here while the panel said "0 typed" and
+                        // the plan came back 422. This row is the only place that
+                        // names the VILLAGE, so it is the one that most needed to
+                        // agree.
+                        const missing = role != null && isEmptyTemplate(roleTemplates[role])
                         const problemId = `role-problem-${v.village_id}`
                         return (
                           <>
