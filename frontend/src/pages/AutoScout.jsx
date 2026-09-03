@@ -1298,11 +1298,23 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   // Round-robin resume position
   const [resumeIndex, setResumeIndex] = useState(0)
 
-  useEffect(() => { return () => {
-    mountedRef.current = false
-    loopStoppedRef.current = true
-    if (loopTimerRef.current) clearTimeout(loopTimerRef.current)
-  } }, [])
+  // Both refs are SET on mount as well as cleared on unmount, for the reason
+  // `ScanConfigPanel`'s own mount effect above already records: StrictMode
+  // (src/main.jsx) re-runs an effect's cleanup and body once on mount, so a
+  // cleanup-only version left `mountedRef` false and `loopStoppedRef` true
+  // from the first teardown onwards -- on a healthy mount. `runOnePass` then
+  // resolved without opening a socket, `handleAutoMessage` dropped every
+  // frame, and `handleStart`'s `if (mountedRef.current) setRunning(false)`
+  // never fired, so Start became a Stop button that never went away.
+  useEffect(() => {
+    mountedRef.current = true
+    loopStoppedRef.current = false
+    return () => {
+      mountedRef.current = false
+      loopStoppedRef.current = true
+      if (loopTimerRef.current) clearTimeout(loopTimerRef.current)
+    }
+  }, [])
 
   const msgIdRef = useRef(0)
   const addMessage = useCallback((type, text) => {
