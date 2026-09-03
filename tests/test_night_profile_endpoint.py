@@ -21,7 +21,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from travian_api.services.distribution.allocation import Resource
+from travian_api.services.distribution.allocation import AllocationMode, Resource
 from travian_api.web.routes.distribution import (
     ForeignTarget,
     NightProfileRequest,
@@ -259,3 +259,68 @@ class TestConsumptionReachesTheFourthPlanningPath:
         """The ruling is at the schema, so it binds this request model as well."""
         with pytest.raises(ValidationError):
             _body(config=[{"village_id": ARMY, "consumption_per_hour": {"crop": 9000}}])
+
+
+class TestASpendPastProductionCannotKillTheRequest:
+    """R4-P1-1. A declared spend one unit above production made the derivation
+    raise, and FastAPI turns an unhandled `AllocationError` into a **500**.
+
+    Netting the spend off the material rates (R3-D2) made material production
+    negative for the first time, and the derivation's closing "everyone
+    untouched keeps exactly what it makes" loop built
+    `Allocation(ABSOLUTE, round(production))` out of it -- which
+    `Allocation.__post_init__` refuses. 03 makes 1,750/h of clay and iron with
+    no explicit day allocation for either, so `{'clay': 1750}` answered 200 and
+    `{'clay': 1751}` answered 500: the endpoint died on the boundary its own
+    tests stopped at.
+
+    Nothing to keep is zero, not a negative -- the same ruling the crop half
+    already carries. And the uncovered part is not dropped: a village spending
+    more than it makes must be FED that difference, so it lands in `demand`
+    exactly as a receiver's would and is reported in `unmet`.
+    """
+
+    def _derive_with(self, consumption, vid=ARMY):
+        return asyncio.run(
+            post_night_profile(
+                _body(
+                    config=[
+                        {"village_id": HUB, "trade_office_level": 19},
+                        {"village_id": vid, "consumption_per_hour": consumption},
+                    ]
+                ),
+                USER,
+            )
+        )
+
+    # 03's own rate for both, and the two materials the fixture's day profile
+    # says nothing about -- so they reach the untouched loop rather than the
+    # receiver branch, which is the path that raised.
+    OWN = 1750
+
+    @pytest.mark.parametrize("resource", [Resource.CLAY, Resource.IRON], ids=lambda r: r.value)
+    @pytest.mark.parametrize("over", [1, OWN], ids=["one-unit-past", "twice-production"])
+    def test_a_spend_above_production_still_derives(self, resource, over):
+        result = self._derive_with({resource.value: self.OWN + over})
+
+        assert result.allocations[resource][ARMY].value == 0.0, (
+            "a village spending more than it makes keeps nothing, not a negative"
+        )
+        assert result.allocations[resource][ARMY].mode is AllocationMode.ABSOLUTE
+
+    @pytest.mark.parametrize("resource", [Resource.CLAY, Resource.IRON], ids=lambda r: r.value)
+    def test_the_part_nobody_can_cover_is_reported_not_dropped(self, resource):
+        """The hub makes 1,750/h of each material and the fixture has no other
+        source of them, so a 4,000/h spend against a 1,750/h production leaves
+        2,250/h to be fed and exactly 500/h of it uncoverable."""
+        result = self._derive_with({resource.value: 4_000})
+
+        assert result.unmet[resource] == pytest.approx(500.0)
+        assert any("no village could cover" in w for w in result.warnings), result.warnings
+
+    def test_a_spend_the_account_can_cover_reports_nothing_outstanding(self):
+        """The other half of the pair: folding the deficit into `demand` must
+        not invent a shortfall the hub's own production covers."""
+        result = self._derive_with({"clay": self.OWN + 1})
+
+        assert result.unmet == {}

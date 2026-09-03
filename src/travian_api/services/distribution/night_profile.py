@@ -205,6 +205,18 @@ def derive_night_profile(
                 )
                 demand -= own - capped(village, resource)
                 forced.append(vid)
+                continue
+            if own < 0:
+                # It spends more of this material than it makes, so it has
+                # nothing to keep and needs the difference DELIVERED -- exactly
+                # the claim the receiver branch above books as `take - own` with
+                # a `take` of zero. Booked here, before the draw, so a village
+                # with slack can cover it and whatever nobody covers is reported
+                # in `unmet`. Its own retention is clamped to zero below: a
+                # negative absolute retention is refused in `Allocation`, and
+                # dropping the deficit instead would hand back a profile that
+                # starves the village while claiming nothing was outstanding.
+                demand += -own
         drawn: list[int] = []
         if demand > 0:
             order = sorted(
@@ -226,11 +238,18 @@ def derive_night_profile(
                 drawn.append(vid)
         # Everyone untouched keeps exactly what it makes, stated rather than
         # omitted so it stays inside the conservation sum instead of leaving it.
+        # Clamped at zero, for the reason the crop loop below is: a declared
+        # spend larger than the village's production makes the rate NEGATIVE
+        # (the caller nets it off, and `NightVillage.production` says so), and a
+        # negative absolute retention is refused in `Allocation.__post_init__`
+        # -- so `/night-profile` answered 500 for a spend one unit past
+        # production. Nothing to keep is zero; the difference is already booked
+        # as demand above, so the clamp reports it rather than hiding it.
         for vid, village in by_id.items():
             if vid not in entries:
                 entries[vid] = Allocation(
                     mode=AllocationMode.ABSOLUTE,
-                    value=float(round(village.production.get(resource, 0.0))),
+                    value=float(max(0, round(village.production.get(resource, 0.0)))),
                 )
         profile.allocations[resource] = entries
         profile.forced_senders[resource] = sorted(forced)

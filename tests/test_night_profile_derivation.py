@@ -266,3 +266,75 @@ class TestAProfileNeverQuietlyOverClaimsTheAccount:
             f"the profile claims {claimed:,.0f}/h out of {produced:,.0f}/h and "
             f"reports only {profile.unmet[Resource.CROP]:,.0f}/h unmet"
         )
+
+
+class TestAMaterialSpendLargerThanProduction:
+    """The material half of the same rule, and where R4-P1-1 lived.
+
+    `NightVillage.production` is documented as possibly negative for a material
+    once the caller nets a declared spend off the rate -- a village burning its
+    whole lumber production has none to keep overnight. The closing "everyone
+    untouched keeps exactly what it makes" loop built
+    `Allocation(ABSOLUTE, round(production))` out of that figure with no clamp,
+    so the derivation raised on the caller for supplying what its own docstring
+    invites.
+
+    Clamped at zero, and the uncovered part folded into `demand`: a village
+    spending more than it makes has to be FED the difference, which is the same
+    claim on the account a receiver's shortfall makes, so it goes through the
+    channel that already reports one rather than being dropped.
+    """
+
+    def _two_villages(self, hub_lumber: float):
+        return [
+            _village(HUB, "hub", 0, 0, lumber=hub_lumber),
+            _village(ARMY, "army", 2, 0, lumber=-20_000.0),
+        ]
+
+    def _derive_pair(self, hub_lumber: float):
+        return derive_night_profile(
+            self._two_villages(hub_lumber),
+            window_hours=8.0,
+            map_span=401,
+            speed_fields_per_hour=12.0,
+            day_retention={},
+            hub_id=HUB,
+            consumer_ids=[],
+        )
+
+    def test_a_negative_material_producer_does_not_raise(self):
+        profile = self._derive_pair(hub_lumber=0.0)
+
+        assert profile.allocations[Resource.LUMBER][ARMY].value == 0.0
+        assert profile.allocations[Resource.LUMBER][ARMY].mode is AllocationMode.ABSOLUTE
+
+    def test_the_deficit_nobody_can_cover_is_reported_in_full(self):
+        profile = self._derive_pair(hub_lumber=0.0)
+
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(20_000.0)
+
+    def test_what_the_hub_produces_is_taken_off_the_shortfall(self):
+        """Not a flat re-report of the spend: the hub is the remainder village,
+        so its own production is supply the deficit draws on first."""
+        profile = self._derive_pair(hub_lumber=15_000.0)
+
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(5_000.0)
+
+    @pytest.mark.parametrize("hub_lumber", [0.0, 15_000.0, 20_000.0, 60_000.0])
+    def test_what_is_claimed_plus_what_is_unmet_is_what_is_produced(self, hub_lumber):
+        villages = self._two_villages(hub_lumber)
+        profile = self._derive_pair(hub_lumber)
+
+        # The hub is the REMAINDER village, so its own claim is whatever is
+        # left; what the absolute retentions claim is the checkable half.
+        claimed = sum(
+            a.value
+            for a in profile.allocations[Resource.LUMBER].values()
+            if a.mode is AllocationMode.ABSOLUTE
+        )
+        produced = sum(v.production.get(Resource.LUMBER, 0.0) for v in villages)
+
+        assert claimed - profile.unmet[Resource.LUMBER] <= produced + 1.0, (
+            f"the profile claims {claimed:,.0f}/h out of {produced:,.0f}/h and "
+            f"reports only {profile.unmet[Resource.LUMBER]:,.0f}/h unmet"
+        )
