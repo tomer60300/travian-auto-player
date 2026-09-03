@@ -449,6 +449,42 @@ class TestTheSchemaGuardsTheCap:
             assert "02" in str(caught.value), model.__name__
 
 
+class TestTheHeadroomAppliesToTheCapToo:
+    """So a cap of 8 is a soft target of 7, and the advice reads oddly.
+
+    Specified behaviour -- the headroom is a fraction of the BUDGET, and under
+    a cap the budget IS the cap -- but following "Raising 02's cap to 16 would
+    fit this plan as it stands" produces a plan that is feasible and ALSO
+    reported as crowded, which looks like the advice arguing with itself.
+
+    Documented in the field's description rather than smoothed over, because
+    the advice answers the question the REFUSAL asked: `over_budget` and
+    `blockers` are decided against the hard budget, so "would fit" has to mean
+    "would clear it". Naming a headroom-adjusted figure instead would make a
+    per-village fix depend on an account-wide preference -- a different number
+    for the same plan depending on a slider elsewhere -- to silence a note that
+    is explicitly reported and never acted on.
+    """
+
+    def test_a_cap_set_to_what_the_plan_wants_is_feasible_and_crowded(self):
+        res = _plan(caps={HUB: 16})
+
+        assert res.feasible is True, "16 committed against a hard budget of 16"
+        crowded = [w for w in res.warnings if "past the 14 it should keep clear" in w]
+        assert crowded, [w for w in res.warnings if "keep clear" in w]
+
+    def test_the_note_belongs_to_the_headroom_and_goes_when_it_does(self):
+        res = _plan(caps={HUB: 16}, merchant_headroom=0.0)
+
+        assert res.feasible is True
+        assert not [w for w in res.warnings if "keep clear" in w]
+
+    def test_the_field_description_says_the_headroom_applies_here(self):
+        description = VillageConfig.model_fields["max_busy_merchants"].description
+
+        assert "headroom" in description, description
+
+
 class TestTheReserveIsBoundedLikeTheCap:
     """The account-wide twin of the cap, and it had no ceiling at all.
 
