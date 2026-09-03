@@ -5,7 +5,13 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // `dist` is the Vite output. The other two are Playwright's run artefacts,
+  // and they have to be here rather than only in .gitignore: flat config does
+  // not read .gitignore, so a single FAILING spec writes `e2e/report/trace/`
+  // -- the bundled trace viewer, minified UMD -- and `npx eslint .` comes back
+  // with 693 errors in code nobody wrote. A gate that breaks when a test fails
+  // is a gate that stops being run.
+  globalIgnores(['dist', 'e2e/report', 'test-results']),
   {
     // Config/tooling files run in Node, not the browser.
     files: ['*.config.{js,mjs}'],

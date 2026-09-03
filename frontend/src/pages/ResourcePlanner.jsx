@@ -54,6 +54,7 @@ import FullDayCheck from '../components/FullDayCheck'
 import NightOverrunTable from '../components/NightOverrunTable'
 import NpcBalancePanel from '../components/NpcBalancePanel'
 import PlanDiagnostics from '../components/PlanDiagnostics'
+import PlanExport from '../components/PlanExport'
 import RoleTemplates from '../components/RoleTemplates'
 import ScrollableTable from '../components/ScrollableTable'
 import UnallocatedPanel from '../components/UnallocatedPanel'
@@ -116,6 +117,12 @@ import {
   npcFeedstockField,
   unansweredAttendance,
 } from '../utils/plannerNpc'
+import {
+  filenameFromDisposition,
+  isDigestConflict,
+  yamlFilename,
+  yamlResponseTransform,
+} from '../utils/plannerExport'
 import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from '../utils/villageRefs'
 import { planStatus, relayLegIndex } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
@@ -362,16 +369,18 @@ function saveJson(key, value) {
 }
 
 /** Hand the browser a file to save. Same shape as the other pages' exports. */
-function downloadJson(filename, value) {
-  const blob = new Blob([JSON.stringify(value, null, 2)], {
-    type: 'application/json;charset=utf-8',
-  })
+function downloadText(filename, text, mime) {
+  const blob = new Blob([text], { type: `${mime};charset=utf-8` })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
   a.download = filename
   a.click()
   URL.revokeObjectURL(url)
+}
+
+function downloadJson(filename, value) {
+  downloadText(filename, JSON.stringify(value, null, 2), 'application/json')
 }
 
 /** FastAPI puts validation failures in `detail` as an ARRAY of error objects;
@@ -757,6 +766,11 @@ export default function ResourcePlanner() {
   // loaded, so the initial defaults can never overwrite it.
   const [hydratedKey, setHydratedKey] = useState(null)
   const [plan, setPlan] = useState(null)
+  // Section 10's export, and the refusal it can come back with. The conflict
+  // is page state rather than a toast because it needs an ACTION -- re-read
+  // the plan -- and a toast is gone before the operator has decided.
+  const [exportingYaml, setExportingYaml] = useState(false)
+  const [yamlConflict, setYamlConflict] = useState(null)
   const [fetching, setFetching] = useState(false)
   const [scanningTradeOffices, setScanningTradeOffices] = useState(false)
   const [planning, setPlanning] = useState(false)
@@ -1003,6 +1017,9 @@ export default function ResourcePlanner() {
   useEffect(() => {
     planInputRev.current += 1
     setPlan(null)
+    // The conflict named a digest this plan no longer has, so it describes
+    // nothing once the inputs move. Cleared with the plan it belonged to.
+    setYamlConflict(null)
     // An execution preview/result belongs to the plan it was run against; the
     // moment any input changes it describes routes for a stale plan. (A live run
     // already committed in-game, and its success/failure is reported via toast;
@@ -1623,6 +1640,9 @@ export default function ResourcePlanner() {
       if (requestedFor !== currentAccountKey()) return
       if (requestedRev !== planInputRev.current) return
       setPlan(res.data)
+      // A fresh plan is a fresh identity, so whatever the last export said
+      // about a digest that has moved is now history.
+      setYamlConflict(null)
       setStage('plan')
     } catch (err) {
       toast.error(errorDetail(err, 'Could not build a plan'))
@@ -1642,6 +1662,60 @@ export default function ResourcePlanner() {
     activeAttendanceOwed,
     activeProfile,
   ])
+
+  // Section 10, in one call: the plan request the operator is looking at, plus
+  // the digest of the plan they are looking AT.
+  //
+  // The digest is the confirmation step, in machine-readable form. Nothing on
+  // the server holds a computed plan -- `/plan` is pure and stateless, which is
+  // what makes tuning a target free -- so the export re-plans, and the digest
+  // is what stops that being silent. A 409 means the plan MOVED, and it is
+  // surfaced rather than retried: re-planning to make the download succeed
+  // would hand over an authoritative-looking file describing a plan nobody
+  // read, which is the one outcome this whole mechanism exists to prevent.
+  const exportPlanYaml = useCallback(async () => {
+    if (!plan?.plan_digest) {
+      toast.error('Build a plan first — the export confirms a plan you have read')
+      return
+    }
+    setExportingYaml(true)
+    try {
+      const res = await api.post(
+        '/distribution/plan/yaml',
+        { ...buildPlanPayload(), expected_plan_digest: plan.plan_digest },
+        {
+          // A YAML document on success and FastAPI's `{"detail": ...}` on a
+          // refusal, so the transform is STATUS-DRIVEN. Returning the raw
+          // string for both left the 409's own sentence unparsed -- and that
+          // sentence is the only place both digests appear.
+          responseType: 'text',
+          transformResponse: [yamlResponseTransform],
+        }
+      )
+      // The server names the file for the PLAN and not for the moment, so two
+      // downloads of one plan are one file and a diff between two files is a
+      // diff between two plans. Respected rather than reconstructed here,
+      // which would be a second implementation of that convention.
+      const filename = filenameFromDisposition(
+        res.headers?.['content-disposition'],
+        yamlFilename(plan.plan_digest)
+      )
+      downloadText(filename, res.data, 'application/yaml')
+      setYamlConflict(null)
+      toast.success(`Exported ${filename} — the plan you confirmed, as a document`)
+    } catch (err) {
+      if (isDigestConflict(err)) {
+        // Kept on screen, with the server's own sentence: it names BOTH
+        // digests, and "it moved" without saying from what to what is not
+        // something anyone can check.
+        setYamlConflict(errorDetail(err, 'This plan is not the one that was confirmed.'))
+        return
+      }
+      toast.error(errorDetail(err, 'Could not render the plan as YAML'))
+    } finally {
+      setExportingYaml(false)
+    }
+  }, [plan, buildPlanPayload, toast])
 
   // Every profile with hours, as the segment list the backend plans one by
   // one. Shared by the day check AND whole-day execution, so the day the
@@ -5398,6 +5472,18 @@ export default function ResourcePlanner() {
                   </div>
                 )}
               </div>
+
+              {/* Section 10's order, and it has to be HERE: the readable
+                  plan is the card above, and the document comes after the
+                  operator has read it. Above the execute panel, because
+                  exporting is the reversible output and going live is not. */}
+              <PlanExport
+                digest={plan.plan_digest}
+                exporting={exportingYaml}
+                conflict={yamlConflict}
+                onConfirm={exportPlanYaml}
+                onRePlan={buildPlan}
+              />
 
               {/* Section 6's deadline, against THIS profile's routes. The
                   same rows the full-day check reports for the composite, so
