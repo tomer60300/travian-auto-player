@@ -302,6 +302,11 @@ const MEASURE = () => {
       if (heads.some((h) => h.startsWith('Role'))) return 'Role templates'
       if (heads.some((h) => h === 'X') && heads.some((h) => h === 'Y')) return 'Foreign targets'
       if (heads.some((h) => h.startsWith('Mode'))) return 'Allocate grid'
+      // The Allocate stage's default view. Named after the two other planner
+      // tables above it are ruled out, because its headers are the bare
+      // resource labels and "Lumber" is a prefix of the Snapshot table's
+      // "Lumber/h" and the Role-template table's "Lumber target".
+      if (heads[0] === 'Village' && heads.some((h) => h === 'Lumber')) return 'By-village result'
       return 'table: ' + heads.slice(0, 3).join('/')
     }
     // Off the planner there are no tables at these sites: the controls sit in
@@ -463,6 +468,11 @@ const MEASURE = () => {
       scrollWidth: w.scrollWidth,
       overflow: w.scrollWidth - w.clientWidth,
       reached,
+      // A TABLE is what makes sideways scrolling a design rather than a
+      // squeeze: it has columns to hide and an identity column to pin. A flex
+      // panel of controls has neither, so its overflow is only ever the panel
+      // being narrower than the controls in it -- see `cramped`.
+      hasTable: w.querySelector('table') != null,
     })
   }
 
@@ -524,15 +534,20 @@ const MEASURE = () => {
   for (const table of document.querySelectorAll('table')) {
     const wrapper = scroller(table)
     if (wrapper == null) continue
-    const head = table.querySelector('thead th.sticky-col')
-    if (head == null) continue
     // A table inside a CLOSED `<details>` still reports a scrollWidth and a
     // clientWidth -- the Role-templates panel reads 1546px of overflow while
-    // collapsed -- but a ResizeObserver is not delivered for a
-    // `content-visibility: hidden` subtree, so nothing has measured it and
-    // nothing should assert on it. `checkVisibility` is the question
-    // `rect.width === 0 && rect.height === 0` was standing in for.
-    if (!head.checkVisibility()) continue
+    // collapsed, and `ScrollableTable`'s synchronous `measure()` even puts
+    // `.table-overflowing` on it from that reading -- but it is not on screen
+    // and its geometry is not what the operator will meet. `checkVisibility`
+    // is the question `rect.width === 0 && rect.height === 0` was standing in
+    // for, and it is asked of the TABLE rather than of a pinned header cell
+    // so that a table with no pinned header is still collected. That is what
+    // `unwired` needs: the pass used to `continue` on a missing
+    // `thead th.sticky-col`, so the one shape the D5 rule exists to forbid --
+    // an overflowing dense table that pins nothing -- was the one shape it
+    // could not see.
+    if (!table.checkVisibility()) continue
+    const head = table.querySelector('thead th.sticky-col')
     const cell = table.querySelector('tbody .sticky-col')
     const hint = wrapper.parentElement?.querySelector(':scope > .scroll-hint') ?? null
     // `.row-focus-edge` and `.sticky-col` have to be the SAME cell. The pair
@@ -561,19 +576,28 @@ const MEASURE = () => {
     const pinnedLeft = cell ? Math.round(cell.getBoundingClientRect().left) : null
     wrapper.scrollLeft = before
     tables.push({
-      surface: surfaceOf(head),
+      surface: surfaceOf(head ?? table),
       overflow: wrapper.scrollWidth - wrapper.clientWidth,
-      position: getComputedStyle(head).position,
+      // Null rather than `static` when nothing is pinned at all, so the two
+      // failures read differently: a pinned column that did not take effect
+      // is `unpinned`, a table with nothing to pin is `unwired`.
+      position: head == null ? null : getComputedStyle(head).position,
       wrapperLeft: Math.round(wrapper.getBoundingClientRect().left),
       pinnedLeft,
       hasHint: hint != null,
       hintVisible: hint != null && hint.checkVisibility(),
       edgeOnPinned: edge == null ? null : edge.classList.contains('sticky-col'),
       hintText: hint == null ? null : hint.textContent.replace(/\s+/g, ' ').trim(),
-      pinnedLabel: headerLabel(head),
+      pinnedLabel: head == null ? null : headerLabel(head),
       scrollingCount: scrolling.length,
       firstScrolling: scrolling[0] ?? null,
       lastScrolling: scrolling[scrolling.length - 1] ?? null,
+      // Whether a figure is TYPED in here. The D5 rule's whole justification
+      // is that an edited field must stay attributable to the right row, so
+      // this is the scope of `unwired`: a read-only report that scrolls loses
+      // a reader's place, which is a smaller thing than a Trade Office level
+      // going into the wrong village.
+      dense: [...table.querySelectorAll('.input-field')].some((el) => el.checkVisibility()),
     })
   }
 
@@ -621,8 +645,14 @@ function pinnedRows(measured) {
   ].concat(
     measured.tables.map(
       (t) =>
-        `    table  ${t.surface.padEnd(16)} overflow ${String(t.overflow).padStart(5)}px` +
-        ` identity ${t.position}, scrolled to left ${t.pinnedLeft} of container ${t.wrapperLeft},` +
+        `    table  ${t.surface.padEnd(18)} overflow ${String(t.overflow).padStart(5)}px` +
+        // `position: null` is a table with no pinned column AT ALL, which is
+        // a different report from one whose pinning did not take effect --
+        // and it is the report the pass could not produce before, because it
+        // skipped any table without a `thead th.sticky-col`.
+        (t.position == null
+          ? ` NOTHING PINNED${t.dense ? ' (editable)' : ' (read-only)'},`
+          : ` identity ${t.position}, scrolled to left ${t.pinnedLeft} of container ${t.wrapperLeft},`) +
         ` hint ${t.hasHint ? (t.hintVisible ? 'visible' : 'hidden') : 'absent'}` +
         // The WORDS, not just the presence. The hint is derived from the
         // header row, so printing it is how a reader checks the derivation
@@ -729,6 +759,32 @@ function assertFits(where, measured, viewport) {
     .map((w) => `${w.surface}: ${w.clientWidth}/${w.scrollWidth} scrolled only to ${w.reached}`)
   expect(stuck, `${where}: wrapper overflows but cannot scroll`).toEqual([])
 
+  // A scrolling container with no TABLE in it is a different claim entirely,
+  // and the weaker one is not available to it: there are no columns to hide
+  // and no identity to pin, so sideways scrolling is not a design here, it is
+  // the panel being narrower than the controls inside it.
+  //
+  // The Build queue is the case. Its two panels are `flex-1 min-w-0` siblings
+  // of one flex row at every width, so at 375 the queue card was 154px wide
+  // holding 389px of bulk bar and queue rows -- 235px of overflow, over the
+  // target-level box and the priority select -- and 250/397 at 768. Round 10
+  // read that pair off the wrapper list and called it "the Build-queue
+  // table": there is no table on this page at any of the three viewports (the
+  // only `<table>` in `BuildQueue.jsx` is the validation result, which
+  // `openBuildQueue` never renders), and the container is the queue card,
+  // whose `overflow-y: auto` forces its `visible` horizontal axis to `auto`
+  // per CSS Overflow -- which is the whole reason it appears in this pass at
+  // all. So it cannot be wired through `ScrollableTable`, and the fix is for
+  // the panels to stop sharing one row when there is not room for two.
+  const cramped = measured.wrappers
+    .filter((w) => w.overflow > 0 && !w.hasTable)
+    .map(
+      (w) =>
+        `${w.surface}: ${w.clientWidth}/${w.scrollWidth} -- ${w.overflow}px of sideways scroll` +
+        ' over controls, with no table to pin or announce',
+    )
+  expect(cramped, `${where}: a panel of controls is narrower than its controls`).toEqual([])
+
   // Item 1 of the UI Definition of Done: a wide table scrolls inside its own
   // container, never the body. Giving the controls their widths back makes every
   // one of these tables wider, so this is the guard on the FIX as much as on the
@@ -765,9 +821,33 @@ function assertFits(where, measured, viewport) {
   // were both gated on `max-width: 640px` / `sm:hidden` while the Snapshot
   // table overflowed by 938px at 768 and 286px at 1440.
   const unpinned = measured.tables
-    .filter((t) => t.overflow > 0 && t.position !== 'sticky')
+    .filter((t) => t.overflow > 0 && t.position != null && t.position !== 'sticky')
     .map((t) => `${t.surface}: overflows by ${t.overflow}px, identity column is position: ${t.position}`)
   expect(unpinned, `${where}: an overflowing table does not pin its identity column`).toEqual([])
+
+  // And the table that pins NOTHING. `unpinned` above only ever looked at
+  // tables that already had a `thead th.sticky-col` to look at, and so did
+  // the pass that feeds it, so the one shape D5's rule exists to forbid was
+  // the one shape the suite could not see: the next dense table added to this
+  // app would have been invisible here exactly as the two round 10 found
+  // were. Scoped to tables a figure is TYPED into, because that is what the
+  // rule's justification is about -- a read-only report that scrolls loses a
+  // reader's place, where a Trade Office level typed one row off breaches a
+  // village's merchant budget with nothing on screen saying so.
+  //
+  // Vacuous today by construction, and said out loud rather than left to be
+  // discovered: every `.input-field`-bearing table on these six surfaces is
+  // wired. Proven to fire by injection, the same way `crowded` and `offset`
+  // are -- stripping `sticky-col` off the Snapshot table's header in the page
+  // produces "Snapshot table: 1151px of overflow over editable controls,
+  // pinning nothing".
+  const unwired = measured.tables
+    .filter((t) => t.overflow > 0 && t.dense && t.position == null)
+    .map(
+      (t) =>
+        `${t.surface}: ${t.overflow}px of overflow over editable controls, pinning nothing`,
+    )
+  expect(unwired, `${where}: an overflowing dense table has no identity column at all`).toEqual([])
 
   // Pinning that does not hold. `position: sticky` with no scrollport, or a
   // `left` offset against the wrong containing block, reports as sticky and
@@ -806,6 +886,10 @@ function assertFits(where, measured, viewport) {
   // defect above; present where it does not is a table claiming to hide
   // columns it is showing.
   const misannounced = measured.tables
+    // Scoped to the tables `ScrollableTable` owns -- identified by the pinned
+    // header, which is the only thing it is asked to wrap for. A table that
+    // pins nothing has no hint to match and is `unwired`'s business.
+    .filter((t) => t.position != null)
     .filter((t) => t.hintVisible !== t.overflow > 0)
     .map(
       (t) =>

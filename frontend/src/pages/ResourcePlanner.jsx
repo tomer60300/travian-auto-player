@@ -4014,166 +4014,175 @@ export default function ResourcePlanner() {
           />
 
           {allocView === 'village' && (
-            <div className="card p-4 relative overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead className="text-secondary uppercase">
-                  <tr>
-                    <th className="text-left py-1.5 px-2">Village</th>
-                    {RESOURCES.map((resource) => (
-                      <th key={resource} className="text-right px-3">
-                        <span className="inline-flex items-center gap-1">
-                          <ResourceIcon resource={resource} />
-                          {RESOURCE_LABEL[resource]}
-                        </span>
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {villages.map((v) => (
-                    <tr
-                      key={v.village_id}
-                      className="border-t border-gray-800 hover:bg-white/5 transition-colors"
-                    >
-                      <td className="py-1.5 px-2 whitespace-nowrap">
-                        {v.name}{' '}
-                        <span className="text-secondary text-[11px]">
-                          ({v.x}|{v.y})
-                        </span>
-                      </td>
-                      {RESOURCES.map((resource) => {
-                        const own = v[`${resource}_per_hour`]
-                        const isRest = remainderFor(resource) === v.village_id
-                        // All three lines from ONE source. The retention, the
-                        // cargo, the spend and the net come off the plan once
-                        // there is one, and off these inputs while there is not.
-                        //
-                        // Mixing the two put three contradictory numbers in one
-                        // cell: the top line was this page's own derivation
-                        // (KEEP → own production) while the net came from the
-                        // plan, whose KEEP target INCLUDES the supplement a
-                        // stock floor makes available -- so a floored village
-                        // read "5,000/h ... −4,000 = 16,000 net", off by exactly
-                        // the 15,000/h supplement. The cargo was derived as
-                        // `target − own`, which the supplement funds, so it
-                        // overstated the route as well.
-                        //
-                        // The spend line still prints what the PLAN used, not
-                        // what was typed: the planner sets aside a declared
-                        // spend whose rate it cannot read, and showing the typed
-                        // figure claimed it had been applied.
-                        const { target: after, ship, spent, net, supplement } = planCellFigures({
-                          planned: planNet[resource]?.[v.village_id],
-                          own,
-                          localTarget: targetFor(resource, v),
-                          declaredSpend: effectiveSpend(resource, v.village_id),
-                        })
-                        return (
-                          <td key={resource} className="text-right px-3 py-1.5 align-top">
-                            {/* A sign change is the story worth telling:
-                                -2,500/h own plus +4,000/h shipped IS +1,500/h,
-                                and a starving village turning surplus (or the
-                                reverse) must read as that transition, not as a
-                                bare final number. */}
-                            <div
-                              className={`font-mono ${
-                                after == null
-                                  ? 'text-secondary'
-                                  : after < 0
-                                    ? 'text-danger'
-                                    : ''
-                              }`}
-                              /* The supplement is named where there is one, or
-                                 the reconciled cell still reads as a
-                                 contradiction: a floored KEEP village shows a
-                                 20,000/h retention against 5,000/h of own
-                                 production and no cargo, and only the stock
-                                 floor explains the other 15,000. */
-                              title={
-                                own == null
-                                  ? 'own production unknown'
-                                  : supplement > 0
-                                    ? `own ${fmt(own)}/h + ${fmt(supplement)}/h drawn from the stock floor`
-                                    : `own ${fmt(own)}/h`
-                              }
-                            >
-                              {after == null ? (
-                                '?'
-                              ) : own != null && own < 0 !== after < 0 && Math.abs(ship) >= 1 ? (
-                                <>
-                                  <span className={own < 0 ? 'text-danger' : ''}>{fmt(own)}</span>
-                                  <span
-                                    className={
-                                      after >= 0 ? 'text-success mx-0.5' : 'text-danger mx-0.5'
-                                    }
-                                  >
-                                    {'\u2192'}
+            <div className="card p-4">
+              {/* The Allocate stage's DEFAULT view, and it overflowed its
+                  container by 92px at 375 with nothing pinned and nothing
+                  said -- it carried `overflow-x-auto` on the card and stopped
+                  there. Read-only figures, so the stakes are a reader losing
+                  their place rather than a figure landing in the wrong row,
+                  but it is the same table shape and it takes the same
+                  treatment. 0px at 768 and 1440, where the class is inert. */}
+              <ScrollableTable>
+                <table className="w-full text-xs">
+                  <thead className="text-secondary uppercase">
+                    <tr>
+                      <th className="text-left py-1.5 px-2 sticky-col">Village</th>
+                      {RESOURCES.map((resource) => (
+                        <th key={resource} className="text-right px-3">
+                          <span className="inline-flex items-center gap-1">
+                            <ResourceIcon resource={resource} />
+                            {RESOURCE_LABEL[resource]}
+                          </span>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {villages.map((v) => (
+                      <tr
+                        key={v.village_id}
+                        className="border-t border-gray-800 hover:bg-white/5 transition-colors"
+                      >
+                        <td className="py-1.5 px-2 whitespace-nowrap sticky-col">
+                          {v.name}{' '}
+                          <span className="text-secondary text-[11px]">
+                            ({v.x}|{v.y})
+                          </span>
+                        </td>
+                        {RESOURCES.map((resource) => {
+                          const own = v[`${resource}_per_hour`]
+                          const isRest = remainderFor(resource) === v.village_id
+                          // All three lines from ONE source. The retention, the
+                          // cargo, the spend and the net come off the plan once
+                          // there is one, and off these inputs while there is not.
+                          //
+                          // Mixing the two put three contradictory numbers in one
+                          // cell: the top line was this page's own derivation
+                          // (KEEP → own production) while the net came from the
+                          // plan, whose KEEP target INCLUDES the supplement a
+                          // stock floor makes available -- so a floored village
+                          // read "5,000/h ... −4,000 = 16,000 net", off by exactly
+                          // the 15,000/h supplement. The cargo was derived as
+                          // `target − own`, which the supplement funds, so it
+                          // overstated the route as well.
+                          //
+                          // The spend line still prints what the PLAN used, not
+                          // what was typed: the planner sets aside a declared
+                          // spend whose rate it cannot read, and showing the typed
+                          // figure claimed it had been applied.
+                          const { target: after, ship, spent, net, supplement } = planCellFigures({
+                            planned: planNet[resource]?.[v.village_id],
+                            own,
+                            localTarget: targetFor(resource, v),
+                            declaredSpend: effectiveSpend(resource, v.village_id),
+                          })
+                          return (
+                            <td key={resource} className="text-right px-3 py-1.5 align-top">
+                              {/* A sign change is the story worth telling:
+                                  -2,500/h own plus +4,000/h shipped IS +1,500/h,
+                                  and a starving village turning surplus (or the
+                                  reverse) must read as that transition, not as a
+                                  bare final number. */}
+                              <div
+                                className={`font-mono ${
+                                  after == null
+                                    ? 'text-secondary'
+                                    : after < 0
+                                      ? 'text-danger'
+                                      : ''
+                                }`}
+                                /* The supplement is named where there is one, or
+                                   the reconciled cell still reads as a
+                                   contradiction: a floored KEEP village shows a
+                                   20,000/h retention against 5,000/h of own
+                                   production and no cargo, and only the stock
+                                   floor explains the other 15,000. */
+                                title={
+                                  own == null
+                                    ? 'own production unknown'
+                                    : supplement > 0
+                                      ? `own ${fmt(own)}/h + ${fmt(supplement)}/h drawn from the stock floor`
+                                      : `own ${fmt(own)}/h`
+                                }
+                              >
+                                {after == null ? (
+                                  '?'
+                                ) : own != null && own < 0 !== after < 0 && Math.abs(ship) >= 1 ? (
+                                  <>
+                                    <span className={own < 0 ? 'text-danger' : ''}>{fmt(own)}</span>
+                                    <span
+                                      className={
+                                        after >= 0 ? 'text-success mx-0.5' : 'text-danger mx-0.5'
+                                      }
+                                    >
+                                      {'\u2192'}
+                                    </span>
+                                    {`${fmt(after)}/h`}
+                                  </>
+                                ) : (
+                                  `${fmt(after)}/h`
+                                )}
+                                {isRest && (
+                                  <span className="ml-1 text-[10px] uppercase text-info font-sans">
+                                    rest
                                   </span>
-                                  {`${fmt(after)}/h`}
-                                </>
-                              ) : (
-                                `${fmt(after)}/h`
-                              )}
-                              {isRest && (
-                                <span className="ml-1 text-[10px] uppercase text-info font-sans">
-                                  rest
-                                </span>
-                              )}
-                            </div>
-                            {/* The delta is the cargo: what must arrive (+) or
-                                leave (−) to make the retention true. */}
-                            <div
-                              className={`text-[11px] font-mono ${
-                                ship == null || Math.abs(ship) < 1
-                                  ? 'text-secondary/60'
-                                  : ship > 0
-                                    ? 'text-success'
-                                    : 'text-warning'
-                              }`}
-                            >
-                              {ship == null ? '—' : Math.abs(ship) < 1 ? '·' : signed(ship)}
-                            </div>
-                            {/* Landing − consumption = net. Level is the
-                                intended state for a role village, so it reads
-                                settled; draining is the one that kills troops,
-                                and a store that gains every hour is the one that
-                                overflows. Same three-way grammar the allocation
-                                meter uses. */}
-                            {net != null && (
+                                )}
+                              </div>
+                              {/* The delta is the cargo: what must arrive (+) or
+                                  leave (−) to make the retention true. */}
                               <div
                                 className={`text-[11px] font-mono ${
-                                  net < -1
-                                    ? 'text-danger'
-                                    : net > 1
-                                      ? 'text-warning'
-                                      : 'text-success'
+                                  ship == null || Math.abs(ship) < 1
+                                    ? 'text-secondary/60'
+                                    : ship > 0
+                                      ? 'text-success'
+                                      : 'text-warning'
                                 }`}
                               >
-                                {`\u2212${fmt(spent)} = `}
-                                {Math.abs(net) < 1 ? '0' : signed(net)}
-                                <span className="ml-1 text-[10px] uppercase font-sans text-secondary">
-                                  net
-                                </span>
+                                {ship == null ? '—' : Math.abs(ship) < 1 ? '·' : signed(ship)}
                               </div>
-                            )}
-                          </td>
-                        )
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot>
-                  <tr className="border-t border-gray-700 text-secondary">
-                    <td className="py-1.5 px-2 uppercase text-[11px]">Account total</td>
-                    {RESOURCES.map((resource) => (
-                      <td key={resource} className="text-right px-3 font-mono">
-                        {fmt(totals[resource].total)}/h
-                        {!totals[resource].known && ' ?'}
-                      </td>
+                              {/* Landing − consumption = net. Level is the
+                                  intended state for a role village, so it reads
+                                  settled; draining is the one that kills troops,
+                                  and a store that gains every hour is the one that
+                                  overflows. Same three-way grammar the allocation
+                                  meter uses. */}
+                              {net != null && (
+                                <div
+                                  className={`text-[11px] font-mono ${
+                                    net < -1
+                                      ? 'text-danger'
+                                      : net > 1
+                                        ? 'text-warning'
+                                        : 'text-success'
+                                  }`}
+                                >
+                                  {`\u2212${fmt(spent)} = `}
+                                  {Math.abs(net) < 1 ? '0' : signed(net)}
+                                  <span className="ml-1 text-[10px] uppercase font-sans text-secondary">
+                                    net
+                                  </span>
+                                </div>
+                              )}
+                            </td>
+                          )
+                        })}
+                      </tr>
                     ))}
-                  </tr>
-                </tfoot>
-              </table>
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t border-gray-700 text-secondary">
+                      <td className="py-1.5 px-2 uppercase text-[11px]">Account total</td>
+                      {RESOURCES.map((resource) => (
+                        <td key={resource} className="text-right px-3 font-mono">
+                          {fmt(totals[resource].total)}/h
+                          {!totals[resource].known && ' ?'}
+                        </td>
+                      ))}
+                    </tr>
+                  </tfoot>
+                </table>
+              </ScrollableTable>
               <p className="text-secondary text-[11px] mt-2">
                 Top line: retention after distribution (red = still negative; a green arrow
                 marks a village whose crop crosses from starving to surplus — e.g. −2,500/h own

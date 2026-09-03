@@ -276,7 +276,10 @@ function QueuePanel({ items, setItems }) {
     <div className="flex flex-col gap-3">
       {/* Bulk action bar */}
       {selectedIds.size > 0 && (
-        <div className="flex items-center gap-2 p-2 bg-surface rounded-lg border-default sticky top-0 z-10">
+        /* Wraps, because it is five controls on one line inside a panel that is
+           325px wide at 375: unwrapped it was the last 64px of the panel's
+           sideways scroll once the two columns stopped sharing a row. */
+        <div className="flex flex-wrap items-center gap-2 p-2 bg-surface rounded-lg border-default sticky top-0 z-10">
           <span className="text-xs text-secondary font-medium">{selectedIds.size} selected</span>
           <select
             value={bulkPriority}
@@ -616,8 +619,20 @@ export default function BuildQueue() {
       {/* Construction queue (in-progress) */}
       <ConstructionQueue queue={constructionQueue} />
 
-      {/* Main layout: buildings list + queue builder */}
-      <div className="flex gap-4 mb-4" style={{ minHeight: 400 }}>
+      {/* Main layout: buildings list + queue builder.
+          Stacked until there is room for two columns. As `flex` at every
+          width, the two `flex-1 min-w-0` panels split whatever there is: at
+          375 the queue card was 154px wide holding 389px of bulk bar and
+          queue rows, and at 768 it was 250px holding 397px. Its own
+          `overflow-y: auto` then forces the horizontal axis to `auto` (CSS
+          Overflow: one axis non-visible makes the other compute to `auto`), so
+          the panel scrolled sideways over the target-level box and the
+          priority select rather than clipping them -- which is why the page
+          never slid, and why nothing on screen said the controls were half
+          off. There is no table here to pin an identity column on, so the
+          remedy is the panels, not a pinned column: `lg` and not `md`, because
+          at exactly 768 two columns are still 250px each. */}
+      <div className="flex flex-col lg:flex-row gap-4 mb-4" style={{ minHeight: 400 }}>
         {/* Left: Building list */}
         <div className="card flex-1 min-w-0 overflow-y-auto" style={{ maxHeight: 600 }}>
           <div className="flex justify-between items-center mb-3">
