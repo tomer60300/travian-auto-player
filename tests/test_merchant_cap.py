@@ -370,6 +370,48 @@ class TestTheSchemaGuardsTheCap:
                 _payload() | {"config": [{"village_id": 99999, "max_busy_merchants": 4}]}
             )
 
+    def test_an_unread_merchant_count_is_not_a_fleet_of_zero(self):
+        """`/snapshot` encodes a count it could not read as 0, and says so.
+
+        It warns about those villages separately -- "no merchant count read
+        for ...; they cannot send until it is known". Read here as a FLEET, one
+        failed parse refused every cap on that village: a 422 from all four
+        endpoints blaming merchant training, over a plan that runs identically
+        without the cap. Unknown is not zero, which is the principle the page's
+        own `unreachableCaps` states.
+        """
+        unread = [
+            _village(HUB, "02", 0, 0, lumber=20_000, merchants=0),
+            _village(NEAR, "03", 2, 0, clay=3_000),
+            _village(FAR, "05", 10, 0),
+        ]
+
+        res = _plan(caps={HUB: 8}, snapshot=unread)
+
+        # It plans, and what bounds the village is the count nobody could read
+        # -- the same answer as with no cap at all, which is why refusing the
+        # request bought nothing.
+        assert _budget(res, HUB).spare == _budget(_plan(snapshot=unread), HUB).spare
+
+    def test_the_sentinel_is_skipped_on_every_request_model(self):
+        """Because it was refused by all four, being one model-level rule."""
+        unread = [
+            _village(HUB, "02", 0, 0, lumber=20_000, merchants=0),
+            _village(NEAR, "03", 2, 0, clay=3_000),
+            _village(FAR, "05", 10, 0),
+        ]
+        for model in (PlanRequest, DayCheckRequest, ExecuteRequest, NightProfileRequest):
+            body = _payload(caps={HUB: 8}, snapshot=unread)
+            if model is DayCheckRequest:
+                body["segments"] = [
+                    {"name": "All day", "window": [0, 1439], "allocations": body.pop("allocations")}
+                ]
+            request = model.model_validate(body)
+
+            assert [c.max_busy_merchants for c in request.config if c.village_id == HUB] == [8], (
+                model.__name__
+            )
+
     def test_it_is_refused_on_every_request_model(self):
         """One rule for all four planning paths, at the schema.
 

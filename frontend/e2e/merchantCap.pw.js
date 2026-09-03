@@ -40,6 +40,10 @@ const CAPITAL = 20002
 // at 8 busy" and "hold 12 back" stop being the same sentence, and it is the
 // only shape in which the fleet bound can be seen to bite.
 const NINETEEN = 20026
+// Merchant count 0, which is `/snapshot`'s sentinel for a count it could not
+// READ -- it warns "no merchant count read for ..." beside it. Unknown is not
+// zero, so a cap here is not a mistake anyone can prove.
+const UNREAD = 20031
 
 function village(id, name, x, y, merchants) {
   return {
@@ -64,7 +68,11 @@ function village(id, name, x, y, merchants) {
 }
 
 const SNAPSHOT = {
-  villages: [village(CAPITAL, '02', 0, 0, 20), village(NINETEEN, '26', 4, 0, 19)],
+  villages: [
+    village(CAPITAL, '02', 0, 0, 20),
+    village(NINETEEN, '26', 4, 0, 19),
+    village(UNREAD, '31', 8, 0, 0),
+  ],
   map_span: 800,
   speed_fields_per_hour: 16,
   requests_used: 0,
@@ -174,6 +182,21 @@ test.describe('the merchant cap, driven', () => {
     await box.fill('19')
     await expect(box).not.toHaveAttribute('aria-invalid', 'true')
     await expect(page.getByText('only 19 merchants here')).toHaveCount(0)
+  })
+
+  test('a cap is not flagged where the merchant count was never read', async ({ page }) => {
+    // The cell computes the fleet bound from live state so the operator sees
+    // it where they typed, and the backend refuses the same thing with a 422.
+    // Both skip a count of 0, because that is the snapshot saying it could not
+    // read one -- and the cell has to agree, or it flags a plan that plans.
+    await openTable(page)
+    const box = page.getByLabel('Most merchants busy at once for 31')
+
+    await box.fill('8')
+
+    await expect(box).not.toHaveAttribute('aria-invalid', 'true')
+    await expect(page.getByText('only 0 merchants here')).toHaveCount(0)
+    expect(await stored(page, 'planner_max_busy')).toEqual({ [UNREAD]: 8 })
   })
 
   test('the cap survives a reload, which is the whole point of storing it', async ({ page }) => {

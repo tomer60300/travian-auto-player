@@ -641,6 +641,14 @@ class PlanRequest(BaseModel):
         Skipped on an empty snapshot: there is nothing to check against, and the
         handlers answer that with "fetch account state first", which is the more
         useful of the two things to say.
+
+        And skipped per village on a merchant count of 0, which is what
+        `/snapshot` writes when it could not READ one -- it warns about those
+        villages by name rather than claiming they have no merchants. Read here
+        as a fleet, one failed parse refused every cap on that village from all
+        four endpoints, with a message about training merchants, over a plan
+        that runs identically without the cap: the budget is already 0 either
+        way. Unknown is not zero.
         """
         if not self.snapshot:
             return self
@@ -655,6 +663,8 @@ class PlanRequest(BaseModel):
                 unknown.append(entry.village_id)
                 continue
             fleet = fleets[entry.village_id]
+            if fleet == 0:
+                continue
             if entry.max_busy_merchants > fleet:
                 unreachable.append(
                     f"{village_label(entry.village_id, names)} is capped at "

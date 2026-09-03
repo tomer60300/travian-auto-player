@@ -2243,6 +2243,9 @@ describe('unreachableCaps', () => {
     { village_id: 20030, name: 'Capital', merchants_total: 20 },
     { village_id: 20031, name: 'V05', merchants_total: 19 },
     { village_id: 20032, name: 'V16', merchants_total: 20 },
+    // The shape `/snapshot` emits for a count it could not read: 0, with a
+    // warning beside it saying so.
+    { village_id: 20034, name: 'V31', merchants_total: 0 },
   ]
 
   it('is empty when every cap is inside its village fleet', () => {
@@ -2259,7 +2262,17 @@ describe('unreachableCaps', () => {
     // Unknown is not zero. A village the snapshot could not read a merchant
     // count for has no bound to fail, and inventing one would flag a cap that
     // may be perfectly correct.
+    //
+    // 0 is the shape `/snapshot` actually emits for that, and the backend's own
+    // reachability check skips it for this same reason -- so a cap of 20 on
+    // V31 is not a mistake anyone can prove yet.
+    expect(unreachableCaps({ 20034: 20 }, FLEETS)).toEqual([])
+    // A cap for a village the snapshot does not carry at all is not this
+    // function's question either; the backend refuses that one by name.
     expect(unreachableCaps({ 20033: 20 }, FLEETS)).toEqual([])
+    // An ABSENT count is a shape no snapshot writes. Kept because a cap must
+    // not be flagged off a field that is not there, but it is the defensive
+    // case, not the real one.
     expect(unreachableCaps({ 20030: 20 }, [{ village_id: 20030, name: 'Capital' }])).toEqual([])
   })
 })

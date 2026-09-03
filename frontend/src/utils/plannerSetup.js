@@ -115,14 +115,17 @@ export function isMaxBusyMerchants(value) {
  *
  * A village whose merchant count was never read has no bound to fail and is
  * left alone. Unknown is not zero, and inventing a bound would flag a cap that
- * may be perfectly correct.
+ * may be perfectly correct. `/snapshot` writes that unknown as 0 -- it warns
+ * "no merchant count read for ..." beside it rather than claiming the village
+ * has no merchants -- so 0 is skipped here, as the backend's own reachability
+ * check skips it. An absent field is skipped too, though no snapshot emits one.
  */
 export function unreachableCaps(maxBusy, villages) {
   const out = []
   for (const village of villages ?? []) {
     const cap = maxBusy?.[village.village_id]
     const fleet = village.merchants_total
-    if (cap == null || typeof fleet !== 'number') continue
+    if (cap == null || typeof fleet !== 'number' || fleet === 0) continue
     if (cap > fleet) {
       out.push({
         village_id: village.village_id,

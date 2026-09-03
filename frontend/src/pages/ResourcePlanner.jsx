@@ -31,6 +31,7 @@ import {
   setupMatchesAccount,
   stripStoredCropSpends,
   stripUnknownRoles,
+  unreachableCaps,
 } from '../utils/plannerSetup'
 import {
   METER_TONE,
@@ -1444,6 +1445,15 @@ export default function ResourcePlanner() {
   const visibleVillages = useMemo(
     () => sortVillages(filterVillages(villages, rowFilter, tradeOffice), sortKey, sortDir),
     [villages, rowFilter, tradeOffice, sortKey, sortDir]
+  )
+
+  // The bound a FILE cannot check: a cap against the village's own fleet, off
+  // live state. Imported rather than recomputed on the cell -- the rule is
+  // written and tested once, in `plannerSetup.js`, and the inline copy that
+  // used to sit on the input was the one that actually ran.
+  const unreachableFleets = useMemo(
+    () => new Set(unreachableCaps(maxBusy, villages).map((c) => c.village_id)),
+    [maxBusy, villages]
   )
 
   // Ascending, then descending, then the account's own order back -- the
@@ -2936,10 +2946,7 @@ export default function ResourcePlanner() {
                     <td className="text-right px-2">
                       {(() => {
                         const cap = maxBusy[v.village_id]
-                        const beyondFleet =
-                          cap != null &&
-                          typeof v.merchants_total === 'number' &&
-                          cap > v.merchants_total
+                        const beyondFleet = unreachableFleets.has(v.village_id)
                         const invalid = (cap != null && !isMaxBusyMerchants(cap)) || beyondFleet
                         const problemId = `max-busy-problem-${v.village_id}`
                         return (
@@ -2947,7 +2954,11 @@ export default function ResourcePlanner() {
                             <input
                               type="number"
                               min="0"
-                              max={v.merchants_total ?? MAX_MERCHANTS_PER_VILLAGE}
+                              // 0 is the snapshot saying it could not read a
+                              // count, so the bound falls back to the 20 a
+                              // village can ever hold -- as `unreachableCaps`
+                              // and the backend both do.
+                              max={v.merchants_total || MAX_MERCHANTS_PER_VILLAGE}
                               aria-label={`Most merchants busy at once for ${v.name}`}
                               aria-invalid={invalid || undefined}
                               aria-describedby={invalid ? problemId : undefined}
