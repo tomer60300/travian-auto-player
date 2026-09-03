@@ -65,6 +65,7 @@ from travian_api.services.distribution.optimizer import (
     MAX_RELAY_HOPS,
     MIN_SEND_FILL,
     VillageState,
+    merchant_ceiling_clause,
 )
 from travian_api.services.distribution.planner import (
     DistributionPlan,
@@ -1898,7 +1899,7 @@ def _explain_over_budget(
     upgrade: int | None,
     *,
     max_busy: int | None,
-    fleet_spare: int,
+    fleet_spare: int | None,
 ) -> str:
     """Say why the merchants ran out, in terms that suggest what to do.
 
@@ -1923,12 +1924,11 @@ def _explain_over_budget(
     worst = legs[0]
     # `spare` is already the tighter of the two (see `merchant_budget`), so the
     # cap binds exactly when it is not looser than what the fleet could field.
-    capped = max_busy is not None and max_busy <= fleet_spare
-    if capped:
-        parts = [
-            f"{label} needs {committed} merchants but you capped it at {max_busy} busy "
-            f"at once; its fleet could otherwise spare {fleet_spare}."
-        ]
+    # Worded by the optimizer's own helper, which `blockers` also renders: the
+    # refusal and the explanation are the same sentence about the same cap.
+    clause = merchant_ceiling_clause(max_busy, fleet_spare)
+    if clause is not None:
+        parts = [f"{label} needs {committed} merchants but {clause}."]
     else:
         parts = [f"{label} needs {committed} merchants but has {spare}."]
 
@@ -1963,7 +1963,7 @@ def _explain_over_budget(
     # that needs no Trade Office, no re-routing and no game action at all, so
     # leaving it unsaid sends them to the expensive options first. The figure is
     # what this plan actually wants, not a round number.
-    if capped:
+    if clause is not None:
         parts.append(f"Raising {label}'s cap to {committed} would fit this plan as it stands.")
     return " ".join(parts)
 

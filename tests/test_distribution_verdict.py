@@ -94,6 +94,34 @@ class TestWhatItWeighed:
         assert "V03" in reasons[0], "the excluded origin must survive into the blocker"
         assert "no village has spare" not in reasons[0]
 
+    def test_a_cap_is_named_as_the_operators_own_ceiling(self):
+        """ "its budget allows 8" of a village fielding 19 is nobody's figure.
+
+        `blockers` renders the /plan verdict AND /execute's 422 body, so this
+        was the one surface that refuses to write while blaming a number the
+        operator cannot find anywhere in the game. Same clause as the budget
+        explanation, from the same helper.
+        """
+        reasons = blockers(
+            _plan(
+                over_budget=(
+                    OverBudget(village_id=7, committed=12, available=8, max_busy=8, fleet_spare=17),
+                )
+            ),
+            NAMES,
+        )
+
+        assert "you capped it at 8 busy at once" in reasons[0], reasons
+        assert "17" in reasons[0], "the fleet the ceiling is holding back"
+
+    def test_an_uncapped_village_reads_as_the_budget_it_always_did(self):
+        reasons = blockers(
+            _plan(over_budget=(OverBudget(village_id=7, committed=12, available=8),)),
+            NAMES,
+        )
+
+        assert reasons[0] == "Capital commits 12 merchants but its budget allows 8"
+
     def test_a_village_with_no_name_is_still_identified(self):
         verdict = assess(
             _plan(over_budget=(OverBudget(village_id=99, committed=9, available=4),)),

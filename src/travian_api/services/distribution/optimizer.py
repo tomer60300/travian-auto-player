@@ -459,9 +459,41 @@ class OverBudget:
     available: int
     trade_office_levels_needed: int | None = None
 
+    max_busy: int | None = None
+    """The operator's own ceiling here, where one was set.
+
+    Carried on the record rather than left to each reader to recompute, because
+    two surfaces explain a breach -- `/plan`'s per-village explanation and the
+    refusal `blockers` renders into `/execute`'s 422 body -- and ``available``
+    alone cannot say whose number it is. "its budget allows 8" of a village
+    fielding 19 merchants names a figure nothing in the game reports."""
+
+    fleet_spare: int | None = None
+    """What the FLEET could have fielded: its merchants less the account
+    reserve. The cap is only worth naming against this. ``None`` where nothing
+    recorded it."""
+
     @property
     def excess(self) -> int:
         return self.committed - self.available
+
+
+def merchant_ceiling_clause(max_busy: int | None, fleet_spare: int | None) -> str | None:
+    """ "you capped it at N busy at once; its fleet could otherwise spare M".
+
+    ``None`` when the cap is not what binds -- unset, or looser than what the
+    fleet could field, in which case the fleet is the story and saying
+    otherwise blames the operator for the geometry.
+
+    One function because two surfaces render it: the budget explanation on
+    `/plan` and the blockers `/execute` refuses with. A cap explained two ways
+    is a cap the operator has to reconcile.
+    """
+    if max_busy is None or fleet_spare is None or max_busy > fleet_spare:
+        return None
+    return (
+        f"you capped it at {max_busy} busy at once; its fleet could otherwise spare {fleet_spare}"
+    )
 
 
 def _trade_office_levels_needed(
@@ -1935,6 +1967,8 @@ def build_plan(
             village_id=vid,
             committed=used,
             available=budgets[vid],
+            max_busy=villages[vid].max_busy_merchants,
+            fleet_spare=villages[vid].spare_merchants(merchant_reserve),
             trade_office_levels_needed=_trade_office_levels_needed(
                 villages[vid],
                 routes_by_origin.get(vid, []),

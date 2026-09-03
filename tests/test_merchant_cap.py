@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from travian_api.services.distribution.allocation import Resource
-from travian_api.services.distribution.optimizer import VillageState
+from travian_api.services.distribution.optimizer import VillageState, merchant_ceiling_clause
 from travian_api.web.auth import get_current_user
 from travian_api.web.routes.distribution import (
     DayCheckRequest,
@@ -528,6 +528,26 @@ class TestTheExplanationNamesWhatIsActuallyBinding:
             "20,000/h on 4 merchants per send needs 5,000 each"
         )
         assert f"+{hub.trade_office_levels_needed}" in hub.explanation
+
+    def test_the_refusal_names_the_ceiling_too_not_only_the_budget(self):
+        """The verdict and /execute's 422 body are the same tuple: `blockers`.
+
+        It said "its budget allows 8" with no mention of whose 8 it was, on the
+        one surface whose whole job is refusing to write to the account.
+        """
+        nineteen = [
+            _village(HUB, "02", 0, 0, lumber=20_000, merchants=19),
+            _village(NEAR, "03", 2, 0, clay=3_000),
+            _village(FAR, "05", 10, 0),
+        ]
+
+        res = _plan(caps={HUB: 8}, snapshot=nineteen)
+
+        assert res.feasible is False
+        blocker = next(b for b in res.verdict.blockers if "02" in b)
+        assert merchant_ceiling_clause(8, 17) in blocker, blocker
+        # And the budget explanation says it the same way, off one helper.
+        assert merchant_ceiling_clause(8, 17) in _budget(res, HUB).explanation
 
     def test_the_wording_is_decided_in_one_place(self):
         """Driven directly, so the two branches are pinned without a fixture."""

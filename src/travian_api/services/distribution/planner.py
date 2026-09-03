@@ -33,6 +33,7 @@ from .optimizer import (
     Shortfall,
     VillageState,
     build_plan,
+    merchant_ceiling_clause,
     relay_findings,
 )
 from .rounding import round_preserving_total
@@ -267,9 +268,14 @@ def blockers(plan: DistributionPlan, names: Mapping[int, str] | None = None) -> 
     """
     reasons: list[str] = []
     for over in plan.over_budget:
+        # Whose ceiling it is, where the record knows: "its budget allows 8" of
+        # a 19-merchant village is a figure the operator can find nowhere in
+        # the game, and this tuple is what /execute refuses with. Same clause
+        # as the budget explanation, from the same helper.
+        clause = merchant_ceiling_clause(over.max_busy, over.fleet_spare)
+        said = clause if clause is not None else f"its budget allows {over.available}"
         reasons.append(
-            f"{village_label(over.village_id, names)} commits {over.committed} merchants "
-            f"but its budget allows {over.available}"
+            f"{village_label(over.village_id, names)} commits {over.committed} merchants but {said}"
         )
     for short in plan.shortfalls:
         # `short.reason`, not a second hardcoded "no village has spare": the
