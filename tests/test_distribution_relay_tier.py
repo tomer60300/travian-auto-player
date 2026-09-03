@@ -674,7 +674,53 @@ class TestTheRelaysWarehouseMustHoldThePassThrough:
         assert [f.village for f in found] == ["18"]
         assert "12,000" in found[0].message
         assert "relay" in found[0].message.lower()
-        assert found[0].loss_per_day > 0
+        assert "/day is destroyed" in found[0].message
+
+    def test_the_destroyed_cargo_is_billed_to_the_account_once(self):
+        """One store filling is one loss, however many findings explain it.
+
+        ``total_loss_per_day`` is a plain sum over the findings' own
+        ``loss_per_day``, so a finding that repeats a figure another finding
+        already carried inflates the account total. Measured before the fix on
+        this plan: ``overflow_structural`` at 18 reported 113,856/day of lumber
+        and ``relay_buffer`` at 18 reported the same 113,856 again, so both
+        ``total_loss_per_day`` and ``loss_by_resource[lumber]`` carried it
+        twice.
+
+        The overflow finding owns the figure. It is the one produced for every
+        account, relay or no relay, straight off ``simulate_day``'s event; the
+        relay finding exists to name a CAUSE the generic line cannot, and a
+        diagnosis does not destroy resources of its own. Same treatment
+        ``OVERFLOW_PROJECTED`` already gets in ``storage_findings``, and for the
+        same stated reason: excluded from the account total is not the same as
+        hidden.
+        """
+        res = _plan(relays=TIER, warehouses={RELAY_A: 12_000})
+
+        billed: dict[tuple[str, str], list[str]] = {}
+        for group in res.diagnostics.groups:
+            for finding in group.findings:
+                if finding.loss_per_day:
+                    billed.setdefault((finding.village, str(finding.resource)), []).append(
+                        finding.category
+                    )
+        doubled = {key: cats for key, cats in billed.items() if len(cats) > 1}
+        assert doubled == {}, f"one store filling billed by two findings: {doubled}"
+
+        # And not hidden: the figure the overflow line owns is the figure the
+        # relay line prints, in its message and in its detail.
+        overflow = next(
+            finding
+            for group in res.diagnostics.groups
+            for finding in group.findings
+            if finding.village == "18"
+            and finding.resource is Resource.LUMBER
+            and finding.category.startswith("overflow")
+        )
+        found = self._relay_buffer(res)
+        assert [f.loss_per_day for f in found] == [0.0]
+        assert f"{overflow.loss_per_day:,.0f}" in found[0].message
+        assert f"{overflow.loss_per_day:,.0f}" in found[0].detail
 
     def test_it_is_critical_because_nothing_was_forwarded_first(self):
         """The cargo is destroyed at the relay, not merely delayed.

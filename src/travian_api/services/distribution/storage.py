@@ -697,13 +697,20 @@ def relay_buffer_findings(
     the ordinary overflow :func:`storage_findings` already reports, and the crop
     hub carries its own guard -- :func:`~.optimizer._may_relay_through` refuses
     a village that is losing crop. The declared material tier had neither.
+
+    **These findings carry no ``loss_per_day``.** The cargo is real and the
+    figure is in every message, but ``storage_findings`` has already billed the
+    same event to the account and ``Diagnostics.total_loss_per_day`` is a plain
+    sum. See the comment at the ``Finding`` below.
     """
     filled = {
         (event.village_id, event.resource): event
         for event in overflows
         if event.wasted_per_day >= MIN_REPORTED_WASTE
     }
-    findings: list[Finding] = []
+    # Paired with the event's waste so the list can still be ordered worst
+    # first: the findings themselves carry no loss figure (see below).
+    findings: list[tuple[float, Finding]] = []
     for relay in hubs:
         if relay.resource not in MATERIALS:
             continue
@@ -750,17 +757,35 @@ def relay_buffer_findings(
             )
             category = Category.RELAY_BUFFER_TIGHT
         findings.append(
-            Finding(
-                category=category,
-                message=message,
-                detail=f"{hub} — {event.wasted_per_day:,.0f}/day of {relay.resource.value}",
-                village=hub,
-                resource=relay.resource,
-                loss_per_day=event.wasted_per_day,
+            (
+                event.wasted_per_day,
+                Finding(
+                    category=category,
+                    message=message,
+                    detail=f"{hub} — {event.wasted_per_day:,.0f}/day of {relay.resource.value}",
+                    village=hub,
+                    resource=relay.resource,
+                    # No `loss_per_day`, and the figure is in the message and
+                    # the detail instead. `Diagnostics.total_loss_per_day` is a
+                    # plain sum over the findings, and this event is ALREADY
+                    # billed there by `storage_findings` -- which reports it for
+                    # every account, relay or no relay, straight off
+                    # `simulate_day`. Carrying it again put 113,856/day of
+                    # lumber into one account's total twice.
+                    #
+                    # The overflow line owns the number because it is the one
+                    # that always exists; this finding exists to name a CAUSE
+                    # the generic line cannot, and a diagnosis destroys nothing
+                    # of its own. Same treatment `OVERFLOW_PROJECTED` gets a few
+                    # hundred lines up, and for the same stated reason:
+                    # excluded from the account total is not the same as hidden.
+                    loss_per_day=0.0,
+                ),
             )
         )
-    # Worst first, as every other finding list is ordered.
-    return sorted(findings, key=lambda f: (-f.loss_per_day, f.village))
+    # Worst first, as every other finding list is ordered -- on the EVENT's
+    # figure, which the findings themselves no longer carry.
+    return [finding for _waste, finding in sorted(findings, key=lambda f: (-f[0], f[1].village))]
 
 
 def _named_villages(village_ids: Sequence[int], names: Mapping[int, str] | None) -> str:
