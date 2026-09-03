@@ -166,6 +166,87 @@ def _config(*, def_role="def", extra=None):
     return rows
 
 
+def _relay_snapshot():
+    """A stranded village that cannot afford its own haul, and a midpoint.
+
+    The same shape as tests/test_relay_hub_safety.py's fixture, at the HTTP
+    layer and mapped onto this suite's village ids, because ``_snapshot`` cannot
+    show a relay at all: its villages sit four fields from the capital, so no
+    relay ever prices better than the direct leg and every ``may_relay`` answer
+    produces the same route set.
+
+    * 02 is the capital and the sink -- no crop of its own, REMAINDER, and
+      enough merchants that the plan never goes infeasible on its budget rather
+      than on the thing under test.
+    * 04 is stranded 120 fields out with crop to give away and 20 merchants,
+      which is not enough to carry it direct.
+    * 11 is halfway along that road, so on distance alone it is the hub the
+      relay search wants.
+    * 13 is solvent and off-axis at the same distance, so refusing 11 leaves the
+      optimizer somewhere to go -- without it a passing test could mean no relay
+      was possible at all rather than that 11 was correctly refused.
+    * 17 and 19 carry no crop allocation, so they are not candidates: naming a
+      village in the crop plan is how the operator offers it as infrastructure.
+    """
+    return [
+        _village(
+            CAPITAL,
+            "02",
+            0,
+            0,
+            lumber=1000,
+            clay=1000,
+            iron=1000,
+            crop=0,
+            merchants=200,
+            cap=2_000_000,
+        ),
+        _village(DEF[0], "11", 60, 0, lumber=1000, clay=1000, iron=1000, crop=1200),
+        _village(DEF[1], "13", 60, 40, lumber=1000, clay=1000, iron=1000, crop=1200),
+        _village(DEF[2], "17", -60, 0, lumber=1000, clay=1000, iron=1000, crop=1200),
+        _village(DEF[3], "19", 0, -60, lumber=1000, clay=1000, iron=1000, crop=1200),
+        _village(FEEDER, "04", 120, 0, lumber=1000, clay=1000, iron=1000, crop=2400),
+    ]
+
+
+def _relay_payload(*, template_may_relay, village_may_relay=None):
+    """A plan over :func:`_relay_snapshot` that turns on one ``may_relay``.
+
+    Crop only, and the template carries no targets or spend: the question is
+    which village may FORWARD someone else's crop, and a full defensive profile
+    would move the demand as well as the permission.
+    """
+    extra = (
+        []
+        if village_may_relay is None
+        else [{"village_id": DEF[0], "may_relay": village_may_relay}]
+    )
+    return PlanRequest.model_validate(
+        {
+            "snapshot": _relay_snapshot(),
+            "config": _config(extra=extra),
+            "allocations": {
+                "crop": {
+                    # The capital absorbs; the other three named villages give
+                    # their crop away, which is what puts them in the graph.
+                    str(CAPITAL): {"mode": "remainder"},
+                    str(DEF[0]): {"mode": "absolute", "value": 0},
+                    str(DEF[1]): {"mode": "absolute", "value": 0},
+                    str(FEEDER): {"mode": "absolute", "value": 0},
+                }
+            },
+            "foreign_targets": [],
+            "roles": {
+                "def": _def_template(allocations={}, consumption={}, may_relay=template_may_relay)
+            },
+            # The relay-safety world: a 401-field map at 12 fields/hour, so 120
+            # fields is a long enough haul for the relay to be worth building.
+            "map_span": 401,
+            "speed_fields_per_hour": 12.0,
+        }
+    )
+
+
 def _plan(**kw):
     return asyncio.run(post_plan(PlanRequest.model_validate(_payload(**kw)), USER))
 
@@ -607,20 +688,38 @@ class TestAVillageMayOverrideItsRolesRelayPermission:
 
     def test_the_merged_answer_is_what_the_optimizer_is_given(self):
         """Resolved in one place, read in one place. A merge the plan does not
-        see is a setting that does nothing."""
-        res = asyncio.run(
-            post_plan(
-                PlanRequest.model_validate(
-                    _payload(
-                        roles={"def": _def_template(may_relay=False)},
-                        config=_config(extra=[{"village_id": DEF[0], "may_relay": True}]),
-                    )
-                ),
-                USER,
-            )
+        see is a setting that does nothing.
+
+        Asserted on ``plan.relays``, because that is the only place the answer
+        becomes visible. This used to assert ``res.feasible`` alone, which is
+        True with the merge reverted and True on the default snapshot -- where
+        every village sits four fields from the capital, so no relay ever prices
+        better than the direct leg and the whole route set is identical whatever
+        ``may_relay`` says. The test could not have failed.
+
+        So it plans the geometry from :func:`_relay_payload` instead, where a
+        relay is the only affordable route, and asserts BOTH directions: with
+        the village's override the plan relays through it and can be carried
+        out; with the template's refusal standing alone nothing is permitted to
+        relay and the plan cannot.
+        """
+        merged = asyncio.run(
+            post_plan(_relay_payload(template_may_relay=False, village_may_relay=True), USER)
         )
 
-        assert res.feasible
+        # The one village the operator overrode is the hub, and its three
+        # siblings -- same role, same refusal from the template -- are not.
+        assert {relay.hub for relay in merged.relays} == {DEF[0]}
+        assert merged.feasible
+
+        # And the control, which is what makes the assertion above bite: take
+        # the override away and the template's `false` is the only answer, so no
+        # village of the role may relay. 04 is then left carrying 2,400/h across
+        # 120 fields on 20 merchants, which it cannot.
+        refused = asyncio.run(post_plan(_relay_payload(template_may_relay=False), USER))
+
+        assert refused.relays == []
+        assert not refused.feasible
 
 
 class TestRolesReachEveryPlanningPath:
