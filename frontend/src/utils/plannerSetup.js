@@ -485,6 +485,43 @@ export function stripStoredCropSpends(stored) {
   return { consumption, droppedFrom }
 }
 
+/** Rehydrate the stored per-village relay flags, keeping only real booleans.
+ *
+ * This was the one hydrated map loaded raw. Its three neighbours in the same
+ * effect are all filtered on the way in -- `stripUnknownRoles`,
+ * `stripStoredCropSpends` and the merchant model's defaults merge -- and the
+ * FILE path refuses a non-boolean `may_relay` outright with a `SetupFileError`.
+ * localStorage was the door left open, and it leads straight into the request:
+ * `may_relay: mayRelay[vid]` is sent whenever the entry is not null.
+ *
+ * What a bad value costs is asymmetric, which is why it is dropped rather than
+ * coerced. The backend's `bool` is lax, so `"yes"` and `1` arrive as TRUE and
+ * the plan may then route someone else's crop through a village on the strength
+ * of a string nobody can see -- profile section 5.9's whole point is that only a
+ * feeder relays. Anything the lax read rejects 422s the entire plan instead,
+ * over a field the planner has no box for: nothing here writes this map except
+ * a setup-file import, so there is no control to clear the value from.
+ *
+ * `false` is kept, because it is an answer: unset means "take the role's own
+ * default", so false is the operator overriding that default. `null` is not,
+ * for the same reason the request reads `!= null` as absent -- a village with
+ * nothing to declare leaves the map rather than holding a key that says nothing.
+ *
+ * Dropped SILENTLY, unlike its two neighbours, and the difference is that they
+ * have something on screen to reconcile: a stripped crop spend un-silences a
+ * CRITICAL the operator typed, and a stripped role empties boxes they can see.
+ * A relay flag has no control in the planner at all, so a receipt would name a
+ * village and point at nothing.
+ */
+export function relayFlagsOnly(stored) {
+  const out = {}
+  if (!stored || typeof stored !== 'object') return out
+  for (const [villageId, flag] of Object.entries(stored)) {
+    if (typeof flag === 'boolean') out[villageId] = flag
+  }
+  return out
+}
+
 /** Rehydrate the stored roles and templates, and say what was dropped.
  *
  * The same shape and the same discipline as `stripStoredCropSpends`: a role

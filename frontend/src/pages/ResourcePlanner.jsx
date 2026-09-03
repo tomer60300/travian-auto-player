@@ -21,6 +21,7 @@ import {
   isStockFloorFraction,
   mergeSetup,
   parseSetup,
+  relayFlagsOnly,
   resolveRoleAllocation,
   resolveRoleSpend,
   resolvedSpend,
@@ -758,7 +759,12 @@ export default function ResourcePlanner() {
       loadJson(`${LS_VILLAGE_ROLES}::${accountKey}`, {}),
       loadJson(`${LS_ROLE_TEMPLATES}::${accountKey}`, {})
     )
-    setMayRelay(loadJson(`${LS_MAY_RELAY}::${accountKey}`, {}))
+    // Filtered, not loaded raw: this map goes straight into the request, and
+    // the backend's lax `bool` reads a stored "yes" as TRUE -- a village relaying
+    // someone else's crop on the strength of a value with no box to clear it
+    // from. See `relayFlagsOnly` for why it is dropped rather than coerced, and
+    // silently rather than with a note.
+    setMayRelay(relayFlagsOnly(loadJson(`${LS_MAY_RELAY}::${accountKey}`, {})))
     setVillageRoles(roles.villageRoles)
     setRoleTemplates(roles.templates)
     setRolesDropped(roles)

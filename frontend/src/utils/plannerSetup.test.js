@@ -16,6 +16,7 @@ import {
   materialSpendOnly,
   mergeSetup,
   parseSetup,
+  relayFlagsOnly,
   resolveRoleAllocation,
   resolveRoleSpend,
   resolvedSpend,
@@ -1501,6 +1502,65 @@ describe('the unknown-resource message names only what may be declared', () => {
       message = err.message
     }
     expect(message).not.toMatch(/crop/)
+  })
+})
+
+describe('relayFlagsOnly', () => {
+  // `may_relay` was the one hydrated map loaded raw. Its three neighbours in the
+  // same effect are filtered on the way in -- `stripUnknownRoles`,
+  // `stripStoredCropSpends`, and the merchant model's defaults merge -- and the
+  // FILE path refuses a non-boolean outright with a `SetupFileError`. So a
+  // stored value the select cannot produce rode into the request unexamined,
+  // where the backend's `bool` either coerces it to something nobody typed
+  // ("yes" is True) or 422s the whole plan over a figure with no box to clear it
+  // from: nothing in the planner writes this map except a setup-file import.
+
+  it('keeps both booleans, because both are answers', () => {
+    // False is not absence here. Unset means "take the role's answer", so a
+    // stored false is the operator refusing a relay this village's role allows.
+    expect(relayFlagsOnly({ 20011: true, 20013: false })).toEqual({ 20011: true, 20013: false })
+  })
+
+  it('drops anything that is not a boolean', () => {
+    // "yes" is the shape that matters: the backend's lax bool would read it as
+    // true, so the plan would relay through a village on the strength of a
+    // string nobody can see.
+    expect(
+      relayFlagsOnly({
+        20011: 'yes',
+        20013: 'true',
+        20017: 1,
+        20019: 0,
+        20021: {},
+        20023: [],
+        20026: 'false',
+      })
+    ).toEqual({})
+  })
+
+  it('drops an explicit null, because absent is how "no answer" is stored', () => {
+    // The request already reads `!= null` as absent, and a village with no
+    // claims at all leaves the map entirely -- so keeping the key would be a
+    // second way to say nothing.
+    expect(relayFlagsOnly({ 20011: null, 20013: undefined, 20017: true })).toEqual({
+      20017: true,
+    })
+  })
+
+  it('keeps the readable entries and only drops the rest', () => {
+    // One corrupt entry must not cost the account the flags it did type.
+    expect(relayFlagsOnly({ 20011: true, 20013: 'yes', 20017: false })).toEqual({
+      20011: true,
+      20017: false,
+    })
+  })
+
+  it('answers an absent or unusable map with an empty one', () => {
+    expect(relayFlagsOnly(undefined)).toEqual({})
+    expect(relayFlagsOnly(null)).toEqual({})
+    expect(relayFlagsOnly('nonsense')).toEqual({})
+    expect(relayFlagsOnly(7)).toEqual({})
+    expect(relayFlagsOnly({})).toEqual({})
   })
 })
 
