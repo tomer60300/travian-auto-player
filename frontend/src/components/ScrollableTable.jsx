@@ -19,6 +19,44 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 const useMeasureEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect
 
 /**
+ * A column's name, as a reader would say it.
+ *
+ * `[aria-hidden="true"]` children are dropped because that attribute already
+ * declares them decoration: the sort controls in the Snapshot table's headers
+ * append an arrow glyph, and `Village↕` is not the name of a column.
+ */
+const columnName = (th) => {
+  const clone = th.cloneNode(true)
+  for (const decoration of clone.querySelectorAll('[aria-hidden="true"]')) decoration.remove()
+  return clone.textContent.replace(/\s+/g, ' ').trim()
+}
+
+/**
+ * What is off to the right, read off the header row that is actually there.
+ *
+ * The pinned column is the one the operator keeps, so it is named as staying
+ * rather than counted as leaving. Header cells with no text — the action
+ * column at the end of the Role-templates and foreign-target tables — are not
+ * columns anyone can be told to scroll to.
+ */
+const describe = (node) => {
+  const heads = [...node.querySelectorAll('thead tr:first-child th')]
+  const pinned = heads.find((th) => th.classList.contains('sticky-col'))
+  const scrolling = heads
+    .filter((th) => th !== pinned)
+    .map(columnName)
+    .filter((name) => name !== '')
+  if (scrolling.length === 0) return ''
+  const count = scrolling.length === 1 ? '1 more column' : `${scrolling.length} more columns`
+  const span =
+    scrolling.length === 1
+      ? scrolling[0]
+      : `${scrolling[0]} to ${scrolling[scrolling.length - 1]}`
+  const stays = pinned == null ? '.' : ` — ${columnName(pinned)} stays pinned.`
+  return `Scroll sideways for ${count}, ${span}${stays}`
+}
+
+/**
  * A dense editor table that scrolls sideways inside its own box, pinning its
  * identity column and telling the operator the rest is there — but only while
  * it actually overflows.
@@ -56,21 +94,37 @@ const useMeasureEffect = typeof window === 'undefined' ? useEffect : useLayoutEf
  * viewport and slid the whole document sideways until this wrapper became
  * their containing block.
  *
- * @param {string} hint - what the operator is told when the table overflows.
- *   Name the columns that are off-screen, in the order they appear: listing
- *   them out of order describes a table that does not exist, which is worse
- *   than saying nothing because the reader counts across to the wrong column
- *   and types a figure into it.
- * @param {string} [className] - extra classes for the scroll container.
+ * The hint's WORDS come off the table's own header row rather than a prop, for
+ * the same reason its VISIBILITY comes off the measured overflow rather than a
+ * breakpoint: a hand-typed description of a table is stale the moment a column
+ * is added, and nobody maintains it. The one over the Snapshot table had
+ * already gone stale — it listed "Merchants, Trade Office, Crop alert, Ships
+ * only to, Relays for, Stock floor and Consumption" for a table that runs
+ * Merchants / ROLE / Trade Office / MAX BUSY / Crop alert / …, so an operator
+ * counting across from Merchants to Trade Office landed on Role, which is a
+ * 233px editable select. Round 9 promoted that hint from a 375-only paragraph
+ * to the primary cue at every viewport, so the miscount travelled with it.
+ * The Allocate grid's omitted Own/h the same way, and neither the
+ * foreign-target nor the Role-template hint named a single header verbatim.
+ *
+ * Naming every column is what cannot be kept true, so the derived form names
+ * the ends and the count instead: they all move together when a column is
+ * added, and none of them can be typed wrong.
  */
-export default function ScrollableTable({ hint, className = '', children }) {
+export default function ScrollableTable({ children }) {
   const ref = useRef(null)
-  const [overflowing, setOverflowing] = useState(false)
+  const [{ overflowing, hint }, setState] = useState({ overflowing: false, hint: '' })
 
   useMeasureEffect(() => {
     const node = ref.current
     if (node == null) return
-    const measure = () => setOverflowing(node.scrollWidth > node.clientWidth)
+    const measure = () => {
+      const overflows = node.scrollWidth > node.clientWidth
+      setState((prev) => {
+        const next = { overflowing: overflows, hint: overflows ? describe(node) : '' }
+        return prev.overflowing === next.overflowing && prev.hint === next.hint ? prev : next
+      })
+    }
     // Measured HERE, synchronously, and not left to the observer's first
     // callback. `observe()` queues that callback for the next rendering cycle,
     // so the frame this effect belongs to still painted an unpinned table with
@@ -94,10 +148,7 @@ export default function ScrollableTable({ hint, className = '', children }) {
   return (
     <>
       {overflowing && <p className="scroll-hint text-secondary text-xs mb-1">{hint}</p>}
-      <div
-        ref={ref}
-        className={`relative overflow-x-auto${overflowing ? ' table-overflowing' : ''} ${className}`}
-      >
+      <div ref={ref} className={`relative overflow-x-auto${overflowing ? ' table-overflowing' : ''}`}>
         {children}
       </div>
     </>

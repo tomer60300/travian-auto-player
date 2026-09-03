@@ -57,7 +57,7 @@ export default function RoleTemplates({
             village(s)
           </span>
         </summary>
-        <p className="text-secondary mt-2 max-w-3xl">
+        <p className="text-secondary mt-2 mb-2 max-w-3xl">
           A village takes its role&apos;s figures for everything it does not state itself,
           per resource &mdash; so overriding one village&apos;s lumber leaves its clay and
           iron on the profile. An override is marked in the{' '}
@@ -74,11 +74,14 @@ export default function RoleTemplates({
             spend figure typed into row four is attributable to row four, and
             the hint names what is off to the right; it had neither before,
             because `.sticky-col` was gated on `max-width: 640px` and this
-            panel never carried a hint at all. */}
-        <ScrollableTable
-          className="mt-2"
-          hint="Scroll the table sideways for each resource's target and spend/h, Relay and Crop-negative by design — the role column stays pinned."
-        >
+            panel never carried a hint at all.
+
+            The gap above is the intro paragraph's `mb-2` rather than a `mt-2`
+            on the scroll container, because the hint renders BETWEEN them:
+            on the container it left the hint flush under the intro text with
+            the whole gap below, reading as a caption for the block above it
+            instead of a label for the table below. */}
+        <ScrollableTable>
           <table className="w-full text-xs">
             <thead className="text-secondary uppercase">
               <tr>

@@ -544,6 +544,18 @@ const MEASURE = () => {
     // same answer at every viewport: at 1440 the Allocate grid does not even
     // overflow, and the mismatch was still there.
     const edge = table.querySelector('tbody .row-focus-edge')
+    // What the hint has to agree with, read off the header row here rather
+    // than taken from the component: the whole point of the claim below is
+    // that the words on screen describe THIS table. `[aria-hidden]` children
+    // are stripped because a sort control's arrow glyph is decoration by
+    // definition -- `Village↕` is not a column name.
+    const headerLabel = (th) => {
+      const clone = th.cloneNode(true)
+      for (const decoration of clone.querySelectorAll('[aria-hidden="true"]')) decoration.remove()
+      return clone.textContent.replace(/\s+/g, ' ').trim()
+    }
+    const heads = [...table.querySelectorAll('thead tr:first-child th')]
+    const scrolling = heads.filter((th) => th !== head).map(headerLabel).filter((l) => l !== '')
     const before = wrapper.scrollLeft
     wrapper.scrollLeft = wrapper.scrollWidth
     const pinnedLeft = cell ? Math.round(cell.getBoundingClientRect().left) : null
@@ -557,6 +569,11 @@ const MEASURE = () => {
       hasHint: hint != null,
       hintVisible: hint != null && hint.checkVisibility(),
       edgeOnPinned: edge == null ? null : edge.classList.contains('sticky-col'),
+      hintText: hint == null ? null : hint.textContent.replace(/\s+/g, ' ').trim(),
+      pinnedLabel: headerLabel(head),
+      scrollingCount: scrolling.length,
+      firstScrolling: scrolling[0] ?? null,
+      lastScrolling: scrolling[scrolling.length - 1] ?? null,
     })
   }
 
@@ -606,7 +623,12 @@ function pinnedRows(measured) {
       (t) =>
         `    table  ${t.surface.padEnd(16)} overflow ${String(t.overflow).padStart(5)}px` +
         ` identity ${t.position}, scrolled to left ${t.pinnedLeft} of container ${t.wrapperLeft},` +
-        ` hint ${t.hasHint ? (t.hintVisible ? 'visible' : 'hidden') : 'absent'}`,
+        ` hint ${t.hasHint ? (t.hintVisible ? 'visible' : 'hidden') : 'absent'}` +
+        // The WORDS, not just the presence. The hint is derived from the
+        // header row, so printing it is how a reader checks the derivation
+        // said something an operator can use rather than merely something
+        // the assertion accepts.
+        `${t.hintVisible ? `\n           "${t.hintText}"` : ''}`,
     ),
   )
   if (measured.pinned.length === 0) return rows.concat(['    pinned: none at this viewport'])
@@ -791,6 +813,43 @@ function assertFits(where, measured, viewport) {
         ` ${t.hasHint ? (t.hintVisible ? 'visible' : 'hidden') : 'absent'}`,
     )
   expect(misannounced, `${where}: a table's scroll hint does not match its overflow`).toEqual([])
+
+  // And what the hint SAYS, against the header row it claims to describe.
+  //
+  // The hints were hand-typed enumerations, and the one over the Snapshot
+  // table had gone stale in the way an enumeration always does: it listed
+  // "Merchants, Trade Office, Crop alert, Ships only to, Relays for, Stock
+  // floor and Consumption" while the table runs Village / Lumber/h / Clay/h /
+  // Iron/h / Net crop / Merchants / ROLE / Trade Office / MAX BUSY / Crop
+  // alert / Ships only to / Relays for / Stock floor % / Consumption /h.
+  // Role (233px, an editable select) and Max busy (96px, an editable number)
+  // were never named, so an operator counting across from "Merchants" to
+  // "Trade Office" landed on Role -- the exact failure the ScrollableTable
+  // docstring says is worse than saying nothing, because the reader types a
+  // figure into the column they counted to. The Allocate grid's omitted Own/h
+  // the same way, and neither the foreign-target nor the Role-template hint
+  // named a single header verbatim.
+  //
+  // So the hint is DERIVED from the header row now, and this is the claim
+  // that keeps the derivation honest: it re-reads the headers here and
+  // requires the words on screen to carry the pinned column, the first and
+  // last scrolling column, and how many there are. Adding a column moves all
+  // four together, which is what the enumeration could not do.
+  const contradicted = measured.tables
+    .filter((t) => t.hintVisible)
+    .filter(
+      (t) =>
+        !t.hintText.includes(t.pinnedLabel) ||
+        !t.hintText.includes(t.firstScrolling) ||
+        !t.hintText.includes(t.lastScrolling) ||
+        !t.hintText.includes(String(t.scrollingCount)),
+    )
+    .map(
+      (t) =>
+        `${t.surface}: hint "${t.hintText}" does not name ${t.scrollingCount} columns` +
+        ` from "${t.firstScrolling}" to "${t.lastScrolling}" beside pinned "${t.pinnedLabel}"`,
+    )
+  expect(contradicted, `${where}: a scroll hint describes a table that is not there`).toEqual([])
 
   // The same item, asked of the DOCUMENT. This used to be printed and not
   // asserted, on the stated grounds that the app "inflates it whatever the

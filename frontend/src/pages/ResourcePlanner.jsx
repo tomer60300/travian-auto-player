@@ -2825,19 +2825,18 @@ export default function ResourcePlanner() {
           )}
 
           {/* Same rule as the Allocate grid, and for higher stakes: the four
-              hand-typed columns are the RIGHTMOST of ten, so the village name
-              is off-screen exactly while a Trade Office level is being typed —
-              and a level typed one row off breaches that village's merchant
-              budget without a warning anywhere. Pin the identity column and
-              say the rest are there.
+              hand-typed columns are the RIGHTMOST of fourteen, so the village
+              name is off-screen exactly while a Trade Office level is being
+              typed — and a level typed one row off breaches that village's
+              merchant budget without a warning anywhere. Pin the identity
+              column and say the rest are there.
 
-              The hint names the columns in the SAME order they appear. Listing
-              Consumption before Stock floor described a table that does not
-              exist, which is worse than no hint: the reader counts across to
-              the wrong column and types a figure into it. */}
-          <ScrollableTable
-            hint="Scroll the table sideways for Merchants, Trade Office, Crop alert, Ships only to, Relays for, Stock floor and Consumption — the village column stays pinned."
-          >
+              The hint's words come off this header row (see ScrollableTable),
+              because the hand-typed one had gone stale in the way an
+              enumeration always does: it named Merchants then Trade Office,
+              with Role and Max busy between them on screen, so the reader
+              counted across to Role and typed into it. */}
+          <ScrollableTable>
             <table className="w-full text-sm">
               <thead className="text-secondary text-xs uppercase">
                 <tr>
@@ -3617,9 +3616,7 @@ export default function ResourcePlanner() {
               </p>
             ) : (
               <>
-                <ScrollableTable
-                  hint="Scroll sideways for the coordinates, crop owed, margin, cadence, excluded origins and route flag — the name column stays pinned."
-                >
+                <ScrollableTable>
                   <table className="w-full text-xs">
                     <thead className="text-secondary uppercase">
                       <tr>
@@ -4377,9 +4374,7 @@ export default function ResourcePlanner() {
                     village while the rest scrolls, and the hint tells the
                     operator the extra columns exist: clipping them silently is
                     how the wrong village gets edited. */}
-                <ScrollableTable
-                  hint="Scroll the table sideways for Mode, Value, Ship/h and Rest — the village column stays pinned."
-                >
+                <ScrollableTable>
                   <table className="w-full text-xs">
                     <thead className="text-secondary uppercase">
                       <tr>
