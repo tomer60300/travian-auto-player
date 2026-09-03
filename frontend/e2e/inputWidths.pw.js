@@ -411,6 +411,41 @@ const MEASURE = () => {
     })
   }
 
+  // Third pass: what a PINNED column costs the strip beside it.
+  //
+  // `.sticky-col` holds the identity column still while the rest of the table
+  // scrolls under it, so its width is taken off the visible strip PERMANENTLY
+  // -- every scrolling column has to fit in what is left, one at a time. Round
+  // 8 widened the foreign-target name box from `w-36` to `w-56` and took the
+  // pinned column from 161px to 241px of a 293px strip at 375: 82%, leaving a
+  // 52px window for nine columns of 96/96/112/96/96/128/63/60/56px. Not one of
+  // them fitted. At 161px a 96px column did.
+  //
+  // Read off the header cells rather than the controls, because the cost is
+  // per COLUMN and a column can be wider than the control in it. Gated on the
+  // computed `position`, not on the class: it is the pinning that spends the
+  // strip, and `.sticky-col` is inert wherever the table fits.
+  const pinned = []
+  for (const th of document.querySelectorAll('thead th.sticky-col')) {
+    if (getComputedStyle(th).position !== 'sticky') continue
+    const table = th.closest('table')
+    const wrapper = scroller(table)
+    if (wrapper == null) continue
+    const others = [...table.querySelectorAll('thead th')]
+      .filter((h) => h !== th)
+      .map((h) => h.getBoundingClientRect().width)
+      .filter((w) => w > 0)
+    if (others.length === 0) continue
+    const width = th.getBoundingClientRect().width
+    pinned.push({
+      surface: surfaceOf(th),
+      width: Math.round(width * 10) / 10,
+      strip: wrapper.clientWidth,
+      left: Math.round((wrapper.clientWidth - width) * 10) / 10,
+      narrowest: Math.round(Math.min(...others) * 10) / 10,
+    })
+  }
+
   // And the page itself: does the BODY slide sideways? Same method as the
   // wrappers -- ask by moving it -- because the two questions have different
   // answers and only one of them is a defect. A container that scrolls is the
@@ -423,6 +458,7 @@ const MEASURE = () => {
   return {
     controls: out,
     wrappers,
+    pinned,
     pageScrollWidth: document.documentElement.scrollWidth,
     pageClientWidth: document.documentElement.clientWidth,
     pageScrollReached: pageReached,
@@ -444,6 +480,23 @@ const isClipped = (c) =>
  * browser globals (they are `**\/*.js` under frontend/, and only
  * `*.config.js` is configured as Node), so the bare name is a `no-undef`
  * error even though the test body does run in Node. */
+/** What each pinned column costs the strip, or that nothing is pinned here.
+ *
+ * Printed in BOTH report modes, and printed even when the list is EMPTY: the
+ * `crowded` clause in `assertFits` says nothing at a viewport where no column
+ * is pinned, and a clause that can be vacuous has to say so out loud. This
+ * file already carried one check that could not fail for any wrapper on any
+ * page (`X && !X`) and it stood for weeks. */
+function pinnedRows(measured) {
+  if (measured.pinned.length === 0) return ['    pinned: none at this viewport']
+  return measured.pinned.map(
+    (p) =>
+      `    pinned ${p.surface.padEnd(16)} ${p.width}px of a ${p.strip}px strip` +
+      ` -> ${p.left}px left, narrowest scrolling column ${p.narrowest}px` +
+      ` ${p.left < p.narrowest ? 'CROWDED' : 'ok'}`,
+  )
+}
+
 function report(where, measured) {
   const mode = globalThis.process?.env?.MEASURE
   if (!mode) return
@@ -459,7 +512,7 @@ function report(where, measured) {
     )
     console.log(
       `  ${where}: page ${measured.pageClientWidth} client / ${measured.pageScrollWidth} scroll\n` +
-        rows.join('\n'),
+        rows.concat(pinnedRows(measured)).join('\n'),
     )
     return
   }
@@ -479,7 +532,7 @@ function report(where, measured) {
   })
   console.log(
     `  ${where}: page ${measured.pageClientWidth} client / ${measured.pageScrollWidth} scroll\n` +
-      lines.join('\n'),
+      lines.concat(pinnedRows(measured)).join('\n'),
   )
 }
 
@@ -534,6 +587,26 @@ function assertFits(where, measured, viewport) {
     .filter((c) => c.wrapperRight != null && c.wrapperRight > viewport.width + 1)
     .map((c) => `${c.surface}: container ends at ${c.wrapperRight} in a ${viewport.width} viewport`)
   expect(escaped, `${where}: a scroll container is wider than the viewport`).toEqual([])
+
+  // A pinned column must leave a whole scrolling column beside it. Pinning
+  // exists so that a figure being typed is attributable to the right row, and
+  // a pinned column that swallows the strip defeats itself twice over: there
+  // is nothing left to read beside the identity, and the operator scrolls a
+  // column at a time through a window narrower than any column. Round 8's
+  // `w-36` -> `w-56` on the foreign-target name box did exactly that, 241px of
+  // a 293px strip, 52px left, narrowest column 55.7px -- and this is the
+  // affirmative form of that arithmetic. The clause is scoped to columns whose
+  // computed position really is `sticky`, so it says nothing at a viewport
+  // where nothing is pinned; the report prints the count so a vacuous pass is
+  // visible rather than silent.
+  const crowded = measured.pinned
+    .filter((p) => p.left < p.narrowest)
+    .map(
+      (p) =>
+        `${p.surface}: pinned column ${p.width}px of a ${p.strip}px strip leaves ${p.left}px,` +
+        ` and its narrowest scrolling column is ${p.narrowest}px`,
+    )
+  expect(crowded, `${where}: a pinned column leaves no room for any scrolling column`).toEqual([])
 
   // The same item, asked of the DOCUMENT. This used to be printed and not
   // asserted, on the stated grounds that the app "inflates it whatever the

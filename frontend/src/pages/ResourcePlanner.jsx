@@ -3673,17 +3673,27 @@ export default function ResourcePlanner() {
                             className="row-focus touch-target border-t-default hover:bg-white/5 transition-colors"
                           >
                             <td className="py-1 px-2 sticky-col row-focus-edge">
-                              {/* w-56, not w-36: a foreign target is named after
-                                  the ally village it belongs to, and 144px held
-                                  22 characters of "Rheinbund-Aussenposten" in
-                                  214px of glyphs. The width spec measured this
-                                  field against its PLACEHOLDER, so it reported
-                                  nothing at all. */}
+                              {/* w-36, and this column is PINNED (.sticky-col),
+                                  so its width is taken off the visible strip
+                                  permanently -- every other column has to fit
+                                  in what is left, one at a time. w-56 was
+                                  tried, to hold all 22 characters of
+                                  "Rheinbund-Aussenposten", and it took the
+                                  pinned column from 161px to 241px of the
+                                  293px strip at 375: 82%, leaving 52px for
+                                  nine columns of 96/96/112/96/96/128/63/60/56.
+                                  Not one of them fitted. At 161px the 96px X
+                                  column does.
+                                  A name that scrolls is still legible -- the
+                                  caret and the arrow keys reach the rest of
+                                  it. A FIGURE is what may not scroll, and
+                                  every figure in this row keeps its own
+                                  width. */}
                               <input
                                 type="text"
                                 aria-label={`Foreign target ${i + 1} name`}
                                 placeholder="Ally name"
-                                className="input-field w-56 text-xs py-0.5"
+                                className="input-field w-36 text-xs py-0.5"
                                 value={t.name}
                                 onChange={(e) => patch('name', e.target.value)}
                               />
