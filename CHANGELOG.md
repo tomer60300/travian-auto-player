@@ -1,6 +1,133 @@
 # Changelog
 
-## [Unreleased] — 2026-04-28
+## [Unreleased] — 2026-09-03
+
+### Added — Resource Distribution Planner: operator-declared village state
+
+The planner gained the vocabulary to describe an account instead of inferring
+it. Every field below is state the game does not report; each is refused rather
+than silently ignored where it cannot mean anything, and each is validated once
+so the rule reaches all four planning paths (`/plan`, `/day-check`, `/execute`,
+`/night-profile`).
+
+- **Roles** — `VillageConfig.role` plus a `Role` StrEnum (`capital`,
+  `troops_off`, `full_off`, `def`, `feeder`). Decides who may relay
+  (`default_may_relay`: `feeder` only, so not the capital) and how loud a
+  designed crop deficit is. `PlanRequest.roles` carries one template per role,
+  so profile section 2's four defensive figures are typed once, and
+  `PlanResponse.role_deviations` names every cell where a village overrode its
+  template. A role with no template is a 422, not a default.
+- **Declared material relay tier** — `VillageConfig.relay_for`. Materials only,
+  one hop. Crop relays are *searched*; material relays are *declared*, and the
+  asymmetry is deliberate. The operator's own route is 02 → 18/14 → 11/17/19,
+  and which relay serves which downstream is a fixture choice, not a solver
+  output. Enforced: a relay may not feed a relay, a role village may not relay,
+  `feeder` and a village with no role may.
+- **Relay buffer check** — `RELAY_BUFFER` (critical) and `RELAY_BUFFER_TIGHT`
+  (warning). A relay must hold `collect_rate × max(collect_cycle,
+  forward_cycle)` — one cycle's pass-through — and the bound is **capacity, not
+  free space**, so a 160,000 warehouse at 94% still holds a 33,488
+  pass-through. Blamed on the tier only for overflow the pass-through can
+  explain; a relay's own retention is reported by the ordinary store check.
+- **`may_relay`** — per village, overriding its role template and then the
+  role's own default, for the account whose one defensive village sits on the
+  only road to a corner of the map.
+- **`ship_only_to`** — a per-village whitelist of own destinations, binding
+  every resource including crop. Resolves into the same origin-exclusion map the
+  optimizer already reads. Foreign tributes are governed by their own
+  `exclude_origins` and report `whitelist_vs_tribute` when supplied from a
+  restricted village.
+- **`stock_floor_fraction`** — the fraction of warehouse capacity a village
+  keeps stocked by NPC trading, spread across the profile's window as extra
+  supply (`fraction × capacity / window_hours`). Materials only — a granary is
+  not NPC-fed. Also holds the store up as a floor in the day simulation.
+- **`consumption_per_hour`** — what a village spends per hour, lumber/clay/iron
+  only, so its store nets `target − consumption` instead of being modelled as
+  stockpiling every unit (an army village read as losing 354,024/day at a cap it
+  never reaches). Crop is refused by design: the snapshot's `crop_per_hour` is
+  already net of troop upkeep, so declaring it again double-counts.
+- **`max_busy_merchants`** — a per-village ceiling on merchants underway;
+  `merchant_budget = min(spare_merchants, max_busy_merchants)`. A cap, not a
+  reserve — a reserve costs every village the same merchants. A cap above the
+  village's own fleet is refused rather than clamped.
+- **`village_nets`** — per village, per resource: own production, supplement,
+  target, cargo, spend and the resulting net, so the allocation grid reads the
+  net from the plan rather than recomputing it in JavaScript. Own villages
+  only; a foreign tribute has no store and appears in `shortfalls`.
+- **Frontend controls** for all of the above on the planner's owned-state path,
+  plus inputs for the two merchant-model levers.
+
+Documented in `docs/25-resource-distribution-planner.md` Part IV.
+
+### Fixed
+
+#### Resource Distribution Planner
+
+- **Merchant base capacity was 2,200, from a superseded reading** — the operator
+  re-read the base as 2,500 (+20% per Trade Office level) on 2026-09-02.
+  `EUROPE2_TEUTON` and the frontend's `DEFAULT_MERCHANT_MODEL` both carried
+  2,200, derived from a live reading of 7,920 per merchant at TO 13 that fitted
+  `2200 × 3.6` exactly. 2,500 predicts 9,000 there, so the two readings are
+  **ordered, not reconciled** — both came off the game and the mechanism is not
+  established. Capacity is the denominator of every merchant count, so this
+  moved plan outcomes: three relabelling-audit seeds and one relay fixture were
+  re-measured rather than relaxed. Settleable at zero request cost by reading
+  capacity at a second Trade Office level.
+- **The origin exclusion only ever bound the greedy seed** —
+  `excluded_origins_by_destination` was handed to `_flows_for_resource` and
+  nowhere else, so a 2×2 swap or a crop relay inside `_improve_flows` was free
+  to name a forbidden sender. Found on the live account before its first run:
+  village 02 was excluded from the foreign tribute, and the night plan shipped
+  it 10,266 crop/h on 9 merchants regardless — an unrecoverable write. Every
+  candidate pair is now vetted, both legs of a relay included.
+- **A downstream named twice was shipped twice** — the relay tier sizes its
+  collecting leg from the sum of its downstreams' gaps, so a duplicate inflated
+  the leg and the forward loop handed that village its whole target once per
+  mention: 16,744/h against an 8,372/h target, with the downstream it displaced
+  reported unreachable and blaming the whitelist. Refused at the schema and
+  conserved in the solver.
+- **The relay tier's source was chosen blind to the merchant cap** — the tier's
+  legs merge in after the improvement search, so nothing downstream re-prices
+  them. On distance alone a capped village was committed 4 merchants against a
+  cap of 2 while an affordable source of the same cargo stood one field further
+  out. The sort key is now `(merchants over budget, distance, coordinates)`,
+  priced with the plan's own route arithmetic.
+- **`ABSOLUTE` allocation is a retention target, not a consumption figure** —
+  `ship_per_hour = target − own production`, so the village retains the target
+  and the figure already includes what it grows. Village 01's granary therefore
+  genuinely gains 8,519/h, which makes its 204,456/day overflow finding real
+  rather than an artefact; a negative absolute target is refused rather than
+  planned.
+- **The netting invariant is per resource** — a village may legitimately
+  receive clay and send lumber, which village 02 does with 13 inbound rows and
+  one outbound. The no-waterfall rule is per resource and now carries the
+  declared-relay exception explicitly.
+
+#### Frontend — accessibility and table pinning
+
+- **Identity columns pin wherever a table actually overflows** — `.sticky-col`
+  was gated on `@media (max-width: 640px)`, on the claim that desktop tables do
+  not overflow. Measured, that is false at both other viewports: the Snapshot
+  table's intrinsic width is 1408px in a 470px container at 768, and Role
+  templates is 1839px with 717px of overflow even at 1440, so the operator
+  scrolled with no village pinned and no hint that ten columns existed.
+  Pinning and the scroll hint now both follow a `ScrollableTable` container's
+  **measured** `scrollWidth > clientWidth` — a ResizeObserver whose first
+  delivery lands before paint — instead of a breakpoint. "Swipe" became
+  "Scroll" now that the hint reaches mouse users too.
+- **Nine controls gained accessible names** — farm lists' `Status` filter, the
+  auto-scout stealth-delay pair and its four bonus-resource selects, and both
+  village selectors (the shell's two renders and Build queue's own), each
+  repeating the visible words verbatim for WCAG 2.5.3 Label in Name. Four
+  filter and loop boxes were named in the preceding round.
+- **The Build queue panel stopped scrolling sideways** — two `flex-1 min-w-0`
+  siblings of one flex row left the queue card 154px wide holding 389px of
+  content at 375 and 250/397 at 768. Stacked below `lg`, with the bulk bar
+  wrapping; 0px of overflow at all three viewports.
+
+---
+
+## [Previous] — 2026-04-28
 
 ### Added — Resumable Cross-Device Operations
 
