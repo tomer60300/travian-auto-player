@@ -1344,3 +1344,74 @@ class TestStockFundedSupply:
 
         assert not any("exceed production" in w for w in res.warnings), res.warnings
         assert any("Day: 02 ships 12,000/h of lumber" in w for w in res.warnings), res.warnings
+
+
+class TestTheMerchantModelSaysWhenItIsUnpinned:
+    """`EUROPE2_TEUTON` is measured on one end only, and nothing said so.
+
+    The base was re-read as 2,500 on 2026-09-02, superseding a 7,920-at-TO-13
+    reading that fitted base 2,200 exactly. The +20%-per-level bonus is carried
+    over from the profile and has never been measured against the new base -- so
+    every capacity the plan computes for a village with a Trade Office rests on
+    an unverified multiplier. By this module's own rule, understating capacity
+    over-provisions merchants (safe) while overstating it breaches the merchant
+    budget invisibly, so being wrong here is wrong in the unsafe direction, and
+    the operator had no way to know the model was unpinned.
+
+    A Trade Office 0 village settles the base with no inversion at all --
+    `calibrate` prefers exactly that sample -- so the finding names the TO 0
+    villages in the snapshot, which is the one reading that would close it.
+    """
+
+    def _plan(self, *, levels, bonus=None):
+        payload = {
+            "snapshot": [
+                {
+                    "village_id": vid,
+                    "name": name,
+                    "x": x,
+                    "y": 0,
+                    "merchants_total": 20,
+                    "merchants_free": 20,
+                    "lumber_per_hour": rate,
+                    "clay_per_hour": 0,
+                    "iron_per_hour": 0,
+                    "crop_per_hour": 0,
+                }
+                for vid, name, x, rate in ((20003, "03", 0, 3000), (20026, "26", 10, 0))
+            ],
+            "allocations": {
+                "lumber": {
+                    "20003": {"mode": "absolute", "value": 0},
+                    "20026": {"mode": "remainder"},
+                }
+            },
+            "config": [
+                {"village_id": vid, "trade_office_level": level} for vid, level in levels.items()
+            ],
+        }
+        if bonus is not None:
+            payload["trade_office_bonus_per_level"] = bonus
+        return asyncio.run(post_plan(PlanRequest.model_validate(payload)))
+
+    def test_a_trade_office_village_on_the_default_bonus_is_flagged(self):
+        res = self._plan(levels={20003: 13, 20026: 0})
+
+        flagged = _findings(res, "merchant_model_uncalibrated")
+        assert flagged, [g.category for g in res.diagnostics.groups]
+        assert "26" in flagged[0].message, "the TO 0 village that would settle it must be named"
+
+    def test_an_account_with_no_trade_office_anywhere_is_not_flagged(self):
+        """At level 0 the capacity IS the base, so the unmeasured multiplier is
+        never applied and nothing about the plan depends on it."""
+        res = self._plan(levels={20003: 0, 20026: 0})
+
+        assert not _findings(res, "merchant_model_uncalibrated")
+
+    def test_a_measured_bonus_is_taken_at_its_word(self):
+        """The finding is about the DEFAULT carried over from the profile. An
+        operator who calibrated and sent their own number has already done the
+        thing it asks for."""
+        res = self._plan(levels={20003: 13, 20026: 0}, bonus=0.175)
+
+        assert not _findings(res, "merchant_model_uncalibrated")

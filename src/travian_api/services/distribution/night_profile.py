@@ -293,9 +293,19 @@ def derive_night_profile(
 
     for vid, village in by_id.items():
         if vid not in crop:
+            # Clamped at zero. `consumer_ids` defaults to `()` and
+            # `NightVillage.production` is documented as possibly negative for an
+            # army village, so a caller can legally reach here with a village
+            # that is LOSING crop -- and a negative absolute retention is refused
+            # in `Allocation.__post_init__`, so the derivation raised at the
+            # caller for supplying exactly what the signature invites. A village
+            # losing crop retains none of it; the deficit belongs to the
+            # receiving side, which is what `consumer_ids` is for. The HTTP path
+            # never gets here (`post_night_profile` classifies consumers from
+            # `crop < 0` first), so this is the library contract, not a route.
             crop[vid] = Allocation(
                 mode=AllocationMode.ABSOLUTE,
-                value=float(round(village.production.get(Resource.CROP, 0.0))),
+                value=float(max(0, round(village.production.get(Resource.CROP, 0.0)))),
             )
 
     # Every retention above is an integer and production is not, so the rounded
@@ -310,10 +320,18 @@ def derive_night_profile(
     claimed = sum(a.value for a in crop.values())
     residual = produced - tribute_per_hour - claimed
     if residual < 0 and demand <= 0:
-        slack = int(-residual) + 1
         largest = max(crop, key=lambda vid: crop[vid].value)
-        crop[largest] = Allocation(mode=AllocationMode.ABSOLUTE, value=crop[largest].value - slack)
-        profile.residual_trimmed = float(slack)
+        # Never more than that entry actually holds. The trim builds another
+        # absolute retention, and `Allocation` refuses a negative one, so a
+        # slack larger than the largest entry would raise instead of rounding.
+        # `residual_trimmed` reports what was taken rather than what was wanted,
+        # so the figure the operator reads is the one the profile used.
+        taken = min(int(-residual) + 1, crop[largest].value)
+        if taken > 0:
+            crop[largest] = Allocation(
+                mode=AllocationMode.ABSOLUTE, value=crop[largest].value - taken
+            )
+            profile.residual_trimmed = float(taken)
 
     profile.allocations[Resource.CROP] = crop
     profile.forced_senders[Resource.CROP] = sorted(forced_crop)

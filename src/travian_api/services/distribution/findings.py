@@ -71,6 +71,7 @@ class Category(StrEnum):
     UNALLOCATED = "unallocated"
     STOCK_FLOOR_UNSUSTAINABLE = "stock_floor_unsustainable"
     STOCK_FUNDED = "stock_funded"
+    MERCHANT_MODEL_UNCALIBRATED = "merchant_model_uncalibrated"
     MERCHANTS_BUSY = "merchants_busy"
     MERCHANTS_CROWDED = "merchants_crowded"
     RELAY_LATENCY = "relay_latency"
@@ -227,6 +228,24 @@ _SPECS: Mapping[Category, _Spec] = {
             "These routes only deliver while the warehouse stays at its floor. That is an "
             "operator promise, not a fact of the account -- keep NPC trading, or the cargo "
             "arrives short with nothing in the plan to say why."
+        ),
+    ),
+    Category.MERCHANT_MODEL_UNCALIBRATED: _Spec(
+        # Just before MERCHANTS_BUSY: both are about the merchant budget, and
+        # this one says how much to trust the numbers in the other.
+        order=10.5,
+        severity=Severity.WARNING,
+        subject="village",
+        headline="every merchant figure rests on an unmeasured Trade Office bonus",
+        action=(
+            "The base capacity was read off the game; the per-level bonus was carried "
+            "over from the profile and never measured against it, so a village with a "
+            "Trade Office has a capacity nobody has checked. Overstating capacity "
+            "breaches the merchant budget invisibly, which is the unsafe direction. One "
+            "Marketplace reading from a Trade Office 0 village settles the base with no "
+            "inversion at all, and any second level then pins the bonus -- pass both "
+            "through calibrate() and send the result as merchant_base_capacity and "
+            "trade_office_bonus_per_level."
         ),
     ),
     Category.MERCHANTS_BUSY: _Spec(

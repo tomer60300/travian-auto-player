@@ -2407,6 +2407,50 @@ async def _plan_account(
                 )
             )
 
+    # How much to trust every merchant figure above. `EUROPE2_TEUTON` is pinned
+    # on one end only: the base was re-read off the game on 2026-09-02, while
+    # the +20%-per-level bonus is carried over from the profile and has never
+    # been measured against it. So a village with a Trade Office has a capacity
+    # nobody has checked -- and by `VillageConfig.trade_office_level`'s own
+    # rule, overstating capacity breaches the merchant budget invisibly where
+    # understating it merely over-provisions. Said only when it matters: at
+    # level 0 the capacity IS the base, so an account with no Trade Office
+    # anywhere never applies the unmeasured multiplier, and an operator who
+    # sent their own bonus has already done what this asks for.
+    #
+    # Names the TO 0 villages because that is the reading that closes it:
+    # capacity at level 0 is the base with no inversion, which is the sample
+    # `calibrate` prefers, and any second level then pins the bonus.
+    if body.trade_office_bonus_per_level == EUROPE2_TEUTON.bonus_per_trade_office_level:
+        levelled = sorted(vid for vid, level in trade_office.items() if level > 0)
+        if levelled:
+            zero_level = sorted(
+                v.village_id for v in body.snapshot if trade_office.get(v.village_id, 0) == 0
+            )
+            where = (
+                ", ".join(village_label(vid, names) for vid in zero_level)
+                if zero_level
+                else "a village with no Trade Office"
+            )
+            extra_findings.append(
+                Finding(
+                    category=Category.MERCHANT_MODEL_UNCALIBRATED,
+                    message=(
+                        f"The merchant model is calibrated on its base only: "
+                        f"{body.merchant_base_capacity:,} was read off the game, but the "
+                        f"+{body.trade_office_bonus_per_level:.0%} per Trade Office level "
+                        f"has never been measured against it, and "
+                        f"{len(levelled)} village(s) in this plan have a Trade Office. "
+                        f"Read a Marketplace capacity at {where} to settle the base with "
+                        f"no inversion, and one at any levelled village to pin the bonus"
+                    ),
+                    detail=(
+                        f"base {body.merchant_base_capacity:,} measured, "
+                        f"+{body.trade_office_bonus_per_level:.0%}/level not"
+                    ),
+                )
+            )
+
     free_now = {v.village_id: v.merchants_free for v in body.snapshot}
     for vid in sorted(plan.merchants_committed):
         committed = plan.merchants_committed[vid]

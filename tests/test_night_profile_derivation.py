@@ -147,3 +147,62 @@ class TestUnmeetableDemandIsReported:
     def test_a_coverable_one_reports_nothing_outstanding(self):
         profile = _derive(tribute_per_hour=1_000.0, tribute_at=(60, 0))
         assert profile.unmet[Resource.CROP] == pytest.approx(0.0)
+
+
+class TestTheLibraryContractSurvivesANegativeProducer:
+    """`consumer_ids` defaults to `()`, and production is documented as possibly
+    negative -- so the two together are a legal call.
+
+    The HTTP path derives its consumers from `crop < 0` and never makes it, but
+    the library contract does: an army village left out of `consumer_ids` fell
+    through to the "everyone untouched keeps what it makes" loop, which builds
+    `Allocation(ABSOLUTE, round(production))`, and a negative absolute retention
+    is refused in `Allocation.__post_init__`. The caller got an AllocationError
+    for supplying exactly what the signature invites.
+
+    Nothing to keep is zero, not a negative: a village losing crop retains none
+    of it, and the deficit is the receiving side's problem -- which is what
+    `consumer_ids` is for and what naming it would have said.
+    """
+
+    def test_an_army_village_nobody_declared_a_consumer_does_not_raise(self):
+        profile = _derive(consumer_ids=[])
+
+        assert profile.allocations[Resource.CROP][ARMY].value == 0.0
+        assert profile.allocations[Resource.CROP][ARMY].mode is AllocationMode.ABSOLUTE
+
+    def test_no_derived_retention_is_ever_negative(self):
+        profile = _derive(consumer_ids=[])
+
+        for resource, per_village in profile.allocations.items():
+            for vid, allocation in per_village.items():
+                assert allocation.value >= 0.0, (resource, vid, allocation)
+
+    def test_the_residual_trim_cannot_push_a_retention_below_zero(self):
+        """The rounding trim takes its slack from the largest retention, and
+        builds another absolute out of it -- so a slack larger than that entry
+        holds would raise the same refusal.
+
+        A property guard, not a reproduction: unlike the two above, no input was
+        found that reaches it, because the entry the trim picks is by
+        construction the biggest one there is. The trim now takes only what is
+        available, so the hazard is closed whether or not it was reachable, and
+        `residual_trimmed` reports what was taken rather than what was wanted.
+        """
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=0.4, wh=1_200_000, gr=800_000, to=19),
+            _village(ARMY, "army", 2, 0, crop=-0.2),
+        ]
+
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            map_span=401,
+            speed_fields_per_hour=12.0,
+            day_retention={},
+            hub_id=HUB,
+            consumer_ids=[],
+        )
+
+        for vid, allocation in profile.allocations[Resource.CROP].items():
+            assert allocation.value >= 0.0, (vid, allocation)
