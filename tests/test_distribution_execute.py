@@ -3007,3 +3007,81 @@ class TestTheRowBudgetCountsWhatSurvives:
 
         assert svc.created == [], "24 rows do not fit an 8-row budget"
         assert res.remaining == 1
+
+
+class TestConsumptionReachesTheThirdPlanningPath:
+    """/execute recomputes the plan server-side, so it needs the spend too.
+
+    The three planning paths share `_plan_account`, but "shares a helper" is a
+    claim about today's code, and /execute is the one that WRITES. A declared
+    consumption that reached /plan and /day-check and not this one would mean
+    the sheet the operator approved and the routes actually created were judged
+    against different arithmetic.
+    """
+
+    ARMY = 20011
+
+    def _snapshot(self):
+        # Capacities the base fixture leaves unread, because a store with no cap
+        # cannot overflow and the finding under test would never fire.
+        return [
+            {
+                "village_id": 20003,
+                "name": "03",
+                "x": 0,
+                "y": 0,
+                "merchants_total": 20,
+                "merchants_free": 20,
+                "lumber_per_hour": 20_000,
+                "clay_per_hour": 0,
+                "iron_per_hour": 0,
+                "crop_per_hour": 0,
+                "lumber_stock": 2_000_000,
+                "warehouse_capacity": 5_000_000,
+                "granary_capacity": 5_000_000,
+            },
+            {
+                "village_id": self.ARMY,
+                "name": "11",
+                "x": 4,
+                "y": 0,
+                "merchants_total": 20,
+                "merchants_free": 20,
+                "lumber_per_hour": 0,
+                "clay_per_hour": 0,
+                "iron_per_hour": 0,
+                "crop_per_hour": 0,
+                "lumber_stock": 40_000,
+                "warehouse_capacity": 80_000,
+                "granary_capacity": 80_000,
+            },
+        ]
+
+    def _run(self, consumption=None):
+        config = [{"village_id": 20003}, {"village_id": self.ARMY}]
+        if consumption is not None:
+            config[1]["consumption_per_hour"] = consumption
+        body = _exec_body(
+            dry_run=True,
+            max_routes_per_run=50,
+            snapshot=self._snapshot(),
+            config=config,
+            allocations={
+                "lumber": {
+                    "20003": {"mode": "remainder"},
+                    str(self.ARMY): {"mode": "absolute", "value": 5_000},
+                }
+            },
+        )
+        body.foreign_targets = []
+        return _execute(body, connected=False)
+
+    @staticmethod
+    def _capped(res):
+        return [w for w in res.warnings if w.startswith("11:") and "hits the cap" in w]
+
+    def test_the_dry_run_reports_the_phantom_overflow_without_a_spend(self):
+        assert self._capped(self._run()), "the fixture must overflow when nothing is declared"
+
+    def test_declaring_the_spend_silences_it_on_the_write_path_too(self):
+        assert self._capped(self._run(consumption={"lumber": 5_000})) == []
