@@ -343,14 +343,42 @@ const MEASURE = () => {
       scrollWidth: el.scrollWidth,
       wrapperClient: wrapper ? wrapper.clientWidth : null,
       wrapperScroll: wrapper ? wrapper.scrollWidth : null,
-      wrapperScrollable: wrapper ? wrapper.scrollWidth > wrapper.clientWidth : null,
       // Where the scrolling container's own box ENDS. A table may be wider than
       // the viewport; its container may not.
       wrapperRight: wrapper ? Math.round(wrapper.getBoundingClientRect().right) : null,
     })
   }
+  // Second pass, after every control's geometry is read: can a wrapper that
+  // overflows actually be scrolled? Asked by MOVING it and reading back where
+  // it landed. The check that used to stand here re-derived
+  // `scrollWidth > clientWidth` and then required its negation, so its filter
+  // was `X && !X` and it could not fail for any wrapper on any page.
+  //
+  // Scrolled last and restored immediately: `scrollLeft` shifts every
+  // `getBoundingClientRect` inside the wrapper, so probing it mid-measurement
+  // would have moved the boxes being measured.
+  const wrappers = []
+  const seen = new Set()
+  for (const el of document.querySelectorAll('.input-field')) {
+    const w = scroller(el)
+    if (w == null || seen.has(w)) continue
+    seen.add(w)
+    const before = w.scrollLeft
+    w.scrollLeft = w.scrollWidth
+    const reached = w.scrollLeft
+    w.scrollLeft = before
+    wrappers.push({
+      surface: surfaceOf(el),
+      clientWidth: w.clientWidth,
+      scrollWidth: w.scrollWidth,
+      overflow: w.scrollWidth - w.clientWidth,
+      reached,
+    })
+  }
+
   return {
     controls: out,
+    wrappers,
     pageScrollWidth: document.documentElement.scrollWidth,
     pageClientWidth: document.documentElement.clientWidth,
   }
@@ -439,13 +467,17 @@ function assertFits(where, measured, viewport) {
     .map((c) => `${c.surface} / ${c.tag} "${c.label}": ${c.width}px for ${c.needed}px of ${c.basis}`)
   expect(clipped, `${where}: controls narrower than their content`).toEqual([])
 
-  // A wrapper that overflows must be reachable. `overflow-x: auto` makes that
-  // true by construction, so this catches the other half: a wrapper whose
-  // content was squeezed to fit reports no overflow at all, which is exactly
-  // how a table full of collapsed controls hid.
-  const stuck = measured.controls
-    .filter((c) => c.wrapperClient != null && c.wrapperScroll > c.wrapperClient && !c.wrapperScrollable)
-    .map((c) => `${c.surface}: ${c.wrapperClient}/${c.wrapperScroll}`)
+  // A wrapper that overflows must be reachable -- and this asks by MOVING it.
+  // The version this replaces filtered on `overflows && !overflows`, which is
+  // false for every wrapper that has ever existed, so the regression its
+  // comment claimed to catch would have passed in silence. Comparing against
+  // where the scroll actually landed is the affirmative form of the same
+  // claim, and it is the one that can fail: a wrapper whose content is clipped
+  // by an ancestor, or pinned by a `position: sticky` child that does not
+  // participate in its scroll width, reports overflow it cannot deliver.
+  const stuck = measured.wrappers
+    .filter((w) => w.overflow > 0 && w.reached < w.overflow - 1)
+    .map((w) => `${w.surface}: ${w.clientWidth}/${w.scrollWidth} scrolled only to ${w.reached}`)
   expect(stuck, `${where}: wrapper overflows but cannot scroll`).toEqual([])
 
   // Item 1 of the UI Definition of Done: a wide table scrolls inside its own
