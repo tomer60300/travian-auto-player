@@ -104,8 +104,12 @@ class NpcPolicy:
     (converting wood into wood) and is refused rather than trimmed.
     """
 
+    # First and undefaulted, which is the whole of the fix: a dataclass default
+    # here IS the guess the docstring above refuses, and `attended = True` is
+    # the direction that over-commits in silence. Every construction passes it
+    # by keyword, so the order costs nothing.
+    attended: bool
     floor_level: Mapping[int, float] = field(default_factory=dict)
-    attended: bool = True
     sources: Mapping[int, frozenset[Resource]] = field(default_factory=dict)
 
     @property

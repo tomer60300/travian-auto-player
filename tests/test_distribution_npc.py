@@ -14,12 +14,17 @@ These tests pin all three so none can come back:
 """
 
 import asyncio
+import dataclasses
 
 import pytest
 from fastapi import HTTPException
 
-from travian_api.services.distribution.allocation import Resource
+from travian_api.services.distribution.allocation import Allocation, AllocationMode, Resource
+from travian_api.services.distribution.geometry import MapGeometry
+from travian_api.services.distribution.merchants import EUROPE2_TEUTON
 from travian_api.services.distribution.npc import NpcPolicy
+from travian_api.services.distribution.optimizer import VillageState
+from travian_api.services.distribution.planner import PlannerConfig, craft_plan
 from travian_api.web.routes import distribution as dist
 from travian_api.web.routes.distribution import PlanRequest, post_plan
 
@@ -233,8 +238,13 @@ class TestZeroIsNoneAtEveryLayer:
         assert res.npc_reserves == []
 
     def test_an_empty_policy_declares_nothing(self):
-        assert NpcPolicy().is_declared is False
-        assert NpcPolicy(floor_level={HUB: 1.0}).is_declared is True
+        # RE-SEEDED: `attended` lost its `= True` default, so both constructions
+        # now state it. What is asserted is unchanged and is not about
+        # attendance -- `is_declared` reads `floor_level` and nothing else, so
+        # the same two cases (no floors, one floor) still answer False and True,
+        # and the value passed here cannot move either.
+        assert NpcPolicy(attended=False).is_declared is False
+        assert NpcPolicy(attended=False, floor_level={HUB: 1.0}).is_declared is True
 
 
 class TestNpcCapacityShort:
@@ -481,3 +491,54 @@ class TestBothStoreChecksNetTheConversion:
 
         for resource in Resource:
             assert continuous[HUB][resource] == pytest.approx(trigger[HUB][resource]), resource
+
+
+class TestAttendanceCannotBeDefaulted:
+    """The docstring says it: "It is REQUIRED of the caller rather than
+    guessed: the account sleeps through the night window, and a default of
+    'attended' would fund night routes from trading nobody is doing."
+
+    The dataclass supplied exactly that guess. Unreachable in the dangerous
+    direction today -- the one defaulted construction sat in `craft_plan`, where
+    `floor_level` is empty so `attended` is never read -- but a loaded gun for
+    the next library caller, and the direction it points is the one section 7's
+    whole guard is about: unattended under-delivers and reports it, attended
+    over-commits in silence.
+    """
+
+    def test_a_policy_cannot_be_built_without_saying(self):
+        with pytest.raises(TypeError):
+            NpcPolicy(floor_level={HUB: 1.0})
+
+    def test_the_field_carries_no_default_at_all(self):
+        (attended,) = [f for f in dataclasses.fields(NpcPolicy) if f.name == "attended"]
+
+        assert attended.default is dataclasses.MISSING
+        assert attended.default_factory is dataclasses.MISSING
+
+    def test_the_planner_no_longer_builds_a_guessed_one(self):
+        """`policy = npc or NpcPolicy()` in `craft_plan` was the only defaulted
+        construction. A library caller declaring no policy at all must still
+        get a plan -- through the single-pass solve, not through an invented
+        declaration that now cannot even be built."""
+        villages = {
+            HUB: VillageState(village_id=HUB, x=0, y=0, merchant_count=20, trade_office_level=0),
+            NEAR: VillageState(village_id=NEAR, x=5, y=0, merchant_count=20, trade_office_level=0),
+        }
+        plan = craft_plan(
+            villages,
+            {Resource.LUMBER: {HUB: 4_000.0, NEAR: 0.0}},
+            {
+                Resource.LUMBER: {
+                    HUB: Allocation(AllocationMode.ABSOLUTE, 0.0),
+                    NEAR: Allocation(AllocationMode.REMAINDER),
+                }
+            },
+            PlannerConfig(
+                geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+                merchant_model=EUROPE2_TEUTON,
+            ),
+        )
+
+        assert plan.npc == {}
+        assert plan.rows, "the plan still routes 4,000/h of lumber to 11"

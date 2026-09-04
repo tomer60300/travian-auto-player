@@ -459,15 +459,18 @@ def craft_plan(
     #
     # Only when a floor is actually declared. With none, `solve({})` is the
     # single pass the planner has always been.
-    policy = npc or NpcPolicy()
+    # No stand-in policy. `npc or NpcPolicy()` needed a default `attended`, and
+    # a default there is exactly the guess the class refuses -- so the absent
+    # case is tested for instead of substituted, and it is the single-pass solve
+    # it always was.
     reserves: dict[int, NpcReserve] = {}
-    if policy.is_declared:
+    if npc is not None and npc.is_declared:
         first = solve({})
         retention = {
             resource: {v.village_id: v.target_per_hour for v in plan.villages}
             for resource, plan in first.items()
         }
-        reserves, npc_findings = derive_reserves(policy, retention, names)
+        reserves, npc_findings = derive_reserves(npc, retention, names)
         findings.extend(npc_findings)
         # Every floored village gets an entry under every material so the
         # declaration is visible to the solve -- but a village whose rate for a
