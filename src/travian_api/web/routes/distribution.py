@@ -1055,11 +1055,14 @@ class PlanRequest(BaseModel):
             "asked to ship beyond its production comes back "
             "NPC_CAPACITY_SHORT and the plan is refused rather than quietly "
             "under-delivering. "
-            "With no `dispatch_window` the route set runs round the clock and "
-            "has no night hours to mis-fund, so this may be omitted and the "
-            "conversion is taken as available. On /day-check attendance lives "
-            "on each entry in `segments` instead, since that is where the hours "
-            "are."
+            "With no `dispatch_window` this may be omitted, and is then taken "
+            "as UNATTENDED: a route set with no window runs round the clock, "
+            "which is all 24 hours including the eight the operator sleeps "
+            "through, and Travian offers nothing to confine a repeat interval "
+            "to part of the day. Assuming conversion nobody performed would "
+            "over-commit; assuming none under-delivers and says so through "
+            "NPC_CAPACITY_SHORT. On /day-check attendance lives on each entry "
+            "in `segments` instead, since that is where the hours are."
         ),
     )
 
@@ -1074,6 +1077,13 @@ class PlanRequest(BaseModel):
 
         0.0 is not a floor (`0.0 is None` at every layer), so a village whose
         fraction is zero declares nothing and asks nothing of the operator.
+
+        A request with no window is not asked, because a setup DOCUMENT is
+        validated through this model and carries no window at all -- windows
+        live on its profiles. Demanding an answer there refuses to save a
+        perfectly good setup. Instead the round-the-clock case is resolved the
+        honest way where the policy is built: unattended, not attended. See
+        `_npc_policy_for`.
         """
         if self.npc_attended is not None or self.dispatch_window is None:
             return self
@@ -1086,10 +1096,11 @@ class PlanRequest(BaseModel):
             raise ValueError(
                 "npc_attended is required: "
                 + ", ".join(f"village {vid}" for vid in floored)
-                + " has a stock floor and this plan runs a window, so whether the "
-                "operator is awake to do the NPC trading decides whether those "
-                "routes are funded at all. Send npc_attended=true for the day "
-                "profile and false for the night one."
+                + " has a stock floor, so whether the operator is awake to do the "
+                "NPC trading decides whether those routes are funded at all. Send "
+                "npc_attended=true for the day profile and false for the night "
+                "one. A plan with no window is not exempt: it runs round the "
+                "clock, which includes the hours nobody is at the Marketplace."
             )
         return self
 
@@ -3894,10 +3905,20 @@ async def _plan_account(
             feedstock[cfg.village_id] = frozenset(cfg.npc_feedstock)
     npc_policy = NpcPolicy(
         floor_level=floor_level,
-        # No window means a round-the-clock set, which has no night hours to
-        # mis-fund; the validator asks for the flag only when a window is given,
-        # so None here can only be that case.
-        attended=body.npc_attended if body.npc_attended is not None else True,
+        # None here can only be a round-the-clock set: the validator asks for
+        # the flag whenever a floor meets a window. It defaults to UNATTENDED,
+        # not attended. "Round the clock has no night hours to mis-fund" was
+        # the old reading and it is backwards -- such a set has ALL 24 hours,
+        # including the eight nobody is at the Marketplace, and Travian offers
+        # nothing to confine a repeat interval to part of the day (which is
+        # what `WINDOW_NOT_ENFORCEABLE` and `window_pruning` exist to say).
+        #
+        # Nothing downstream would have caught the optimistic reading:
+        # `simulate_day` tops the store up at every departure minute including
+        # 03:00, and `NPC_CAPACITY_SHORT` is measured against that same cap. So
+        # the direction of the default is the whole guard. Unattended
+        # under-delivers and reports it; attended over-commits in silence.
+        attended=body.npc_attended if body.npc_attended is not None else False,
         sources=feedstock,
     )
 

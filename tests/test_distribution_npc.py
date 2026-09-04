@@ -162,6 +162,45 @@ class TestNpcAttendanceIsExplicit:
         assert lumber.total_npc_allowance == 0.0
         assert lumber.total_npc_draw == 0.0
 
+    def test_round_the_clock_is_unattended_unless_the_operator_says_otherwise(self):
+        """The bypass, and the direction of the default that closes it.
+
+        A request with no window used to skip the guard entirely and then
+        default to ATTENDED, justified as "round the clock has no night hours
+        to mis-fund". Backwards: such a set has all 24 hours, including the
+        eight nobody is at the Marketplace, and Travian offers nothing to
+        confine a repeat interval to part of the day -- which is exactly what
+        WINDOW_NOT_ENFORCEABLE and window_pruning exist to say.
+
+        Nothing downstream caught it. `simulate_day` tops the store up at every
+        departure minute including 03:00, and NPC_CAPACITY_SHORT is measured
+        against that same optimistic cap, so the default WAS the guard.
+
+        It is not a 422: a setup DOCUMENT is validated through this model and
+        carries no window at all -- windows live on its profiles -- so
+        demanding an answer here would refuse to save a good setup. Unattended
+        under-delivers and reports it; attended over-commits in silence.
+        """
+        payload = _payload(window=None)
+        del payload["npc_attended"]
+
+        # Accepted, unlike the windowed case above.
+        res = asyncio.run(post_plan(PlanRequest.model_validate(payload)))
+
+        lumber = _lumber(res)
+        assert lumber.total_npc_allowance == 0.0, (
+            "a round-the-clock set must not be credited conversion nobody performed"
+        )
+        assert lumber.total_npc_draw == 0.0
+
+    def test_round_the_clock_still_takes_the_operator_at_their_word(self):
+        payload = _payload(window=None)
+        payload["npc_attended"] = True
+
+        res = asyncio.run(post_plan(PlanRequest.model_validate(payload)))
+
+        assert _lumber(res).total_npc_allowance > 0.0
+
 
 class TestZeroIsNoneAtEveryLayer:
     """`0.0` is not a floor, at the schema, the policy and the solve alike."""
