@@ -703,7 +703,11 @@ function BudgetBar({ budget, cap }) {
 /** Batch-set the mode/value of the CHECKED villages for one resource, so a
  *  common allocation does not have to be typed row by row. Select rows with
  *  the checkboxes (or the header select-all); the remainder village keeps its
- *  role. Disabled until at least one village is checked. */
+ *  role. Disabled until at least one village is checked.
+ *
+ *  Takes the resource LABEL, not the key, because every control here is named
+ *  with it: four of these render on the Targets stage and all three of their
+ *  controls used to share one name apiece across the four. */
 /** `flex-wrap` for the same reason the two rows that hold this one already
  * have it: a `w-auto` mode select, a `w-20` value box and an "Apply to N
  * selected" button come to 344px, which is 10px past what a 375 viewport's
@@ -726,14 +730,14 @@ function MerchantRule({ id, rule }) {
   )
 }
 
-function BatchSet({ count, onApply }) {
+function BatchSet({ resource, count, onApply }) {
   const [mode, setMode] = useState('keep')
   const [value, setValue] = useState(0)
   return (
     <div className="flex flex-wrap items-center gap-1 text-xs">
       <span className="text-secondary">Set checked</span>
       <select
-        aria-label="Batch mode"
+        aria-label={`Mode to set on the checked villages for ${resource}`}
         className="input-field w-auto text-xs py-0.5"
         value={mode}
         onChange={(e) => setMode(e.target.value)}
@@ -746,18 +750,23 @@ function BatchSet({ count, onApply }) {
       </select>
       <input
         type="number"
-        aria-label="Batch value"
+        aria-label={`Value to set on the checked villages for ${resource}`}
         className="input-field w-20 text-right text-xs py-0.5"
         disabled={mode === 'keep'}
         value={value}
         onChange={(e) => setValue(Number(e.target.value))}
       />
+      {/* The resource in an `sr-only` SUFFIX rather than in an `aria-label`, so
+          the accessible name still CONTAINS the words on screen (WCAG 2.5.3)
+          while four of these buttons no longer announce as four copies of
+          "Apply to 2 selected". */}
       <button
         className="btn-secondary btn-xs"
         disabled={!count}
         onClick={() => onApply(mode, value)}
       >
         Apply to {count} selected
+        <span className="sr-only">{` villages for ${resource}`}</span>
       </button>
     </div>
   )
@@ -5571,7 +5580,15 @@ export default function ResourcePlanner() {
                 <div className="flex justify-between items-baseline mb-2 flex-wrap gap-2">
                   <h3 className="font-semibold">{RESOURCE_LABEL[resource]}</h3>
                   <div className="flex items-center gap-3 flex-wrap">
+                    {/* Every control in this widget names its resource. Four
+                        of these render on one screen, one per resource, and
+                        every one of them used to be called "Batch mode",
+                        "Batch value" and "Apply to N selected" -- so a screen
+                        reader announced four identical controls and no spec
+                        could target any of them. Batch-set was the one feature
+                        in the grid the audit could not drive at all. */}
                     <BatchSet
+                      resource={RESOURCE_LABEL[resource]}
                       count={(selected[resource] ?? []).length}
                       onApply={(mode, value) => applyToSelected(resource, mode, value)}
                     />
@@ -5626,7 +5643,7 @@ export default function ResourcePlanner() {
                           <span className="inline-flex items-center gap-2">
                             <input
                               type="checkbox"
-                              aria-label="Select all villages"
+                              aria-label={`Select all villages for ${RESOURCE_LABEL[resource]}`}
                               checked={allSelected(resource)}
                               ref={(el) => {
                                 if (el) el.indeterminate = someSelected(resource) && !allSelected(resource)
@@ -5730,7 +5747,7 @@ export default function ResourcePlanner() {
                               <span className="inline-flex items-center gap-2">
                                 <input
                                   type="checkbox"
-                                  aria-label={`Select ${v.name} for batch edit`}
+                                  aria-label={`Select ${v.name} for batch edit of ${RESOURCE_LABEL[resource]}`}
                                   checked={isSelected(resource, v.village_id)}
                                   onChange={() => toggleSelected(resource, v.village_id)}
                                 />
