@@ -489,3 +489,79 @@ test.describe('the undo for a live run is reachable, and the app keeps its key',
     expect(bodies[0].trace_id).toBe('aaa111bbb222')
   })
 })
+
+test.describe('the Plan stage leads with the verdict, not with an empty history', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  /** Where each landmark sits in the page's own reading order. */
+  async function order(page) {
+    return page.evaluate(() => {
+      const t = document.body.innerText
+      return {
+        history: t.indexOf('Run history'),
+        routes: t.indexOf('ROUTES'),
+        verdict: t.search(/Ready to run|Runs, not clean|Cannot run/),
+      }
+    })
+  }
+
+  test('Run history sits below the verdict on the Plan stage', async ({ page }) => {
+    // Measured before: "Run history -- what previous live runs wrote (0
+    // requests) / No live run has been recorded yet on this machine." was line
+    // 68 of the rendered text and "ROUTES / 3" was line 72. The least useful
+    // panel on the page held the most valuable slot on its most consequential
+    // stage -- and it is the one panel that is empty on a fresh machine.
+    await isolate(page)
+    await seed(page)
+    await openPlan(page)
+
+    const at = await order(page)
+    expect(at.routes).toBeGreaterThan(-1)
+    expect(at.history).toBeGreaterThan(-1)
+    expect(at.verdict).toBeGreaterThan(-1)
+    expect(at.history, 'the verdict is read before the write history').toBeGreaterThan(at.verdict)
+    expect(at.history).toBeGreaterThan(at.routes)
+  })
+
+  test('and stays where it was on the other stages', async ({ page }) => {
+    // It already sat at the bottom of the other three. Moving it must not
+    // change that, or the fix trades one misplacement for three.
+    await isolate(page)
+    await seed(page)
+    await page.goto('/resource-planner')
+
+    for (const stage of ['Account', 'Targets', 'Day & night']) {
+      await page.getByRole('button', { name: stage, exact: true }).click()
+      const at = await order(page)
+      const tail = await page.evaluate(() => document.body.innerText.length)
+      expect(at.history, `${stage} keeps its history at the bottom`).toBeGreaterThan(tail / 2)
+    }
+  })
+
+  test('the last-run record travels with it', async ({ page }) => {
+    // The two panels are one pair -- a write history and the record of the last
+    // write -- and the undo lives in the second. Splitting them would leave the
+    // post-run artefact above the go/no-go verdict, which is the same defect.
+    await isolate(page)
+    await seed(page, {
+      planner_last_live_run: {
+        at: new Date().toISOString(),
+        traceId: 'abc123def456',
+        created: 1,
+        problems: [],
+        disables: [],
+        routes: [],
+      },
+    })
+    await openPlan(page)
+
+    const at = await page.evaluate(() => {
+      const t = document.body.innerText
+      return {
+        lastRun: t.indexOf('Last live trade-route run'),
+        verdict: t.search(/Ready to run|Runs, not clean|Cannot run/),
+      }
+    })
+    expect(at.lastRun).toBeGreaterThan(at.verdict)
+  })
+})

@@ -5765,210 +5765,6 @@ export default function ResourcePlanner() {
         </div>
       )}
 
-      {/* What the automation has WRITTEN, from the app's own traces. Sits
-          outside the stage gates for the same reason the last-run card does:
-          this is the panel an operator opens when they are not planning at all,
-          just checking the thing still works. Deliberately a write history --
-          traces cannot say what the game shipped afterwards. */}
-      <div className="card p-3 mb-4">
-        <details
-          className="text-xs"
-          onToggle={(e) => {
-            if (e.currentTarget.open && !runHistory && !historyLoading) loadRunHistory()
-          }}
-        >
-          <summary className="cursor-pointer text-secondary">
-            Run history — what previous live runs wrote{' '}
-            <span className="text-primary">(0 requests)</span>
-          </summary>
-          {historyLoading && <p className="text-secondary mt-2">Reading traces…</p>}
-          {runHistory && runHistory.runs.length === 0 && (
-            <p className="text-secondary mt-2">
-              No live run has been recorded yet on this machine.
-            </p>
-          )}
-          {runHistory && runHistory.runs.length > 0 && (
-            <div className="mt-2 space-y-2">
-              <p className="text-secondary">
-                <strong className="text-primary">
-                  {runHistory.rollup.runs} run(s) · {runHistory.rollup.total_created} route(s)
-                  created
-                </strong>
-                {runHistory.rollup.total_problems > 0 &&
-                  ` · ${runHistory.rollup.total_problems} problem(s)`}
-                {runHistory.rollup.total_created_unverified > 0 && (
-                  <span className="text-warning">
-                    {' '}
-                    · {runHistory.rollup.total_created_unverified} unverified
-                  </span>
-                )}
-                {runHistory.rollup.failed_runs > 0 && (
-                  <span className="text-danger"> · {runHistory.rollup.failed_runs} failed</span>
-                )}
-              </p>
-              {runHistory.rollup.repeat_problem_villages.length > 0 && (
-                <p className="text-warning">
-                  Villages that hit a schedule mismatch in more than one run:{' '}
-                  {runHistory.rollup.repeat_problem_villages
-                    .map((v) => `${namesForVillageIds([v.village_id], villages) || v.village_id} (${v.runs}×)`)
-                    .join(', ')}{' '}
-                  — a destination whose live schedule keeps diverging is worth a look in the
-                  game.
-                </p>
-              )}
-              <table className="w-full">
-                <thead className="text-secondary uppercase">
-                  <tr>
-                    <th className="text-left py-1 pr-2">When</th>
-                    <th className="text-right px-2">Created</th>
-                    <th className="text-right px-2">Rows</th>
-                    <th className="text-right px-2">Disabled</th>
-                    <th className="text-left px-2">Result</th>
-                    <th className="text-left px-2">Undo</th>
-                  </tr>
-                </thead>
-                <tbody className="font-mono">
-                  {runHistory.runs.map((r) => (
-                    <tr key={r.run_id} className="border-t border-gray-800">
-                      <td className="py-1 pr-2">{new Date(r.started_at).toLocaleString()}</td>
-                      <td className="text-right px-2">{r.created ?? '—'}</td>
-                      <td className="text-right px-2">{r.created_game_rows ?? '—'}</td>
-                      <td className="text-right px-2">{r.disabled ?? '—'}</td>
-                      <td
-                        className={`px-2 ${
-                          r.failed || r.needs_attention ? 'text-warning' : 'text-secondary'
-                        }`}
-                      >
-                        {r.failed
-                          ? `failed — ${r.error ?? 'no reason recorded'}`
-                          : !r.complete
-                            ? 'incomplete — the run did not finish writing its trace'
-                            : r.needs_attention
-                              ? [
-                                  r.created_unverified
-                                    ? `${r.created_unverified} unverified`
-                                    : null,
-                                  r.verify_failures ? `${r.verify_failures} verify failure(s)` : null,
-                                  r.problems ? `${r.problems} problem(s)` : null,
-                                  r.gold_club_blocked ? 'Gold Club refused' : null,
-                                  r.stopped_early ? 'stopped early' : null,
-                                ]
-                                  .filter(Boolean)
-                                  .join(' · ')
-                              : 'clean'}
-                      </td>
-                      {/* `run_id` IS the trace id `/routes/revert-plan` takes,
-                          so the undo is not limited to whichever run this
-                          browser happens to have recorded in localStorage. */}
-                      <td className="px-2">
-                        <button
-                          type="button"
-                          className="btn-secondary btn-xs"
-                          onClick={() => setRevertRun(r.run_id)}
-                        >
-                          Undo this run
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {revertRun && (
-                <div className="card-danger p-2">
-                  <p className="text-xs font-semibold">
-                    Undoing the run of{' '}
-                    {new Date(
-                      runHistory.runs.find((r) => r.run_id === revertRun)?.started_at ?? Date.now()
-                    ).toLocaleString()}{' '}
-                    <span className="font-mono text-secondary">({revertRun})</span>
-                  </p>
-                  <RevertRunPanel
-                    traceId={revertRun}
-                    state={revert}
-                    villages={villages}
-                    onCheck={(id) => requestRevert(id, false, false)}
-                    onDisable={(id) => setConfirmRevert({ traceId: id, deleting: false })}
-                    onDelete={(id) => setConfirmRevert({ traceId: id, deleting: true })}
-                  />
-                </div>
-              )}
-              <button className="btn-secondary btn-xs" onClick={loadRunHistory}>
-                Refresh (0 requests)
-              </button>
-            </div>
-          )}
-        </details>
-      </div>
-
-      {/* Durable audit of the last LIVE run, rendered OUTSIDE the stage/plan
-          gates on purpose: `plan` is cleared by any input edit and `stage`
-          resets to 'snapshot' on reload, so nesting this inside them would hide
-          the record in exactly the two situations it is persisted for. */}
-      {lastRun && (
-        <div className="card p-3 mb-4">
-          <details className="text-xs">
-            <summary className="cursor-pointer text-secondary">
-              Last live trade-route run — {new Date(lastRun.at).toLocaleString()} ·{' '}
-              {lastRun.created} created
-              {lastRun.problems.length ? ` · ${lastRun.problems.length} problem(s)` : ''}
-            </summary>
-            <div className="mt-2 space-y-1">
-              {lastRun.problems.length > 0 && (
-                <ul className="text-danger list-disc list-inside">
-                  {lastRun.problems.map((p, i) => (
-                    <li key={i}>{p}</li>
-                  ))}
-                </ul>
-              )}
-              {lastRun.disables.length > 0 && (
-                <ul className="text-secondary list-disc list-inside">
-                  {lastRun.disables.map((d, i) => (
-                    <li key={i}>{d}</li>
-                  ))}
-                </ul>
-              )}
-              <ul className="list-disc list-inside">
-                {lastRun.routes.map((r, i) => (
-                  <li key={i}>
-                    {r.from} → {r.to} ({r.at}): <strong>{r.status}</strong>
-                    {r.detail ? ` — ${r.detail}` : ''}
-                  </li>
-                ))}
-              </ul>
-              {/* The way back. `/routes/revert-plan` has existed all along and
-                  was unreachable, because the one handle it accepts -- this
-                  run's trace id -- was dropped on the floor. */}
-              {lastRun.traceId ? (
-                <details className="mt-3 border-t-default pt-2">
-                  <summary className="cursor-pointer text-primary">
-                    Undo the last live run
-                  </summary>
-                  <div className="mt-2">
-                    <RevertRunPanel
-                      traceId={lastRun.traceId}
-                      state={revert}
-                      villages={villages}
-                      onCheck={(id) => requestRevert(id, false, false)}
-                      onDisable={(id) => setConfirmRevert({ traceId: id, deleting: false })}
-                      onDelete={(id) => setConfirmRevert({ traceId: id, deleting: true })}
-                    />
-                  </div>
-                </details>
-              ) : (
-                <p className="text-secondary mt-3 border-t-default pt-2">
-                  This run was recorded before this build kept the run&apos;s trace id, so there
-                  is nothing to undo it with. The trace id is what
-                  <span className="font-mono"> /routes/revert-plan </span>
-                  reads the pre-run inventory by, and the game returns no id when it creates a
-                  route — so without it there is no record of what each village held before.
-                  Later runs carry it.
-                </p>
-              )}
-            </div>
-          </details>
-        </div>
-      )}
-
       {stage === 'plan' && (
         <div className="space-y-4">
           {!plan && (
@@ -6865,6 +6661,227 @@ export default function ResourcePlanner() {
               )}
             </>
           )}
+        </div>
+      )}
+
+      {/* The write history and the record of the last write, MOVED to the
+          bottom. They sit outside the stage gates -- an operator opens them
+          when they are not planning at all, just checking the thing still
+          works -- but "outside the gates" used to mean ABOVE the Plan stage,
+          and the Plan stage is the one that ends in a live write. Measured at
+          1440 before this: "Run history -- what previous live runs wrote (0
+          requests) / No live run has been recorded yet on this machine." was
+          line 68 of the rendered text and "ROUTES / 3" was line 72, so the
+          least useful panel on the page -- empty on a fresh machine -- held the
+          most valuable slot on its most consequential stage. Below the four
+          stages they are last on all four, which is where they already sat on
+          the other three.
+
+          Both, not just the history: they are one pair, a write history and
+          the record of the last write, and B2 put the undo in the second.
+          Leaving that above the go/no-go verdict would be the same defect with
+          a different panel in it. */}
+      {/* What the automation has WRITTEN, from the app's own traces. Sits
+          outside the stage gates for the same reason the last-run card does:
+          this is the panel an operator opens when they are not planning at all,
+          just checking the thing still works. Deliberately a write history --
+          traces cannot say what the game shipped afterwards. */}
+      <div className="card p-3 mb-4">
+        <details
+          className="text-xs"
+          onToggle={(e) => {
+            if (e.currentTarget.open && !runHistory && !historyLoading) loadRunHistory()
+          }}
+        >
+          <summary className="cursor-pointer text-secondary">
+            Run history — what previous live runs wrote{' '}
+            <span className="text-primary">(0 requests)</span>
+          </summary>
+          {historyLoading && <p className="text-secondary mt-2">Reading traces…</p>}
+          {runHistory && runHistory.runs.length === 0 && (
+            <p className="text-secondary mt-2">
+              No live run has been recorded yet on this machine.
+            </p>
+          )}
+          {runHistory && runHistory.runs.length > 0 && (
+            <div className="mt-2 space-y-2">
+              <p className="text-secondary">
+                <strong className="text-primary">
+                  {runHistory.rollup.runs} run(s) · {runHistory.rollup.total_created} route(s)
+                  created
+                </strong>
+                {runHistory.rollup.total_problems > 0 &&
+                  ` · ${runHistory.rollup.total_problems} problem(s)`}
+                {runHistory.rollup.total_created_unverified > 0 && (
+                  <span className="text-warning">
+                    {' '}
+                    · {runHistory.rollup.total_created_unverified} unverified
+                  </span>
+                )}
+                {runHistory.rollup.failed_runs > 0 && (
+                  <span className="text-danger"> · {runHistory.rollup.failed_runs} failed</span>
+                )}
+              </p>
+              {runHistory.rollup.repeat_problem_villages.length > 0 && (
+                <p className="text-warning">
+                  Villages that hit a schedule mismatch in more than one run:{' '}
+                  {runHistory.rollup.repeat_problem_villages
+                    .map((v) => `${namesForVillageIds([v.village_id], villages) || v.village_id} (${v.runs}×)`)
+                    .join(', ')}{' '}
+                  — a destination whose live schedule keeps diverging is worth a look in the
+                  game.
+                </p>
+              )}
+              <table className="w-full">
+                <thead className="text-secondary uppercase">
+                  <tr>
+                    <th className="text-left py-1 pr-2">When</th>
+                    <th className="text-right px-2">Created</th>
+                    <th className="text-right px-2">Rows</th>
+                    <th className="text-right px-2">Disabled</th>
+                    <th className="text-left px-2">Result</th>
+                    <th className="text-left px-2">Undo</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {runHistory.runs.map((r) => (
+                    <tr key={r.run_id} className="border-t border-gray-800">
+                      <td className="py-1 pr-2">{new Date(r.started_at).toLocaleString()}</td>
+                      <td className="text-right px-2">{r.created ?? '—'}</td>
+                      <td className="text-right px-2">{r.created_game_rows ?? '—'}</td>
+                      <td className="text-right px-2">{r.disabled ?? '—'}</td>
+                      <td
+                        className={`px-2 ${
+                          r.failed || r.needs_attention ? 'text-warning' : 'text-secondary'
+                        }`}
+                      >
+                        {r.failed
+                          ? `failed — ${r.error ?? 'no reason recorded'}`
+                          : !r.complete
+                            ? 'incomplete — the run did not finish writing its trace'
+                            : r.needs_attention
+                              ? [
+                                  r.created_unverified
+                                    ? `${r.created_unverified} unverified`
+                                    : null,
+                                  r.verify_failures ? `${r.verify_failures} verify failure(s)` : null,
+                                  r.problems ? `${r.problems} problem(s)` : null,
+                                  r.gold_club_blocked ? 'Gold Club refused' : null,
+                                  r.stopped_early ? 'stopped early' : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ')
+                              : 'clean'}
+                      </td>
+                      {/* `run_id` IS the trace id `/routes/revert-plan` takes,
+                          so the undo is not limited to whichever run this
+                          browser happens to have recorded in localStorage. */}
+                      <td className="px-2">
+                        <button
+                          type="button"
+                          className="btn-secondary btn-xs"
+                          onClick={() => setRevertRun(r.run_id)}
+                        >
+                          Undo this run
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {revertRun && (
+                <div className="card-danger p-2">
+                  <p className="text-xs font-semibold">
+                    Undoing the run of{' '}
+                    {new Date(
+                      runHistory.runs.find((r) => r.run_id === revertRun)?.started_at ?? Date.now()
+                    ).toLocaleString()}{' '}
+                    <span className="font-mono text-secondary">({revertRun})</span>
+                  </p>
+                  <RevertRunPanel
+                    traceId={revertRun}
+                    state={revert}
+                    villages={villages}
+                    onCheck={(id) => requestRevert(id, false, false)}
+                    onDisable={(id) => setConfirmRevert({ traceId: id, deleting: false })}
+                    onDelete={(id) => setConfirmRevert({ traceId: id, deleting: true })}
+                  />
+                </div>
+              )}
+              <button className="btn-secondary btn-xs" onClick={loadRunHistory}>
+                Refresh (0 requests)
+              </button>
+            </div>
+          )}
+        </details>
+      </div>
+
+      {/* Durable audit of the last LIVE run, rendered OUTSIDE the stage/plan
+          gates on purpose: `plan` is cleared by any input edit and `stage`
+          resets to 'snapshot' on reload, so nesting this inside them would hide
+          the record in exactly the two situations it is persisted for. */}
+      {lastRun && (
+        <div className="card p-3 mb-4">
+          <details className="text-xs">
+            <summary className="cursor-pointer text-secondary">
+              Last live trade-route run — {new Date(lastRun.at).toLocaleString()} ·{' '}
+              {lastRun.created} created
+              {lastRun.problems.length ? ` · ${lastRun.problems.length} problem(s)` : ''}
+            </summary>
+            <div className="mt-2 space-y-1">
+              {lastRun.problems.length > 0 && (
+                <ul className="text-danger list-disc list-inside">
+                  {lastRun.problems.map((p, i) => (
+                    <li key={i}>{p}</li>
+                  ))}
+                </ul>
+              )}
+              {lastRun.disables.length > 0 && (
+                <ul className="text-secondary list-disc list-inside">
+                  {lastRun.disables.map((d, i) => (
+                    <li key={i}>{d}</li>
+                  ))}
+                </ul>
+              )}
+              <ul className="list-disc list-inside">
+                {lastRun.routes.map((r, i) => (
+                  <li key={i}>
+                    {r.from} → {r.to} ({r.at}): <strong>{r.status}</strong>
+                    {r.detail ? ` — ${r.detail}` : ''}
+                  </li>
+                ))}
+              </ul>
+              {/* The way back. `/routes/revert-plan` has existed all along and
+                  was unreachable, because the one handle it accepts -- this
+                  run's trace id -- was dropped on the floor. */}
+              {lastRun.traceId ? (
+                <details className="mt-3 border-t-default pt-2">
+                  <summary className="cursor-pointer text-primary">
+                    Undo the last live run
+                  </summary>
+                  <div className="mt-2">
+                    <RevertRunPanel
+                      traceId={lastRun.traceId}
+                      state={revert}
+                      villages={villages}
+                      onCheck={(id) => requestRevert(id, false, false)}
+                      onDisable={(id) => setConfirmRevert({ traceId: id, deleting: false })}
+                      onDelete={(id) => setConfirmRevert({ traceId: id, deleting: true })}
+                    />
+                  </div>
+                </details>
+              ) : (
+                <p className="text-secondary mt-3 border-t-default pt-2">
+                  This run was recorded before this build kept the run&apos;s trace id, so there
+                  is nothing to undo it with. The trace id is what
+                  <span className="font-mono"> /routes/revert-plan </span>
+                  reads the pre-run inventory by, and the game returns no id when it creates a
+                  route — so without it there is no record of what each village held before.
+                  Later runs carry it.
+                </p>
+              )}
+            </div>
+          </details>
         </div>
       )}
 
