@@ -128,7 +128,12 @@ import {
   yamlFilename,
   yamlResponseTransform,
 } from '../utils/plannerExport'
-import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from '../utils/villageRefs'
+import {
+  excludedOriginIds,
+  namesForVillageIds,
+  resolveVillageNames,
+  unresolvedProtectedEntries,
+} from '../utils/villageRefs'
 import { planStatus, relayLegIndex } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
 import { groupWarnings } from '../utils/warningGroups'
@@ -3259,6 +3264,15 @@ export default function ResourcePlanner() {
   // creates, and it is an upper bound for the same reason plannedOriginCount is.
   const liveRequestEstimate = plannedOriginCount + plannedCreateCount
 
+  // Which "Never disable" entries will protect nothing. The server validates
+  // the shape and cannot validate the miss -- it does not hold this account's
+  // village list -- so this is the only place the typo is knowable before the
+  // run switches the route off.
+  const protectionMisses = useMemo(
+    () => unresolvedProtectedEntries(protectDestinations, villages),
+    [protectDestinations, villages]
+  )
+
   const liveConfirmMessage = [
     'Execute this plan against Travian now?',
     '',
@@ -6227,6 +6241,22 @@ export default function ResourcePlanner() {
                         value={protectDestinations}
                         onChange={(e) => setProtectDestinations(e.target.value)}
                       />
+                      {/* Named back, exactly as the foreign-target exclusion
+                          field does it. The server can only check the SHAPE
+                          here -- it does not hold this account's village list --
+                          so "4688" for "46|88" passes validation, protects
+                          nothing, and the next run switches off the route the
+                          operator was protecting. This page has the list. */}
+                      {protectionMisses.length > 0 && (
+                        <span className="block text-warning text-xs mt-0.5">
+                          {protectionMisses.map((miss) => (
+                            <span key={miss.entry} className="block">
+                              no village named {miss.entry}
+                              {miss.suggestion ? ` — did you mean ${miss.suggestion}?` : ''}
+                            </span>
+                          ))}
+                        </span>
+                      )}
                     </label>
                     <label className="text-xs">
                       <span className="text-secondary block">Only origin (village id)</span>

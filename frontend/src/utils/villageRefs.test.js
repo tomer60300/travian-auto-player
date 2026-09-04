@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 
-import { excludedOriginIds, namesForVillageIds, resolveVillageNames } from './villageRefs'
+import {
+  excludedOriginIds,
+  namesForVillageIds,
+  resolveVillageNames,
+  unresolvedProtectedEntries,
+} from './villageRefs'
 
 const VILLAGES = [
   { village_id: 53629, name: '02' },
@@ -111,5 +116,91 @@ describe('excludedOriginIds', () => {
 
   it('drops a stored value that is not a village id', () => {
     expect(excludedOriginIds({ exclude_origins: [0, -5, 53629] }, VS)).toEqual([53629])
+  })
+})
+
+describe('unresolvedProtectedEntries', () => {
+  // Coordinates, because a hand-made route to a foreign target has no usable
+  // village id -- which is why this field accepts both shapes at all.
+  const WITH_COORDS = [
+    { village_id: 53629, name: '02', x: 12, y: -34 },
+    { village_id: 41212, name: '18', x: -5, y: 7 },
+  ]
+
+  it('says nothing about an entry that names a real village id', () => {
+    expect(unresolvedProtectedEntries('53629', WITH_COORDS)).toEqual([])
+  })
+
+  it('says nothing about coordinates, which need not be a village at all', () => {
+    // The whole reason the field takes coordinates: the routes worth protecting
+    // are the hand-made ones to targets this account does not own, so a pair
+    // pointing at nothing in the snapshot is the NORMAL case, not an error.
+    expect(unresolvedProtectedEntries('46|133, -5|7', WITH_COORDS)).toEqual([])
+  })
+
+  it('flags a bare integer no village has, and offers the coordinate reading', () => {
+    // The exact case the backend's own docstring names: "A typo ('4688' for
+    // '46|88') that is silently ignored leaves the operator believing a route
+    // is protected when it is not, and the very next run switches it off."
+    // `4688` is shape-valid as a village id, so the server accepts it and
+    // protects nothing.
+    expect(unresolvedProtectedEntries('4688', WITH_COORDS)).toEqual([
+      { entry: '4688', suggestion: '46|88' },
+    ])
+  })
+
+  it('splits six digits into two three-digit coordinates', () => {
+    expect(unresolvedProtectedEntries('461330', WITH_COORDS)).toEqual([
+      { entry: '461330', suggestion: '461|330' },
+    ])
+  })
+
+  it('offers the ID when the operator typed a village NAME', () => {
+    // The account names its villages "02" and "18", which are bare integers --
+    // so `int("02")` is 2, the server protects village 2, and the village the
+    // operator meant keeps being switched off. Higher confidence than a digit
+    // split, so it wins.
+    expect(unresolvedProtectedEntries('02', WITH_COORDS)).toEqual([
+      { entry: '02', suggestion: '53629' },
+    ])
+  })
+
+  it('offers nothing it cannot ground, rather than guessing', () => {
+    // Five digits do not split evenly and no village is named this, so the
+    // honest answer is that nothing matches.
+    expect(unresolvedProtectedEntries('53628', WITH_COORDS)).toEqual([
+      { entry: '53628', suggestion: null },
+    ])
+  })
+
+  it('does not split two digits, which would be noise', () => {
+    expect(unresolvedProtectedEntries('99', WITH_COORDS)).toEqual([
+      { entry: '99', suggestion: null },
+    ])
+  })
+
+  it('flags an entry that is neither an id nor coordinates', () => {
+    // The server 422s this, so the page saying it first is a faster no.
+    expect(unresolvedProtectedEntries('Sommerwind', WITH_COORDS)).toEqual([
+      { entry: 'Sommerwind', suggestion: null },
+    ])
+  })
+
+  it('ignores blanks from trailing commas and stray spaces', () => {
+    // Mid-typing states must not read as errors, or the field fights the typist.
+    expect(unresolvedProtectedEntries(' 53629 , , 46|133 ,', WITH_COORDS)).toEqual([])
+  })
+
+  it('is empty for empty input rather than throwing', () => {
+    expect(unresolvedProtectedEntries('', WITH_COORDS)).toEqual([])
+    expect(unresolvedProtectedEntries(null, WITH_COORDS)).toEqual([])
+  })
+
+  it('flags everything when there is no snapshot yet', () => {
+    // Nothing can be resolved before a snapshot, and claiming a protection
+    // holds would be worse than saying it does not.
+    expect(unresolvedProtectedEntries('53629', [])).toEqual([
+      { entry: '53629', suggestion: null },
+    ])
   })
 })

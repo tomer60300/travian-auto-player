@@ -94,3 +94,65 @@ test.describe('the row cap the page explains is on by default', () => {
     expect('max_game_rows_per_run' in body).toBe(false)
   })
 })
+
+test.describe('a protect_destinations typo is undetectable by the server', () => {
+  test.use({ viewport: { width: 1440, height: 1200 } })
+
+  test('a bare integer no village has is named back, with the coordinate reading', async ({
+    page,
+  }) => {
+    // Driven before the fix: typing 4688 sent `protect_destinations: ["4688"]`
+    // with no inline warning at all. It is shape-valid as a village id, so the
+    // server's `_protected_entries_are_parseable` passes it -- and the server
+    // cannot do better, because it does not hold this account's village list.
+    await isolate(page)
+    await seed(page)
+    await openPlan(page)
+
+    await page.getByLabel('Never disable').fill('4688')
+    await expect(page.getByText('no village named 4688 — did you mean 46|88?')).toBeVisible()
+  })
+
+  test('coordinates are never flagged, however foreign', async ({ page }) => {
+    // The routes worth protecting are the hand-made ones to targets this
+    // account does not own, so a pair matching no village is the normal case.
+    await isolate(page)
+    await seed(page)
+    await openPlan(page)
+
+    await page.getByLabel('Never disable').fill('46|133')
+    await expect(page.getByText(/no village named/)).toHaveCount(0)
+  })
+
+  test('a real village id is left alone', async ({ page }) => {
+    await isolate(page)
+    await seed(page)
+    await openPlan(page)
+
+    await page.getByLabel('Never disable').fill('20011')
+    await expect(page.getByText(/no village named/)).toHaveCount(0)
+  })
+
+  test('the warning does not block the run, because the entry may be right', async ({ page }) => {
+    // A foreign village id pasted from a Travian link is legitimate and is not
+    // in the snapshot. So this is a warning and not a gate -- the same call the
+    // foreign-target exclusion field makes.
+    let body = null
+    await isolate(page, (path, route) => {
+      if (path.endsWith('/distribution/execute')) {
+        body = route.request().postDataJSON()
+        return PREVIEW
+      }
+      return undefined
+    })
+    await seed(page)
+    await openPlan(page)
+
+    await page.getByLabel('Never disable').fill('4688')
+    await expect(page.getByText(/no village named 4688/)).toBeVisible()
+    await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
+    await expect(page.getByText(/route\(s\) would be created/)).toBeVisible()
+
+    expect(body.protect_destinations).toEqual(['4688'])
+  })
+})
