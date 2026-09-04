@@ -695,6 +695,74 @@ h1, h2, h3 {
   font-size: 0.75rem;
   white-space: nowrap;
 }
+/* A row's height must not depend on a disclosure.
+   Measured on a 12-village Account table before this rule: rows 47.8-48.3px
+   closed and 298.5-299px with the four pickers open -- 6.2x -- and the page
+   2743 -> 5751 at 375, 1996 -> 5004 at 768, 1569 -> 4576 at 1440. Twelve of the
+   fourteen cells in an open row were dead space, because a `<details>` panel in
+   the normal flow makes its whole ROW as tall as itself.
+
+   So the panel is out of flow and anchored to its own cell: it draws OVER the
+   rows below instead of between them, and the row is the same height open or
+   closed.
+
+   Still a `<details>`, and that is a deliberate refusal of the native popover.
+   `popover` would put the panel in the top layer, which is strictly better
+   about clipping -- but `popover="auto"` allows exactly one open at a time,
+   and four spec files measure this surface with EVERY disclosure open
+   (`for (const d of document.querySelectorAll('details')) d.open = true`,
+   then `expect(details:not([open])).toHaveCount(0)`), which is what pins every
+   `.input-field` width and every clipped-control count inside these panels.
+   Keeping the disclosure keeps those guarantees, the Enter/Escape behaviour and
+   the tab order, and costs one thing only: the panel is clipped by the
+   scroller, which `.cell-picker-up` deals with.
+
+   `z-index: 1`, not more: it has to paint over the static cells of the rows
+   below, and it must NOT paint over `.table-overflowing .sticky-col` (z-index
+   2), which is the pinned village name a scrolled panel would otherwise cover.
+
+   Radius, border, surface and elevation are the card tokens -- this is a small
+   raised surface over the table, which is what those tokens are for. */
+.cell-picker {
+  position: relative;
+}
+.cell-picker > .cell-picker-panel {
+  position: absolute;
+  z-index: 1;
+  top: calc(100% + 0.25rem);
+  left: 0;
+  min-width: 12rem;
+  max-width: 20rem;
+  max-height: 14rem;
+  overflow-y: auto;
+  /* EXPLICITLY hidden, and this line is load-bearing. Per CSS Overflow, an
+     axis left `visible` beside one that is not computes to `auto` -- so
+     `overflow-y: auto` alone made this panel a HORIZONTAL scroll container,
+     and `inputWidths.pw.js` walks up from every control to the nearest such
+     container and asserts its box ends inside the viewport. Anchored to a cell
+     in one of the table's last four columns, this panel's box does not: 11
+     controls failed that check at all three viewports. It is the same trap the
+     spec's own note about the Build-queue card describes. The panel is 20rem
+     wide with short, nowrap content, so there is nothing here to scroll
+     sideways anyway. */
+  overflow-x: hidden;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background-color: var(--bg-card);
+  box-shadow: var(--elevation-2);
+}
+/* The last rows open UPWARD. `overflow-x: auto` computes `overflow-y` to `auto`
+   as well, so the scroller's box -- which ends with the last row -- clips a
+   panel hanging past it, and a vertical scrollbar appearing there would change
+   `clientWidth` under the very measurement that decides whether the table is
+   pinned. Decided from the row's INDEX at render time rather than from a
+   measurement in an effect: it is deterministic, it costs nothing, and it
+   cannot fight React over a className. */
+.cell-picker.cell-picker-up > .cell-picker-panel {
+  top: auto;
+  bottom: calc(100% + 0.25rem);
+}
 /* The hours of the day, as ONE 24-hour track.
    Night's 23:00-07:00 used to draw as two disconnected slabs on a bare
    `rounded-full` pill: no 00:00 tick, no axis, no hour label anywhere, and the

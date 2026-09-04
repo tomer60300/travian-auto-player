@@ -4224,7 +4224,19 @@ export default function ResourcePlanner() {
                 </tr>
               </thead>
               <tbody>
-                {visibleVillages.map((v) => (
+                {visibleVillages.map((v, rowIndex) => {
+                  // A picker on one of the last four rows opens UPWARD, because
+                  // the scroller's box ends with the last row and an out-of-flow
+                  // panel hanging past it would be clipped there. Only on a
+                  // table long enough to have a bottom worth avoiding: on a
+                  // short one every row is near the end, and opening a panel
+                  // above the header would be the same defect upside down.
+                  const picker = `cell-picker text-xs${
+                    visibleVillages.length > 8 && rowIndex >= visibleVillages.length - 4
+                      ? ' cell-picker-up'
+                      : ''
+                  }`
+                  return (
                   <tr
                     key={v.village_id}
                     className="row-focus touch-target border-t-default hover:bg-white/5 transition-colors"
@@ -4399,7 +4411,7 @@ export default function ResourcePlanner() {
                       {(() => {
                         const allowed = shipOnlyTo[v.village_id]
                         return (
-                          <details className="text-xs">
+                          <details className={picker}>
                             <summary
                               className={`cursor-pointer whitespace-nowrap pointer-coarse:min-h-11 ${
                                 allowed == null ? 'text-secondary' : 'text-primary'
@@ -4411,7 +4423,7 @@ export default function ResourcePlanner() {
                             <div
                               role="group"
                               aria-label={`Villages ${v.name} may ship to`}
-                              className="mt-1 max-h-40 overflow-y-auto"
+                              className="cell-picker-panel"
                             >
                               {villages
                                 .filter((o) => o.village_id !== v.village_id)
@@ -4474,7 +4486,8 @@ export default function ResourcePlanner() {
                         const problems = relayProblems[v.village_id] ?? []
                         const problemId = `relay-problem-${v.village_id}`
                         return (
-                          <details className="text-xs">
+                          <>
+                          <details className={picker}>
                             <summary
                               className={`cursor-pointer whitespace-nowrap pointer-coarse:min-h-11 ${
                                 problems.length
@@ -4491,7 +4504,7 @@ export default function ResourcePlanner() {
                             <div
                               role="group"
                               aria-label={`Villages ${v.name} forwards material to`}
-                              className="mt-1 max-h-40 overflow-y-auto"
+                              className="cell-picker-panel"
                             >
                               {villages
                                 .filter((o) => o.village_id !== v.village_id)
@@ -4534,12 +4547,20 @@ export default function ResourcePlanner() {
                                 </button>
                               )}
                             </div>
-                            {problems.length > 0 && (
-                              <p id={problemId} className="text-danger mt-1 max-w-xs">
-                                {problems.join(' ')}
-                              </p>
-                            )}
                           </details>
+                          {/* OUTSIDE the disclosure, like every other inline
+                              warning in this table. Inside it, the refusal the
+                              summary names with `aria-describedby` was rendered
+                              only while the picker was open -- a description
+                              nobody could read without opening the thing it was
+                              describing -- and with the panel out of flow it
+                              would have been drawn under one. */}
+                          {problems.length > 0 && (
+                            <p id={problemId} className="text-danger text-xs mt-1 max-w-xs">
+                              {problems.join(' ')}
+                            </p>
+                          )}
+                          </>
                         )
                       })()}
                     </td>
@@ -4600,7 +4621,7 @@ export default function ResourcePlanner() {
                         const override = isFeedstockList(chosen)
                         const halfTyped = Array.isArray(chosen) && chosen.length === 0
                         return (
-                          <details className="text-xs">
+                          <details className={picker}>
                             <summary
                               className={`cursor-pointer whitespace-nowrap pointer-coarse:min-h-11 ${
                                 halfTyped
@@ -4616,7 +4637,7 @@ export default function ResourcePlanner() {
                             <div
                               role="group"
                               aria-label={`Stores NPC may convert from at ${v.name}`}
-                              className="mt-1"
+                              className="cell-picker-panel"
                             >
                               {NPC_FEEDSTOCK_RESOURCES.map((resource) => (
                                 <label
@@ -4709,7 +4730,7 @@ export default function ResourcePlanner() {
                         // entry.
                         const source = describeSpendSource(resolved, role)
                         return (
-                          <details className="text-xs">
+                          <details className={picker}>
                             <summary
                               className={`cursor-pointer whitespace-nowrap pointer-coarse:min-h-11 ${
                                 declaresConsumption(spent) ? 'text-primary' : 'text-secondary'
@@ -4724,7 +4745,7 @@ export default function ResourcePlanner() {
                             <div
                               role="group"
                               aria-label={`What ${v.name} spends per hour`}
-                              className="mt-1"
+                              className="cell-picker-panel"
                             >
                               {CONSUMABLE_RESOURCES.map((resource) => {
                                 const rate = spent?.[resource]
@@ -4817,7 +4838,8 @@ export default function ResourcePlanner() {
                       })()}
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </ScrollableTable>
