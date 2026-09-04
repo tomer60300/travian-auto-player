@@ -4175,13 +4175,26 @@ async def _plan_account(
     if body.trade_office_bonus_per_level == EUROPE2_TEUTON.bonus_per_trade_office_level:
         levelled = sorted(vid for vid, level in trade_office.items() if level > 0)
         if levelled:
+            # Only villages the operator actually SENT a row for. A village
+            # with no config row reads 0 through `.get(vid, 0)` -- which is the
+            # right default for SIZING, because understating capacity
+            # over-provisions merchants and that is the safe direction -- but it
+            # is the wrong village to name here. Naming it says "level 0, read
+            # the base off this one"; if it is really Trade Office 13 the dialog
+            # reads about 9,000, that becomes `merchant_base_capacity`, and
+            # every route in the account is then sized to cargo the merchants
+            # cannot carry. That is account-killer #8, reached THROUGH the
+            # mechanism meant to settle the model.
+            declared = {c.village_id for c in body.config}
             zero_level = sorted(
-                v.village_id for v in body.snapshot if trade_office.get(v.village_id, 0) == 0
+                v.village_id
+                for v in body.snapshot
+                if v.village_id in declared and trade_office.get(v.village_id, 0) == 0
             )
             where = (
                 ", ".join(village_label(vid, names) for vid in zero_level)
                 if zero_level
-                else "a village with no Trade Office"
+                else "a village you have confirmed in-game has no Trade Office"
             )
             extra_findings.append(
                 Finding(
@@ -4193,7 +4206,10 @@ async def _plan_account(
                         f"has never been measured against it, and "
                         f"{len(levelled)} village(s) in this plan have a Trade Office. "
                         f"Read a Marketplace capacity at {where} to settle the base with "
-                        f"no inversion, and one at any levelled village to pin the bonus"
+                        f"no inversion, and one at any levelled village to pin the bonus. "
+                        f"Check in-game that the level really is 0 before entering what you "
+                        f"read: a level nobody has typed also reads 0 here, and a base taken "
+                        f"off a levelled village would be too high for every route"
                     ),
                     detail=(
                         f"base {body.merchant_base_capacity:,} measured, "

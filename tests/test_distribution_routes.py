@@ -1548,6 +1548,32 @@ class TestTheMerchantModelSaysWhenItIsUnpinned:
 
         assert not _findings(res, "merchant_model_uncalibrated")
 
+    def test_a_village_whose_level_was_never_typed_is_not_named(self):
+        """The dangerous half of "unknown is not zero", on the one path where
+        this codebase was not applying its own rule.
+
+        `.get(vid, 0)` is right for SIZING -- understating capacity
+        over-provisions merchants, which is the safe direction, and the field
+        says so. It is wrong for naming a village HERE, because the finding
+        tells the operator to read the base off the village it names. Follow
+        that on a village whose level was never typed and is really Trade Office
+        13, and the dialog reads about 9,000; entered as the base, that is 3.6x
+        too high and every route in the account is sized to cargo the merchants
+        cannot carry -- account-killer #8, arrived at through the very mechanism
+        meant to settle the model.
+        """
+        # 20026 is in the snapshot with no config row of its own.
+        res = self._plan(levels={20003: 13})
+
+        flagged = _findings(res, "merchant_model_uncalibrated")
+        assert flagged, "a levelled village on the default bonus is still flagged"
+        assert "26" not in flagged[0].message, (
+            "a village with no config row must not be offered as the level-0 sample"
+        )
+        # And it still tells the operator what to do, rather than going quiet.
+        assert "confirmed in-game" in flagged[0].message
+        assert "really is 0" in flagged[0].message
+
     def test_a_measured_bonus_is_taken_at_its_word(self):
         """The finding is about the DEFAULT carried over from the profile. An
         operator who calibrated and sent their own number has already done the
