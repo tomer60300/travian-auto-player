@@ -12,6 +12,13 @@
  * read as either zero or the whole day -- the backend refuses a zero-width
  * dispatch window outright, and guessing which of the two the operator meant is
  * how a profile comes to plan for hours it does not own.
+ *
+ * `overnight` lives here for the same reason `coversSmallHours` does: it is a
+ * question ABOUT a profile's hours -- which window is the one the operator
+ * sleeps through, so section 6's rules govern it -- and the derivation is pure
+ * clock arithmetic. Its request-shape builder sits beside it rather than in
+ * `plannerNpc.js`, which is section 7's module; putting a section 6 field
+ * there would be the second place a wire format could be got wrong.
  */
 
 export const MINUTES_IN_DAY = 1440
@@ -76,4 +83,90 @@ export function coversSmallHours(hours) {
   // Sampled on the hour across 01:00-04:00, which is enough: a window is a
   // contiguous arc, so if it holds any of the small hours it holds one of these.
   return [60, 120, 180, 240].some(inside)
+}
+
+/** Does this window run past midnight into the next day? */
+export function windowWrapsMidnight(hours) {
+  const pair = dispatchWindowFor(hours)
+  return pair != null && pair[0] > pair[1]
+}
+
+/** Is this profile the OVERNIGHT one, which section 6's rules govern?
+ *
+ * `declared` is the operator's own answer and it wins; the clock only derives.
+ * The same asymmetry `npc_attended` has, and the backend's own rule --
+ * `is_night_window(window, overnight=...)` in
+ * `services/distribution/night_profile.py` returns the declaration first and
+ * falls back to the wrap.
+ *
+ * The derivation is right for a night stated as one 23:00-07:00 window and
+ * wrong twice over, which is why the declaration exists:
+ *
+ *   * a night SPLIT at midnight. 23:00-00:00 is `[1380, 0]` and does wrap, but
+ *     00:00-07:00 is `[0, 420]` -- the half that runs up to the morning switch,
+ *     wrapping in neither direction. Undeclared, a 600-minute round trip inside
+ *     a 420-minute night is not reported as NIGHT_OVERRUN, and with only the
+ *     pre-midnight half recognised the 60% morning floor is measured at 00:00
+ *     instead of 07:00.
+ *   * a near-24h day profile. `[420, 419]` wraps and is not the night.
+ */
+export function isOvernightProfile(hours, declared) {
+  if (typeof declared === 'boolean') return declared
+  return windowWrapsMidnight(hours)
+}
+
+/** Only the real booleans in a stored overnight map.
+ *
+ * Its own function rather than a shared boolean filter, on the reasoning
+ * `parseOvernight` and `parseAttendance` are two near-identical parsers for:
+ * each field owns its own rule, so a change to one cannot silently move the
+ * other. This map goes straight into the request, and the backend's lax `bool`
+ * would read a stored `"yes"` -- from a hand-edited origin, or a build that
+ * stored it differently -- as a night nobody declared, which puts section 6's
+ * closing deadline on the wrong profile. Dropped silently, because absent is
+ * the resting state and the panel says which way it then derives.
+ */
+export function overnightMapOnly(stored) {
+  const out = {}
+  for (const [name, value] of Object.entries(stored ?? {})) {
+    if (typeof value === 'boolean') out[name] = value
+  }
+  return out
+}
+
+/** `overnight` for a request body or a segment, or nothing at all.
+ *
+ * Omitted when nothing was declared, because absent is what asks the backend
+ * to derive it -- and the derivation is right for the common case, so sending
+ * a computed copy of it would only make the request look like a decision.
+ *
+ * Omitted with no window too, and here the rule is the backend's own refusal
+ * rather than this module's taste: `_overnight_needs_hours_to_be_overnight`
+ * raises on `overnight` without `dispatch_window`, because section 6's
+ * deadline is measured against the window's END and a declaration with no
+ * window decides nothing. (This is NOT the rule `npcAttendedField` used to
+ * have and lost -- that one had no backend behind it and inverted a stated
+ * answer. This one is a 422 if ignored.)
+ */
+export function overnightField({ declared, hasWindow }) {
+  if (!hasWindow) return {}
+  if (typeof declared !== 'boolean') return {}
+  return { overnight: declared }
+}
+
+/** The overnight answer in words, so it is never carried by a widget position.
+ *
+ * Says WHERE the answer came from as well as what it is, because a derived
+ * answer and a declared one are the same boolean with different authority --
+ * and the whole reason the field exists is that the derivation is wrong for a
+ * split night.
+ */
+export function describeOvernight(declared, hours) {
+  if (typeof declared === 'boolean') {
+    return declared ? 'you said this is the night' : 'you said this is not the night'
+  }
+  if (dispatchWindowFor(hours) == null) return 'no hours, so nothing to read it from'
+  return windowWrapsMidnight(hours)
+    ? 'from the hours: this is the night'
+    : 'from the hours: not the night'
 }

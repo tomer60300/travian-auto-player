@@ -395,6 +395,51 @@ describe('mergeSetup with profiles', () => {
     expect(() => roundTrip(doc)).toThrow(/not an answer/)
   })
 
+  it('carries the per-profile overnight declaration through, including false', () => {
+    // Section 6's rules are the overnight profile's, and until now the ONLY
+    // way the backend could know which profile that was came off the clock:
+    // a window that wraps past midnight. That is wrong for a night SPLIT at
+    // midnight -- 00:00-07:00 wraps in neither direction -- so the operator's
+    // own declaration has to travel, and false has to travel with it: a
+    // near-24h day profile (`[420, 419]`) wraps and is not the night.
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        profiles: { Night: NIGHT },
+        profileWindows: { 'Night early': ['00:00', '07:00'] },
+        overnight: { 'Night early': true, Day: false },
+        exportedAt: STAMP,
+      })
+    )
+    expect(setup.overnight).toEqual({ 'Night early': true, Day: false })
+
+    const merged = mergeSetup({ setup, villages: VILLAGES, overnight: {} })
+    expect(merged.overnight).toEqual({ 'Night early': true, Day: false })
+  })
+
+  it('omits the overnight field entirely when no profile has declared', () => {
+    // Absent is the third state here too, and it is the state that asks the
+    // backend to DERIVE. An empty map would import as every profile having
+    // declared nothing, which reads identically on screen but is a different
+    // document.
+    const setup = buildSetup({ villages: VILLAGES, overnight: {}, exportedAt: STAMP })
+    expect('overnight' in setup).toBe(false)
+  })
+
+  it('leaves a profile the file says nothing about overnight for alone', () => {
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, overnight: { Night: true }, exportedAt: STAMP })
+    )
+    const merged = mergeSetup({ setup, villages: VILLAGES, overnight: { Day: false } })
+    expect(merged.overnight).toEqual({ Day: false, Night: true })
+  })
+
+  it('rejects an overnight that is not a boolean rather than guessing one', () => {
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.overnight = { Night: 'yes' }
+    expect(() => roundTrip(doc)).toThrow(/not a declaration/)
+  })
+
   it('carries the windows and the merchant model through', () => {
     const setup = roundTrip(
       buildSetup({

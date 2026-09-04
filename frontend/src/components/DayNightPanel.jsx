@@ -5,7 +5,13 @@ import {
   suggestedAttendance,
   unansweredAttendance,
 } from '../utils/plannerNpc'
-import { coversSmallHours, windowDayShare, dispatchWindowFor, MINUTES_IN_DAY } from '../utils/plannerClock'
+import {
+  coversSmallHours,
+  describeOvernight,
+  dispatchWindowFor,
+  windowDayShare,
+  MINUTES_IN_DAY,
+} from '../utils/plannerClock'
 
 /** The day, as one picture: every profile's hours side by side, and who is
  *  awake during each of them.
@@ -31,6 +37,18 @@ import { coversSmallHours, windowDayShare, dispatchWindowFor, MINUTES_IN_DAY } f
  * the small hours is offered "asleep" as a chip -- and may never decide,
  * because "the operator is asleep" is a fact about the operator.
  *
+ * Section 6's `overnight` is the second answer about these same hours, and it
+ * is asked in the same table for the same reason: which profile is the one the
+ * operator sleeps through decides where the closing deadline and the morning
+ * floor land, and that is a statement about the day as a whole rather than
+ * about whichever profile happens to be selected. Here the clock is allowed to
+ * DERIVE rather than only suggest -- a window that wraps past midnight is the
+ * night, which is right for a night stated as one 23:00-07:00 pair -- and the
+ * declaration overrules it. Seen side by side, a split night's two halves
+ * reading "from the hours: this is the night" above "from the hours: not the
+ * night" is self-evidently wrong, which is the same argument the attendance
+ * column is built on.
+ *
  * Data in, callbacks out, and no effects: it renders from props alone so
  * `renderToString` reaches all of it, unlike the stage it sits in.
  */
@@ -39,10 +57,12 @@ export default function DayNightPanel({
   activeProfile,
   profileWindows,
   profileAttendance,
+  profileOvernight,
   attendanceRequired,
   reservedWindow,
   onWindow,
   onAttendance,
+  onOvernight,
   onReservedWindow,
   onSelectProfile,
 }) {
@@ -68,6 +88,23 @@ export default function DayNightPanel({
     (name) =>
       attendanceFor(profileAttendance, name) === true && coversSmallHours(profileWindows[name])
   )
+  // A night SPLIT at midnight, detected off the clock alone and with nothing
+  // guessed: one profile's window ENDS at 00:00 and another's STARTS there.
+  // The pre-midnight half wraps, so it derives as the night correctly; the
+  // post-midnight half wraps in neither direction and derives as a day
+  // profile. Undeclared, that is a 600-minute round trip inside a 420-minute
+  // night going unreported as NIGHT_OVERRUN, and the 60% morning floor
+  // measured at 00:00 instead of 07:00. Two profiles CAN both be the night --
+  // that is what a split night is -- so this is not a contradiction to
+  // refuse, it is the one derivation that needs a declaration over it.
+  const endsAtMidnight = withHours.some((name) => dispatchWindowFor(profileWindows[name])[1] === 0)
+  const splitNightUndeclared = endsAtMidnight
+    ? withHours.filter(
+        (name) =>
+          dispatchWindowFor(profileWindows[name])[0] === 0 &&
+          typeof profileOvernight?.[name] !== 'boolean'
+      )
+    : []
 
   return (
     <div className="card p-4">
@@ -114,6 +151,18 @@ export default function DayNightPanel({
         </p>
       )}
 
+      {splitNightUndeclared.length > 0 && (
+        <p className="text-warning text-xs mb-3" role="status">
+          {'⚠ '}
+          Your night looks split at midnight, and {splitNightUndeclared.join(', ')}{' '}
+          {splitNightUndeclared.length === 1 ? 'runs' : 'run'} the half after it. A window that
+          does not wrap past midnight reads as a <strong>day</strong> profile, so section
+          6&apos;s rules would not govern it: no closing deadline for its merchants, and the
+          morning floor measured at 00:00 instead of the end of the night. Say so in the
+          overnight column.
+        </p>
+      )}
+
       <ScrollableTable>
         <table className="w-full text-xs">
           <thead className="text-secondary uppercase">
@@ -127,6 +176,12 @@ export default function DayNightPanel({
               >
                 Who is trading
               </th>
+              <th
+                className="text-left px-2"
+                title="Whether this profile is the one you sleep through, so section 6's rules govern it: no latency target, and every merchant home before the window closes. Left on 'from the hours' it is derived from the window wrapping past midnight — right for a night stated as one 23:00-07:00 pair, wrong for the half of a night split at midnight and for a day profile covering almost the whole day."
+              >
+                Overnight
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -135,6 +190,8 @@ export default function DayNightPanel({
               const pair = dispatchWindowFor(hours)
               const share = windowDayShare(hours)
               const answer = attendanceFor(profileAttendance, name)
+              const declaredNight =
+                typeof profileOvernight?.[name] === 'boolean' ? profileOvernight[name] : null
               const suggestion = suggestedAttendance(hours)
               const owed = attendanceRequired && pair != null && answer === null
               // The same question, unanswered, on a profile with no hours. It
@@ -276,6 +333,41 @@ export default function DayNightPanel({
                         </button>
                       </>
                     )}
+                  </td>
+                  {/* Section 6's own answer, beside section 7's because both
+                      are questions ABOUT these hours. Three states, and the
+                      resting one is DERIVE rather than a boolean: the clock is
+                      right for a night stated as one 23:00-07:00 window, and
+                      overriding it is the exception. Disabled where there are
+                      no hours, because the backend refuses a declaration with
+                      no window to measure the deadline against -- and a
+                      disabled field looks disabled. */}
+                  <td className="px-2">
+                    <select
+                      aria-label={`Is ${name} the overnight profile`}
+                      className="input-field w-auto text-xs py-1"
+                      disabled={pair == null}
+                      value={
+                        typeof declaredNight === 'boolean'
+                          ? declaredNight
+                            ? 'night'
+                            : 'day'
+                          : ''
+                      }
+                      onChange={(e) =>
+                        onOvernight(
+                          name,
+                          e.target.value === '' ? null : e.target.value === 'night'
+                        )
+                      }
+                    >
+                      <option value="">From the hours</option>
+                      <option value="night">The night you sleep through</option>
+                      <option value="day">Not the night</option>
+                    </select>
+                    <span className="block text-secondary mt-0.5">
+                      {describeOvernight(declaredNight, hours)}
+                    </span>
                   </td>
                 </tr>
               )

@@ -104,6 +104,8 @@ import {
 import {
   MINUTES_IN_DAY,
   dispatchWindowFor,
+  overnightField,
+  overnightMapOnly,
   windowDayShare,
 } from '../utils/plannerClock'
 import {
@@ -273,11 +275,29 @@ const DEFAULT_WINDOWS = { Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] }
 // this operator is awake for the day and asleep through the night, so the two
 // profiles carry opposite answers and neither is a default.
 //
-// NOT in the setup document, and that is a real gap rather than a decision:
-// the document has no field for it, and adding one means a version bump the
-// server has to read too. Until then it does not follow the operator between
-// origins the way the hours beside it do.
+// It travels in the setup document too (v7), so it follows the operator
+// between origins the way the hours beside it do -- localStorage is scoped to
+// an ORIGIN, and this app is served on :80, :8001, the LAN address and over
+// Tailscale.
 const LS_NPC_ATTENDED = 'planner_npc_attended'
+// Which profile is the one the operator sleeps through: { [profile]: boolean }.
+// Section 6's `overnight`, and the second answer the page could not give --
+// the backend took the field on `PlanRequest` and on every day segment, and
+// `grep -rn overnight frontend/src` found one prose mention, so the fix was
+// API-only and unreachable from here.
+//
+// Absent is the third state and it is the RESTING one: it asks the backend to
+// derive the night from a window that wraps past midnight, which is right for
+// a night stated as one 23:00-07:00 pair. The declaration exists for the two
+// cases the derivation gets wrong -- a night SPLIT at midnight, where
+// 00:00-07:00 wraps in neither direction, and a near-24h day profile
+// (`[420, 419]`) that wraps and is not the night. The operator can create a
+// split night from this page (`addProfile`), so the exact configuration the
+// backend fix exists for was reachable and got the broken answer: a 600-minute
+// round trip inside a 420-minute night went unreported as NIGHT_OVERRUN, and
+// with only the pre-midnight half recognised the 60% morning floor was
+// measured at 00:00 instead of 07:00.
+const LS_OVERNIGHT = 'planner_overnight'
 // Minutes of the day to keep clear of ARRIVALS, so the operator's manual NPC
 // burst is not competing with merchants landing. Account-wide, because it is
 // one person at one marketplace -- unlike the attendance answer above, which
@@ -665,6 +685,11 @@ export default function ResourcePlanner() {
   // account does not have. The plan is refused until every profile with hours
   // says, and the Day & night stage is where it says it.
   const [profileAttendance, setProfileAttendance] = useState({})
+  // Section 6's `overnight`, per profile, on exactly the shape above: absent
+  // means "derive it from the window", which is the resting state and the
+  // right answer for a night stated as one 23:00-07:00 pair. See LS_OVERNIGHT
+  // for the two cases the derivation gets wrong and why the declaration wins.
+  const [profileOvernight, setProfileOvernight] = useState({})
   // The NPC burst window, as an `['HH:MM', 'HH:MM']` pair or null for none.
   // Arrivals avoid it where an alternative exists, and the plan warns when the
   // geometry forces one into it -- so it is a preference the planner weighs,
@@ -935,6 +960,7 @@ export default function ResourcePlanner() {
       setRoleTemplates({})
       setProfiles({ [DEFAULT_PROFILE]: {} })
       setProfileAttendance({})
+      setProfileOvernight({})
       setReservedWindow(null)
       setForeignTargets([])
       setMayRelay({})
@@ -966,6 +992,10 @@ export default function ResourcePlanner() {
     // and the backend's lax `bool` would read a stored "yes" from a
     // hand-edited origin as an attendance nobody declared.
     setProfileAttendance(attendanceMapOnly(loadJson(`${LS_NPC_ATTENDED}::${accountKey}`, {})))
+    // Same discipline, same reason: a stored "yes" from a hand-edited origin
+    // would read as a declared night through the backend's lax `bool`, and
+    // section 6's rules would then govern a profile nobody named.
+    setProfileOvernight(overnightMapOnly(loadJson(`${LS_OVERNIGHT}::${accountKey}`, {})))
     setReservedWindow(loadJson(`${LS_RESERVED_WINDOW}::${accountKey}`, null))
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
@@ -1071,6 +1101,10 @@ export default function ResourcePlanner() {
   }, [profileAttendance, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_OVERNIGHT), profileOvernight)
+  }, [profileOvernight, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_RESERVED_WINDOW), reservedWindow)
   }, [reservedWindow, hydratedKey, accountKey, storageKey])
   // A day-check result is a pure function of these inputs; the moment any of
@@ -1090,6 +1124,16 @@ export default function ResourcePlanner() {
     // snapshot and the allocations, and this list still described that older,
     // narrower request -- so editing a Trade Office level left the green
     // all-clear on screen describing a day computed from the old capacity.
+    //
+    // Section 6's overnight declaration belongs here for the sharper of the
+    // two reasons: per segment it decides both which one is graded against the
+    // closing deadline and when the morning threshold is read. A day check
+    // computed with the post-midnight half of a split night undeclared read
+    // that threshold at 00:00.
+    //
+    // Above the array rather than inside it, on the rule stated at the plan
+    // effect below: `depOrder.js` text-scans the array's whole span, comments
+    // included, and the word "floor" is a `const` further down this file.
   }, [
     profiles,
     profileWindows,
@@ -1110,6 +1154,7 @@ export default function ResourcePlanner() {
     // at all, so a day computed with the night marked awake is a different day.
     // The reserved window moves arrival times, and the day check reads them.
     profileAttendance,
+    profileOvernight,
     reservedWindow,
   ])
   // Same rule for the route sheet, with higher stakes: its rows are copied
@@ -1148,6 +1193,12 @@ export default function ResourcePlanner() {
     // allowance -- so a route set built while it said "awake" prescribes
     // deliveries nothing funds.
     //
+    // profileOvernight is here for the same class of reason: `overnight`
+    // decides whether section 6's rules govern this route set -- no latency
+    // target, and every merchant home before the window closes -- so a sheet
+    // built while the night was undeclared prescribes departures the closing
+    // deadline would have refused.
+    //
     // relayFor and pruneToWindow are here because they were MISSING, and both
     // are in the payload: `relay_for` decides which village forwards whose
     // cargo and `prune_to_window` decides what the run leaves behind. The
@@ -1180,6 +1231,7 @@ export default function ResourcePlanner() {
     profileWindows,
     activeProfile,
     profileAttendance,
+    profileOvernight,
     reservedWindow,
     pruneToWindow,
   ])
@@ -1435,6 +1487,13 @@ export default function ResourcePlanner() {
         // Tailscale the way the hours beside it did, and a save-then-reload
         // lost it silently. Carrying it is what the v7 bump is for.
         npcAttended: profileAttendance,
+        // Section 6's declaration, carried for the same reason and with the
+        // same consequence for losing it: a split night whose post-midnight
+        // half arrives undeclared has its 60% morning floor measured at 00:00
+        // and its overruns unreported. It rides inside v7 rather than raising
+        // the version, which is a debt -- see the note at `doc.overnight` in
+        // `plannerSetup.js` for the server lines a v8 needs.
+        overnight: profileOvernight,
         merchantModel,
         foreignTargets,
         exportedAt: new Date().toISOString(),
@@ -1457,6 +1516,7 @@ export default function ResourcePlanner() {
     profiles,
     profileWindows,
     profileAttendance,
+    profileOvernight,
     merchantModel,
     foreignTargets,
     accountKey,
@@ -1518,6 +1578,7 @@ export default function ResourcePlanner() {
         profiles,
         profileWindows,
         npcAttended: profileAttendance,
+        overnight: profileOvernight,
         foreignTargets,
       })
       setTradeOffice(merged.tradeOffice)
@@ -1535,6 +1596,7 @@ export default function ResourcePlanner() {
       setProfiles(merged.profiles)
       setProfileWindows(merged.profileWindows)
       setProfileAttendance(merged.npcAttended)
+      setProfileOvernight(merged.overnight)
       // Capacity is server-calibrated, so a file that carries a calibration is
       // more trustworthy than this build's default. Absent, the default stands.
       if (merged.merchantModel) {
@@ -1577,6 +1639,7 @@ export default function ResourcePlanner() {
       roleTemplates,
       profiles,
       profileAttendance,
+      profileOvernight,
       profileWindows,
       foreignTargets,
       accountKey,
@@ -1742,6 +1805,19 @@ export default function ResourcePlanner() {
       // Omitted only when nothing has been answered; `buildPlan` refuses to
       // send in that case, so the backend's 422 is a backstop, not the path.
       ...npcAttendedField(attendanceFor(profileAttendance, activeProfile)),
+      // Section 6, and the second field that used to be unsendable: whether
+      // THESE hours are the ones the operator sleeps through, so the closing
+      // deadline and the suspended latency target apply to them. Omitted when
+      // nothing has been declared, which is the resting state and asks the
+      // backend to derive it from the window -- right for a night stated as
+      // one 23:00-07:00 pair. Omitted with no window too, and that half is the
+      // backend's own refusal rather than a convenience: a declaration with no
+      // window has no closing minute to be measured against, so
+      // `_overnight_needs_hours_to_be_overnight` raises on it.
+      ...overnightField({
+        declared: profileOvernight[activeProfile],
+        hasWindow: dispatchWindow != null,
+      }),
       // Kept clear of arrivals for the manual NPC burst. Omitted when unset,
       // and omitted for a zero-width pair: an empty reserved window reserves
       // nothing, so sending one would only make the request look like it
@@ -1858,6 +1934,7 @@ export default function ResourcePlanner() {
     profileWindows,
     activeProfile,
     profileAttendance,
+    profileOvernight,
     reservedWindow,
     pruneToWindow,
   ])
@@ -2028,10 +2105,23 @@ export default function ResourcePlanner() {
         // what the backend refuses on -- and it refuses naming the villages,
         // which is why the caller checks `unanswered` first.
         ...(attended === null ? {} : { npc_attended: attended }),
+        // Section 6's declaration, on the same rule and in the place the
+        // backend puts it: `DaySegmentInput.overnight`, because the hours live
+        // here. `hasWindow` is unconditionally true on a segment -- `window` is
+        // required and a zero-width one is refused above -- so the only thing
+        // that omits it is the operator not having declared, which is what
+        // asks the backend to derive.
+        //
+        // This is the field a SPLIT night needs. 23:00-00:00 wraps and derives
+        // correctly; 00:00-07:00 wraps in neither direction, so undeclared it
+        // was planned as a day segment: no NIGHT_OVERRUN for a 600-minute
+        // round trip inside a 420-minute night, and the 60% morning floor
+        // measured at 00:00 rather than 07:00.
+        ...overnightField({ declared: profileOvernight[name], hasWindow: true }),
       })
     }
     return { segments, skipped, unanswered }
-  }, [profiles, profileWindows, villageRoles, profileAttendance])
+  }, [profiles, profileWindows, villageRoles, profileAttendance, profileOvernight])
 
   // Reads the local trace files the app wrote on previous live runs. Costs
   // nothing against the game, so it is safe to call whenever the operator opens
@@ -2119,13 +2209,22 @@ export default function ResourcePlanner() {
           `${unanswered.join(', ')} has not said. Answer it under Day & night.`
       )
     }
-    // Three fields move to the segments, not two. `npc_attended` is the third
-    // and it was the one left behind: the segments each carry their own, and
-    // the per-segment value is what the backend applies -- so a top-level one
-    // is a claim about hours this request no longer has. That is precisely the
-    // shape `/execute` forbids unknown fields over: a parameter that looks
-    // like it says something and is discarded.
-    const { allocations: _a, dispatch_window: _w, npc_attended: _n, ...rest } = base
+    // FOUR fields move to the segments, not three. `npc_attended` was the one
+    // left behind once; `overnight` is the same shape and would be worse than
+    // discarded -- the top-level `dispatch_window` is stripped here, and
+    // `_overnight_needs_hours_to_be_overnight` REFUSES a declaration with no
+    // window, so leaving it on would 422 the whole run. The segments each
+    // carry their own, and the per-segment value is what the backend applies,
+    // so a top-level one is a claim about hours this request no longer has.
+    // That is precisely the shape `/execute` forbids unknown fields over: a
+    // parameter that looks like it says something and is discarded.
+    const {
+      allocations: _a,
+      dispatch_window: _w,
+      npc_attended: _n,
+      overnight: _o,
+      ...rest
+    } = base
     return { ...rest, segments, prune_to_window: true }
   }, [buildPlanPayload, buildSegments, wholeDay, attendanceIsRequired])
 
@@ -2831,6 +2930,13 @@ export default function ResourcePlanner() {
         // ignores a top-level attendance, which is worse -- a field that
         // reads as an answer and is thrown away.
         npc_attended: _perProfileAttendance,
+        // And section 6's declaration, which is the fourth. Not merely
+        // ignored if left on: with the top-level window stripped, a top-level
+        // `overnight` is exactly what
+        // `_overnight_needs_hours_to_be_overnight` raises on, so the whole
+        // day check would come back 422 over a field the segments already
+        // carry.
+        overnight: _perProfileOvernight,
         ...planInputs
       } = buildPlanPayload()
       const res = await api.post('/distribution/day-check', {
@@ -2917,6 +3023,17 @@ export default function ResourcePlanner() {
       delete next[activeProfile]
       return next
     })
+    // And the overnight declaration, on the same rule: it belongs to the
+    // profile rather than to its old name, and an orphaned `true` inherited by
+    // a future profile that reuses the name would put section 6's closing
+    // deadline on hours nobody declared as the night.
+    setProfileOvernight((prev) => {
+      if (!(activeProfile in prev)) return prev
+      const next = { ...prev }
+      next[name] = next[activeProfile]
+      delete next[activeProfile]
+      return next
+    })
     setActiveProfile(name)
   }
 
@@ -2939,6 +3056,12 @@ export default function ResourcePlanner() {
       return next
     })
     setProfileAttendance((prev) => {
+      if (!(activeProfile in prev)) return prev
+      const next = { ...prev }
+      delete next[activeProfile]
+      return next
+    })
+    setProfileOvernight((prev) => {
       if (!(activeProfile in prev)) return prev
       const next = { ...prev }
       delete next[activeProfile]
@@ -5351,6 +5474,7 @@ export default function ResourcePlanner() {
             activeProfile={activeProfile}
             profileWindows={profileWindows}
             profileAttendance={profileAttendance}
+            profileOvernight={profileOvernight}
             attendanceRequired={attendanceIsRequired}
             reservedWindow={reservedWindow}
             onReservedWindow={setReservedWindow}
@@ -5364,6 +5488,16 @@ export default function ResourcePlanner() {
                 // Unanswered is the ABSENCE of a key, not a stored null: the
                 // map goes into the request, and a null would have to be
                 // filtered out of it somewhere else instead.
+                if (value == null) delete next[name]
+                else next[name] = value
+                return next
+              })
+            }
+            // Same shape, and undeclared is the same absence: it is what asks
+            // the backend to derive the night from the window.
+            onOvernight={(name, value) =>
+              setProfileOvernight((prev) => {
+                const next = { ...prev }
                 if (value == null) delete next[name]
                 else next[name] = value
                 return next

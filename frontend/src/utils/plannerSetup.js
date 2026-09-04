@@ -83,6 +83,18 @@
  * ("ships to nobody"), while "forwards to nobody" says nothing that leaving the
  * field off does not already say.
  *
+ * Version 7 adds `npc_attended`, one answer per profile, as a sibling map
+ * beside `profile_windows` rather than a field on the window pair -- so a
+ * profile can carry an answer before it has hours and the two stay
+ * independently absent.
+ *
+ * `overnight` is the third map in that family and travels the same way: which
+ * profile is the one the operator sleeps through, over the derivation from a
+ * window that wraps past midnight. It is carried WITHOUT a version bump, which
+ * is a debt rather than a decision -- see the note at `doc.overnight` in
+ * `buildSetup` for the exact lines a v8 needs on the server, and why taking
+ * only this half of it would 422 every fresh save.
+ *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
  */
@@ -112,7 +124,11 @@ export const SETUP_VERSION = 7
  * v7 is coupled to the server, which validates the version on write: the
  * `READABLE_VERSIONS` tuple in `src/travian_api/web/routes/planner_setup.py`
  * has to gain 7 in the same breath, or every save comes back 422 "NEWER
- * build". That module's own comment states the coupling from its side. */
+ * build". That module's own comment states the coupling from its side.
+ *
+ * That coupling is why `overnight` travels inside v7 instead of raising this to
+ * 8. Bumping here alone answers 422 on every fresh export; bumping there is a
+ * backend change. The owed work is listed at `doc.overnight` in `buildSetup`. */
 export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
@@ -812,6 +828,7 @@ export function buildSetup({
   profiles,
   profileWindows,
   npcAttended,
+  overnight,
   merchantModel,
   foreignTargets,
   exportedAt,
@@ -914,6 +931,29 @@ export function buildSetup({
   // every profile having answered nothing, which reads identically on screen.
   if (npcAttended && Object.keys(npcAttended).length) {
     doc.npc_attended = npcAttended
+  }
+  // Section 6's own per-profile answer, a third sibling map beside the hours
+  // and the attendance, and omitted-when-empty on the same rule: absent is
+  // "derive it from the window", which is right for a night stated as one
+  // 23:00-07:00 pair and wrong for the half of a split night that wraps in
+  // neither direction. An empty map would import as every profile having
+  // declared nothing, which reads identically and is a different document.
+  //
+  // VERSION DEBT, stated where it is incurred. By the rule this file states
+  // above -- "the version still has to rise when a field is added" -- and by
+  // v7's own justification, this field earns a v8: a build that cannot read it
+  // loads the document, drops the declaration, and the operator saves from
+  // there, at which point the split night silently measures its 60% morning
+  // floor at 00:00 again. The bump is deliberately NOT taken here, because it
+  // is not one-sided: `READABLE_VERSIONS` in
+  // `src/travian_api/web/routes/planner_setup.py` has to gain 8 in the same
+  // breath or every fresh export comes back 422 "NEWER build", and its three
+  // pins in `tests/test_planner_setup_store.py` move with it. Until then the
+  // field rides as an unknown key, which the server tolerates by design --
+  // `SetupDocument` ignores extras and `_validate` stores the raw body -- so
+  // it round trips through a save today.
+  if (overnight && Object.keys(overnight).length) {
+    doc.overnight = overnight
   }
   if (merchantModel) doc.merchant_model = merchantModel
   // A tribute is entirely operator-supplied -- the game will not say that an ally
@@ -1239,6 +1279,31 @@ function parseAttendance(raw, where) {
   return out
 }
 
+/** One boolean per profile saying which one the operator sleeps through.
+ *
+ * Refused rather than coerced, on `parseAttendance`'s reasoning and for a
+ * consequence of the same size: a document is the operator ASSERTING an
+ * answer, and section 6's rules -- no latency target, every merchant home
+ * before the window closes -- are applied to whichever profile this names.
+ */
+function parseOvernight(raw, where) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new SetupFileError(`${where} is not a map of declarations.`)
+  }
+  const out = {}
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value !== 'boolean') {
+      throw new SetupFileError(
+        `${where}["${name}"] is ${JSON.stringify(value)}, which is not a declaration. ` +
+          `It must be true (this is the night you sleep through), false (this is not ` +
+          `the night), or absent to let the window decide.`
+      )
+    }
+    out[name] = value
+  }
+  return out
+}
+
 /** Parse and validate a setup document. Throws rather than half-loading.
  *
  * Out-of-range levels are rejected, not clamped. Clamping down would be the
@@ -1493,6 +1558,7 @@ export function parseSetup(text) {
     raw.profile_windows == null ? {} : parseWindows(raw.profile_windows, 'profile_windows')
   const npcAttended =
     raw.npc_attended == null ? {} : parseAttendance(raw.npc_attended, 'npc_attended')
+  const overnight = raw.overnight == null ? {} : parseOvernight(raw.overnight, 'overnight')
 
   let merchantModel = null
   if (raw.merchant_model != null) {
@@ -1548,6 +1614,7 @@ export function parseSetup(text) {
     profiles,
     profileWindows,
     npcAttended,
+    overnight,
     merchantModel,
     foreignTargets,
   }
@@ -1578,6 +1645,7 @@ export function mergeSetup({
   profiles,
   profileWindows,
   npcAttended,
+  overnight,
   foreignTargets,
 }) {
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
@@ -1653,6 +1721,7 @@ export function mergeSetup({
   const nextProfiles = { ...(profiles ?? {}) }
   const nextWindows = { ...(profileWindows ?? {}) }
   const nextAttendance = { ...(npcAttended ?? {}) }
+  const nextOvernight = { ...(overnight ?? {}) }
   const profilesLoaded = []
   const droppedVillages = new Set()
   for (const [name, alloc] of Object.entries(setup.profiles ?? {})) {
@@ -1678,6 +1747,12 @@ export function mergeSetup({
   // beside it do. False overwrites, because false is an answer.
   for (const [name, answer] of Object.entries(setup.npcAttended ?? {})) {
     nextAttendance[name] = answer
+  }
+  // Per profile and merged, on exactly the rule above. False overwrites here
+  // too, and it has to: false is what keeps a near-24h day profile out of
+  // section 6's rules when its window happens to wrap.
+  for (const [name, declared] of Object.entries(setup.overnight ?? {})) {
+    nextOvernight[name] = declared
   }
 
   // A role the file names replaces the template on screen wholesale, on the
@@ -1706,6 +1781,7 @@ export function mergeSetup({
     profiles: nextProfiles,
     profileWindows: nextWindows,
     npcAttended: nextAttendance,
+    overnight: nextOvernight,
     merchantModel: setup.merchantModel ?? null,
     // Replaced wholesale, not merged. Merging two tribute lists would either
     // double an obligation or leave a target the operator deleted still being
