@@ -174,6 +174,63 @@ describe('FullDayCheck', () => {
     )
     expect(out).toContain('Not run yet')
   })
+
+  // `crop_ceilings` is typed HERE now -- it used to be column 10 of the Account
+  // table, two stages from the only column and the only warning that read it.
+  // Which is why the crop table can no longer be gated on a check having run:
+  // the level has to be typable before the simulation it will be graded against.
+  // `crop_ceilings` is typed HERE now -- it used to be column 10 of the Account
+  // table, two stages from the only column and the only warning that read it.
+  // Which is why the crop table can no longer be gated on a check having run:
+  // the level has to be typable BEFORE the simulation it will be graded against.
+  //
+  // These two assert on the MARKUP rather than through `text()`, because an
+  // input carries its name and its value in attributes and `text()` strips
+  // them -- and an unnamed box is the defect `getByLabel` exists to catch.
+  it('offers the alert level before the simulation has ever run', () => {
+    const html = renderToString(
+      <FullDayCheck
+        dayCheck={null}
+        dayChecking={false}
+        onRun={() => {}}
+        cropCeilings={{}}
+        onCropCeiling={() => {}}
+        villages={[{ village_id: 20002, name: '02' }]}
+      />
+    )
+    expect(html).toContain('aria-label="Crop stock alert level for 02"')
+    // And the computed columns say so rather than printing a fabricated zero.
+    expect(html).toContain('not simulated yet')
+  })
+
+  it('renders the typed level in the box', () => {
+    const html = renderToString(
+      <FullDayCheck
+        dayCheck={{
+          ...dayCheck,
+          villages: [
+            {
+              village_id: 11,
+              village_name: '11',
+              resource: 'crop',
+              low: 100,
+              high: 400000,
+              daily_net: 0,
+              settled: true,
+            },
+          ],
+        }}
+        dayChecking={false}
+        onRun={() => {}}
+        cropCeilings={{ 11: 300000 }}
+        onCropCeiling={() => {}}
+        villages={[{ village_id: 11, name: '11', crop_stock: 120000 }]}
+      />
+    )
+    expect(html).toContain('value="300000"')
+    // 400,000 is over the 300,000 level, so the row says so in words.
+    expect(html).toContain('crosses your alert')
+  })
 })
 
 describe('NightOverrunTable', () => {

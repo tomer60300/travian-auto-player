@@ -3842,9 +3842,11 @@ export default function ResourcePlanner() {
 
       {stage === 'snapshot' && villages.length > 0 && (
         <div className="card p-4 relative overflow-x-auto">
-          {/* Trade Office and Crop alert below are typed by hand and stored per
-              origin, so they do not follow you between :80, :8001, the LAN
-              address or Tailscale. Save them once and reload them instead. */}
+          {/* Every owned column below is typed by hand and stored per origin, so
+              it does not follow you between :80, :8001, the LAN address or
+              Tailscale. Save them once and reload them instead. (The crop alert
+              level used to be here too; it is typed on Day & night now, in the
+              one column that reads it.) */}
           {/* The account in one line. Every number here is a fact the operator
               otherwise derives by scanning the rows, and each problem count is
               a button that isolates exactly those rows. */}
@@ -4180,12 +4182,6 @@ export default function ResourcePlanner() {
                     Max busy
                   </th>
                   <th
-                    className="text-right px-2"
-                    title="Alert when this village's crop stock would cross this level (e.g. your NPC trigger). Used by the full-day check."
-                  >
-                    Crop alert
-                  </th>
-                  <th
                     className="text-left px-2"
                     title="Where this village may send. Unrestricted by default; once restricted it ships to the ticked villages only, and a restriction with nothing ticked ships to nobody. Tributes are governed by their own exclusions."
                   >
@@ -4382,23 +4378,6 @@ export default function ResourcePlanner() {
                           </>
                         )
                       })()}
-                    </td>
-                    <td className="text-right px-2">
-                      <input
-                        type="number"
-                        min="0"
-                        aria-label={`Crop stock alert level for ${v.name}`}
-                        placeholder="none"
-                        className="input-field w-28 text-right text-xs py-1"
-                        value={cropCeilings[v.village_id] ?? ''}
-                        onChange={(e) =>
-                          setCropCeilings((prev) => ({
-                            ...prev,
-                            [v.village_id]:
-                              e.target.value === '' ? undefined : Number(e.target.value),
-                          }))
-                        }
-                      />
                     </td>
                     <td className="px-2">
                       {/* Owned, like the Trade Office level. Nothing stored is the
@@ -6089,6 +6068,14 @@ export default function ResourcePlanner() {
             dayChecking={dayChecking}
             onRun={runDayCheck}
             cropCeilings={cropCeilings}
+            onCropCeiling={(villageId, raw) =>
+              setCropCeilings((prev) => ({
+                ...prev,
+                // Emptied is UNKNOWN, not zero: 0 says "alert the moment this
+                // village holds any crop at all", which is a claim.
+                [villageId]: raw === '' ? undefined : Number(raw),
+              }))
+            }
             villages={villages}
           />
         </div>

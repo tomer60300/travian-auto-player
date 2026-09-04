@@ -209,3 +209,71 @@ test.describe('the night derivation sits beside the hours it derives from', () =
     await expect(page.getByText(/This profile runs 16h of the day/)).toHaveCount(0)
   })
 })
+
+test.describe('the crop alert level is typed where it is read', () => {
+  test.use({ viewport: { width: 1440, height: 1200 } })
+
+  // It was column 10 of the Account table. The only things that read it -- the
+  // full-day check's ALERT AT column and its "crosses its crop ceiling at
+  // 04:00" warning -- are two stages away on Day & night.
+  test('it is on Day & night, and gone from the Account table', async ({ page }) => {
+    await isolatePlanning(page)
+    await seed(page)
+    await page.goto('/resource-planner')
+
+    await expect(page.getByLabel('Crop stock alert level for 02')).toHaveCount(0)
+    await expect(page.getByRole('columnheader', { name: 'Crop alert' })).toHaveCount(0)
+
+    await stageTab(page, 'Day & night').click()
+    await expect(page.getByLabel('Crop stock alert level for 02')).toBeVisible()
+  })
+
+  // The table it lives in used to be gated on a simulation having run, so
+  // moving the input there without this would have made it untypable until the
+  // operator pressed a button they had no reason to press first.
+  test('it is typable before the simulation has ever run, and survives it', async ({ page }) => {
+    const dayChecks = []
+    await isolate(page, async (path, route) => {
+      if (path.endsWith('/distribution/day-check')) {
+        dayChecks.push(route.request().postDataJSON())
+        await route.fulfill({
+          json: {
+            morning_floor: 0.6,
+            pre_night_baseline: 0.25,
+            morning_shortfalls: [],
+            pre_night_over_baseline: [],
+            night_overruns: [],
+            warnings: [],
+            skipped: [],
+            villages: [
+              {
+                village_id: 20002,
+                village_name: '02',
+                resource: 'crop',
+                low: 1000,
+                high: 250000,
+                daily_net: 12,
+                settled: true,
+              },
+            ],
+          },
+        })
+        return 'handled'
+      }
+      return undefined
+    })
+    await seed(page)
+    await page.goto('/resource-planner')
+    await stageTab(page, 'Day & night').click()
+
+    // Before any run: the box is there and the computed columns say so.
+    await expect(page.getByText('not simulated yet').first()).toBeVisible()
+    await page.getByLabel('Crop stock alert level for 02').fill('300000')
+
+    await page.getByRole('button', { name: /^Run \(0 requests\)/ }).click()
+    await expect.poll(() => dayChecks.length).toBe(1)
+    expect(dayChecks[0].crop_ceilings).toEqual({ 20002: 300000 })
+    // And the box still holds it once the rows are real.
+    await expect(page.getByLabel('Crop stock alert level for 02')).toHaveValue('300000')
+  })
+})

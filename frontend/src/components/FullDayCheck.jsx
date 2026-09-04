@@ -30,9 +30,31 @@ const signed = (n) => (n == null ? '—' : `${n > 0 ? '+' : ''}${Math.round(n).t
  * derivation uses as its baseline and ceiling, and a second copy in the view
  * would let the panel disagree with the plan it is describing.
  */
-export default function FullDayCheck({ dayCheck, dayChecking, onRun, cropCeilings, villages }) {
+export default function FullDayCheck({
+  dayCheck,
+  dayChecking,
+  onRun,
+  cropCeilings,
+  onCropCeiling,
+  villages,
+}) {
   const morningFloor = dayCheck?.morning_floor ?? null
   const preNightBaseline = dayCheck?.pre_night_baseline ?? null
+  // The crop rows, with or without a check. `crop_ceilings` is TYPED here now
+  // -- it used to be column 10 of the Account table, two stages from the only
+  // thing that reads it: this column and the "crosses its crop ceiling at
+  // 04:00" warning above are its entire consequence, and both are here.
+  //
+  // Which means the table can no longer be gated on `dayCheck`: an operator who
+  // has not run the simulation still has to be able to type the level the
+  // simulation will be graded against. The computed columns read em-dash until
+  // there is something to compute.
+  const cropRows = dayCheck
+    ? dayCheck.villages.filter((t) => t.resource === 'crop')
+    : (villages ?? []).map((v) => ({
+        village_id: v.village_id,
+        village_name: v.name || String(v.village_id),
+      }))
 
   return (
     <div className="card p-4">
@@ -134,7 +156,7 @@ export default function FullDayCheck({ dayCheck, dayChecking, onRun, cropCeiling
         />
       )}
 
-      {dayCheck && (
+      {cropRows.length > 0 && (
         <ScrollableTable>
           <table className="w-full text-xs">
             <thead className="text-secondary uppercase">
@@ -143,17 +165,19 @@ export default function FullDayCheck({ dayCheck, dayChecking, onRun, cropCeiling
                 <th className="text-right px-2">Crop now</th>
                 <th className="text-right px-2">Day swing (low → high)</th>
                 <th className="text-right px-2">Drift/day</th>
-                <th className="text-right px-2" title="Your alert level from the Account stage">
+                <th
+                  className="text-right px-2"
+                  title="Alert when this village's crop stock would cross this level (e.g. your NPC trigger). Typed here, because this column and the warning above are the only things that read it."
+                >
                   Alert at
                 </th>
               </tr>
             </thead>
             <tbody>
-              {dayCheck.villages
-                .filter((t) => t.resource === 'crop')
+              {cropRows
                 .map((t) => {
-                  const ceiling = Number(cropCeilings[t.village_id]) || null
-                  const nearAlert = ceiling != null && t.high >= ceiling
+                  const ceiling = Number(cropCeilings?.[t.village_id]) || null
+                  const nearAlert = ceiling != null && t.high != null && t.high >= ceiling
                   return (
                     <tr
                       key={t.village_id}
@@ -185,14 +209,20 @@ export default function FullDayCheck({ dayCheck, dayChecking, onRun, cropCeiling
                         {fmt(villages.find((v) => v.village_id === t.village_id)?.crop_stock ?? 0)}
                       </td>
                       <td className="text-right px-2 font-mono">
-                        {fmt(t.low)} → {fmt(t.high)}
-                        {!t.settled && (
-                          <span
-                            className="text-warning ml-1"
-                            title="Still drifting at the simulation horizon — the drift column is the story"
-                          >
-                            ↗
-                          </span>
+                        {t.high == null ? (
+                          <span className="text-secondary">not simulated yet</span>
+                        ) : (
+                          <>
+                            {fmt(t.low)} → {fmt(t.high)}
+                            {!t.settled && (
+                              <span
+                                className="text-warning ml-1"
+                                title="Still drifting at the simulation horizon — the drift column is the story"
+                              >
+                                ↗
+                              </span>
+                            )}
+                          </>
                         )}
                       </td>
                       <td
@@ -201,13 +231,23 @@ export default function FullDayCheck({ dayCheck, dayChecking, onRun, cropCeiling
                           // into the cap or the alert, down walks toward an
                           // empty granary. Green would read as "fine" about a
                           // village slowly starving.
-                          Math.abs(t.daily_net) < 1 ? 'text-secondary/60' : 'text-warning'
+                          t.daily_net == null || Math.abs(t.daily_net) < 1
+                            ? 'text-secondary/60'
+                            : 'text-warning'
                         }`}
                       >
-                        {signed(t.daily_net)}
+                        {t.daily_net == null ? '—' : signed(t.daily_net)}
                       </td>
-                      <td className="text-right px-2 font-mono text-secondary">
-                        {ceiling != null ? fmt(ceiling) : '—'}
+                      <td className="text-right px-2">
+                        <input
+                          type="number"
+                          min="0"
+                          aria-label={`Crop stock alert level for ${t.village_name}`}
+                          placeholder="none"
+                          className="input-field w-28 text-right text-xs py-1"
+                          value={cropCeilings?.[t.village_id] ?? ''}
+                          onChange={(e) => onCropCeiling(t.village_id, e.target.value)}
+                        />
                       </td>
                     </tr>
                   )
@@ -218,9 +258,9 @@ export default function FullDayCheck({ dayCheck, dayChecking, onRun, cropCeiling
       )}
 
       {!dayCheck && !dayChecking && (
-        <p className="text-secondary text-xs italic">
+        <p className="text-secondary text-xs italic mt-2">
           Not run yet. It costs no game requests — everything comes from the snapshot you
-          already hold.
+          already hold. The alert levels above are read when it runs.
         </p>
       )}
       <p className="text-secondary text-[11px] mt-2">

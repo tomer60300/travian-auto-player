@@ -221,7 +221,7 @@ async function openDisclosures(page) {
  *  table and the World & merchants bar -- all three surfaces measured here. */
 async function openAccount(page) {
   await page.goto('/resource-planner')
-  await expect(page.getByLabel('Crop stock alert level for 02')).toBeVisible()
+  await expect(page.getByLabel('Trade Office level for 02')).toBeVisible()
 }
 
 async function buildPlan(page, sent) {
@@ -243,10 +243,12 @@ test.describe('a blank box is unknown; a typed zero is an answer', () => {
     await seed(page)
     await openAccount(page)
 
+    // Day & night, in the one column that reads it: the alert level used to be
+    // column 10 of the Account table, two stages from its only consequence.
+    await page.getByRole('button', { name: 'Day & night' }).click()
     await page.getByLabel('Crop stock alert level for 02').fill('0')
     await page.getByLabel('Crop stock alert level for 11').fill('1500000')
 
-    await page.getByRole('button', { name: 'Day & night' }).click()
     await page.getByRole('button', { name: /^Run \(0 requests\)$/ }).click()
     await expect.poll(() => sent.dayCheck.length).toBe(1)
 
