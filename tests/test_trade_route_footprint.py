@@ -20,6 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from travian_api.exceptions import NetworkError
 from travian_api.services.distribution.allocation import Resource
 from travian_api.services.trade_route_service import (
     MARKETPLACE_READBACK_QUERY,
@@ -89,7 +90,11 @@ class _CountingClient:
         self.waits: list[str] = []
         self.settings = SimpleNamespace(base_url="https://example.invalid")
         self.human_delay = SimpleNamespace(wait=self._wait)
-        self.activity_scheduler = SimpleNamespace(log_activity=lambda _s: None)
+        # Recorded, not discarded: every request this service makes is billed
+        # to the daily activity ceiling, and "how much traffic did that cost"
+        # is exactly what this file is about.
+        self.logged_activity: list[float] = []
+        self.activity_scheduler = SimpleNamespace(log_activity=self.logged_activity.append)
 
     async def _wait(self, _action, reason=""):
         # Pacing is what keeps a burst from looking like a burst. Recorded so a
@@ -321,3 +326,91 @@ class TestAnUnreadableAnswerIsNeverSilentlyEmpty:
         service, _ = _service(["<html/>", "<html><body>login please</body></html>"])
         with pytest.raises(MarketplaceUnreadable):
             asyncio.run(service.list_existing_routes(20003))
+
+
+class TestAFailedReadIsBilledToo:
+    """A read that raised spent its request exactly as one that answered.
+
+    This is the module's own argument for billing reads at all, pointed at the
+    failures: they consumed a real throttler gap, and the daily ceiling is
+    SHARED with the farm-list and oasis loops, so under-counting here silently
+    licenses THOSE to overspend. A NetworkError refunds nothing.
+
+    Exactly once is the property, in both directions: a read that failed
+    half-way through its two GETs must not be billed twice, and one that
+    answered must not be billed at all over again.
+    """
+
+    def _refusing_get(self, client, fail_on: int):
+        """A get_html that answers normally until the *fail_on*-th call."""
+        seen = {"n": 0}
+        real = client.get_html
+
+        async def get_html(path, **kwargs):
+            seen["n"] += 1
+            if seen["n"] == fail_on:
+                client.calls.append(("GET", path))
+                raise NetworkError("HTTP 500: the game said no")
+            return await real(path, **kwargs)
+
+        return get_html
+
+    def test_a_village_view_that_fails_is_still_billed(self):
+        service, client = _service([])
+        client.get_html = self._refusing_get(client, fail_on=1)
+
+        with pytest.raises(NetworkError):
+            asyncio.run(service.open_marketplace(20003))
+
+        assert client.calls == [("GET", "/dorf2.php?newdid=20003")]
+        assert len(client.logged_activity) == 1, "a failed read is not a free read"
+        assert client.logged_activity[0] >= 0.0
+
+    def test_a_marketplace_get_that_fails_after_the_village_view_is_billed_once(self):
+        # Two requests went out and one billing covers the pair, exactly as on
+        # the success path -- the span is what is billed, not the count.
+        service, client = _service([EMPTY_MARKETPLACE])
+        client.get_html = self._refusing_get(client, fail_on=2)
+
+        with pytest.raises(NetworkError):
+            asyncio.run(service.open_marketplace(20003))
+
+        assert len(client.calls) == 2
+        assert len(client.logged_activity) == 1
+
+    def test_a_read_back_that_fails_is_still_billed(self):
+        service, client = _service([])
+
+        async def refuse(path, _payload, **_kwargs):
+            client.calls.append(("POST", path))
+            raise NetworkError("HTTP 500: the game said no")
+
+        client.post_json = refuse
+
+        with pytest.raises(NetworkError):
+            asyncio.run(service.refresh_marketplace(20003))
+
+        assert client.calls == [("POST", GRAPHQL)]
+        assert len(client.logged_activity) == 1
+
+    def test_an_unreadable_answer_is_billed_exactly_once(self):
+        from travian_api.services.trade_route_service import MarketplaceUnreadable
+
+        # The request succeeded and the BODY was the problem. Already billed
+        # before this raise, so the guard is against billing it twice.
+        service, client = _service([], [{"errors": [{"message": "nope"}]}])
+
+        with pytest.raises(MarketplaceUnreadable):
+            asyncio.run(service.refresh_marketplace(20003))
+
+        assert len(client.logged_activity) == 1
+
+    def test_a_read_that_answers_is_billed_once_per_method(self):
+        # The regression anchor: open_marketplace is two GETs and one billing,
+        # refresh_marketplace is one POST and one billing.
+        service, client = _service([EMPTY_MARKETPLACE, EMPTY_MARKETPLACE], [_readback(20003)])
+        asyncio.run(service.list_existing_routes(20003))
+        assert len(client.logged_activity) == 1
+
+        asyncio.run(service.refresh_marketplace(20003))
+        assert len(client.logged_activity) == 2

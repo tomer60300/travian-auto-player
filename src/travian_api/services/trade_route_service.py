@@ -345,27 +345,37 @@ class TradeRouteService:
         newdid_amp = f"&newdid={village_id}" if village_id else ""
         base = self.http_client.settings.base_url.rstrip("/")
         village_view = f"/dorf2.php{newdid_q}"
-        await self.http_client.get_html(village_view)
-        # `t=3` is the trade-route tab. Without it we never load the tab the
-        # routes live on -- so the reconciler read a page that cannot contain
-        # them, and a server-side "did this session render the trade-route tab
-        # before POSTing to it?" check would fail outright.
-        path = f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}"
-        # Pin the second GET to the village view we just loaded, rather than
-        # letting BrowserHeaders supply it. The two are the same value only in a
-        # quiet session: this GET waits out a throttler gap BEFORE its headers
-        # are built, and the account-wide "last page" is one field shared with
-        # every concurrent operation -- so a farm loop or queue poll landing in
-        # that window sends this navigation out referred from /dorf1.php. The
-        # same hazard `_marketplace_referer` closes on the writes, closed on the
-        # read that establishes them.
-        html = await self.http_client.get_html(path, referer=f"{base}{village_view}")
-        self._marketplace_referer[village_id] = f"{base}{path}"
-        # Reads bill the ceiling too. They were free, so an execute run reported
-        # roughly half the traffic it actually spent -- and the daily ceiling is
-        # shared with the farm and oasis loops, so under-reporting here lets
-        # THOSE overspend. Each of these consumed a real throttler gap.
-        self._log_activity(started)
+        try:
+            await self.http_client.get_html(village_view)
+            # `t=3` is the trade-route tab. Without it we never load the tab the
+            # routes live on -- so the reconciler read a page that cannot contain
+            # them, and a server-side "did this session render the trade-route tab
+            # before POSTing to it?" check would fail outright.
+            path = f"/build.php?gid={MARKETPLACE_GID}&t=3{newdid_amp}"
+            # Pin the second GET to the village view we just loaded, rather than
+            # letting BrowserHeaders supply it. The two are the same value only in a
+            # quiet session: this GET waits out a throttler gap BEFORE its headers
+            # are built, and the account-wide "last page" is one field shared with
+            # every concurrent operation -- so a farm loop or queue poll landing in
+            # that window sends this navigation out referred from /dorf1.php. The
+            # same hazard `_marketplace_referer` closes on the writes, closed on the
+            # read that establishes them.
+            html = await self.http_client.get_html(path, referer=f"{base}{village_view}")
+            self._marketplace_referer[village_id] = f"{base}{path}"
+        finally:
+            # Reads bill the ceiling too. They were free, so an execute run reported
+            # roughly half the traffic it actually spent -- and the daily ceiling is
+            # shared with the farm and oasis loops, so under-reporting here lets
+            # THOSE overspend. Each of these consumed a real throttler gap.
+            #
+            # On the way out rather than on success: a read that RAISED spent the
+            # same requests and the same gaps, and the game merely answered badly.
+            # On the `finally` rather than in an except branch, so it covers
+            # whatever the transport raises next, and stays one call site -- which
+            # is what makes 'exactly once' hold by construction. A read that never
+            # went out still costs nothing: `started` is taken just above the
+            # first request.
+            self._log_activity(started)
         return html
 
     async def refresh_marketplace(self, village_id: int) -> dict[str, Any]:
@@ -393,21 +403,24 @@ class TradeRouteService:
         page model's.
         """
         started = time.monotonic()
-        response = await self.http_client.post_json(
-            "/api/v1/graphql",
-            # `variables` is absent on purpose: the client's call passes none, and
-            # JSON.stringify drops an undefined value, so the real body has this
-            # one key. An extra key is a fingerprint like any other.
-            {"query": MARKETPLACE_READBACK_QUERY},
-            # An API request never advances page context, so this one must state
-            # where it is issued from: the marketplace tab, which is the only
-            # page whose script fires this query. Falling back to the
-            # account-wide last page would send it referred from whatever a
-            # concurrent loop touched during the write's 3-20s pacing delay.
-            referer=self._marketplace_referer.get(village_id),
-        )
-        # Reads bill the ceiling too -- this one consumed a real throttler gap.
-        self._log_activity(started)
+        try:
+            response = await self.http_client.post_json(
+                "/api/v1/graphql",
+                # `variables` is absent on purpose: the client's call passes none, and
+                # JSON.stringify drops an undefined value, so the real body has this
+                # one key. An extra key is a fingerprint like any other.
+                {"query": MARKETPLACE_READBACK_QUERY},
+                # An API request never advances page context, so this one must state
+                # where it is issued from: the marketplace tab, which is the only
+                # page whose script fires this query. Falling back to the
+                # account-wide last page would send it referred from whatever a
+                # concurrent loop touched during the write's 3-20s pacing delay.
+                referer=self._marketplace_referer.get(village_id),
+            )
+        finally:
+            # Reads bill the ceiling too -- this one consumed a real throttler gap,
+            # answered or not. Same shape and same reasoning as open_marketplace.
+            self._log_activity(started)
         view = response.get("data") if isinstance(response, dict) else None
         if not isinstance(view, dict):
             raise MarketplaceUnreadable(
