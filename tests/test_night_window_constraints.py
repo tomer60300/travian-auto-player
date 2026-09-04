@@ -58,7 +58,12 @@ from travian_api.services.distribution.storage import (
     pre_night_overfills,
     simulate_profile_cycle,
 )
-from travian_api.web.routes.distribution import DayCheckRequest, post_day_check
+from travian_api.web.routes.distribution import (
+    DayCheckRequest,
+    ExecuteRequest,
+    post_day_check,
+    post_execute,
+)
 
 USER = SimpleNamespace(id=1)
 DAY_WINDOW = (7 * 60, 23 * 60)
@@ -888,13 +893,19 @@ class TestTheNightsEndsDoNotDependOnListOrder:
 # -- The deadline is 07:00, not whenever this half of the night ends ----------
 
 
-def _split_night_shipping_body(one_way_fields):
+def _split_night_shipping_doc(one_way_fields, *, after_midnight_start=0, roles=False):
     """A split night where the PRE-midnight half is the one that ships.
 
     The existing split-night fixture ships only after midnight, which is why
     nothing caught this: for the (1380, 0) half `_window_length` is 60, so any
     round trip over an hour was reported as missing section 6's deadline -- at
     12 fields/h, every route beyond 6 fields.
+
+    `after_midnight_start` opens a GAP between the halves -- 30 leaves
+    00:00-00:30 running on production alone, which the overlap check allows by
+    design -- so the declarations stop chaining and the night has no single
+    close. `roles` declares the two villages so section 6's state rules have
+    something to measure, which is what the gap warning used to be gated on.
     """
 
     def village(vid, name, x, crop_rate):
@@ -923,30 +934,40 @@ def _split_night_shipping_body(one_way_fields):
             str(ARMY): {"mode": "remainder"},
         }
     }
-    return DayCheckRequest.model_validate(
-        {
-            "snapshot": [
-                village(HUB, "02", 0, 1_000),
-                village(ARMY, "03", one_way_fields, 0),
-            ],
-            "config": [{"village_id": HUB}, {"village_id": ARMY}],
-            "segments": [
-                {"name": "Day", "window": list(DAY_WINDOW), "allocations": {}, "overnight": False},
-                {
-                    "name": "Night before midnight",
-                    "window": list(NIGHT_BEFORE_MIDNIGHT),
-                    "allocations": ships,
-                    "overnight": True,
-                },
-                {
-                    "name": "Night after midnight",
-                    "window": list(NIGHT_AFTER_MIDNIGHT),
-                    "allocations": {},
-                    "overnight": True,
-                },
-            ],
-        }
-    )
+    return {
+        "snapshot": [
+            village(HUB, "02", 0, 1_000),
+            village(ARMY, "03", one_way_fields, 0),
+        ],
+        "config": (
+            [
+                {"village_id": HUB, "role": "capital"},
+                {"village_id": ARMY, "role": "troops_off"},
+            ]
+            if roles
+            else [{"village_id": HUB}, {"village_id": ARMY}]
+        ),
+        "roles": {"capital": {}, "troops_off": {}} if roles else {},
+        "segments": [
+            {"name": "Day", "window": list(DAY_WINDOW), "allocations": {}, "overnight": False},
+            {
+                "name": "Night before midnight",
+                "window": list(NIGHT_BEFORE_MIDNIGHT),
+                "allocations": ships,
+                "overnight": True,
+            },
+            {
+                "name": "Night after midnight",
+                "window": [after_midnight_start, NIGHT_AFTER_MIDNIGHT[1]],
+                "allocations": {},
+                "overnight": True,
+            },
+        ],
+    }
+
+
+def _split_night_shipping_body(one_way_fields, **kw):
+    return DayCheckRequest.model_validate(_split_night_shipping_doc(one_way_fields, **kw))
 
 
 class TestTheClosingDeadlineIsTheNightsEnd:
@@ -1018,3 +1039,115 @@ class TestTheClosingDeadlineIsTheNightsEnd:
         rows = [r for r in res.night_overruns if r.origin == HUB]
         assert rows, res.warnings
         assert rows[0].overrun_minutes == pytest.approx(70.0)
+
+
+# -- A night that does not chain is said out loud, by both endpoints ----------
+
+
+class TestAGappedNightIsReportedWhoeverIsAsking:
+    """Typed `[1380, 0]` + `[30, 420]`, a 30-minute gap the overlap check allows
+    by design. The declarations then do not chain, `_night_close_minute` is
+    None, and every half falls back to its own end.
+
+    Three holes, all measured on that body:
+
+    * the warning was gated on `floor_villages`, so an operator who has
+      declared no roles got a bare CRITICAL for merchants home at 04:00 reading
+      "the morning starts with merchants still on the road" -- the exact
+      message 595f298 exists to eliminate -- with nothing naming the cause;
+    * with roles declared the warning appeared but spoke only about section 6's
+      two STATE rules, so it did not account for the overrun row sitting in the
+      same response;
+    * `/execute` said nothing in either case, which breaks the branch's own
+      stated principle: one resolver because /day-check and /execute must plan
+      the same night from the same body. They resolved it identically and only
+      one reported the failure to resolve it.
+    """
+
+    GAP = dict(after_midnight_start=30)
+
+    def _day_check(self, **kw):
+        return asyncio.run(post_day_check(_split_night_shipping_body(30, **kw), USER))
+
+    def _execute(self, **kw):
+        # The document, not the day-check model: /execute's request does not
+        # carry `crop_ceilings` and forbids extras.
+        body = dict(_split_night_shipping_doc(30, **kw))
+        body["dry_run"] = True
+        # Two windowed profiles need the prune to be told apart; the request
+        # refuses the pair without it.
+        body["prune_to_window"] = True
+        return asyncio.run(post_execute(ExecuteRequest.model_validate(body), USER))
+
+    @staticmethod
+    def _said(res):
+        return [w for w in res.warnings if "one continuous night" in w]
+
+    def test_it_is_said_with_no_role_village_declared(self):
+        res = self._day_check(**self.GAP)
+
+        assert self._said(res), res.warnings
+        # And the bare CRITICAL it explains is still there, so the pair has to
+        # arrive together.
+        assert res.night_overruns, "the row this warning accounts for"
+
+    def test_it_is_still_said_with_role_villages_declared(self):
+        assert self._said(self._day_check(roles=True, **self.GAP))
+
+    def test_the_message_accounts_for_the_overrun_row_as_well(self):
+        (said,) = self._said(self._day_check(**self.GAP))
+
+        # The two state rules, which it always named...
+        assert "25%" in said and "60%" in said, said
+        # ...and the completion deadline, which it did not: the row in this
+        # very response measures a 23:00 dispatch against 00:00.
+        assert "each half" in said, said
+        assert "00:00" in said, said
+
+    def test_execute_says_it_too_from_the_same_resolver(self):
+        res = self._execute(**self.GAP)
+
+        assert [w for w in res.warnings if "one continuous night" in w], res.warnings
+
+    def test_neither_endpoint_says_it_when_the_halves_chain(self):
+        assert self._said(self._day_check()) == []
+        assert [w for w in self._execute().warnings if "one continuous night" in w] == []
+
+
+class TestTheOverrunMessageNamesTheMinuteItActuallyMeasured:
+    """`595f298` put the closing minute in the message, which is right, and
+    called it "the 00:00 the night ends at", which is false prose whenever
+    `night_end` is None on a half of a night: the night does not end there, the
+    profile's hours do. The pre-fix wording was vaguer and not false, so this
+    was a regression in truthfulness rather than in behaviour.
+    """
+
+    def test_a_resolved_night_end_is_called_the_nights_end(self):
+        beat = build_beat(
+            (_leg(260.0, cycle=1),),
+            dispatch_window=NIGHT_BEFORE_MIDNIGHT,
+            overnight=True,
+            night_end=MORNING_MINUTE,
+        )
+
+        (finding,) = _overruns(beat)
+        assert "07:00 the night ends at" in finding.message, finding.message
+        assert "the morning starts with merchants still on the road" in finding.message
+
+    def test_an_unresolved_one_claims_only_what_it_measured(self):
+        """The same shape with no night end resolved -- a gapped night. 300 min
+        from 23:00 is home at 04:00, four hours past this half's own 00:00 and
+        three hours before any morning."""
+        beat = build_beat(
+            (_leg(150.0, cycle=1),), dispatch_window=NIGHT_BEFORE_MIDNIGHT, overnight=True
+        )
+
+        (finding,) = _overruns(beat)
+        assert "00:00" in finding.message, finding.message
+        assert "the night ends at" not in finding.message, (
+            "the night does not end at 00:00; only this profile's hours do"
+        )
+        assert "this profile's hours end at" in finding.message, finding.message
+        assert "the morning starts" not in finding.message, (
+            "04:00 is not the morning, which is the whole reason 595f298 exists"
+        )

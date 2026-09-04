@@ -21,6 +21,7 @@ each worker gets its own throwaway database, so a test that leaned on another's
 rows would pass or fail on which worker happened to take it.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -752,6 +753,53 @@ class TestWhatThePlannerWouldRefuse:
         res = client.put(SETUP, params={"account_key": account}, json=["not", "a", "document"])
 
         assert res.status_code == 422, res.text
+
+
+class TestTheDocumentDescribesTheTypesTheStoreEnforces:
+    """`docs/25` section 4.17 recorded as a *Known gap* the very hole the
+    store had just closed, which is worse than saying nothing: a reader plans
+    around a defect that no longer exists, and the next reviewer files against
+    working code.
+
+    Pinned by grep the way section 4.20's partial-send paragraph is, and for
+    the same reason -- that paragraph stated the opposite of what the replays
+    do and nothing noticed. A doc sentence about a TYPE is cheap to check and
+    expensive to leave wrong.
+    """
+
+    @staticmethod
+    def _section():
+        doc = (
+            Path(__file__).resolve().parents[1] / "docs" / "25-resource-distribution-planner.md"
+        ).read_text(encoding="utf-8")
+        _, _, rest = doc.partition("## 4.17 The setup document, stored server-side")
+        section, _, _ = rest.partition("## 4.18")
+        assert section.strip(), "section 4.17 has moved or been renamed"
+        return section
+
+    def test_the_known_gap_paragraph_does_not_outlive_the_gap(self):
+        section = self._section()
+
+        assert "survive as ignored extras" not in section, (
+            "npc_attended and overnight are declared fields; the gap is closed"
+        )
+        assert "would store" not in section, "a non-boolean is a 422, not a save"
+
+    def test_it_names_the_type_and_all_three_fields_that_carry_it(self):
+        section = self._section()
+
+        assert "StrictBool" in section
+        for field in ("npc_attended", "overnight", "may_relay"):
+            assert field in section, f"{field} is one of the three and must be named"
+
+    def test_it_still_names_the_two_that_are_deliberately_lax(self):
+        # Left lax because `parseSetup` coerces them instead of throwing, so
+        # the document loads. Recorded so the asymmetry reads as a decision.
+        section = self._section()
+
+        assert "crop_negative_by_design" in section
+        assert "route_eligible" in section
+        assert "Boolean(" in section, "the reason they are safe is the coercion"
 
 
 class TestTheAccountKeyIsRequired:

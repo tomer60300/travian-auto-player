@@ -1157,9 +1157,22 @@ operator saves from that build, and the answer is gone from the shared copy.
 Older documents load with the field absent; newer ones are **refused, never
 upgraded**, and the version is stored as given.
 
-*Known gap:* only v9's `reserved_window` is a declared field on `SetupDocument`.
-`npc_attended` and `overnight` survive as ignored extras, so they get no
-server-side type check — a `"yes"` where a boolean belongs would store.
+**Every boolean answer is typed at the door.** `npc_attended` and `overnight`
+are declared `dict[str, StrictBool]` on `SetupDocument`, and `may_relay` is
+`StrictBool | None` on both doors that carry it — the village row
+(`VillageConfig`) and the role template (`RoleTemplate`). `StrictBool` rather
+than `bool` because pydantic's lax bool accepts the **string** `"yes"`, and
+`"no"`, `"on"`, `"off"`, `"1"` and `"0"` besides: the body is stored verbatim
+and `parseSetup` **throws** on a non-boolean in all three places, so a coerced
+`"yes"` saved with a 200 and the page then refused, permanently, to load the
+document it had just written. All three are now a **422**.
+
+`crop_negative_by_design` and `route_eligible` stay lax on purpose:
+`parseSetup` coerces both with `Boolean(...)` rather than refusing them, so the
+document still loads. (Not a perfect agreement — pydantic reads `"off"` as
+false where JS `Boolean` reads it as true — but that is a value divergence, not
+a document that cannot be opened.) The numeric fields are safe the same way:
+`Number(...)` on each.
 
 ## 4.18 The reserved marketplace window
 

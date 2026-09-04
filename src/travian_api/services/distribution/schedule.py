@@ -648,6 +648,21 @@ def build_beat(
             last = last_night_dispatch(placement, dispatch_window)
             if overrun > 0 and last is not None:
                 closes = dispatch_window[1] if night_end is None else night_end
+                # Name the minute for what it IS. With `night_end` resolved it
+                # is the night's close and the consequence is section 6's own
+                # sentence. Without one -- a declaration set that does not
+                # chain, so no half knows where the night ends -- it is only
+                # this profile's last minute, and both halves of "past the
+                # 00:00 the night ends at, so the morning starts with merchants
+                # still on the road" are false for merchants home at 04:00.
+                # That is the message `595f298` exists to eliminate, so it must
+                # not be reachable by prose.
+                consequence = (
+                    "the night ends at — so the morning starts with merchants still on the road"
+                    if night_end is not None
+                    else "this profile's hours end at — so its merchants are still out "
+                    "when the next profile takes over"
+                )
                 round_trip = 2.0 * route.one_way_minutes
                 findings.append(
                     Finding(
@@ -656,8 +671,7 @@ def build_beat(
                             f"route {leg} last leaves at {last // 60:02d}:{last % 60:02d} and "
                             f"its merchants are not home for another {round_trip:.0f} min, "
                             f"{overrun:.0f} min past the {closes // 60:02d}:{closes % 60:02d} "
-                            f"the night ends at — so the "
-                            f"morning starts with merchants still on the road. Shorten the "
+                            f"{consequence}. Shorten the "
                             f"{route.cycle_hours}h cycle, ship from a nearer village, or move "
                             f"its last dispatch earlier"
                         ),

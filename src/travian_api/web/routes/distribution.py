@@ -1749,6 +1749,54 @@ def _night_close_minute(segments: Sequence["DaySegmentInput"]) -> int | None:
     return None if run is None else run[1].window[1]
 
 
+def _night_is_not_one_run(segments: Sequence["DaySegmentInput"]) -> str | None:
+    """Why the declared night has no single close, or None when it has one.
+
+    Beside :func:`_night_close_minute` and reading the same declarations,
+    because the two must never disagree: that function returns ``None`` and
+    this one explains it, so a body one endpoint plans against each half's own
+    end is a body both endpoints SAY SO about. /execute was silent in every
+    case -- the resolver was shared and the report was not, which breaks the
+    stated reason there is one resolver.
+
+    Not gated on anything. It used to be reachable only when a role village
+    held a morning floor, so an operator who has declared no roles was handed a
+    bare CRITICAL for merchants home at 04:00 reading "the morning starts with
+    merchants still on the road", with nothing naming the cause.
+
+    Both consequences are named, because both land in the same response: the
+    completion deadline falls back to each half's own end, so the overrun table
+    measures against the wrong minute, AND section 6's two state rules have no
+    single pair of ends to read.
+    """
+    night_segments = [s for s in segments if is_night_window(s.window, overnight=s.overnight)]
+    if not night_segments or _one_night_run(night_segments) is not None:
+        return None
+    return (
+        # In clock order, not request order: the whole finding is that the
+        # answer must not depend on how the list happens to be sorted, and a
+        # message that does is the same defect in prose.
+        "the profiles declared overnight ("
+        + ", ".join(
+            f"{s.name} {_clock(s.window[0])}-{_clock(s.window[1])}"
+            for s in sorted(night_segments, key=lambda s: s.window[0])
+        )
+        + ") are not one continuous night -- they leave a gap or describe "
+        "separate stretches, so the night has no single close. Two things then "
+        "read against the wrong minute. Section 6's completion deadline falls "
+        "back to each half's own end ("
+        + ", ".join(
+            f"{s.name} against {_clock(s.window[1])}"
+            for s in sorted(night_segments, key=lambda s: s.window[0])
+        )
+        + "), so the overrun table reports merchants as late for a morning that "
+        "is still hours away; and section 6's 25% pre-night baseline and 60% "
+        "morning floor could not be measured at all. Give the night one unbroken "
+        "run of profiles, split at midnight if you like, and declare only those "
+        "as overnight."
+    )
+
+
 def _night_overrun_rows(
     beat,
     window: tuple[int, int] | None,
@@ -3844,30 +3892,21 @@ async def post_day_check(
     floor_villages = [vid for vid, role in roles.of_village.items() if keeps_a_morning_floor(role)]
     morning_short: tuple[FillAtSwitch, ...] = ()
     pre_night_over: tuple[FillAtSwitch, ...] = ()
-    if night_segments and floor_villages and night_run is None:
-        # Two nights are not one night, and section 6's rules are about ONE:
-        # the 25% baseline at the minute it opens and the 60% floor at the
-        # minute it closes. Measuring either against an arbitrary piece would
-        # answer a question the operator did not ask, so this says what is
-        # wrong instead. Loudly, because a silent skip reads as "the floor was
-        # met" -- the same reason the missing-morning-profile note below is
-        # said rather than skipped.
-        warnings.append(
-            # In clock order, not request order: the whole finding is that the
-            # answer must not depend on how the list happens to be sorted, and
-            # a message that does is the same defect in prose.
-            "the profiles declared overnight ("
-            + ", ".join(
-                f"{s.name} {_clock(s.window[0])}-{_clock(s.window[1])}"
-                for s in sorted(night_segments, key=lambda s: s.window[0])
-            )
-            + ") are not one continuous night -- they leave a gap or describe "
-            "separate stretches, so section 6's 25% pre-night baseline and 60% "
-            "morning floor could not be measured. Give the night one unbroken "
-            "run of profiles, split at midnight if you like, and declare only "
-            "those as overnight."
-        )
-    elif night_run is not None and floor_villages:
+    # Two nights are not one night, and section 6's rules are about ONE: the
+    # 25% baseline at the minute it opens and the 60% floor at the minute it
+    # closes. Measuring either against an arbitrary piece would answer a
+    # question the operator did not ask, so this says what is wrong instead.
+    # Loudly, because a silent skip reads as "the floor was met" -- the same
+    # reason the missing-morning-profile note below is said rather than
+    # skipped.
+    #
+    # Said whether or not any village holds a floor. Gated on `floor_villages`
+    # it was unreachable exactly where it was needed most: with no roles
+    # declared the operator still gets the NIGHT_OVERRUN table measured against
+    # each half's own end, and nothing named the cause.
+    if (not_one_run := _night_is_not_one_run(body.segments)) is not None:
+        warnings.append(not_one_run)
+    if night_run is not None and floor_villages:
         # Section 6's two state rules read the night from either END of it, so
         # a night SPLIT at midnight needs both ends named rather than one
         # segment standing in for both: the 25% baseline belongs to the half
@@ -5681,6 +5720,15 @@ async def post_execute(
             [acc for _segment, acc in planned_segments], body.merchant_reserve, names
         )
     )
+    # And unprefixed for the same reason: a night that does not chain is a fact
+    # about the SET of declarations, not about one of them. /day-check says it
+    # and this endpoint did not, in any case at all -- which is the one thing
+    # `_night_close_minute` being a single resolver was supposed to rule out:
+    # both endpoints resolve the night identically, and only one reported the
+    # failure to resolve it. The routes this run WRITES are phased against
+    # each half's own end when it fires.
+    if (not_one_run := _night_is_not_one_run(body.segments)) is not None:
+        warnings.append(not_one_run)
 
     # Each plan row is one route from a real origin village's marketplace to a
     # destination (a real village or a foreign sink — coords cover both).
