@@ -319,7 +319,9 @@ test.describe('a blank box is unknown; a typed zero is an answer', () => {
     const sent = await isolate(page)
     await seed(page)
     await page.goto('/resource-planner')
-    await page.getByRole('button', { name: 'Targets' }).click()
+    // Day & night, beside the windows it derives from: the panel moved off
+    // Targets, where its own warning told the operator not to press it.
+    await page.getByRole('button', { name: 'Day & night' }).click()
 
     await page.getByLabel('Emptied to').fill('')
     await page.getByRole('button', { name: /^Derive from stores/ }).click()

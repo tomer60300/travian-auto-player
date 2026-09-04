@@ -5325,181 +5325,6 @@ export default function ResourcePlanner() {
 
       {stage === 'allocate' && villages.length > 0 && (
         <div className="space-y-4">
-          {/* Build the night profile from the stores.
-
-              Deliberately at the TOP of the allocation stage and not buried in a
-              menu: it fills in the table below, so it belongs where the operator
-              is about to start typing the hundred numbers it saves them. */}
-          <div className="card p-4 border-l-2 border-l-indigo-400/60">
-            <div className="flex items-start justify-between gap-4 flex-wrap">
-              <div className="min-w-[18rem] flex-1">
-                <h3 className="font-semibold">Derive an idle-window profile from your stores</h3>
-                <p className="text-secondary text-xs mt-1">
-                  At night nothing is spent, so everything that arrives stays and the
-                  store becomes the limit — not the plan. The most a village may take
-                  per hour is the room it has, divided by the hours it has to fill it:
-                </p>
-                <p className="text-xs mt-2 font-mono text-info">
-                  (full% − empty%) × capacity ÷ hours
-                </p>
-                <p className="text-secondary text-xs mt-2">
-                  Measured from the state <span className="text-primary">you leave behind</span>,
-                  not from the snapshot. That is the difference between a profile that
-                  holds for weeks and one that is stale within the hour.
-                </p>
-              </div>
-
-              {/* flex-wrap: two number boxes, a separator and a
-                  `whitespace-nowrap` button add up to 486px, and without
-                  wrapping that pushed the whole DOCUMENT to 486 in a 375
-                  viewport -- the page slid 111px sideways, which is item 1 of
-                  the UI Definition of Done. */}
-              <div className="flex flex-wrap items-end gap-3">
-                <label className="text-xs">
-                  <span className="text-secondary block mb-1">Emptied to</span>
-                  <span className="flex items-baseline gap-1">
-                    <input
-                      type="number"
-                      min="0"
-                      max="90"
-                      className="input-sm w-16 text-right"
-                      value={baselineFill}
-                      onChange={(e) => setBaselineFill(e.target.value)}
-                    />
-                    <span className="text-secondary">%</span>
-                  </span>
-                </label>
-                <span className="text-secondary text-xs pb-2">→</span>
-                <label className="text-xs">
-                  <span className="text-secondary block mb-1">Full to</span>
-                  <span className="flex items-baseline gap-1">
-                    <input
-                      type="number"
-                      min="10"
-                      max="100"
-                      className="input-sm w-16 text-right"
-                      value={targetFill}
-                      onChange={(e) => setTargetFill(e.target.value)}
-                    />
-                    <span className="text-secondary">%</span>
-                  </span>
-                </label>
-                <button
-                  type="button"
-                  className="btn-primary text-xs py-1.5 whitespace-nowrap"
-                  disabled={deriving || !villages.length}
-                  onClick={buildNightProfile}
-                >
-                  {deriving ? 'Deriving…' : 'Derive from stores · 0 requests'}
-                </button>
-              </div>
-            </div>
-
-            {/* These two figures and the full-day check's two thresholds are
-                the same pair of quantities seen from either side -- "never
-                overflow during the night, never arrive empty at morning" --
-                so a plan derived against one pair and graded against the other
-                describes a night that does not exist. They DID disagree: the
-                boxes defaulted to 30% and 80% while the check measured against
-                the server's own 25% and 60%. They agree now, and the boxes
-                start from `DEFAULT_BASELINE_FILL` / `DEFAULT_TARGET_FILL`
-                rather than from two literals, so the two cannot drift again
-                unnoticed -- `plannerSetup.test.js` pins them.
-                This note is still earned, because the operator may EDIT either
-                box, and the pair they type is theirs. Shown only once a check
-                has run, because until then there is no second pair to compare
-                against -- which is also why the pin is not optional: a
-                divergence in the DEFAULTS would be invisible here until
-                someone asked for a full-day check. */}
-            {dayCheck != null &&
-              (Math.abs(Number(baselineFill) / 100 - dayCheck.pre_night_baseline) > 0.001 ||
-                Math.abs(Number(targetFill) / 100 - dayCheck.morning_floor) > 0.001) && (
-                <p className="text-warning text-xs mt-2">
-                  These are your figures. The full-day check measures the same two switches
-                  against{' '}
-                  <span className="font-mono">
-                    {Math.round(dayCheck.pre_night_baseline * 100)}%
-                  </span>{' '}
-                  and{' '}
-                  <span className="font-mono">{Math.round(dayCheck.morning_floor * 100)}%</span>,
-                  which is not the pair above — so a profile derived for{' '}
-                  <span className="font-mono">
-                    {baselineFill}% → {targetFill}%
-                  </span>{' '}
-                  is reported against a different night. Which pair the account should run on
-                  is still open; nothing here decides it.
-                </p>
-              )}
-
-            {/* The premise, stated where it cannot be missed. This is night
-                arithmetic: it assumes nothing is spent, so everything that
-                arrives stays. On a profile covering most of the day that is
-                false -- the operator is awake and spending -- and it would cap
-                inflows that the spending would have made room for. Judged on the
-                WINDOW rather than the profile's name, which is theirs to rename. */}
-            {profileDayShare > 0.6 ? (
-              <p className="text-warning text-xs mt-2">
-                This profile runs {Math.round(profileDayShare * 24)}h of the day, so you are
-                awake and spending through most of it. This works out what a store can hold
-                when <strong>nothing</strong> is spent — on a daytime profile it will hold
-                back inflow your own spending would have made room for. Build a daytime
-                profile by hand.
-              </p>
-            ) : null}
-
-            {/* What it worked out for itself. A derivation whose inputs are
-                invisible is one nobody can check, so the reasoning is shown
-                rather than left to be trusted. */}
-            {derived ? (
-              <div className="mt-3 pt-3 border-t border-gray-800 text-xs space-y-1">
-                <p className="text-secondary">
-                  <span className="text-primary">It worked out:</span> window{' '}
-                  <span className="font-mono text-info">{derived.window_hours}h</span>
-                  {' · '}hub <span className="font-mono text-info">{derived.hub_name}</span>
-                  {derived.consumers?.length ? (
-                    <>
-                      {' · '}fed{' '}
-                      <span className="font-mono text-info">
-                        {derived.consumers.join(', ')}
-                      </span>
-                    </>
-                  ) : null}
-                  {derived.tribute_per_hour > 0 ? (
-                    <>
-                      {' · '}tribute{' '}
-                      <span className="font-mono text-info">
-                        {fmt(derived.tribute_per_hour)}/h
-                      </span>
-                    </>
-                  ) : null}
-                </p>
-                {Object.entries(derived.drawn_in || {}).some(([, v]) => v.length) ? (
-                  <p className="text-secondary">
-                    <span className="text-primary">Drawn on, nearest first:</span>{' '}
-                    {Object.entries(derived.drawn_in)
-                      .filter(([, v]) => v.length)
-                      .map(([r, v]) => `${r} ${v.join(', ')}`)
-                      .join('  ·  ')}
-                  </p>
-                ) : null}
-                {Object.entries(derived.forced_senders || {}).some(([, v]) => v.length) ? (
-                  <p className="text-secondary">
-                    <span className="text-warning">Already past {targetFill}%, so they give:</span>{' '}
-                    {Object.entries(derived.forced_senders)
-                      .filter(([, v]) => v.length)
-                      .map(([r, v]) => `${r} ${v.join(', ')}`)
-                      .join('  ·  ')}
-                  </p>
-                ) : null}
-                {derived.warnings?.map((w) => (
-                  <p key={w} className="text-warning">
-                    {w}
-                  </p>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
           <div className="flex items-center gap-2">
             {/* Editor first, matching the default and the reading order of the
                 stage: set the targets, then look at what they come to. */}
@@ -6073,6 +5898,192 @@ export default function ResourcePlanner() {
               })
             }
           />
+          {/* Build the night profile from the stores.
+
+              On DAY & NIGHT, beside the profile whose hours it derives from,
+              and that is the whole of this move. It used to be the first card
+              on Targets, carrying that stage's only large filled CTA -- while
+              the sentence inside it read "this profile runs 16h of the day, so
+              you are awake and spending through most of it... build a daytime
+              profile by hand." The warning was right; a stage whose loudest
+              button tells the operator not to press it is not.
+
+              Two things fall out of the new placement. The window it reads is
+              edited in the panel directly above, so "16h of the day" is now
+              readable in the same glance as the figure that makes it true. And
+              the 25%/60% pair below is on the same stage as `FullDayCheck`,
+              which GRADES against that pair -- the two used to sit on different
+              stages, which is how they came to disagree (30/80 in the boxes
+              against the server's 25/60) without anyone seeing both at once. */}
+          <div className="card p-4 border-l-2 border-l-indigo-400/60">
+            <div className="flex items-start justify-between gap-4 flex-wrap">
+              <div className="min-w-[18rem] flex-1">
+                <h3 className="font-semibold">Derive an idle-window profile from your stores</h3>
+                <p className="text-secondary text-xs mt-1">
+                  At night nothing is spent, so everything that arrives stays and the
+                  store becomes the limit — not the plan. The most a village may take
+                  per hour is the room it has, divided by the hours it has to fill it:
+                </p>
+                <p className="text-xs mt-2 font-mono text-info">
+                  (full% − empty%) × capacity ÷ hours
+                </p>
+                <p className="text-secondary text-xs mt-2">
+                  Measured from the state <span className="text-primary">you leave behind</span>,
+                  not from the snapshot. That is the difference between a profile that
+                  holds for weeks and one that is stale within the hour.
+                </p>
+              </div>
+
+              {/* flex-wrap: two number boxes, a separator and a
+                  `whitespace-nowrap` button add up to 486px, and without
+                  wrapping that pushed the whole DOCUMENT to 486 in a 375
+                  viewport -- the page slid 111px sideways, which is item 1 of
+                  the UI Definition of Done. */}
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="text-xs">
+                  <span className="text-secondary block mb-1">Emptied to</span>
+                  <span className="flex items-baseline gap-1">
+                    <input
+                      type="number"
+                      min="0"
+                      max="90"
+                      className="input-sm w-16 text-right"
+                      value={baselineFill}
+                      onChange={(e) => setBaselineFill(e.target.value)}
+                    />
+                    <span className="text-secondary">%</span>
+                  </span>
+                </label>
+                <span className="text-secondary text-xs pb-2">→</span>
+                <label className="text-xs">
+                  <span className="text-secondary block mb-1">Full to</span>
+                  <span className="flex items-baseline gap-1">
+                    <input
+                      type="number"
+                      min="10"
+                      max="100"
+                      className="input-sm w-16 text-right"
+                      value={targetFill}
+                      onChange={(e) => setTargetFill(e.target.value)}
+                    />
+                    <span className="text-secondary">%</span>
+                  </span>
+                </label>
+                <button
+                  type="button"
+                  className="btn-primary text-xs py-1.5 whitespace-nowrap"
+                  disabled={deriving || !villages.length}
+                  onClick={buildNightProfile}
+                >
+                  {deriving ? 'Deriving…' : 'Derive from stores · 0 requests'}
+                </button>
+              </div>
+            </div>
+
+            {/* These two figures and the full-day check's two thresholds are
+                the same pair of quantities seen from either side -- "never
+                overflow during the night, never arrive empty at morning" --
+                so a plan derived against one pair and graded against the other
+                describes a night that does not exist. They DID disagree: the
+                boxes defaulted to 30% and 80% while the check measured against
+                the server's own 25% and 60%. They agree now, and the boxes
+                start from `DEFAULT_BASELINE_FILL` / `DEFAULT_TARGET_FILL`
+                rather than from two literals, so the two cannot drift again
+                unnoticed -- `plannerSetup.test.js` pins them.
+                This note is still earned, because the operator may EDIT either
+                box, and the pair they type is theirs. Shown only once a check
+                has run, because until then there is no second pair to compare
+                against -- which is also why the pin is not optional: a
+                divergence in the DEFAULTS would be invisible here until
+                someone asked for a full-day check. */}
+            {dayCheck != null &&
+              (Math.abs(Number(baselineFill) / 100 - dayCheck.pre_night_baseline) > 0.001 ||
+                Math.abs(Number(targetFill) / 100 - dayCheck.morning_floor) > 0.001) && (
+                <p className="text-warning text-xs mt-2">
+                  These are your figures. The full-day check measures the same two switches
+                  against{' '}
+                  <span className="font-mono">
+                    {Math.round(dayCheck.pre_night_baseline * 100)}%
+                  </span>{' '}
+                  and{' '}
+                  <span className="font-mono">{Math.round(dayCheck.morning_floor * 100)}%</span>,
+                  which is not the pair above — so a profile derived for{' '}
+                  <span className="font-mono">
+                    {baselineFill}% → {targetFill}%
+                  </span>{' '}
+                  is reported against a different night. Which pair the account should run on
+                  is still open; nothing here decides it.
+                </p>
+              )}
+
+            {/* The premise, stated where it cannot be missed. This is night
+                arithmetic: it assumes nothing is spent, so everything that
+                arrives stays. On a profile covering most of the day that is
+                false -- the operator is awake and spending -- and it would cap
+                inflows that the spending would have made room for. Judged on the
+                WINDOW rather than the profile's name, which is theirs to rename. */}
+            {profileDayShare > 0.6 ? (
+              <p className="text-warning text-xs mt-2">
+                This profile runs {Math.round(profileDayShare * 24)}h of the day, so you are
+                awake and spending through most of it. This works out what a store can hold
+                when <strong>nothing</strong> is spent — on a daytime profile it will hold
+                back inflow your own spending would have made room for. Build a daytime
+                profile by hand.
+              </p>
+            ) : null}
+
+            {/* What it worked out for itself. A derivation whose inputs are
+                invisible is one nobody can check, so the reasoning is shown
+                rather than left to be trusted. */}
+            {derived ? (
+              <div className="mt-3 pt-3 border-t border-gray-800 text-xs space-y-1">
+                <p className="text-secondary">
+                  <span className="text-primary">It worked out:</span> window{' '}
+                  <span className="font-mono text-info">{derived.window_hours}h</span>
+                  {' · '}hub <span className="font-mono text-info">{derived.hub_name}</span>
+                  {derived.consumers?.length ? (
+                    <>
+                      {' · '}fed{' '}
+                      <span className="font-mono text-info">
+                        {derived.consumers.join(', ')}
+                      </span>
+                    </>
+                  ) : null}
+                  {derived.tribute_per_hour > 0 ? (
+                    <>
+                      {' · '}tribute{' '}
+                      <span className="font-mono text-info">
+                        {fmt(derived.tribute_per_hour)}/h
+                      </span>
+                    </>
+                  ) : null}
+                </p>
+                {Object.entries(derived.drawn_in || {}).some(([, v]) => v.length) ? (
+                  <p className="text-secondary">
+                    <span className="text-primary">Drawn on, nearest first:</span>{' '}
+                    {Object.entries(derived.drawn_in)
+                      .filter(([, v]) => v.length)
+                      .map(([r, v]) => `${r} ${v.join(', ')}`)
+                      .join('  ·  ')}
+                  </p>
+                ) : null}
+                {Object.entries(derived.forced_senders || {}).some(([, v]) => v.length) ? (
+                  <p className="text-secondary">
+                    <span className="text-warning">Already past {targetFill}%, so they give:</span>{' '}
+                    {Object.entries(derived.forced_senders)
+                      .filter(([, v]) => v.length)
+                      .map(([r, v]) => `${r} ${v.join(', ')}`)
+                      .join('  ·  ')}
+                  </p>
+                ) : null}
+                {derived.warnings?.map((w) => (
+                  <p key={w} className="text-warning">
+                    {w}
+                  </p>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <FullDayCheck
             dayCheck={dayCheck}
             dayChecking={dayChecking}

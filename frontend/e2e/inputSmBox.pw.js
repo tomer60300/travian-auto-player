@@ -38,10 +38,10 @@
 
 import { expect, test } from '@playwright/test'
 
-import { VIEWPORTS, isolate, openPlan, openTargets, seed } from './plannerHarness'
+import { VIEWPORTS, isolate, openDayNight, openPlan, seed } from './plannerHarness'
 
 const SURFACES = [
-  { name: 'Targets stage (the 25%/60% night pair)', open: openTargets, expected: 2 },
+  { name: 'Day & night stage (the 25%/60% night pair)', open: openDayNight, expected: 2 },
   { name: 'Plan stage (the five controlled-run boxes)', open: openPlan, expected: 5 },
 ]
 

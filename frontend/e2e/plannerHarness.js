@@ -320,10 +320,19 @@ export async function seed(page, extra = {}) {
   )
 }
 
-/** The Targets stage, which carries the 25%/60% night pair. */
+/** The Targets stage, which opens on the editor that sets a target. */
 export async function openTargets(page) {
   await page.goto('/resource-planner')
   await page.getByRole('button', { name: 'Targets' }).click()
+  await expect(page.getByLabel('Lumber value for 11')).toBeVisible()
+}
+
+/** The Day & night stage, which carries the windows, the full-day check, and
+ *  -- since the derivation panel moved off Targets -- the 25%/60% night pair
+ *  the check grades against. */
+export async function openDayNight(page) {
+  await page.goto('/resource-planner')
+  await page.getByRole('button', { name: 'Day & night' }).click()
   await expect(page.getByText('Derive an idle-window profile from your stores')).toBeVisible()
 }
 

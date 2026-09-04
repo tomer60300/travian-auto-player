@@ -84,7 +84,7 @@ test.describe('the gate on Build plan', () => {
     await seed(page, { planner_max_busy: { [DEF_A]: 99 } })
     await page.goto('/resource-planner')
     await page.getByRole('button', { name: 'Targets' }).click()
-    await expect(page.getByText('Derive an idle-window profile from your stores')).toBeVisible()
+    await expect(page.getByLabel('Lumber value for 11')).toBeVisible()
 
     await buildPlan(page).click()
     expect(posts).toHaveLength(0)

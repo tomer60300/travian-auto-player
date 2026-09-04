@@ -152,3 +152,60 @@ test.describe('the Targets stage opens on the view that sets a target', () => {
     await expect(page.getByLabel('Lumber value for 11')).toHaveCount(0)
   })
 })
+
+test.describe('the night derivation sits beside the hours it derives from', () => {
+  test.use({ viewport: { width: 1440, height: 1200 } })
+
+  const DERIVE = 'Derive an idle-window profile from your stores'
+
+  // It was the first card on Targets, carrying that stage's only large filled
+  // CTA -- and the sentence inside it told the operator not to press it.
+  test('it is on Day & night, and no longer on Targets', async ({ page }) => {
+    await isolatePlanning(page)
+    await seed(page)
+    await page.goto('/resource-planner')
+
+    await stageTab(page, 'Targets').click()
+    await expect(page.getByText(DERIVE)).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /^Derive from stores/ })).toHaveCount(0)
+
+    await stageTab(page, 'Day & night').click()
+    await expect(page.getByText(DERIVE)).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Derive from stores/ })).toBeVisible()
+  })
+
+  // The pair the panel derives AGAINST and the check that grades against it are
+  // now one glance apart. On separate stages they came to disagree -- 30/80 in
+  // the boxes against the server's own 25/60 -- with nobody seeing both.
+  test('the 25/60 pair and the check that grades against it are on one stage', async ({
+    page,
+  }) => {
+    await isolatePlanning(page)
+    await seed(page)
+    await page.goto('/resource-planner')
+    await stageTab(page, 'Day & night').click()
+
+    await expect(page.getByText('(full% − empty%) × capacity ÷ hours')).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Run \(0 requests\)/ })).toBeVisible()
+    // And the panel that edits the windows the derivation reads is right there.
+    await expect(page.getByText('The day, window by window')).toBeVisible()
+  })
+
+  // The window is edited on this stage, so the warning about a 16h profile is
+  // now readable in the same glance as the figure that makes it true.
+  test('the daytime warning reacts to the window edited beside it', async ({ page }) => {
+    await isolatePlanning(page)
+    await seed(page)
+    await page.goto('/resource-planner')
+    await stageTab(page, 'Day & night').click()
+
+    // Day is 07:00-23:00 by default: 16 of 24 hours.
+    await expect(page.getByText(/This profile runs 16h of the day/)).toBeVisible()
+
+    // `.first()`: the profile bar and the Day & night table both carry a
+    // control named "Day window start", which is a duplicate accessible name on
+    // that stage -- reported, not fixed here.
+    await page.getByLabel('Day window start').first().fill('22:00')
+    await expect(page.getByText(/This profile runs 16h of the day/)).toHaveCount(0)
+  })
+})
