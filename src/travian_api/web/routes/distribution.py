@@ -6509,9 +6509,25 @@ async def post_execute(
                             blocked = set()
                             for e in disabled_desired:
                                 blocked |= _existing_keys(e)
+                            # The service's own words, carried through as the
+                            # disable branch above and the cargo update below
+                            # carry theirs. `_toggle_routes` builds the detail
+                            # asymmetrically on purpose: an UNREADABLE enable
+                            # says the request returned success, so the rows may
+                            # already be on and a later run can re-enable them
+                            # harmlessly. A fixed line lost that, and the
+                            # operator could not tell "the game said no" from
+                            # "the answer was unreadable" -- only the second
+                            # means the next run's read-back will disagree with
+                            # the trace.
+                            said = (
+                                ""
+                                if enabled is None
+                                else f" — {enabled.status} {enabled.detail}".rstrip()
+                            )
                             problems.append(
                                 f"{village_label(origin, names)}: could not re-enable a "
-                                "disabled route the plan still wants"
+                                f"disabled route the plan still wants{said}"
                             )
 
                     # Minutes each destination gained from creates THIS visit.

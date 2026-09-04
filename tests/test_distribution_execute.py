@@ -3089,3 +3089,60 @@ class TestConsumptionReachesTheThirdPlanningPath:
 
     def test_declaring_the_spend_silences_it_on_the_write_path_too(self):
         assert self._capped(self._run(consumption={"lumber": 5_000})) == []
+
+
+class TestAnUnreadableReEnableSaysWhatTheGameSaid:
+    """`_toggle_routes` writes an asymmetric detail on purpose.
+
+    A toggle whose response body cannot be read returns "failed" with a detail
+    saying the request DID return success, so some or all of the rows may have
+    gone through -- for an enable, that they may still be inactive and a later
+    run can re-enable them harmlessly. The re-enable branch reported a fixed
+    line instead and dropped it, so the operator could not tell "the game said
+    no" from "the answer was unreadable and the rows may already be on" -- and
+    only the second means the next run's read-back will disagree with the
+    trace. The disable branch and the cargo update both carry theirs through.
+    """
+
+    UNREADABLE = (
+        "enabling of 4 route(s) cannot be confirmed: no 'routes' key in the response. "
+        "The request returned success, so some or all may have gone through -- they "
+        "may still be inactive, and a later run can re-enable them."
+    )
+
+    def _svc(self, detail, status="failed"):
+        outer = self
+
+        class _Unconfirmable(_FakeLiveSvc):
+            async def enable_routes(self, vid, routes, *, stop_check=None):
+                from travian_api.services.trade_route_service import RouteActionResult
+
+                if not routes:
+                    return None
+                self.enabled.append((vid, tuple(sorted((r.dest_x, r.dest_y) for r in routes))))
+                return RouteActionResult(vid, 0, 0, status, detail or outer.UNREADABLE)
+
+        return _Unconfirmable(existing={20003: _fanned(_FOREIGN_REAL_ID, 40, 40, active=False)})
+
+    def test_the_services_own_detail_reaches_the_operator(self):
+        res = _run_live(self._svc(None), _two_origin_account(), max_routes_per_run=50)
+
+        assert any(self.UNREADABLE in problem for problem in res.problems), res.problems
+
+    def test_the_problem_still_names_the_village_and_the_status(self):
+        res = _run_live(self._svc(None), _two_origin_account(), max_routes_per_run=50)
+
+        (problem,) = [p for p in res.problems if "re-enable" in p]
+        assert problem.startswith("03:"), problem
+        assert "failed" in problem, problem
+
+    def test_a_flat_refusal_reads_as_a_refusal(self):
+        """The other half of the asymmetry: a detail that is not about an
+        unreadable answer must not be dressed up as one."""
+        res = _run_live(
+            self._svc("2 of 4 route(s) rejected: [901, 902]"),
+            _two_origin_account(),
+            max_routes_per_run=50,
+        )
+
+        assert any("rejected: [901, 902]" in problem for problem in res.problems), res.problems
