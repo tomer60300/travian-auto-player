@@ -682,6 +682,19 @@ h1, h2, h3 {
   color: var(--success);
   border-color: var(--success);
 }
+/* The same three tones at chip size, beside the Build plan button. Shares
+   `.plan-verdict-blocked` / `-dirty` / `-clean` with the banner, so the two
+   surfaces cannot disagree about what red means -- only the geometry differs.
+   9999px is the documented pill radius; 0.75rem is the xs step the rest of that
+   header row uses. Unlayered like everything else in this file, deliberately:
+   see the note on `.input-field`'s width. */
+.plan-verdict-chip {
+  border: 1px solid;
+  border-radius: 9999px;
+  padding: 0.125rem 0.625rem;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
 /* 2rem, the typography scale's largest documented step. The audit asked for
    "~36px", which is not a step in this design system; 2rem is, and it is
    already four times the 0.75rem the surrounding cards use. */

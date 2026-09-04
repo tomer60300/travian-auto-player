@@ -9,6 +9,7 @@ import {
   lossChip,
   planStatus,
   relayLegIndex,
+  verdictSummary,
 } from './plannerFindings'
 
 /** One critical group and one warning group, in the order the backend ranks
@@ -270,5 +271,63 @@ describe('SEVERITY_LABEL', () => {
     for (const severity of SEVERITY_ORDER) {
       expect(SEVERITY_LABEL[severity], severity).toBeTruthy()
     }
+  })
+})
+
+// ── The chip beside the Build plan button ───────────────────────────────
+//
+// `Build plan` no longer moves the stage -- see `verdictSummary`'s own note --
+// so this line is the whole acknowledgement of the press. It has to say the
+// answer AND how much is outstanding, because the operator who is not switching
+// stages is not going to read the banner.
+describe('verdictSummary', () => {
+  const state = (verdict) => planStatus({ feasible: verdict.executable, verdict })
+
+  it('says nothing when there is no plan', () => {
+    expect(verdictSummary(null)).toBe(null)
+    expect(verdictSummary(planStatus(null))).toBe(null)
+  })
+
+  it('is the bare label when the plan is clean', () => {
+    expect(
+      verdictSummary(
+        state({ executable: true, clean: true, blockers: [], critical_findings: 0 })
+      )
+    ).toBe('Ready to run')
+  })
+
+  it('counts the blockers when the plan cannot run', () => {
+    expect(
+      verdictSummary(
+        state({
+          executable: false,
+          clean: false,
+          blockers: ['02 commits 9 merchants but its budget allows 8', '11 needs 2,200 crop/h'],
+          critical_findings: 2,
+        })
+      )
+    ).toBe('Cannot run · 2 blockers')
+  })
+
+  it('counts the critical findings when it runs but is not clean', () => {
+    expect(
+      verdictSummary(
+        state({ executable: true, clean: false, blockers: [], critical_findings: 1 })
+      )
+    ).toBe('Runs, not clean · 1 critical finding')
+  })
+
+  it('does not pluralise one blocker', () => {
+    expect(
+      verdictSummary(
+        state({ executable: false, clean: false, blockers: ['one thing'], critical_findings: 1 })
+      )
+    ).toBe('Cannot run · 1 blocker')
+  })
+
+  // An older backend sends no verdict at all, and `planStatus` already refuses
+  // to invent the second answer. The chip must not invent a count either.
+  it('is the bare label when the backend sent no verdict', () => {
+    expect(verdictSummary(planStatus({ feasible: true }))).toBe('Executable; safety unknown')
   })
 })

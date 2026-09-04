@@ -290,6 +290,7 @@ test.describe('the overnight declaration', () => {
     // Undeclared first: absent is what asks the backend to derive, so sending
     // a computed copy would only make the request look like a decision.
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     expect(sent.plan).toHaveLength(1)
     expect(sent.plan[0]).not.toHaveProperty('overnight')
@@ -299,6 +300,7 @@ test.describe('the overnight declaration', () => {
     await page.getByRole('button', { name: 'Day & night' }).click()
     await page.getByLabel('Is Night late the overnight profile').selectOption('night')
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
 
     expect(sent.plan).toHaveLength(2)
@@ -342,6 +344,7 @@ test.describe('the overnight declaration', () => {
     await page.getByLabel('Is Night late the overnight profile').selectOption('night')
 
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
 
     await page.getByLabel(/Whole day — execute all profiles at once/).check()

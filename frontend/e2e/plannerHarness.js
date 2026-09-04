@@ -331,5 +331,6 @@ export async function openTargets(page) {
 export async function openPlan(page) {
   await page.goto('/resource-planner')
   await page.getByRole('button', { name: /^Build plan/ }).click()
+  await page.getByRole('button', { name: 'Plan', exact: true }).click()
   await expect(page.getByText(/^Routes$/)).toBeVisible()
 }

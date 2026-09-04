@@ -131,6 +131,31 @@ export function planStatus(plan) {
   return { label: 'Ready to run', tone: 'text-success', verdict }
 }
 
+/** The verdict as ONE line, for the chip beside the Build plan button.
+ *
+ * `Build plan` used to end with an unconditional `setStage('plan')`, so
+ * pressing it while tuning a 15-column table on Account threw the operator to
+ * another stage -- and navigating back remounted the table with every
+ * `<details>` closed, because `open` is DOM state React does not restore. The
+ * whole architecture exists so that re-planning while tuning a target costs
+ * nothing, and the stage jump was charging for it.
+ *
+ * Removing the jump leaves the press with no acknowledgement, so this is the
+ * acknowledgement: the answer, in place, next to the button that asked for it.
+ * `planStatus` already decided the label and the tone; this only appends the
+ * count, which is a field read rather than a second rule -- the Plan stage's
+ * own banner says the same count inside a longer sentence that also says what
+ * to do about it, and neither is derived from the other.
+ */
+export function verdictSummary(state) {
+  if (!state) return null
+  const verdict = state.verdict
+  if (!verdict || verdict.clean) return state.label
+  const count = verdict.executable ? verdict.critical_findings : verdict.blockers.length
+  const noun = verdict.executable ? 'critical finding' : 'blocker'
+  return `${state.label} · ${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
 /** Sheet rows that are legs of a relayed crop delivery, keyed `origin:destination`.
  *
  * A relay is two ordinary rows, so the sheet cannot show it: the operator

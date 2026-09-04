@@ -185,6 +185,7 @@ test.describe('npc_feedstock, per village', () => {
     await expect(feedstockCell(page, '02')).toHaveText(/derived/)
 
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     expect(configFor(sent[0], CAPITAL)).not.toHaveProperty('npc_feedstock')
   })
@@ -202,6 +203,7 @@ test.describe('npc_feedstock, per village', () => {
     await page.getByLabel('NPC may convert Clay at 02').check()
 
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     expect(configFor(sent[0], CAPITAL).npc_feedstock).toEqual(['clay', 'crop'])
   })
@@ -220,6 +222,7 @@ test.describe('npc_feedstock, per village', () => {
     await expect(page.getByText(/Nothing ticked, so this is not an override yet/)).toBeVisible()
 
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     // Dropped, not sent as `[]`.
     expect(configFor(sent[0], CAPITAL)).not.toHaveProperty('npc_feedstock')
@@ -281,6 +284,7 @@ test.describe('assumed_crop_per_hour, per role', () => {
     await expect(page.getByText('checked, ships nothing')).toBeVisible()
 
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     expect(sent[0].roles.full_off.assumed_crop_per_hour).toBe(-5880)
   })
@@ -293,6 +297,7 @@ test.describe('assumed_crop_per_hour, per role', () => {
     await page.getByLabel('Assumed net crop per hour for a DEF village').fill('0')
 
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     expect(sent[0].roles.def.assumed_crop_per_hour).toBe(0)
   })
@@ -315,6 +320,7 @@ test.describe('assumed_crop_per_hour, per role', () => {
     // which would silently drop the only thing the figure can do.
     await expect(page.getByText(/DEF has villages\s+but no template/)).toHaveCount(0)
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     expect(sent[0].roles.def.assumed_crop_per_hour).toBe(-100)
   })
@@ -330,6 +336,7 @@ test.describe('assumed_crop_per_hour, per role', () => {
     await expect(page.getByText('not checked')).toHaveCount(5)
 
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     expect(sent[0].roles.def).not.toHaveProperty('assumed_crop_per_hour')
   })

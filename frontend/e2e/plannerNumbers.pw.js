@@ -227,6 +227,7 @@ async function openAccount(page) {
 async function buildPlan(page, sent) {
   await page.getByRole('button', { name: /^Build plan/ }).click()
   await expect.poll(() => sent.plan.length).toBe(1)
+  await page.getByRole('button', { name: 'Plan', exact: true }).click()
   await expect(page.getByText(/^Routes$/)).toBeVisible()
 }
 

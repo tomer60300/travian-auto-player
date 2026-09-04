@@ -225,6 +225,7 @@ test.describe('NPC attendance', () => {
     await page.goto('/resource-planner')
 
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
 
     expect(sent.plan).toHaveLength(1)
@@ -250,6 +251,7 @@ test.describe('NPC attendance', () => {
 
     // The single-window path: `/plan` carries the ACTIVE profile's answer.
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     expect(sent.plan).toHaveLength(1)
     expect(sent.plan[0].npc_attended).toBe(true)
@@ -326,6 +328,7 @@ test.describe('NPC attendance', () => {
     // as two empty boxes.
     await expect(page.getByText(/Nothing reserved/)).toBeVisible()
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     expect(sent.plan[0]).not.toHaveProperty('reserved_window')
 
@@ -335,6 +338,7 @@ test.describe('NPC attendance', () => {
     await expect(page.getByText(/Arrivals avoid 20:00–21:00/)).toBeVisible()
 
     await page.getByRole('button', { name: /^Build plan/ }).click()
+    await page.getByRole('button', { name: 'Plan', exact: true }).click()
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     // Minutes past midnight, which is the unit the request carries.
     expect(sent.plan[sent.plan.length - 1].reserved_window).toEqual([1200, 1260])
@@ -361,6 +365,7 @@ test.describe('NPC attendance', () => {
       await page.getByLabel('Who is trading during All day').selectOption('awake')
 
       await page.getByRole('button', { name: /^Build plan/ }).click()
+      await page.getByRole('button', { name: 'Plan', exact: true }).click()
       await expect(page.getByText(/^Routes$/)).toBeVisible()
 
       expect(sent.plan).toHaveLength(1)
@@ -378,6 +383,7 @@ test.describe('NPC attendance', () => {
       await page.getByLabel('Who is trading during All day').selectOption('asleep')
 
       await page.getByRole('button', { name: /^Build plan/ }).click()
+      await page.getByRole('button', { name: 'Plan', exact: true }).click()
       await expect(page.getByText(/^Routes$/)).toBeVisible()
 
       expect(sent.plan[0].npc_attended).toBe(false)
@@ -396,6 +402,7 @@ test.describe('NPC attendance', () => {
 
       // The plan still builds, and sends nothing it was not told.
       await page.getByRole('button', { name: /^Build plan/ }).click()
+      await page.getByRole('button', { name: 'Plan', exact: true }).click()
       await expect(page.getByText(/^Routes$/)).toBeVisible()
       expect(sent.plan[0]).not.toHaveProperty('npc_attended')
     })

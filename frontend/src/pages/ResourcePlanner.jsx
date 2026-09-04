@@ -140,7 +140,7 @@ import {
   unresolvedProtectedEntries,
 } from '../utils/villageRefs'
 import { describeBlockers, planBlockers } from '../utils/plannerBlockers'
-import { planStatus, relayLegIndex } from '../utils/plannerFindings'
+import { planStatus, relayLegIndex, verdictSummary } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
 import { groupWarnings } from '../utils/warningGroups'
 import {
@@ -2249,7 +2249,14 @@ export default function ResourcePlanner() {
       // A fresh plan is a fresh identity, so whatever the last export said
       // about a digest that has moved is now history.
       setYamlConflict(null)
-      setStage('plan')
+      // AND THE STAGE DOES NOT MOVE. This used to end `setStage('plan')`, so
+      // editing a 15-column table on Account and pressing Build plan threw the
+      // operator onto another stage -- and navigating back remounted the table
+      // with every `<details>` CLOSED, because `open` is DOM state React does
+      // not restore. Every picker the operator had opened to read across the
+      // row shut itself, on a press whose whole purpose is that re-planning
+      // while tuning a target is free. The verdict chip beside the button is
+      // the acknowledgement, and it is one click from the stage.
     } catch (err) {
       toast.error(errorDetail(err, 'Could not build a plan'))
     } finally {
@@ -3628,7 +3635,12 @@ export default function ResourcePlanner() {
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex justify-between items-center mb-4 gap-3 flex-wrap">
         <h2 className="heading-gold text-2xl">Resource Planner</h2>
-        <div className="flex items-center gap-3">
+        {/* `flex-wrap` on the INNER group too, which it did not have: the outer
+            row wrapped the heading away from the controls and then the controls
+            themselves overflowed. Measured at 375 the moment the verdict chip
+            joined them -- the document went 76px past the viewport, and
+            `liveRunGuards` read 82px of page scroll. */}
+        <div className="flex items-center gap-3 flex-wrap">
           <span className="text-secondary text-xs">
             {villages.length ? `${villages.length} villages` : 'no snapshot yet'}
           </span>
@@ -3651,6 +3663,23 @@ export default function ResourcePlanner() {
           >
             {planning ? 'Planning…' : 'Build plan (0 requests)'}
           </button>
+          {/* The answer, where the question was asked. Pressing Build plan no
+              longer moves the stage (see `buildPlan`), so this is what says the
+              press landed -- and it is a button, because the operator who wants
+              the detail should not have to find the tab. In words as well as in
+              tone: `plan-verdict-chip` colours it, and "Cannot run" is what
+              carries the meaning. */}
+          {planState && (
+            <button
+              type="button"
+              className={`plan-verdict-chip ${
+                VERDICT_TONE_CLASS[planState.tone] ?? 'plan-verdict-dirty'
+              }`}
+              onClick={() => setStage('plan')}
+            >
+              {verdictSummary(planState)}
+            </button>
+          )}
         </div>
       </div>
 
