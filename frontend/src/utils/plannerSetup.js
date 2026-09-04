@@ -1767,6 +1767,50 @@ export function parseSetup(text) {
       }
       merchantModel.merchant_headroom = headroom
     }
+    // The two WORLD overrides, and the pair this parser used to drop in
+    // silence. `buildSetup` stores `merchant_model` WHOLESALE, so a typed
+    // `map_span` or `speed_fields_per_hour` has always reached the file -- while
+    // this reader rebuilt the model field by field and simply did not name
+    // them. A round trip therefore lost both with no message, which is the
+    // worst shape the loss can take: the span scales every distance the
+    // geometry computes and the speed divides into every travel time, so an
+    // operator on a non-Europe-2 world reloaded their own file and planned
+    // another world's journeys.
+    //
+    // NO VERSION BUMP. The rule this file states above is that the version
+    // rises when a FIELD IS ADDED to the document -- because an older build
+    // would then load it, drop the field, and let the operator save from
+    // there. Nothing is added here: the writer already emitted these keys
+    // inside v9, and the server's `MerchantModelIn` ignores extras while the
+    // store keeps the body verbatim, so v9 documents carrying them are already
+    // saved and already readable. Only the reader changes, so this is the one
+    // case where the two halves do not have to move together.
+    //
+    // Refused rather than coerced, on the same discipline as the four above and
+    // with the same predicates the boxes use: the plan request's `map_span`
+    // validator refuses an even span outright, so accepting one here would load
+    // a figure every subsequent plan is refused over.
+    if (m.map_span != null) {
+      const span = Number(m.map_span)
+      if (!isMapSpan(span)) {
+        throw new SetupFileError(
+          `merchant_model.map_span is ${JSON.stringify(m.map_span)}; ` +
+            `it must be an odd whole number of fields -- a world is centred on 0|0, ` +
+            `so its width is always odd.`
+        )
+      }
+      merchantModel.map_span = span
+    }
+    if (m.speed_fields_per_hour != null) {
+      const speed = Number(m.speed_fields_per_hour)
+      if (!isMerchantSpeed(speed)) {
+        throw new SetupFileError(
+          `merchant_model.speed_fields_per_hour is ${JSON.stringify(m.speed_fields_per_hour)}; ` +
+            `it must be more than 0 -- the plan divides every distance by it.`
+        )
+      }
+      merchantModel.speed_fields_per_hour = speed
+    }
   }
 
   const foreignTargets =

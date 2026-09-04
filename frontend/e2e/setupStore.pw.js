@@ -81,9 +81,27 @@ const STORED = {
   roles: { def: { allocations: {}, consumption: { lumber: 8372 } } },
 }
 
+/** The same document at v9, carrying the two WORLD overrides.
+ *
+ * `buildSetup` has always written these -- it stores `merchant_model` wholesale
+ * -- and `parseSetup` rebuilt the model field by field and dropped them, so a
+ * saved setup came back with the operator's own span and speed missing and
+ * nothing said. Same version: the writer's half never changed. */
+const STORED_WORLD = {
+  ...STORED,
+  version: 9,
+  merchant_model: {
+    base_capacity: 2500,
+    bonus_per_to_level: 0.2,
+    map_span: 801,
+    speed_fields_per_hour: 24,
+  },
+}
+
 /**
  * @param {object} store the store's behaviour: `get` is 'found' | 'missing' |
- *   'empty' | 'error', and `put`/`del` are 'ok' | 'refused' | 'missing'.
+ *   'empty' | 'error' | 'world', and `put`/`del` are 'ok' | 'refused' |
+ *   'missing'.
  */
 async function isolate(page, store = {}) {
   const behaviour = { get: 'missing', put: 'ok', del: 'ok', ...store }
@@ -126,7 +144,9 @@ async function isolate(page, store = {}) {
         const setup =
           behaviour.get === 'empty'
             ? { ...STORED, villages: [], roles: {} }
-            : STORED
+            : behaviour.get === 'world'
+              ? STORED_WORLD
+              : STORED
         return route.fulfill({
           json: { account_key: accountKey, setup, saved_at: SAVED_AT },
         })
@@ -235,6 +255,22 @@ test.describe('the setup on the server', () => {
     // The role template came with it, so the row no longer says the role has
     // no profile -- which is what the backend would refuse the plan over.
     await expect(page.getByText('no DEF template yet')).toHaveCount(0)
+  })
+
+  test('the two world overrides survive the load, instead of vanishing', async ({ page }) => {
+    await isolate(page, { get: 'world' })
+    await seed(page)
+    await page.goto('/resource-planner')
+
+    await page.getByRole('button', { name: 'Load setup from server' }).click()
+    await expect(page.getByText('Loaded 2 village(s) from the saved setup.')).toBeVisible()
+
+    // Both were dropped in silence before. The span scales every distance the
+    // geometry computes and the speed divides into every travel time, so a
+    // non-Europe-2 operator reloaded their own document and planned another
+    // world's journeys.
+    await expect(page.getByLabel('Map span override')).toHaveValue('801')
+    await expect(page.getByLabel('Merchant speed fields per hour override')).toHaveValue('24')
   })
 
   test('saving sends the same document the file export writes', async ({ page }) => {

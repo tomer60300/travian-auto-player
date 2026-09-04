@@ -2480,6 +2480,75 @@ describe('the account-wide merchant levers in the setup file', () => {
     expect(() => roundTrip(doc)).toThrow(/merchant_reserve/)
   })
 
+  // The two WORLD overrides, which `buildSetup` has always written -- it stores
+  // `merchant_model` wholesale -- and which `parseSetup` rebuilt field by field
+  // and therefore dropped. A round trip lost both in silence, which is the worst
+  // shape a loss can take here: `map_span` scales every distance the geometry
+  // computes and the speed divides into every travel time, so an operator on a
+  // non-Europe-2 world reloaded their own file and planned another world's
+  // journeys with no message at all.
+  //
+  // NO VERSION BUMP, and that is checked below: the document byte for byte is
+  // what it always was, because the writer already emitted these keys inside v9
+  // and the store keeps the body verbatim (`MerchantModelIn` ignores extras).
+  // Only the reader changes, so the two halves do not have to move together.
+  it('round-trips the two world overrides the writer has always written', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      merchantModel: {
+        base_capacity: 2500,
+        bonus_per_to_level: 0.2,
+        map_span: 801,
+        speed_fields_per_hour: 24,
+      },
+      exportedAt: STAMP,
+    })
+
+    // The writer's half, unchanged.
+    expect(doc.merchant_model.map_span).toBe(801)
+    expect(doc.merchant_model.speed_fields_per_hour).toBe(24)
+    expect(doc.version).toBe(SETUP_VERSION)
+
+    expect(roundTrip(doc).merchantModel).toEqual({
+      base_capacity: 2500,
+      bonus_per_to_level: 0.2,
+      map_span: 801,
+      speed_fields_per_hour: 24,
+    })
+  })
+
+  it('leaves the world overrides out when the file does not carry them', () => {
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        tradeOffice: { 20030: 19 },
+        merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
+        exportedAt: STAMP,
+      })
+    )
+    expect(setup.merchantModel).not.toHaveProperty('map_span')
+    expect(setup.merchantModel).not.toHaveProperty('speed_fields_per_hour')
+  })
+
+  it('refuses an even map span, which a world centred on 0|0 cannot have', () => {
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.merchant_model = { base_capacity: 2500, bonus_per_to_level: 0.2, map_span: 800 }
+
+    expect(() => roundTrip(doc)).toThrow(/map_span/)
+  })
+
+  it('refuses a merchant speed of zero, which the backend divides by', () => {
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.merchant_model = {
+      base_capacity: 2500,
+      bonus_per_to_level: 0.2,
+      speed_fields_per_hour: 0,
+    }
+
+    expect(() => roundTrip(doc)).toThrow(/speed_fields_per_hour/)
+  })
+
   it('refuses a headroom of 1, which would hold every merchant back', () => {
     // The backend's `lt=1.0`: at 1 the whole budget is held clear and every
     // route is billed as crowding, which is not a plan.
