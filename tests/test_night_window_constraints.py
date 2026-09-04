@@ -757,3 +757,129 @@ class TestASplitNightIsStillTheNight:
         assert rows, f"a 600-minute round trip cannot close a 420-minute night: {res.warnings}"
         assert rows[0].overrun_minutes > 0
         assert rows[0].round_trip_minutes == pytest.approx(600.0)
+
+
+# -- The night has to be ONE night, whatever order it is typed in -------------
+
+
+def _night_state(res):
+    """Everything section 6's two state rules produce, as one comparable value."""
+    return (
+        [(r.village_id, r.resource, r.store, r.fill) for r in res.morning_shortfalls],
+        [(r.village_id, r.resource, r.store, r.fill) for r in res.pre_night_over_baseline],
+        sorted(w for w in res.warnings if "07:00" in w or "60%" in w or "25%" in w),
+    )
+
+
+def _pieces_body(pieces):
+    """A day check over exactly the profiles given, in exactly that order.
+
+    Nothing moves: zero rates and no allocations anywhere, so 07:00 holds what
+    was seeded and the only thing under test is WHICH minute each rule reads.
+    03 is a troops_off village at 10% of its granary, well under the 60% floor.
+    """
+
+    def village(vid, name, x, crop_stock):
+        return {
+            "village_id": vid,
+            "name": name,
+            "x": x,
+            "y": 0,
+            "merchants_total": 20,
+            "merchants_free": 20,
+            "lumber_per_hour": 0,
+            "clay_per_hour": 0,
+            "iron_per_hour": 0,
+            "crop_per_hour": 0,
+            "crop_stock": crop_stock,
+            # Materials well over the floor, so the granary is the only store
+            # with anything to report and the rows stay about the crop.
+            "lumber_stock": 90_000,
+            "clay_stock": 90_000,
+            "iron_stock": 90_000,
+            "granary_capacity": 100_000,
+            "warehouse_capacity": 100_000,
+        }
+
+    return DayCheckRequest.model_validate(
+        {
+            "snapshot": [village(HUB, "02", 0, 90_000), village(ARMY, "03", 1, 10_000)],
+            "config": [
+                {"village_id": HUB, "role": "capital"},
+                {"village_id": ARMY, "role": "troops_off"},
+            ],
+            "roles": {"capital": {}, "troops_off": {}},
+            "segments": [
+                {"name": name, "window": list(window), "allocations": {}, "overnight": overnight}
+                for name, window, overnight in pieces
+            ],
+        }
+    )
+
+
+DAY_TO_23 = ("Day", (7 * 60, 23 * 60), False)
+NIGHT_A = ("Night before midnight", (23 * 60, 0), True)
+NIGHT_B_GAPPED = ("Night after midnight", (30, 7 * 60), True)
+NAP = ("Nap", (13 * 60, 14 * 60), True)
+
+
+class TestTheNightsEndsDoNotDependOnListOrder:
+    """Section 6 reads the night from both ends of it, and `next()` over the
+    request's list order is not a way to find either.
+
+    The comment claimed order-independence, and that holds only when the halves
+    chain end-to-start. Both counter-cases are legal -- the overlap check
+    refuses overlaps, not gaps -- and in both of them every declared-overnight
+    profile qualifies as the opening AND as the closing, so the answer came
+    down to which one happened to be listed first.
+    """
+
+    def test_a_gap_between_the_halves_reads_the_same_either_way_round(self):
+        """23:00-00:00 and 00:30-07:00, with the half hour between them running
+        on production alone. Listed one way the closing half ended at 00:00 and
+        the morning floor was measured against nothing; listed the other way it
+        ended at 07:00 and the floor was measured against the day."""
+        forward = asyncio.run(
+            post_day_check(_pieces_body([DAY_TO_23, NIGHT_A, NIGHT_B_GAPPED]), USER)
+        )
+        backward = asyncio.run(
+            post_day_check(_pieces_body([DAY_TO_23, NIGHT_B_GAPPED, NIGHT_A]), USER)
+        )
+
+        assert _night_state(forward) == _night_state(backward)
+
+    def test_a_gap_says_so_rather_than_measuring_one_end_of_two_nights(self):
+        res = asyncio.run(post_day_check(_pieces_body([DAY_TO_23, NIGHT_A, NIGHT_B_GAPPED]), USER))
+
+        assert any("one continuous night" in w for w in res.warnings), res.warnings
+
+    def test_a_second_declared_overnight_profile_reads_the_same_either_way_round(self):
+        """An afternoon nap declared overnight is legal and is not the night.
+        Both it and the real night qualified as opening and as closing, so both
+        of section 6's state rules could end up measured against the nap."""
+        pieces = [
+            ("Morning", (7 * 60, 13 * 60), False),
+            ("Afternoon", (14 * 60, 23 * 60), False),
+            ("Night", (23 * 60, 7 * 60), True),
+        ]
+        forward = asyncio.run(post_day_check(_pieces_body([*pieces, NAP]), USER))
+        backward = asyncio.run(post_day_check(_pieces_body([NAP, *pieces]), USER))
+
+        assert _night_state(forward) == _night_state(backward)
+        # And it is the ambiguity that has to be said, not one arbitrary end of
+        # it: listed first, the nap became both ends of "the night".
+        assert any("one continuous night" in w for w in forward.warnings), forward.warnings
+
+    def test_one_contiguous_night_still_reads_both_of_its_ends(self):
+        """The shape this branch exists to support must keep working: the 25%
+        baseline at 23:00 and the 60% floor against the profile that takes over
+        at 07:00, from halves given in either order."""
+        night_b = ("Night after midnight", (0, 7 * 60), True)
+        forward = asyncio.run(post_day_check(_pieces_body([DAY_TO_23, NIGHT_A, night_b]), USER))
+        backward = asyncio.run(post_day_check(_pieces_body([DAY_TO_23, night_b, NIGHT_A]), USER))
+
+        assert _night_state(forward) == _night_state(backward)
+        rows = [r for r in forward.morning_shortfalls if r.village_id == ARMY]
+        assert [r.store for r in rows] == ["granary"], forward.morning_shortfalls
+        assert rows[0].fill == pytest.approx(0.10)
+        assert not any("one continuous night" in w for w in forward.warnings), forward.warnings

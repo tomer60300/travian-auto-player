@@ -1665,6 +1665,53 @@ def _fill_rows(
     ]
 
 
+def _one_night_run(
+    night_segments: Sequence["DaySegmentInput"],
+) -> tuple["DaySegmentInput", "DaySegmentInput"] | None:
+    """The declared night as ONE run: the profile that opens it and the one that
+    closes it. ``None`` when the declarations do not form a single run.
+
+    Section 6 asks two questions about "the night" -- the 25% baseline at the
+    minute it opens and the 60% floor at the minute it closes -- and a night is
+    legally typed as a PAIR either side of midnight, so both ends have to be
+    found rather than assumed to be one segment's.
+
+    Found by CHAINING end-to-start, which is the only reading that cannot
+    depend on the order the request happens to list the segments in. Picking
+    "the half no other half ends at" looks order-free and is not: two legal
+    shapes make every declared-overnight profile qualify as both ends at once,
+    and then `next()` decides by list position.
+
+    * A GAP. ``(1380, 0)`` with ``(30, 420)`` leaves 00:00-00:30 to production
+      alone, which is legal -- the overlap check refuses overlaps, not gaps --
+      and listed the other way round the 25% baseline was read at 00:30 instead
+      of 23:00.
+    * A SECOND declared-overnight window. An afternoon ``(780, 840)`` marked
+      overnight is also legal, and both of section 6's state rules could end up
+      measured against the nap.
+
+    Windows here are non-overlapping (validated before this runs), so no two
+    can share a start or an end, and the chain therefore cannot revisit a
+    segment. The length guard is belt-and-braces against that stopping being
+    true.
+    """
+    by_start = {s.window[0]: s for s in night_segments}
+    if len(by_start) != len(night_segments):
+        return None
+    ends = {s.window[1] for s in night_segments}
+    openings = [s for s in night_segments if s.window[0] not in ends]
+    if len(openings) != 1:
+        return None
+    chain = [openings[0]]
+    while (following := by_start.get(chain[-1].window[1])) is not None:
+        chain.append(following)
+        if len(chain) > len(night_segments):
+            return None
+    if len(chain) != len(night_segments):
+        return None
+    return chain[0], chain[-1]
+
+
 def _night_overrun_rows(
     beat,
     window: tuple[int, int] | None,
@@ -3703,24 +3750,40 @@ async def post_day_check(
     floor_villages = [vid for vid, role in roles.of_village.items() if keeps_a_morning_floor(role)]
     morning_short: tuple[FillAtSwitch, ...] = ()
     pre_night_over: tuple[FillAtSwitch, ...] = ()
-    if night_segments and floor_villages:
+    night_run = _one_night_run(night_segments) if night_segments else None
+    if night_segments and floor_villages and night_run is None:
+        # Two nights are not one night, and section 6's rules are about ONE:
+        # the 25% baseline at the minute it opens and the 60% floor at the
+        # minute it closes. Measuring either against an arbitrary piece would
+        # answer a question the operator did not ask, so this says what is
+        # wrong instead. Loudly, because a silent skip reads as "the floor was
+        # met" -- the same reason the missing-morning-profile note below is
+        # said rather than skipped.
+        warnings.append(
+            # In clock order, not request order: the whole finding is that the
+            # answer must not depend on how the list happens to be sorted, and
+            # a message that does is the same defect in prose.
+            "the profiles declared overnight ("
+            + ", ".join(
+                f"{s.name} {_clock(s.window[0])}-{_clock(s.window[1])}"
+                for s in sorted(night_segments, key=lambda s: s.window[0])
+            )
+            + ") are not one continuous night -- they leave a gap or describe "
+            "separate stretches, so section 6's 25% pre-night baseline and 60% "
+            "morning floor could not be measured. Give the night one unbroken "
+            "run of profiles, split at midnight if you like, and declare only "
+            "those as overnight."
+        )
+    elif night_run is not None and floor_villages:
         # Section 6's two state rules read the night from either END of it, so
         # a night SPLIT at midnight needs both ends named rather than one
         # segment standing in for both: the 25% baseline belongs to the half
         # that OPENS the night (23:00) and the 60% floor to the half that
-        # closes it (07:00). Found by the minutes, so the answer does not
-        # depend on the order `segments` happens to arrive in -- the opening
-        # half is the one no other night half ends at, the closing half the one
-        # no other night half starts at. A night stated as one window is the
-        # degenerate case: both are that window.
-        night_starts = {s.window[0] for s in night_segments}
-        night_ends = {s.window[1] for s in night_segments}
-        opening = next(
-            (s for s in night_segments if s.window[0] not in night_ends), night_segments[0]
-        )
-        closing = next(
-            (s for s in night_segments if s.window[1] not in night_starts), night_segments[-1]
-        )
+        # closes it (07:00). Both come from `_one_night_run`, which chains the
+        # halves end-to-start, so the answer cannot depend on the order
+        # `segments` happens to arrive in. A night stated as one window is the
+        # degenerate case: both ends are that window.
+        opening, closing = night_run
         pre_night_over = pre_night_overfills(trajectories, capacities, floor_villages, opening.name)
         # Whichever profile takes over at the night's last minute -- 07:00 on the
         # operator's own pair. Found by the minute rather than by position or by
