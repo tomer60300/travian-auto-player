@@ -27,6 +27,7 @@ import pytest
 from pydantic import ValidationError
 
 from travian_api.services.distribution.allocation import Resource
+from travian_api.services.distribution.optimizer import VillageState
 from travian_api.web.routes import distribution as dist_module
 from travian_api.web.routes.distribution import DayCheckRequest, ExecuteRequest, post_day_check
 
@@ -72,6 +73,20 @@ def _account(rows):
     )
     return SimpleNamespace(
         plan=plan,
+        # `_PlannedAccount` carries the village models, and the whole-day
+        # merchant boundary reads each village's budget off them -- the one
+        # place the fleet, the reserve and the operator's cap are composed.
+        villages={
+            20003: VillageState(
+                village_id=20003, x=0, y=0, merchant_count=20, trade_office_level=10
+            ),
+            20011: VillageState(
+                village_id=20011, x=10, y=0, merchant_count=20, trade_office_level=0
+            ),
+            20012: VillageState(
+                village_id=20012, x=0, y=10, merchant_count=20, trade_office_level=0
+            ),
+        },
         names={20003: "03", 20011: "11", 20012: "12"},
         coords={20003: (0, 0), 20011: (10, 0), 20012: (0, 10)},
         warnings=[],
@@ -559,3 +574,78 @@ class TestOneLatencyTargetPerSegment:
         ]
 
         assert _executed_latency(payload)[(420, 480)] == 1.0
+
+
+# -- The profiles together honour the per-village merchant reserve -----------
+
+
+def _with_fleet(payload, merchants, reserve):
+    """The same body, at a fleet small enough for the boundary sum to bind."""
+    for village in payload["snapshot"]:
+        village["merchants_total"] = merchants
+        village["merchants_free"] = merchants
+    payload["merchant_reserve"] = reserve
+    return payload
+
+
+class TestTheProfilesTogetherHonourTheMerchantReserve:
+    """Section I.3.5: `sum(pool) <= merchants_total - reserve`, per village.
+
+    Each profile fits `merchant_budget(reserve)` on its own -- the optimizer
+    refuses otherwise -- but a round trip started late in one window is still in
+    the air when the next begins, so the sum across profiles is what a village
+    actually needs. The reserve is precisely what a boundary overlap eats, and
+    section VII.6 asks for it to be generous rather than tight: defensive calls
+    come at random hours, and a village with zero idle merchants cannot respond
+    to anything by hand.
+
+    At 7 merchants and a reserve of 2 the pair commits 4 + 3 = 7: the whole
+    fleet, with nothing left for 01:00. Measured against the FLEET that is
+    `7 > 7`, which is false, so the composite passed in silence.
+    """
+
+    def _payload(self):
+        return _with_fleet(_shared_payload(), 7, 2)
+
+    def _boundary(self, warnings):
+        return [w for w in warnings if "together commit" in w]
+
+    def test_a_composite_that_eats_the_reserve_is_reported(self):
+        res = _execute(
+            ExecuteRequest.model_validate({**self._payload(), "dry_run": True}), connected=False
+        )
+
+        (warning,) = self._boundary(res.warnings)
+        assert "03:" in warning, warning
+        # The budget, not the fleet: 7 in the fleet less the 2 held back.
+        assert "7 merchants" in warning and "5" in warning, warning
+
+    def test_the_endpoint_the_operator_reviews_with_reports_it_too(self):
+        """The check lived only in /execute, so the day picture the operator
+        signs off was silent about it -- and /execute builds the same
+        per-segment plans, so there was never a reason for the two to differ."""
+        res = asyncio.run(
+            post_day_check(DayCheckRequest.model_validate(self._payload()), SimpleNamespace(id=1))
+        )
+
+        assert self._boundary(res.warnings), res.warnings
+
+    def test_both_endpoints_word_it_identically(self):
+        executed = _execute(
+            ExecuteRequest.model_validate({**self._payload(), "dry_run": True}), connected=False
+        )
+        checked = asyncio.run(
+            post_day_check(DayCheckRequest.model_validate(self._payload()), SimpleNamespace(id=1))
+        )
+
+        assert self._boundary(executed.warnings) == self._boundary(checked.warnings)
+
+    def test_a_fleet_with_room_for_the_reserve_says_nothing(self):
+        res = _execute(
+            ExecuteRequest.model_validate(
+                {**_with_fleet(_shared_payload(), 20, 2), "dry_run": True}
+            ),
+            connected=False,
+        )
+
+        assert not self._boundary(res.warnings), res.warnings

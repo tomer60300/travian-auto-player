@@ -3528,6 +3528,9 @@ async def post_day_check(
     night_segments: list[DaySegmentInput] = []
     night_overruns: list[NightOverrunResponse] = []
     npc_reserves: dict[int, NpcReserve] = {}
+    # Kept because the whole-day merchant boundary is a question about the SUM
+    # across profiles, which no single segment's plan can answer.
+    planned: list[_PlannedAccount] = []
     for segment in body.segments:
         # Route each profile through the SAME planner /plan and /execute use, so
         # the day picture is built from the real route set -- actual cycles,
@@ -3553,6 +3556,7 @@ async def post_day_check(
             raise HTTPException(
                 status_code=exc.status_code, detail=f"{segment.name}: {exc.detail}"
             ) from exc
+        planned.append(account)
         # Every finding, both halves: a profile needs the allocation-level ones
         # (unallocated slack, a receiver nothing sources) that live on the plan
         # as much as the ones computed here.
@@ -3627,6 +3631,10 @@ async def post_day_check(
         for vid, reserve in account.plan.npc.items():
             if reserve.allowance_per_day > 0.0 or vid not in npc_reserves:
                 npc_reserves[vid] = reserve
+    # Unprefixed: this is not one profile's finding but the account's, about the
+    # boundary BETWEEN them. Same helper /execute runs, so the endpoint the
+    # operator reviews with and the endpoint that writes cannot differ on it.
+    warnings.extend(_merchant_boundary_warnings(planned, body.merchant_reserve, names))
     # Off the event loop for the same reason craft_plan is: pure CPU that must
     # not stall WebSocket frames or stealth-timed game requests. The simulation
     # got much heavier when it became discrete -- a tick per dispatch and per
@@ -3849,6 +3857,68 @@ class _PlannedAccount:
     def verdict(self) -> Verdict:
         """What feasibility decided, and what it left to the operator."""
         return assess(self.plan, self.all_findings, self.names)
+
+
+def _merchant_boundary_warnings(
+    planned: Sequence[_PlannedAccount],
+    reserve: int,
+    names: Mapping[int, str],
+) -> list[str]:
+    """Villages whose profiles TOGETHER commit more than the plan may.
+
+    Merchants are one fleet shared across the day. Each profile fits its own
+    ``merchant_budget`` -- the optimizer refuses otherwise -- but a long round
+    trip started late in one window is still in the air when the next begins,
+    so the sum across profiles is the honest upper bound on what the village
+    needs. Warned, never blocked: a short merchant is a late send, not a
+    disaster, and the windows' separation usually absorbs it.
+
+    Measured against the BUDGET and not the fleet. Section I.3.5 is
+    ``sum(pool) <= merchants_total - reserve``, and the reserve is precisely
+    what a boundary overlap eats: against the raw fleet a composite committing
+    exactly it passed in silence, as did everything between `fleet - reserve`
+    and `fleet`. Section VII.6 is why that matters -- defensive calls come at
+    random hours, and a village with zero idle merchants cannot respond to
+    anything by hand.
+
+    Shared by /execute and /day-check rather than living in the writer alone.
+    Both build the same per-segment plans, so a check only one of them ran left
+    the endpoint the operator REVIEWS with silent about it.
+    """
+    if len(planned) < 2:
+        return []
+    committed: dict[int, int] = {}
+    for account in planned:
+        for vid, count in account.plan.merchants_committed.items():
+            committed[vid] = committed.get(vid, 0) + count
+    # Every segment models the same villages off the same snapshot and config,
+    # so the first stands in for all of them -- the same standing-in /execute
+    # does for names and coords.
+    villages = planned[0].villages
+    warnings: list[str] = []
+    for vid, total in sorted(committed.items()):
+        village = villages.get(vid)
+        if village is None:
+            continue
+        budget = village.merchant_budget(reserve)
+        if not total > budget > 0:
+            continue
+        # Where the operator's own cap is what binds, say so in the words the
+        # rest of the planner says it in rather than blaming the reserve.
+        clause = merchant_ceiling_clause(
+            village.max_busy_merchants, village.spare_merchants(reserve)
+        )
+        why = clause or (
+            f"{village.merchant_count} in the fleet less the {reserve} held in reserve"
+        )
+        warnings.append(
+            f"{village_label(vid, names)}: the profiles together commit "
+            f"{total} merchants against a budget of {budget} ({why}); round trips "
+            f"crossing a window boundary may briefly run short, delaying sends "
+            f"rather than losing them -- and the reserve is what an emergency "
+            f"shipment at 01:00 has to come out of"
+        )
+    return warnings
 
 
 async def _plan_account(
@@ -5410,6 +5480,15 @@ async def post_execute(
         ]
     else:
         warnings = list(account.warnings)
+    # Unprefixed: this is not one profile's finding but the account's, about the
+    # boundary BETWEEN them. Raised HERE rather than beside the reconciliation
+    # it used to sit in, because the dry run returns before that point -- so the
+    # preview the operator authorises a live run from never showed it either.
+    warnings.extend(
+        _merchant_boundary_warnings(
+            [acc for _segment, acc in planned_segments], body.merchant_reserve, names
+        )
+    )
 
     # Each plan row is one route from a real origin village's marketplace to a
     # destination (a real village or a foreign sink — coords cover both).
@@ -5727,26 +5806,6 @@ async def post_execute(
     desired_by_origin: dict[int, list[tuple[SheetRow, PlannedRoute]]] = {}
     for row, route in items:
         desired_by_origin.setdefault(route.origin_village_id, []).append((row, route))
-    if len(planned_segments) > 1:
-        # Merchants are one fleet shared across the day. Each profile fits its
-        # own budget, but a long round trip started late in one window is still
-        # in the air when the next begins -- the sum across profiles is the
-        # honest upper bound. Warned, never blocked: a short merchant is a late
-        # send, not a disaster, and the windows' separation usually absorbs it.
-        _fleet = {v.village_id: v.merchants_total for v in body.snapshot}
-        _committed_sum: dict[int, int] = {}
-        for _segment, _acc in planned_segments:
-            for _vid, _n in _acc.plan.merchants_committed.items():
-                _committed_sum[_vid] = _committed_sum.get(_vid, 0) + _n
-        for _vid, _total in sorted(_committed_sum.items()):
-            _have = _fleet.get(_vid, 0)
-            if _total > _have > 0:
-                warnings.append(
-                    f"{village_label(_vid, names)}: the profiles together commit "
-                    f"{_total} merchants against a fleet of {_have}; round trips "
-                    f"crossing a window boundary may briefly run short, delaying "
-                    f"sends rather than losing them"
-                )
     if body.reconcile_all_origins:
         # Every own village, whether the plan still ships from it or not. A
         # village with no desired routes is not skipped -- it is the case this
