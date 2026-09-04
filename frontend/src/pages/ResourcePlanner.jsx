@@ -180,6 +180,26 @@ const routeCap = (typed) =>
   String(typed).trim() === '' || !Number.isFinite(Number(typed))
     ? MAX_ROUTES_PER_RUN
     : Number(typed)
+/** Route ROWS one run may put in the game, by default.
+ *
+ * The unit the operator actually authorises, in the backend's own words. A
+ * ROUTE is one request; Travian turns each "repeat every N hours" into 24/N
+ * separate daily rows and fires every one of them, so `MAX_ROUTES_PER_RUN` of 3
+ * on one-hour cycles is 72 rows -- and removing them later means deleting each
+ * row by hand.
+ *
+ * The row cap defaulted to blank, which the payload omits and the server reads
+ * as 0 = unbounded. So a default live run bounded routes at 3 and rows at
+ * infinity: "nothing bounded it, so what was agreed to and what was written
+ * were different units", as the backend field says.
+ *
+ * 24 is one route at the shortest cycle the game offers -- the cautious reading
+ * of "a few at a time", which is what the whole controlled run is for. Blank
+ * still means no limit, and says so in the box, because a whole-day
+ * provisioning pass is a legitimate thing to ask for and emptying the box is
+ * how it is asked.
+ */
+const MAX_GAME_ROWS_PER_RUN = 24
 // Villages a single reconciliation chunk visits. Two paced reads each, plus a
 // disable and its verifying re-read where there is something stale, lands a
 // chunk of five at roughly 40-70 seconds — comfortably inside one request, which
@@ -864,9 +884,12 @@ export default function ResourcePlanner() {
   const [onlyOrigin, setOnlyOrigin] = useState('')
   // Rows, not routes: the unit that actually lands in the game. A route is a
   // request; Travian turns it into 24/cycle daily rows, so three routes on
-  // one-hour cycles is seventy-two rows. Blank = no limit, so an existing run
-  // is unchanged until the operator sets one.
-  const [maxGameRows, setMaxGameRows] = useState('')
+  // one-hour cycles is seventy-two rows. Defaulted rather than blank -- see
+  // MAX_GAME_ROWS_PER_RUN -- because blank omits the field and the server then
+  // reads 0, which is unbounded: the run capped the unit nobody authorises and
+  // left the one they do uncapped. Blank still means no limit, and the box says
+  // so.
+  const [maxGameRows, setMaxGameRows] = useState(String(MAX_GAME_ROWS_PER_RUN))
   // Travian cannot confine a route to part of the day, but its fan-out can be
   // trimmed: repeat-every-N-hours is 24/N individually deletable rows, so the
   // ones departing outside the profile get removed after creation. On by
@@ -6138,12 +6161,16 @@ export default function ResourcePlanner() {
                         request; Travian turns it into 24/cycle daily rows, so a
                         cap of 3 routes on 1-hour cycles is 72 rows. */}
                     <label className="text-xs">
-                      <span className="text-secondary block">
-                        Max rows this run <span className="text-secondary">(0 = no limit)</span>
-                      </span>
+                      <span className="text-secondary block">Max rows this run</span>
+                      {/* "no limit" belongs IN the box. In the label it
+                          described a state the box could be in while the box
+                          itself was empty and unstyled, so the one control on
+                          this bar with nothing to look at was also the one whose
+                          resting value was unbounded. */}
                       <input
                         type="number"
                         min="0"
+                        placeholder="no limit"
                         className="input-sm w-28"
                         value={maxGameRows}
                         onChange={(e) => setMaxGameRows(e.target.value)}
