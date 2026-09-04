@@ -57,7 +57,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, StrictBool, ValidationError, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -235,6 +235,32 @@ class SetupDocument(BaseModel):
     # the slack, and this is where that is said.
     profiles: dict[str, dict[Resource, dict[Annotated[int, Field(gt=0)], AllocationInput]]] = {}
     profile_windows: dict[str, tuple[_ClockTime, _ClockTime]] = {}
+    # The two per-profile ANSWERS, keyed by profile name like the windows above.
+    #
+    # Declared here rather than left to ride through as unknown keys, which is
+    # what they did until 2026-09-04: the body is stored verbatim and this model
+    # ignores extras, so a `"yes"` where a boolean belongs saved without
+    # complaint and the page then refused to load the document it had just
+    # written. That is exactly the trap `_floor_sits_on_the_grid_the_input_types_on`
+    # exists to prevent, and the store's own rule is that a document the planner
+    # would refuse is refused HERE.
+    #
+    # Both are answers the planner will not guess, which is why the type matters
+    # more than it looks: `npc_attended` guessed wrong funds night routes from
+    # trading nobody did, and `overnight` guessed wrong un-declares which
+    # profile is the night, so a night split across midnight stops being read as
+    # one. Absent is the third state -- "not answered yet" -- and it is the state
+    # that refuses a plan rather than the one that invents an answer.
+    #
+    # `StrictBool`, not `bool`: pydantic's lax bool accepts the STRING "yes",
+    # and "no", "on", "off", "1" and "0" besides. Measured -- a document
+    # carrying `{"Night": "yes"}` saved with a 200 and came back coerced to
+    # `true`. That is a value nobody typed as a boolean being read as an answer
+    # to the one question this code refuses to guess, so the coercion is worse
+    # here than the refusal. `parseSetup` throws on a non-boolean for the same
+    # reason; this is the server half of that rule.
+    npc_attended: dict[str, StrictBool] = {}
+    overnight: dict[str, StrictBool] = {}
     # Minutes of the day to keep clear of ARRIVALS, so the operator's manual NPC
     # burst is not competing with merchants landing. A PAIR and not a fourth map
     # beside the three per-profile ones, because it is one person at one

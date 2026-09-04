@@ -558,6 +558,51 @@ class TestWhatThePlannerWouldRefuse:
 
         assert res.status_code == 422, res.text
 
+    def test_a_per_profile_answer_that_is_not_a_boolean_is_refused(self, client, account):
+        """The two answers the planner will not guess, typed at the door.
+
+        `npc_attended` (v7) and `overnight` (v8) rode through as unknown keys
+        until 2026-09-04: the body is stored verbatim and `SetupDocument`
+        ignores extras, so a `"yes"` saved without complaint and `parseSetup`
+        then refused to load the document the page had just written. The store's
+        own rule is that a document the planner would refuse is refused HERE.
+
+        The type is not pedantry. A guessed `npc_attended` funds night routes
+        from trading nobody did; a guessed `overnight` un-declares which profile
+        is the night, so a night split across midnight stops being read as one
+        and the 60% morning floor is measured against the wrong minute.
+        """
+        for field in ("npc_attended", "overnight"):
+            for value in ({"Night": "yes"}, {"Night": 1.5}, ["Night"], "Night"):
+                doc = _minimal(account, version=9, **{field: value})
+
+                res = _put(client, account, doc)
+
+                assert res.status_code == 422, f"{field}={value!r}: {res.text}"
+                assert field in res.text, f"{field}={value!r} must be named: {res.text}"
+
+    def test_both_per_profile_answers_round_trip(self, client, account):
+        # Absent is the third state and stays absent -- "not answered yet" is
+        # what refuses a plan, and inventing a `false` here would fund nothing
+        # while claiming the operator had said so.
+        doc = _minimal(
+            account,
+            version=9,
+            npc_attended={"Day": True, "Night": False},
+            overnight={"Day": False, "Night": True},
+        )
+
+        assert _put(client, account, doc).status_code == 200, doc
+        assert _get(client, account).json()["setup"] == doc
+
+    def test_a_document_that_answers_neither_is_still_accepted(self, client, account):
+        doc = _minimal(account, version=9)
+
+        assert _put(client, account, doc).status_code == 200
+        saved = _get(client, account).json()["setup"]
+        assert "npc_attended" not in saved
+        assert "overnight" not in saved
+
     def test_a_reserved_window_that_is_not_a_clock_pair(self, client, account):
         # Same shape and same discipline as `profile_windows` above: a document
         # is the operator asserting an answer, so a malformed pair is refused
