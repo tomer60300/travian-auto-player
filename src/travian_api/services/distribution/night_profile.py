@@ -248,10 +248,31 @@ def derive_night_profile(
         # applies on the plan side: a cap above the fleet is not extra merchants.
         if v.max_busy_merchants is not None:
             fleet = min(fleet, v.max_busy_merchants)
-        others = [_hours(v, o, speed_fields_per_hour, map_span) for o in villages if o is not v]
-        if not others:
-            return 0.0
-        trips = max(1, int(window_hours // (2 * min(others))))
+        # To the HUB, because that is where a sender's cargo actually goes. This
+        # used to measure the nearest village on the account, which is an upper
+        # bound on turnarounds and no bound at all on a clustered map: a
+        # neighbour one field away yields 47 trips in an 8h night, so the
+        # "limit" came out around six times fleet x capacity per hour. Worse,
+        # the operator's cap is applied just above and then multiplied by that
+        # count -- so the "8 busy at 02" ceiling this function exists to honour
+        # was negated inside it. The hub distance is already computed below for
+        # the draw ordering.
+        one_way = _hours(v, by_id[hub_id], speed_fields_per_hour, map_span)
+        if one_way <= 0:
+            # `v` IS the hub. The crop pass can force the hub itself to ship
+            # (its granary ceiling can sit under its own production), and its
+            # cargo plainly does not travel to itself. The nearest other
+            # village is the only destination available here, and it is what
+            # this function used for everyone before -- so the hub keeps its
+            # previous reading rather than acquiring a guessed one.
+            others = [_hours(v, o, speed_fields_per_hour, map_span) for o in villages if o is not v]
+            one_way = min(others) if others else 0.0
+            if one_way <= 0:
+                return 0.0
+        # No `max(1, ...)`. A village whose round trip does not fit the window
+        # sheds NOTHING: crediting it one trip promises cargo that would still
+        # be in the air at 07:00, which section 6 forbids outright.
+        trips = int(window_hours // (2 * one_way))
         return fleet * capacity * trips / window_hours
 
     def capped(v: NightVillage, resource: Resource) -> int:

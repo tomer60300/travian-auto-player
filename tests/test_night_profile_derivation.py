@@ -370,10 +370,17 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
 
     # FAR makes 40,000 lumber into a 1,200,000 warehouse, so the night's own
     # ceiling (52,500/h) is no constraint and the day plan's 6,000 is what it
-    # would keep. Four fields from its nearest neighbour at Trade Office 10 it
-    # turns round 12 times in the window, so its shed limit is 202,500/h with
-    # the fleet free, 22,500/h held to two merchants and nothing at all at
-    # zero -- three answers either side of the 34,000/h the draw wants of it.
+    # would keep.
+    #
+    # RE-SEEDED again (shed limit measured to the HUB). FAR is 6 fields from
+    # the hub and 4 from its nearest neighbour, and its cargo goes to the hub:
+    # 6 fields at 12 f/h is a 1h round trip, so 8 turnarounds in the window,
+    # not the 12 the neighbour distance implied. At Trade Office 10 a merchant
+    # carries 7,500, so the shed limit is 135,000/h with the fleet free
+    # (18 x 7,500 x 8 / 8), 15,000/h held to two merchants, and nothing at all
+    # at zero -- three answers either side of the 34,000/h the draw wants of
+    # it. The old figures were 202,500 and 22,500 off 12 trips; the fixture did
+    # not move, the distance being measured did.
     def _account(self, cap, hub_cap):
         return [
             _village(
@@ -412,13 +419,14 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
     def test_a_material_draw_stops_at_what_the_cap_can_carry(self):
         profile = self._derive(cap=2)
 
-        # 22,500/h is all two merchants move in the window, so the other
-        # 17,500 stays here instead of being promised to the hub.
-        assert profile.allocations[Resource.LUMBER][FAR].value == 17_500.0
-        # And the 22,500/h the cap put out of reach is reported: the hub wants
-        # 40,000 of lumber it does not make, plus the 5,000 the army needs
-        # delivered to reach its 7,000 ceiling from a production of 2,000.
-        assert profile.unmet[Resource.LUMBER] == pytest.approx(22_500.0)
+        # 15,000/h is all two merchants move to the HUB in the window, so the
+        # other 25,000 stays here instead of being promised.
+        assert profile.allocations[Resource.LUMBER][FAR].value == 25_000.0
+        # And what the cap put out of reach is reported: the hub wants 40,000 of
+        # lumber it does not make, plus the 5,000 the army needs delivered to
+        # reach its 7,000 ceiling from a production of 2,000 -- 45,000 of demand
+        # against 15,000 shipped.
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(30_000.0)
 
     def test_a_cap_of_zero_draws_nothing_and_reports_the_gap(self):
         profile = self._derive(cap=0)
@@ -427,6 +435,43 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
         assert profile.drawn_in[Resource.LUMBER] == []
         # Reported, never hidden: the whole 45,000/h the cap put out of reach.
         assert profile.unmet[Resource.LUMBER] == pytest.approx(45_000.0)
+
+    def test_a_village_that_cannot_get_home_by_morning_sheds_nothing(self):
+        """Section 6: no merchant may still be out at 07:00.
+
+        The shed limit used to floor its trip count at one, so a village whose
+        round trip does not fit the window was credited a whole trip anyway --
+        promising cargo that would provably still be in the air at the profile
+        switch, which is the one thing section 6 forbids outright. Nothing else
+        catches it here: the derivation is what the operator writes into the
+        active profile, and `NIGHT_OVERRUN` is raised by the PLANNER, on routes
+        this profile has already claimed are shippable.
+        """
+        # 60 fields from the hub at 12 f/h is 5h each way: a 10h round trip
+        # inside an 8h night. One trip is not available at any fleet size.
+        far_away = [
+            _village(HUB, "hub", 0, 0, lumber=-40_000.0, wh=1_200_000, gr=800_000, to=19),
+            _village(ARMY, "army", 2, 0, crop=-35_000.0, lumber=2_000.0),
+            _village(FAR, "far", 60, 0, lumber=40_000.0, wh=1_200_000),
+        ]
+        profile = derive_night_profile(
+            far_away,
+            window_hours=8.0,
+            map_span=401,
+            speed_fields_per_hour=12.0,
+            day_retention={Resource.LUMBER: {FAR: 6_000.0}},
+            hub_id=HUB,
+            consumer_ids=[ARMY],
+        )
+
+        # It keeps everything it makes, is never drawn on, and the whole gap is
+        # reported rather than papered over with a trip that cannot happen.
+        # The gap is the hub's own 40,000/h deficit and nothing else: only FAR
+        # carries a day retention here, so the army -- room 7,000/h against
+        # production 2,000/h -- books no top-up of its own.
+        assert profile.allocations[Resource.LUMBER][FAR].value == 40_000.0
+        assert profile.drawn_in[Resource.LUMBER] == []
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(40_000.0)
 
     def test_the_crop_draw_honours_the_cap_too(self):
         # Materials and crop draw down separate branches, so one fix does not
