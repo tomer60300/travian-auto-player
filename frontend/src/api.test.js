@@ -146,7 +146,14 @@ describe('api log store hygiene', () => {
     expect(useLogStore.getState().entries[1].source).toBe('planner')
   })
 
-  it('keeps what a 422 SAID without echoing the value it rejected', async () => {
+  // The error envelope was the exception the invariant did not admit to. A
+  // pydantic entry's `type` is a fixed vocabulary -- `int_parsing`,
+  // `value_error`, `missing` -- and names no value; `loc` and `msg` do. `loc`
+  // carries dict KEYS, which on this API are profile names and village ids
+  // (`body.allocations.lumber.30002.value`), and a model validator's own
+  // sentence arrives as `msg`, prefixed "Value error, " -- which is how the
+  // attendance refusal naming village ids gets there.
+  it('keeps a 422 readable by its codes, without the paths or the sentences', async () => {
     respondWith(422, {
       detail: [
         {
@@ -155,23 +162,57 @@ describe('api log store hygiene', () => {
           msg: 'Input should be a valid integer, unable to parse string as an integer',
           input: '01 Kayhut Capital',
         },
+        {
+          type: 'value_error',
+          loc: ['body', 'allocations', 'lumber', 30002, 'value'],
+          msg: 'Value error, no role template was sent for 01 Kayhut Capital (role def)',
+          input: {},
+        },
       ],
     })
     await expect(api.post('/distribution/plan', { villages: [VILLAGE] })).rejects.toThrow()
 
     const text = storeText()
-    expect(text).toContain('Input should be a valid integer')
-    expect(text).toContain('body.villages.0.crop_target')
+    // Enough to act on: how many fields the server refused, and why in the
+    // machine's own words.
+    expect(text).toContain('2 field errors')
+    expect(text).toContain('int_parsing')
+    expect(text).toContain('value_error')
+    // And nothing the operator typed. Not the value, not the path that names a
+    // village id, and not the validator's own sentence.
     expect(text).not.toContain('Kayhut')
+    expect(text).not.toContain('30002')
+    expect(text).not.toContain('crop_target')
+    expect(text).not.toContain('Input should be a valid integer')
   })
 
-  it("keeps a refusal's own sentence, which is the only place both digests appear", async () => {
+  // Both measured examples of the leak were STRING details, and both are the
+  // backend's own prose about the operator's own account: "no role template
+  // was sent for 01 Kayhut Capital (role def)" from a setup save, and "this
+  // setup was exported from account https://...|Kayhut, and would be saved
+  // under https://...|Other".
+  it('keeps a refusal countable without publishing the sentence', async () => {
     respondWith(409, { detail: 'The plan moved from deadbeef to feedface.' })
     await expect(api.post('/distribution/plan/yaml', { villages: [VILLAGE] })).rejects.toThrow()
 
     const text = storeText()
-    expect(text).toContain('The plan moved from deadbeef to feedface.')
+    expect(text).toContain('41-char refusal')
+    expect(text).toContain('on screen only')
+    expect(text).not.toContain('deadbeef')
     expect(text).not.toContain('Kayhut')
+  })
+
+  it('does not publish the account key a cross-account refusal names', async () => {
+    respondWith(422, {
+      detail:
+        'this setup was exported from account https://ts2.travian.test|Kayhut, and ' +
+        'would be saved under https://ts2.travian.test|Other',
+    })
+    await expect(api.put('/distribution/setup', { villages: [VILLAGE] })).rejects.toThrow()
+
+    const text = storeText()
+    expect(text).not.toContain('Kayhut')
+    expect(text).not.toContain('travian.test')
   })
 
   it('falls back to the axios message when a failure body is not an error envelope', async () => {

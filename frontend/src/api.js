@@ -41,6 +41,17 @@ function logSource(url) {
 // password cannot be redacted out of a body that is never written down, and
 // neither can a village name, which no key list would ever have caught.
 // `api.test.js` pins both halves.
+//
+// The ERROR path was the one place that claim was not true. It returned the
+// server's `detail` sentence verbatim, and this API's refusal sentences name
+// villages and the account key -- "no role template was sent for 01 Kayhut
+// Capital (role def)", "this setup was exported from account
+// https://...|Kayhut". The reasoning for excluding FastAPI's `input` was about
+// echoed VALUES and never reached the prose itself. So `errorDetail` now keeps
+// an ALLOWLIST -- pydantic's `type` codes, a field count, a sentence LENGTH --
+// and the invariant above holds without an exception. The sentence still
+// reaches the operator, through the toast or panel the calling page renders
+// from `response.data.detail`; none of those is written to a file.
 function describePayload(data) {
   if (data === undefined || data === null) return null
   if (typeof data === 'string') return `${data.length} chars`
@@ -65,22 +76,53 @@ function summarizeData(data, maxLen) {
   } catch { return '[unserializable]' }
 }
 
-/** The one thing worth keeping from a failure: what the server SAID.
+/** The SHAPE of a failure, which is all the invariant above allows.
  *
- * Read out of the error envelope only, never off the body as a whole.
- * FastAPI's validation errors echo the rejected value back in `input`, so a
- * 422 on a plan payload would re-leak the entire payload through the error
- * path; `loc`, `msg` and `type` name the field and the reason without
- * repeating the value. A body that is not an error envelope at all (an HTML
- * gateway page, say) has nothing quotable in it, so axios's own message is
- * the honest answer.
+ * This used to return the server's `detail` verbatim, and that was the one
+ * hole in "nothing a request or a response carries reaches the log store". The
+ * reasoning behind it -- exclude `input`, because FastAPI echoes the rejected
+ * value back in it -- was about echoed VALUES, and the refusal sentences
+ * themselves are the account. Two measured examples, both real:
+ *
+ *   "no role template was sent for 01 Kayhut Capital (role def)..."  (422 from
+ *   saving a setup)
+ *   "this setup was exported from account https://...|Kayhut, and would be
+ *   saved under https://...|Other"
+ *
+ * A per-field allowlist cannot help there, because the leak is in the prose. So
+ * an ALLOWLIST of what survives, not a filter of what does not:
+ *
+ *   * an entry's `type` -- `int_parsing`, `value_error`, `missing`,
+ *     `greater_than` -- is pydantic's own fixed vocabulary and names no value;
+ *   * a count of how many fields the server refused;
+ *   * the length of a refusal sentence, so a truncated response is
+ *     distinguishable from a terse one.
+ *
+ * `loc` and `msg` are dropped, and both had to be. `loc` carries dict KEYS,
+ * which on this API are profile names and village ids
+ * (`body.allocations.lumber.30002.value`); and a model validator's own
+ * sentence arrives as `msg` prefixed "Value error, ", which is how the
+ * attendance refusal naming village ids reaches this function at all.
+ *
+ * The operator does not lose the sentence. Every page that makes a call
+ * surfaces `response.data.detail` itself -- `errorDetail` in
+ * `pages/ResourcePlanner.jsx` puts it in a toast, and the YAML digest conflict
+ * into a panel that stays until it is acted on -- and none of those is written
+ * to a file. This log's job is correlation: which call, what status, how long,
+ * how many fields and which kind. The sentence's job is being read now.
+ *
+ * A body that is not an error envelope at all (an HTML gateway page, say) has
+ * nothing quotable in it, so axios's own message is the honest answer.
  */
 function errorDetail(error) {
   const detail = error.response?.data?.detail
-  if (typeof detail === 'string') return summarizeData(detail, 500)
+  if (typeof detail === 'string') {
+    return `${detail.length}-char refusal, on screen only`
+  }
   if (Array.isArray(detail)) {
+    const kinds = [...new Set(detail.map((e) => String(e?.type ?? 'unknown')))]
     return summarizeData(
-      detail.map((e) => `${(e?.loc || []).join('.')}: ${e?.msg} (${e?.type})`),
+      `${detail.length} field errors: ${kinds.join(', ')} (text on screen only)`,
       500
     )
   }
