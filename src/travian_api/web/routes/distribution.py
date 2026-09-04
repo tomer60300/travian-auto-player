@@ -1949,6 +1949,35 @@ class DaySegmentInput(BaseModel):
         return value
 
 
+def _one_name_per_profile(segments: Sequence[DaySegmentInput]) -> Sequence[DaySegmentInput]:
+    """Refuse two profiles that share a name, in the two requests that take them.
+
+    A profile's name is a KEY, not a label. `simulate_profile_cycle` records
+    each hand-over stock as `openings[segment.name]` and section 6's two state
+    rules -- `morning_floor_shortfalls` and `pre_night_overfills` -- read it
+    back by name, so two halves of a split night both called "Night" collapse
+    to one entry. Right by accident for a 23:00/00:00 split, where the surviving
+    write is the opening minute anyway; wrong for a 22:00/23:00 one, where the
+    25% baseline is then read at 23:00 for a half that opened at 22:00.
+
+    `min_length=1` was the only rule the field had, and neither request checked
+    uniqueness. Refused here rather than keyed around, because the name is what
+    every breach line and every prefixed warning identifies a profile by -- two
+    profiles the operator cannot tell apart in the output are not named.
+    """
+    clashing = sorted(
+        name for name, count in Counter(s.name for s in segments).items() if count > 1
+    )
+    if clashing:
+        raise ValueError(
+            "two profiles share a name (" + ", ".join(clashing) + "), and the name is what "
+            "the day's stock hand-overs and every warning are keyed and reported by -- "
+            "give each profile its own, such as 'Night before midnight' and "
+            "'Night after midnight'"
+        )
+    return segments
+
+
 class ExecuteRequest(PlanRequest):
     # Unknown fields are REJECTED here, unlike everywhere else in this module.
     #
@@ -1989,6 +2018,8 @@ class ExecuteRequest(PlanRequest):
             "execution using the top-level allocations/dispatch_window."
         ),
     )
+
+    _unique_segment_names = field_validator("segments")(_one_name_per_profile)
 
     @model_validator(mode="after")
     def _segments_are_coherent(self) -> "ExecuteRequest":
@@ -2966,6 +2997,8 @@ class DayCheckRequest(PlanRequest):
             "the profile that was running."
         ),
     )
+
+    _unique_segment_names = field_validator("segments")(_one_name_per_profile)
 
     @field_validator("dispatch_window")
     @classmethod

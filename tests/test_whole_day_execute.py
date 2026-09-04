@@ -649,3 +649,62 @@ class TestTheProfilesTogetherHonourTheMerchantReserve:
         )
 
         assert not self._boundary(res.warnings), res.warnings
+
+
+# -- A profile name is a key, so it has to be unique -------------------------
+
+
+class TestTwoProfilesCannotShareAName:
+    """The section 6 state rules look a stock up by profile NAME.
+
+    `simulate_profile_cycle` records the hand-over stock as
+    `openings[starts[minute]]`, keyed by name, and `morning_floor_shortfalls`
+    and `pre_night_overfills` read it back the same way. Two halves of a split
+    night both called "Night" collapse to one entry -- right by accident for a
+    23:00/00:00 split, where the second write is the opening minute anyway, and
+    wrong for a 22:00/23:00 one, where the 25% baseline is then read at 23:00
+    for a half that opened at 22:00. The breach lines say "during Night" for
+    both of them too, so a duplicate name is unreadable for the operator as
+    well as ambiguous for the lookup.
+
+    Refused at the schema rather than keyed around, because a name the operator
+    cannot tell apart in the output is not a name.
+    """
+
+    def test_the_day_check_refuses_two_profiles_with_one_name(self):
+        with pytest.raises(ValidationError, match="name"):
+            DayCheckRequest.model_validate(
+                {
+                    **_shared_payload(),
+                    "segments": [
+                        {"name": "Night", "window": [22 * 60, 23 * 60], "allocations": {}},
+                        {"name": "Night", "window": [23 * 60, 7 * 60], "allocations": {}},
+                        {"name": "Day", "window": [7 * 60, 22 * 60], "allocations": {}},
+                    ],
+                }
+            )
+
+    def test_execute_refuses_them_too(self):
+        with pytest.raises(ValidationError, match="name"):
+            _segments_body(
+                segments=[
+                    {"name": "Night", "window": [22 * 60, 23 * 60], "allocations": {}},
+                    {"name": "Night", "window": [23 * 60, 7 * 60], "allocations": {}},
+                    {"name": "Day", "window": [7 * 60, 22 * 60], "allocations": {}},
+                ]
+            )
+
+    def test_distinct_names_are_untouched(self):
+        body = _segments_body(
+            segments=[
+                {"name": "Night before midnight", "window": [23 * 60, 0], "allocations": {}},
+                {"name": "Night after midnight", "window": [0, 7 * 60], "allocations": {}},
+                {"name": "Day", "window": [7 * 60, 23 * 60], "allocations": {}},
+            ]
+        )
+
+        assert [s.name for s in body.segments] == [
+            "Night before midnight",
+            "Night after midnight",
+            "Day",
+        ]
