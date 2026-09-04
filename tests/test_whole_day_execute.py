@@ -145,7 +145,7 @@ def _segments_body(**extra):
 def _run_union(svc, body=None, accounts=ACCOUNTS):
     """Execute with segments, each segment planned by its window's account."""
 
-    async def _plan(_body, dispatch_window=None):
+    async def _plan(_body, dispatch_window=None, overnight=None):
         return accounts[tuple(dispatch_window)]
 
     with (
@@ -370,7 +370,7 @@ class TestThePreviewBillsTheRun:
     def test_a_dry_run_forecasts_its_requests(self):
         body = _segments_body(dry_run=True)
 
-        async def _plan(_body, dispatch_window=None):
+        async def _plan(_body, dispatch_window=None, overnight=None):
             return ACCOUNTS[tuple(dispatch_window)]
 
         with _patch(dist_module, "_plan_account", _plan):

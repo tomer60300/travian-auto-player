@@ -90,26 +90,48 @@ pool everywhere; and every role village must be at
 """
 
 
-def is_night_window(window: tuple[int, int] | None) -> bool:
+def is_night_window(window: tuple[int, int] | None, *, overnight: bool | None = None) -> bool:
     """Is this profile the overnight one, which section 6's rules govern?
 
-    A window that WRAPS past midnight, rather than an equality test against
-    :data:`NIGHT_WINDOW`. Two reasons, and the second is the real one:
+    ``overnight`` is the profile's own DECLARATION, and it wins. Which profile
+    the operator sleeps through is a fact about the operator and not about the
+    clock -- the same reason ``npc_attended`` is declared per profile rather
+    than inferred from its hours -- and the wrapping test below is neither
+    necessary nor sufficient for it. Both misreadings are legal input:
+
+    * A night SPLIT at midnight is two profiles, 23:00-00:00 and 00:00-07:00.
+      Minute 1440 does not exist, so the first is typed ``(1380, 0)`` and does
+      wrap; the SECOND -- the half that actually runs up to the switch -- does
+      not, so nothing checks that its merchants are home by 07:00 and the 2h
+      latency target buys speed nobody is waiting for.
+    * A day profile that runs almost the whole day, ``(420, 419)``, wraps.
+      Nothing about it is overnight, and the derivation alone silently
+      suspends the latency target for the entire day.
+
+    Absent a declaration the wrap is still the answer, so every caller that
+    never had one keeps the behaviour it had:
 
     * A day's profiles do not overlap, so at most one of them can span
-      midnight, and that one is the overnight profile by construction. The test
-      is therefore structural rather than a magic number an operator has to
-      match to the minute -- 22:45 to 07:15 is still the night.
+      midnight, and *where the operator's night is a single window* that one is
+      it. The test is therefore structural rather than a magic number an
+      operator has to match to the minute -- 22:45 to 07:15 is still the night.
     * The rules exist because nothing is SPENT overnight. That is what makes
       latency the wrong measure (a delivery nobody is waiting for costs nothing
       by being six hours old) and what makes the closing deadline the right one
       (the pool has to be whole when spending resumes). Both follow from the
-      operator being asleep, which is the wrapping window and not the clock.
+      operator being asleep, which is what the declaration states outright and
+      what the wrap only stands in for.
 
     ``None`` is a round-the-clock route set, which has no switch to be ready
-    for and so keeps the day's rules.
+    for and so keeps the day's rules whatever is declared: section 6's deadline
+    is measured against a window's END, and there is no end to measure. The
+    declaration cannot invent one.
     """
-    return window is not None and window[0] > window[1]
+    if window is None:
+        return False
+    if overnight is not None:
+        return overnight
+    return window[0] > window[1]
 
 
 @dataclass(frozen=True)

@@ -1039,6 +1039,23 @@ class PlanRequest(BaseModel):
             "is meant to be running. May wrap past midnight."
         ),
     )
+    overnight: bool | None = Field(
+        default=None,
+        description=(
+            "Whether this route set's hours are the ones the operator sleeps "
+            "through, so section 6's rules govern them: no latency target, and "
+            "every merchant home before `dispatch_window` closes. Left out it "
+            "is DERIVED from the window wrapping past midnight, which is right "
+            "for a night stated as one 23:00-07:00 window. Send it explicitly "
+            "for the half of a night SPLIT at midnight (`[0, 420]` wraps in "
+            "neither direction yet carries the whole deadline) and for a "
+            "near-24h day profile (`[420, 419]` wraps and is not the night). "
+            "Requires `dispatch_window`: a set with no window runs round the "
+            "clock and has no switch to be ready for. On /day-check and "
+            "whole-day /execute this lives on each entry in `segments`, since "
+            "that is where the hours are."
+        ),
+    )
     npc_attended: bool | None = Field(
         default=None,
         description=(
@@ -1101,6 +1118,26 @@ class PlanRequest(BaseModel):
                 "npc_attended=true for the day profile and false for the night "
                 "one. A plan with no window is not exempt: it runs round the "
                 "clock, which includes the hours nobody is at the Marketplace."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _overnight_needs_hours_to_be_overnight(self) -> "PlanRequest":
+        """A declared night must say which hours it is.
+
+        Refused rather than ignored: section 6's deadline is measured against
+        the window's END, so a declaration with no window decides nothing and
+        silently answers the opposite of what the client asked for. On
+        /day-check and whole-day /execute the hours live on `segments`, and so
+        does the declaration -- a top-level one there is refused by this same
+        rule, because those endpoints refuse a top-level `dispatch_window`.
+        """
+        if self.overnight is not None and self.dispatch_window is None:
+            raise ValueError(
+                "overnight requires dispatch_window: a route set with no window "
+                "runs round the clock, which has no switch for its merchants to "
+                "be home for. Give the profile its hours, or put the declaration "
+                "on the entry in `segments` that has them."
             )
         return self
 
@@ -1629,7 +1666,10 @@ def _fill_rows(
 
 
 def _night_overrun_rows(
-    beat, window: tuple[int, int] | None, names: Mapping[int, str]
+    beat,
+    window: tuple[int, int] | None,
+    names: Mapping[int, str],
+    overnight: bool | None = None,
 ) -> list[NightOverrunResponse]:
     """Section 6's completion rule, measured on the beat that was built.
 
@@ -1637,8 +1677,13 @@ def _night_overrun_rows(
     switch to be ready for. The overrun itself comes from the same pure function
     the beat scores its placements with, so the table and the finding cannot
     disagree about a number.
+
+    ``overnight`` is the profile's own declaration, threaded so this table and
+    the beat that produced it read the same answer to "is this the night" -- a
+    row here about a profile the beat scheduled under the day's rules would be
+    a deadline nothing tried to meet.
     """
-    if not is_night_window(window):
+    if not is_night_window(window, overnight=overnight):
         return []
     rows: list[NightOverrunResponse] = []
     for scheduled in beat.routes:
@@ -1795,6 +1840,21 @@ class DaySegmentInput(BaseModel):
     window: tuple[int, int]
     """Minutes past midnight (start, end); may wrap past midnight."""
     allocations: dict[Resource, dict[int, AllocationInput]] = {}
+    overnight: bool | None = Field(
+        default=None,
+        description=(
+            "Whether this profile is the one the operator sleeps through, so "
+            "section 6's rules govern it: no latency target, and every merchant "
+            "home before the window closes. Left out it is DERIVED from the "
+            "window wrapping past midnight, which is right for a night stated "
+            "as one 23:00-07:00 window and wrong twice over. Send it "
+            "explicitly when the night is SPLIT at midnight -- 23:00-00:00 is "
+            "`[1380, 0]` and does wrap, but `[0, 420]` is the half that runs up "
+            "to the switch and wraps in neither direction -- and when a day "
+            "profile covers almost the whole day (`[420, 419]` wraps and is "
+            "not the night)."
+        ),
+    )
     npc_attended: bool | None = Field(
         default=None,
         description=(
@@ -3401,10 +3461,12 @@ async def post_day_check(
 
     segments: list[ProfileSegment] = []
     # Section 6's rules are the overnight profile's, so the loop below keeps
-    # which segment that is and the beat it was actually given. Derived from the
-    # window rather than from the name: a profile called "Night" that runs
-    # 09:00-17:00 is not one, and a wrapping window is one whatever it is called.
-    night_segment: DaySegmentInput | None = None
+    # which segments those are and the beats they were actually given. Never
+    # from the NAME: a profile called "Night" that runs 09:00-17:00 is not one.
+    # Each segment's own `overnight` declaration decides, falling back to the
+    # window's wrap -- and there may be TWO of them, because the operator may
+    # type the night as a pair either side of midnight.
+    night_segments: list[DaySegmentInput] = []
     night_overruns: list[NightOverrunResponse] = []
     npc_reserves: dict[int, NpcReserve] = {}
     for segment in body.segments:
@@ -3425,7 +3487,9 @@ async def post_day_check(
             update={"allocations": segment.allocations, "npc_attended": segment.npc_attended}
         )
         try:
-            account = await _plan_account(per_profile, dispatch_window=segment.window)
+            account = await _plan_account(
+                per_profile, dispatch_window=segment.window, overnight=segment.overnight
+            )
         except HTTPException as exc:
             raise HTTPException(
                 status_code=exc.status_code, detail=f"{segment.name}: {exc.detail}"
@@ -3473,9 +3537,16 @@ async def post_day_check(
             else:
                 manual.setdefault(funder, {})[Resource.CROP] = -owed_by_hand
 
-        if is_night_window(segment.window):
-            night_segment = segment
-            night_overruns = _night_overrun_rows(account.plan.beat, segment.window, names)
+        if is_night_window(segment.window, overnight=segment.overnight):
+            night_segments.append(segment)
+            # Extended, not assigned: a night split at midnight is two
+            # profiles, and a merchant still on the road at 07:00 belongs to
+            # whichever half dispatched it.
+            night_overruns.extend(
+                _night_overrun_rows(
+                    account.plan.beat, segment.window, names, overnight=segment.overnight
+                )
+            )
 
         segments.append(
             ProfileSegment(
@@ -3565,10 +3636,25 @@ async def post_day_check(
     floor_villages = [vid for vid, role in roles.of_village.items() if keeps_a_morning_floor(role)]
     morning_short: tuple[FillAtSwitch, ...] = ()
     pre_night_over: tuple[FillAtSwitch, ...] = ()
-    if night_segment is not None and floor_villages:
-        pre_night_over = pre_night_overfills(
-            trajectories, capacities, floor_villages, night_segment.name
+    if night_segments and floor_villages:
+        # Section 6's two state rules read the night from either END of it, so
+        # a night SPLIT at midnight needs both ends named rather than one
+        # segment standing in for both: the 25% baseline belongs to the half
+        # that OPENS the night (23:00) and the 60% floor to the half that
+        # closes it (07:00). Found by the minutes, so the answer does not
+        # depend on the order `segments` happens to arrive in -- the opening
+        # half is the one no other night half ends at, the closing half the one
+        # no other night half starts at. A night stated as one window is the
+        # degenerate case: both are that window.
+        night_starts = {s.window[0] for s in night_segments}
+        night_ends = {s.window[1] for s in night_segments}
+        opening = next(
+            (s for s in night_segments if s.window[0] not in night_ends), night_segments[0]
         )
+        closing = next(
+            (s for s in night_segments if s.window[1] not in night_starts), night_segments[-1]
+        )
+        pre_night_over = pre_night_overfills(trajectories, capacities, floor_villages, opening.name)
         # Whichever profile takes over at the night's last minute -- 07:00 on the
         # operator's own pair. Found by the minute rather than by position or by
         # name: `segments` need not be given in clock order, and an hour with no
@@ -3576,11 +3662,11 @@ async def post_day_check(
         # alone), in which case nothing hands over and the floor cannot be
         # measured. Said out loud rather than skipped, because a silent skip
         # reads as "the floor was met".
-        morning = next((s for s in body.segments if s.window[0] == night_segment.window[1]), None)
+        morning = next((s for s in body.segments if s.window[0] == closing.window[1]), None)
         if morning is None:
             warnings.append(
-                f"no profile starts at {_clock(night_segment.window[1])}, where "
-                f"{night_segment.name} ends, so the morning fill floor could not be "
+                f"no profile starts at {_clock(closing.window[1])}, where "
+                f"{closing.name} ends, so the morning fill floor could not be "
                 f"measured -- those hours run on production alone. Give the morning "
                 f"profile the night's end as its start."
             )
@@ -3625,7 +3711,11 @@ async def post_day_check(
         pre_night_baseline=DEFAULT_BASELINE_FILL,
         morning_shortfalls=_fill_rows(morning_short, names),
         pre_night_over_baseline=_fill_rows(pre_night_over, names),
-        night_overruns=night_overruns,
+        # Re-sorted across the halves of a split night, so the worst overrun is
+        # first however many profiles contributed rows.
+        night_overruns=sorted(
+            night_overruns, key=lambda row: (-row.overrun_minutes, row.origin, row.destination)
+        ),
         villages=[
             VillageDayResponse(
                 village_id=t.village_id,
@@ -3703,7 +3793,9 @@ class _PlannedAccount:
 
 
 async def _plan_account(
-    body: PlanRequest, dispatch_window: tuple[int, int] | None = None
+    body: PlanRequest,
+    dispatch_window: tuple[int, int] | None = None,
+    overnight: bool | None = None,
 ) -> _PlannedAccount:
     """Build the account model, run the optimizer, resolve coords + warnings.
 
@@ -3714,6 +3806,12 @@ async def _plan_account(
     that belongs to one allocation profile rather than to the whole day. It
     phases the sends into those hours; /plan and /execute leave it None and get
     the round-the-clock beat.
+
+    ``overnight`` says whether those hours are the ones the operator sleeps
+    through, which decides whether section 6's rules govern the plan. It travels
+    with the window for the same reason attendance does -- the caller with the
+    segment in hand is the only one that knows -- and left None the window's
+    wrap decides it (see :func:`~.night_profile.is_night_window`).
     """
     # Warnings are read by a person: name villages the way they do, never by id.
     names = {v.village_id: v.name for v in body.snapshot if v.name}
@@ -3872,6 +3970,9 @@ async def _plan_account(
     # The window this plan will actually be pruned to, resolved once so the
     # cycle choice below and the scheduler agree on it.
     effective_window = dispatch_window if dispatch_window is not None else body.dispatch_window
+    # Same precedence, so the declaration cannot end up describing a different
+    # profile's hours than the ones it was sent with.
+    effective_overnight = overnight if overnight is not None else body.overnight
 
     # Section 7's declaration, and nothing more than a declaration: the buffer
     # LEVEL per village (only this layer knows the warehouse capacity), whether
@@ -4006,6 +4107,7 @@ async def _plan_account(
         # hours); otherwise take what the client sent on the request, which is
         # how /plan and /execute learn the active profile's window.
         dispatch_window=effective_window,
+        overnight=effective_overnight,
         # Plan-time, because it changes what the plan MEANS: with pruning the
         # window is genuinely enforced and the escaping firings become a note
         # about a dependency, without it they are a critical over-delivery.
@@ -4502,7 +4604,9 @@ def _plan_response(account: _PlannedAccount) -> PlanResponse:
         # comes off the config the plan was actually built with, so a payload
         # that named no window gets an empty list instead of a rule it never
         # asked for.
-        night_overruns=_night_overrun_rows(plan.beat, config.dispatch_window, names),
+        night_overruns=_night_overrun_rows(
+            plan.beat, config.dispatch_window, names, overnight=config.overnight
+        ),
         npc_reserves=_npc_reserve_rows(plan, names),
         npc_triggers=_npc_trigger_rows(account.npc_triggers, names),
         warnings=[f.message for f in findings],
@@ -5199,7 +5303,16 @@ async def post_execute(
                 }
             )
             planned_segments.append(
-                (segment, await _plan_account(per_segment, dispatch_window=tuple(segment.window)))
+                (
+                    segment,
+                    await _plan_account(
+                        per_segment,
+                        dispatch_window=tuple(segment.window),
+                        # The profile's own declaration, so the run that WRITES
+                        # judges section 6 on the same profile /day-check did.
+                        overnight=segment.overnight,
+                    ),
+                )
             )
         account = planned_segments[0][1]
     else:

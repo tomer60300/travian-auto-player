@@ -61,6 +61,17 @@ class PlannerConfig:
     """Hours of the day this route set actually runs, when it is one allocation
     profile's rather than the whole day's. Sends are phased into it; left None
     the beat may use any minute, which is what a round-the-clock set wants."""
+    overnight: bool | None = None
+    """Whether this profile is the one the operator sleeps through.
+
+    A DECLARATION, exactly as `npc_attended` is on the request: it decides
+    which profile section 6's rules govern -- no latency target, every merchant
+    home before the window closes. Left None it is derived from the window
+    wrapping past midnight, which is what every caller had before and is right
+    for a night stated as one window. It is wrong for a night SPLIT at midnight
+    (the half after it wraps in neither direction) and wrong for a near-24h day
+    profile (which wraps and is not the night), so a declaration overrules it.
+    See :func:`~.night_profile.is_night_window`."""
     excluded_origins_by_destination: Mapping[int, set[int]] = field(default_factory=dict)
     """Villages that must not supply a given destination, by destination id.
 
@@ -471,7 +482,9 @@ def craft_plan(
     #
     # None is exactly "no target": it also skips `_spend_idle_merchants_on_latency`
     # and the LATENCY findings, which is the whole of what the rule is.
-    latency_target = None if is_night_window(config.dispatch_window) else config.max_latency_hours
+    # Declared where the operator said so, derived from the wrap otherwise.
+    overnight = is_night_window(config.dispatch_window, overnight=config.overnight)
+    latency_target = None if overnight else config.max_latency_hours
 
     routing = build_plan(
         villages,
@@ -497,6 +510,7 @@ def craft_plan(
         names=names,
         dispatch_window=config.dispatch_window,
         prune_to_window=config.prune_to_window,
+        overnight=config.overnight,
     )
     findings.extend(beat.findings)
 

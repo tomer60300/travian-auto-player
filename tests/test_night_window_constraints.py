@@ -137,6 +137,51 @@ class TestWhichProfileIsTheNight:
         assert not is_night_window(None)
 
 
+# ── The wrap is a default; the profile's own declaration wins ────────────────
+
+# The night typed as two profiles either side of midnight. Minute 1440 does not
+# exist (`DaySegmentInput._window_in_day` requires 0-1439), so "23:00 to
+# midnight" is `(1380, 0)` -- which DOES wrap -- and it is the SECOND half, the
+# one that actually runs up to the 07:00 switch, that wraps in neither
+# direction and so reads as a day profile.
+NIGHT_BEFORE_MIDNIGHT = (23 * 60, 0)
+NIGHT_AFTER_MIDNIGHT = (0, 7 * 60)
+# A day profile that runs almost the whole day. It wraps, and nothing about it
+# is overnight.
+NEARLY_ALL_DAY = (7 * 60, 7 * 60 - 1)
+
+
+class TestTheDeclarationBeatsTheWrap:
+    """`window[0] > window[1]` is neither necessary nor sufficient.
+
+    Which profile the operator sleeps through is a fact about the operator, not
+    about the clock -- the same reason `npc_attended` is declared per profile
+    rather than inferred from its hours. Both misreadings below are legal
+    input, so the declaration has to be able to overrule the derivation in both
+    directions.
+    """
+
+    def test_the_half_of_a_split_night_after_midnight_wraps_in_neither_direction(self):
+        assert is_night_window(NIGHT_BEFORE_MIDNIGHT), "23:00-00:00 is typed (1380, 0), which wraps"
+        assert not is_night_window(NIGHT_AFTER_MIDNIGHT), (
+            "and 00:00-07:00 does not, though it is the half with the deadline"
+        )
+        assert is_night_window(NIGHT_AFTER_MIDNIGHT, overnight=True)
+
+    def test_a_near_24h_day_profile_wraps_and_is_not_the_night(self):
+        assert is_night_window(NEARLY_ALL_DAY), "07:00-06:59 wraps"
+        assert not is_night_window(NEARLY_ALL_DAY, overnight=False)
+
+    def test_a_declaration_overrides_the_derivation_in_both_directions(self):
+        assert not is_night_window(NIGHT_WINDOW, overnight=False)
+        assert is_night_window(DAY_WINDOW, overnight=True)
+
+    def test_a_round_the_clock_set_has_no_switch_to_declare_one_for(self):
+        """Section 6's deadline is measured against a window's END, and a set
+        with no window has none. The declaration cannot invent one."""
+        assert not is_night_window(None, overnight=True)
+
+
 # ── Everything home before 07:00 ─────────────────────────────────────────────
 
 
@@ -235,6 +280,26 @@ class TestEveryNightMovementFinishesBeforeDawn:
         assert not _overruns(beat)
 
 
+class TestTheDeclarationDecidesWhereTheDeadlineBinds:
+    """A 490-minute round trip cannot fit the 420 minutes between midnight and
+    07:00, so the merchants are still on the road when the morning profile
+    starts believing the pool is whole."""
+
+    def test_the_half_of_a_split_night_after_midnight_must_still_get_home(self):
+        derived = build_beat((_leg(245.0),), dispatch_window=NIGHT_AFTER_MIDNIGHT)
+        assert not _overruns(derived), (
+            "the wrap alone reads 00:00-07:00 as a day profile, which has no deadline"
+        )
+
+        declared = build_beat((_leg(245.0),), dispatch_window=NIGHT_AFTER_MIDNIGHT, overnight=True)
+        assert _overruns(declared), f"490 min of round trip does not fit 420: {declared.warnings}"
+
+    def test_a_declared_day_profile_carries_no_deadline_however_it_is_typed(self):
+        beat = build_beat((_leg(245.0),), dispatch_window=NIGHT_WINDOW, overnight=False)
+
+        assert not _overruns(beat), f"the day has no completion rule: {beat.warnings}"
+
+
 # ── The latency target is a day rule ─────────────────────────────────────────
 
 
@@ -253,11 +318,12 @@ def _two_villages():
     return villages, productions, allocations
 
 
-def _config(window):
+def _config(window, overnight=None):
     return PlannerConfig(
         geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
         merchant_model=EUROPE2_TEUTON,
         dispatch_window=window,
+        overnight=overnight,
     )
 
 
@@ -290,6 +356,36 @@ class TestTheLatencyTargetDoesNotBindAtNight:
         plan = craft_plan(villages, productions, allocations, _config(None))
 
         assert [f for f in plan.findings if f.category is Category.LATENCY]
+
+
+def _latency(config):
+    villages, productions, allocations = _two_villages()
+    plan = craft_plan(villages, productions, allocations, config)
+    return [f for f in plan.findings if f.category is Category.LATENCY], plan.warnings
+
+
+class TestTheDeclarationDecidesWhereTheLatencyTargetBinds:
+    """Both misreadings put the target on the wrong profile, and each costs.
+
+    Suspended where it should bind, a 23h59 day profile ships six-hour-old
+    deliveries into villages that are spending; left binding where it should
+    not, the night buys merchants for freshness nobody is waiting for -- and
+    those merchants are exactly the ones section 6 needs home by 07:00.
+    """
+
+    def test_a_near_24h_day_profile_keeps_the_target_when_it_says_it_is_the_day(self):
+        suspended, _ = _latency(_config(NEARLY_ALL_DAY))
+        assert not suspended, "the wrap alone reads 07:00-06:59 as the night"
+
+        binding, warnings = _latency(_config(NEARLY_ALL_DAY, overnight=False))
+        assert binding, f"a declared day profile keeps the 2h target: {warnings}"
+
+    def test_the_half_of_a_split_night_after_midnight_suspends_it(self):
+        binding, _ = _latency(_config(NIGHT_AFTER_MIDNIGHT))
+        assert binding, "the wrap alone reads 00:00-07:00 as a day profile"
+
+        suspended, warnings = _latency(_config(NIGHT_AFTER_MIDNIGHT, overnight=True))
+        assert not suspended, f"a declared night profile suspends it: {warnings}"
 
 
 # ── The morning floor, on both stores, for the role villages only ────────────
@@ -580,3 +676,84 @@ class TestTheDayCheckReportsTheNightState:
         assert rows[0].fill == pytest.approx(0.40)
         assert rows[0].store == "granary"
         assert any("25%" in w and "40%" in w for w in res.warnings), res.warnings
+
+
+def _split_night_body(*, declared: bool):
+    """The night typed as two profiles either side of midnight.
+
+    02 sits 60 fields from 03, which is five hours each way at 12 fields/h --
+    a 600-minute round trip that cannot fit the 420 minutes between midnight
+    and 07:00 however it is phased. Only the second half ships, so the whole
+    of section 6's completion rule rests on that half being recognised.
+    """
+
+    def village(vid, name, x, crop_rate):
+        return {
+            "village_id": vid,
+            "name": name,
+            "x": x,
+            "y": 0,
+            "merchants_total": 20,
+            "merchants_free": 20,
+            "lumber_per_hour": 0,
+            "clay_per_hour": 0,
+            "iron_per_hour": 0,
+            "crop_per_hour": crop_rate,
+            "crop_stock": 50_000,
+            "lumber_stock": 0,
+            "clay_stock": 0,
+            "iron_stock": 0,
+            "granary_capacity": 400_000,
+            "warehouse_capacity": 400_000,
+        }
+
+    def segment(name, window, allocations):
+        entry = {"name": name, "window": list(window), "allocations": allocations}
+        if declared:
+            entry["overnight"] = name.startswith("Night")
+        return entry
+
+    return DayCheckRequest.model_validate(
+        {
+            "snapshot": [village(HUB, "02", 0, 1_000), village(ARMY, "03", 60, 0)],
+            "config": [{"village_id": HUB}, {"village_id": ARMY}],
+            "segments": [
+                segment("Day", DAY_WINDOW, {}),
+                segment("Night before midnight", NIGHT_BEFORE_MIDNIGHT, {}),
+                segment(
+                    "Night after midnight",
+                    NIGHT_AFTER_MIDNIGHT,
+                    {
+                        "crop": {
+                            str(HUB): {"mode": "absolute", "value": 0},
+                            str(ARMY): {"mode": "remainder"},
+                        }
+                    },
+                ),
+            ],
+        }
+    )
+
+
+class TestASplitNightIsStillTheNight:
+    """Through the endpoint the page calls.
+
+    The half of the night after midnight is where the 07:00 deadline actually
+    bites, and it is the half the wrapping derivation cannot see.
+    """
+
+    def test_the_derivation_alone_checks_nothing_after_midnight(self):
+        res = asyncio.run(post_day_check(_split_night_body(declared=False), USER))
+
+        assert not res.night_overruns, (
+            "00:00-07:00 does not wrap, so section 6's completion rule is never "
+            f"applied to the only profile that ships: {res.night_overruns}"
+        )
+
+    def test_the_declaration_reports_the_merchants_still_on_the_road_at_07_00(self):
+        res = asyncio.run(post_day_check(_split_night_body(declared=True), USER))
+
+        rows = [r for r in res.night_overruns if r.origin == HUB and r.destination == ARMY]
+        assert rows, f"a 600-minute round trip cannot close a 420-minute night: {res.warnings}"
+        assert rows[0].overrun_minutes > 0
+        assert rows[0].round_trip_minutes == pytest.approx(600.0)

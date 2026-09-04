@@ -230,6 +230,7 @@ def build_beat(
     names: Mapping[int, str] | None = None,
     dispatch_window: tuple[int, int] | None = None,
     prune_to_window: bool = False,
+    overnight: bool | None = None,
 ) -> Beat:
     """Place every route on the daily beat, spacing arrivals at each destination.
 
@@ -253,12 +254,15 @@ def build_beat(
             :func:`~.storage.simulate_profile_cycle`). Left None the whole day
             is open, which is what a single round-the-clock route set wants.
 
-            A window that WRAPS past midnight is the overnight profile
-            (:func:`~.night_profile.is_night_window`), and section 6 gives that
-            one an extra rule: every merchant must be home before the window
-            ends. Placements that manage it are preferred, and a route no
-            placement can close is reported as ``NIGHT_OVERRUN`` rather than
-            having a firing quietly dropped to make it fit.
+        overnight: whether these hours are the ones the operator sleeps
+            through. Section 6 gives that profile an extra rule: every merchant
+            must be home before the window ends. Placements that manage it are
+            preferred, and a route no placement can close is reported as
+            ``NIGHT_OVERRUN`` rather than having a firing quietly dropped to
+            make it fit. Left None it is DERIVED from the window wrapping past
+            midnight, which is right for a night stated as one window and wrong
+            for a night split at midnight or a near-24h day profile -- see
+            :func:`~.night_profile.is_night_window`.
 
     Returns:
         A :class:`Beat`. Every route is always scheduled -- a route that cannot
@@ -273,7 +277,7 @@ def build_beat(
     # Section 6's closing deadline applies to the overnight profile only. Bound
     # once, so the placement search and the finding below cannot disagree about
     # which profile they are scheduling.
-    night = is_night_window(dispatch_window)
+    night = is_night_window(dispatch_window, overnight=overnight)
 
     scheduled: list[ScheduledRoute] = []
     findings: list[Finding] = []
