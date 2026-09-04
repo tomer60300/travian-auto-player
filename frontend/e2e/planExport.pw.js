@@ -162,6 +162,16 @@ async function seed(page) {
       localStorage.setItem(`planner_snapshot_at::${key}`, JSON.stringify(Date.now()))
       localStorage.setItem(`planner_profiles::${key}`, JSON.stringify({ Always: {} }))
       localStorage.setItem(`planner_profile_windows::${key}`, JSON.stringify({}))
+      // A typed Trade Office level, so the request has a config ROW to be
+      // asserted about below. A village with nothing typed no longer gets one:
+      // the row said only "this village exists", which the snapshot already
+      // says, and while it was sent the backend's calibration filter -- which
+      // narrows its level-0 sample to villages with a config row -- was a
+      // tautology. See `tradeOfficeUnknown.pw.js`.
+      localStorage.setItem(
+        `planner_trade_office::${key}`,
+        JSON.stringify({ [snap.villages[0].village_id]: 13 })
+      )
     },
     [KEY, SNAPSHOT]
   )
@@ -203,6 +213,7 @@ test.describe('confirm, then export', () => {
     // server renders describes the plan that was read.
     expect(sent.yaml[0].snapshot).toHaveLength(1)
     expect(sent.yaml[0].config[0].village_id).toBe(CAPITAL)
+    expect(sent.yaml[0].config[0].trade_office_level).toBe(13)
 
     expect(file.suggestedFilename()).toBe(`distribution-plan-${DIGEST.slice(0, 12)}.yaml`)
   })

@@ -1842,51 +1842,88 @@ export default function ResourcePlanner() {
               (dispatchWindow[1] - dispatchWindow[0] + MINUTES_IN_DAY) % MINUTES_IN_DAY / 60,
           }
         : {}),
-      config: villages.map((v) => ({
-        village_id: v.village_id,
-        trade_office_level: Number(tradeOffice[v.village_id] ?? 0),
-        // Omitted when unset, so an undeclared village's row is byte-identical
-        // to before. A role sent WITHOUT its template is a 422, which is why
-        // `sendRoles` above carries every role some village claims.
-        ...(villageRoles[v.village_id] != null ? { role: villageRoles[v.village_id] } : {}),
-        // Omitted when unset, so an undeclared village's row is unchanged:
-        // absent means "take the role template's answer", and on a village
-        // with no role at all leaves the crop-sign inference in place.
-        ...(mayRelay[v.village_id] != null ? { may_relay: mayRelay[v.village_id] } : {}),
-        // Both omitted when unset, so an ordinary village's row is byte-identical
-        // to before: absent means "unrestricted" and "no floor" on the backend.
-        // An EMPTY ship_only_to list is sent, because it means "nobody".
-        ...(shipOnlyTo[v.village_id] != null ? { ship_only_to: shipOnlyTo[v.village_id] } : {}),
-        // Profile section 5's relay tier, and the one field here whose EMPTY
-        // list is dropped rather than sent. An empty `ship_only_to` means
-        // "nobody", which is an answer; "forwards to nobody" says nothing that
-        // omitting the field does not, so the backend refuses an empty list with
-        // a 422 -- and the picker holds one for the moment between opening and
-        // the first tick, which must not 422 the plan.
-        ...(relayFor[v.village_id]?.length ? { relay_for: relayFor[v.village_id] } : {}),
-        ...(stockFloors[v.village_id] != null
-          ? { stock_floor_fraction: stockFloors[v.village_id] }
-          : {}),
-        // The feedstock override, dropped when there is none AND when the
-        // picker holds an empty list: absent means "derive it", which is what
-        // almost every village says, and an override of nothing is a statement
-        // NPC cannot carry out -- the backend refuses one.
-        ...npcFeedstockField(npcFeedstock[v.village_id]),
-        // Omitted when unset, so a village with no ceiling is byte-identical to
-        // before: absent means the fleet, less the account reserve, is the
-        // budget. 0 IS sent -- it says every route from this village is a
-        // budget breach, which is an answer.
-        ...(maxBusy[v.village_id] != null
-          ? { max_busy_merchants: Number(maxBusy[v.village_id]) }
-          : {}),
-        // An empty map is omitted too: the backend reads absent and {} the
-        // same way, and sending {} would only make the request look like it
-        // declares a spend. A village mid-edit with every box cleared is not
-        // saying it spends nothing.
-        ...(declaresConsumption(consumption[v.village_id])
-          ? { consumption_per_hour: consumption[v.village_id] }
-          : {}),
-      })),
+      config: villages
+        .map((v) => ({
+          village_id: v.village_id,
+          // Omitted when nobody typed one, so "unknown" is distinguishable from
+          // "checked in game, there is no Trade Office here". Both plan
+          // identically -- the backend's field is `Field(default=0)` and its
+          // sizing reads `.get(vid, 0)`, and flooring an unknown level to 0 is
+          // the SAFE direction: understating capacity over-provisions merchants
+          // while overstating it breaches the merchant budget invisibly. What
+          // changes is what the request CLAIMS.
+          //
+          // It matters because of the merchant-calibration finding, which reads
+          // a level-0 village as "read the base capacity off this one". Naming a
+          // village whose level nobody has checked is account-killer #8 reached
+          // through the mechanism meant to settle the model: if it is really
+          // Trade Office 13 the dialog reads about 9,000, that becomes
+          // `merchant_base_capacity`, and every route is sized to cargo the
+          // merchants cannot carry. The backend already filters the sample to
+          // villages with a config ROW -- which is why the row itself is dropped
+          // below when a village declares nothing at all, and which is the half
+          // of this that today's backend can act on. A village that declares
+          // something else keeps its row and still says nothing about a Trade
+          // Office; closing that residue needs the backend to read
+          // `"trade_office_level" in cfg.model_fields_set`.
+          ...(tradeOffice[v.village_id] != null
+            ? { trade_office_level: Number(tradeOffice[v.village_id]) }
+            : {}),
+          // Omitted when unset, so an undeclared village's row is byte-identical
+          // to before. A role sent WITHOUT its template is a 422, which is why
+          // `sendRoles` above carries every role some village claims.
+          ...(villageRoles[v.village_id] != null ? { role: villageRoles[v.village_id] } : {}),
+          // Omitted when unset, so an undeclared village's row is unchanged:
+          // absent means "take the role template's answer", and on a village
+          // with no role at all leaves the crop-sign inference in place.
+          ...(mayRelay[v.village_id] != null ? { may_relay: mayRelay[v.village_id] } : {}),
+          // Both omitted when unset, so an ordinary village's row is byte-identical
+          // to before: absent means "unrestricted" and "no floor" on the backend.
+          // An EMPTY ship_only_to list is sent, because it means "nobody".
+          ...(shipOnlyTo[v.village_id] != null ? { ship_only_to: shipOnlyTo[v.village_id] } : {}),
+          // Profile section 5's relay tier, and the one field here whose EMPTY
+          // list is dropped rather than sent. An empty `ship_only_to` means
+          // "nobody", which is an answer; "forwards to nobody" says nothing that
+          // omitting the field does not, so the backend refuses an empty list with
+          // a 422 -- and the picker holds one for the moment between opening and
+          // the first tick, which must not 422 the plan.
+          ...(relayFor[v.village_id]?.length ? { relay_for: relayFor[v.village_id] } : {}),
+          ...(stockFloors[v.village_id] != null
+            ? { stock_floor_fraction: stockFloors[v.village_id] }
+            : {}),
+          // The feedstock override, dropped when there is none AND when the
+          // picker holds an empty list: absent means "derive it", which is what
+          // almost every village says, and an override of nothing is a statement
+          // NPC cannot carry out -- the backend refuses one.
+          ...npcFeedstockField(npcFeedstock[v.village_id]),
+          // Omitted when unset, so a village with no ceiling is byte-identical to
+          // before: absent means the fleet, less the account reserve, is the
+          // budget. 0 IS sent -- it says every route from this village is a
+          // budget breach, which is an answer.
+          ...(maxBusy[v.village_id] != null
+            ? { max_busy_merchants: Number(maxBusy[v.village_id]) }
+            : {}),
+          // An empty map is omitted too: the backend reads absent and {} the
+          // same way, and sending {} would only make the request look like it
+          // declares a spend. A village mid-edit with every box cleared is not
+          // saying it spends nothing.
+          ...(declaresConsumption(consumption[v.village_id])
+            ? { consumption_per_hour: consumption[v.village_id] }
+            : {}),
+        }))
+        // A row carrying nothing but its own id is dropped. It said only "this
+        // village exists", which the snapshot above already says -- and while
+        // it was sent, the backend's `declared = {c.village_id for c in
+        // body.config}` filter on the merchant-calibration sample was a
+        // tautology, because every village had a row. The same predicate
+        // `buildSetup` applies to the exported document, for the same reason:
+        // a village with nothing typed has nothing to declare.
+        //
+        // Behaviourally inert otherwise, and checked rather than assumed:
+        // every consumer of `body.config` either iterates and skips rows
+        // lacking its own field or reads `.get(vid, 0)`, so a village with no
+        // row plans exactly as one whose row held only a floored level.
+        .filter((row) => Object.keys(row).length > 1),
       allocations: sendAllocations,
       // Only the roles some village actually claims. A template nobody claims
       // is harmless on the backend, but sending it would put a half-typed
