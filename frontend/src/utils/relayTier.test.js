@@ -211,7 +211,7 @@ describe('the relay tier in the setup file', () => {
     // is added, so that an older build refuses a file it would otherwise
     // half-load, and a literal is what makes forgetting the bump a failing test
     // rather than a tautology.
-    expect(setup.version).toBe(7)
+    expect(setup.version).toBe(8)
     expect(setup.villages.find((v) => v.village_id === 18).relay_for).toEqual([11, 17])
     expect(setup.villages.find((v) => v.village_id === 14).relay_for).toEqual([19])
     expect(roundTrip(setup).villages.find((v) => v.village_id === 18).relay_for).toEqual([11, 17])

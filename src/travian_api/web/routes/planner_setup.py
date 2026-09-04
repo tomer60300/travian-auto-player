@@ -89,19 +89,25 @@ router = APIRouter(prefix="/api/distribution", tags=["distribution"])
 
 SETUP_FORMAT = "travian-planner-owned-state"
 
-READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7)
+READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8)
 """Versions this build can read. A v1 document simply carries no profiles, a v2
 one no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
 v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing any
 of them would strand every export written before those travelled.
 
-v7 carries `npc_attended` per profile. It earned a version rather than riding
-along as an unknown key -- which it mechanically could, since the body is stored
-verbatim and `SetupDocument` ignores extras -- because the harmful path is real:
-a new build writes attendance into a v6 document, an older v6 build reads it,
-silently drops it, and the operator saves from that build. The answer is then
-gone from the shared copy, and this is the one field the code refuses to guess,
-because guessing it funds night routes from trading nobody did."""
+v7 carries `npc_attended` per profile and v8 carries `overnight` per profile.
+Both earned a version rather than riding along as unknown keys -- which they
+mechanically could, since the body is stored verbatim and `SetupDocument`
+ignores extras -- because the harmful path is identical for each: a new build
+writes the answer into an older document, an older build reads it, silently
+drops it, and the operator saves from that build. The answer is then gone from
+the SHARED copy, which is the whole reason this store exists.
+
+Both are answers the planner refuses to guess, and dropping either is silent.
+Losing `npc_attended` funds night routes from trading nobody did. Losing
+`overnight` un-declares which profile is the night, so a night split across
+midnight stops being recognised as one: section 6's completion rule goes
+unchecked and the 60% morning floor is measured against the wrong minute."""
 
 MAX_MERCHANTS_PER_VILLAGE = 20
 """Travian's hard ceiling on merchants in one village. The only bound on a

@@ -111,7 +111,7 @@ import { NPC_FEEDSTOCK_RESOURCES, isFeedstockList } from './plannerNpc'
 import { namesForVillageIds } from './villageRefs'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 7
+export const SETUP_VERSION = 8
 /** Versions this build can read. A v1 file simply carries no profiles, a v2 one
  * no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
  * v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing
@@ -129,7 +129,7 @@ export const SETUP_VERSION = 7
  * That coupling is why `overnight` travels inside v7 instead of raising this to
  * 8. Bumping here alone answers 422 on every fresh export; bumping there is a
  * backend change. The owed work is listed at `doc.overnight` in `buildSetup`. */
-export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7])
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20

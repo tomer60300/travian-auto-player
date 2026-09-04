@@ -149,9 +149,20 @@ it is wrong. The limiter on 02 is its **remainder role**, not a no-waterfall rul
 | 5 | Tournament Square maximum — +200% or +500%? | troop travel time |
 | 6 | Current cancel-refund rule for construction | build-queue economics |
 
-The code's stated default for #1 is **skip**, and that assumption is load-bearing.
-A reviewer should check the assumption is *stated where it is used*, not that it is
-right — nobody knows yet.
+The code's assumption for #1 is **partial** — `shipped = min(batch, available)`,
+in both replays — and it is load-bearing on every rate the tool reports.
+
+**This file said "skip" until 2026-09-04, and that was wrong.** So did
+`docs/25`, which has since been corrected and records that its own sentence was
+the error. The mechanics reference never agreed with either: §I.5.4 has always
+said the route "sends what it can". A reviewer trusting the "skip" wording would
+have filed against correct code, which is exactly what this file exists to stop.
+
+The assumption is now stated at both points of use, with the direction it cuts:
+against a *skipping* game the tool reports more arriving than really does, and
+calls a receiver fed that is not. A reviewer should check it is still stated
+where it is used, not that it is right — nobody knows yet, and one deliberately
+resource-starved route settles it.
 
 ## Open with the operator
 

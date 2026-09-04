@@ -237,7 +237,7 @@ describe('profiles in the setup file', () => {
     // so that an older build refuses a file it would otherwise half-load, and a
     // literal is what makes forgetting the bump a failing test rather than a
     // tautology.
-    expect(setup.version).toBe(7)
+    expect(setup.version).toBe(8)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -2339,7 +2339,7 @@ describe('the merchant cap in the setup file', () => {
     // sixteen merchants where the operator allowed eight; a v5 build dropping a
     // relay tier reports the villages beyond it as unreachable while the answer
     // sits on screen.
-    expect(SETUP_VERSION).toBe(7)
+    expect(SETUP_VERSION).toBe(8)
 
     const older = {
       format: SETUP_FORMAT,
