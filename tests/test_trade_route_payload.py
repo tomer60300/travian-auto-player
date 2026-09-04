@@ -27,6 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from travian_api.exceptions import NetworkError, SessionExpiredError
 from travian_api.services.distribution.allocation import Resource
 from travian_api.services.trade_route_service import (
     ExistingRoute,
@@ -90,6 +91,10 @@ def _service() -> tuple[TradeRouteService, _RecordingClient]:
     # The gate that normally blocks a create is exercised in
     # tests/test_trade_route_reconciler_gate.py.
     return TradeRouteService(client, live_enabled=True, reconciler_verified=True), client
+
+
+def _existing() -> list[ExistingRoute]:
+    return [ExistingRoute(route_id=1, dest_village_id=20044, dest_x=23, dest_y=88)]
 
 
 def _route(*, dispatch_minute: int = 15 * 60 + 27, cycle_hours: int = 1) -> PlannedRoute:
@@ -253,6 +258,79 @@ class TestWritesConsumeActivityBudget:
             asyncio.run(service.create_route(_route()))
 
         assert client.logged_activity == []
+
+    @pytest.mark.parametrize(
+        "verb,invoke",
+        [
+            ("post_json", lambda s: s.create_route(_route())),
+            ("put_json", lambda s: s.disable_routes(20031, _existing())),
+            ("put_json", lambda s: s.enable_routes(20031, _existing())),
+            (
+                "put_json",
+                lambda s: s.update_cargo(
+                    20031, _existing(), {Resource.CROP: 1}, dest_x=23, dest_y=88
+                ),
+            ),
+            ("delete_json", lambda s: s.delete_routes(20031, _existing())),
+        ],
+        ids=["create", "disable", "enable", "cargo-update", "delete"],
+    )
+    def test_a_failed_write_reports_the_time_it_took_too(self, verb, invoke):
+        """A write that failed spent exactly what one that worked spent.
+
+        The same request left the machine and the same throttler gap was
+        waited out; the game simply answered badly. Billing only the successes
+        made an execute run report a fraction of the traffic it really spent,
+        and the ceiling is SHARED with the farm-list and oasis loops -- so
+        under-reporting here is a licence for those to overspend. The module
+        already makes this argument for the reads in open_marketplace.
+        """
+        client = _RecordingClient()
+
+        async def refuse(*_args, **_kwargs):
+            raise NetworkError("HTTP 500: the game said no")
+
+        setattr(client, verb, refuse)
+        service = TradeRouteService(client, live_enabled=True, reconciler_verified=True)
+
+        result = asyncio.run(invoke(service))
+
+        assert result.status == "failed"
+        assert len(client.logged_activity) == 1, "a failed write is not a free write"
+        assert client.logged_activity[0] >= 0.0
+
+    def test_a_gold_club_refusal_is_billed_as_well(self):
+        # "skipped" describes the ROUTE, not the traffic: the create went out
+        # and came back refused, at full price.
+        client = _RecordingClient()
+
+        async def refuse(*_args, **_kwargs):
+            raise NetworkError("HTTP 400: plus.error_goldclub")
+
+        client.post_json = refuse
+        service = TradeRouteService(client, live_enabled=True, reconciler_verified=True)
+
+        result = asyncio.run(service.create_route(_route()))
+
+        assert result.status == "skipped"
+        assert len(client.logged_activity) == 1
+
+    def test_a_write_that_fails_in_an_unforeseen_way_is_billed_as_well(self):
+        # Billing hung on the NetworkError branch alone would keep missing
+        # whatever the transport raises next, so it hangs on leaving the
+        # request instead -- however that happens.
+        client = _RecordingClient()
+
+        async def expire(*_args, **_kwargs):
+            raise SessionExpiredError("the session went away mid-write")
+
+        client.post_json = expire
+        service = TradeRouteService(client, live_enabled=True, reconciler_verified=True)
+
+        with pytest.raises(SessionExpiredError):
+            asyncio.run(service.create_route(_route()))
+
+        assert len(client.logged_activity) == 1
 
 
 class TestEveryPlannableCycleIsLegalInGame:

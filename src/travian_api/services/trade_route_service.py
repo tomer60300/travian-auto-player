@@ -677,7 +677,15 @@ class TradeRouteService:
             return RouteActionResult(
                 route.origin_village_id, route.dest_x, route.dest_y, "failed", str(exc)
             )
-        self._log_activity(started)
+        finally:
+            # Billed on the way out, not on success. A write that FAILED spent
+            # the same request and the same throttler gap as one that worked --
+            # the game just answered badly -- and the ceiling is shared with the
+            # farm and oasis loops, so under-reporting here lets THOSE overspend.
+            # Same argument the reads already make in open_marketplace. On the
+            # `finally` rather than in the except branch so it also covers
+            # whatever the transport raises next.
+            self._log_activity(started)
         self._trace_write("create", route.origin_village_id, "created", started, payload)
         return RouteActionResult(route.origin_village_id, route.dest_x, route.dest_y, "created")
 
@@ -718,7 +726,9 @@ class TradeRouteService:
         except NetworkError as exc:
             self._trace_write(kind, origin_village_id, "failed", started, payload, str(exc))
             return RouteActionResult(origin_village_id, 0, 0, "failed", f"{verb} failed: {exc}")
-        self._log_activity(started)
+        finally:
+            # A failed toggle cost a real request; see create_route.
+            self._log_activity(started)
 
         # Unlike the create, the bulk toggle DOES answer with a body, and the
         # game's own client reads it: it counts `response.routes` entries with an
@@ -892,7 +902,9 @@ class TradeRouteService:
             return RouteActionResult(
                 origin_village_id, 0, 0, "failed", f"cargo update failed: {exc}"
             )
-        self._log_activity(started)
+        finally:
+            # A failed cargo update cost a real request; see create_route.
+            self._log_activity(started)
 
         try:
             rejected = self._rejected_routes(response)
@@ -970,7 +982,9 @@ class TradeRouteService:
         except NetworkError as exc:
             self._trace_write("delete", origin_village_id, "failed", started, payload, str(exc))
             return RouteActionResult(origin_village_id, 0, 0, "failed", f"delete failed: {exc}")
-        self._log_activity(started)
+        finally:
+            # A failed delete cost a real request; see create_route.
+            self._log_activity(started)
         self._trace_write("delete", origin_village_id, "deleted", started, payload)
         return RouteActionResult(origin_village_id, 0, 0, "deleted", f"{len(routes)} route(s)")
 
