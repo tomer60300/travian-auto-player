@@ -196,3 +196,65 @@ test.describe('an explanation comes before the table it explains', () => {
     await expect(page.getByRole('columnheader', { name: 'Route?' })).toBeAttached()
   })
 })
+
+test.describe('two world constants leave the World & merchants row', () => {
+  test.use({ viewport: { width: 1440, height: 1200 } })
+
+  // 401 and 0.2. Both defaulted from the snapshot, neither a decision anybody
+  // sensibly makes, and between them two of the seven slots on the row that
+  // also holds the four levers an operator really does tune.
+  test('they are behind a disclosure, not removed', async ({ page }) => {
+    await isolate(page)
+    await seed(page)
+    await page.goto('/resource-planner')
+
+    const span = page.getByLabel('Map span override')
+    const bonus = page.getByLabel('Trade Office bonus per level')
+    // Present in the DOM, and not on screen: an operator on another world needs
+    // both, so folding them away may not remove them.
+    await expect(span).toBeAttached()
+    await expect(span).toBeHidden()
+    await expect(bonus).toBeAttached()
+    await expect(bonus).toBeHidden()
+
+    await page.getByText('Non-Europe-2 world').click()
+    await expect(span).toBeVisible()
+    await expect(bonus).toBeVisible()
+    await expect(span).toHaveAttribute('placeholder', '401')
+  })
+
+  // A refusal must never point at a cell nobody can see. `Build plan`'s jump
+  // opens ancestor disclosures imperatively; this is the half that holds
+  // without it.
+  test('the disclosure is open when either figure is wrong', async ({ page }) => {
+    await isolate(page)
+    await seed(page, {
+      planner_merchant_model: {
+        base_capacity: 2500,
+        bonus_per_to_level: 0.2,
+        merchant_reserve: 2,
+        merchant_headroom: 0.1,
+        map_span: 400,
+      },
+    })
+    await page.goto('/resource-planner')
+
+    await expect(page.getByLabel('Map span override')).toBeVisible()
+    await expect(page.getByText('odd — a world is centred on 0|0')).toBeVisible()
+  })
+
+  test('the four levers an operator does tune are still on the row', async ({ page }) => {
+    await isolate(page)
+    await seed(page)
+    await page.goto('/resource-planner')
+
+    for (const name of [
+      'Merchant base capacity',
+      'Merchant speed fields per hour override',
+      'Merchants held in reserve at every village',
+      "Merchant headroom, percent of each village's budget",
+    ]) {
+      await expect(page.getByLabel(name)).toBeVisible()
+    }
+  })
+})

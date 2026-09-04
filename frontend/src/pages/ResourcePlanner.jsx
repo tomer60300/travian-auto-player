@@ -4867,8 +4867,12 @@ export default function ResourcePlanner() {
           )}
 
           {/* World + merchant model. Capacity is server-calibrated and speed
-              defaults to the tribe's x1 value; both — plus map span — are
-              overridable for non-Europe 2 worlds without spending a request. */}
+              defaults to the tribe's x1 value; both are overridable without
+              spending a request.
+
+              The two figures that are properties of the WORLD rather than of
+              this account -- the map span and the Trade Office scaling -- are
+              behind the disclosure at the end of the row. See its own note. */}
           <div className="mt-4 flex items-center gap-4 flex-wrap text-xs border-t border-gray-800 pt-3">
             <span className="text-secondary uppercase">World &amp; merchants</span>
             <label className="flex items-center gap-1">
@@ -4901,32 +4905,6 @@ export default function ResourcePlanner() {
               <MerchantRule
                 id="merchant-problem-base_capacity"
                 rule={merchantProblems.base_capacity}
-              />
-            </label>
-            <label className="flex items-center gap-1">
-              <span className="text-secondary">Bonus / TO level</span>
-              <input
-                type="number"
-                min="0"
-                step="0.05"
-                aria-label="Trade Office bonus per level"
-                aria-invalid={merchantProblems.bonus_per_to_level ? true : undefined}
-                aria-describedby={
-                  merchantProblems.bonus_per_to_level ? 'merchant-problem-bonus_per_to_level' : undefined
-                }
-                className="input-field w-20 text-right py-1"
-                value={merchantModel.bonus_per_to_level ?? ''}
-                onChange={(e) =>
-                  setMerchantModel((m) => ({
-                    ...m,
-                    bonus_per_to_level:
-                      e.target.value === '' ? undefined : Number(e.target.value),
-                  }))
-                }
-              />
-              <MerchantRule
-                id="merchant-problem-bonus_per_to_level"
-                rule={merchantProblems.bonus_per_to_level}
               />
             </label>
             <label className="flex items-center gap-1">
@@ -5031,31 +5009,93 @@ export default function ResourcePlanner() {
                 rule={merchantProblems.merchant_headroom}
               />
             </label>
-            <label className="flex items-center gap-1">
-              <span className="text-secondary">Map span</span>
-              <input
-                type="number"
-                min="1"
-                aria-label="Map span override"
-                aria-invalid={merchantProblems.map_span ? true : undefined}
-                aria-describedby={
-                  merchantProblems.map_span ? 'merchant-problem-map_span' : undefined
-                }
-                placeholder={String(snapshot?.map_span ?? '')}
-                className="input-field w-20 text-right py-1"
-                value={merchantModel.map_span ?? ''}
-                onChange={(e) =>
-                  setMerchantModel((m) => ({
-                    ...m,
-                    map_span: e.target.value === '' ? undefined : Number(e.target.value),
-                  }))
-                }
-              />
-              <MerchantRule
-                id="merchant-problem-map_span"
-                rule={merchantProblems.map_span}
-              />
-            </label>
+            {/* The two WORLD constants, folded away. Neither is a decision
+                anybody sensibly makes: this world's span is 401 and its Trade
+                Office scaling is 0.2 per level, both defaulted from the
+                snapshot, and between them they took two of the seven slots on
+                the row that also holds the four levers an operator really does
+                tune. Not removed -- an operator on another world needs both,
+                and `map_span` scales every distance the geometry computes -- so
+                they are one click away and the summary says when to look.
+
+                Open when either is wrong, so a refusal can never point at a
+                cell inside a collapsed disclosure. `Build plan`'s own jump
+                opens ancestor `<details>` imperatively for the same reason;
+                this is the half that does not depend on the jump. */}
+            <details
+              className="text-xs"
+              open={
+                merchantProblems.map_span != null ||
+                merchantProblems.bonus_per_to_level != null ||
+                undefined
+              }
+            >
+              <summary className="cursor-pointer text-secondary pointer-coarse:min-h-11">
+                Non-Europe-2 world
+              </summary>
+              <div className="flex items-center gap-4 flex-wrap mt-2">
+                <label className="flex items-center gap-1">
+                  <span
+                    className="text-secondary"
+                    title="Extra cargo per Trade Office level, as a fraction. 0.2 on Europe 2, and a world with no Trade Office scaling would be 0."
+                  >
+                    Bonus / TO level
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.05"
+                    aria-label="Trade Office bonus per level"
+                    aria-invalid={merchantProblems.bonus_per_to_level ? true : undefined}
+                    aria-describedby={
+                      merchantProblems.bonus_per_to_level
+                        ? 'merchant-problem-bonus_per_to_level'
+                        : undefined
+                    }
+                    className="input-field w-20 text-right py-1"
+                    value={merchantModel.bonus_per_to_level ?? ''}
+                    onChange={(e) =>
+                      setMerchantModel((m) => ({
+                        ...m,
+                        bonus_per_to_level:
+                          e.target.value === '' ? undefined : Number(e.target.value),
+                      }))
+                    }
+                  />
+                  <MerchantRule
+                    id="merchant-problem-bonus_per_to_level"
+                    rule={merchantProblems.bonus_per_to_level}
+                  />
+                </label>
+                <label className="flex items-center gap-1">
+                  <span
+                    className="text-secondary"
+                    title="The world's width in fields. Always odd, because a Travian world is centred on 0|0. Defaulted from the snapshot; every distance the plan computes is scaled by it."
+                  >
+                    Map span
+                  </span>
+                  <input
+                    type="number"
+                    min="1"
+                    aria-label="Map span override"
+                    aria-invalid={merchantProblems.map_span ? true : undefined}
+                    aria-describedby={
+                      merchantProblems.map_span ? 'merchant-problem-map_span' : undefined
+                    }
+                    placeholder={String(snapshot?.map_span ?? '')}
+                    className="input-field w-20 text-right py-1"
+                    value={merchantModel.map_span ?? ''}
+                    onChange={(e) =>
+                      setMerchantModel((m) => ({
+                        ...m,
+                        map_span: e.target.value === '' ? undefined : Number(e.target.value),
+                      }))
+                    }
+                  />
+                  <MerchantRule id="merchant-problem-map_span" rule={merchantProblems.map_span} />
+                </label>
+              </div>
+            </details>
           </div>
 
           {/* Villages outside the account that are owed crop. Kept in their own

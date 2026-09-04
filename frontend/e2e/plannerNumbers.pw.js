@@ -272,6 +272,10 @@ test.describe('a blank box is unknown; a typed zero is an answer', () => {
     await openAccount(page)
 
     await page.getByLabel('Merchant base capacity').fill('')
+    // The Trade Office scaling is a property of the WORLD, so it lives behind
+    // the "Non-Europe-2 world" disclosure rather than on the row that holds the
+    // four merchant levers.
+    await page.getByText('Non-Europe-2 world').click()
     await page.getByLabel('Trade Office bonus per level').fill('')
 
     const model = await stored(page, 'planner_merchant_model')

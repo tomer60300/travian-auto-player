@@ -121,6 +121,10 @@ test.describe('the gate on Build plan', () => {
     await seed(page)
     await page.goto('/resource-planner')
 
+    // Behind the "Non-Europe-2 world" disclosure now: a world's span is not a
+    // figure anybody sensibly changes, so it does not sit on the row that holds
+    // the four merchant levers.
+    await page.getByText('Non-Europe-2 world').click()
     const span = page.getByLabel('Map span override')
     await span.fill('400')
     await expect(span).toHaveAttribute('aria-invalid', 'true')
