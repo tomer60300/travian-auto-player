@@ -22,7 +22,17 @@
 
 import { expect, test } from '@playwright/test'
 
-import { KEY, PREVIEW, isolate, openPlan, seed } from './plannerHarness'
+import {
+  BLOCKER_BUDGET,
+  BLOCKER_SHORT,
+  KEY,
+  PLAN_BLOCKED,
+  PREVIEW,
+  VIEWPORTS,
+  isolate,
+  openPlan,
+  seed,
+} from './plannerHarness'
 
 /** Drive a preview and hand back the body `/distribution/execute` was sent. */
 async function previewBody(page) {
@@ -402,17 +412,23 @@ test.describe('the undo for a live run is reachable, and the app keeps its key',
     await page.getByRole('button', { name: /^Check what undoing this would take/ }).click()
     await expect(page.getByText(/must be deleted by hand/i)).toBeVisible()
 
-    const box = await page.locator('.card-danger').first().evaluate((el) => {
-      const cs = getComputedStyle(el)
-      const card = getComputedStyle(el.closest('.card'))
-      return {
-        background: cs.backgroundColor,
-        borderWidth: cs.borderTopWidth,
-        borderColor: cs.borderTopColor,
-        radius: cs.borderTopLeftRadius,
-        cardBackground: card.backgroundColor,
-      }
-    })
+    // Scoped by its own text: the write card is `.card card-danger` too, and it
+    // is earlier in the DOM. That is deliberate -- it is the only tinted CARD --
+    // and this box is a nested one inside a panel.
+    const box = await page
+      .locator('.card-danger')
+      .filter({ hasText: 'must be deleted by hand' })
+      .evaluate((el) => {
+        const cs = getComputedStyle(el)
+        const card = getComputedStyle(el.closest('.card'))
+        return {
+          background: cs.backgroundColor,
+          borderWidth: cs.borderTopWidth,
+          borderColor: cs.borderTopColor,
+          radius: cs.borderTopLeftRadius,
+          cardBackground: card.backgroundColor,
+        }
+      })
     if (globalThis.process?.env?.MEASURE) console.log('\n.card-danger:', JSON.stringify(box))
 
     expect(parseFloat(box.borderWidth)).toBe(1)
@@ -722,4 +738,374 @@ test.describe('the reserved NPC-burst window survives being saved', () => {
     // The boxes on screen, which is where the answer is typed.
     await expect(page.getByLabel('NPC burst window start')).toHaveValue('19:30')
   })
+})
+
+test.describe('the Plan stage puts the verdict and the write path first', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  /** The Plan stage with a plan that CANNOT run. */
+  async function blocked(page) {
+    await isolate(page, (path) =>
+      path.endsWith('/distribution/plan') ? PLAN_BLOCKED : undefined,
+    )
+    await seed(page)
+    await openPlan(page)
+  }
+
+  /** The Plan stage with a clean plan. */
+  async function clean(page) {
+    await isolate(page)
+    await seed(page)
+    await openPlan(page)
+  }
+
+  test('the verdict is the largest thing on the stage, and it leads', async ({ page }) => {
+    // The audit's verdict on "eye-catching" was no: eleven cards of identical
+    // weight, width and 11-14px type, with the go/no-go answer as a small line
+    // in a three-column strip and the largest number on the page a COST three
+    // thousand pixels below the fold.
+    await blocked(page)
+
+    const banner = page.locator('.plan-verdict')
+    await expect(banner).toBeVisible()
+    const size = await banner
+      .locator('.plan-verdict-label')
+      .evaluate((el) => parseFloat(getComputedStyle(el).fontSize))
+    expect(size).toBeGreaterThanOrEqual(32)
+
+    // First in the stage's own reading order.
+    const at = await page.evaluate(() => {
+      const t = document.body.innerText
+      return { verdict: t.indexOf('Cannot run'), sheet: t.indexOf('Setup sheet') }
+    })
+    expect(at.verdict).toBeGreaterThan(-1)
+    expect(at.verdict).toBeLessThan(at.sheet)
+  })
+
+  test('the verdict changes tone rather than only wording', async ({ page }) => {
+    await blocked(page)
+    await expect(page.locator('.plan-verdict.plan-verdict-blocked')).toHaveCount(1)
+
+    await clean(page)
+    await expect(page.locator('.plan-verdict.plan-verdict-clean')).toHaveCount(1)
+  })
+
+  test('each blocker is printed exactly once, with a way to fix it', async ({ page }) => {
+    // Measured before: the same two sentences appeared four times on one
+    // screen -- in the "what this checked" disclosure, in the execute panel,
+    // and twice more as restatements.
+    await blocked(page)
+
+    const text = await page.evaluate(() => document.body.innerText)
+    for (const blocker of [BLOCKER_BUDGET, BLOCKER_SHORT]) {
+      const count = text.split(blocker).length - 1
+      expect(count, `"${blocker}" is printed once`).toBe(1)
+    }
+    // And each one is actionable from where it is printed.
+    await expect(page.locator('.plan-verdict').getByRole('button', { name: /fix/ })).toHaveCount(2)
+  })
+
+  test('the other copies become one line each', async ({ page }) => {
+    await blocked(page)
+
+    // The count, not the sentences. Both other copies live inside panels the
+    // operator has to open, which is itself the point: neither competes with
+    // the banner for the same screen.
+    await expect(page.getByText(/2 problems? above/)).toHaveCount(2)
+    await page.getByText(/^What “Cannot run” checked/).click()
+    await expect(page.getByText(/2 problems? above/).first()).toBeVisible()
+  })
+
+  test('cost and NPC triggers are the only other large numbers', async ({ page }) => {
+    await blocked(page)
+
+    const tiles = page.locator('.plan-headline-figure')
+    await expect(tiles).toHaveCount(2)
+    for (const size of await tiles.evaluateAll((nodes) =>
+      nodes.map((el) => parseFloat(getComputedStyle(el).fontSize)),
+    )) {
+      expect(size).toBeGreaterThanOrEqual(24)
+    }
+    await expect(page.getByText('96,000').first()).toBeVisible()
+
+    // Above the sheet, which is where the operator acts on them.
+    const at = await page.evaluate(() => {
+      const t = document.body.innerText
+      return { cost: t.indexOf('96,000'), sheet: t.indexOf('Setup sheet') }
+    })
+    expect(at.cost).toBeLessThan(at.sheet)
+  })
+
+  test('every read-only panel folds, with its count in the summary', async ({ page }) => {
+    await blocked(page)
+
+    for (const summary of [
+      /^Merchant budget/,
+      /^Relayed crop/,
+      /^What the account had to give/,
+      /^NPC balancing/,
+      /^Still on the road at the switch/,
+    ]) {
+      const found = page.getByText(summary).first()
+      await expect(found, `${summary} is a disclosure summary`).toBeVisible()
+      const tag = await found.evaluate((el) => el.closest('details, summary')?.tagName ?? el.tagName)
+      expect(tag).toMatch(/DETAILS|SUMMARY/)
+    }
+    // The counts, so a closed panel still says whether it is worth opening.
+    await expect(page.getByText(/Merchant budget \(1 village over\)/)).toBeVisible()
+  })
+
+  test('a non-clean plan opens them, a clean one leaves them shut', async ({ page }) => {
+    await blocked(page)
+    expect(
+      await page.locator('details.plan-readonly[open]').count(),
+      'a refused plan opens what it left behind',
+    ).toBeGreaterThan(0)
+
+    await clean(page)
+    expect(await page.locator('details.plan-readonly[open]').count()).toBe(0)
+  })
+
+  test('the write card is the only tinted card, and the live button is the danger one', async ({
+    page,
+  }) => {
+    await isolate(page, (path) => (path.endsWith('/distribution/execute') ? PREVIEW : undefined))
+    await seed(page)
+    await openPlan(page)
+
+    // Exactly one tinted, bordered card on the stage, and it is the one that
+    // writes. Eleven cards of identical weight is how the write path came to be
+    // indistinguishable from the YAML export.
+    await expect(page.locator('.card-danger')).toHaveCount(1)
+    await expect(page.locator('.card-danger')).toContainText(/Write it to the game/i)
+
+    await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
+    const live = page.getByRole('button', { name: /^Disable old routes & create/ })
+    const shape = await live.evaluate((el) => ({
+      classes: el.className,
+      width: Math.round(el.getBoundingClientRect().width),
+      parent: Math.round(el.parentElement.getBoundingClientRect().width),
+    }))
+    expect(shape.classes).toContain('btn-danger')
+    // Full width, so the thing that writes to the account is not a small
+    // outline button beside a large filled one that writes a document.
+    expect(shape.width).toBeGreaterThan(shape.parent * 0.9)
+    // The estimate stays: every action on this page states its cost.
+    await expect(live).toContainText(/~\d+ requests/)
+  })
+
+  test('the YAML export is a bottom disclosure with its digest', async ({ page }) => {
+    // It was the biggest filled button on the page -- for a document that
+    // changes nothing -- while the button that writes to the account was a
+    // small one further down.
+    await clean(page)
+
+    const summary = page.getByText(/^Export this plan as YAML/)
+    await expect(summary).toBeVisible()
+    await expect(summary).toContainText('dddddddddddd')
+
+    const at = await page.evaluate(() => {
+      const t = document.body.innerText
+      return { yaml: t.indexOf('Export this plan as YAML'), write: t.indexOf('Write it to the game') }
+    })
+    expect(at.yaml).toBeGreaterThan(at.write)
+
+    // And it is no longer the loudest button.
+    await summary.click()
+    const cls = await page
+      .getByRole('button', { name: /Confirm this plan and export YAML/ })
+      .evaluate((el) => el.className)
+    expect(cls).not.toContain('btn-primary')
+  })
+})
+
+test.describe('the redesigned Plan stage against the UI Definition of Done', () => {
+  for (const viewport of VIEWPORTS) {
+    test.describe(`at ${viewport.width}px`, () => {
+      test.use({ viewport })
+
+      test('nothing scrolls the page sideways, with every disclosure open', async ({ page }) => {
+        // Item 1. Asked with the disclosures DRIVEN OPEN, because "not on
+        // screen" is otherwise a loophole -- the redesign moved five panels
+        // behind <details>, so a closed one cannot be the reason this passes.
+        await isolate(page, (path) =>
+          path.endsWith('/distribution/plan') ? PLAN_BLOCKED : undefined,
+        )
+        await seed(page)
+        await openPlan(page)
+
+        const opened = await page.evaluate(() => {
+          const all = [...document.querySelectorAll('details')]
+          for (const d of all) d.open = true
+          return all.length
+        })
+        expect(opened, 'there are disclosures to open').toBeGreaterThan(5)
+        expect(
+          await page.evaluate(() => [...document.querySelectorAll('details:not([open])')].length),
+          'every disclosure is open',
+        ).toBe(0)
+
+        const scroll = await page.evaluate(() => ({
+          x: document.scrollingElement.scrollWidth - document.scrollingElement.clientWidth,
+          overflowing: [...document.querySelectorAll('*')]
+            .filter((el) => {
+              const cs = getComputedStyle(el)
+              if (cs.overflowX !== 'auto' && cs.overflowX !== 'scroll') return false
+              return el.getBoundingClientRect().width > document.documentElement.clientWidth + 1
+            })
+            .map((el) => el.className),
+        }))
+        if (globalThis.process?.env?.MEASURE) console.log(`\n${viewport.width}px page scroll:`, JSON.stringify(scroll))
+        expect(scroll.x, 'no horizontal page scroll').toBe(0)
+        expect(scroll.overflowing, 'no scrolling container is wider than the viewport').toEqual([])
+      })
+
+      test('no control is clipped, with every disclosure open', async ({ page }) => {
+        // Item 1's other half, and the number the audit asks be held at zero: a
+        // control whose own content does not fit inside it.
+        await isolate(page, (path) =>
+          path.endsWith('/distribution/plan') ? PLAN_BLOCKED : undefined,
+        )
+        await seed(page)
+        await openPlan(page)
+        await page.evaluate(() => {
+          for (const d of document.querySelectorAll('details')) d.open = true
+        })
+
+        const clipped = await page.$$eval('input, select, button', (nodes) =>
+          nodes
+            .filter((el) => el.getBoundingClientRect().width > 0)
+            .filter((el) => el.scrollWidth > el.clientWidth + 1)
+            .map((el) => ({
+              tag: el.tagName,
+              label:
+                el.getAttribute('aria-label') || el.textContent?.trim().slice(0, 40) || el.type,
+              client: Math.round(el.clientWidth),
+              content: Math.round(el.scrollWidth),
+            })),
+        )
+        if (globalThis.process?.env?.MEASURE) console.log(`\n${viewport.width}px clipped:`, JSON.stringify(clipped))
+        expect(clipped).toEqual([])
+      })
+    })
+  }
+
+  test('the sheet keeps its identity column pinned when it scrolls', async ({ page }) => {
+    // The one table the redesign touched around: the relay chain moved inside a
+    // disclosure in the same card as the sheet. Pinning is what makes a wide
+    // table readable, and it is asserted structurally rather than by screenshot.
+    await page.setViewportSize({ width: 375, height: 900 })
+    await isolate(page, (path) => (path.endsWith('/distribution/plan') ? PLAN_BLOCKED : undefined))
+    await seed(page)
+    await openPlan(page)
+    await page.evaluate(() => {
+      for (const d of document.querySelectorAll('details')) d.open = true
+    })
+
+    const pinned = await page.$$eval('.table-overflowing', (wrappers) =>
+      wrappers.map((w) => ({
+        scrollable: w.scrollWidth > w.clientWidth,
+        pinnedCells: w.querySelectorAll('.sticky-col').length,
+      })),
+    )
+    if (globalThis.process?.env?.MEASURE) console.log('\npinned:', JSON.stringify(pinned))
+    for (const wrapper of pinned) {
+      if (wrapper.scrollable) expect(wrapper.pinnedCells).toBeGreaterThan(0)
+    }
+  })
+})
+
+test.describe('the new surfaces meet WCAG AA in both themes', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  /**
+   * The contrast ratio of one element's own text against its own background.
+   *
+   * The channel parser handles `color(srgb r g b)` as well as `rgb(r, g, b)`,
+   * and that is not defensive coding -- `color-mix()` computes to the FORMER,
+   * with components in 0..1. A first version of this measurement read those as
+   * 0..255, which turned every washed background into near-black and reported
+   * the clean banner at 3.23:1. The banner was fine; the ruler was not.
+   */
+  async function contrast(page, selector) {
+    return page.evaluate((sel) => {
+      const channels = (value) => {
+        const probe = document.createElement('span')
+        probe.style.color = value
+        document.body.appendChild(probe)
+        const computed = getComputedStyle(probe).color
+        probe.remove()
+        const numbers = (computed.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number)
+        // `color(srgb ...)` is 0..1 per channel; `rgb()` is 0..255.
+        return computed.startsWith('color(') ? numbers.map((n) => n * 255) : numbers
+      }
+      const lin = (c) => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
+      const lum = ([r, g, b]) => 0.2126 * lin(r / 255) + 0.7152 * lin(g / 255) + 0.0722 * lin(b / 255)
+      const el = document.querySelector(sel)
+      if (!el) return null
+      const cs = getComputedStyle(el)
+      const fg = lum(channels(cs.color))
+      const bg = lum(channels(cs.backgroundColor))
+      const ratio = (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05)
+      return Math.round(ratio * 100) / 100
+    }, selector)
+  }
+
+  for (const theme of ['light', 'dark']) {
+    for (const tone of [
+      { name: 'blocked', selector: '.plan-verdict-blocked', plan: PLAN_BLOCKED },
+      { name: 'clean', selector: '.plan-verdict-clean', plan: null },
+      {
+        // Executable, with a critical finding the gate does not weigh: the
+        // third state, and the one that is neither red nor green.
+        name: 'dirty',
+        selector: '.plan-verdict-dirty',
+        plan: {
+          ...PLAN_BLOCKED,
+          feasible: true,
+          verdict: {
+            executable: true,
+            clean: false,
+            blockers: [],
+            covers: ['every merchant budget'],
+            unweighed: ['overflow'],
+            critical_findings: 1,
+          },
+        },
+      },
+    ]) {
+      test(`the ${tone.name} verdict banner in ${theme}`, async ({ page }) => {
+        // Item 3 of the UI Definition of Done: "a token pair that passes in
+        // light can fail in dark". The app sets no `data-theme` today -- the
+        // dark tokens exist and nothing selects them -- so the attribute is set
+        // here, which is the only way to ask the question at all.
+        await isolate(page, (path) =>
+          tone.plan && path.endsWith('/distribution/plan') ? tone.plan : undefined,
+        )
+        await seed(page)
+        await openPlan(page)
+        await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme)
+
+        const ratio = await contrast(page, tone.selector)
+        if (globalThis.process?.env?.MEASURE) {
+          console.log(`\n${theme} ${tone.name} banner: ${ratio}:1`)
+        }
+        // 4.5:1, the small-text threshold. The banner's own label is 2rem and
+        // would only need 3, but its blocker lines and its sub-line are 12px,
+        // and they inherit this colour.
+        expect(ratio).toBeGreaterThanOrEqual(4.5)
+      })
+    }
+
+    test(`the write card's danger wash in ${theme}`, async ({ page }) => {
+      await isolate(page)
+      await seed(page)
+      await openPlan(page)
+      await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme)
+
+      const ratio = await contrast(page, '.card-danger')
+      if (globalThis.process?.env?.MEASURE) console.log(`\n${theme} write card: ${ratio}:1`)
+      expect(ratio).toBeGreaterThanOrEqual(4.5)
+    })
+  }
 })

@@ -127,6 +127,7 @@ import {
 import {
   filenameFromDisposition,
   isDigestConflict,
+  planDigestShort,
   yamlFilename,
   yamlResponseTransform,
 } from '../utils/plannerExport'
@@ -215,6 +216,19 @@ const SWEEP_VILLAGES_PER_CHUNK = 5
 // Travian's repeat interval is a closed set of the divisors of 24. Offering
 // anything else would plan a cadence the create payload cannot express.
 const TRAVIAN_REPEAT_INTERVALS = [1, 2, 3, 4, 6, 8, 12, 24]
+// `planStatus()`'s tone, as the verdict banner's tone class. Mapped rather than
+// interpolated, because the three tones are a closed set the CSS declares and a
+// template string would silently produce a class that does not exist.
+const VERDICT_TONE_CLASS = {
+  'text-danger': 'plan-verdict-blocked',
+  'text-warning': 'plan-verdict-dirty',
+  'text-success': 'plan-verdict-clean',
+  // `planStatus` returns this when an older backend sent no verdict at all, so
+  // the second question -- is anything critical outstanding -- went unanswered.
+  // The cautious tone, not the green one.
+  'text-secondary': 'plan-verdict-dirty',
+}
+
 // The three profile actions that need a name typed, as one dialog. Titles and
 // action words rather than a mode word in a heading, so each reads as the
 // question it is.
@@ -3439,6 +3453,11 @@ export default function ResourcePlanner() {
   // the shape and cannot validate the miss -- it does not hold this account's
   // village list -- so this is the only place the typo is knowable before the
   // run switches the route off.
+  // Villages the plan commits more merchants at than they are allowed. Read off
+  // `plan.budgets`, which is what the panel below renders, so the count in its
+  // summary cannot disagree with the bars inside it.
+  const overBudgetCount = plan?.budgets?.filter((b) => b.over_budget).length ?? 0
+
   const protectionMisses = useMemo(
     () => unresolvedProtectedEntries(protectDestinations, villages),
     [protectDestinations, villages]
@@ -5821,6 +5840,121 @@ export default function ResourcePlanner() {
 
           {plan && (
             <>
+              {/* ── The verdict, first and largest ──
+                  The audit's answer to "is this eye-catching" was no: eleven
+                  cards of identical weight, width and 11-14px type, with the
+                  go/no-go answer as a 14px line in the third column of a
+                  three-column strip, the largest number on the page a COST
+                  three thousand pixels below the fold, and the biggest filled
+                  button the YAML export -- a document that changes nothing.
+
+                  `planStatus()` already returned the three-state label and the
+                  tone; nothing here re-derives either. This is size and
+                  placement. */}
+              <div
+                className={`plan-verdict ${
+                  VERDICT_TONE_CLASS[planState.tone] ?? 'plan-verdict-dirty'
+                }`}
+              >
+                <p className="plan-verdict-label">{planState.label}</p>
+                {verdict && !verdict.clean && (
+                  <p className="text-xs mt-1">
+                    {verdict.executable
+                      ? `${verdict.critical_findings} critical finding${
+                          verdict.critical_findings === 1 ? '' : 's'
+                        } this check does not weigh — read the findings below before going live`
+                      : `${verdict.blockers.length} blocker${
+                          verdict.blockers.length === 1 ? '' : 's'
+                        }, and the server refuses a live run too`}
+                  </p>
+                )}
+                {/* Printed ONCE, here, in the backend's own wording. The same
+                    two sentences used to appear four times on one screen, and
+                    every other copy is now a count that points back here. */}
+                {verdict && verdict.blockers.length > 0 && (
+                  <>
+                    <ul className="text-xs mt-2 space-y-1">
+                      {verdict.blockers.map((line) => (
+                        <li key={line} className="flex items-start gap-2 flex-wrap">
+                          <span className="flex-1 min-w-[16rem]">{line}</span>
+                          {/* Targets, and not a destination sniffed out of the
+                              sentence. Every one of the four blocker kinds --
+                              a merchant budget breach, an unroutable receiver,
+                              an over-claimed allocation, a conversion
+                              shortfall -- is fixed by lowering a target; the
+                              owned columns on Account are the other lever, and
+                              the line below says so once rather than per row.
+                              Matching keywords against a backend sentence to
+                              choose between them is exactly the coupling this
+                              codebase keeps warning about. */}
+                          <button
+                            type="button"
+                            className="underline whitespace-nowrap pointer-coarse:min-h-11"
+                            onClick={() => setStage('allocate')}
+                          >
+                            → fix
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-xs mt-2">
+                      Every one of these comes down to a target that asks for more than the
+                      account can carry. Lower it on <strong>Targets</strong>, or change what the
+                      village is allowed on <strong>Account</strong> — its merchant cap, its relay
+                      tier, its stock floor.
+                    </p>
+                  </>
+                )}
+                {verdict && verdict.clean && (
+                  <p className="text-xs mt-1">
+                    Nothing critical outstanding. Preview it, then write it.
+                  </p>
+                )}
+              </div>
+
+              {/* ── The two figures the operator acts on after the verdict ──
+                  The only other large numbers on the stage, because they are
+                  the only other numbers that ask for a decision: what this plan
+                  destroys per day, and how many NPC conversions it wants done
+                  by hand. Both were computed and both were below the fold.
+                  Neither is re-derived -- the loss is the diagnostics' own total
+                  and the count is the trigger list's length -- and the panels
+                  that break them down are still below. */}
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="card p-4">
+                  <div className="text-secondary text-xs uppercase">Costs per day</div>
+                  <div
+                    className={`plan-headline-figure font-mono ${
+                      plan.diagnostics?.total_loss_per_day > 0 ? 'text-danger' : 'text-success'
+                    }`}
+                  >
+                    {plan.diagnostics?.total_loss_per_day > 0
+                      ? fmt(plan.diagnostics.total_loss_per_day)
+                      : 'nothing'}
+                  </div>
+                  <p className="text-secondary text-xs mt-0.5">
+                    {plan.diagnostics?.total_loss_per_day > 0
+                      ? 'resources destroyed per day — broken down under “What this plan costs”'
+                      : 'no resource is destroyed by this plan'}
+                  </p>
+                </div>
+                <div className="card p-4">
+                  <div className="text-secondary text-xs uppercase">NPC by hand</div>
+                  <div
+                    className={`plan-headline-figure font-mono ${
+                      plan.npc_triggers?.length ? 'text-warning' : 'text-secondary'
+                    }`}
+                  >
+                    {plan.npc_triggers?.length ?? 0}
+                  </div>
+                  <p className="text-secondary text-xs mt-0.5">
+                    {plan.npc_triggers?.length
+                      ? 'conversion(s) the planner says are worth doing — it never presses the button'
+                      : 'no conversion is worth doing right now'}
+                  </p>
+                </div>
+              </div>
+
               <div className="card p-4 flex flex-wrap gap-6 items-center">
                 <div>
                   <div className="text-secondary text-xs uppercase">Routes</div>
@@ -5830,21 +5964,9 @@ export default function ResourcePlanner() {
                   <div className="text-secondary text-xs uppercase">Merchants</div>
                   <div className="text-xl font-mono">{plan.total_merchants}</div>
                 </div>
-                <div>
-                  <div className="text-secondary text-xs uppercase">Status</div>
-                  <div className={planState.tone}>{planState.label}</div>
-                  {verdict && !verdict.clean && (
-                    <div className="text-secondary text-xs">
-                      {verdict.executable
-                        ? `${verdict.critical_findings} critical finding${
-                            verdict.critical_findings === 1 ? '' : 's'
-                          } this check does not weigh`
-                        : `${verdict.blockers.length} blocker${
-                            verdict.blockers.length === 1 ? '' : 's'
-                          }`}
-                    </div>
-                  )}
-                </div>
+                {/* The Status column is gone: the banner above says it at 2rem,
+                    and saying it twice at two sizes is what made eleven cards
+                    read as one weight. */}
               </div>
 
               {verdict && (
@@ -5861,17 +5983,13 @@ export default function ResourcePlanner() {
                       <li key={line}>{line}</li>
                     ))}
                   </ul>
+                  {/* A COUNT, not the sentences. They are in the banner. */}
                   {verdict.blockers.length > 0 && (
-                    <>
-                      <p className="text-danger mt-2 font-semibold">
-                        Why it cannot run, in full:
-                      </p>
-                      <ul className="list-disc list-inside text-danger">
-                        {verdict.blockers.map((line) => (
-                          <li key={line}>{line}</li>
-                        ))}
-                      </ul>
-                    </>
+                    <p className="text-danger mt-2">
+                      {verdict.blockers.length} problem
+                      {verdict.blockers.length === 1 ? '' : 's'} above, each one named in the
+                      banner at the top of this stage.
+                    </p>
                   )}
                   <p className="text-secondary mt-2">
                     It deliberately does <strong>not</strong> weigh what the plan leaves behind —
@@ -5889,12 +6007,18 @@ export default function ResourcePlanner() {
                 </details>
               )}
 
-              {/* What the account had to give, before what it will do with
-                  it. `unallocated` was computed on every plan and rendered
-                  nowhere, so the only slack figure on screen was the Targets
-                  grid's own live derivation -- right while typing, and not
-                  what the plan used. */}
-              <UnallocatedPanel rows={plan.unallocated ?? []} villages={villages} />
+              {/* ── What the plan LEFT BEHIND, folded ──
+                  Read-only panels: they say what the plan already decided, not
+                  what is still to be decided, and five of them at full weight
+                  used to sit between the verdict and the write path. Each folds
+                  with its count in the summary, and each opens on its own when
+                  the plan is not clean -- the same rule `initialExpanded`
+                  applies to the findings. */}
+              <UnallocatedPanel
+                rows={plan.unallocated ?? []}
+                villages={villages}
+                expanded={!verdict?.clean}
+              />
 
               {/* Section 7, once the two-pass solve has sized it. Renders
                   nothing for an account that declares no floor. */}
@@ -5902,11 +6026,15 @@ export default function ResourcePlanner() {
                 reserves={plan.npc_reserves ?? []}
                 triggers={plan.npc_triggers ?? []}
                 drawByVillage={planNpcDraw}
+                expanded={!verdict?.clean}
               />
 
-              <div className="card p-4">
-                <h3 className="font-semibold mb-2">Merchant budget</h3>
-                <div className="space-y-1">
+              <details className="plan-readonly card p-4" open={!verdict?.clean}>
+                <summary className="cursor-pointer font-semibold">
+                  Merchant budget ({overBudgetCount} village
+                  {overBudgetCount === 1 ? '' : 's'} over)
+                </summary>
+                <div className="space-y-1 mt-3">
                   {plan.budgets
                     .filter((b) => b.committed > 0 || b.over_budget)
                     .map((b) => (
@@ -5919,7 +6047,7 @@ export default function ResourcePlanner() {
                       </div>
                     ))}
                 </div>
-              </div>
+              </details>
 
               <div className="card p-4 relative overflow-x-auto">
                 <div className="flex items-baseline justify-between flex-wrap gap-2 mb-2">
@@ -6019,7 +6147,18 @@ export default function ResourcePlanner() {
                   set separately. It is not the wall-clock instant you must press create.
                 </p>
                 {relays.length > 0 && (
-                  <div className="mt-3 border-t border-gray-800 pt-3">
+                  /* Folded on the same rule as the four panels above: read-only,
+                     with the count in the summary. `border-gray-800` became
+                     `border-t-default` while this line was being rewritten -- a
+                     fixed dark grey that renders as a near-black hairline on a
+                     light surface. */
+                  <details
+                    className="plan-readonly mt-3 border-t-default pt-3"
+                    open={!verdict?.clean}
+                  >
+                    <summary className="cursor-pointer font-semibold text-xs">
+                      Relayed crop · {relays.length} chain{relays.length === 1 ? '' : 's'}
+                    </summary>
                     {/* Rewritten after the operator read it and had to ask what
                         it meant. The old copy opened with the mechanism -- how a
                         hub's granary refills -- and left the two things they
@@ -6029,9 +6168,6 @@ export default function ResourcePlanner() {
                         "worst case", which reads as danger for a figure that is
                         simply how long the pipe takes to fill. Consequence and
                         action first; mechanism underneath for whoever wants it. */}
-                    <h4 className="font-semibold text-xs">
-                      Relayed crop · {relays.length} chain{relays.length === 1 ? '' : 's'}
-                    </h4>
                     <p className="text-secondary text-xs mt-1">
                       These deliver through a middle village, because the source is too far
                       to reach the target directly.
@@ -6099,41 +6235,43 @@ export default function ResourcePlanner() {
                         ))}
                       </tbody>
                     </table>
-                  </div>
+                  </details>
                 )}
               </div>
-
-              {/* Section 10's order, and it has to be HERE: the readable
-                  plan is the card above, and the document comes after the
-                  operator has read it. Above the execute panel, because
-                  exporting is the reversible output and going live is not. */}
-              <PlanExport
-                digest={plan.plan_digest}
-                exporting={exportingYaml}
-                conflict={yamlConflict}
-                onConfirm={exportPlanYaml}
-                onRePlan={buildPlan}
-              />
 
               {/* Section 6's deadline, against THIS profile's routes. The
                   same rows the full-day check reports for the composite, so
                   one table renders both -- two would be two chances to
                   describe the same fact differently. Only ever populated for
                   an overnight profile: by day nothing says a merchant may not
-                  be on the road at the switch. */}
+                  be on the road at the switch. Folded, with the count in the
+                  summary, on the same rule as every other read-only panel. */}
               {plan.night_overruns?.length > 0 && (
-                <div className="card p-4">
-                  <NightOverrunTable
-                    rows={plan.night_overruns}
-                    emptyNote="Every movement closes before the window ends."
-                  />
-                </div>
+                <details className="plan-readonly card p-4" open={!verdict?.clean}>
+                  <summary className="cursor-pointer font-semibold text-sm">
+                    Still on the road at the switch ({plan.night_overruns.length} route
+                    {plan.night_overruns.length === 1 ? '' : 's'})
+                  </summary>
+                  <div className="mt-3">
+                    <NightOverrunTable
+                      rows={plan.night_overruns}
+                      emptyNote="Every movement closes before the window ends."
+                    />
+                  </div>
+                </details>
               )}
 
-              <div className="card p-4">
+              {/* ── The write path, and the only tinted card on the page ──
+                  Eleven cards of identical weight, width and 11-14px type is
+                  how the one action that changes a real account came to look
+                  exactly like the ten that do not. `--md-error` at 1px over a
+                  wash derived from `--md-error-container` -- see `.card-danger`
+                  in index.css -- so the eye finds the write path first and
+                  finds it once. */}
+              <div className="card card-danger p-4">
                 <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
                   <div>
-                    <h3 className="font-semibold">Execute as trade routes</h3>
+                    <h3 className="font-semibold">Write it to the game</h3>
                     <p className="text-secondary text-xs mt-0.5">
                       Creates these routes in-game instead of retyping them. Preview costs no
                       requests. Going live disables each origin’s old routes first, then creates a
@@ -6441,15 +6579,18 @@ export default function ResourcePlanner() {
                       refuses it too. Preview is not blocked: it changes nothing, costs no
                       requests, and naming the routes that break is how you resolve it.
                     </p>
-                    {/* The reasons, not a category. "Over budget / unroutable" told the
-                        operator which of two shapes the problem had and nothing about
-                        which village caused it. */}
+                    {/* The COUNT, and a pointer. The sentences are in the
+                        verdict banner at the top of this stage -- printed
+                        there once, in the backend's own wording, with a way to
+                        fix each. They used to be printed here as well, and in
+                        the "what this checked" disclosure, and restated twice
+                        more: the same two sentences four times on one screen. */}
                     {verdict && verdict.blockers.length > 0 && (
-                      <ul className="list-disc list-inside mt-1">
-                        {verdict.blockers.map((line) => (
-                          <li key={line}>{line}</li>
-                        ))}
-                      </ul>
+                      <p className="mt-1">
+                        {verdict.blockers.length} problem
+                        {verdict.blockers.length === 1 ? '' : 's'} above, each one named in the
+                        banner at the top of this stage.
+                      </p>
                     )}
                   </div>
                 )}
@@ -6719,9 +6860,16 @@ export default function ResourcePlanner() {
                               unroutable rows above, build the plan again, then preview.
                             </p>
                           )}
+                          {/* `btn-danger btn-full`, and that is the point of
+                              the whole rearrangement: the biggest filled button
+                              on this page was the YAML export -- a document
+                              that changes nothing -- while the button that
+                              writes to a real account was a small one further
+                              down. The `~N requests` estimate stays: every
+                              action here states its cost before spending it. */}
                           <button
                             type="button"
-                            className="btn-primary text-xs py-1.5 mt-2"
+                            className="btn-danger btn-full text-xs py-1.5 mt-2"
                             disabled={executing || !plan.feasible}
                             onClick={() => setConfirmLive(true)}
                           >
@@ -6766,6 +6914,37 @@ export default function ResourcePlanner() {
               {plan.diagnostics && plan.warnings.length > 0 && (
                 <PlanDiagnostics diagnostics={plan.diagnostics} lineCount={plan.warnings.length} />
               )}
+
+              {/* ── The document, demoted to the bottom ──
+                  Section 10's order is unchanged and is still enforced by the
+                  digest: read the plan, confirm it, get the file. What changed
+                  is its WEIGHT. Its "Confirm this plan and export YAML" was the
+                  biggest filled button on the page, for an artefact that
+                  changes nothing in the game, sitting above the small button
+                  that writes to a real account. So it folds, with the digest in
+                  the summary -- which is where the digest is most useful
+                  anyway: twelve characters that name which of three downloads
+                  describes which plan. */}
+              <details className="card p-4">
+                <summary className="cursor-pointer font-semibold">
+                  Export this plan as YAML{' '}
+                  <span className="font-mono text-info font-normal" title={plan.plan_digest}>
+                    plan {planDigestShort(plan.plan_digest)}
+                  </span>{' '}
+                  <span className="text-secondary text-xs font-normal">
+                    — a document. It changes nothing in the game.
+                  </span>
+                </summary>
+                <div className="mt-3">
+                  <PlanExport
+                    digest={plan.plan_digest}
+                    exporting={exportingYaml}
+                    conflict={yamlConflict}
+                    onConfirm={exportPlanYaml}
+                    onRePlan={buildPlan}
+                  />
+                </div>
+              </details>
             </>
           )}
         </div>
@@ -6852,7 +7031,7 @@ export default function ResourcePlanner() {
                 </thead>
                 <tbody className="font-mono">
                   {runHistory.runs.map((r) => (
-                    <tr key={r.run_id} className="border-t border-gray-800">
+                    <tr key={r.run_id} className="border-t-default">
                       <td className="py-1 pr-2">{new Date(r.started_at).toLocaleString()}</td>
                       <td className="text-right px-2">{r.created ?? '—'}</td>
                       <td className="text-right px-2">{r.created_game_rows ?? '—'}</td>
@@ -6897,7 +7076,7 @@ export default function ResourcePlanner() {
                 </tbody>
               </table>
               {revertRun && (
-                <div className="card-danger p-2">
+                <div className="card-danger rounded-xl p-2">
                   <p className="text-xs font-semibold">
                     Undoing the run of{' '}
                     {new Date(

@@ -23,14 +23,26 @@ const signed = (n) => (n == null ? '—' : `${n > 0 ? '+' : ''}${Math.round(n).t
  * A resource whose ceiling is large and whose draw is zero is the normal case,
  * not a waste: conversion is consumed only against unmet demand.
  */
-export default function UnallocatedPanel({ rows, villages }) {
+export default function UnallocatedPanel({ rows, villages, expanded }) {
   if (!rows.length) return null
   const anyNpc = rows.some((row) => (row.total_npc_allowance ?? 0) > 0)
 
   return (
-    <div className="card p-4">
-      <h3 className="font-semibold mb-1">What the account had to give</h3>
-      <p className="text-secondary text-xs mb-3">
+    /* Folded, with the count in the summary. This is read-only -- it says what
+       the plan already decided, not what is still to be decided -- and five
+       panels of that kind used to sit at full weight between the verdict and
+       the write path. A closed panel still has to say whether it is worth
+       opening, which is what the count is for.
+
+       `expanded` is the INITIAL state and nothing more: `<details>` toggles
+       itself natively afterwards. The caller opens it when the plan is not
+       clean, which is the rule `initialExpanded` already applies to the
+       findings. */
+    <details className="plan-readonly card p-4" open={expanded}>
+      <summary className="cursor-pointer font-semibold mb-1">
+        What the account had to give ({rows.length} resource{rows.length === 1 ? '' : 's'})
+      </summary>
+      <p className="text-secondary text-xs mb-3 mt-2">
         Per resource: what the villages produce, what the plan left unassigned, and which
         village absorbs it. Unassigned is production minus every target the plan committed —
         a negative figure means the targets ask for more than the account makes.
@@ -111,6 +123,6 @@ export default function UnallocatedPanel({ rows, villages }) {
           </tbody>
         </table>
       </ScrollableTable>
-    </div>
+    </details>
   )
 }

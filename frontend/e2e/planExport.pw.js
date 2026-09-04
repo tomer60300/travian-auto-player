@@ -183,6 +183,19 @@ async function buildPlan(page) {
   await expect(page.getByText(/^Routes$/)).toBeVisible()
 }
 
+/** Open the export disclosure.
+ *
+ * It is a disclosure now, at the bottom of the stage. Its "Confirm this plan
+ * and export YAML" used to be the biggest filled button on the page -- for a
+ * document that changes nothing in the game -- above the small button that
+ * writes to a real account. Section 10's order is unchanged and is still
+ * enforced by the digest; only the weight moved.
+ */
+async function openExport(page) {
+  await page.getByText(/^Export this plan as YAML/).click()
+  await expect(page.getByText(/Confirm this plan, then export it/)).toBeVisible()
+}
+
 test.describe('confirm, then export', () => {
   test.use({ viewport: { width: 1440, height: 1400 } })
 
@@ -193,14 +206,17 @@ test.describe('confirm, then export', () => {
 
     // The first twelve hex characters, which is exactly what the server's own
     // filename uses -- so the figure on screen and the figure in the file name
-    // are the same string.
-    await expect(page.getByText(DIGEST.slice(0, 12))).toBeVisible()
+    // are the same string. In the disclosure's SUMMARY, which is where it is
+    // most useful: twelve characters that say which of three downloads
+    // describes which plan, readable without opening anything.
+    await expect(page.getByText(DIGEST.slice(0, 12)).first()).toBeVisible()
   })
 
   test('confirming sends the digest back, and the file is named as asked', async ({ page }) => {
     const sent = await isolate(page)
     await seed(page)
     await buildPlan(page)
+    await openExport(page)
 
     const download = page.waitForEvent('download')
     await page.getByRole('button', { name: /Confirm this plan/ }).click()
@@ -222,8 +238,9 @@ test.describe('confirm, then export', () => {
     const sent = await isolate(page, 'conflict')
     await seed(page)
     await buildPlan(page)
+    await openExport(page)
 
-    await page.getByRole('button', { name: /Confirm this plan/ }).click()
+    await page.getByRole('button', { name: /Confirm this plan and export/ }).click()
 
     // Said in the page, not only in a toast: this needs an action, and a toast
     // is gone before the operator has decided what to do about it.
@@ -242,7 +259,8 @@ test.describe('confirm, then export', () => {
     const sent = await isolate(page, 'conflict')
     await seed(page)
     await buildPlan(page)
-    await page.getByRole('button', { name: /Confirm this plan/ }).click()
+    await openExport(page)
+    await page.getByRole('button', { name: /Confirm this plan and export/ }).click()
     await expect(page.getByText(/The plan moved since you read it/i)).toBeVisible()
 
     await page.getByRole('button', { name: /Re-read the plan/ }).click()

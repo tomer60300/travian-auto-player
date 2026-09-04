@@ -25,13 +25,19 @@ const fmt = (n) => (n == null ? '—' : Math.round(n).toLocaleString())
  * plan" are different claims, and only one of them is something to act on
  * before the plan has run.
  */
-export default function NpcBalancePanel({ reserves, triggers, drawByVillage }) {
+export default function NpcBalancePanel({ reserves, triggers, drawByVillage, expanded }) {
   if (reserves.length === 0 && triggers.length === 0) return null
 
   return (
-    <div className="card p-4">
-      <h3 className="font-semibold mb-1">NPC balancing</h3>
-      <p className="text-secondary text-xs mb-3">
+    /* Folded with its two counts in the summary, on `UnallocatedPanel`'s
+       reasoning: read-only, and a closed panel still has to say whether it is
+       worth opening. The trigger count is also one of the two figures the stage
+       now leads with, so a closed panel here does not hide it. */
+    <details className="plan-readonly card p-4" open={expanded}>
+      <summary className="cursor-pointer font-semibold mb-1">
+        NPC balancing ({reserves.length} buffered, {triggers.length} to do by hand)
+      </summary>
+      <p className="text-secondary text-xs mb-3 mt-2">
         The buffer each village keeps by hand, what its own retention could convert, and
         which stores pay for it. The planner never presses the button — it sizes what the
         button could do and says when it is worth doing.
@@ -179,6 +185,6 @@ export default function NpcBalancePanel({ reserves, triggers, drawByVillage }) {
           </p>
         </div>
       )}
-    </div>
+    </details>
   )
 }

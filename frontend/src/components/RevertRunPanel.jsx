@@ -86,7 +86,7 @@ export default function RevertRunPanel({
         <div className="mt-3 space-y-2">
           {/* The half no button covers, first. */}
           {outstanding.length > 0 && (
-            <div className="card-danger p-2">
+            <div className="card-danger rounded-xl p-2">
               <p className="text-danger font-semibold">
                 {outstanding.reduce((n, row) => n + row.ids.length, 0)} route(s) must be deleted
                 by hand

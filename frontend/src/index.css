@@ -636,11 +636,71 @@ h1, h2, h3 {
    because `--md-error-container` at full strength (#FFDAD6 / #93000A) is a
    background for `--md-on-error-container` text and would fight the
    `--text-primary` a card's own content uses. Mixed with `--bg-card` and not
-   `transparent`, so the surface stays opaque over whatever is behind it. */
+   `transparent`, so the surface stays opaque over whatever is behind it.
+
+   No `border-radius`: this is worn WITH `.card` at the planner's write panel,
+   and a radius here would beat `.card`'s 16px on source order and leave one
+   card on the page cornered differently from the other ten. Where it is worn
+   alone, the site asks for `rounded-xl`. */
 .card-danger {
   border: 1px solid var(--md-error);
-  border-radius: 12px;
   background-color: color-mix(in srgb, var(--md-error-container) 35%, var(--bg-card));
+}
+
+/* ── The plan's verdict, as a banner ──
+   The go/no-go answer used to be a 14px line in the third column of a
+   three-column strip, while the largest number on the page was a COST three
+   thousand pixels below the fold and the biggest filled button was the YAML
+   export -- a document that changes nothing. `planStatus()` already returns the
+   three-state label and tone; this is size and placement.
+
+   Three tones, because the three states are not interchangeable: refused,
+   executable-but-not-clean, and clean. Blocked takes MD3's own guaranteed pair
+   (`--md-on-error-container` on `--md-error-container`); the other two take
+   their semantic colour over a 12% wash of itself, which is exactly what
+   `.status-badge-pending` and `.status-badge-done` above already do -- derived
+   with `color-mix` over `--bg-card` rather than hardcoded, so both themes are
+   one declaration. Measured: 4.73:1 light / 7.96:1 dark for warning, 4.70:1 /
+   6.61:1 for success, both clear of the 4.5 the label's own body text needs. */
+.plan-verdict {
+  border: 1px solid;
+  border-radius: 16px;
+  padding: 1rem 1.25rem;
+}
+.plan-verdict-blocked {
+  background-color: var(--md-error-container);
+  color: var(--md-on-error-container);
+  border-color: var(--md-error);
+}
+.plan-verdict-dirty {
+  background-color: color-mix(in srgb, var(--warning) 12%, var(--bg-card));
+  color: var(--warning);
+  border-color: var(--warning);
+}
+.plan-verdict-clean {
+  background-color: color-mix(in srgb, var(--success) 12%, var(--bg-card));
+  color: var(--success);
+  border-color: var(--success);
+}
+/* 2rem, the typography scale's largest documented step. The audit asked for
+   "~36px", which is not a step in this design system; 2rem is, and it is
+   already four times the 0.75rem the surrounding cards use. */
+.plan-verdict-label {
+  font-size: 2rem;
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+/* The two figures the operator acts on AFTER the verdict, and the only other
+   large numbers on the stage: what the plan destroys per day, and how many NPC
+   conversions it wants done by hand. `1.5rem` -- the page-title step -- because
+   they rank below the verdict's 2rem and above the 0.75rem everything else
+   uses. A cost this size three thousand pixels below the fold, which is where
+   it was, is a number nobody reads. */
+.plan-headline-figure {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.3;
 }
 
 .border-default { border: 1px solid var(--border); }

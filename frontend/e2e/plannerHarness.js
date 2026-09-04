@@ -102,6 +102,117 @@ export const PLAN = {
   plan_digest: 'd'.repeat(64),
 }
 
+/** The same plan, refused, with every panel the redesign folds populated.
+ *
+ * Two blockers, because the audit's finding was that the SAME TWO sentences
+ * were printed four times on one screen.
+ */
+export const BLOCKER_BUDGET = '02 commits 9 merchants but its budget allows 8'
+export const BLOCKER_SHORT = '11 needs 2,200 crop/h: no village has spare crop'
+
+export const PLAN_BLOCKED = {
+  ...PLAN,
+  feasible: false,
+  verdict: {
+    executable: false,
+    clean: false,
+    blockers: [BLOCKER_BUDGET, BLOCKER_SHORT],
+    covers: ['every merchant budget', 'every receiver is routable'],
+    unweighed: ['overflow'],
+    critical_findings: 2,
+  },
+  budgets: [
+    { village_id: CAPITAL, committed: 9, spare: 0, over_budget: true, legs: [] },
+    { village_id: DEF_A, committed: 3, spare: 14, over_budget: false, legs: [] },
+  ],
+  shortfalls: [
+    {
+      village_id: DEF_A,
+      village_name: '11',
+      resource: 'crop',
+      per_hour: 2200,
+      reason: 'no village has spare crop',
+    },
+  ],
+  unallocated: [
+    {
+      resource: 'lumber',
+      total_production: 121_000,
+      total_npc_allowance: 22_000,
+      total_npc_draw: 15_000,
+      unallocated: 3000,
+      remainder_village_id: DEF_A,
+    },
+  ],
+  relays: [
+    {
+      hub: DEF_A,
+      hub_name: '11',
+      origins: [CAPITAL],
+      origin_names: ['02'],
+      destinations: [DEF_A],
+      destination_names: ['11'],
+      collect_hours: 1.2,
+      forward_hours: 0.8,
+      end_to_end_hours: 2,
+    },
+  ],
+  night_overruns: [
+    {
+      origin: CAPITAL,
+      origin_name: '02',
+      destination: DEF_A,
+      destination_name: '11',
+      cycle_hours: 4,
+      last_dispatch_minute: 360,
+      last_dispatch_clock: '06:00',
+      round_trip_minutes: 108,
+      overrun_minutes: 48,
+    },
+  ],
+  npc_reserves: [
+    {
+      village_id: CAPITAL,
+      village_name: '02',
+      floor_level: 120_000,
+      allowance_per_day: 528_000,
+      allowance_per_hour: 22_000,
+      feedstock: ['clay', 'crop'],
+      feedstock_shares: [0.6, 0.4],
+      drawn: ['lumber'],
+    },
+  ],
+  npc_triggers: [
+    {
+      village_id: CAPITAL,
+      village_name: '02',
+      kind: 'wood_low',
+      resource: 'lumber',
+      level: 95_000,
+      threshold: 120_000,
+      projected: false,
+    },
+  ],
+  warnings: ['02 is over its merchant ceiling'],
+  diagnostics: {
+    headline: 'One thing needs a decision.',
+    total_loss_per_day: 96_000,
+    loss_by_resource: [{ resource: 'lumber', per_day: 96_000 }],
+    counts: { critical: 2, warning: 0, note: 0 },
+    groups: [
+      {
+        key: 'npc_capacity_short',
+        severity: 'critical',
+        headline: '02 is short 4,000/h of conversion capacity',
+        action: 'Lower its target, or raise the stock floor it converts out of.',
+        count: 1,
+        loss_per_day: 96_000,
+        findings: [],
+      },
+    ],
+  },
+}
+
 /** A preview response with the live opt-in ON, so the live branch renders. */
 export const PREVIEW = {
   dry_run: true,

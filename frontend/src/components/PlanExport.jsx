@@ -27,7 +27,10 @@ import { planDigestShort } from '../utils/plannerExport'
  */
 export default function PlanExport({ digest, exporting, conflict, onConfirm, onRePlan }) {
   return (
-    <div className="card p-4">
+    /* No `.card` of its own any more: the planner renders this inside a
+       disclosure that IS the card, and a card inside a card reads as two
+       panels. */
+    <div>
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div className="min-w-[18rem] flex-1">
           <h3 className="font-semibold">Confirm this plan, then export it</h3>
@@ -51,9 +54,13 @@ export default function PlanExport({ digest, exporting, conflict, onConfirm, onR
             which is item 1 of the UI Definition of Done. The card's own
             `flex-wrap` already gives the button its own line at that width;
             what it cannot do is make the label narrower than one word. */}
+        {/* `btn-secondary`, not `btn-primary`. This was the biggest filled
+            button on the whole planner -- for a DOCUMENT, which changes nothing
+            in the game -- while the button that writes to a real account was a
+            small one further down. The write path owns the loud button now. */}
         <button
           type="button"
-          className="btn-primary text-xs py-1.5"
+          className="btn-secondary text-xs py-1.5"
           disabled={exporting || !digest}
           onClick={onConfirm}
         >
