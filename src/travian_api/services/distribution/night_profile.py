@@ -292,12 +292,33 @@ def derive_night_profile(
         if one_way <= 0:
             # `v` IS the hub. The crop pass can force the hub itself to ship
             # (its granary ceiling can sit under its own production), and its
-            # cargo plainly does not travel to itself. The nearest other
-            # village is the only destination available here, and it is what
-            # this function used for everyone before -- so the hub keeps its
-            # previous reading rather than acquiring a guessed one.
-            others = [_hours(v, o, geometry) for o in villages if o is not v]
-            one_way = min(others) if others else 0.0
+            # cargo plainly does not travel to itself -- so the destination has
+            # to come from where that cargo actually goes: the crop-negative
+            # villages in `consumer_ids`, or `tribute_at` when there is one.
+            #
+            # It used to be the nearest village of ANY kind, which is the
+            # over-estimating bound this function exists to remove and was left
+            # at the one village most likely to be a forced crop sender.
+            # Nothing ties a neighbour to a consumer: a capital hub with a
+            # feeder one field away and the hammer forty out was credited 47
+            # turnarounds against a 6h40 round trip, so the bound never bound,
+            # the ceiling decided instead, and the second forced-crop pass could
+            # draw the hub down to retaining nothing -- cargo the operator
+            # writes into the active profile as shippable and the hammer's
+            # deficit booked as covered while `unmet` stayed 0.
+            #
+            # The NEAREST of them, which is the aggregation the old fallback
+            # used -- the change is the SET it is taken over, not the way it is
+            # reduced. A rate bound over destinations at different distances has
+            # no single right answer, so where the hub serves several this is
+            # still the optimistic end of the range; what it can no longer do is
+            # measure a village the cargo never visits. Nowhere for the crop to
+            # go at all -- no consumer and no tribute -- sheds nothing, which is
+            # the honest reading of a destination that does not exist.
+            destinations = [_hours(v, by_id[c], geometry) for c in consumers]
+            if tribute_at is not None:
+                destinations.append(geometry.one_way_minutes((v.x, v.y), tribute_at) / 60.0)
+            one_way = min(destinations, default=0.0)
             if one_way <= 0:
                 return 0.0
         # No `max(1, ...)`. A village whose round trip does not fit the window

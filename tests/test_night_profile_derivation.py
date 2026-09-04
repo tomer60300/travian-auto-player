@@ -642,3 +642,90 @@ class TestCapacityAndGeometryAreInjected:
         )
 
         assert profile.allocations[Resource.CROP][ARMY].value == pytest.approx(7_000.0)
+
+
+class TestTheHubIsBoundedByWhereItsCropActuallyGoes:
+    """The hub reaches `shed_limit` only as a forced CROP sender.
+
+    Its granary ceiling can sit under its own production, and then the crop pass
+    forces it to shed -- but its cargo plainly does not travel to itself, so the
+    hub-distance bound reads zero and something else has to stand in. It used to
+    be the nearest village of ANY kind, which is exactly the over-estimating
+    bound the branch removed for every other sender: a feeder one field away
+    yields dozens of turnarounds in an 8h night, the bound never binds, and the
+    hub is booked to ship crop to a consumer forty fields away at a next-door
+    village's rate.
+
+    The canonical fixture cannot see it, because there the hub's nearest
+    neighbour IS the consumer. Here a feeder sits between them.
+    """
+
+    def _account(self, consumer_at):
+        return [
+            _village(HUB, "hub", 0, 0, crop=60_000.0),
+            _village(ARMY, "feeder", 1, 0, crop=0.0),
+            _village(FAR, "hammer", consumer_at, 0, crop=-40_000.0),
+        ]
+
+    def _derive(self, consumer_at):
+        return derive_night_profile(
+            self._account(consumer_at),
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            consumer_ids=[FAR],
+        )
+
+    def test_the_bound_is_the_distance_to_the_consumer_not_to_the_feeder(self):
+        """40 fields at 12 f/h is a 6h40 round trip: ONE complete trip in an 8h
+        night, so 18 merchants carrying 7,500 each shed 16,875/h and no more.
+
+        The feeder distance would have credited 47 trips -- 793,125/h, thirteen
+        times the hub's whole production -- so the ceiling decided instead and
+        the hub was left retaining 7,000/h of the 60,000 it makes.
+        """
+        profile = self._derive(consumer_at=40)
+
+        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(43_125.0)
+        # 60,000 made less 43,125 kept is the 16,875/h it can actually move,
+        # against the hammer's 40,000/h deficit -- so 23,125/h is outstanding
+        # and reported rather than booked as covered.
+        assert profile.unmet[Resource.CROP] == pytest.approx(23_125.0)
+
+    def test_a_consumer_no_round_trip_reaches_leaves_the_hub_shedding_nothing(self):
+        """60 fields is a 10h round trip inside an 8h night: zero complete
+        trips, so the honest answer is the hub keeping its whole production and
+        the hammer's entire deficit reported unmet. Under the feeder bound this
+        was 53,000/h of crop the operator would have written into the active
+        profile as shippable."""
+        profile = self._derive(consumer_at=60)
+
+        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(60_000.0)
+        assert profile.unmet[Resource.CROP] == pytest.approx(40_000.0)
+
+    def test_a_tribute_is_a_destination_and_a_feeder_is_not(self):
+        """`tribute_at` is somewhere the hub's crop really goes, so it counts
+        among the destinations; the feeder next door does not, whatever the
+        distance says. Measuring the feeder would credit 47 turnarounds against
+        a 6h40 haul to the ally."""
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=60_000.0),
+            _village(ARMY, "feeder", 1, 0, crop=0.0),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            tribute_per_hour=80_000.0,
+            tribute_at=(40, 0),
+        )
+
+        # One trip at 16,875/h, exactly as above: 60,000 - 16,875 = 43,125,
+        # leaving 63,125/h of the obligation outstanding and reported.
+        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(43_125.0)
+        assert profile.unmet[Resource.CROP] == pytest.approx(63_125.0)
