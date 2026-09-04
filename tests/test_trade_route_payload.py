@@ -390,13 +390,43 @@ class TestTheBulkToggleReadsItsOwnResponse:
         assert "1 of 3" in result.detail
         assert "[2]" in result.detail
 
-    def test_an_empty_body_is_not_treated_as_a_rejection(self):
-        # Absence of evidence must not become evidence of failure, or every
-        # successful toggle against a terser response would report a problem.
-        for body in ({}, None, {"routes": []}, {"other": 1}, "not json at all"):
+    def test_a_readable_body_naming_no_failures_is_a_clean_disable(self):
+        # Absence of evidence must not become evidence of failure. `routes: []`
+        # is a body we CAN read that names no rejection, so it is success.
+        service, _ = self._service_returning({"routes": []})
+        result = asyncio.run(service.disable_routes(20031, self._routes()))
+        assert result.status == "disabled"
+
+    def test_a_body_we_cannot_read_is_not_reported_as_a_disable(self):
+        # RE-SEEDED. This case used to assert that {}, None, {"other": 1} and a
+        # bare string all read as "disabled". That conflated two answers the
+        # rest of this module is careful to keep apart -- a body naming no
+        # failures, and a body we could not read at all -- and the caller reads
+        # a clean disable as "all N are off". On the revert path that reported
+        # twenty-four rows disabled while twenty-four rows kept shipping.
+        #
+        # The old rationale is preserved above, on the case it actually
+        # describes: `routes: []` is still success.
+        for body in ({}, None, {"other": 1}, "not json at all"):
             service, _ = self._service_returning(body)
             result = asyncio.run(service.disable_routes(20031, self._routes()))
-            assert result.status == "disabled", f"body {body!r} must read as success"
+            assert result.status == "failed", f"body {body!r} must not read as success"
+            assert "cannot be confirmed" in result.detail
+
+    def test_an_unreadable_disable_sends_the_operator_to_look(self):
+        # The asymmetry: a disable that may not have happened leaves resources
+        # moving, so the message has to say so rather than offering a retry.
+        service, _ = self._service_returning({})
+        result = asyncio.run(service.disable_routes(20031, self._routes()))
+        assert "still be SHIPPING" in result.detail
+        assert "checked in-game" in result.detail
+
+    def test_an_unreadable_enable_says_a_later_run_can_repair_it(self):
+        service, _ = self._service_returning({})
+        result = asyncio.run(service.enable_routes(20031, self._routes()))
+        assert result.status == "failed"
+        assert "re-enable" in result.detail
+        assert "SHIPPING" not in result.detail, "an enable leaves nothing moving"
 
     def test_a_rejection_without_a_usable_id_does_not_crash_the_run(self):
         service, _ = self._service_returning(

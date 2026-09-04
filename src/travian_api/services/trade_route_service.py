@@ -109,6 +109,26 @@ class TradeRouteReconcilerUnverified(TravianError):
     """Raised when a route would be CREATED without being able to read existing ones."""
 
 
+class ToggleResponseUnreadable(TravianError):
+    """A bulk enable/disable answered with a body we could not read.
+
+    Raised instead of returning "nothing was rejected", for the reason
+    :class:`MarketplaceUnreadable` exists on the read side: "I could not check"
+    and "the game refused nothing" are different answers and must not collapse
+    into one. The bulk toggle DOES answer with a body and the game's own client
+    reads it, so an unrecognised body means something changed underneath us --
+    a soft-block page, a gpack revision, an HTML error -- not that every route
+    went through.
+
+    The direction of the damage is what makes this worth an exception. On a
+    DISABLE, which is the revert path, collapsing the two reported
+    ``disabled: 24 route(s)`` while twenty-four rows kept shipping: a revert
+    complete on paper with the account still draining a sender. A revert that
+    plainly names the rows a human must remove is far better than one that
+    claims to have done it.
+    """
+
+
 class MarketplaceUnreadable(TravianError):
     """A marketplace page carried no trade-route model we could read.
 
@@ -706,7 +726,26 @@ class TradeRouteService:
         # where the game accepted some routes and rejected others reported a
         # clean success for all of them -- a per-route failure hidden behind an
         # overall 200.
-        rejected = self._rejected_routes(response)
+        try:
+            rejected = self._rejected_routes(response)
+        except ToggleResponseUnreadable as exc:
+            # Loudly unknown, not quietly fine -- and the asymmetry the message
+            # carries is the point. An unreadable ENABLE leaves rows that may
+            # still be off, which a later run re-enables harmlessly. An
+            # unreadable DISABLE leaves rows that may still be SHIPPING, and
+            # that is the revert path, so the operator must be sent to look
+            # rather than handed a revert that is complete on paper.
+            consequence = (
+                "they may still be inactive, and a later run can re-enable them"
+                if active
+                else "they may still be SHIPPING and have to be checked in-game"
+            )
+            detail = (
+                f"{verb} of {len(routes)} route(s) cannot be confirmed: {exc}. The request "
+                f"returned success, so some or all may have gone through -- {consequence}."
+            )
+            self._trace_write(kind, origin_village_id, "unreadable", started, payload, detail)
+            return RouteActionResult(origin_village_id, 0, 0, "failed", detail)
         if rejected:
             detail = f"{len(rejected)} of {len(routes)} route(s) rejected: {rejected}"
             self._trace_write(kind, origin_village_id, "partial", started, payload, detail)
@@ -720,16 +759,27 @@ class TradeRouteService:
     def _rejected_routes(response: Any) -> list[int]:
         """Route ids the game refused inside an otherwise-successful bulk toggle.
 
-        Shape from the client's own handler:
-        ``response.routes[].error`` marks the ones that failed. Absent or
-        unrecognised means nothing was rejected -- an unparseable body must not
-        invent failures, only report the ones the game actually named.
+        Shape from the client's own handler: ``response.routes[].error`` marks
+        the ones that failed. An empty list therefore means one thing only --
+        the game named no failures in a body we could read.
+
+        A body we could NOT read raises :class:`ToggleResponseUnreadable`. The
+        old behaviour returned ``[]`` for it, defended as "an unparseable body
+        must not invent failures"; the instinct is right and was pointed the
+        wrong way. Not inventing failures is not the same as asserting success,
+        and the caller reads ``[]`` as "all N went through". A route the game
+        never toggled is then reported as toggled.
         """
         if not isinstance(response, dict):
-            return []
+            raise ToggleResponseUnreadable(
+                f"the bulk toggle answered with {type(response).__name__}, not an object"
+            )
         entries = response.get("routes")
         if not isinstance(entries, list):
-            return []
+            raise ToggleResponseUnreadable(
+                "the bulk toggle's answer carried no 'routes' array, so which routes "
+                "the game accepted cannot be read"
+            )
         rejected: list[int] = []
         for entry in entries:
             if isinstance(entry, dict) and entry.get("error"):
@@ -844,7 +894,19 @@ class TradeRouteService:
             )
         self._log_activity(started)
 
-        rejected = self._rejected_routes(response)
+        try:
+            rejected = self._rejected_routes(response)
+        except ToggleResponseUnreadable as exc:
+            # A cargo correction that did not happen, reported as applied, is
+            # the same defect wearing different clothes: the rows keep carrying
+            # the figures the plan was supposed to replace.
+            detail = (
+                f"cargo update of {len(routes)} route(s) cannot be confirmed: {exc}. The "
+                f"request returned success, so some or all may still carry the OLD cargo "
+                f"and have to be checked in-game."
+            )
+            self._trace_write("update", origin_village_id, "unreadable", started, payload, detail)
+            return RouteActionResult(origin_village_id, 0, 0, "failed", detail)
         if rejected:
             detail = f"{len(rejected)} of {len(routes)} route(s) rejected: {rejected}"
             self._trace_write("update", origin_village_id, "partial", started, payload, detail)
