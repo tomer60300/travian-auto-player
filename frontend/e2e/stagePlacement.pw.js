@@ -119,3 +119,36 @@ test.describe('re-planning does not move the operator', () => {
       .toHaveCount(0)
   })
 })
+
+test.describe('the Targets stage opens on the view that sets a target', () => {
+  test.use({ viewport: { width: 1440, height: 1200 } })
+
+  // The stage is called Targets, it opened on the read-only grid, and that
+  // grid's own hint read "Edit the targets in the other view."
+  test('the editor is showing, unasked', async ({ page }) => {
+    await isolatePlanning(page)
+    await seed(page)
+    await page.goto('/resource-planner')
+    await stageTab(page, 'Targets').click()
+
+    await expect(page.getByRole('button', { name: 'Edit by resource' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    // A control that can only exist on the editing view.
+    await expect(page.getByLabel('Lumber value for 11')).toBeVisible()
+    await expect(page.getByText(/Edit the targets in the other view/)).toHaveCount(0)
+  })
+
+  test('the read-only grid is still one click away, and says what it is', async ({ page }) => {
+    await isolatePlanning(page)
+    await seed(page)
+    await page.goto('/resource-planner')
+    await stageTab(page, 'Targets').click()
+
+    await page.getByRole('button', { name: 'Result by village' }).click()
+    await expect(page.getByText(/What each village keeps per hour once the routes run/))
+      .toBeVisible()
+    await expect(page.getByLabel('Lumber value for 11')).toHaveCount(0)
+  })
+})

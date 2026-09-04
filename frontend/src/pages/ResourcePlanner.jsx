@@ -781,7 +781,12 @@ export default function ResourcePlanner() {
   // result grid grouped by village showing what each ends up with. Grouping by
   // material is how the targets are EDITED; grouped by village is how the
   // operator actually thinks about the outcome.
-  const [allocView, setAllocView] = useState('village')
+  //
+  // The EDITOR is the default, and it took an audit to notice it was not: the
+  // stage is called Targets, it opened on the read-only grid, and that grid's
+  // own hint read "Edit the targets in the other view." A stage named after a
+  // thing has to open on the view that sets it.
+  const [allocView, setAllocView] = useState('edit')
   // Which hours of the day each profile actually runs, 'HH:MM' pairs. The
   // profiles are separate plans, but the account lives through all of them
   // every day -- the windows are what lets the full-day check line them up.
@@ -5496,9 +5501,11 @@ export default function ResourcePlanner() {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Editor first, matching the default and the reading order of the
+                stage: set the targets, then look at what they come to. */}
             {[
-              ['village', 'Result by village'],
               ['edit', 'Edit by resource'],
+              ['village', 'Result by village'],
             ].map(([key, label]) => (
               <button
                 key={key}
@@ -5514,12 +5521,11 @@ export default function ResourcePlanner() {
                 {label}
               </button>
             ))}
-            {allocView === 'village' && (
-              <span className="text-secondary text-xs ml-2">
-                What each village keeps per hour once the routes run. Edit the targets in the
-                other view.
-              </span>
-            )}
+            <span className="text-secondary text-xs ml-2">
+              {allocView === 'village'
+                ? 'What each village keeps per hour once the routes run. Edit the targets in the other view.'
+                : 'One table per resource: what each village should end up keeping per hour, and which one absorbs the rest.'}
+            </span>
           </div>
 
 
