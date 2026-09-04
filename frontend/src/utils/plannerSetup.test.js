@@ -10,6 +10,7 @@ import {
   buildSetup,
   declaresConsumption,
   describeConsumption,
+  describeRelayPermission,
   describeSpendSource,
   isConsumptionRate,
   isEmptyTemplate,
@@ -2842,5 +2843,54 @@ describe('roleInherits', () => {
         roleInherits(DEF, 'lumber', allocation) && roleDeviates(DEF, 'lumber', allocation)
       ).toBe(false)
     }
+  })
+})
+
+// ── The resting state of a village's relay permission ───────────────────
+//
+// `may_relay` had no input at all for four rounds, so nothing had to name what
+// "unset" meant -- and it means three different things depending on the role,
+// on the role's template, and on the sign of the village's own crop. The
+// backend's order, mirrored: the village's own answer, then the template's,
+// then `default_may_relay(role)`, then `crop_per_hour >= 0`.
+describe('describeRelayPermission', () => {
+  it('names the role default where the template is silent', () => {
+    expect(describeRelayPermission({ role: 'def', template: undefined })).toBe(
+      'Role default (may not)'
+    )
+    expect(describeRelayPermission({ role: 'feeder', template: {} })).toBe('Role default (may)')
+  })
+
+  // The capital is `may not` on purpose -- it is the hub every feeder ships to
+  // and hands off from -- and it is the one everybody gets wrong.
+  it('says the capital may not, which is the answer that surprises people', () => {
+    expect(describeRelayPermission({ role: 'capital' })).toBe('Role default (may not)')
+  })
+
+  it('names the TEMPLATE where the template has an opinion', () => {
+    expect(describeRelayPermission({ role: 'def', template: { may_relay: true } })).toBe(
+      'DEF template (may)'
+    )
+    expect(describeRelayPermission({ role: 'feeder', template: { may_relay: false } })).toBe(
+      'Feeder template (may not)'
+    )
+  })
+
+  it('falls to the crop sign for a village with no role, and says which way', () => {
+    expect(describeRelayPermission({ role: null, cropPerHour: 1200 })).toBe(
+      'From the crop sign (may)'
+    )
+    expect(describeRelayPermission({ role: null, cropPerHour: -5880 })).toBe(
+      'From the crop sign (may not)'
+    )
+    // 0 is crop-neutral and the backend reads `>= 0`.
+    expect(describeRelayPermission({ role: null, cropPerHour: 0 })).toBe(
+      'From the crop sign (may)'
+    )
+  })
+
+  it('does not guess a direction from a crop rate it could not read', () => {
+    expect(describeRelayPermission({ role: null, cropPerHour: null })).toBe('From the crop sign')
+    expect(describeRelayPermission({})).toBe('From the crop sign')
   })
 })

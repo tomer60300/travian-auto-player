@@ -77,6 +77,7 @@ import {
   declaresConsumption,
   describeConsumption,
   describeRelayFor,
+  describeRelayPermission,
   describeSpendSource,
   isConsumptionRate,
   isEmptyTemplate,
@@ -882,9 +883,13 @@ export default function ResourcePlanner() {
   // template's answer: { [village_id]: boolean }. Per village because the case
   // is singular -- the account this exists for has one defensive village on the
   // only road to a corner of the map, and putting the override on the template
-  // would hand the permission to all four. No input for it yet; it arrives from
-  // the setup file, which is why the page has to carry it rather than let the
-  // parser's answer fall on the floor.
+  // would hand the permission to all four.
+  //
+  // Typed in the Relays for cell, beside the relay tier -- the other half of
+  // the same question. For four rounds it had NO INPUT AT ALL: the field
+  // existed, travelled in the setup document, and was carried here only so the
+  // parser's answer did not fall on the floor, so the one case it exists for
+  // could not be stated from the page.
   const [mayRelay, setMayRelay] = useState({})
   // One profile per role: { [role]: { allocations, consumption, may_relay,
   // crop_negative_by_design } }. Section 2.1 gives ONE profile for FOUR
@@ -4199,7 +4204,7 @@ export default function ResourcePlanner() {
                   </th>
                   <th
                     className="text-left px-2"
-                    title="Villages this one FORWARDS the capital's lumber, clay and iron on to (profile section 5's relay tier). Not a preference: 02 may only reach its own neighbours, so without a relay the defensive villages beyond them are unreachable and the plan comes back infeasible with a shortfall each. One hop only, and a role village may not relay — a feeder, or a village with no role, may. Materials only: crop already relays through a sub-hub wherever the route search finds it worth doing. The merchants for the COLLECTING leg are billed to whoever sends it, so at 02 they count inside its Max busy."
+                    title="Two answers about forwarding, because they are two halves of one question. The picker is profile section 5's relay TIER: which villages this one forwards the capital's lumber, clay and iron on to. Not a preference — 02 may only reach its own neighbours, so without a relay the defensive villages beyond them are unreachable and the plan comes back infeasible with a shortfall each. One hop only; materials only, because crop already relays through a sub-hub wherever the route search finds it worth doing. The select below it is PERMISSION: whether the route search may conscript this village as a crop hub at all, overriding its role template for this village alone. The merchants for the COLLECTING leg are billed to whoever sends it, so at 02 they count inside its Max busy."
                   >
                     Relays for
                   </th>
@@ -4560,6 +4565,60 @@ export default function ResourcePlanner() {
                               {problems.join(' ')}
                             </p>
                           )}
+                          {/* `may_relay`, which had NO INPUT AT ALL. The field
+                              existed, travelled in the setup file, was carried
+                              through this page only so the parser's answer did
+                              not fall on the floor -- and the documented case
+                              for it, a DEF village on the only road to a corner
+                              of the map, could not be typed.
+
+                              Here rather than in a column of its own, because
+                              it is the other half of the same question: the
+                              picker above says which villages this one FORWARDS
+                              a material to, and this says whether the route
+                              search may conscript it as a crop hub at all. Two
+                              fields, one subject.
+
+                              Three states, matching the role template's own
+                              control -- and the resting one names what it
+                              resolves to rather than saying "default", because
+                              which of three answers that is depends on the role,
+                              on the template, and on the sign of this village's
+                              crop. */}
+                          <select
+                            aria-label={`Whether ${v.name} may relay`}
+                            title="Whether the route search may make this village forward someone else's cargo — one hop, and billed to whoever sends it. Overrides its role template per village, because the case is singular: a DEF village on the only road to a corner of the map wants this, and its three siblings do not."
+                            className="input-field w-auto text-xs py-0.5 mt-1"
+                            value={
+                              mayRelay[v.village_id] == null
+                                ? ''
+                                : mayRelay[v.village_id]
+                                  ? 'yes'
+                                  : 'no'
+                            }
+                            onChange={(e) =>
+                              setMayRelay((prev) => {
+                                const next = { ...prev }
+                                // Unset is the ABSENCE of a key, like every
+                                // other three-state map on this page: the value
+                                // goes into the request, and a stored null would
+                                // have to be filtered out somewhere else.
+                                if (e.target.value === '') delete next[v.village_id]
+                                else next[v.village_id] = e.target.value === 'yes'
+                                return next
+                              })
+                            }
+                          >
+                            <option value="">
+                              {describeRelayPermission({
+                                role: villageRoles[v.village_id],
+                                template: roleTemplates[villageRoles[v.village_id]],
+                                cropPerHour: v.crop_per_hour,
+                              })}
+                            </option>
+                            <option value="yes">May relay</option>
+                            <option value="no">May not relay</option>
+                          </select>
                           </>
                         )
                       })()}

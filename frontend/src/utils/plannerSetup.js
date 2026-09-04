@@ -424,6 +424,34 @@ export const ROLES_THAT_MAY_NOT_RELAY = Object.freeze(
   VILLAGE_ROLES.filter((role) => role !== 'feeder')
 )
 
+/** What a village's `may_relay` resolves to when the village says nothing.
+ *
+ * The resting state of this field is not a blank, it is an ANSWER, and which
+ * answer depends on three things the operator cannot see from the cell: the
+ * village's role, whether that role's template states a permission, and -- for
+ * a village with no role at all -- the sign of its own crop rate. The
+ * backend's order, mirrored: the village's own answer, then its role
+ * template's, then `default_may_relay(role)`, then `crop_per_hour >= 0`.
+ *
+ * So the "unset" option names the answer rather than saying "default", which
+ * is the same rule the feedstock picker follows for "derived": an option that
+ * hides which of three things it means is a control the operator cannot use.
+ */
+export function describeRelayPermission({ role, template, cropPerHour }) {
+  if (role != null) {
+    if (template?.may_relay != null) {
+      return `${ROLE_LABEL[role] ?? role} template (${template.may_relay ? 'may' : 'may not'})`
+    }
+    return `Role default (${ROLES_THAT_MAY_NOT_RELAY.includes(role) ? 'may not' : 'may'})`
+  }
+  // A village with no role falls to the crop sign, which the snapshot states --
+  // so it can be named here rather than left as "derived from something".
+  if (typeof cropPerHour !== 'number' || !Number.isFinite(cropPerHour)) {
+    return 'From the crop sign'
+  }
+  return `From the crop sign (${cropPerHour >= 0 ? 'may' : 'may not'})`
+}
+
 /** Everything wrong with a declared relay tier, BY THE RELAY that has to change.
  *
  * The same six refusals the backend makes at the schema, computed from live
