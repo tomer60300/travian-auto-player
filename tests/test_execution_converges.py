@@ -76,7 +76,7 @@ def _drive_to_fixed_point(svc, body_factory, accounts, max_passes=MAX_PASSES):
     which is the situation a daily run is actually in.
     """
 
-    async def _plan(_body, dispatch_window=None, overnight=None):
+    async def _plan(_body, dispatch_window=None, overnight=None, night_end=None):
         return accounts[tuple(dispatch_window)]
 
     counts = []

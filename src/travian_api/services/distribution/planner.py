@@ -72,6 +72,21 @@ class PlannerConfig:
     (the half after it wraps in neither direction) and wrong for a near-24h day
     profile (which wraps and is not the night), so a declaration overrules it.
     See :func:`~.night_profile.is_night_window`."""
+    night_end_minute: int | None = None
+    """The minute the whole NIGHT closes, when `dispatch_window` is one half of
+    a night typed either side of midnight.
+
+    Section 6's completion deadline belongs to the night, not to each half of
+    it: "all night movements complete before 07:00, so the morning profile
+    starts with a full merchant pool". Measured against its own end the
+    23:00-00:00 half is 60 minutes long, so every route with a round trip over
+    an hour -- at 12 fields/h, everything past 6 fields -- was reported
+    CRITICAL for merchants that are home at 02:00.
+
+    `None` is the degenerate case a single-window night and a round-the-clock
+    set both want: the window IS the night. Only a caller holding the whole
+    day's profiles can say otherwise, which is why it arrives here rather than
+    being derived."""
     excluded_origins_by_destination: Mapping[int, set[int]] = field(default_factory=dict)
     """Villages that must not supply a given destination, by destination id.
 
@@ -511,6 +526,7 @@ def craft_plan(
         dispatch_window=config.dispatch_window,
         prune_to_window=config.prune_to_window,
         overnight=config.overnight,
+        night_end=config.night_end_minute,
     )
     findings.extend(beat.findings)
 

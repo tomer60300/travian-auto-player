@@ -99,7 +99,11 @@ from travian_api.services.distribution.run_history import (
     RunSummary,
     summarise_runs,
 )
-from travian_api.services.distribution.schedule import MINUTES_PER_DAY, night_overrun_minutes
+from travian_api.services.distribution.schedule import (
+    MINUTES_PER_DAY,
+    last_night_dispatch,
+    night_overrun_minutes,
+)
 from travian_api.services.distribution.storage import (
     FillAtSwitch,
     ProfileSegment,
@@ -1712,11 +1716,27 @@ def _one_night_run(
     return chain[0], chain[-1]
 
 
+def _night_close_minute(segments: Sequence["DaySegmentInput"]) -> int | None:
+    """The minute the declared night ends, or None if there is not one night.
+
+    Section 6's completion deadline -- everything home before 07:00 -- belongs
+    to the night as a whole, and the night is legally typed as a pair either
+    side of midnight, so no single segment knows it. One resolver because
+    /day-check and /execute must plan the same night from the same body: they
+    build the same per-segment plans, and a beat phased against a different
+    closing minute is a different route set.
+    """
+    night_segments = [s for s in segments if is_night_window(s.window, overnight=s.overnight)]
+    run = _one_night_run(night_segments) if night_segments else None
+    return None if run is None else run[1].window[1]
+
+
 def _night_overrun_rows(
     beat,
     window: tuple[int, int] | None,
     names: Mapping[int, str],
     overnight: bool | None = None,
+    night_end: int | None = None,
 ) -> list[NightOverrunResponse]:
     """Section 6's completion rule, measured on the beat that was built.
 
@@ -1729,15 +1749,20 @@ def _night_overrun_rows(
     the beat that produced it read the same answer to "is this the night" -- a
     row here about a profile the beat scheduled under the day's rules would be
     a deadline nothing tried to meet.
+
+    ``night_end`` travels for the same reason: the deadline is the NIGHT's
+    close, and for a night split at midnight that is not this half's window
+    end. Passed as the beat was given it, or the table would report an overrun
+    against a minute the plan never aimed at.
     """
     if not is_night_window(window, overnight=overnight):
         return []
     rows: list[NightOverrunResponse] = []
     for scheduled in beat.routes:
-        overrun = night_overrun_minutes(scheduled, window)
-        if overrun <= 0:
+        overrun = night_overrun_minutes(scheduled, window, night_end)
+        last = last_night_dispatch(scheduled, window)
+        if overrun <= 0 or last is None:
             continue
-        last = max(scheduled.dispatch_minutes, key=lambda m: (m - window[0]) % MINUTES_PER_DAY)
         rows.append(
             NightOverrunResponse(
                 origin=scheduled.route.origin,
@@ -3566,13 +3591,21 @@ async def post_day_check(
             names[-(index + 1)] = target.name
 
     segments: list[ProfileSegment] = []
-    # Section 6's rules are the overnight profile's, so the loop below keeps
-    # which segments those are and the beats they were actually given. Never
-    # from the NAME: a profile called "Night" that runs 09:00-17:00 is not one.
-    # Each segment's own `overnight` declaration decides, falling back to the
-    # window's wrap -- and there may be TWO of them, because the operator may
-    # type the night as a pair either side of midnight.
-    night_segments: list[DaySegmentInput] = []
+    # Section 6's rules are the overnight profile's. Never from the NAME: a
+    # profile called "Night" that runs 09:00-17:00 is not one. Each segment's
+    # own `overnight` declaration decides, falling back to the window's wrap --
+    # and there may be TWO of them, because the operator may type the night as
+    # a pair either side of midnight.
+    #
+    # Resolved BEFORE anything is planned, because the completion deadline is
+    # an input to the beat: it belongs to the night rather than to each half,
+    # and the beat both phases against it and reports against it. A declaration
+    # set that is not one continuous night has no single close, and then the
+    # halves fall back to their own ends -- which is the reading section 6's
+    # state rules refuse below, for the same reason.
+    night_segments = [s for s in body.segments if is_night_window(s.window, overnight=s.overnight)]
+    night_run = _one_night_run(night_segments) if night_segments else None
+    night_close = _night_close_minute(body.segments)
     night_overruns: list[NightOverrunResponse] = []
     npc_reserves: dict[int, NpcReserve] = {}
     # Kept because the whole-day merchant boundary is a question about the SUM
@@ -3595,9 +3628,16 @@ async def post_day_check(
         per_profile = body.model_copy(
             update={"allocations": segment.allocations, "npc_attended": segment.npc_attended}
         )
+        # Only the night's own halves carry a completion deadline, so only they
+        # are given where it falls; `build_beat` ignores it on any other
+        # profile, and passing it anyway would read as a rule the day has.
+        segment_is_night = is_night_window(segment.window, overnight=segment.overnight)
         try:
             account = await _plan_account(
-                per_profile, dispatch_window=segment.window, overnight=segment.overnight
+                per_profile,
+                dispatch_window=segment.window,
+                overnight=segment.overnight,
+                night_end=night_close if segment_is_night else None,
             )
         except HTTPException as exc:
             raise HTTPException(
@@ -3647,14 +3687,17 @@ async def post_day_check(
             else:
                 manual.setdefault(funder, {})[Resource.CROP] = -owed_by_hand
 
-        if is_night_window(segment.window, overnight=segment.overnight):
-            night_segments.append(segment)
+        if segment_is_night:
             # Extended, not assigned: a night split at midnight is two
             # profiles, and a merchant still on the road at 07:00 belongs to
             # whichever half dispatched it.
             night_overruns.extend(
                 _night_overrun_rows(
-                    account.plan.beat, segment.window, names, overnight=segment.overnight
+                    account.plan.beat,
+                    segment.window,
+                    names,
+                    overnight=segment.overnight,
+                    night_end=night_close,
                 )
             )
 
@@ -3750,7 +3793,6 @@ async def post_day_check(
     floor_villages = [vid for vid, role in roles.of_village.items() if keeps_a_morning_floor(role)]
     morning_short: tuple[FillAtSwitch, ...] = ()
     pre_night_over: tuple[FillAtSwitch, ...] = ()
-    night_run = _one_night_run(night_segments) if night_segments else None
     if night_segments and floor_villages and night_run is None:
         # Two nights are not one night, and section 6's rules are about ONE:
         # the 25% baseline at the minute it opens and the 60% floor at the
@@ -3988,6 +4030,7 @@ async def _plan_account(
     body: PlanRequest,
     dispatch_window: tuple[int, int] | None = None,
     overnight: bool | None = None,
+    night_end: int | None = None,
 ) -> _PlannedAccount:
     """Build the account model, run the optimizer, resolve coords + warnings.
 
@@ -4004,6 +4047,12 @@ async def _plan_account(
     with the window for the same reason attendance does -- the caller with the
     segment in hand is the only one that knows -- and left None the window's
     wrap decides it (see :func:`~.night_profile.is_night_window`).
+
+    ``night_end`` is the minute the whole night closes, for a night typed as a
+    pair either side of midnight. Section 6's completion deadline is the
+    night's and not each half's, and only a caller holding every profile can
+    say where the night ends -- left None the window is the night, which is
+    what /plan and a single-window night both want.
     """
     # Warnings are read by a person: name villages the way they do, never by id.
     names = {v.village_id: v.name for v in body.snapshot if v.name}
@@ -4315,6 +4364,7 @@ async def _plan_account(
         # how /plan and /execute learn the active profile's window.
         dispatch_window=effective_window,
         overnight=effective_overnight,
+        night_end_minute=night_end,
         # Plan-time, because it changes what the plan MEANS: with pruning the
         # window is genuinely enforced and the escaping firings become a note
         # about a dependency, without it they are a critical over-delivery.
@@ -4812,7 +4862,11 @@ def _plan_response(account: _PlannedAccount) -> PlanResponse:
         # that named no window gets an empty list instead of a rule it never
         # asked for.
         night_overruns=_night_overrun_rows(
-            plan.beat, config.dispatch_window, names, overnight=config.overnight
+            plan.beat,
+            config.dispatch_window,
+            names,
+            overnight=config.overnight,
+            night_end=config.night_end_minute,
         ),
         npc_reserves=_npc_reserve_rows(plan, names),
         npc_triggers=_npc_trigger_rows(account.npc_triggers, names),
@@ -5489,6 +5543,13 @@ async def post_execute(
         # so names/coords/foreign ids are identical across accounts; the first
         # stands in for all of them everywhere a single account was used.
         planned_segments: list[tuple[DaySegmentInput, _PlannedAccount]] = []
+        # Where the night closes, resolved the same way /day-check resolves it
+        # and BEFORE anything is planned: section 6's completion deadline is
+        # the night's rather than each half's, and the beat both phases against
+        # it and reports against it. `None` where the overnight declarations do
+        # not form one continuous night, which leaves each half measured
+        # against its own end -- the reading /day-check refuses out loud.
+        night_close = _night_close_minute(body.segments)
         for segment in body.segments:
             per_segment = body.model_copy(
                 update={
@@ -5515,6 +5576,13 @@ async def post_execute(
                         # The profile's own declaration, so the run that WRITES
                         # judges section 6 on the same profile /day-check did.
                         overnight=segment.overnight,
+                        # And against the same closing minute, or the two would
+                        # build different beats for the same night.
+                        night_end=(
+                            night_close
+                            if is_night_window(tuple(segment.window), overnight=segment.overnight)
+                            else None
+                        ),
                     ),
                 )
             )

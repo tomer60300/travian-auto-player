@@ -883,3 +883,138 @@ class TestTheNightsEndsDoNotDependOnListOrder:
         assert [r.store for r in rows] == ["granary"], forward.morning_shortfalls
         assert rows[0].fill == pytest.approx(0.10)
         assert not any("one continuous night" in w for w in forward.warnings), forward.warnings
+
+
+# -- The deadline is 07:00, not whenever this half of the night ends ----------
+
+
+def _split_night_shipping_body(one_way_fields):
+    """A split night where the PRE-midnight half is the one that ships.
+
+    The existing split-night fixture ships only after midnight, which is why
+    nothing caught this: for the (1380, 0) half `_window_length` is 60, so any
+    round trip over an hour was reported as missing section 6's deadline -- at
+    12 fields/h, every route beyond 6 fields.
+    """
+
+    def village(vid, name, x, crop_rate):
+        return {
+            "village_id": vid,
+            "name": name,
+            "x": x,
+            "y": 0,
+            "merchants_total": 20,
+            "merchants_free": 20,
+            "lumber_per_hour": 0,
+            "clay_per_hour": 0,
+            "iron_per_hour": 0,
+            "crop_per_hour": crop_rate,
+            "crop_stock": 50_000,
+            "lumber_stock": 0,
+            "clay_stock": 0,
+            "iron_stock": 0,
+            "granary_capacity": 400_000,
+            "warehouse_capacity": 400_000,
+        }
+
+    ships = {
+        "crop": {
+            str(HUB): {"mode": "absolute", "value": 0},
+            str(ARMY): {"mode": "remainder"},
+        }
+    }
+    return DayCheckRequest.model_validate(
+        {
+            "snapshot": [
+                village(HUB, "02", 0, 1_000),
+                village(ARMY, "03", one_way_fields, 0),
+            ],
+            "config": [{"village_id": HUB}, {"village_id": ARMY}],
+            "segments": [
+                {"name": "Day", "window": list(DAY_WINDOW), "allocations": {}, "overnight": False},
+                {
+                    "name": "Night before midnight",
+                    "window": list(NIGHT_BEFORE_MIDNIGHT),
+                    "allocations": ships,
+                    "overnight": True,
+                },
+                {
+                    "name": "Night after midnight",
+                    "window": list(NIGHT_AFTER_MIDNIGHT),
+                    "allocations": {},
+                    "overnight": True,
+                },
+            ],
+        }
+    )
+
+
+class TestTheClosingDeadlineIsTheNightsEnd:
+    """Section 6's rule is "all night movements complete before 07:00", and the
+    consequence it states is that the morning starts with a full pool.
+
+    Each half of a split night was measured against its OWN window's end, so a
+    merchant dispatched at 23:00 and home at 02:00 was reported as a CRITICAL
+    reading "the morning starts with merchants still on the road" -- five hours
+    before the morning, on the profile shape this branch was built to support.
+
+    A merchant still out at midnight does overlap the other half's fleet, which
+    is real; that is the whole-day merchant boundary, reported as its own
+    warning against `merchant_budget`, and it is not section 6's 07:00 rule.
+    """
+
+    def test_a_round_trip_that_ends_inside_the_night_is_not_an_overrun(self):
+        # 90 min each way: leaves 23:00, home at 02:00, five hours clear of the
+        # switch. Against the half's own 60-minute window that was 120 min late.
+        beat = build_beat(
+            (_leg(90.0, cycle=1),),
+            dispatch_window=NIGHT_BEFORE_MIDNIGHT,
+            overnight=True,
+            night_end=MORNING_MINUTE,
+        )
+
+        assert not _overruns(beat), beat.warnings
+
+    def test_a_round_trip_that_really_misses_07_00_still_is_one(self):
+        # 260 min each way from 23:00 is home at 07:40: 40 minutes late, and the
+        # only phase available is the window's single minute.
+        beat = build_beat(
+            (_leg(260.0, cycle=1),),
+            dispatch_window=NIGHT_BEFORE_MIDNIGHT,
+            overnight=True,
+            night_end=MORNING_MINUTE,
+        )
+
+        (finding,) = _overruns(beat)
+        assert finding.severity is Severity.CRITICAL
+        assert "40 min" in finding.message, finding.message
+
+    def test_a_night_stated_as_one_window_is_unchanged(self):
+        """The degenerate case: the night's end IS the window's end, so passing
+        it decides nothing and a 480-minute round trip still just fits."""
+        stated = build_beat((_leg(240.0),), dispatch_window=NIGHT_WINDOW)
+        with_end = build_beat(
+            (_leg(240.0),), dispatch_window=NIGHT_WINDOW, night_end=MORNING_MINUTE
+        )
+
+        assert not _overruns(stated) and not _overruns(with_end)
+        assert [p.dispatch_minute for p in stated.routes] == [
+            p.dispatch_minute for p in with_end.routes
+        ]
+
+    def test_the_endpoint_measures_the_pre_midnight_half_against_07_00(self):
+        """03 is 30 fields out: a 300-minute round trip, home at 04:00. Against
+        the half's own window that is a CRITICAL four hours early."""
+        res = asyncio.run(post_day_check(_split_night_shipping_body(30), USER))
+
+        assert not res.night_overruns, res.night_overruns
+        assert not [w for w in res.warnings if "still on the road" in w], res.warnings
+
+    def test_the_endpoint_still_reports_a_half_that_misses_the_morning(self):
+        """55 fields out is a 550-minute round trip from 23:00 -- home at 08:10,
+        70 minutes into the morning profile."""
+        res = asyncio.run(post_day_check(_split_night_shipping_body(55), USER))
+
+        rows = [r for r in res.night_overruns if r.origin == HUB]
+        assert rows, res.warnings
+        assert rows[0].overrun_minutes == pytest.approx(70.0)

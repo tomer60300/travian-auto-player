@@ -28,7 +28,7 @@ from .test_whole_day_execute import ACCOUNTS, _segments_body
 
 
 def _run_once(svc, body=None, accounts=ACCOUNTS):
-    async def _plan(_body, dispatch_window=None, overnight=None):
+    async def _plan(_body, dispatch_window=None, overnight=None, night_end=None):
         return accounts[tuple(dispatch_window)]
 
     with (

@@ -114,47 +114,81 @@ class Beat:
         return tuple(sorted(arrivals, key=lambda pair: (pair[0], pair[1].route.origin)))
 
 
-def night_overrun_minutes(scheduled: ScheduledRoute, window: tuple[int, int]) -> float:
-    """Minutes past *window*'s end this route's last merchant gets home.
+def last_night_dispatch(scheduled: ScheduledRoute, window: tuple[int, int]) -> int | None:
+    """The latest departure *window*'s hours actually make, or None if none do.
 
-    Section 6: **all night movements must complete before 07:00** -- nothing
-    underway and nothing returning at the switch, so the morning profile starts
-    with a full merchant pool everywhere. In the units this module already
-    works in that is ``last_dispatch + round_trip <= window end``, and the
-    figure returned is by how much it is not. Zero or negative means the road
-    is clear at the switch.
-
-    Three things it is careful about:
-
-    * **The round trip, not the delivery.** A merchant is committed for the
-      whole journey out and back -- which is exactly what
-      ``Route.sets_in_flight`` already prices -- so a delivery that lands at
-      06:00 from an hour away still has merchants on the road until 07:00.
-    * **The LAST firing inside the window.** A route fires 24/N times a day and
-      the binding one is the latest departure the profile actually makes, so
-      this is measured from the largest offset into the window rather than from
-      the placement's first dispatch.
-    * **Unrounded travel.** ``arrival_minutes`` rounds for display; a round trip
-      that misses by forty seconds still leaves a merchant out, so the raw
-      ``one_way_minutes`` is doubled here.
+    A route fires 24/N times a day and the binding one for section 6 is the
+    last that leaves inside the profile, so this is the largest offset INTO the
+    window rather than the placement's first dispatch or the day's last.
 
     Firings the profile's hours exclude are not counted. Without pruning those
     firings really do happen -- Travian fans a repeat interval across the whole
     day and offers nothing to confine it -- but that is a different and larger
     problem, already reported as ``WINDOW_NOT_ENFORCEABLE``: a route shipping
     round the clock is not merely late home.
+
+    One function because the overrun and the two places that RENDER it all need
+    the same minute. They did not share it, and a 2h route in a 23:00-00:00
+    half then reported "last leaves at 21:00" beside an overrun measured from
+    23:00 -- a message naming a departure the figure beside it excluded.
     """
-    start, _end = window
-    length = _window_length(window)
-    offsets = [
-        (minute - start) % MINUTES_PER_DAY
-        for minute in scheduled.dispatch_minutes
-        if _in_window(minute, window)
-    ]
-    if not offsets:
+    inside = [minute for minute in scheduled.dispatch_minutes if _in_window(minute, window)]
+    if not inside:
+        return None
+    return max(inside, key=lambda minute: (minute - window[0]) % MINUTES_PER_DAY)
+
+
+def night_overrun_minutes(
+    scheduled: ScheduledRoute,
+    window: tuple[int, int],
+    night_end: int | None = None,
+) -> float:
+    """Minutes past the night's close this route's last merchant gets home.
+
+    Section 6: **all night movements must complete before 07:00** -- nothing
+    underway and nothing returning at the switch, so the morning profile starts
+    with a full merchant pool everywhere. In the units this module already
+    works in that is ``last_dispatch + round_trip <= the night's end``, and the
+    figure returned is by how much it is not. Zero or negative means the road
+    is clear at the switch.
+
+    ``night_end`` is the minute the whole NIGHT closes, which is not always this
+    window's end: the operator may type the night as a pair either side of
+    midnight, and the deadline belongs to the night rather than to each half.
+    Measured against its own end, the 23:00-00:00 half has a window 60 minutes
+    long, so every route with a round trip over an hour -- at 12 fields/h,
+    everything beyond 6 fields -- was reported as CRITICAL, reading "the
+    morning starts with merchants still on the road" for merchants home at
+    02:00. Left None the window IS the night, which is the degenerate case of a
+    night stated as one window and what every caller had before.
+
+    (A merchant still out at midnight does overlap the other half's fleet, and
+    that is real -- each half is planned against the whole fleet. It is the
+    whole-day merchant boundary, warned against ``merchant_budget`` where the
+    sum across profiles is visible, and it is not section 6's 07:00 rule.)
+
+    Two more things it is careful about:
+
+    * **The round trip, not the delivery.** A merchant is committed for the
+      whole journey out and back -- which is exactly what
+      ``Route.sets_in_flight`` already prices -- so a delivery that lands at
+      06:00 from an hour away still has merchants on the road until 07:00.
+    * **Unrounded travel.** ``arrival_minutes`` rounds for display; a round trip
+      that misses by forty seconds still leaves a merchant out, so the raw
+      ``one_way_minutes`` is doubled here.
+    """
+    last = last_night_dispatch(scheduled, window)
+    if last is None:
         return 0.0
+    # Both measured as offsets from the window's first minute, so a night that
+    # wraps past midnight needs no special case. A zero closing offset would
+    # mean a deadline at the window's own start: unreachable, since a
+    # zero-width dispatch window is refused at every entry point and a night
+    # running the whole day round has no opening half to chain from.
+    deadline = window[1] if night_end is None else night_end
+    closing = (deadline - window[0]) % MINUTES_PER_DAY
     round_trip = 2.0 * scheduled.route.one_way_minutes
-    return max(offsets) + round_trip - length
+    return ((last - window[0]) % MINUTES_PER_DAY) + round_trip - closing
 
 
 def _circular_gap(a: int, b: int) -> int:
@@ -231,6 +265,7 @@ def build_beat(
     dispatch_window: tuple[int, int] | None = None,
     prune_to_window: bool = False,
     overnight: bool | None = None,
+    night_end: int | None = None,
 ) -> Beat:
     """Place every route on the daily beat, spacing arrivals at each destination.
 
@@ -263,6 +298,14 @@ def build_beat(
             midnight, which is right for a night stated as one window and wrong
             for a night split at midnight or a near-24h day profile -- see
             :func:`~.night_profile.is_night_window`.
+
+        night_end: the minute the whole NIGHT closes, when these hours are one
+            half of a night typed either side of midnight. The deadline belongs
+            to the night and not to each half: measured against its own end the
+            23:00-00:00 half is 60 minutes long, so every route with a round
+            trip over an hour was refused for merchants home at 02:00. Left
+            None the window is the night, which is right for a night stated as
+            one window and is what every caller had before.
 
     Returns:
         A :class:`Beat`. Every route is always scheduled -- a route that cannot
@@ -471,7 +514,11 @@ def build_beat(
             # Ranked ABOVE the reserved window because the two are different
             # kinds of thing: the NPC slot is a preference ("avoided when an
             # alternative exists"), an empty road at 07:00 is a requirement.
-            home = -max(0.0, night_overrun_minutes(candidate, dispatch_window)) if night else 0.0
+            home = (
+                -max(0.0, night_overrun_minutes(candidate, dispatch_window, night_end))
+                if night
+                else 0.0
+            )
             # Order of preference: send at all, then be home by the switch, then
             # clear the reserved window, then MEET the arrival-gap target, then
             # ship soon after collecting, then widen the spacing further.
@@ -595,12 +642,12 @@ def build_beat(
         # here means no phase does, and the remaining fixes are all changes to
         # the ROUTE (a shorter cycle, a nearer source) rather than to its slot.
         if night:
-            overrun = night_overrun_minutes(placement, dispatch_window)
-            if overrun > 0:
-                last = max(
-                    placement.dispatch_minutes,
-                    key=lambda m: (m - dispatch_window[0]) % MINUTES_PER_DAY,
-                )
+            overrun = night_overrun_minutes(placement, dispatch_window, night_end)
+            # The same minute the overrun was measured from, not the day's last
+            # firing: see `last_night_dispatch`.
+            last = last_night_dispatch(placement, dispatch_window)
+            if overrun > 0 and last is not None:
+                closes = dispatch_window[1] if night_end is None else night_end
                 round_trip = 2.0 * route.one_way_minutes
                 findings.append(
                     Finding(
@@ -608,7 +655,8 @@ def build_beat(
                         message=(
                             f"route {leg} last leaves at {last // 60:02d}:{last % 60:02d} and "
                             f"its merchants are not home for another {round_trip:.0f} min, "
-                            f"{overrun:.0f} min past the end of the night profile — so the "
+                            f"{overrun:.0f} min past the {closes // 60:02d}:{closes % 60:02d} "
+                            f"the night ends at — so the "
                             f"morning starts with merchants still on the road. Shorten the "
                             f"{route.cycle_hours}h cycle, ship from a nearer village, or move "
                             f"its last dispatch earlier"
