@@ -258,6 +258,14 @@ class _FakeLiveSvc:
         existing=None,
         create_status="created",
         disable_status="disabled",
+        # Whether the game really switched the rows off, INDEPENDENTLY of what
+        # its response said. The two were welded together, which made the one
+        # case that matters here unrepresentable: a 200 whose body could not be
+        # read, over rows that are now off. That is the whole of an `unverified`
+        # toggle -- the write landed and the answer did not prove it -- and the
+        # caller is supposed to settle it by looking. None keeps the old
+        # coupling.
+        disable_applies=None,
         enable_status="enabled",
         budget_ok=True,
         read_raises=None,
@@ -284,6 +292,9 @@ class _FakeLiveSvc:
         self._existing = existing or {}
         self._create_status = create_status
         self._disable_status = disable_status
+        self._disable_applies = (
+            disable_status == "disabled" if disable_applies is None else disable_applies
+        )
         self._enable_status = enable_status
         self._read_raises = read_raises or set()  # origin ids whose read raises
         self.created = []  # PlannedRoute objects a create was ATTEMPTED for
@@ -369,7 +380,7 @@ class _FakeLiveSvc:
         if stop_check is not None and (reason := stop_check()):
             return RouteActionResult(vid, 0, 0, "stopped", reason)
         self.disabled.append((vid, tuple(sorted((r.dest_x, r.dest_y) for r in routes))))
-        if self._disable_status == "disabled":
+        if self._disable_applies:
             # The real game switches the rows off, which is the only evidence
             # the PUT's response does not provide.
             targets = {r.route_id for r in routes}
@@ -3091,6 +3102,74 @@ class TestConsumptionReachesTheThirdPlanningPath:
         assert self._capped(self._run(consumption={"lumber": 5_000})) == []
 
 
+class TestAnUnverifiedDisableIsSettledByLookingAtTheMarketplace:
+    """A 200 whose body cannot be read is not "it failed".
+
+    `docs/15` records the create's 200 body as EMPTY, and records that
+    `routes[].error` came off the game's own `main.js` rather than an observed
+    reply -- so on an account that has never run live, "the answer was
+    unreadable" is a plausible verdict for EVERY toggle. Reading it as a
+    failure deferred the origin and, worse, misreported: `disables` stayed
+    empty, so the response and `run_history` said "disabled 0" while N rows
+    were off, and the operator was sent to check rows already correct.
+
+    This service already has the right answer for identical evidence. A create
+    whose read-back fails is `created_unverified` -- "the write was accepted
+    but the read-back failed: probably fine, not confirmed" -- and it does not
+    defer the origin. So the toggle is settled the same way: LOOK, and decide
+    from state.
+
+    The decision has to be made before the creates, which is why the read-back
+    is taken here rather than left to the end-of-origin verification: whether
+    to create new routes on top turns on whether the stale rows are really off
+    (issue #61).
+    """
+
+    def _svc(self, *, really_off):
+        return _FakeLiveSvc(
+            existing={20003: [ExistingRoute(9, _UNWANTED_DEST, 99, 98, active=True)]},
+            disable_status="unverified",
+            disable_applies=really_off,
+        )
+
+    def test_rows_the_game_really_switched_off_let_the_run_carry_on(self):
+        svc = self._svc(really_off=True)
+
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert (40, 40) in {(r.dest_x, r.dest_y) for r in svc.created}, (
+            "the stale rows are off, so there is nothing to defer for"
+        )
+        # And the disable is REPORTED. Under the failure reading `disables`
+        # stayed empty while the row was off, so the run said "disabled 0".
+        assert any("20003" in line or "03" in line for line in res.disables), res.disables
+        assert not any("STILL" in p for p in res.problems), res.problems
+
+    def test_rows_still_shipping_defer_the_origin_exactly_as_a_failure_did(self):
+        svc = self._svc(really_off=False)
+
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert (40, 40) not in {(r.dest_x, r.dest_y) for r in svc.created}, (
+            "a stale row still shipping must stop new routes on that origin"
+        )
+        assert any("disable" in p.lower() for p in res.problems), res.problems
+        assert res.disables == [], "nothing may be claimed disabled while a row is active"
+
+    def test_a_read_back_that_fails_defers_rather_than_guessing(self):
+        svc = _FakeLiveSvc(
+            existing={20003: [ExistingRoute(9, _UNWANTED_DEST, 99, 98, active=True)]},
+            disable_status="unverified",
+            disable_applies=True,
+            confirm_raises={20003},
+        )
+
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        assert (40, 40) not in {(r.dest_x, r.dest_y) for r in svc.created}
+        assert any("disable" in p.lower() for p in res.problems), res.problems
+
+
 class TestAnUnreadableReEnableSaysWhatTheGameSaid:
     """`_toggle_routes` writes an asymmetric detail on purpose.
 
@@ -3125,16 +3204,25 @@ class TestAnUnreadableReEnableSaysWhatTheGameSaid:
         return _Unconfirmable(existing={20003: _fanned(_FOREIGN_REAL_ID, 40, 40, active=False)})
 
     def test_the_services_own_detail_reaches_the_operator(self):
-        res = _run_live(self._svc(None), _two_origin_account(), max_routes_per_run=50)
+        res = _run_live(
+            self._svc(None, status="unverified"), _two_origin_account(), max_routes_per_run=50
+        )
 
         assert any(self.UNREADABLE in problem for problem in res.problems), res.problems
 
     def test_the_problem_still_names_the_village_and_the_status(self):
-        res = _run_live(self._svc(None), _two_origin_account(), max_routes_per_run=50)
+        # RE-SEEDED for the status vocabulary: an unreadable toggle answers
+        # `unverified` rather than `failed`, because the request DID return
+        # success. The property under test is unchanged -- the village and the
+        # service's verdict both reach the operator -- and the verdict is now
+        # the one the detail has always described.
+        res = _run_live(
+            self._svc(None, status="unverified"), _two_origin_account(), max_routes_per_run=50
+        )
 
         (problem,) = [p for p in res.problems if "re-enable" in p]
         assert problem.startswith("03:"), problem
-        assert "failed" in problem, problem
+        assert "unverified" in problem, problem
 
     def test_a_flat_refusal_reads_as_a_refusal(self):
         """The other half of the asymmetry: a detail that is not about an

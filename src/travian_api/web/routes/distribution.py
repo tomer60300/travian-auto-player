@@ -5235,11 +5235,21 @@ async def post_revert_plan(
                     f"manual steps below still apply."
                 )
                 continue
-            if result is not None and result.status == "disabled":
+            if result is not None and result.status in ("disabled", "unverified"):
                 # Read back, for the same reason every other write is: the PUT
                 # says it was accepted, not that the rows are off. This endpoint
                 # exists to make an undo trustworthy, so claiming an unverified
                 # disable here would defeat its whole purpose.
+                #
+                # `unverified` -- a 200 whose body could not be read -- belongs
+                # on this path and not in the else below. It used to skip the
+                # read entirely and fall through to "they are STILL RUNNING",
+                # which is the OPPOSITE of the truth whenever the game had in
+                # fact switched them off, from the one endpoint whose whole job
+                # is to be trustworthy about that. It is precisely the case a
+                # read-back answers, so the page decides. `failed` -- the game
+                # naming a rejection -- stays in the else: there is nothing to
+                # look at, and looking would cost a request for no information.
                 try:
                     after = await svc.confirm_routes(origin, map_span=body.map_span)
                     requests_used += 1
@@ -6456,7 +6466,77 @@ async def post_execute(
                                 problems.append(disabled.detail)
                                 deferred.extend(desired)
                                 continue
-                            if disabled.status == "failed":
+                            if disabled.status == "unverified":
+                                # A 200 whose body could not be read. That is
+                                # NOT a refusal -- the write probably landed --
+                                # and it is not proof either, so it is settled
+                                # the way the create path settles the identical
+                                # evidence: look. Decided from STATE rather
+                                # than from a response shape nobody has
+                                # observed.
+                                #
+                                # Read HERE and not at the end-of-origin
+                                # verification, because the decision that
+                                # follows is whether to create new routes on
+                                # top, and that turns on whether the stale rows
+                                # are really off (issue #61). Reading a
+                                # response shape as failure instead cost a
+                                # deferral AND misreported: `disables` stayed
+                                # empty, so the run said "disabled 0" while N
+                                # rows were off and the operator was sent to
+                                # check rows already correct.
+                                stale_ids = {e.route_id for e in stale}
+                                try:
+                                    checked = await svc.confirm_routes(
+                                        origin, map_span=body.map_span
+                                    )
+                                except (NetworkError, MarketplaceUnreadable) as exc:
+                                    # Two unknowns in a row is not evidence of
+                                    # anything, so this falls back to the
+                                    # cautious half: nothing claimed, nothing
+                                    # created on top.
+                                    problems.append(
+                                        f"{village_label(origin, names)}: the disable of "
+                                        f"{sorted(stale_ids)} returned success but could "
+                                        f"not be confirmed, and the marketplace read-back "
+                                        f"failed too ({exc}); skipping new routes for this "
+                                        f"origin this run"
+                                    )
+                                    trace.event(
+                                        "unverified_disable",
+                                        origin=origin,
+                                        route_ids=sorted(stale_ids),
+                                        settled="unreadable",
+                                    )
+                                    deferred.extend(desired)
+                                    continue
+                                still_on = [
+                                    e.route_id
+                                    for e in checked
+                                    if e.route_id in stale_ids and e.active
+                                ]
+                                trace.event(
+                                    "unverified_disable",
+                                    origin=origin,
+                                    route_ids=sorted(stale_ids),
+                                    settled="still_active" if still_on else "off",
+                                    still_active=still_on,
+                                )
+                                if still_on:
+                                    problems.append(
+                                        f"Could not disable stale routes — {line}; the "
+                                        f"marketplace still shows {still_on} shipping; "
+                                        f"skipping new routes for this origin this run"
+                                    )
+                                    deferred.extend(desired)
+                                    continue
+                                disabled_here.extend(sorted(stale_ids))
+                                disables.append(
+                                    f"{village_label(origin, names)}: disabled "
+                                    f"{len(stale_ids)} route(s) - the toggle's answer was "
+                                    f"unreadable, confirmed off by the marketplace"
+                                )
+                            elif disabled.status == "failed":
                                 # A failed/ambiguous disable leaves stale routes
                                 # live; do NOT add new routes on top for this
                                 # origin — defer them and reconcile on a later run
@@ -6467,8 +6547,9 @@ async def post_execute(
                                 )
                                 deferred.extend(desired)
                                 continue
-                            disabled_here.extend(e.route_id for e in stale)
-                            disables.append(line)
+                            else:
+                                disabled_here.extend(e.route_id for e in stale)
+                                disables.append(line)
 
                     # Only a destination whose ENABLED rows match the planned
                     # fan-out is satisfied. "Some active row exists" let a 3h

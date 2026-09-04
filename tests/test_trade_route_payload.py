@@ -476,20 +476,47 @@ class TestTheBulkToggleReadsItsOwnResponse:
         assert result.status == "disabled"
 
     def test_a_body_we_cannot_read_is_not_reported_as_a_disable(self):
-        # RE-SEEDED. This case used to assert that {}, None, {"other": 1} and a
+        # RE-SEEDED TWICE. It first asserted that {}, None, {"other": 1} and a
         # bare string all read as "disabled". That conflated two answers the
         # rest of this module is careful to keep apart -- a body naming no
         # failures, and a body we could not read at all -- and the caller reads
         # a clean disable as "all N are off". On the revert path that reported
         # twenty-four rows disabled while twenty-four rows kept shipping.
         #
-        # The old rationale is preserved above, on the case it actually
+        # It then asserted "failed", which is the other over-statement: the
+        # request returned SUCCESS and the rows are probably off, so a verdict
+        # of failure sent /execute to defer the origin and made /revert-plan
+        # report created routes as "STILL RUNNING" when the game had switched
+        # them off. `unverified` is the third answer, and it is the one the
+        # create path already has for identical evidence
+        # (`created_unverified`). The caller looks at the marketplace.
+        #
+        # The original rationale is preserved above, on the case it actually
         # describes: `routes: []` is still success.
         for body in ({}, None, {"other": 1}, "not json at all"):
             service, _ = self._service_returning(body)
             result = asyncio.run(service.disable_routes(20031, self._routes()))
-            assert result.status == "failed", f"body {body!r} must not read as success"
+            assert result.status == "unverified", f"body {body!r} must not read as success"
+            assert result.status != "disabled", f"body {body!r} is not evidence of a disable"
             assert "cannot be confirmed" in result.detail
+
+    def test_a_rejection_and_an_unreadable_body_are_different_verdicts(self):
+        """The distinction the whole vocabulary rests on.
+
+        A body naming a rejection is the game saying NO -- nothing to look at,
+        the caller must not create on top. A body that cannot be read is the
+        game saying yes in a shape nobody has observed; `docs/15` records the
+        create's 200 body as EMPTY and records that `routes[].error` came off
+        the game's own `main.js` rather than an observed reply, so on an
+        account that has never run live "unreadable" may well be every single
+        toggle. Collapsing the two made every disable, enable and cargo update
+        a failure.
+        """
+        rejected, _ = self._service_returning({"routes": [{"id": 2, "error": "nope"}]})
+        unreadable, _ = self._service_returning({})
+
+        assert asyncio.run(rejected.disable_routes(20031, self._routes())).status == "failed"
+        assert asyncio.run(unreadable.disable_routes(20031, self._routes())).status == "unverified"
 
     def test_an_unreadable_disable_sends_the_operator_to_look(self):
         # The asymmetry: a disable that may not have happened leaves resources
@@ -502,7 +529,7 @@ class TestTheBulkToggleReadsItsOwnResponse:
     def test_an_unreadable_enable_says_a_later_run_can_repair_it(self):
         service, _ = self._service_returning({})
         result = asyncio.run(service.enable_routes(20031, self._routes()))
-        assert result.status == "failed"
+        assert result.status == "unverified"
         assert "re-enable" in result.detail
         assert "SHIPPING" not in result.detail, "an enable leaves nothing moving"
 

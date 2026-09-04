@@ -204,7 +204,14 @@ class RouteActionResult:
     # Every status this class actually produces. Kept in step with the code
     # because a stale list here is worse than none: it invites a caller to
     # branch on something that never arrives.
-    status: str  # created | disabled | enabled | updated | deleted | failed | skipped | stopped
+    #
+    # `unverified` is not a weaker `failed`, it is a different answer: the
+    # request returned SUCCESS and its body could not be read, so the write
+    # probably landed and nothing here proves it. Only the marketplace does,
+    # and the caller is expected to look -- exactly what the create path
+    # already calls `created_unverified`.
+    status: str  # created | disabled | enabled | updated | deleted
+    #             | unverified | failed | skipped | stopped
     detail: str = ""
 
 
@@ -752,12 +759,23 @@ class TradeRouteService:
         try:
             rejected = self._rejected_routes(response)
         except ToggleResponseUnreadable as exc:
-            # Loudly unknown, not quietly fine -- and the asymmetry the message
-            # carries is the point. An unreadable ENABLE leaves rows that may
-            # still be off, which a later run re-enables harmlessly. An
-            # unreadable DISABLE leaves rows that may still be SHIPPING, and
-            # that is the revert path, so the operator must be sent to look
-            # rather than handed a revert that is complete on paper.
+            # Loudly unknown, not quietly fine -- and not FAILED either, which
+            # is the over-statement this used to make. The request returned
+            # success; what is missing is proof, and the shape the proof was
+            # looked for in has never been observed on this account (`docs/15`
+            # records the create's 200 body as empty, and records that
+            # `routes[].error` came off the game's own `main.js` rather than a
+            # reply anyone saw). Reading it as a refusal made every disable,
+            # enable and cargo update a failure and sent /revert-plan to report
+            # created routes as STILL RUNNING when the game had switched them
+            # off. `unverified` is the same verdict the create path reaches on
+            # the same evidence, and the caller settles it by reading the
+            # marketplace back.
+            #
+            # The asymmetry the message carries stays: an unreadable ENABLE
+            # leaves rows that may still be off, which a later run re-enables
+            # harmlessly, while an unreadable DISABLE leaves rows that may
+            # still be SHIPPING.
             consequence = (
                 "they may still be inactive, and a later run can re-enable them"
                 if active
@@ -768,7 +786,7 @@ class TradeRouteService:
                 f"returned success, so some or all may have gone through -- {consequence}."
             )
             self._trace_write(kind, origin_village_id, "unreadable", started, payload, detail)
-            return RouteActionResult(origin_village_id, 0, 0, "failed", detail)
+            return RouteActionResult(origin_village_id, 0, 0, "unverified", detail)
         if rejected:
             detail = f"{len(rejected)} of {len(routes)} route(s) rejected: {rejected}"
             self._trace_write(kind, origin_village_id, "partial", started, payload, detail)

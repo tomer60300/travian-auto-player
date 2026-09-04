@@ -141,6 +141,66 @@ class TestADisableIsConfirmedBeforeItIsClaimed:
         assert any("until you have looked" in p for p in res.problems)
 
 
+class TestAnUnverifiedDisableStillGetsItsReadBack:
+    """The verdict this endpoint exists to get right.
+
+    `confirm_routes` sat inside `if result.status == "disabled"`, so a toggle
+    whose 200 body could not be read SKIPPED the read entirely and fell to the
+    else branch -- which reports the created routes as "STILL RUNNING". The one
+    endpoint built to make an undo trustworthy asserted the opposite of the
+    truth whenever the game had in fact switched them off. `unverified` is
+    exactly the case a read-back answers, so it takes the same path a
+    `disabled` does and the PAGE decides.
+    """
+
+    def test_rows_the_read_back_finds_off_are_claimed_as_disabled(self):
+        trace = _trace_with(20003, [])
+        svc = _Svc(
+            [ExistingRoute(555, 30540, active=True)],
+            disable=RouteActionResult(
+                20003, 0, 0, "unverified", "disabling of 1 route(s) cannot be confirmed"
+            ),
+            confirm_after=[ExistingRoute(555, 30540, active=False)],
+        )
+
+        res = _call(trace, svc, apply_disable=True)
+
+        assert svc.calls == ["read", "disable", "confirm"], "the read-back must not be skipped"
+        assert res.disabled_now == {20003: [555]}
+        assert any("confirmed inert" in s for s in res.steps)
+        assert not any("STILL RUNNING" in p for p in res.problems), res.problems
+
+    def test_rows_the_read_back_finds_on_are_still_reported(self):
+        trace = _trace_with(20003, [])
+        svc = _Svc(
+            [ExistingRoute(555, 30540, active=True)],
+            disable=RouteActionResult(
+                20003, 0, 0, "unverified", "disabling of 1 route(s) cannot be confirmed"
+            ),
+            confirm_after=[ExistingRoute(555, 30540, active=True)],  # still on
+        )
+
+        res = _call(trace, svc, apply_disable=True)
+
+        assert res.disabled_now == {}
+        assert any("STILL RUNNING" in p for p in res.problems)
+
+    def test_a_flat_refusal_never_reaches_the_read_back(self):
+        """The other half: `failed` is the game saying no, and there is nothing
+        to look at. It must stay in the else branch."""
+        trace = _trace_with(20003, [])
+        svc = _Svc(
+            [ExistingRoute(555, 30540, active=True)],
+            disable=RouteActionResult(20003, 0, 0, "failed", "1 of 1 route(s) rejected: [555]"),
+        )
+
+        res = _call(trace, svc, apply_disable=True)
+
+        assert svc.calls == ["read", "disable"], "a refusal costs no extra request"
+        assert res.disabled_now == {}
+        assert any("STILL RUNNING" in p for p in res.problems)
+
+
 class TestItRefusesRatherThanGuesses:
     def test_a_missing_trace_is_a_404(self):
         with pytest.raises(HTTPException) as caught:
