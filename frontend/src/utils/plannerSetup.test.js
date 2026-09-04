@@ -23,6 +23,7 @@ import {
   resolveRoleSpend,
   resolvedSpend,
   roleDeviates,
+  roleInherits,
   rolesForRequest,
   setupFilename,
   setupMatchesAccount,
@@ -2802,5 +2803,44 @@ describe('the reserved NPC-burst window in the setup file', () => {
       reservedWindow: ['09:00', '10:00'],
     })
     expect(withNone.reservedWindow).toEqual(['09:00', '10:00'])
+  })
+})
+
+// ── The other half of the deviation mark ────────────────────────────────
+//
+// An override was marked ("≠ DEF: Absolute /h 8,372") while the cell it would
+// be overridden FROM carried nothing, so the operator could not tell -- before
+// touching a cell -- that touching it creates an override.
+describe('roleInherits', () => {
+  const DEF = { allocations: { lumber: { mode: 'absolute', value: 8372 } } }
+
+  it('is true for a templated resource the village has not touched', () => {
+    expect(roleInherits(DEF, 'lumber', undefined)).toBe(true)
+  })
+
+  it('is false once the village states its own, agreeing or not', () => {
+    // The agreeing case matters: an own entry is what the NEXT template edit
+    // will no longer reach, so it is an override whatever it currently says.
+    expect(roleInherits(DEF, 'lumber', { mode: 'absolute', value: 8372 })).toBe(false)
+    expect(roleInherits(DEF, 'lumber', { mode: 'absolute', value: 9000 })).toBe(false)
+  })
+
+  it('is false for a resource the template says nothing about', () => {
+    expect(roleInherits(DEF, 'clay', undefined)).toBe(false)
+  })
+
+  it('is false with no template and no role at all', () => {
+    expect(roleInherits(undefined, 'lumber', undefined)).toBe(false)
+    expect(roleInherits({}, 'lumber', undefined)).toBe(false)
+  })
+
+  // The two marks are mutually exclusive, which is what lets the cell show one
+  // provenance note rather than two that contradict each other.
+  it('never holds at the same time as roleDeviates', () => {
+    for (const allocation of [undefined, { mode: 'absolute', value: 8372 }, { mode: 'keep' }]) {
+      expect(
+        roleInherits(DEF, 'lumber', allocation) && roleDeviates(DEF, 'lumber', allocation)
+      ).toBe(false)
+    }
   })
 })

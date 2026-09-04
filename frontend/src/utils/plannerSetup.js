@@ -577,6 +577,28 @@ export function resolveRoleSpend(template, resource, spend) {
   return spend ?? template?.consumption?.[resource]
 }
 
+/** Is this cell showing its ROLE's figure, untouched?
+ *
+ * The other half of `roleDeviates`, and the half that was missing. An override
+ * was marked -- the cell gained "≠ DEF: Absolute /h 8,372" -- while the cell it
+ * had been overridden FROM carried nothing at all: "Lumber value for 11" read
+ * `absolute / 8372` off the DEF template with nothing saying where the figure
+ * came from. So the operator could not tell, BEFORE touching a cell, that
+ * touching it creates an override; and a whole role profile read as this
+ * village's own entry.
+ *
+ * The Account stage already solved this one stage over, per `describeSpendSource`
+ * -- "from DEF" on a spend the village never typed. This is the same answer for
+ * an allocation.
+ *
+ * `allocation == null` is the whole test on the village's side: an own entry is
+ * an override whether or not it happens to agree with the template, because it
+ * is what the next template edit will no longer reach.
+ */
+export function roleInherits(template, resource, allocation) {
+  return allocation == null && template?.allocations?.[resource] != null
+}
+
 /** Does this village's own allocation differ from what its role's template says?
  *
  * The same question the backend answers with `role_deviations`, asked here so

@@ -91,6 +91,7 @@ import {
   resolveRoleSpend,
   resolvedSpend,
   roleDeviates,
+  roleInherits,
   rolesForRequest,
   setupFilename,
   setupMatchesAccount,
@@ -5694,7 +5695,18 @@ export default function ResourcePlanner() {
                           resource,
                           allocations[resource]?.[v.village_id]
                         )
+                        // The other half, and the half that was missing: an
+                        // override was marked while the cell it would be
+                        // overridden FROM said nothing. So the operator could
+                        // not tell, before touching a cell, that touching it
+                        // creates an override.
+                        const inherits = roleInherits(
+                          roleTemplates[role],
+                          resource,
+                          allocations[resource]?.[v.village_id]
+                        )
                         const deviationId = `deviates-${resource}-${v.village_id}`
+                        const inheritedId = `inherits-${resource}-${v.village_id}`
                         const a = effectiveAllocation(resource, v.village_id)
                         let target = own ?? 0
                         if (a.mode === 'absolute') target = Number(a.value) || 0
@@ -5765,7 +5777,9 @@ export default function ResourcePlanner() {
                               <input
                                 type="number"
                                 aria-label={`${RESOURCE_LABEL[resource]} value for ${v.name}`}
-                                aria-describedby={deviates ? deviationId : undefined}
+                                aria-describedby={
+                                  deviates ? deviationId : inherits ? inheritedId : undefined
+                                }
                                 className={`input-field w-24 text-right text-xs py-0.5 ${
                                   deviates ? 'border-info' : ''
                                 }`}
@@ -5782,6 +5796,23 @@ export default function ResourcePlanner() {
                                   edge cannot tell the operator WHAT the role
                                   asked for, which is the only thing that makes
                                   the mark worth acting on. */}
+                              {/* Said before it is acted on, not only after.
+                                  `aria-describedby` points at whichever of the
+                                  two applies, so a screen reader hears the same
+                                  fact the border and the chip carry -- and the
+                                  chip is DROPPED the moment the cell is
+                                  overridden, because then the deviation line
+                                  below says where the figure came from and two
+                                  provenance notes on one cell contradict each
+                                  other. */}
+                              {inherits && (
+                                <span
+                                  id={inheritedId}
+                                  className="block text-secondary text-xs mt-0.5 whitespace-nowrap"
+                                >
+                                  from {ROLE_LABEL[role]}
+                                </span>
+                              )}
                               {deviates && (
                                 <span
                                   id={deviationId}

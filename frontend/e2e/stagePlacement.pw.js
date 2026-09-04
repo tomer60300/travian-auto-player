@@ -277,3 +277,59 @@ test.describe('the crop alert level is typed where it is read', () => {
     await expect(page.getByLabel('Crop stock alert level for 02')).toHaveValue('300000')
   })
 })
+
+test.describe('a cell says where its figure came from', () => {
+  test.use({ viewport: { width: 1440, height: 1200 } })
+
+  const DEF_TEMPLATE = { def: { allocations: { lumber: { mode: 'absolute', value: 8372 } } } }
+
+  async function openTargetsWithRole(page) {
+    await seed(page, {
+      planner_village_roles: { 20011: 'def' },
+      planner_role_templates: DEF_TEMPLATE,
+    })
+    await page.goto('/resource-planner')
+    await stageTab(page, 'Targets').click()
+    await expect(page.getByLabel('Lumber value for 11')).toBeVisible()
+  }
+
+  // The reported case: the cell read `absolute / 8372` off the DEF template
+  // with nothing saying where it came from, while an OVERRIDE was correctly
+  // marked. So the operator could not tell, before touching the cell, that
+  // touching it creates an override.
+  test('an inherited figure is marked as inherited', async ({ page }) => {
+    await isolatePlanning(page)
+    await openTargetsWithRole(page)
+
+    const box = page.getByLabel('Lumber value for 11')
+    await expect(box).toHaveValue('8372')
+    await expect(page.getByText('from DEF')).toBeVisible()
+    // And a screen reader hears the same fact the chip carries.
+    await expect(box).toHaveAttribute('aria-describedby', 'inherits-lumber-20011')
+  })
+
+  test('the chip is dropped the moment the cell is overridden', async ({ page }) => {
+    await isolatePlanning(page)
+    await openTargetsWithRole(page)
+
+    await page.getByLabel('Lumber value for 11').fill('12000')
+    // One provenance note, not two: the deviation line now says where the
+    // figure came from and what the role asked for.
+    await expect(page.getByText('from DEF')).toHaveCount(0)
+    await expect(page.getByText(/≠ DEF: Absolute \/h 8,372/)).toBeVisible()
+    await expect(page.getByLabel('Lumber value for 11')).toHaveAttribute(
+      'aria-describedby',
+      'deviates-lumber-20011',
+    )
+  })
+
+  test('a resource the template says nothing about is not marked', async ({ page }) => {
+    await isolatePlanning(page)
+    await openTargetsWithRole(page)
+    // Clay has no DEF figure, so its cell is the village's own default.
+    await expect(page.getByLabel('Clay value for 11')).not.toHaveAttribute(
+      'aria-describedby',
+      /inherits/,
+    )
+  })
+})
