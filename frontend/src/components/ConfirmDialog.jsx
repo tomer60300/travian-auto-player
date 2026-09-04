@@ -16,9 +16,15 @@ export default function ConfirmDialog({
   useEffect(() => {
     if (!open) return
 
-    // Focus the confirm button when dialog opens
+    // Focus what the operator has to answer: a form control if the message
+    // carries one, otherwise the action. A dialog that asks for a profile name
+    // and lands focus on its Confirm button makes the typist Tab backwards to
+    // reach the only field in it -- and every dialog in the app that carries no
+    // field behaves exactly as it did.
     const timer = setTimeout(() => {
-      confirmBtnRef.current?.focus()
+      const field = dialogRef.current?.querySelector('input, select, textarea')
+      if (field) field.focus()
+      else confirmBtnRef.current?.focus()
     }, 50)
 
     const handleKeyDown = (e) => {
@@ -79,9 +85,14 @@ export default function ConfirmDialog({
         >
           {title}
         </h3>
-        <p className="text-secondary text-sm mb-6 leading-relaxed">
+        {/* A <div>, not a <p>. `message` is a node rather than a string at the
+            planner's live-run manifest, which is a LIST of the state-changing
+            effects a run will have -- and a <ul> inside a <p> is invalid HTML
+            that the parser silently reshapes, so the list escaped the styled
+            wrapper. Every caller that passes a plain string renders identically. */}
+        <div className="text-secondary text-sm mb-6 leading-relaxed">
           {message}
-        </p>
+        </div>
         <div className="flex justify-end gap-3">
           <button type="button" className="btn-secondary" onClick={onCancel}>
             {cancelText}

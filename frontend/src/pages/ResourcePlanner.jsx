@@ -49,6 +49,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import ConfirmDialog from '../components/ConfirmDialog'
 import DayNightPanel from '../components/DayNightPanel'
 import FullDayCheck from '../components/FullDayCheck'
 import NightOverrunTable from '../components/NightOverrunTable'
@@ -213,6 +214,19 @@ const SWEEP_VILLAGES_PER_CHUNK = 5
 // Travian's repeat interval is a closed set of the divisors of 24. Offering
 // anything else would plan a cadence the create payload cannot express.
 const TRAVIAN_REPEAT_INTERVALS = [1, 2, 3, 4, 6, 8, 12, 24]
+// The three profile actions that need a name typed, as one dialog. Titles and
+// action words rather than a mode word in a heading, so each reads as the
+// question it is.
+const PROFILE_NAMING_TITLE = {
+  add: 'New plan profile',
+  duplicate: 'Duplicate this profile',
+  rename: 'Rename this profile',
+}
+const PROFILE_NAMING_ACTION = {
+  add: 'Create it',
+  duplicate: 'Duplicate it',
+  rename: 'Rename it',
+}
 const splitProtected = (text) =>
   text
     .split(',')
@@ -828,6 +842,27 @@ export default function ResourcePlanner() {
   const [pasteOpen, setPasteOpen] = useState(false)
   const [pasteText, setPasteText] = useState('')
   const setupFileRef = useRef(null)
+  // The five questions this page has to ask before it changes something, held
+  // as state and answered by `components/ConfirmDialog` -- the one every other
+  // page in the app already uses.
+  //
+  // They were four `window.confirm` calls and three `window.prompt` calls, and
+  // the live-run manifest was one of them. A native dialog renders unstyled and
+  // theme-blind, gives no emphasis to the counts that decide the answer, cannot
+  // be re-read once dismissed, and -- the part that made it a defect rather than
+  // a preference -- Chrome's "Prevent this page from creating additional
+  // dialogs" makes every later `confirm()` return false and every later
+  // `prompt()` return null, SILENTLY. The live button then does nothing, with
+  // no explanation, on the one action that writes to a real account.
+  //
+  // `pendingSetup` holds a document from a different account until the operator
+  // insists; `profileNaming` is `{ mode, value }` for the three actions that
+  // need a name typed.
+  const [pendingSetup, setPendingSetup] = useState(null)
+  const [confirmForget, setConfirmForget] = useState(false)
+  const [confirmDeleteProfile, setConfirmDeleteProfile] = useState(null)
+  const [profileNaming, setProfileNaming] = useState(null)
+  const [confirmLive, setConfirmLive] = useState(false)
   const [dayCheck, setDayCheck] = useState(null)
   const [dayChecking, setDayChecking] = useState(false)
   // Invalidates an in-flight day-check when its inputs change, so a stale
@@ -1583,24 +1618,8 @@ export default function ResourcePlanner() {
   //
   // `where` names the source in the messages, because "this file was exported
   // from a different account" is the wrong sentence about a server document.
-  const applyParsedSetup = useCallback(
+  const mergeParsedSetup = useCallback(
     (setup, where) => {
-      if (!villages.length) {
-        toast.error(`Fetch account state first — a ${where} cannot be matched to villages without it`)
-        return
-      }
-      // A document from another account would apply its levels to whatever
-      // village happens to share an id, which is a silently wrong plan rather
-      // than a visible error. Refuse unless the operator insists.
-      if (!setupMatchesAccount(setup, accountKey)) {
-        const proceed = window.confirm(
-          `This ${where} was saved from a different account:\n\n` +
-            `  ${where}: ${setup.account}\n  current: ${accountKey}\n\n` +
-            `Village ids are per-account, so loading it can attach the wrong ` +
-            `Trade Office levels to the wrong villages. Load it anyway?`
-        )
-        if (!proceed) return
-      }
       const merged = mergeSetup({
         setup,
         villages,
@@ -1682,9 +1701,31 @@ export default function ResourcePlanner() {
       profileOvernight,
       profileWindows,
       foreignTargets,
-      accountKey,
       toast,
     ]
+  )
+
+  const applyParsedSetup = useCallback(
+    (setup, where) => {
+      if (!villages.length) {
+        toast.error(`Fetch account state first — a ${where} cannot be matched to villages without it`)
+        return
+      }
+      // A document from another account would apply its levels to whatever
+      // village happens to share an id, which is a silently wrong plan rather
+      // than a visible error. Refuse unless the operator insists.
+      //
+      // Held as pending state rather than asked with `window.confirm`, because
+      // Chrome's "Prevent this page from creating additional dialogs" makes a
+      // later `confirm()` return false with nothing on screen -- and a load that
+      // silently does nothing is indistinguishable from a load that worked.
+      if (!setupMatchesAccount(setup, accountKey)) {
+        setPendingSetup({ setup, where })
+        return
+      }
+      mergeParsedSetup(setup, where)
+    },
+    [villages, accountKey, mergeParsedSetup, toast]
   )
 
   const applySetupText = useCallback(
@@ -1761,15 +1802,6 @@ export default function ResourcePlanner() {
   }, [accountKey, applyParsedSetup, toast])
 
   const forgetServerSetup = useCallback(async () => {
-    if (
-      !window.confirm(
-        'Delete the setup saved on the server for this account?\n\n' +
-          'What is on screen stays, and so does any file you exported. Only the ' +
-          'shared copy every origin reads is removed.'
-      )
-    ) {
-      return
-    }
     setSetupBusy('forgetting')
     try {
       await api.delete('/distribution/setup', { params: { account_key: accountKey } })
@@ -3039,8 +3071,21 @@ export default function ResourcePlanner() {
     setPlan(null)
   }
 
-  const addProfile = () => {
-    const name = (window.prompt('New profile name', 'Night') || '').trim()
+  /** The three profile actions that need a name typed, asked in the app.
+   *
+   * `window.prompt` was suppressed by the same Chrome setting that suppresses
+   * `confirm` -- and a suppressed prompt returns null, so "+ New" silently did
+   * nothing at all. One descriptor drives one dialog, because these are one
+   * interaction asked three times.
+   */
+  const askForProfileName = (mode) =>
+    setProfileNaming({
+      mode,
+      value:
+        mode === 'add' ? 'Night' : mode === 'duplicate' ? `${activeProfile} copy` : activeProfile,
+    })
+
+  const addProfile = (name) => {
     if (!name) return
     if (profiles[name]) {
       toast.error(`Profile "${name}" already exists`)
@@ -3051,8 +3096,7 @@ export default function ResourcePlanner() {
     setPlan(null)
   }
 
-  const duplicateProfile = () => {
-    const name = (window.prompt(`Duplicate "${activeProfile}" as`, `${activeProfile} copy`) || '').trim()
+  const duplicateProfile = (name) => {
     if (!name) return
     if (profiles[name]) {
       toast.error(`Profile "${name}" already exists`)
@@ -3066,8 +3110,7 @@ export default function ResourcePlanner() {
     setPlan(null)
   }
 
-  const renameProfile = () => {
-    const name = (window.prompt('Rename profile', activeProfile) || '').trim()
+  const renameProfile = (name) => {
     if (!name || name === activeProfile) return
     if (profiles[name]) {
       toast.error(`Profile "${name}" already exists`)
@@ -3114,12 +3157,18 @@ export default function ResourcePlanner() {
     setActiveProfile(name)
   }
 
+  /** Route the typed name to whichever of the three asked for it, then close. */
+  const commitProfileName = () => {
+    const asked = profileNaming
+    if (!asked) return
+    setProfileNaming(null)
+    const name = String(asked.value ?? '').trim()
+    if (asked.mode === 'add') addProfile(name)
+    else if (asked.mode === 'duplicate') duplicateProfile(name)
+    else renameProfile(name)
+  }
+
   const deleteProfile = () => {
-    if (profileNames.length <= 1) {
-      toast.error('Keep at least one profile')
-      return
-    }
-    if (!window.confirm(`Delete profile "${activeProfile}"?`)) return
     const fallback = profileNames.find((n) => n !== activeProfile)
     setProfiles((prev) => {
       const next = { ...prev }
@@ -3273,26 +3322,58 @@ export default function ResourcePlanner() {
     [protectDestinations, villages]
   )
 
-  const liveConfirmMessage = [
-    'Execute this plan against Travian now?',
-    '',
-    // Only claimed when it is actually going to happen: the checkbox can make
-    // this a create-only run, and a dialog listing a disable that will not
-    // occur is worse than no dialog.
-    disableExisting
-      ? `• Disable existing routes this plan no longer wants, on up to ${plannedOriginCount} origin village(s)`
-      : '• Create ONLY — no existing route will be disabled',
-    `• Create up to ${plannedCreateCount} new route(s)`,
-    execResult?.remaining ? `• Defer ${execResult.remaining} route(s) to a later run` : null,
-    '',
-    'Already-active routes that the plan still wants are left untouched, and a',
-    'route the plan wants that is currently DISABLED is switched back on.',
-    '',
-    'This sends live requests to Travian. If a create fails after a disable, old',
-    'routes can remain disabled without their replacements — re-run to reconcile.',
-  ]
-    .filter((line) => line !== null)
-    .join('\n')
+  /** The manifest, as a list rather than as a `\n`-joined string.
+   *
+   * Every word of it is the wording the native dialog carried, including the
+   * honest last sentence -- that was the good half. What changes is that the
+   * COUNTS are emphasised, because they are what decides the answer and a
+   * native dialog rendered them as one more run of 8pt prose; that the
+   * irreversible line takes `--danger`; and that it can be read twice.
+   */
+  const liveManifest = (
+    <>
+      <p className="text-primary">Execute this plan against Travian now?</p>
+      <ul className="mt-3 space-y-1.5">
+        {/* Only claimed when it is actually going to happen: the checkbox can
+            make this a create-only run, and a dialog listing a disable that
+            will not occur is worse than no dialog. */}
+        <li>
+          {disableExisting ? (
+            <>
+              Disable existing routes this plan no longer wants, on up to{' '}
+              <strong className="text-primary text-xl font-mono">{plannedOriginCount}</strong>{' '}
+              origin village{plannedOriginCount === 1 ? '' : 's'}
+            </>
+          ) : (
+            <>
+              <strong className="text-primary">Create ONLY</strong> — no existing route will be
+              disabled
+            </>
+          )}
+        </li>
+        <li>
+          Create up to{' '}
+          <strong className="text-primary text-xl font-mono">{plannedCreateCount}</strong> new
+          route{plannedCreateCount === 1 ? '' : 's'}
+        </li>
+        {execResult?.remaining ? (
+          <li>
+            Defer{' '}
+            <strong className="text-primary text-xl font-mono">{execResult.remaining}</strong>{' '}
+            route(s) to a later run
+          </li>
+        ) : null}
+      </ul>
+      <p className="mt-3">
+        Already-active routes that the plan still wants are left untouched, and a route the plan
+        wants that is currently DISABLED is switched back on.
+      </p>
+      <p className="mt-3 text-danger">
+        This sends live requests to Travian. If a create fails after a disable, old routes can
+        remain disabled without their replacements — re-run to reconcile.
+      </p>
+    </>
+  )
 
   return (
     <div className="p-6 max-w-7xl mx-auto">
@@ -3368,18 +3449,18 @@ export default function ResourcePlanner() {
             </option>
           ))}
         </select>
-        <button className="btn-secondary btn-xs" onClick={addProfile}>
+        <button className="btn-secondary btn-xs" onClick={() => askForProfileName('add')}>
           + New
         </button>
-        <button className="btn-secondary btn-xs" onClick={duplicateProfile}>
+        <button className="btn-secondary btn-xs" onClick={() => askForProfileName('duplicate')}>
           Duplicate
         </button>
-        <button className="btn-secondary btn-xs" onClick={renameProfile}>
+        <button className="btn-secondary btn-xs" onClick={() => askForProfileName('rename')}>
           Rename
         </button>
         <button
           className="btn-secondary btn-xs"
-          onClick={deleteProfile}
+          onClick={() => setConfirmDeleteProfile(activeProfile)}
           disabled={profileNames.length <= 1}
         >
           Delete
@@ -3606,7 +3687,7 @@ export default function ResourcePlanner() {
             busy={setupBusy}
             onSave={saveSetupToServer}
             onLoad={loadSetupFromServer}
-            onForget={forgetServerSetup}
+            onForget={() => setConfirmForget(true)}
             onExportFile={exportSetup}
             onImportFile={() => setupFileRef.current?.click()}
             onPaste={() => setPasteOpen((v) => !v)}
@@ -6601,9 +6682,7 @@ export default function ResourcePlanner() {
                             type="button"
                             className="btn-primary text-xs py-1.5 mt-2"
                             disabled={executing || !plan.feasible}
-                            onClick={() => {
-                              if (window.confirm(liveConfirmMessage)) executePlan(false)
-                            }}
+                            onClick={() => setConfirmLive(true)}
                           >
                             {executing
                               ? 'Working…'
@@ -6650,6 +6729,109 @@ export default function ResourcePlanner() {
           )}
         </div>
       )}
+
+      {/* Every question this page asks before it changes something, in the app.
+          Rendered outside the stage gates because two of them are asked from
+          the global profile bar, which is itself outside them. */}
+      <ConfirmDialog
+        open={pendingSetup != null}
+        title="This setup was saved from a different account"
+        message={
+          <>
+            <p>
+              <span className="font-mono">{pendingSetup?.where}</span>:{' '}
+              <strong className="text-primary">{pendingSetup?.setup?.account}</strong>
+            </p>
+            <p>
+              current: <strong className="text-primary">{accountKey}</strong>
+            </p>
+            <p className="mt-3 text-danger">
+              Village ids are per-account, so loading it can attach the wrong Trade Office levels
+              to the wrong villages.
+            </p>
+          </>
+        }
+        confirmText="Load it anyway"
+        cancelText="Cancel"
+        variant="danger"
+        onConfirm={() => {
+          const pending = pendingSetup
+          setPendingSetup(null)
+          if (pending) mergeParsedSetup(pending.setup, pending.where)
+        }}
+        onCancel={() => setPendingSetup(null)}
+      />
+
+      <ConfirmDialog
+        open={confirmForget}
+        title="Delete the setup saved on the server?"
+        message="What is on screen stays, and so does any file you exported. Only the shared copy every origin reads is removed."
+        confirmText="Delete it"
+        cancelText="Keep it"
+        variant="danger"
+        onConfirm={() => {
+          setConfirmForget(false)
+          forgetServerSetup()
+        }}
+        onCancel={() => setConfirmForget(false)}
+      />
+
+      <ConfirmDialog
+        open={confirmDeleteProfile != null}
+        title={`Delete profile "${confirmDeleteProfile}"?`}
+        message="Its allocations, hours, attendance answer and overnight declaration go with it. Nothing in the game changes — this is the plan, not the routes."
+        confirmText="Delete"
+        cancelText="Keep it"
+        variant="danger"
+        onConfirm={() => {
+          setConfirmDeleteProfile(null)
+          deleteProfile()
+        }}
+        onCancel={() => setConfirmDeleteProfile(null)}
+      />
+
+      <ConfirmDialog
+        open={profileNaming != null}
+        title={PROFILE_NAMING_TITLE[profileNaming?.mode] ?? 'Name this profile'}
+        message={
+          <label className="block">
+            <span className="block mb-1">Profile name</span>
+            <input
+              type="text"
+              className="input-field"
+              aria-label="Profile name"
+              value={profileNaming?.value ?? ''}
+              onChange={(e) => setProfileNaming((p) => (p ? { ...p, value: e.target.value } : p))}
+              onKeyDown={(e) => {
+                // Enter is what a native prompt did, and the dialog is not a
+                // <form>, so nothing else would submit it.
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  commitProfileName()
+                }
+              }}
+            />
+          </label>
+        }
+        confirmText={PROFILE_NAMING_ACTION[profileNaming?.mode] ?? 'Confirm'}
+        cancelText="Cancel"
+        onConfirm={commitProfileName}
+        onCancel={() => setProfileNaming(null)}
+      />
+
+      <ConfirmDialog
+        open={confirmLive}
+        title="Write these routes to the game"
+        message={liveManifest}
+        confirmText={`Go live (~${liveRequestEstimate} requests)`}
+        cancelText="Not yet"
+        variant="danger"
+        onConfirm={() => {
+          setConfirmLive(false)
+          executePlan(false)
+        }}
+        onCancel={() => setConfirmLive(false)}
+      />
     </div>
   )
 }

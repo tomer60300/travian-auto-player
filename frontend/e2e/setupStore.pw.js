@@ -177,9 +177,12 @@ async function seed(page, { tradeOffice = null } = {}) {
     },
     [KEY, SNAPSHOT, tradeOffice]
   )
-  // Dialogs are the account-mismatch confirm and the forget confirm. Accepted
-  // by default; the one test that needs a rejection overrides this.
-  page.on('dialog', (dialog) => dialog.accept())
+  // No native dialog handler any more, and that is the assertion rather than an
+  // omission: the account-mismatch confirm and the forget confirm are both
+  // `components/ConfirmDialog` now, so a `page.on('dialog')` here would be
+  // waiting for something that can no longer happen -- and Playwright's default
+  // is to DISMISS, which would silently turn every one of these into a no-op.
+  // The tests below click the in-app button instead.
 }
 
 test.describe('the setup on the server', () => {
@@ -275,6 +278,13 @@ test.describe('the setup on the server', () => {
     await expect(page.getByText(/A setup is saved on the server/)).toBeVisible()
 
     await page.getByRole('button', { name: 'Forget the saved setup' }).click()
+    // Asks in the app, not in the browser chrome: a native `confirm` cannot be
+    // re-read, and Chrome's dialog suppression makes a later one return false
+    // with nothing on screen.
+    await expect(page.getByRole('dialog')).toContainText(
+      /Only the shared copy every origin reads is removed/
+    )
+    await page.getByRole('button', { name: 'Delete it' }).click()
 
     expect(sent.del).toEqual([KEY])
     await expect(page.getByText(/Nothing is saved on the server for this account yet/)).toBeVisible()
@@ -287,6 +297,7 @@ test.describe('the setup on the server', () => {
     await expect(page.getByText(/A setup is saved on the server/)).toBeVisible()
 
     await page.getByRole('button', { name: 'Forget the saved setup' }).click()
+    await page.getByRole('button', { name: 'Delete it' }).click()
 
     // A 404 on delete is not a failure to report as one: the state it wanted
     // to reach is the state it is in.

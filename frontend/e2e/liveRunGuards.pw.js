@@ -156,3 +156,107 @@ test.describe('a protect_destinations typo is undetectable by the server', () =>
     expect(body.protect_destinations).toEqual(['4688'])
   })
 })
+
+test.describe('the gate on a live write is in the app, not the browser chrome', () => {
+  test.use({ viewport: { width: 1440, height: 1200 } })
+
+  /** Every native dialog the page opens, which must be none. */
+  function watchNativeDialogs(page) {
+    const seen = []
+    page.on('dialog', (dialog) => {
+      seen.push(`${dialog.type()}: ${dialog.message().slice(0, 60)}`)
+      dialog.dismiss()
+    })
+    return seen
+  }
+
+  test('the live-run manifest is an in-app dialog', async ({ page }) => {
+    // `window.confirm` renders unstyled and theme-blind, cannot be re-read
+    // after dismissal, and -- the part that matters -- Chrome's "Prevent this
+    // page from creating additional dialogs" makes every later `confirm()`
+    // return false SILENTLY. The live button then does nothing, with no
+    // explanation, on the one action that writes to a real account.
+    const natives = watchNativeDialogs(page)
+    await isolate(page, (path) => (path.endsWith('/distribution/execute') ? PREVIEW : undefined))
+    await seed(page)
+    await openPlan(page)
+
+    await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
+    await page.getByRole('button', { name: /^Disable old routes & create/ }).click()
+
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    expect(natives, 'no native dialog was opened').toEqual([])
+    // The manifest's own words, which are good and are kept.
+    await expect(dialog).toContainText('Execute this plan against Travian now?')
+    await expect(dialog).toContainText(/Create up to 1 new route/)
+    await expect(dialog).toContainText(
+      /If a create fails after a disable, old routes can remain disabled/,
+    )
+  })
+
+  test('the manifest can be re-read after it is dismissed', async ({ page }) => {
+    // The other thing a native dialog cannot do. Once dismissed its text is
+    // gone, so an operator who wanted to check a count had to press the
+    // irreversible button again to see it.
+    await isolate(page, (path) => (path.endsWith('/distribution/execute') ? PREVIEW : undefined))
+    await seed(page)
+    await openPlan(page)
+
+    await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
+    await page.getByRole('button', { name: /^Disable old routes & create/ }).click()
+    await page.getByRole('button', { name: 'Not yet' }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+
+    await page.getByRole('button', { name: /^Disable old routes & create/ }).click()
+    await expect(page.getByRole('dialog')).toContainText('Execute this plan against Travian now?')
+  })
+
+  test('cancelling writes nothing', async ({ page }) => {
+    let executes = 0
+    await isolate(page, (path) => {
+      if (path.endsWith('/distribution/execute')) {
+        executes += 1
+        return PREVIEW
+      }
+      return undefined
+    })
+    await seed(page)
+    await openPlan(page)
+
+    await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
+    expect(executes).toBe(1)
+    await page.getByRole('button', { name: /^Disable old routes & create/ }).click()
+    await page.getByRole('button', { name: 'Not yet' }).click()
+    expect(executes, 'cancelling sent no second execute').toBe(1)
+  })
+
+  test('deleting a profile asks in the app', async ({ page }) => {
+    const natives = watchNativeDialogs(page)
+    await isolate(page)
+    await seed(page, { planner_profiles: { Day: {}, Night: {} } })
+    await page.goto('/resource-planner')
+
+    await page.getByRole('button', { name: 'Delete' }).click()
+    await expect(page.getByRole('dialog')).toContainText('Day')
+    expect(natives).toEqual([])
+  })
+
+  test('naming a new profile asks in the app', async ({ page }) => {
+    // `window.prompt` is suppressed by the same Chrome setting, and a
+    // suppressed prompt returns null -- so "+ New" silently does nothing.
+    const natives = watchNativeDialogs(page)
+    await isolate(page)
+    await seed(page)
+    await page.goto('/resource-planner')
+
+    await page.getByRole('button', { name: '+ New' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    expect(natives).toEqual([])
+
+    await dialog.getByRole('textbox').fill('Night')
+    await dialog.getByRole('button', { name: /^(Create|Add|Confirm)/ }).click()
+    await expect(page.getByLabel('Allocation profile')).toHaveValue('Night')
+  })
+})
