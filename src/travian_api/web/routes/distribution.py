@@ -2515,6 +2515,47 @@ def _resolve_roles(body: PlanRequest) -> _ResolvedRoles:
     )
 
 
+def _npc_store_deltas(plan) -> dict[int, dict[Resource, float]]:
+    """What section 7's conversion does to a floored village's OWN stores, per hour.
+
+    The NPC merchant exchanges resources INSIDE one village, so none of it is
+    route cargo and none of it appears in any route's ``cargo_per_hour``: the
+    drawn material gains exactly what was drawn, and the feedstock stores are
+    debited that same budget, split by the reserve's shares (one budget funds
+    every material the village converts into, so one debit is spread across
+    them). The two together sum to zero, which is what makes NPC an exchange
+    rather than a source.
+
+    Both store checks read the figure from here, so section 7's trigger table
+    and the continuous fill/drain status cannot disagree about a floored
+    village's net rate. They did: the continuous check folded in NEITHER term,
+    so a village drawing 12,000/h of lumber read as a warehouse draining at
+    -12,000/h on a store the plan leaves exactly level, and its granary read as
+    banking every unit of the crop that pays for it.
+
+    Empty for a village with no declared floor -- no reserve, nothing converted.
+    """
+    deltas: dict[int, dict[Resource, float]] = {}
+    for vid, reserve in plan.npc.items():
+        converted = 0.0
+        draws: dict[Resource, float] = {}
+        for resource in Resource:
+            rp = plan.resource_plans.get(resource)
+            if rp is None:
+                continue
+            allocation = next((v for v in rp.villages if v.village_id == vid), None)
+            if allocation is None:
+                continue
+            draws[resource] = allocation.npc_draw_per_hour
+            if resource in MATERIALS:
+                converted += allocation.npc_draw_per_hour
+        deltas[vid] = {
+            resource: draws.get(resource, 0.0) - converted * reserve.share_of(resource)
+            for resource in Resource
+        }
+    return deltas
+
+
 def _npc_store_state(
     body: PlanRequest, plan
 ) -> tuple[
@@ -2534,14 +2575,11 @@ def _npc_store_state(
     stocks: dict[int, dict[Resource, float]] = {}
     capacities: dict[int, dict[Resource, float]] = {}
     nets: dict[int, dict[Resource, float]] = {}
+    deltas = _npc_store_deltas(plan)
     for village in body.snapshot:
         vid = village.village_id
-        reserve = plan.npc.get(vid)
-        if reserve is None:
+        if plan.npc.get(vid) is None:
             continue
-        # Every material this village converts INTO, summed: one budget funded
-        # them all, so one debit is spread across the feedstock stores.
-        converted = 0.0
         allocations: dict[Resource, object] = {}
         for resource in Resource:
             rp = plan.resource_plans.get(resource)
@@ -2551,8 +2589,6 @@ def _npc_store_state(
             if allocation is None:
                 continue
             allocations[resource] = allocation
-            if resource in MATERIALS:
-                converted += allocation.npc_draw_per_hour
         for resource in Resource:
             stocks.setdefault(vid, {})[resource] = float(getattr(village, _STOCK_FIELD[resource]))
             cap = (
@@ -2563,8 +2599,20 @@ def _npc_store_state(
             if cap is not None:
                 capacities.setdefault(vid, {})[resource] = float(cap)
             allocation = allocations.get(resource)
-            net = allocation.net_per_hour if allocation is not None else 0.0
-            nets.setdefault(vid, {})[resource] = net - converted * reserve.share_of(resource)
+            # Own production plus the cargo the plan INTENDS to move, less the
+            # spend, plus what the conversion does. Written this way rather
+            # than as `net_per_hour` so it is the same statement
+            # `_storage_findings` makes forty lines below, with the one real
+            # difference visible: this reads the intended ship rate and that
+            # one reads the cargo the optimizer actually routed. Note
+            # `net_per_hour` (= target - consumption) already counts the draw,
+            # since `target = own + draw + ship`, which is why the draw arrives
+            # here only through the shared delta.
+            nets.setdefault(vid, {})[resource] = (
+                allocation.own_per_hour + allocation.ship_per_hour - allocation.consumption_per_hour
+                if allocation is not None
+                else 0.0
+            ) + deltas.get(vid, {}).get(resource, 0.0)
     return stocks, capacities, nets
 
 
@@ -2602,10 +2650,16 @@ def _storage_findings(
     # the one the plan was built with reports overflows that plan never had.
     roles = _resolve_roles(body)
     consumption = roles.consumption
+    # Section 7's conversion, from the same function the trigger table reads.
+    # It is not route cargo -- NPC exchanges inside one village -- so it appears
+    # in neither `shipped` below nor the snapshot's own rates, and the two
+    # adjacent checks disagreed about every floored village's net rate until
+    # both took it from here. See `_npc_store_deltas`.
+    npc_deltas = _npc_store_deltas(plan)
 
     # Net rate per village per resource AFTER the plan: own production plus what
-    # arrives minus what leaves minus what is spent. That is what the store
-    # actually sees.
+    # arrives minus what leaves minus what is spent, plus what the operator
+    # converts. That is what the store actually sees.
     shipped: dict[int, dict[Resource, float]] = {}
     for route in plan.routing.routes:
         for resource, amount in route.cargo_per_hour.items():
@@ -2634,6 +2688,7 @@ def _storage_findings(
                 float(own)
                 + shipped.get(vid, {}).get(resource, 0.0)
                 - consumption.get(vid, {}).get(resource, 0.0)
+                + npc_deltas.get(vid, {}).get(resource, 0.0)
             )
             stocks.setdefault(vid, {})[resource] = stock
             own_rates.setdefault(vid, {})[resource] = float(own)

@@ -20,6 +20,7 @@ from fastapi import HTTPException
 
 from travian_api.services.distribution.allocation import Resource
 from travian_api.services.distribution.npc import NpcPolicy
+from travian_api.web.routes import distribution as dist
 from travian_api.web.routes.distribution import PlanRequest, post_plan
 
 HUB, NEAR, FAR = 20002, 20011, 20003
@@ -395,3 +396,88 @@ class TestTheTwoTriggers:
         drawn_row = next(t for t in drawing.npc_triggers if t.kind == "crop_banked")
         quiet_row = next(t for t in quiet.npc_triggers if t.kind == "crop_banked")
         assert quiet_row.level - drawn_row.level == pytest.approx(24 * 12_000)
+
+
+# ── Both store checks read the same stores ───────────────────────────────────
+
+
+def _floored_plan():
+    """The account above with real stores, so both store checks have one to read.
+
+    02 draws 12,000/h of lumber, funded out of the 20,000/h of crop it retains
+    -- the one resource it produces and is not drawing on, so it pays for the
+    whole conversion.
+    """
+    body = PlanRequest.model_validate(
+        _payload(
+            window=DAY_16H,
+            granary_capacity=800_000,
+            crop_stock=100_000,
+            lumber_stock=100_000,
+        )
+    )
+    return body, asyncio.run(dist._plan_account(body)).plan
+
+
+def _continuous_net_rates(body, plan):
+    """The net rate ``_storage_findings`` hands the continuous store check.
+
+    Recorded off ``store_status`` itself rather than recomputed here: the figure
+    under test is the one that function is actually given, and a test that
+    rebuilt it would only be checking its own arithmetic.
+    """
+    real = dist.store_status
+    seen: dict[int, dict[Resource, float]] = {}
+
+    def recording(village_id, resource, stock, capacity, net_per_hour, *args, **kw):
+        seen.setdefault(village_id, {})[resource] = net_per_hour
+        return real(village_id, resource, stock, capacity, net_per_hour, *args, **kw)
+
+    dist.store_status = recording
+    try:
+        dist._storage_findings(body, plan, body.dispatch_window)
+    finally:
+        dist.store_status = real
+    return seen
+
+
+class TestBothStoreChecksNetTheConversion:
+    """The NPC trade moves resources INSIDE one village, so none of it is cargo.
+
+    `_npc_store_state` nets it and says why; `_storage_findings`, forty lines
+    below, built its rate from own production plus route cargo alone. So the
+    continuous check read 02's warehouse as draining at exactly the rate the
+    conversion fills it, on a store the plan leaves level, and read its granary
+    as banking every unit of crop while 12,000/h of it is traded away.
+    """
+
+    def test_the_drawn_store_is_credited_the_draw(self):
+        body, plan = _floored_plan()
+        _, _, trigger = dist._npc_store_state(body, plan)
+
+        continuous = _continuous_net_rates(body, plan)
+
+        # own 6,000 + drawn 12,000 - shipped 18,000 = 0: the store is level.
+        # Without the draw it reads as -12,000/h, which is -draw exactly.
+        assert trigger[HUB][Resource.LUMBER] == pytest.approx(0.0)
+        assert continuous[HUB][Resource.LUMBER] == pytest.approx(0.0)
+
+    def test_the_feedstock_store_is_debited_what_the_conversion_spent(self):
+        body, plan = _floored_plan()
+        _, _, trigger = dist._npc_store_state(body, plan)
+
+        continuous = _continuous_net_rates(body, plan)
+
+        # 20,000/h retained, 12,000/h of it converted into wood: +8,000/h. Crop
+        # is the only feedstock, so its share of every conversion is 1.0.
+        assert trigger[HUB][Resource.CROP] == pytest.approx(8_000.0)
+        assert continuous[HUB][Resource.CROP] == pytest.approx(8_000.0)
+
+    def test_the_two_checks_agree_on_every_store_of_a_floored_village(self):
+        body, plan = _floored_plan()
+        _, _, trigger = dist._npc_store_state(body, plan)
+
+        continuous = _continuous_net_rates(body, plan)
+
+        for resource in Resource:
+            assert continuous[HUB][resource] == pytest.approx(trigger[HUB][resource]), resource
