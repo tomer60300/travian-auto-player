@@ -10,9 +10,14 @@ over-claims the account, consumers break even so the profile does not drift, and
 demand it cannot meet is reported instead of quietly dropped.
 """
 
+import inspect
+
 import pytest
 
+from travian_api.services.distribution import night_profile
 from travian_api.services.distribution.allocation import AllocationMode, Resource
+from travian_api.services.distribution.geometry import MapGeometry
+from travian_api.services.distribution.merchants import EUROPE2_TEUTON, MerchantModel
 from travian_api.services.distribution.night_profile import (
     NightVillage,
     derive_night_profile,
@@ -51,8 +56,8 @@ def _account():
 def _derive(**kw):
     defaults = dict(
         window_hours=8.0,
-        map_span=401,
-        speed_fields_per_hour=12.0,
+        geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+        merchant_model=EUROPE2_TEUTON,
         day_retention={Resource.LUMBER: {ARMY: 7_700.0}},
         hub_id=HUB,
         consumer_ids=[ARMY],
@@ -117,8 +122,8 @@ class TestItNeverOverClaimsTheAccount:
         profile = derive_night_profile(
             villages,
             window_hours=8.0,
-            map_span=401,
-            speed_fields_per_hour=12.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
             day_retention={},
             hub_id=HUB,
             consumer_ids=[ARMY],
@@ -200,8 +205,8 @@ class TestTheLibraryContractSurvivesANegativeProducer:
         profile = derive_night_profile(
             villages,
             window_hours=8.0,
-            map_span=401,
-            speed_fields_per_hour=12.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
             day_retention={},
             hub_id=HUB,
             consumer_ids=[],
@@ -238,8 +243,8 @@ class TestAProfileNeverQuietlyOverClaimsTheAccount:
         return derive_night_profile(
             self._two_villages(hub_crop),
             window_hours=8.0,
-            map_span=401,
-            speed_fields_per_hour=12.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
             day_retention={},
             hub_id=HUB,
             consumer_ids=[],
@@ -298,8 +303,8 @@ class TestAMaterialSpendLargerThanProduction:
         return derive_night_profile(
             self._two_villages(hub_lumber),
             window_hours=8.0,
-            map_span=401,
-            speed_fields_per_hour=12.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
             day_retention={},
             hub_id=HUB,
             consumer_ids=[],
@@ -403,8 +408,8 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
         return derive_night_profile(
             self._account(cap, hub_cap),
             window_hours=8.0,
-            map_span=401,
-            speed_fields_per_hour=12.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
             day_retention={Resource.LUMBER: {ARMY: 7_700.0, FAR: 6_000.0}},
             hub_id=HUB,
             consumer_ids=[ARMY],
@@ -457,8 +462,8 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
         profile = derive_night_profile(
             far_away,
             window_hours=8.0,
-            map_span=401,
-            speed_fields_per_hour=12.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
             day_retention={Resource.LUMBER: {FAR: 6_000.0}},
             hub_id=HUB,
             consumer_ids=[ARMY],
@@ -495,3 +500,145 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
 
         assert grounded.allocations[Resource.CROP][HUB].value == 60_000.0
         assert grounded.unmet[Resource.CROP] == pytest.approx(30_000.0)
+
+
+# ── Capacity and geometry are injected, never re-derived here ────────────────
+
+
+class TestCapacityAndGeometryAreInjected:
+    """Operator ruling section 1: capacity lives behind ONE injectable
+    `MerchantModel` with `calibrate()`, and nothing else in the planner may
+    hardcode a capacity -- a hardcoded one anywhere else IS a finding.
+
+    This module took `merchant_base_capacity=2500` and
+    `trade_office_bonus_per_level=0.2` as primitives and re-derived
+    `base * (1 + k * level)` inline. The numbers were right and the HTTP path
+    passed correct ones; the defect is that a `calibrate()` reading would
+    update `merchants.py` and silently leave this copy stale. Geometry the
+    same: a private `_wrapped_fields` re-implemented `MapGeometry`'s
+    `min(raw, span - raw)`.
+    """
+
+    def test_it_takes_a_merchant_model_and_a_map_geometry(self):
+        params = inspect.signature(derive_night_profile).parameters
+
+        assert "merchant_model" in params, "capacity must arrive as the one injectable model"
+        assert "geometry" in params, "distance must arrive as the one map model"
+        for primitive in (
+            "merchant_base_capacity",
+            "trade_office_bonus_per_level",
+            "speed_fields_per_hour",
+            "map_span",
+        ):
+            assert primitive not in params, (
+                f"{primitive} is a second place to state something the injected model states"
+            )
+
+    def test_the_reserve_comes_from_the_optimizers_own_constant(self):
+        """It defaulted to a bare `2` beside `DEFAULT_MERCHANT_RESERVE`."""
+        assert (
+            inspect.signature(derive_night_profile).parameters["merchant_reserve"].default
+            is night_profile.DEFAULT_MERCHANT_RESERVE
+        )
+        assert night_profile.DEFAULT_MERCHANT_RESERVE == 2
+
+    def test_no_capacity_arithmetic_is_left_in_the_module(self):
+        """The inline `base * (1 + bonus * level)` and the hand-rolled torus,
+        by the text of them. Both now live in one place each."""
+        source = inspect.getsource(night_profile)
+
+        assert "2500" not in source
+        assert "trade_office_bonus_per_level" not in source
+        assert "_wrapped_fields" not in source
+
+    @staticmethod
+    def _forced_sender(model):
+        """One sender half an hour from the hub, so the shed limit binds.
+
+        18 merchants (20 less the reserve of 2) making 8 round trips in an
+        8-hour night sheds `18 x capacity` an hour. Its granary ceiling is
+        (0.60 - 0.25) x 160,000 / 8 = 7,000/h, far under its own 100,000/h, so
+        it is a forced sender and its retention is `own - shed_limit`.
+        """
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=0.0, wh=1_200_000, gr=800_000, to=0),
+            _village(ARMY, "sender", 6, 0, crop=100_000.0, to=0),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=model,
+            day_retention={},
+            hub_id=HUB,
+        )
+        return profile.allocations[Resource.CROP][ARMY].value
+
+    def test_the_injected_model_is_what_sizes_the_shed_limit(self):
+        # 18 x 2,500 = 45,000/h shed, so 100,000 - 45,000 = 55,000 is retained.
+        assert self._forced_sender(EUROPE2_TEUTON) == pytest.approx(55_000.0)
+
+    def test_a_recalibrated_model_moves_it_with_no_other_change(self):
+        # Half the capacity carries half the cargo: 18 x 1,250 = 22,500/h shed,
+        # so 100,000 - 22,500 = 77,500 is retained. This is the whole point of
+        # the seam -- one `calibrate()` reading has to reach here too.
+        half = MerchantModel(base_capacity=1_250, bonus_per_trade_office_level=0.20)
+
+        assert self._forced_sender(half) == pytest.approx(77_500.0)
+
+    def test_the_trade_office_bonus_comes_from_the_model_too(self):
+        """A Trade Office 10 village carries 2,500 x (1 + 0.2 x 10) = 7,500,
+        three times the base -- so 18 of them shed 135,000/h, more than the
+        village makes, and the ceiling is what is left holding it: 7,000."""
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=0.0, wh=1_200_000, gr=800_000, to=0),
+            _village(ARMY, "sender", 6, 0, crop=100_000.0, to=10),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+        )
+
+        assert profile.allocations[Resource.CROP][ARMY].value == pytest.approx(7_000.0)
+
+    def test_the_odd_span_boundary_is_the_map_geometrys_answer(self):
+        """The one place a hand-rolled torus and `MapGeometry` could differ.
+
+        `_wrapped_fields` mod-ed and compared against `span / 2` (200.5 on a
+        401-wide world); `MapGeometry` takes `min(raw, span - raw)`. They agree
+        everywhere a village can be, and the boundary is where that is worth
+        checking: 201 apart IS 200 apart, and 205 apart is 196 -- so on this
+        map the farther-looking village is the nearer one.
+        """
+        geometry = MapGeometry(span=401, speed_fields_per_hour=12.0)
+
+        assert geometry.distance((-100, 0), (100, 0)) == pytest.approx(200.0)
+        assert geometry.distance((-100, 0), (101, 0)) == pytest.approx(200.0)
+        assert geometry.distance((-100, 0), (105, 0)) == pytest.approx(196.0)
+
+    def test_the_derivation_measures_around_the_seam_and_not_across_it(self):
+        """A hub at (-200|0) and a sender at (199|0) are two fields apart, not
+        399. Two fields is 24 round trips in an 8-hour night, so 18 merchants
+        shed 135,000/h and the sender's 100,000/h is held down to its 7,000/h
+        ceiling. Measured flat the round trip does not fit the night at all,
+        the shed limit is zero, and the same village is told to keep every
+        unit it makes.
+        """
+        villages = [
+            _village(HUB, "hub", -200, 0, crop=0.0, wh=1_200_000, gr=800_000, to=0),
+            _village(ARMY, "across-the-seam", 199, 0, crop=100_000.0, to=0),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+        )
+
+        assert profile.allocations[Resource.CROP][ARMY].value == pytest.approx(7_000.0)

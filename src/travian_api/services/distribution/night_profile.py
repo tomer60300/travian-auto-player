@@ -31,7 +31,6 @@ Pure: no requests, no clock, no I/O. Everything it needs is passed in.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -39,6 +38,15 @@ from dataclasses import dataclass, field
 # both because this module uses it and so the older `night_profile.MATERIALS`
 # import keeps resolving.
 from .allocation import MATERIALS, Allocation, AllocationMode, Resource
+from .geometry import MapGeometry
+
+# The reserve, capacity and distance models the planner already owns. Operator
+# ruling section 1: capacity lives behind ONE injectable `MerchantModel` with
+# `calibrate()`, and nothing else in the planner may hardcode a capacity -- so
+# this module takes the model rather than the two primitives it is built from,
+# and `MapGeometry` rather than its own copy of the torus.
+from .merchants import MerchantModel
+from .optimizer import DEFAULT_MERCHANT_RESERVE
 
 DEFAULT_TARGET_FILL = 0.60
 """How full a store may be at dawn, and the FLOOR it must reach.
@@ -189,35 +197,27 @@ class NightProfile:
     whatever the largest share could not cover lands in `unmet` instead."""
 
 
-def _wrapped_fields(dx: float, dy: float, map_span: int) -> float:
-    """Field distance on Travian's wrapped map.
+def _hours(a: NightVillage, b: NightVillage, geometry: MapGeometry) -> float:
+    """Travel time one way, in hours, on Travian's wrapped map.
 
     The map is a torus: the shortest path between two edge villages can cross
     the seam, and the game routes merchants that way. Raw hypot made a hub at
     (-200|0) see a supplier at (200|0) as 400 fields away when it is 1, so the
     night draw picked a genuinely distant village over a next-door one and
     understated how much edge villages can shed overnight.
+
+    Measured by :class:`~.geometry.MapGeometry`, which the plan side already
+    uses, rather than by a second implementation of the same wrap here.
     """
-    half = map_span / 2.0
-    dx = abs(dx) % map_span
-    dy = abs(dy) % map_span
-    if dx > half:
-        dx = map_span - dx
-    if dy > half:
-        dy = map_span - dy
-    return math.hypot(dx, dy)
-
-
-def _hours(a: NightVillage, b: NightVillage, speed: float, map_span: int) -> float:
-    return _wrapped_fields(a.x - b.x, a.y - b.y, map_span) / speed
+    return geometry.one_way_minutes((a.x, a.y), (b.x, b.y)) / 60.0
 
 
 def derive_night_profile(
     villages: Sequence[NightVillage],
     *,
     window_hours: float,
-    speed_fields_per_hour: float,
-    map_span: int,
+    geometry: MapGeometry,
+    merchant_model: MerchantModel,
     day_retention: Mapping[Resource, Mapping[int, float]],
     hub_id: int,
     consumer_ids: Sequence[int] = (),
@@ -225,13 +225,21 @@ def derive_night_profile(
     tribute_at: tuple[int, int] | None = None,
     baseline_fill: float = DEFAULT_BASELINE_FILL,
     target_fill: float = DEFAULT_TARGET_FILL,
-    merchant_base_capacity: int = 2500,
-    trade_office_bonus_per_level: float = 0.2,
-    merchant_reserve: int = 2,
+    merchant_reserve: int = DEFAULT_MERCHANT_RESERVE,
 ) -> NightProfile:
     """Allocations for one night, from capacities and production alone.
 
     Args:
+        geometry: the map's span and the merchants' speed, as
+            :func:`craft_plan` takes them. The wrap matters here for the same
+            reason it does there -- the night draw orders suppliers by
+            distance -- and one model means the two cannot disagree about it.
+        merchant_model: how much one merchant carries. Injected rather than
+            re-derived from a base and a bonus, per operator ruling section 1:
+            capacity lives behind this one model and its ``calibrate()``, and
+            nothing else in the planner may hardcode one. It bounds how much a
+            village can SHED overnight, so a stale copy here would promise
+            cargo the merchants cannot carry.
         day_retention: what each village retains per hour under the DAY profile,
             per resource. The army villages' shares come from here rather than
             being invented, so the night is the day's plan bounded by the stores.
@@ -260,9 +268,10 @@ def derive_night_profile(
         how far it goes: a village one field from its neighbour turns round dozens
         of times, one an hour away twice.
         """
-        capacity = merchant_base_capacity * (
-            1 + trade_office_bonus_per_level * v.trade_office_level
-        )
+        # Off the injected model, floored exactly as the plan side floors it --
+        # understating capacity over-provisions merchants, overstating it
+        # breaches the budget, and only the first is recoverable.
+        capacity = merchant_model.capacity(v.trade_office_level)
         fleet = max(0, v.merchants_total - merchant_reserve)
         # The operator's cap, where there is one, is what may actually be in the
         # air -- so it is the fleet this village ships the night with. The
@@ -279,7 +288,7 @@ def derive_night_profile(
         # count -- so the "8 busy at 02" ceiling this function exists to honour
         # was negated inside it. The hub distance is already computed below for
         # the draw ordering.
-        one_way = _hours(v, by_id[hub_id], speed_fields_per_hour, map_span)
+        one_way = _hours(v, by_id[hub_id], geometry)
         if one_way <= 0:
             # `v` IS the hub. The crop pass can force the hub itself to ship
             # (its granary ceiling can sit under its own production), and its
@@ -287,7 +296,7 @@ def derive_night_profile(
             # village is the only destination available here, and it is what
             # this function used for everyone before -- so the hub keeps its
             # previous reading rather than acquiring a guessed one.
-            others = [_hours(v, o, speed_fields_per_hour, map_span) for o in villages if o is not v]
+            others = [_hours(v, o, geometry) for o in villages if o is not v]
             one_way = min(others) if others else 0.0
             if one_way <= 0:
                 return 0.0
@@ -350,7 +359,7 @@ def derive_night_profile(
         if demand > 0:
             order = sorted(
                 (vid for vid in by_id if vid != hub_id and vid not in entries),
-                key=lambda vid: _hours(by_id[vid], by_id[hub_id], speed_fields_per_hour, map_span),
+                key=lambda vid: _hours(by_id[vid], by_id[hub_id], geometry),
             )
             for vid in order:
                 if demand <= 0:
@@ -420,11 +429,11 @@ def derive_night_profile(
 
             def _cost(vid: int) -> float:
                 v = by_id[vid]
-                return _wrapped_fields(v.x - tx, v.y - ty, map_span)
+                return geometry.distance((v.x, v.y), (tx, ty))
         else:
 
             def _cost(vid: int) -> float:
-                return _hours(by_id[vid], by_id[hub_id], speed_fields_per_hour, map_span)
+                return _hours(by_id[vid], by_id[hub_id], geometry)
 
         for vid in sorted((v for v in by_id if v not in crop), key=_cost):
             if demand <= 0:

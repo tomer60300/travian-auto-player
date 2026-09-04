@@ -383,6 +383,7 @@ class TestNightDerivationKnowsTheMapWraps:
     edge villages can shed overnight."""
 
     def _derive(self, map_span):
+        from travian_api.services.distribution.geometry import MapGeometry
         from travian_api.services.distribution.night_profile import (
             NightVillage,
             derive_night_profile,
@@ -418,8 +419,8 @@ class TestNightDerivationKnowsTheMapWraps:
         return derive_night_profile(
             villages,
             window_hours=8.0,
-            speed_fields_per_hour=12.0,
-            map_span=map_span,
+            geometry=MapGeometry(span=map_span, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
             day_retention={},
             hub_id=1,
             consumer_ids=[4],

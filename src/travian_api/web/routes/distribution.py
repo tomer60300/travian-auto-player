@@ -3316,8 +3316,14 @@ async def post_night_profile(
     profile = derive_night_profile(
         villages,
         window_hours=window_hours,
-        speed_fields_per_hour=body.speed_fields_per_hour,
-        map_span=body.map_span,
+        # The same two models `_plan_account` builds its `PlannerConfig` from,
+        # so the night derivation and the plan that runs it cannot disagree
+        # about a distance or about what a merchant carries.
+        geometry=MapGeometry(span=body.map_span, speed_fields_per_hour=body.speed_fields_per_hour),
+        merchant_model=MerchantModel(
+            base_capacity=body.merchant_base_capacity,
+            bonus_per_trade_office_level=body.trade_office_bonus_per_level,
+        ),
         day_retention=day_retention,
         hub_id=hub,
         consumer_ids=consumers,
@@ -3325,8 +3331,6 @@ async def post_night_profile(
         tribute_at=tribute_at,
         baseline_fill=body.baseline_fill,
         target_fill=body.target_fill,
-        merchant_base_capacity=body.merchant_base_capacity,
-        trade_office_bonus_per_level=body.trade_office_bonus_per_level,
         merchant_reserve=body.merchant_reserve,
     )
 

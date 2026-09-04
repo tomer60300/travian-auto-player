@@ -109,8 +109,8 @@ class TestTheFillFractionsAreTwentyFiveAndSixty:
         profile = derive_night_profile(
             [hub, village],
             window_hours=8.0,
-            speed_fields_per_hour=12.0,
-            map_span=401,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
             # Far above anything the store can hold, so the answer is the
             # ceiling and nothing else.
             day_retention={Resource.LUMBER: {ARMY: 999_999.0}},
