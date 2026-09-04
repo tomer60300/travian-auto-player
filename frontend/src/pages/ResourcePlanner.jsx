@@ -163,6 +163,19 @@ const LS_LAST_RUN = 'planner_last_live_run'
 // villages a single run VISITS (and therefore may disable stale routes on), so
 // the confirmation copy derives its counts from the same number the request uses.
 const MAX_ROUTES_PER_RUN = 3
+/** What the box says, with blank falling back and 0 SURVIVING.
+ *
+ * The backend documents 0 as "reconcile only: read, disable what the plan no
+ * longer wants, and create nothing — the safe first half of a profile switch",
+ * and the box offers it (`min="0"`). `Number(routesPerRun) || MAX_ROUTES_PER_RUN`
+ * turned that request into three live route creations, which is the opposite
+ * instruction: the operator asks for the cautious half and gets the committing
+ * one. Blank still falls back, because blank is unknown and unknown is not 0.
+ */
+const routeCap = (typed) =>
+  String(typed).trim() === '' || !Number.isFinite(Number(typed))
+    ? MAX_ROUTES_PER_RUN
+    : Number(typed)
 // Villages a single reconciliation chunk visits. Two paced reads each, plus a
 // disable and its verifying re-read where there is something stale, lands a
 // chunk of five at roughly 40-70 seconds — comfortably inside one request, which
@@ -275,13 +288,26 @@ const LS_RESERVED_WINDOW = 'planner_reserved_window'
 // Only complete rows go to the backend: a half-typed target would 422 the
 // whole request, and the operator is mid-edit, not in error. Shared by the
 // plan build and the full-day check so both see the same tributes.
+/** A coordinate the operator actually typed. Blank is not 0.
+ *
+ * `Number('') || 0` turned a cleared box into (0|0) -- the middle of the map --
+ * while the box on screen still read blank, so a half-typed tribute was planned
+ * against a village that is not where it is, with the distance, the cycle and
+ * the merchant count all computed from the wrong tile. A row missing one is a
+ * draft, on exactly the rule its missing name or crop rate already followed.
+ */
+const hasCoord = (value) => String(value).trim() !== '' && Number.isFinite(Number(value))
+
+const foreignTargetIsDraft = (t) =>
+  !String(t.name).trim() || !(Number(t.crop_per_hour) > 0) || !hasCoord(t.x) || !hasCoord(t.y)
+
 const usableForeignTargets = (targets, villages = []) =>
   targets
-    .filter((t) => t.name.trim() && Number(t.crop_per_hour) > 0)
+    .filter((t) => !foreignTargetIsDraft(t))
     .map((t) => ({
       name: t.name.trim(),
-      x: Number(t.x) || 0,
-      y: Number(t.y) || 0,
+      x: Number(t.x),
+      y: Number(t.y),
       crop_per_hour: Number(t.crop_per_hour),
       safety_margin_pct: Number(t.safety_margin_pct) || 0,
       route_eligible: Boolean(t.route_eligible),
@@ -1122,6 +1148,14 @@ export default function ResourcePlanner() {
     // allowance -- so a route set built while it said "awake" prescribes
     // deliveries nothing funds.
     //
+    // relayFor and pruneToWindow are here because they were MISSING, and both
+    // are in the payload: `relay_for` decides which village forwards whose
+    // cargo and `prune_to_window` decides what the run leaves behind. The
+    // sheet is retyped into the game's trade-route dialog, so a route table
+    // that outlived the tier it describes is not a stale display -- it is
+    // wrong instructions for a live account. Nothing tests these arrays
+    // against `buildPlanPayload`, which is how two fields drifted out of one.
+    //
     // And every one of these sentences is above the array rather than inside
     // it, which is now a rule and not a habit: `depOrder.js` guards this hook
     // by TEXT-scanning everything between `}, [` and `]`, comments included, so
@@ -1138,6 +1172,7 @@ export default function ResourcePlanner() {
     consumption,
     villageRoles,
     mayRelay,
+    relayFor,
     roleTemplates,
     merchantModel,
     foreignTargets,
@@ -1146,6 +1181,7 @@ export default function ResourcePlanner() {
     activeProfile,
     profileAttendance,
     reservedWindow,
+    pruneToWindow,
   ])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
@@ -2118,7 +2154,7 @@ export default function ResourcePlanner() {
           ...buildExecutePayload(),
           dry_run: dryRun,
           disable_existing: disableExisting,
-          max_routes_per_run: Number(routesPerRun) || MAX_ROUTES_PER_RUN,
+          max_routes_per_run: routeCap(routesPerRun),
           // Targeting a single pair is how a first live run against a real
           // account becomes a controlled test rather than an uncontrolled one
           // with a small blast radius. Omitted entirely when unset, so an
@@ -2268,6 +2304,19 @@ export default function ResourcePlanner() {
       )
       return
     }
+    // `Number('') / 100` is 0, so an emptied box used to ask for a profile
+    // that empties to 0% or fills to 0% -- and neither is what a blank box
+    // says. It says nothing, and nothing is not a threshold. Refused here
+    // rather than defaulted, because a derivation is only as good as the two
+    // figures it is measured from and guessing one of them is how a profile
+    // stops matching the account it was built for.
+    if (String(baselineFill).trim() === '' || String(targetFill).trim() === '') {
+      toast.error(
+        'Type both fills before deriving — a blank box is not 0%, and a store ' +
+          'emptied to nothing is a different night from one you did not answer for.'
+      )
+      return
+    }
     setDeriving(true)
     try {
       const res = await api.post('/distribution/night-profile', {
@@ -2352,7 +2401,7 @@ export default function ResourcePlanner() {
             // Whole-day mode provisions as it sweeps -- one read per village
             // serves reconcile AND create, which is the entire point of the
             // single pass. Otherwise the sweep only takes routes away.
-            max_routes_per_run: wholeDay ? Number(routesPerRun) || MAX_ROUTES_PER_RUN : 0,
+            max_routes_per_run: wholeDay ? routeCap(routesPerRun) : 0,
             ...(wholeDay && Number(maxGameRows) > 0
               ? { max_game_rows_per_run: Number(maxGameRows) }
               : {}),
@@ -2744,9 +2793,14 @@ export default function ResourcePlanner() {
     }
     setDayChecking(true)
     try {
+      // `!= null`, not `> 0`: a ceiling of 0 is the answer "tell me when this
+      // store is empty", and the truthiness gate that used to be here read it
+      // as "no ceiling at all" -- so the one village whose alert level is the
+      // most urgent one there is was the one village never checked. Blank is
+      // still absent, because blank is unknown and unknown is not zero.
       const ceilings = {}
       for (const [vid, value] of Object.entries(cropCeilings)) {
-        if (Number(value) > 0) ceilings[vid] = Number(value)
+        if (value != null) ceilings[vid] = Number(value)
       }
       // The day check routes every profile through the SAME optimizer as
       // /plan, so it needs the same inputs: Trade Office levels, the merchant
@@ -4228,9 +4282,20 @@ export default function ResourcePlanner() {
                 min="1"
                 aria-label="Merchant base capacity"
                 className="input-field w-24 text-right py-1"
-                value={merchantModel.base_capacity}
+                value={merchantModel.base_capacity ?? ''}
                 onChange={(e) =>
-                  setMerchantModel((m) => ({ ...m, base_capacity: Number(e.target.value) }))
+                  setMerchantModel((m) => ({
+                    ...m,
+                    // `Number('')` is 0, and a 0 here is not what an emptied box
+                    // says. The four boxes beside this one already guard it; these
+                    // two did not, so clearing either wrote a zero nobody typed --
+                    // and then the two went different wrong ways. Base capacity was
+                    // dropped by `|| undefined` at the payload, so the box read 0
+                    // while the plan was built at the backend default; the bonus was
+                    // kept, so an accidental clear silently stopped every Trade
+                    // Office level adding capacity.
+                    base_capacity: e.target.value === '' ? undefined : Number(e.target.value),
+                  }))
                 }
               />
             </label>
@@ -4242,9 +4307,13 @@ export default function ResourcePlanner() {
                 step="0.05"
                 aria-label="Trade Office bonus per level"
                 className="input-field w-20 text-right py-1"
-                value={merchantModel.bonus_per_to_level}
+                value={merchantModel.bonus_per_to_level ?? ''}
                 onChange={(e) =>
-                  setMerchantModel((m) => ({ ...m, bonus_per_to_level: Number(e.target.value) }))
+                  setMerchantModel((m) => ({
+                    ...m,
+                    bonus_per_to_level:
+                      e.target.value === '' ? undefined : Number(e.target.value),
+                  }))
                 }
               />
             </label>
@@ -4303,9 +4372,15 @@ export default function ResourcePlanner() {
                 placeholder={String(DEFAULT_MERCHANT_MODEL.merchant_headroom * 100)}
                 className="input-field w-20 text-right py-1"
                 value={
+                  // `fractionToPercent`, the same helper the stock-floor box
+                  // uses, rather than a round to one decimal: the box writes
+                  // back what it renders, so rounding the display silently
+                  // rewrote a server-calibrated 0.1234 to 0.123 on the first
+                  // keystroke. A display that changes the value it displays is
+                  // not a display.
                   merchantModel.merchant_headroom == null
                     ? ''
-                    : Math.round(merchantModel.merchant_headroom * 1000) / 10
+                    : fractionToPercent(merchantModel.merchant_headroom)
                 }
                 onChange={(e) =>
                   setMerchantModel((m) => ({
@@ -4417,7 +4492,10 @@ export default function ResourcePlanner() {
                       {foreignTargets.map((t, i) => {
                         const owed = Number(t.crop_per_hour) || 0
                         const ships = owed * (1 + (Number(t.safety_margin_pct) || 0) / 100)
-                        const incomplete = !String(t.name).trim() || owed <= 0
+                        // The same predicate `usableForeignTargets` filters on,
+                        // so the badge and the payload can never disagree about
+                        // which rows are being planned.
+                        const incomplete = foreignTargetIsDraft(t)
                         const patch = (field, value) =>
                           setForeignTargets((prev) =>
                             prev.map((row, j) => (j === i ? { ...row, [field]: value } : row))
@@ -4563,7 +4641,7 @@ export default function ResourcePlanner() {
                               {incomplete && (
                                 <span
                                   className="text-warning mr-2"
-                                  title="Needs a name and a crop rate before the planner uses it"
+                                  title="Needs a name, a crop rate and a coordinate before the planner uses it"
                                 >
                                   draft
                                 </span>
