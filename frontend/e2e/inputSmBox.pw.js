@@ -26,9 +26,9 @@
  * a desktop pointer is a narrow window, not a phone, and the app's own
  * `@media (pointer: coarse)` block is orthogonal to width by design.
  *
- * This file carries its own fixture rather than sharing `inputWidths.pw.js`'s.
+ * The fixture is `plannerHarness.js`, a plain module rather than a spec:
  * Playwright collects every `*.pw.js` under `e2e/`, so importing from another
- * spec would register that spec's tests a second time.
+ * SPEC would register that spec's tests a second time.
  *
  * Running it:
  *   cd frontend
@@ -38,154 +38,7 @@
 
 import { expect, test } from '@playwright/test'
 
-const SERVER = 'https://ts2.x1.europe.travian.com'
-const PLAYER = 'e2e-operator'
-const KEY = `${SERVER}|${PLAYER}`
-
-const CAPITAL = 20002
-const DEF_A = 20011
-
-// The three widths the UI Definition of Done names.
-const VIEWPORTS = [
-  { width: 375, height: 900 },
-  { width: 768, height: 1000 },
-  { width: 1440, height: 1200 },
-]
-
-function village(id, name, x, y) {
-  return {
-    village_id: id,
-    name,
-    x,
-    y,
-    merchants_total: 20,
-    merchants_free: 20,
-    lumber_per_hour: 8372,
-    clay_per_hour: 5168,
-    iron_per_hour: 5809,
-    crop_per_hour: 2200,
-    crop_draining: false,
-    lumber_stock: 100_000,
-    clay_stock: 100_000,
-    iron_stock: 100_000,
-    crop_stock: 100_000,
-    warehouse_capacity: 400_000,
-    granary_capacity: 400_000,
-  }
-}
-
-const SNAPSHOT = {
-  villages: [village(CAPITAL, '02', 0, 0), village(DEF_A, '11', 4, 0)],
-  map_span: 800,
-  speed_fields_per_hour: 16,
-  requests_used: 0,
-  warnings: [],
-}
-
-/** A clean, feasible one-route plan: the least this stage needs to render. */
-const PLAN = {
-  rows: [
-    {
-      origin: CAPITAL,
-      origin_name: '02',
-      destination: DEF_A,
-      destination_name: '11',
-      cargo: { lumber: 7920, clay: 0, iron: 0, crop: 0 },
-      cycle_hours: 4,
-      dispatch: '08:20',
-      arrival: '09:48',
-      merchants: 3,
-    },
-  ],
-  budgets: [{ village_id: CAPITAL, committed: 3, spare: 14, over_budget: false, legs: [] }],
-  shortfalls: [],
-  unallocated: [],
-  total_merchants: 3,
-  feasible: true,
-  verdict: {
-    executable: true,
-    clean: true,
-    blockers: [],
-    covers: ['every merchant budget', 'every receiver is routable'],
-    unweighed: [],
-    critical_findings: 0,
-  },
-  warnings: [],
-  relays: [],
-  role_deviations: [],
-  village_nets: [],
-  night_overruns: [],
-  npc_reserves: [],
-  npc_triggers: [],
-  diagnostics: null,
-  plan_digest: 'd'.repeat(64),
-}
-
-/** Everything the shell asks for, and a hard stop for anything else.
- *
- * Fail-closed is the whole safety model: there is a live Travian account on
- * this machine, so anything unrecognised is aborted rather than passed through.
- */
-async function isolate(page) {
-  await page.routeWebSocket(/.*/, (ws) => ws.close())
-  await page.route('**/api/**', (route) => {
-    const path = new URL(route.request().url()).pathname
-    if (path.endsWith('/users/me')) {
-      return route.fulfill({ json: { id: 1, username: PLAYER, is_active: true } })
-    }
-    if (path.endsWith('/travian/status')) {
-      return route.fulfill({
-        json: {
-          connected: true,
-          server_url: SERVER,
-          player_name: PLAYER,
-          tribe_id: 1,
-          active_village_id: CAPITAL,
-          villages: SNAPSHOT.villages.map((v) => ({
-            id: v.village_id,
-            name: v.name,
-            x: v.x,
-            y: v.y,
-          })),
-        },
-      })
-    }
-    if (path.endsWith('/distribution/setup')) {
-      return route.fulfill({
-        status: 404,
-        json: { detail: 'No planner setup is saved for this account.' },
-      })
-    }
-    if (path.endsWith('/distribution/plan')) return route.fulfill({ json: PLAN })
-    return route.abort('blockedbyclient')
-  })
-}
-
-async function seed(page) {
-  await page.addInitScript(
-    ([key, snapshot]) => {
-      const set = (name, value) => localStorage.setItem(`${name}::${key}`, JSON.stringify(value))
-      localStorage.setItem('token', 'e2e-not-a-real-token')
-      set('planner_snapshot', snapshot)
-      set('planner_snapshot_at', Date.now())
-    },
-    [KEY, SNAPSHOT],
-  )
-}
-
-/** The Targets stage, which carries the 25%/60% night pair. */
-async function openTargets(page) {
-  await page.goto('/resource-planner')
-  await page.getByRole('button', { name: 'Targets' }).click()
-  await expect(page.getByText('Derive an idle-window profile from your stores')).toBeVisible()
-}
-
-/** The Plan stage, which carries the five controlled-run boxes. */
-async function openPlan(page) {
-  await page.goto('/resource-planner')
-  await page.getByRole('button', { name: /^Build plan/ }).click()
-  await expect(page.getByText(/^Routes$/)).toBeVisible()
-}
+import { VIEWPORTS, isolate, openPlan, openTargets, seed } from './plannerHarness'
 
 const SURFACES = [
   { name: 'Targets stage (the 25%/60% night pair)', open: openTargets, expected: 2 },
