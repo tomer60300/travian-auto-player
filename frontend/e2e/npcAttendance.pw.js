@@ -293,10 +293,17 @@ test.describe('NPC attendance', () => {
     await page.reload()
     await page.getByRole('button', { name: 'Day & night' }).click()
 
-    await expect(page.getByLabel('Who is trading during Night')).toHaveValue('asleep')
-    // In words under the control, not only as a selected option: the state is
-    // never carried by a widget position alone.
-    await expect(page.getByText('nobody is trading', { exact: true })).toBeVisible()
+    const answer = page.getByLabel('Who is trading during Night')
+    await expect(answer).toHaveValue('asleep')
+    // In WORDS, and read off the control itself rather than off an echo beneath
+    // it. The rule this asserts is unchanged -- the state is never carried by a
+    // widget position alone -- but a `<select>` renders its chosen option's
+    // text, so the words were already there: the 11px grey line underneath
+    // printed the same sentence a second time, and one of the two copies was
+    // the illegible one. Dropped, and the assertion moved onto the control.
+    await expect(
+      answer.evaluate((el) => el.options[el.selectedIndex].textContent)
+    ).resolves.toBe('Nobody is trading')
   })
 
   test('the clock suggests and never decides', async ({ page }) => {

@@ -125,6 +125,31 @@ describe('RoleTemplates', () => {
     expect(html).toContain(ROLE_LABEL.def)
   })
 
+  // The subject is a LIST, and it read "DEF, Feeder has villages". Counted
+  // rather than pinned to one form, because one missing role is the commonest
+  // case and "DEF have villages" is the same defect the other way round.
+  it('agrees with the number of roles it is naming', () => {
+    expect(
+      render({ roleCounts: { ...NO_COUNTS, def: 4 }, missingTemplates: ['def'] })
+    ).toContain('has villages')
+    const two = render({
+      roleCounts: { ...NO_COUNTS, def: 4, feeder: 2 },
+      missingTemplates: ['def', 'feeder'],
+    })
+    expect(two).toContain('have villages')
+    expect(two).not.toContain('has villages')
+  })
+
+  // The remedy exists and works -- every village claiming an untyped role has a
+  // "Type the … figures" button that jumps into this panel with the caret in
+  // the row -- and the warning did not mention it, so the operator was told
+  // about a problem and left to find the fix.
+  it('names the button that fixes it, and where that button is', () => {
+    const html = render({ roleCounts: { ...NO_COUNTS, def: 4 }, missingTemplates: ['def'] })
+    expect(html).toContain('Type the … figures')
+    expect(html).toContain('Account')
+  })
+
   it('says nothing about missing templates when none are missing', () => {
     expect(render({ templates: { def: DEF_TEMPLATE } })).not.toContain('will refuse it')
   })

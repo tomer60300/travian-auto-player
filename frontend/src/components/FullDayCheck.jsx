@@ -157,7 +157,7 @@ export default function FullDayCheck({
       )}
 
       {cropRows.length > 0 && (
-        <ScrollableTable>
+        <ScrollableTable label="Crop across the whole day">
           <table className="w-full text-xs">
             <thead className="text-secondary uppercase">
               <tr>

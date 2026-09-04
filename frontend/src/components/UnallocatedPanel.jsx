@@ -47,7 +47,7 @@ export default function UnallocatedPanel({ rows, villages, expanded }) {
         village absorbs it. Unassigned is production minus every target the plan committed —
         a negative figure means the targets ask for more than the account makes.
       </p>
-      <ScrollableTable>
+      <ScrollableTable label="Unassigned production, resource by resource">
         <table className="w-full text-xs">
           <thead className="text-secondary uppercase">
             <tr>

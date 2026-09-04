@@ -44,7 +44,7 @@ export default function NpcBalancePanel({ reserves, triggers, drawByVillage, exp
       </p>
 
       {reserves.length > 0 && (
-        <ScrollableTable>
+        <ScrollableTable label="NPC conversion, village by village">
           <table className="w-full text-xs">
             <thead className="text-secondary uppercase">
               <tr>

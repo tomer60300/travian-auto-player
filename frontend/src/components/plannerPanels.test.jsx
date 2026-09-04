@@ -73,12 +73,24 @@ describe('DayNightPanel', () => {
   }
 
   it('shows both profiles with their opposite answers, which is the whole point', () => {
+    // Read off the SELECTS, which is where the answer is stated. It used to be
+    // asserted through the 11px echo printed under each of them -- the same
+    // sentence as the option above it, in the least legible type on the stage
+    // -- so dropping the echo is what moved this assertion onto the control
+    // that actually carries the answer.
+    const html = renderToString(<DayNightPanel {...props} />)
+    expect(html).toContain('<option value="awake" selected="">You are at the marketplace')
+    expect(html).toContain('<option value="asleep" selected="">Nobody is trading')
+    // And exactly one of each, so the two rows really do disagree.
+    expect(html.match(/<option value="awake" selected="">/g)).toHaveLength(1)
+    expect(html.match(/<option value="asleep" selected="">/g)).toHaveLength(1)
+
     const out = text(<DayNightPanel {...props} />)
-    expect(out).toContain('you are at the marketplace')
-    expect(out).toContain('nobody is trading')
     // Each window's share of the day, so the pair is comparable at a glance.
     expect(out).toContain('16h')
     expect(out).toContain('8h')
+    // And the axis that makes the tracks under them readable at all.
+    expect(out).toContain('00 06 12 18')
   })
 
   it('names every profile that owes an answer', () => {

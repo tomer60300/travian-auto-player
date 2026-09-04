@@ -111,7 +111,7 @@ const describe = (node) => {
  * the ends and the count instead: they all move together when a column is
  * added, and none of them can be typed wrong.
  */
-export default function ScrollableTable({ children }) {
+export default function ScrollableTable({ label, children }) {
   const ref = useRef(null)
   const [{ overflowing, hint }, setState] = useState({ overflowing: false, hint: '' })
 
@@ -148,7 +148,32 @@ export default function ScrollableTable({ children }) {
   return (
     <>
       {overflowing && <p className="scroll-hint text-secondary text-xs mb-1">{hint}</p>}
-      <div ref={ref} className={`relative overflow-x-auto${overflowing ? ' table-overflowing' : ''}`}>
+      {/* Reachable by Tab, and only while there is something out of reach.
+          WCAG 2.1.1: an `overflow-x: auto` box is scrolled by the pointer and
+          by nothing else. Tabbing into an off-screen INPUT auto-scrolls it into
+          view, which is why this went unnoticed for twelve rounds -- but the
+          read-only figures and the whole header row in the scrolled-away region
+          are not focusable, so a keyboard user could not reach them at all. On
+          the Account table that is every production rate and every column
+          heading past the pinned village.
+
+          Gated on `overflowing` for the same reason the hint and the pinning
+          are: a tab stop on a container with nothing hidden is a stop that does
+          nothing, and there are ten of these on the page.
+
+          `role="region"` needs a name to be a landmark at all, so the name is a
+          prop. It is the ONE thing here that is hand-written rather than
+          derived, and deliberately: what the hint says about a table has to
+          track its columns, and what a region is CALLED is its identity. The
+          derived form would be the pinned column's heading, which is "Village"
+          on five of them. */}
+      <div
+        ref={ref}
+        role={overflowing ? 'region' : undefined}
+        aria-label={overflowing ? label : undefined}
+        tabIndex={overflowing ? 0 : undefined}
+        className={`relative overflow-x-auto${overflowing ? ' table-overflowing' : ''}`}
+      >
         {children}
       </div>
     </>

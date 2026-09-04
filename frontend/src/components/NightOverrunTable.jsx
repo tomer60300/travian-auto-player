@@ -33,7 +33,7 @@ export default function NightOverrunTable({ rows, emptyNote, className = '' }) {
             These merchants are still out when the day profile takes over, so the morning
             starts short of the fleet its own routes were costed against.
           </p>
-          <ScrollableTable>
+          <ScrollableTable label="Night movements still on the road at the switch">
             <table className="w-full text-xs mt-1">
               <thead className="text-secondary uppercase">
                 <tr>

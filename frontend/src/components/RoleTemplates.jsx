@@ -131,7 +131,20 @@ export default function RoleTemplates({
             on the container it left the hint flush under the intro text with
             the whole gap below, reading as a caption for the block above it
             instead of a label for the table below. */}
-        <ScrollableTable>
+        {/* ABOVE the table, because the column it is about is the last of
+            eleven and this table shows four of them at 1440: printed after the
+            table, an explanation of an off-screen column is reached only by
+            scrolling past the thing it explains. "Assumed crop/h" is the
+            header verbatim, so the scroll hint's own wording leads to it. */}
+        <p className="text-secondary mb-2 max-w-3xl">
+          <span className="text-primary">Assumed crop/h ships nothing.</span> Section 9 calls
+          these profiles flat constants and expects drift between manual updates, so this is
+          the figure the planner compares the snapshot&apos;s own net crop against — over 20%
+          apart and it raises a warning. What a role should KEEP of its crop is its crop
+          target; what it spends is refused outright, because the snapshot&apos;s crop rate is
+          already net of upkeep.
+        </p>
+        <ScrollableTable label="Role templates, one profile per kind of village">
           <table className="w-full text-xs">
             <thead className="text-secondary uppercase">
               <tr>
@@ -366,14 +379,6 @@ export default function RoleTemplates({
             </tbody>
           </table>
         </ScrollableTable>
-        <p className="text-secondary mt-2 max-w-3xl">
-          <span className="text-primary">Assumed crop/h ships nothing.</span> Section 9 calls
-          these profiles flat constants and expects drift between manual updates, so this is
-          the figure the planner compares the snapshot&apos;s own net crop against — over 20%
-          apart and it raises a warning. What a role should KEEP of its crop is its crop
-          target above; what it spends is refused outright, because the snapshot&apos;s crop
-          rate is already net of upkeep.
-        </p>
         {/* Named in words as well as flagged in the row: the backend
             refuses a role whose template never arrived, and an operator
             who has collapsed this panel needs to know which role it is
@@ -381,9 +386,25 @@ export default function RoleTemplates({
         {missingTemplates.length > 0 && (
           <p className="text-warning mt-2">
             {'\u26A0 '}
-            {missingTemplates.map((role) => ROLE_LABEL[role]).join(', ')} has villages
-            but no template, so the plan will refuse it rather than read those villages as
-            keeping their own production.
+            {missingTemplates.map((role) => ROLE_LABEL[role]).join(', ')}{' '}
+            {/* The subject is a LIST, and it read "DEF, Feeder has villages".
+                Counted rather than fixed to one form, because one missing role
+                is the commonest case and "DEF have villages" is the same defect
+                the other way round. */}
+            {missingTemplates.length === 1 ? 'has' : 'have'} villages but no template, so the
+            plan will refuse it rather than read those villages as keeping their own
+            production.{' '}
+            {/* The remedy, named. It exists and it works -- every village
+                claiming an untyped role carries a "Type the … figures" button
+                that jumps straight into this panel with the caret in the row --
+                and nothing on this warning said so, so the operator was told
+                about a problem and left to find the fix. */}
+            <span className="text-secondary">
+              Each of those villages has a{' '}
+              <span className="text-primary">Type the … figures</span> button on{' '}
+              <span className="text-primary">Account</span> that brings you straight back
+              here, into that role&apos;s row.
+            </span>
           </p>
         )}
       </details>

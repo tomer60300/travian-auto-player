@@ -4120,7 +4120,7 @@ export default function ResourcePlanner() {
               enumeration always does: it named Merchants then Trade Office,
               with Role and Max busy between them on screen, so the reader
               counted across to Role and typed into it. */}
-          <ScrollableTable>
+          <ScrollableTable label="The account, village by village">
             <table className="w-full text-sm">
               <thead className="text-secondary text-xs uppercase">
                 <tr>
@@ -5046,9 +5046,11 @@ export default function ResourcePlanner() {
                 <span className="text-secondary text-xs uppercase">Crop owed to other players</span>
                 <p className="text-secondary text-xs mt-0.5">
                   Travian only allows a Gold Club trade route to your own, Wonder, or
-                  alliance/confederacy artifact villages. Tick “route-eligible” only for those —
-                  the planner then ships it like any other demand. An ordinary ally/sitter village
-                  is reported as a manual transfer and is left out of the route plan.
+                  alliance/confederacy artifact villages. Tick{' '}
+                  <span className="text-primary">Route?</span> — the last column, which the
+                  scroll hint below names — only for those; the planner then ships it like any
+                  other demand. An ordinary ally/sitter village is reported as a manual
+                  transfer and is left out of the route plan.
                 </p>
               </div>
               <button
@@ -5078,7 +5080,7 @@ export default function ResourcePlanner() {
               </p>
             ) : (
               <>
-                <ScrollableTable>
+                <ScrollableTable label="Crop owed to other players">
                   <table className="w-full text-xs">
                     <thead className="text-secondary uppercase">
                       <tr>
@@ -5367,7 +5369,7 @@ export default function ResourcePlanner() {
                   their place rather than a figure landing in the wrong row,
                   but it is the same table shape and it takes the same
                   treatment. 0px at 768 and 1440, where the class is inert. */}
-              <ScrollableTable>
+              <ScrollableTable label="What each village keeps per hour">
                 <table className="w-full text-xs">
                   <thead className="text-secondary uppercase">
                     <tr>
@@ -5624,7 +5626,9 @@ export default function ResourcePlanner() {
                     village while the rest scrolls, and the hint tells the
                     operator the extra columns exist: clipping them silently is
                     how the wrong village gets edited. */}
-                <ScrollableTable>
+                <ScrollableTable
+                  label={`${RESOURCE_LABEL[resource]} targets, village by village`}
+                >
                   <table className="w-full text-xs">
                     <thead className="text-secondary uppercase">
                       <tr>

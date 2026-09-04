@@ -695,6 +695,57 @@ h1, h2, h3 {
   font-size: 0.75rem;
   white-space: nowrap;
 }
+/* The hours of the day, as ONE 24-hour track.
+   Night's 23:00-07:00 used to draw as two disconnected slabs on a bare
+   `rounded-full` pill: no 00:00 tick, no axis, no hour label anywhere, and the
+   pill's own radius curving the inner ends of both slabs so the wrap read as
+   two unrelated windows rather than as one night. The track is therefore
+   SQUARE-ended -- a band has to be able to reach the edge and be cut by it --
+   and the caps are set per band in the component, rounded where the window
+   really starts or ends and square where it runs off the track.
+   0.5rem tall, matching the `h-2` it replaces; the tick is a hairline in the
+   outline-variant token, which reads on both the empty track and a band. */
+.day-track {
+  display: block;
+  position: relative;
+  height: 0.5rem;
+  overflow: hidden;
+  background-color: var(--md-surface-container-high);
+}
+.day-track-band {
+  position: absolute;
+  top: 0;
+  height: 100%;
+}
+.day-track-tick {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 1px;
+  background-color: var(--md-outline-variant);
+}
+/* The labels for those ticks, once, under the column heading. 0.75rem is the
+   xs step -- badges and table meta -- which is what this is. */
+.day-axis {
+  display: block;
+  position: relative;
+  height: 0.75rem;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--md-on-surface-variant);
+}
+.day-axis > span {
+  position: absolute;
+  top: 0;
+}
+/* Centred on its own tick. 00 is left-aligned instead, because half of it would
+   sit outside the track. */
+.day-axis-mid {
+  transform: translateX(-50%);
+}
 /* 2rem, the typography scale's largest documented step. The audit asked for
    "~36px", which is not a step in this design system; 2rem is, and it is
    already four times the 0.75rem the surrounding cards use. */

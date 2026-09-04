@@ -1,7 +1,6 @@
 import ScrollableTable from './ScrollableTable'
 import {
   attendanceFor,
-  describeAttendance,
   suggestedAttendance,
   unansweredAttendance,
 } from '../utils/plannerNpc'
@@ -163,13 +162,29 @@ export default function DayNightPanel({
         </p>
       )}
 
-      <ScrollableTable>
+      <ScrollableTable label="The day, window by window">
         <table className="w-full text-xs">
           <thead className="text-secondary uppercase">
             <tr>
               <th className="text-left py-1 px-2 sticky-col">Profile</th>
               <th className="text-left px-2">Runs</th>
-              <th className="text-left px-2">Hours of the day</th>
+              {/* The axis, once, at the top of the column every row's track
+                  belongs to. Four labels at the same four fractions the ticks
+                  use, so a slab's position is readable rather than guessed. */}
+              <th className="text-left px-2 min-w-40">
+                Hours of the day
+                <span aria-hidden="true" className="day-axis">
+                  {DAY_TICKS.map((hour) => (
+                    <span
+                      key={hour}
+                      className={hour === 0 ? undefined : 'day-axis-mid'}
+                      style={{ left: `${(hour / 24) * 100}%` }}
+                    >
+                      {String(hour).padStart(2, '0')}
+                    </span>
+                  ))}
+                </span>
+              </th>
               <th
                 className="text-left px-2"
                 title="Whether you are at the marketplace during these hours, so section 7's NPC conversion can actually be performed. Required as soon as any village keeps a stock floor: false means the conversion allowance is zero for this profile — the crop keeps growing, but nobody is converting it."
@@ -261,18 +276,42 @@ export default function DayNightPanel({
                         {/* Decorative: the same fact is in the figure beside
                             it, so the track carries aria-hidden rather than a
                             role nothing can read usefully. */}
-                        <span
-                          aria-hidden="true"
-                          className="block h-2 rounded-full relative overflow-hidden"
-                          style={{ background: 'var(--md-surface-container-high)' }}
-                        >
+                        <span aria-hidden="true" className="day-track">
+                          {/* Midnight, 06:00, noon, 18:00 -- the whole reason
+                              this bar was unreadable. Night's 23:00-07:00 drew
+                              as two slabs on a bare pill with no tick, no axis
+                              and no label anywhere, so which end was which, and
+                              whether the two were one band or two windows, was
+                              unknowable. The axis under the column heading
+                              carries the same four positions. */}
+                          {DAY_TICKS.map((hour) => (
+                            <span
+                              key={hour}
+                              className="day-track-tick"
+                              style={{ left: `${(hour / 24) * 100}%` }}
+                            />
+                          ))}
                           {arcs(pair).map((arc, i) => (
                             <span
                               key={i}
-                              className="absolute top-0 h-full"
+                              className="day-track-band"
                               style={{
                                 left: `${arc.left}%`,
                                 width: `${arc.width}%`,
+                                // A wrap is ONE band, drawn leaving the right
+                                // edge and re-entering the left: the cap is
+                                // rounded where the window really begins or
+                                // ends and SQUARE where it runs off the track,
+                                // so 23:00-07:00 reads as a single night rather
+                                // than as two unrelated pills. `arcs` returns
+                                // the late piece first, so index 0 of a pair is
+                                // the one leaving the right edge.
+                                borderRadius:
+                                  arcs(pair).length === 1
+                                    ? '9999px'
+                                    : i === 0
+                                      ? '9999px 0 0 9999px'
+                                      : '0 9999px 9999px 0',
                                 background:
                                   answer === false ? 'var(--md-outline)' : 'var(--md-primary)',
                               }}
@@ -303,9 +342,13 @@ export default function DayNightPanel({
                       <option value="awake">You are at the marketplace</option>
                       <option value="asleep">Nobody is trading</option>
                     </select>
-                    <span className="block text-secondary mt-0.5">
-                      {describeAttendance(answer)}
-                    </span>
+                    {/* No echo under the select. It printed
+                        `describeAttendance(answer)` -- "you are at the
+                        marketplace" -- in 11px grey directly under the option
+                        that reads "You are at the marketplace", so the same
+                        answer was on screen twice, one of the two illegible.
+                        The words still exist where they are the only statement
+                        of the answer: the profile bar's chip. */}
                     {(owed || silentAllDay) && (
                       <>
                         <span id={problemId} className="block text-warning mt-0.5">
@@ -451,6 +494,11 @@ function pairOrNull(pair) {
  * profile: 23:00-07:00 is an hour at the right-hand end and seven at the left,
  * not a negative-width bar.
  */
+/** The four hours the track marks and the axis labels. Every six hours: the
+ *  quarters of the day, and enough to place a slab without crowding a 160px
+ *  column. */
+const DAY_TICKS = [0, 6, 12, 18]
+
 function arcs([from, to]) {
   const pct = (minute) => (minute / MINUTES_IN_DAY) * 100
   if (from < to) return [{ left: pct(from), width: pct(to - from) }]
