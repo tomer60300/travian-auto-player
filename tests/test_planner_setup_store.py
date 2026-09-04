@@ -581,6 +581,55 @@ class TestWhatThePlannerWouldRefuse:
                 assert res.status_code == 422, f"{field}={value!r}: {res.text}"
                 assert field in res.text, f"{field}={value!r} must be named: {res.text}"
 
+    def test_a_may_relay_that_is_not_a_boolean_is_refused(self, client, account):
+        """The tri-state `may_relay`, on both doors that carry it.
+
+        The same laxness `npc_attended` had and with the same live trap:
+        pydantic's non-strict `bool` accepts the STRING "yes" -- and "no",
+        "on", "off", "1" and "0" -- so a row carrying one saved with a 200,
+        the body being kept verbatim, and `parseSetup` then refused to load
+        the document the page had just written, permanently. It throws a
+        `SetupFileError` on a non-boolean `may_relay` in BOTH places: the
+        village row and the role template.
+
+        Not a small field. It is the tri-state the store's own docstring calls
+        "the one thing the page reads differently from zero" -- absent means
+        take the role's answer, `false` means this village may not relay
+        whatever its role says -- and it feeds the six relay-tier rules.
+        Reachability is API-only, exactly as `npc_attended`'s was.
+        """
+        for value in ("yes", "off", 1, 0, [], {}):
+            village = _minimal(
+                account, villages=[{"village_id": 2, "name": "02", "may_relay": value}]
+            )
+            res = _put(client, account, village)
+            assert res.status_code == 422, f"villages[].may_relay={value!r}: {res.text}"
+            assert "may_relay" in res.text, f"{value!r} must be named: {res.text}"
+
+            template = _minimal(account, roles={"capital": {"allocations": {}, "may_relay": value}})
+            res = _put(client, account, template)
+            assert res.status_code == 422, f"roles[].may_relay={value!r}: {res.text}"
+            assert "may_relay" in res.text, f"{value!r} must be named: {res.text}"
+
+    def test_a_may_relay_that_is_a_boolean_still_round_trips(self, client, account):
+        # Both real answers and the third state, absent. `false` is the one that
+        # has to survive: it means "not this village, whatever its role says",
+        # and a store that dropped it would silently re-enable the relay.
+        doc = _minimal(
+            account,
+            villages=[
+                {"village_id": 2, "name": "02", "may_relay": False},
+                {"village_id": 3, "name": "03", "may_relay": True},
+                {"village_id": 4, "name": "04"},
+            ],
+            roles={"capital": {"allocations": {}, "may_relay": False}},
+        )
+
+        assert _put(client, account, doc).status_code == 200, doc
+        saved = _get(client, account).json()["setup"]
+        assert saved == doc
+        assert "may_relay" not in saved["villages"][2]
+
     def test_both_per_profile_answers_round_trip(self, client, account):
         # Absent is the third state and stays absent -- "not answered yet" is
         # what refuses a plan, and inventing a `false` here would fund nothing

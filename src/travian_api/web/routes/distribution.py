@@ -22,7 +22,14 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from travian_api.exceptions import ActivityBudgetExhausted, NetworkError, TravianError
 from travian_api.parsers.html_parser import (
@@ -327,7 +334,14 @@ class RoleTemplate(BaseModel):
             )
         return value
 
-    may_relay: bool | None = Field(
+    # `StrictBool`, not `bool`: pydantic's lax bool accepts the STRING "yes",
+    # and "no", "on", "off", "1" and "0" besides. This field rides into the
+    # SETUP document (`SetupDocument.roles`), which is stored verbatim and read
+    # back by `parseSetup` -- and `parseSetup` THROWS on a non-boolean here, so
+    # a `"yes"` saved with a 200 and the page then refused to load the document
+    # it had just written, permanently. The same trap `npc_attended` had, on a
+    # tri-state where absent, true and false are three different answers.
+    may_relay: StrictBool | None = Field(
         default=None,
         description=(
             "Whether villages of this role may forward someone else's cargo. "
@@ -563,7 +577,11 @@ class VillageConfig(BaseModel):
             )
         return value
 
-    may_relay: bool | None = Field(
+    # `StrictBool`, for the reason `RoleTemplate.may_relay` states: the setup
+    # document carries it verbatim and `parseSetup` refuses a non-boolean row
+    # outright, so a coerced "yes" here is a document that saves and never
+    # loads again.
+    may_relay: StrictBool | None = Field(
         default=None,
         description=(
             "Whether THIS village may forward someone else's cargo, overriding "
