@@ -340,10 +340,26 @@ def simulate_day(
     indefinitely. Only waste that survives to a settled day is a property of the
     beat, and only that is reported.
 
-    **Cargo is conserved.** A dispatch takes what the origin actually has; the
-    matching arrival delivers exactly that. Crediting the destination a full
-    batch the origin could not fund invents resources, and the invented cargo
-    then shows up as overflow at the far end.
+    **A short send ships a PARTIAL load, and that is an ASSUMPTION about the
+    game rather than a property of this replay.** A dispatch takes what the
+    origin actually has and the matching arrival delivers exactly that
+    (``shipped = min(batch, available)`` below), which does keep cargo
+    conserved end to end -- crediting the destination a full batch the origin
+    could not fund invents resources, and the invented cargo then shows up as
+    overflow at the far end.
+
+    What is assumed is which of three things the GAME does when a row fires
+    short of resources: skip the send, ship what is there, or top the shortfall
+    up from the next cycle. That is **UNVERIFIED** (mechanics reference I.5.4)
+    and it is load-bearing -- every hourly figure in a plan rests on it. Which
+    way it cuts: under SKIP the destination gets nothing that cycle and the
+    whole load stays at the origin; under PARTIAL, which is what this does, it
+    gets whatever the origin held. So against a skipping game this replay
+    reports more arriving than really does, and a receiver it calls fed may not
+    be -- the optimistic direction, which is why the assumption is written down
+    here instead of left implied. One deliberately resource-starved route
+    settles it: size a row above what its origin produces, then read the
+    destination back after a cycle.
 
     ``net_per_hour`` is each village's OWN production. The routes are applied
     here as discrete events, so folding them into the rate as well would count
@@ -504,6 +520,11 @@ def simulate_day(
                                 source_key = (origin, source)
                                 moved[source_key] = moved.get(source_key, 0.0) - amount
                     available = level.get(key, 0.0)
+                    # THE ASSUMPTION, at the point of use: a row the origin
+                    # cannot fully fund ships a PARTIAL load rather than being
+                    # skipped for the cycle. UNVERIFIED against the game -- see
+                    # this function's docstring for which way it cuts and for
+                    # the one resource-starved route that settles it.
                     shipped = min(batch, available)
                     level[key] = available - shipped
                     in_flight[index] = shipped
@@ -1157,10 +1178,16 @@ def simulate_profile_cycle(
     entirely, understating the night's inflow -- the optimistic direction for an
     overnight overflow, and so the wrong way to be wrong.
 
-    **Cargo is conserved.** A dispatch takes what the origin actually has, and
-    the matching arrival delivers exactly that. Crediting a batch the origin
-    could not fund invents resources, and the invention resurfaces as overflow
-    at the far end.
+    **A short send ships a PARTIAL load -- an ASSUMPTION, as in
+    :func:`simulate_day`.** A dispatch takes what the origin actually has and
+    the matching arrival delivers exactly that, so cargo is conserved:
+    crediting a batch the origin could not fund invents resources, and the
+    invention resurfaces as overflow at the far end. Whether the game instead
+    SKIPS the send, or tops the shortfall up next cycle, is **UNVERIFIED**
+    (mechanics reference I.5.4) and settled by one deliberately
+    resource-starved route. Both replays make the same assumption deliberately
+    -- one of them modelling a skipping game and the other a partial one is how
+    /plan and /day-check would come to answer one account differently.
 
     ``ceilings`` is an operator-set alert level for CROP, below capacity --
     typically an NPC trigger. Crossing it (from below, on the post-clamp level)
@@ -1408,6 +1435,11 @@ def simulate_profile_cycle(
                         apply(key, funded, minute, day, draining=False)
                         for source, debit in paid.items():
                             apply((origin, source), -debit, minute, day, draining=True)
+                # THE ASSUMPTION, at the point of use, and the same one
+                # `simulate_day` makes: a row the origin cannot fully fund
+                # ships a PARTIAL load rather than being skipped for the cycle.
+                # UNVERIFIED against the game; one resource-starved route
+                # settles it. See this function's docstring.
                 shipped = min(amount, max(0.0, level.get(key, 0.0)))
                 in_flight[index] = shipped
                 if shipped:

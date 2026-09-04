@@ -8,6 +8,9 @@ asking the same question -- does the answer stay honest when the village is
 heading the other way?
 """
 
+import inspect
+from pathlib import Path
+
 import pytest
 
 from travian_api.services.distribution.allocation import Resource
@@ -1001,3 +1004,88 @@ class TestADesignedCropDeficitIsNotAnEmergency:
                 [self._draining(self.HAMMER)], [], warn_hours=24.0, names=self.NAMES
             )[0].message
         )
+
+
+# ── The partial send is an assumption about the game ─────────────────────────
+
+
+class TestThePartialSendIsAnAssumptionAboutTheGame:
+    """`shipped = min(batch, available)` is a guess, not a law.
+
+    Whether Travian skips an under-funded send outright, ships a partial load,
+    or tops the missed amount up from the next cycle is **UNVERIFIED**
+    (reference I.5.4), and it qualifies every rate the tool prints. Two things
+    were wrong about how that was recorded rather than about the behaviour:
+    `docs/25` stated the code assumes the send is SKIPPED, which is the
+    opposite of what the replay does, and the replay's own docstring presented
+    partial shipping as a property ("cargo is conserved") rather than as an
+    assumption -- so a reader of either could not tell there was a question
+    open at all.
+
+    The behaviour is deliberately unchanged. What these pin is that it is
+    STATED where it is used, and that it is partial rather than skip -- nothing
+    distinguished the two before, so a future edit could have flipped it
+    silently.
+    """
+
+    @staticmethod
+    def _route(origin, destination, per_hour):
+        return Route(
+            origin=origin,
+            destination=destination,
+            cargo_per_hour={Resource.LUMBER: per_hour},
+            cycle_hours=24,
+            merchants_per_send=1,
+            sets_in_flight=1,
+            one_way_minutes=60.0,
+        )
+
+    def test_an_under_funded_send_ships_what_the_origin_holds(self):
+        """The behaviour the three possibilities differ on, pinned by number.
+
+        A 24,000 batch leaves village 1 daily, which makes only 6,000 a day. It
+        ships that 6,000 -- not zero (skip) and not the full 24,000 (top up) --
+        so village 2, already at its cap, loses exactly 6,000 a day.
+        """
+        beat = build_beat((self._route(1, 2, 1_000),))
+
+        overflows = simulate_day(
+            beat,
+            stocks={1: {Resource.LUMBER: 0}, 2: {Resource.LUMBER: 10_000}},
+            capacities={1: {Resource.LUMBER: 1_000_000}, 2: {Resource.LUMBER: 10_000}},
+            net_per_hour={1: {Resource.LUMBER: 250}, 2: {Resource.LUMBER: 0}},
+        )
+
+        event = next((e for e in overflows if e.village_id == 2), None)
+        assert event is not None, (
+            "a skipping replay would deliver nothing and report no loss at all"
+        )
+        assert event.net_gain_per_day == pytest.approx(6_000.0), (
+            "0 would be skip, 24,000 would be a topped-up batch the origin never had"
+        )
+        assert event.wasted_per_day == pytest.approx(6_000.0)
+
+    def test_the_assumption_is_stated_in_both_replays(self):
+        """Stated where it is USED, which is the check the operator's ruling
+        register asks for -- not that it is right, which nobody knows."""
+        for replay in (simulate_day, simulate_profile_cycle):
+            source = inspect.getsource(replay)
+            where = replay.__name__
+            assert "ASSUMPTION" in source, where
+            assert "UNVERIFIED" in source, where
+            assert "partial" in source.lower(), where
+            assert "skip" in source.lower(), f"{where}: the alternative must be named"
+            assert "resource-starved" in source, (
+                f"{where}: the one in-game test that settles it must be named"
+            )
+
+    def test_the_document_says_the_same_thing_the_code_does(self):
+        doc = (
+            Path(__file__).resolve().parents[1] / "docs" / "25-resource-distribution-planner.md"
+        ).read_text(encoding="utf-8")
+
+        assert "simply SKIPS that send" not in doc, (
+            "docs/25 stated the opposite of what both replays do"
+        )
+        assert "UNVERIFIED" in doc, "and it must still be marked unverified"
+        assert "resource-starved" in doc, "and still name the test that settles it"

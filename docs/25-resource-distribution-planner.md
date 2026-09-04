@@ -521,10 +521,29 @@ requirements profile, which the code's docstrings cite as "profile section N".
 Bare `§N` is a section of *this* document, as elsewhere.
 
 One assumption qualifies every rate below: **the code assumes a trade route
-whose resources or merchants are short simply SKIPS that send.** Whether the
-game skips, ships a partial load, or tops up from the next cycle is
-**UNVERIFIED**, and it is load-bearing — every hourly figure in a plan depends
-on which of the three it is. It is settleable with one controlled in-game test.
+whose resources are short ships a PARTIAL load — whatever the origin holds at
+that minute — and never tops the missed amount up later.** That is what both
+replays do (`shipped = min(batch, available)` in `storage.simulate_day`, and
+the same line in `storage.simulate_profile_cycle`), and both now say so at the
+point of use rather than presenting it as a property of the simulation.
+
+*This paragraph used to state the opposite — that the code assumes the send is
+simply SKIPPED. The code never did; the sentence was the error, and it is
+recorded here rather than quietly replaced because it is exactly the kind of
+drift the `UNVERIFIED` tag exists to keep visible.*
+
+Whether the game skips the send, ships a partial load, or tops up from the next
+cycle is **UNVERIFIED** (§I.5.4 of the mechanics reference), and it is
+load-bearing — every hourly figure in a plan depends on which of the three it
+is. **Which way it cuts:** under SKIP the destination gets nothing that cycle
+and the whole load stays at the origin; under PARTIAL it gets whatever the
+origin held. So against a skipping game the tool reports more arriving than
+really does, and a receiver it calls fed may not be — the optimistic direction.
+
+**The one test that settles it:** a single deliberately resource-starved route.
+Size a row above what its origin produces, leave the origin short, and read the
+destination back after one cycle. Nothing else in the plan need change, and no
+extra fetch is needed beyond that read-back.
 
 ## 4.1 The declared material relay tier
 
