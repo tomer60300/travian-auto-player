@@ -260,7 +260,38 @@ def derive_night_profile(
     def ceiling(v: NightVillage, resource: Resource) -> int:
         return round((target_fill - baseline_fill) * v.capacity_for(resource) / window_hours)
 
-    def shed_limit(v: NightVillage) -> float:
+    def _destinations(v: NightVillage, resource: Resource) -> list[float]:
+        """Where this village's cargo of `resource` goes, in one-way hours.
+
+        It is a DIFFERENT set per resource, which is why `shed_limit` cannot be
+        asked without one. The hub absorbs surplus MATERIALS, so for lumber,
+        clay and iron the hub is the destination and there is exactly one. Crop
+        never reaches it: the crop pass below ships to the crop-negative
+        villages in `consumer_ids` and to `tribute_at`, and on this account the
+        hub is a crop SENDER rather than a sink -- its own granary ceiling can
+        sit under its own production and force it to give.
+
+        Measuring every sender to the hub bound each crop sender by a village
+        its cargo never visits, and it read wrong in both directions. A feeder
+        one field from the hub with the hammer 199 fields out was booked to
+        ship its whole production at the hub's 48 turnarounds while no round
+        trip to the hammer fits the night at all; and a feeder 199 fields from
+        the hub feeding a hammer one field away -- a ten-minute haul, 48
+        turnarounds -- was told it could ship nothing.
+
+        A village is never its own destination: the tile is unique in Travian,
+        so a zero hop is the village itself and is dropped rather than allowed
+        to read as a free delivery.
+        """
+        if resource is not Resource.CROP:
+            hops = [_hours(v, by_id[hub_id], geometry)]
+        else:
+            hops = [_hours(v, by_id[c], geometry) for c in consumers]
+            if tribute_at is not None:
+                hops.append(geometry.one_way_minutes((v.x, v.y), tribute_at) / 60.0)
+        return [hop for hop in hops if hop > 0]
+
+    def shed_limit(v: NightVillage, resource: Resource) -> float:
         """The most this village can send per hour and still be shippable.
 
         A retention below production only means something if the merchants exist
@@ -279,48 +310,20 @@ def derive_night_profile(
         # applies on the plan side: a cap above the fleet is not extra merchants.
         if v.max_busy_merchants is not None:
             fleet = min(fleet, v.max_busy_merchants)
-        # To the HUB, because that is where a sender's cargo actually goes. This
-        # used to measure the nearest village on the account, which is an upper
-        # bound on turnarounds and no bound at all on a clustered map: a
-        # neighbour one field away yields 47 trips in an 8h night, so the
-        # "limit" came out around six times fleet x capacity per hour. Worse,
-        # the operator's cap is applied just above and then multiplied by that
-        # count -- so the "8 busy at 02" ceiling this function exists to honour
-        # was negated inside it. The hub distance is already computed below for
-        # the draw ordering.
-        one_way = _hours(v, by_id[hub_id], geometry)
+        # Where the cargo of THIS resource actually goes. It used to measure the
+        # nearest village on the account, which is an upper bound on turnarounds
+        # and no bound at all on a clustered map: a neighbour one field away
+        # yields 47 trips in an 8h night, so the "limit" came out around six
+        # times fleet x capacity per hour. Worse, the operator's cap is applied
+        # just above and then multiplied by that count -- so the "8 busy at 02"
+        # ceiling this function exists to honour was negated inside it.
+        one_way = min(_destinations(v, resource), default=0.0)
         if one_way <= 0:
-            # `v` IS the hub. The crop pass can force the hub itself to ship
-            # (its granary ceiling can sit under its own production), and its
-            # cargo plainly does not travel to itself -- so the destination has
-            # to come from where that cargo actually goes: the crop-negative
-            # villages in `consumer_ids`, or `tribute_at` when there is one.
-            #
-            # It used to be the nearest village of ANY kind, which is the
-            # over-estimating bound this function exists to remove and was left
-            # at the one village most likely to be a forced crop sender.
-            # Nothing ties a neighbour to a consumer: a capital hub with a
-            # feeder one field away and the hammer forty out was credited 47
-            # turnarounds against a 6h40 round trip, so the bound never bound,
-            # the ceiling decided instead, and the second forced-crop pass could
-            # draw the hub down to retaining nothing -- cargo the operator
-            # writes into the active profile as shippable and the hammer's
-            # deficit booked as covered while `unmet` stayed 0.
-            #
-            # The NEAREST of them, which is the aggregation the old fallback
-            # used -- the change is the SET it is taken over, not the way it is
-            # reduced. A rate bound over destinations at different distances has
-            # no single right answer, so where the hub serves several this is
-            # still the optimistic end of the range; what it can no longer do is
-            # measure a village the cargo never visits. Nowhere for the crop to
-            # go at all -- no consumer and no tribute -- sheds nothing, which is
-            # the honest reading of a destination that does not exist.
-            destinations = [_hours(v, by_id[c], geometry) for c in consumers]
-            if tribute_at is not None:
-                destinations.append(geometry.one_way_minutes((v.x, v.y), tribute_at) / 60.0)
-            one_way = min(destinations, default=0.0)
-            if one_way <= 0:
-                return 0.0
+            # Nowhere for this resource to go -- the hub asked about its own
+            # materials, or a crop sender on an account with no crop-negative
+            # village and no tribute. Sheds nothing, which is the honest reading
+            # of a destination that does not exist.
+            return 0.0
         # No `max(1, ...)`. A village whose round trip does not fit the window
         # sheds NOTHING: crediting it one trip promises cargo that would still
         # be in the air at 07:00, which section 6 forbids outright.
@@ -330,7 +333,7 @@ def derive_night_profile(
     def capped(v: NightVillage, resource: Resource) -> int:
         """Its ceiling, never asking for more export than it can ship."""
         own = v.production.get(resource, 0.0)
-        return max(ceiling(v, resource), round(own - shed_limit(v)))
+        return max(ceiling(v, resource), round(own - shed_limit(v, resource)))
 
     profile = NightProfile()
 
@@ -392,7 +395,7 @@ def derive_night_profile(
                 # that promise costs -- the bound `capped()` already puts under
                 # a FORCED sender, and the draw is the same promise made for a
                 # different reason.
-                give = min(own - keep, demand, shed_limit(by_id[vid]))
+                give = min(own - keep, demand, shed_limit(by_id[vid], resource))
                 if give <= 0:
                     continue
                 entries[vid] = Allocation(
@@ -463,7 +466,7 @@ def derive_night_profile(
             if own <= 0:
                 continue
             # Bounded by what it can move, as the material draw above is.
-            give = min(own, demand, shed_limit(by_id[vid]))
+            give = min(own, demand, shed_limit(by_id[vid], Resource.CROP))
             if give <= 0:
                 continue
             crop[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=float(round(own - give)))
@@ -484,7 +487,7 @@ def derive_night_profile(
             # Down to retaining nothing, never below -- and never past what it
             # can ship. The forced pass already booked `own - held` of its shed
             # limit, so only the rest of that limit is still available here.
-            give = min(held, demand, shed_limit(by_id[vid]) - (own - held))
+            give = min(held, demand, shed_limit(by_id[vid], Resource.CROP) - (own - held))
             if give <= 0:
                 continue
             crop[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=float(held - give))

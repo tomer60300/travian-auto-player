@@ -559,9 +559,17 @@ class TestCapacityAndGeometryAreInjected:
         8-hour night sheds `18 x capacity` an hour. Its granary ceiling is
         (0.60 - 0.25) x 160,000 / 8 = 7,000/h, far under its own 100,000/h, so
         it is a forced sender and its retention is `own - shed_limit`.
+
+        RE-SEEDED (crop is bounded by where crop goes). The hub is named the
+        crop CONSUMER here, and its rate made negative to be one. It was
+        neither, and the sender's crop therefore had no declared destination at
+        all -- which the derivation now reads as shedding nothing, so the
+        arithmetic these four tests exist to check never ran. The distance being
+        measured is unchanged: 6 fields, the sender to the hub, exactly as
+        before. Nothing else moved, and no expected figure did.
         """
         villages = [
-            _village(HUB, "hub", 0, 0, crop=0.0, wh=1_200_000, gr=800_000, to=0),
+            _village(HUB, "hub", 0, 0, crop=-20_000.0, wh=1_200_000, gr=800_000, to=0),
             _village(ARMY, "sender", 6, 0, crop=100_000.0, to=0),
         ]
         profile = derive_night_profile(
@@ -571,6 +579,7 @@ class TestCapacityAndGeometryAreInjected:
             merchant_model=model,
             day_retention={},
             hub_id=HUB,
+            consumer_ids=[HUB],
         )
         return profile.allocations[Resource.CROP][ARMY].value
 
@@ -589,9 +598,14 @@ class TestCapacityAndGeometryAreInjected:
     def test_the_trade_office_bonus_comes_from_the_model_too(self):
         """A Trade Office 10 village carries 2,500 x (1 + 0.2 x 10) = 7,500,
         three times the base -- so 18 of them shed 135,000/h, more than the
-        village makes, and the ceiling is what is left holding it: 7,000."""
+        village makes, and the ceiling is what is left holding it: 7,000.
+
+        Hub crop negative and named a consumer for the reason `_forced_sender`
+        states: crop with nowhere declared to go sheds nothing, and then this
+        measures no capacity at all.
+        """
         villages = [
-            _village(HUB, "hub", 0, 0, crop=0.0, wh=1_200_000, gr=800_000, to=0),
+            _village(HUB, "hub", 0, 0, crop=-20_000.0, wh=1_200_000, gr=800_000, to=0),
             _village(ARMY, "sender", 6, 0, crop=100_000.0, to=10),
         ]
         profile = derive_night_profile(
@@ -601,6 +615,7 @@ class TestCapacityAndGeometryAreInjected:
             merchant_model=EUROPE2_TEUTON,
             day_retention={},
             hub_id=HUB,
+            consumer_ids=[HUB],
         )
 
         assert profile.allocations[Resource.CROP][ARMY].value == pytest.approx(7_000.0)
@@ -627,9 +642,14 @@ class TestCapacityAndGeometryAreInjected:
         ceiling. Measured flat the round trip does not fit the night at all,
         the shed limit is zero, and the same village is told to keep every
         unit it makes.
+
+        Hub crop negative and named a consumer for the reason `_forced_sender`
+        states. It has to be the hub here and not a third village: the point of
+        the fixture is that sender and destination sit on OPPOSITE edges, and
+        the only tile two fields from (199|0) across the seam is the hub's.
         """
         villages = [
-            _village(HUB, "hub", -200, 0, crop=0.0, wh=1_200_000, gr=800_000, to=0),
+            _village(HUB, "hub", -200, 0, crop=-20_000.0, wh=1_200_000, gr=800_000, to=0),
             _village(ARMY, "across-the-seam", 199, 0, crop=100_000.0, to=0),
         ]
         profile = derive_night_profile(
@@ -639,6 +659,7 @@ class TestCapacityAndGeometryAreInjected:
             merchant_model=EUROPE2_TEUTON,
             day_retention={},
             hub_id=HUB,
+            consumer_ids=[HUB],
         )
 
         assert profile.allocations[Resource.CROP][ARMY].value == pytest.approx(7_000.0)
@@ -729,3 +750,101 @@ class TestTheHubIsBoundedByWhereItsCropActuallyGoes:
         # leaving 63,125/h of the obligation outstanding and reported.
         assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(43_125.0)
         assert profile.unmet[Resource.CROP] == pytest.approx(63_125.0)
+
+
+class TestEverySenderIsBoundedByWhereItsOwnCargoGoes:
+    """`shed_limit` needs the RESOURCE, because the destination depends on it.
+
+    The hub absorbs surplus MATERIALS, so for lumber, clay and iron the hub
+    distance is where a sender's cargo really goes. Crop never reaches it: the
+    crop pass ships to the villages in `consumer_ids`, or to `tribute_at`, and
+    the hub is a crop SENDER on this account rather than a sink. Measuring
+    every sender to the hub therefore bound each crop sender by a village its
+    cargo never visits -- the same error the hub's own fallback was written to
+    remove, one level down and for every OTHER village.
+
+    It reads wrong in both directions, which is why both are pinned here.
+    """
+
+    def _account(self, *, hub_at, feeder_at, hammer_at):
+        return [
+            _village(HUB, "hub", *hub_at, crop=0.0, gr=800_000),
+            _village(ARMY, "feeder", *feeder_at, crop=20_000.0, gr=800_000),
+            _village(FAR, "hammer", *hammer_at, crop=-20_000.0, gr=800_000),
+        ]
+
+    def _derive(self, **kw):
+        return derive_night_profile(
+            self._account(**kw),
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            consumer_ids=[FAR],
+        )
+
+    # The feeder is one field from the hub and the hammer is moved out along x,
+    # so the hub distance says the same thing at every row and the real haul
+    # says three different things. 18 merchants (20 less the reserve) carry
+    # 7,500 each at Trade Office 10, so the shed limit is `18 x 7,500 x trips /
+    # 8`:
+    #
+    #   (5|0)   -> 4 fields, 0h40 round trip, 12 trips -> 202,500/h
+    #   (40|0)  -> 39 fields, 6h30 round trip, 1 trip  ->  16,875/h
+    #   (200|0) -> 199 fields, 33h10 round trip, 0 trips ->      0/h
+    #
+    # Measured to the hub instead it is 810,000/h at all three, which binds
+    # nothing: the feeder was booked to ship its whole 20,000/h to a hammer
+    # 199 fields away and `unmet` read 0.
+    @pytest.mark.parametrize(
+        ("hammer_x", "ships", "unmet"),
+        [(5, 20_000.0, 0.0), (40, 16_875.0, 3_125.0), (200, 0.0, 20_000.0)],
+    )
+    def test_a_crop_sender_is_bounded_by_the_haul_to_the_consumer(self, hammer_x, ships, unmet):
+        profile = self._derive(hub_at=(0, 0), feeder_at=(1, 0), hammer_at=(hammer_x, 0))
+
+        assert profile.allocations[Resource.CROP][ARMY].value == pytest.approx(20_000.0 - ships)
+        assert profile.unmet[Resource.CROP] == pytest.approx(unmet)
+
+    def test_a_ten_minute_haul_to_the_consumer_stays_shippable(self):
+        """The other direction, and the one the hub distance made worse.
+
+        The feeder is 199 fields from the hub and ONE field from the hammer it
+        actually feeds: a 10-minute round trip, 48 turnarounds in an 8h night.
+        Measured to the hub the round trip is 33h10, no trip fits the window at
+        all, and a haul the merchants could make forty-eight times over was
+        reported unshippable with the hammer's whole deficit unmet.
+        """
+        profile = self._derive(hub_at=(200, 0), feeder_at=(1, 0), hammer_at=(0, 0))
+
+        assert profile.allocations[Resource.CROP][ARMY].value == pytest.approx(0.0)
+        assert profile.drawn_in[Resource.CROP] == [ARMY]
+        assert profile.unmet[Resource.CROP] == pytest.approx(0.0)
+
+    def test_a_material_sender_is_still_bounded_by_the_hub(self):
+        """The hub IS where surplus materials go, so nothing moves for them.
+
+        The feeder is 199 fields from the hub here, so its lumber cannot be
+        shipped in the window whatever the crop consumer next door can take --
+        proof the two resources are measured against different destinations
+        rather than one standing in for both.
+        """
+        villages = [
+            _village(HUB, "hub", 200, 0, lumber=-20_000.0, wh=1_200_000, gr=800_000),
+            _village(ARMY, "feeder", 1, 0, lumber=20_000.0, gr=800_000),
+            _village(FAR, "hammer", 0, 0, crop=-20_000.0, gr=800_000),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            consumer_ids=[FAR],
+        )
+
+        assert profile.allocations[Resource.LUMBER][ARMY].value == pytest.approx(20_000.0)
+        assert profile.drawn_in[Resource.LUMBER] == []
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(20_000.0)
