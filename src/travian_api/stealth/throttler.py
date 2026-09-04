@@ -130,10 +130,8 @@ class RequestThrottler:
             waited = 0.0
 
             # Check penalty (from server errors / captcha detection)
-            if now < self._penalty_until:
-                penalty_wait = self._penalty_until - now
-                logger.debug(f"Throttle penalty: waiting {penalty_wait:.1f}s")
-                await asyncio.sleep(penalty_wait)
+            penalty_wait = await self.wait_for_penalty()
+            if penalty_wait > 0:
                 waited += penalty_wait
                 now = time.monotonic()
 
@@ -214,6 +212,26 @@ class RequestThrottler:
             return self.min_gap_s
         increment = random.lognormvariate(math.log(span * self._gap_median_frac), self._gap_sigma)
         return min(self.min_gap_s + increment, self.max_gap_s * 3.0)
+
+    async def wait_for_penalty(self) -> float:
+        """Sleep out any outstanding penalty. Returns the seconds waited.
+
+        Deliberately independent of ``enabled``. That flag is the operator's
+        pacing preference — how fast to go when the server has said nothing —
+        but a 429 is the server saying stop, and honouring it is not a
+        preference. Turning pacing off used to remove the backoff with it,
+        leaving a rate-limited loop with no brake at all.
+
+        :meth:`wait` folds this into the paced gate, so a penalty is served
+        once and only once; the unpaced path calls it directly.
+        """
+        now = time.monotonic()
+        if now >= self._penalty_until:
+            return 0.0
+        penalty_wait = self._penalty_until - now
+        logger.debug(f"Throttle penalty: waiting {penalty_wait:.1f}s")
+        await asyncio.sleep(penalty_wait)
+        return penalty_wait
 
     def add_penalty(self, seconds: float) -> None:
         """Add a temporary penalty (e.g., after receiving a suspicious response).

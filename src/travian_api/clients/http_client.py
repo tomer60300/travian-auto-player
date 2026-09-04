@@ -558,6 +558,11 @@ class HttpClient:
         x_version = await self._fetch_x_version()
 
         if not self._stealth_enabled:
+            # Pacing is off, but a rate-limit penalty is not pacing: it is the
+            # server having asked for a pause, so serve any outstanding one
+            # before sending. The gap and the burst cooldown stay off, which is
+            # what the switch is actually for.
+            await self._throttler.wait_for_penalty()
             headers = {
                 "Content-Type": "application/json"
                 if request_type == "json"
@@ -650,6 +655,24 @@ class HttpClient:
             target_url = fallback_url
         if target_url:
             self._browser_headers.update_last_page(target_url)
+
+    def _penalize_rate_limit(self) -> None:
+        """Back off after a 429 — whatever the pacing switch is set to.
+
+        Every one of these ten call sites used to be conditioned on
+        ``_stealth_enabled``, the same flag that turns the inter-request pacing
+        off. So turning pacing off also removed the only brake a rate-limited
+        loop had: the 429 came back, the helper raised, and the caller's next
+        request went out immediately.
+
+        Pacing is the operator's preference about how fast to go unprompted. A
+        429 is the server asking us to stop, which is not a preference and not a
+        stealth question — ignoring it is simply a bug, and the least courteous
+        thing this client can do to the game's servers. The throttler serves the
+        penalty on both paths (see ``RequestThrottler.wait_for_penalty``).
+        """
+        self._throttler.add_penalty(_jitter_penalty(120.0))
+        logger.warning("429 Too Many Requests — adding 120s penalty")
 
     @staticmethod
     def _dump_http_error(
@@ -1090,9 +1113,7 @@ class HttpClient:
 
             if response.status_code >= 400:
                 if response.status_code == 429:
-                    if self._stealth_enabled:
-                        self._throttler.add_penalty(_jitter_penalty(120.0))
-                        logger.warning("429 Too Many Requests — adding 120s penalty")
+                    self._penalize_rate_limit()
                 raise NetworkError(
                     f"HTTP {response.status_code}: {response.text}", response.status_code
                 )
@@ -1108,9 +1129,7 @@ class HttpClient:
             raise
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
-                if self._stealth_enabled:
-                    self._throttler.add_penalty(_jitter_penalty(120.0))
-                    logger.warning("429 Too Many Requests — adding 120s penalty")
+                self._penalize_rate_limit()
             raise NetworkError(
                 f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
             )
@@ -1231,9 +1250,7 @@ class HttpClient:
 
             if response.status_code >= 400:
                 if response.status_code == 429:
-                    if self._stealth_enabled:
-                        self._throttler.add_penalty(_jitter_penalty(120.0))
-                        logger.warning("429 Too Many Requests — adding 120s penalty")
+                    self._penalize_rate_limit()
                 raise NetworkError(
                     f"HTTP {response.status_code}: {response.text}", response.status_code
                 )
@@ -1249,9 +1266,7 @@ class HttpClient:
             raise
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
-                if self._stealth_enabled:
-                    self._throttler.add_penalty(_jitter_penalty(120.0))
-                    logger.warning("429 Too Many Requests — adding 120s penalty")
+                self._penalize_rate_limit()
             raise NetworkError(
                 f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
             )
@@ -1348,9 +1363,7 @@ class HttpClient:
 
             if response.status_code >= 400:
                 if response.status_code == 429:
-                    if self._stealth_enabled:
-                        self._throttler.add_penalty(_jitter_penalty(120.0))
-                        logger.warning("429 Too Many Requests — adding 120s penalty")
+                    self._penalize_rate_limit()
                 raise NetworkError(
                     f"HTTP {response.status_code}: {response.text}", response.status_code
                 )
@@ -1366,9 +1379,7 @@ class HttpClient:
             raise
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
-                if self._stealth_enabled:
-                    self._throttler.add_penalty(_jitter_penalty(120.0))
-                    logger.warning("429 Too Many Requests — adding 120s penalty")
+                self._penalize_rate_limit()
             raise NetworkError(
                 f"HTTP {e.response.status_code}: {e.response.text}", e.response.status_code
             )
@@ -1469,8 +1480,7 @@ class HttpClient:
 
             if response.status_code >= 400:
                 if response.status_code == 429:
-                    if self._stealth_enabled:
-                        self._throttler.add_penalty(_jitter_penalty(120.0))
+                    self._penalize_rate_limit()
                 self._dump_http_error(
                     method="POST",
                     url=url,
@@ -1489,8 +1499,7 @@ class HttpClient:
             raise
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
-                if self._stealth_enabled:
-                    self._throttler.add_penalty(_jitter_penalty(120.0))
+                self._penalize_rate_limit()
             self._dump_http_error(
                 method="POST",
                 url=url,
@@ -1596,9 +1605,8 @@ class HttpClient:
                     raise SessionExpiredError(f"Session expired (redirected to login): {resp_url}")
 
             if follow_redirects and response.status_code >= 400:
-                if response.status_code == 429 and self._stealth_enabled:
-                    self._throttler.add_penalty(_jitter_penalty(120.0))
-                    logger.warning("429 Too Many Requests on GET — adding 120s penalty")
+                if response.status_code == 429:
+                    self._penalize_rate_limit()
                 self._dump_http_error(
                     method="GET",
                     url=url,
@@ -1617,8 +1625,7 @@ class HttpClient:
             raise
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
-                if self._stealth_enabled:
-                    self._throttler.add_penalty(_jitter_penalty(120.0))
+                self._penalize_rate_limit()
             self._dump_http_error(
                 method="GET",
                 url=url,
