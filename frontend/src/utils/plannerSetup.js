@@ -88,12 +88,26 @@
  * profile can carry an answer before it has hours and the two stay
  * independently absent.
  *
- * `overnight` is the third map in that family and travels the same way: which
- * profile is the one the operator sleeps through, over the derivation from a
- * window that wraps past midnight. It is carried WITHOUT a version bump, which
- * is a debt rather than a decision -- see the note at `doc.overnight` in
- * `buildSetup` for the exact lines a v8 needs on the server, and why taking
- * only this half of it would 422 every fresh save.
+ * Version 8 adds `overnight`, the third map in that family, travelling the same
+ * way: which profile is the one the operator sleeps through, over the
+ * derivation from a window that wraps past midnight.
+ *
+ * Version 9 adds `reserved_window`, the minutes of the day to keep clear of
+ * ARRIVALS so the operator's manual NPC burst is not competing with merchants
+ * landing. A PAIR and not a fourth map beside the three above, and that is the
+ * whole reason it sits at the top level: it is one person at one marketplace.
+ * The attendance answer is per profile because the operator is awake for some
+ * windows and not others; when they sit down to trade is not a property of a
+ * window at all.
+ *
+ * It earns a version on the same rule as the three before it and for the same
+ * consequence: an older build loads the document, drops the window, and the
+ * operator saves from there -- at which point the burst competes with arrivals
+ * again with nothing on screen saying the answer was lost. Until this it was
+ * carried by NEITHER persistence path: it lived only in localStorage, which is
+ * per browser origin, so it did not follow the operator between :80, :8001, the
+ * LAN address and Tailscale -- the exact failure the page's own copy warns
+ * about two panels earlier.
  *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
@@ -111,7 +125,7 @@ import { NPC_FEEDSTOCK_RESOURCES, isFeedstockList } from './plannerNpc'
 import { namesForVillageIds } from './villageRefs'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 8
+export const SETUP_VERSION = 9
 /** Versions this build can read. A v1 file simply carries no profiles, a v2 one
  * no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
  * v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing
@@ -121,15 +135,16 @@ export const SETUP_VERSION = 8
  * the villages, drops their profiles and plans a different account without
  * saying so.
  *
- * v7 is coupled to the server, which validates the version on write: the
- * `READABLE_VERSIONS` tuple in `src/travian_api/web/routes/planner_setup.py`
- * has to gain 7 in the same breath, or every save comes back 422 "NEWER
- * build". That module's own comment states the coupling from its side.
- *
- * That coupling is why `overnight` travels inside v7 instead of raising this to
- * 8. Bumping here alone answers 422 on every fresh export; bumping there is a
- * backend change. The owed work is listed at `doc.overnight` in `buildSetup`. */
-export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8])
+ * Every version here is coupled to the server, which validates the version on
+ * write: the `READABLE_VERSIONS` tuple in
+ * `src/travian_api/web/routes/planner_setup.py` has to gain the same number in
+ * the same breath, or every fresh export comes back 422 "NEWER build". That
+ * module's own comment states the coupling from its side, and
+ * `tests/test_planner_setup_store.py` pins both directions -- the parametrised
+ * readable list AND two refusals that have to be asked for with a version
+ * beyond this build. Bumping one side alone is the failure this note exists to
+ * prevent. */
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
@@ -859,6 +874,7 @@ export function buildSetup({
   profileWindows,
   npcAttended,
   overnight,
+  reservedWindow,
   merchantModel,
   foreignTargets,
   exportedAt,
@@ -969,21 +985,33 @@ export function buildSetup({
   // neither direction. An empty map would import as every profile having
   // declared nothing, which reads identically and is a different document.
   //
-  // VERSION DEBT, stated where it is incurred. By the rule this file states
-  // above -- "the version still has to rise when a field is added" -- and by
-  // v7's own justification, this field earns a v8: a build that cannot read it
-  // loads the document, drops the declaration, and the operator saves from
-  // there, at which point the split night silently measures its 60% morning
-  // floor at 00:00 again. The bump is deliberately NOT taken here, because it
-  // is not one-sided: `READABLE_VERSIONS` in
-  // `src/travian_api/web/routes/planner_setup.py` has to gain 8 in the same
-  // breath or every fresh export comes back 422 "NEWER build", and its three
-  // pins in `tests/test_planner_setup_store.py` move with it. Until then the
-  // field rides as an unknown key, which the server tolerates by design --
-  // `SetupDocument` ignores extras and `_validate` stores the raw body -- so
-  // it round trips through a save today.
+  // v8, by the rule this file states above: a build that cannot read it loads
+  // the document, drops the declaration, and the operator saves from there --
+  // at which point the split night silently measures its 60% morning floor at
+  // 00:00 again.
   if (overnight && Object.keys(overnight).length) {
     doc.overnight = overnight
+  }
+  // v9, and the only owned answer that used to be carried by NEITHER
+  // persistence path: it lived in localStorage alone, which is per browser
+  // origin, so it did not follow the operator between :80, :8001, the LAN
+  // address and Tailscale -- the failure the page's own copy warns about two
+  // panels earlier. Confirmed against a real saved document, whose top level
+  // held every other owned field and not this one.
+  //
+  // A PAIR at the top level, not a fourth map beside the three above: the
+  // window is account-wide because it is one person at one marketplace, where
+  // the attendance answer is per profile because the operator is awake for some
+  // windows and not others.
+  //
+  // Omitted when unset on the same rule as the maps above, and here the rule is
+  // simply honest: absent means "reserve nothing", which is what a half-typed
+  // pair would mean too -- so writing one would only make the document look
+  // like it had an answer. What is stored is what was TYPED, because a document
+  // is what the operator sees in the boxes; `dispatchWindowFor` is what the
+  // plan REQUEST uses to decide whether the pair reserves anything.
+  if (Array.isArray(reservedWindow) && reservedWindow.length === 2) {
+    doc.reserved_window = [String(reservedWindow[0]), String(reservedWindow[1])]
   }
   if (merchantModel) doc.merchant_model = merchantModel
   // A tribute is entirely operator-supplied -- the game will not say that an ally
@@ -1262,6 +1290,24 @@ function parseRoleTemplate(raw, where) {
   }
 }
 
+/** Validate one `['HH:MM', 'HH:MM']` pair.
+ *
+ * Split out of `parseWindows` rather than copied: the reserved window is the
+ * same shape asked of a different thing, and two copies of a clock-time regex
+ * is how one of them comes to accept "6am".
+ */
+function parseClockPair(pair, where) {
+  if (!Array.isArray(pair) || pair.length !== 2) {
+    throw new SetupFileError(`${where} must be a [start, end] pair.`)
+  }
+  for (const t of pair) {
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(t))) {
+      throw new SetupFileError(`${where} has "${t}", which is not HH:MM.`)
+    }
+  }
+  return [String(pair[0]), String(pair[1])]
+}
+
 /** Validate a `{ profile: ['HH:MM', 'HH:MM'] }` window map. */
 function parseWindows(raw, where) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -1269,15 +1315,7 @@ function parseWindows(raw, where) {
   }
   const out = {}
   for (const [name, pair] of Object.entries(raw)) {
-    if (!Array.isArray(pair) || pair.length !== 2) {
-      throw new SetupFileError(`${where}["${name}"] must be a [start, end] pair.`)
-    }
-    for (const t of pair) {
-      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(t))) {
-        throw new SetupFileError(`${where}["${name}"] has "${t}", which is not HH:MM.`)
-      }
-    }
-    out[name] = [String(pair[0]), String(pair[1])]
+    out[name] = parseClockPair(pair, `${where}["${name}"]`)
   }
   return out
 }
@@ -1589,6 +1627,12 @@ export function parseSetup(text) {
   const npcAttended =
     raw.npc_attended == null ? {} : parseAttendance(raw.npc_attended, 'npc_attended')
   const overnight = raw.overnight == null ? {} : parseOvernight(raw.overnight, 'overnight')
+  // null rather than an empty pair: absent means "reserve nothing", and a pair
+  // is what the boxes hold. Refused rather than coerced on the same discipline
+  // the window map follows -- the backend's `_ClockTime` refuses it too, so
+  // accepting it here would write a file the server will not take.
+  const reservedWindow =
+    raw.reserved_window == null ? null : parseClockPair(raw.reserved_window, 'reserved_window')
 
   let merchantModel = null
   if (raw.merchant_model != null) {
@@ -1645,6 +1689,7 @@ export function parseSetup(text) {
     profileWindows,
     npcAttended,
     overnight,
+    reservedWindow,
     merchantModel,
     foreignTargets,
   }
@@ -1676,6 +1721,7 @@ export function mergeSetup({
   profileWindows,
   npcAttended,
   overnight,
+  reservedWindow,
   foreignTargets,
 }) {
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
@@ -1813,6 +1859,11 @@ export function mergeSetup({
     npcAttended: nextAttendance,
     overnight: nextOvernight,
     merchantModel: setup.merchantModel ?? null,
+    // The file wins where it HAS one and says nothing where it does not -- the
+    // same rule the merchant model above follows. Absent is not a clear: a v8
+    // document knows nothing about this field, so loading one must not wipe the
+    // window the operator has on screen.
+    reservedWindow: setup.reservedWindow ?? reservedWindow ?? null,
     // Replaced wholesale, not merged. Merging two tribute lists would either
     // double an obligation or leave a target the operator deleted still being
     // shipped to. A file with no targets leaves what is on screen alone.

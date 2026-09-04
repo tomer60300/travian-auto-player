@@ -345,19 +345,29 @@ class TestOnePerUser:
 
 class TestTheVersion:
     def test_a_newer_version_says_so(self, client, account):
-        # 8, not 7: v7 became readable when per-profile NPC attendance started
-        # travelling in the document. This case needs a version that is
+        # 10, not 9: v9 became readable when the reserved NPC-burst window
+        # started travelling in the document. This case needs a version that is
         # guaranteed to be beyond this build, so it moves whenever
         # READABLE_VERSIONS grows -- and the parametrised case below is what
         # would fail if the two ever disagreed.
-        res = _put(client, account, _minimal(account, version=9))
+        res = _put(client, account, _minimal(account, version=10))
 
         assert res.status_code == 422, res.text
         assert "NEWER build" in res.text
 
-    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8])
+    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8, 9])
     def test_every_readable_version_is_accepted(self, client, account, version):
         assert _put(client, account, _minimal(account, version=version)).status_code == 200
+
+    def test_the_reserved_window_round_trips(self, client, account):
+        # The one owned answer neither persistence path carried. It lived only
+        # in localStorage, which is per BROWSER ORIGIN -- so it did not follow
+        # the operator between :80, :8001, the LAN address and Tailscale, which
+        # is the exact failure the page's own copy warns about.
+        doc = _minimal(account, version=9, reserved_window=["20:00", "21:00"])
+        assert _put(client, account, doc).status_code == 200, doc
+
+        assert _get(client, account).json()["setup"]["reserved_window"] == ["20:00", "21:00"]
 
     def test_the_version_is_stored_as_given_not_upgraded(self, client, account):
         assert _put(client, account, _minimal(account, version=1)).status_code == 200
@@ -548,6 +558,29 @@ class TestWhatThePlannerWouldRefuse:
 
         assert res.status_code == 422, res.text
 
+    def test_a_reserved_window_that_is_not_a_clock_pair(self, client, account):
+        # Same shape and same discipline as `profile_windows` above: a document
+        # is the operator asserting an answer, so a malformed pair is refused
+        # rather than coerced.
+        doc = _minimal(account, version=9, reserved_window=["8pm", "21:00"])
+
+        res = _put(client, account, doc)
+
+        assert res.status_code == 422, res.text
+        # The reason matters: without this the case passed vacuously while v9
+        # itself was still being refused as a newer build.
+        assert "reserved_window" in res.text, res.text
+
+    def test_a_reserved_window_of_the_wrong_length(self, client, account):
+        doc = _minimal(account, version=9, reserved_window=["20:00"])
+
+        res = _put(client, account, doc)
+
+        assert res.status_code == 422, res.text
+        # The reason matters: without this the case passed vacuously while v9
+        # itself was still being refused as a newer build.
+        assert "reserved_window" in res.text, res.text
+
     def test_a_merchant_headroom_of_one(self, client, account):
         doc = _minimal(
             account,
@@ -600,9 +633,9 @@ class TestWhatThePlannerWouldRefuse:
         doc = _realistic(account)
         assert _put(client, account, doc).status_code == 200
 
-        # 8 for the same reason as TestTheVersion's: v7 is readable now, so a
+        # 10 for the same reason as TestTheVersion's: v9 is readable now, so a
         # refusal has to be asked for with a version beyond this build.
-        assert _put(client, account, _minimal(account, version=9)).status_code == 422
+        assert _put(client, account, _minimal(account, version=10)).status_code == 422
 
         assert _get(client, account).json()["setup"] == doc
 

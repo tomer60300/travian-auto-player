@@ -1610,10 +1610,16 @@ export default function ResourcePlanner() {
         // Section 6's declaration, carried for the same reason and with the
         // same consequence for losing it: a split night whose post-midnight
         // half arrives undeclared has its 60% morning floor measured at 00:00
-        // and its overruns unreported. It rides inside v7 rather than raising
-        // the version, which is a debt -- see the note at `doc.overnight` in
-        // `plannerSetup.js` for the server lines a v8 needs.
+        // and its overruns unreported. That is what v8 is for.
         overnight: profileOvernight,
+        // Section 7's reserved burst window, and v9. The last owned answer that
+        // neither persistence path carried: it lived only in localStorage,
+        // which is per browser origin, so it did not follow the operator
+        // between :80, :8001, the LAN address and Tailscale -- exactly what the
+        // storage panel two cards up warns about. Confirmed against a real
+        // saved document, whose top level held every other owned field and not
+        // this one.
+        reservedWindow,
         merchantModel,
         foreignTargets,
         exportedAt: new Date().toISOString(),
@@ -1637,6 +1643,7 @@ export default function ResourcePlanner() {
     profileWindows,
     profileAttendance,
     profileOvernight,
+    reservedWindow,
     merchantModel,
     foreignTargets,
     accountKey,
@@ -1683,6 +1690,7 @@ export default function ResourcePlanner() {
         profileWindows,
         npcAttended: profileAttendance,
         overnight: profileOvernight,
+        reservedWindow,
         foreignTargets,
       })
       setTradeOffice(merged.tradeOffice)
@@ -1701,6 +1709,10 @@ export default function ResourcePlanner() {
       setProfileWindows(merged.profileWindows)
       setProfileAttendance(merged.npcAttended)
       setProfileOvernight(merged.overnight)
+      // `mergeSetup` already decided this: the document wins where it has a
+      // window and says nothing where it does not, so a v8 file cannot wipe the
+      // one on screen.
+      setReservedWindow(merged.reservedWindow)
       // Capacity is server-calibrated, so a file that carries a calibration is
       // more trustworthy than this build's default. Absent, the default stands.
       if (merged.merchantModel) {
@@ -1745,6 +1757,7 @@ export default function ResourcePlanner() {
       profileAttendance,
       profileOvernight,
       profileWindows,
+      reservedWindow,
       foreignTargets,
       toast,
     ]

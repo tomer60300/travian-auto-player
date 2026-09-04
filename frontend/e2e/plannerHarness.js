@@ -154,6 +154,12 @@ export async function isolate(page, extra = () => undefined) {
   await page.routeWebSocket(/.*/, (ws) => ws.close())
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
+    // `extra` goes FIRST, so a spec can own an endpoint this function also has
+    // a default for -- the setup store below is the case: its default is the
+    // 404 a fresh account gets, and a spec about saving needs the PUT.
+    const answer = await extra(path, route)
+    if (answer === 'handled') return undefined
+    if (answer !== undefined) return route.fulfill({ json: answer })
     if (path.endsWith('/users/me')) {
       return route.fulfill({ json: { id: 1, username: PLAYER, is_active: true } })
     }
@@ -181,9 +187,6 @@ export async function isolate(page, extra = () => undefined) {
       })
     }
     if (path.endsWith('/distribution/plan')) return route.fulfill({ json: PLAN })
-    const answer = await extra(path, route)
-    if (answer === 'handled') return undefined
-    if (answer !== undefined) return route.fulfill({ json: answer })
     return route.abort('blockedbyclient')
   })
 }

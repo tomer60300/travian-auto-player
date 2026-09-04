@@ -665,3 +665,61 @@ test.describe('the controlled run is a form, not a slab of prose', () => {
     await context.close()
   })
 })
+
+test.describe('the reserved NPC-burst window survives being saved', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  test('it travels in the document the server is sent', async ({ page }) => {
+    // `grep -rn "reserved" frontend/src/utils/` found nothing: the window lived
+    // only in localStorage, which is per browser origin -- so it did not follow
+    // the operator between :80, :8001, the LAN address and Tailscale, the exact
+    // failure the storage panel two cards up warns about. Confirmed against a
+    // real saved document, whose top level held every other owned field and not
+    // this one.
+    let saved = null
+    await isolate(page, (path, route) => {
+      if (path.endsWith('/distribution/setup') && route.request().method() === 'PUT') {
+        saved = route.request().postDataJSON()
+        return { account_key: 'k', setup: saved, saved_at: new Date().toISOString() }
+      }
+      return undefined
+    })
+    await seed(page, {
+      planner_reserved_window: ['20:00', '21:00'],
+      planner_trade_office: { 20002: 13 },
+    })
+    await page.goto('/resource-planner')
+
+    await page.getByRole('button', { name: 'Save setup to server' }).click()
+    await expect.poll(() => saved).not.toBeNull()
+
+    expect(saved.reserved_window).toEqual(['20:00', '21:00'])
+    // Both halves of the bump, or a fresh export answers 422 "NEWER build".
+    expect(saved.version).toBe(9)
+  })
+
+  test('and comes back out of it', async ({ page }) => {
+    const DOC = {
+      format: 'travian-planner-owned-state',
+      version: 9,
+      exported_at: new Date().toISOString(),
+      account: KEY,
+      villages: [{ village_id: 20002, name: '02', trade_office_level: 13 }],
+      reserved_window: ['19:30', '20:30'],
+    }
+    await isolate(page, (path, route) => {
+      if (path.endsWith('/distribution/setup') && route.request().method() === 'GET') {
+        return { account_key: KEY, setup: DOC, saved_at: DOC.exported_at }
+      }
+      return undefined
+    })
+    await seed(page)
+    await page.goto('/resource-planner')
+
+    await page.getByRole('button', { name: 'Load setup from server' }).click()
+    await page.getByRole('button', { name: 'Day & night' }).click()
+
+    // The boxes on screen, which is where the answer is typed.
+    await expect(page.getByLabel('NPC burst window start')).toHaveValue('19:30')
+  })
+})

@@ -231,13 +231,14 @@ describe('profiles in the setup file', () => {
       merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
       exportedAt: STAMP,
     })
-    // 6 since profile section 5's declared relay tier landed (5 was the
-    // per-village merchant cap, 4 `may_relay`, 3 the role templates). Pinned to
-    // a literal on purpose: the version has to rise whenever a field is added,
-    // so that an older build refuses a file it would otherwise half-load, and a
-    // literal is what makes forgetting the bump a failing test rather than a
-    // tautology.
-    expect(setup.version).toBe(8)
+    // 9 since the reserved NPC-burst window landed (8 was the overnight
+    // declaration, 7 the per-profile NPC attendance, 6 profile section 5's
+    // declared relay tier, 5 the per-village merchant cap, 4 `may_relay`, 3 the
+    // role templates). Pinned to a literal on purpose: the version has to rise
+    // whenever a field is added, so that an older build refuses a file it would
+    // otherwise half-load, and a literal is what makes forgetting the bump a
+    // failing test rather than a tautology.
+    expect(setup.version).toBe(9)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -2330,16 +2331,17 @@ describe('the merchant cap in the setup file', () => {
     expect(Math.round(DEFAULT_TARGET_FILL * 100)).toBe(60)
   })
 
-  it('is a version 6 file, and every older one simply carries less', () => {
-    // Rewritten from "is a version 5 file" when profile section 5's declared
-    // relay tier landed, and from "version 4" when the per-village merchant cap
-    // did. The contract is the RULE, not the number: the version rises whenever
-    // a field is added, so a build that cannot read the new one REFUSES a file
-    // it would otherwise half-load. A v4 build silently dropping a cap plans
-    // sixteen merchants where the operator allowed eight; a v5 build dropping a
-    // relay tier reports the villages beyond it as unreachable while the answer
-    // sits on screen.
-    expect(SETUP_VERSION).toBe(8)
+  it('is a version 9 file, and every older one simply carries less', () => {
+    // Retitled at every bump -- v4 (the per-village merchant cap), v5, v6
+    // (section 5's declared relay tier), v7, v8, and v9 for the reserved
+    // NPC-burst window. The contract is the RULE, not the number: the version
+    // rises whenever a field is added, so a build that cannot read the new one
+    // REFUSES a file it would otherwise half-load. A v4 build silently dropping
+    // a cap plans sixteen merchants where the operator allowed eight; a v5
+    // build dropping a relay tier reports the villages beyond it as unreachable
+    // while the answer sits on screen; a v8 build dropping the reserved window
+    // puts the manual NPC burst back into competition with arrivals.
+    expect(SETUP_VERSION).toBe(9)
 
     const older = {
       format: SETUP_FORMAT,
@@ -2641,5 +2643,95 @@ describe('assumed_crop_per_hour, per role', () => {
     doc.roles.def.assumed_crop_per_hour = 'lots'
 
     expect(() => roundTrip(doc)).toThrow(/assumed_crop_per_hour/)
+  })
+})
+
+// ── The reserved NPC-burst window (format version 9) ─────────────────
+//
+// The one owned answer that neither persistence path carried.
+// `grep -rn "reserved" frontend/src/utils/` found nothing at all: the window
+// lived only in localStorage under `LS_RESERVED_WINDOW`, which is exactly the
+// failure the page's own copy warns about two panels earlier -- "stored per
+// browser origin, so they do not follow you between :80, :8001, the LAN address
+// and Tailscale". Confirmed against a real saved document: its top level was
+// `format, version, exported_at, account, villages, profiles, roles,
+// profile_windows, npc_attended, merchant_model, foreign_targets`, with no
+// `reserved_window` anywhere.
+//
+// Account-wide rather than per profile, and that is the reason it is a pair and
+// not a map beside `profile_windows`: it is one person at one marketplace. The
+// attendance answer next to it is per profile because the operator is awake for
+// some windows and not others; when they sit down to trade is not a property of
+// a window at all.
+
+describe('the reserved NPC-burst window in the setup file', () => {
+  it('rides the round trip, and the version rose for it', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      reservedWindow: ['20:00', '21:00'],
+      exportedAt: STAMP,
+    })
+
+    // 9 since the reserved window landed (8 was the overnight declaration, 7
+    // the per-profile NPC attendance, 6 the relay tier). Pinned to a literal on
+    // purpose: the version has to rise whenever a field is added, so that an
+    // older build refuses a file it would otherwise half-load, and a literal is
+    // what makes forgetting the bump a failing test rather than a tautology.
+    expect(setup.version).toBe(9)
+    expect(setup.reserved_window).toEqual(['20:00', '21:00'])
+    expect(roundTrip(setup).reservedWindow).toEqual(['20:00', '21:00'])
+  })
+
+  it('is omitted when nothing is reserved, rather than written empty', () => {
+    // Absent is the resting state and means "reserve nothing". An empty pair
+    // reserves nothing either, so writing one would only make the document look
+    // like it had an answer.
+    const setup = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 19 }, exportedAt: STAMP })
+
+    expect('reserved_window' in setup).toBe(false)
+    expect(roundTrip(setup).reservedWindow).toBe(null)
+  })
+
+  it('refuses a pair that is not two clock times', () => {
+    // A document is the operator ASSERTING an answer, so a malformed pair is
+    // refused rather than coerced -- the same discipline `profile_windows`
+    // follows, and the backend's `_ClockTime` pattern refuses it too.
+    for (const bad of [['20:00'], ['20:00', '21:00', '22:00'], ['8pm', '21:00'], '20:00-21:00']) {
+      expect(() =>
+        roundTrip({ format: SETUP_FORMAT, version: SETUP_VERSION, villages: [], reserved_window: bad })
+      ).toThrow(/reserved_window/)
+    }
+  })
+
+  it('still reads a version 8 file, which simply has no reserved window', () => {
+    const parsed = roundTrip({
+      format: SETUP_FORMAT,
+      version: 8,
+      villages: [{ village_id: 20030, name: '02', trade_office_level: 19 }],
+    })
+
+    expect(parsed.reservedWindow).toBe(null)
+    expect(parsed.villages[0].trade_office_level).toBe(19)
+  })
+
+  it('lets the file win over what is on screen, and says nothing when absent', () => {
+    // The same rule the merchant model follows: a document that carries one
+    // replaces it, and a document that does not leaves the screen alone.
+    const withOne = mergeSetup({
+      setup: roundTrip(
+        buildSetup({ villages: VILLAGES, reservedWindow: ['20:00', '21:00'], exportedAt: STAMP })
+      ),
+      villages: VILLAGES,
+      reservedWindow: ['09:00', '10:00'],
+    })
+    expect(withOne.reservedWindow).toEqual(['20:00', '21:00'])
+
+    const withNone = mergeSetup({
+      setup: roundTrip(buildSetup({ villages: VILLAGES, exportedAt: STAMP })),
+      villages: VILLAGES,
+      reservedWindow: ['09:00', '10:00'],
+    })
+    expect(withNone.reservedWindow).toEqual(['09:00', '10:00'])
   })
 })

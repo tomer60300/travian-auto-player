@@ -89,25 +89,31 @@ router = APIRouter(prefix="/api/distribution", tags=["distribution"])
 
 SETUP_FORMAT = "travian-planner-owned-state"
 
-READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8)
+READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9)
 """Versions this build can read. A v1 document simply carries no profiles, a v2
 one no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
 v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing any
 of them would strand every export written before those travelled.
 
-v7 carries `npc_attended` per profile and v8 carries `overnight` per profile.
-Both earned a version rather than riding along as unknown keys -- which they
-mechanically could, since the body is stored verbatim and `SetupDocument`
-ignores extras -- because the harmful path is identical for each: a new build
-writes the answer into an older document, an older build reads it, silently
-drops it, and the operator saves from that build. The answer is then gone from
-the SHARED copy, which is the whole reason this store exists.
+v7 carries `npc_attended` per profile, v8 carries `overnight` per profile, and
+v9 carries the account-wide `reserved_window`. All three earned a version rather
+than riding along as unknown keys -- which they mechanically could, since the
+body is stored verbatim and `SetupDocument` ignores extras -- because the
+harmful path is identical for each: a new build writes the answer into an older
+document, an older build reads it, silently drops it, and the operator saves
+from that build. The answer is then gone from the SHARED copy, which is the
+whole reason this store exists.
 
-Both are answers the planner refuses to guess, and dropping either is silent.
-Losing `npc_attended` funds night routes from trading nobody did. Losing
+All three are answers the planner refuses to guess, and dropping any of them is
+silent. Losing `npc_attended` funds night routes from trading nobody did. Losing
 `overnight` un-declares which profile is the night, so a night split across
 midnight stops being recognised as one: section 6's completion rule goes
-unchecked and the 60% morning floor is measured against the wrong minute."""
+unchecked and the 60% morning floor is measured against the wrong minute. Losing
+`reserved_window` puts the operator's manual NPC burst back into competition
+with merchants landing -- and that one was carried by NEITHER persistence path
+before v9, living only in the page's localStorage, which is per browser origin
+and so does not follow the operator between :80, :8001, the LAN address and
+Tailscale."""
 
 MAX_MERCHANTS_PER_VILLAGE = 20
 """Travian's hard ceiling on merchants in one village. The only bound on a
@@ -229,6 +235,13 @@ class SetupDocument(BaseModel):
     # the slack, and this is where that is said.
     profiles: dict[str, dict[Resource, dict[Annotated[int, Field(gt=0)], AllocationInput]]] = {}
     profile_windows: dict[str, tuple[_ClockTime, _ClockTime]] = {}
+    # Minutes of the day to keep clear of ARRIVALS, so the operator's manual NPC
+    # burst is not competing with merchants landing. A PAIR and not a fourth map
+    # beside the three per-profile ones, because it is one person at one
+    # marketplace: attendance is per profile since the operator is awake for
+    # some windows and not others, while when they sit down to trade is not a
+    # property of a window at all. Absent means "reserve nothing".
+    reserved_window: tuple[_ClockTime, _ClockTime] | None = None
     merchant_model: MerchantModelIn | None = None
     foreign_targets: list[ForeignTarget] = []
 
