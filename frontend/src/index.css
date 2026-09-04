@@ -385,6 +385,62 @@ h1, h2, h3 {
   .input-field { width: 100%; }
 }
 
+/* ── Input — the dense variant ──
+   `.input-sm` was named on seven controls and had no base rule at all. Its one
+   mention in this file sat inside `@media (max-width: 640px)` and only pinned
+   `font-size: 16px`, so at every wider viewport the class contributed NOTHING
+   and the browser drew a bare `<input>`. Measured before this rule, at 768 and
+   1440: `height 16px`, `background rgba(0, 0, 0, 0)`, `border-width 0px`,
+   `border-radius 0px`, `padding 0px 0px`. At 375 the mobile rule made it 21.3px
+   of 16px text and nothing else.
+
+   Five of the seven are the live-run safety controls -- the route cap, the row
+   cap, the never-disable list and the two single-village narrowing boxes -- so
+   "Routes this run" rendered as bare prose and "Max rows this run", empty by
+   default, had nothing on screen to click. The other two are the 25%/60% night
+   pair. `e2e/inputSmBox.pw.js` measures all seven.
+
+   `--md-surface-container-HIGH`, not `--md-surface-container`, and that is
+   measured rather than stylistic: `--md-surface-container` is byte-identical to
+   `--bg-card` in both themes (`#F3EDF7` light, `#2B2930` dark), which is the
+   `.card` these seven controls sit on -- so that token fills the box with its
+   own background and leaves the control exactly as undiscoverable as it was.
+   `-high` is what `.input-field` and `.input-troop` both take, for the same
+   reason.
+
+   The fill alone is still only 1.05:1 against the card, which is why
+   `.input-field` carries a 2px underline and not a fill: the BOUNDARY is what
+   makes a control a control (item 3 of the UI Definition of Done asks 3:1 of
+   it). So this takes `.input-troop`'s 1px `--md-outline` underline, which
+   measures 3.92:1 light and 4.53:1 dark against `--bg-card`.
+
+   No `width`. All seven sites carry a width utility (`w-16` through `w-56`) and
+   an unlayered `width` here would beat every one of them -- see the long note
+   on `.input-field`'s `@layer components` rule above for what that cost the
+   last time it happened.
+
+   The mobile `font-size: 16px !important` rule further down STAYS: it exists
+   because iOS Safari zooms the viewport when a smaller input takes focus. */
+.input-sm {
+  background-color: var(--md-surface-container-high);
+  border: none;
+  border-bottom: 1px solid var(--md-outline);
+  color: var(--text-primary);
+  padding: 0.375rem 0.5rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-family: 'Roboto', system-ui, sans-serif;
+  transition: border-color 200ms var(--md-easing), background-color 200ms;
+}
+.input-sm::placeholder { color: var(--md-on-surface-variant); }
+.input-sm:focus { border-bottom-color: var(--md-primary); }
+/* The app-wide ring, identical to `.input-field:focus-visible` and
+   `.btn-primary:focus-visible`. Item 2 of the UI Definition of Done. */
+.input-sm:focus-visible {
+  outline: 2px solid var(--md-primary);
+  outline-offset: 2px;
+}
+
 /* ── Layout ── */
 
 .top-bar {
@@ -547,6 +603,13 @@ h1, h2, h3 {
   .touch-target input[type="text"] {
     min-height: 44px;
   }
+  /* The dense variant is not in a table, so `.touch-target` above never reaches
+     it, and its own padding lands it at ~32px (37px once the mobile font rule
+     forces 16px) -- under the 44px item 4 asks for. `.input-field` clears it on
+     padding alone at 47.3px; this one cannot without abandoning the half-steps
+     that make it dense in the first place, so it is asked for directly, on the
+     same pointer query and with the same number. */
+  .input-sm { min-height: 44px; }
   .touch-target input[type="checkbox"],
   .touch-target input[type="radio"] {
     width: 24px;
