@@ -4370,7 +4370,11 @@ export default function ResourcePlanner() {
                 max="99"
                 aria-label="Merchant headroom, percent of each village's budget"
                 placeholder={String(DEFAULT_MERCHANT_MODEL.merchant_headroom * 100)}
-                className="input-field w-20 text-right py-1"
+                // w-24, matching the Base capacity box beside it: this box no
+                // longer rounds its own value, so it has to fit two decimals.
+                // Measured at 375/768/1440 -- "12.34" wants 87px and w-20 is
+                // 80, which clipped it at all three.
+                className="input-field w-24 text-right py-1"
                 value={
                   // `fractionToPercent`, the same helper the stock-floor box
                   // uses, rather than a round to one decimal: the box writes
