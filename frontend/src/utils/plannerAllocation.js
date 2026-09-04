@@ -58,6 +58,33 @@ export function withEditedAllocation({ perVillage, villageId, template, resource
   return { ...perVillage, [villageId]: { ...shown, ...patch } }
 }
 
+/** One resource's per-village map after the Rest radio moves.
+ *
+ * `villageId == null` is "no remainder village" -- the initial state of every
+ * account, a state the Plan stage reports on ("no remainder village set"), and
+ * one that was UNREACHABLE once left. There was no `none` option, no clear, the
+ * page's setter only ever SET, and clicking the already-checked radio fires no
+ * change event: so the first Rest tick on a fresh account was a one-way door.
+ *
+ * The displaced village's entry is DELETED rather than overwritten with
+ * `{mode: 'keep', value: 0}`, which is what used to happen. A written `keep` is
+ * a claim -- "this village holds its own production" -- and on a village with a
+ * role it silently overrides the template: 02 stops being Rest and its DEF
+ * profile's 8,372/h absolute quietly becomes "keep your own 1,500". Absent is
+ * the resting state, and `resolveRoleAllocation` reads it as the template's
+ * figure again, which is the answer the operator never changed. It is also what
+ * makes the Mode select honest: with a `keep` written in, the row that had just
+ * stopped absorbing the slack read "Keep own" as though someone had chosen it.
+ */
+export function withRemainder({ perVillage, villageId }) {
+  const per = { ...(perVillage ?? {}) }
+  for (const [vid, allocation] of Object.entries(per)) {
+    if (allocation?.mode === 'remainder') delete per[vid]
+  }
+  if (villageId != null) per[villageId] = { mode: 'remainder', value: 0 }
+  return per
+}
+
 /** The plan's own per-village figures, indexed the way the grid reads them:
  *  `resource -> village id -> row`.
  *

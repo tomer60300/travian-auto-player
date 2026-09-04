@@ -105,6 +105,7 @@ import {
   planCellFigures,
   villageNetIndex,
   withEditedAllocation,
+  withRemainder,
 } from '../utils/plannerAllocation'
 import {
   MINUTES_IN_DAY,
@@ -3179,16 +3180,16 @@ export default function ResourcePlanner() {
     })
   }
 
+  // Exactly one remainder per resource, or NONE -- `villageId == null` is the
+  // initial state of every account and the one this widget could not get back
+  // to. The merge lives in `withRemainder`, where it can be tested, and where
+  // the displaced village's entry is deleted rather than overwritten with a
+  // `keep` nobody chose.
   const setRemainder = (resource, villageId) => {
-    setAllocations((prev) => {
-      const per = { ...(prev[resource] ?? {}) }
-      // Exactly one remainder per resource, enforced by the widget itself.
-      for (const [vid, a] of Object.entries(per)) {
-        if (a.mode === 'remainder') per[vid] = { mode: 'keep', value: 0 }
-      }
-      per[villageId] = { mode: 'remainder', value: 0 }
-      return { ...prev, [resource]: per }
-    })
+    setAllocations((prev) => ({
+      ...prev,
+      [resource]: withRemainder({ perVillage: prev[resource] ?? {}, villageId }),
+    }))
   }
 
   const explicitTotal = (resource) => {
@@ -5795,7 +5796,36 @@ export default function ResourcePlanner() {
                         <th className="text-left px-2">Mode</th>
                         <th className="text-right px-2">Value</th>
                         <th className="text-right px-2">Ship/h</th>
-                        <th className="text-center px-2">Rest</th>
+                        {/* The column heading AND the group's `none` option,
+                            which is the state every account starts in: with no
+                            `none` radio there was nothing to click, no clear,
+                            and clicking the checked radio fires no change event
+                            -- so the first tick was a one-way door out of a
+                            state the Plan stage still reports on. In the header
+                            because "no village" is not a row.
+
+                            The resource is in the accessible name, so the four
+                            tables do not offer four controls called "none", and
+                            it is prefixed rather than replacing the visible word
+                            so the name still CONTAINS the label on screen
+                            (WCAG 2.5.3). */}
+                        <th className="text-center px-2">
+                          <span className="inline-flex flex-col items-center gap-0.5">
+                            Rest
+                            <label className="inline-flex items-center gap-1 font-normal normal-case cursor-pointer">
+                              <input
+                                type="radio"
+                                name={`remainder-${resource}`}
+                                checked={remainder == null}
+                                onChange={() => setRemainder(resource, null)}
+                              />
+                              <span className="sr-only">
+                                {`no village absorbs the remaining ${RESOURCE_LABEL[resource]}: `}
+                              </span>
+                              none
+                            </label>
+                          </span>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -5856,19 +5886,36 @@ export default function ResourcePlanner() {
                               {own == null ? '—' : signed(own)}
                             </td>
                             <td className="px-2">
+                              {/* A Rest row says so, and cannot be told to say
+                                  anything else. It used to read `Keep own` --
+                                  `remainder` is deliberately absent from MODES,
+                                  so the select fell back to the first legal
+                                  value -- which is not what the plan does with
+                                  the Rest village, and on a village with a role
+                                  reads as a silent override of the role's own
+                                  figure. Disabled rather than removed, because
+                                  the column has to stay attributable to the row;
+                                  `.input-field:disabled` is what makes it look
+                                  disabled. The radio beside it is the control
+                                  that moves it, which is where it always was. */}
                               <select
                                 aria-label={`${RESOURCE_LABEL[resource]} mode for ${v.name}`}
                                 className="input-field w-auto text-xs py-0.5"
-                                value={a.mode === 'remainder' ? 'keep' : a.mode}
+                                disabled={a.mode === 'remainder'}
+                                value={a.mode}
                                 onChange={(e) =>
                                   setAllocation(resource, v.village_id, { mode: e.target.value })
                                 }
                               >
-                                {MODES.map((m) => (
-                                  <option key={m.value} value={m.value}>
-                                    {m.label}
-                                  </option>
-                                ))}
+                                {a.mode === 'remainder' ? (
+                                  <option value="remainder">Rest &mdash; absorbs the slack</option>
+                                ) : (
+                                  MODES.map((m) => (
+                                    <option key={m.value} value={m.value}>
+                                      {m.label}
+                                    </option>
+                                  ))
+                                )}
                               </select>
                             </td>
                             <td className="text-right px-2">

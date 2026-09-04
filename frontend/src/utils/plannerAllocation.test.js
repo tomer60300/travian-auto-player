@@ -7,6 +7,7 @@ import {
   npcDrawByVillage,
   villageNetIndex,
   withEditedAllocation,
+  withRemainder,
 } from './plannerAllocation'
 
 describe('allocationMeterSeverity', () => {
@@ -419,5 +420,57 @@ describe('planCellFigures carries the ceiling as well as the draw', () => {
 
     expect(figures.supplement).toBe(0)
     expect(figures.allowance).toBe(0)
+  })
+})
+
+// ── The Rest radio, which was a one-way door ────────────────────────────
+//
+// Driven in e2e/restRadio.pw.js as well, because "unreachable" was a property
+// of the widget rather than of this function: there was no `none` option to
+// click, and clicking the checked radio fires no change event at all.
+describe('withRemainder', () => {
+  it('makes one village the remainder', () => {
+    expect(withRemainder({ perVillage: {}, villageId: 20011 })).toEqual({
+      20011: { mode: 'remainder', value: 0 },
+    })
+  })
+
+  it('moves it, leaving the displaced village with NO entry rather than a keep', () => {
+    const per = withRemainder({
+      perVillage: {
+        20002: { mode: 'remainder', value: 0 },
+        20013: { mode: 'absolute', value: 5168 },
+      },
+      villageId: 20011,
+    })
+    expect(per).toEqual({
+      20013: { mode: 'absolute', value: 5168 },
+      20011: { mode: 'remainder', value: 0 },
+    })
+    // The half that matters: a written `keep` would override 02's role template
+    // and read as a choice nobody made.
+    expect(per).not.toHaveProperty('20002')
+  })
+
+  it('clears it, which is the initial state of every account', () => {
+    expect(
+      withRemainder({ perVillage: { 20002: { mode: 'remainder', value: 0 } }, villageId: null })
+    ).toEqual({})
+  })
+
+  it('clearing leaves every other village alone', () => {
+    expect(
+      withRemainder({
+        perVillage: {
+          20002: { mode: 'remainder', value: 0 },
+          20013: { mode: 'percentage', value: 25 },
+        },
+        villageId: null,
+      })
+    ).toEqual({ 20013: { mode: 'percentage', value: 25 } })
+  })
+
+  it('clearing an account that never had one is a no-op, not a throw', () => {
+    expect(withRemainder({ perVillage: undefined, villageId: null })).toEqual({})
   })
 })
