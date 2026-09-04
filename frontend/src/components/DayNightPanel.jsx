@@ -48,6 +48,18 @@ export default function DayNightPanel({
 }) {
   const withHours = profileNames.filter((name) => dispatchWindowFor(profileWindows[name]) != null)
   const unanswered = attendanceRequired ? unansweredAttendance(withHours, profileAttendance) : []
+  // Profiles with NO hours and no answer. Not the refusal above -- the backend
+  // accepts a windowless request without the field -- and worse for being
+  // accepted: a missing answer there is read as UNATTENDED, so the allowance is
+  // zero and the plan quietly under-delivers instead of stopping. A set with no
+  // window is not a set with no night; it owns all 24 hours, the eight nobody
+  // is at the Marketplace included, and Travian cannot confine a repeat
+  // interval to part of the day.
+  const roundTheClockSilent = attendanceRequired
+    ? profileNames.filter(
+        (name) => !withHours.includes(name) && attendanceFor(profileAttendance, name) === null
+      )
+    : []
   // Every profile awake, and one of them running through the small hours. Not
   // an error -- a night shift is a real thing -- but it is the shape of a
   // forgotten answer, and the consequence is a night route funded by trading
@@ -82,6 +94,18 @@ export default function DayNightPanel({
         </p>
       )}
 
+      {roundTheClockSilent.length > 0 && (
+        <p className="text-warning text-xs mb-3" role="status">
+          {'⚠ '}
+          {roundTheClockSilent.join(', ')} {roundTheClockSilent.length === 1 ? 'has' : 'have'} no
+          hours, so {roundTheClockSilent.length === 1 ? 'it runs' : 'they run'} round the clock —
+          all 24 hours, including the ones nobody is at the marketplace. The plan is not refused
+          over it, and that is the problem: an unanswered window counts as{' '}
+          <strong>nobody trading</strong>, so the NPC allowance is zero and the routes those
+          villages were meant to fund come back short.
+        </p>
+      )}
+
       {claimsAwakeAtNight.length > 0 && (
         <p className="text-warning text-xs mb-3">
           {claimsAwakeAtNight.join(', ')} runs through the small hours and says you are
@@ -113,6 +137,11 @@ export default function DayNightPanel({
               const answer = attendanceFor(profileAttendance, name)
               const suggestion = suggestedAttendance(hours)
               const owed = attendanceRequired && pair != null && answer === null
+              // The same question, unanswered, on a profile with no hours. It
+              // does not refuse the plan -- the backend takes the request -- so
+              // it is stated rather than enforced, but it is asked in the same
+              // place and answered by the same chip.
+              const silentAllDay = attendanceRequired && pair == null && answer === null
               const problemId = `attendance-problem-${name}`
               return (
                 <tr
@@ -203,7 +232,7 @@ export default function DayNightPanel({
                     <select
                       aria-label={`Who is trading during ${name}`}
                       aria-invalid={owed || undefined}
-                      aria-describedby={owed ? problemId : undefined}
+                      aria-describedby={owed || silentAllDay ? problemId : undefined}
                       className="input-field w-auto text-xs py-1"
                       value={answer === null ? '' : answer ? 'awake' : 'asleep'}
                       onChange={(e) =>
@@ -220,21 +249,30 @@ export default function DayNightPanel({
                     <span className="block text-secondary mt-0.5">
                       {describeAttendance(answer)}
                     </span>
-                    {owed && (
+                    {(owed || silentAllDay) && (
                       <>
                         <span id={problemId} className="block text-warning mt-0.5">
-                          the plan is refused until this says
+                          {owed
+                            ? 'the plan is refused until this says'
+                            : 'no hours, so this runs round the clock — silence counts as nobody trading'}
                         </span>
                         {/* The clock's guess, offered rather than applied. One
                             press, and the label names the answer it will
-                            write so it is never a mystery button. */}
+                            write so it is never a mystery button. A profile
+                            with no hours gets its own wording, because "these
+                            hours" names hours it does not have -- and the
+                            guess there is asleep, since round the clock covers
+                            the small hours rather than skipping them. */}
                         <button
                           type="button"
                           className="block underline text-info hover:text-primary mt-0.5 pointer-coarse:min-h-11"
                           onClick={() => onAttendance(name, suggestion)}
                         >
-                          These hours look like{' '}
-                          {suggestion ? 'you are awake' : 'you are asleep'} — say so
+                          {pair == null
+                            ? 'Round the clock covers the small hours too — say you are asleep'
+                            : `These hours look like ${
+                                suggestion ? 'you are awake' : 'you are asleep'
+                              } — say so`}
                         </button>
                       </>
                     )}

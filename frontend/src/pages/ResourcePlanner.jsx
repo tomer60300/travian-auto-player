@@ -1732,14 +1732,16 @@ export default function ResourcePlanner() {
       snapshot: villages,
       dispatch_window: dispatchWindow,
       // Section 7, and the field that used to be unsendable: whether the
-      // operator is at the marketplace during THESE hours. Omitted when the
-      // profile runs round the clock (no night hours to mis-fund) and when
-      // nothing has been answered -- `buildPlan` refuses to send in that case,
-      // so the backend's 422 is a backstop rather than the path.
-      ...npcAttendedField({
-        attended: attendanceFor(profileAttendance, activeProfile),
-        hasWindow: dispatchWindow != null,
-      }),
+      // operator is at the marketplace during THESE hours. Sent whenever it has
+      // been answered, WINDOW OR NOT: a route set with no window runs round the
+      // clock, which is all 24 hours including the eight nobody is at the
+      // Marketplace, and the backend reads a missing answer there as
+      // unattended. It used to be dropped in that case on the reasoning that
+      // round the clock "has no night hours to mis-fund" -- backwards, and it
+      // threw away a `true` the operator could still see on screen.
+      // Omitted only when nothing has been answered; `buildPlan` refuses to
+      // send in that case, so the backend's 422 is a backstop, not the path.
+      ...npcAttendedField(attendanceFor(profileAttendance, activeProfile)),
       // Kept clear of arrivals for the manual NPC burst. Omitted when unset,
       // and omitted for a zero-width pair: an empty reserved window reserves
       // nothing, so sending one would only make the request look like it

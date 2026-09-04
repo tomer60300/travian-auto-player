@@ -153,22 +153,24 @@ async function isolate(page) {
  * stock floor on the capital — which is what makes the attendance answer
  * REQUIRED rather than optional.
  */
-async function seed(page, { floor = 0.3, attendance = null } = {}) {
+async function seed(
+  page,
+  {
+    floor = 0.3,
+    attendance = null,
+    profiles = { Day: {}, Night: {} },
+    // The hours the account actually runs. Seeded rather than left to the
+    // page's own defaults so the spec states the windows it asserts about.
+    windows = { Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] },
+  } = {}
+) {
   await page.addInitScript(
-    ([key, snap, capital, stockFloor, stored]) => {
+    ([key, snap, capital, stockFloor, stored, profileMap, windowMap]) => {
       localStorage.setItem('token', 'e2e-not-a-real-token')
       localStorage.setItem(`planner_snapshot::${key}`, JSON.stringify(snap))
       localStorage.setItem(`planner_snapshot_at::${key}`, JSON.stringify(Date.now()))
-      localStorage.setItem(
-        `planner_profiles::${key}`,
-        JSON.stringify({ Day: {}, Night: {} })
-      )
-      // The hours the account actually runs. Seeded rather than left to the
-      // page's own defaults so the spec states the windows it asserts about.
-      localStorage.setItem(
-        `planner_profile_windows::${key}`,
-        JSON.stringify({ Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] })
-      )
+      localStorage.setItem(`planner_profiles::${key}`, JSON.stringify(profileMap))
+      localStorage.setItem(`planner_profile_windows::${key}`, JSON.stringify(windowMap))
       if (stockFloor != null) {
         localStorage.setItem(
           `planner_stock_floor::${key}`,
@@ -179,7 +181,7 @@ async function seed(page, { floor = 0.3, attendance = null } = {}) {
         localStorage.setItem(`planner_npc_attended::${key}`, JSON.stringify(stored))
       }
     },
-    [KEY, SNAPSHOT, CAPITAL, floor, attendance]
+    [KEY, SNAPSHOT, CAPITAL, floor, attendance, profiles, windows]
   )
 }
 
@@ -336,6 +338,89 @@ test.describe('NPC attendance', () => {
     await expect(page.getByText(/^Routes$/)).toBeVisible()
     // Minutes past midnight, which is the unit the request carries.
     expect(sent.plan[sent.plan.length - 1].reserved_window).toEqual([1200, 1260])
+  })
+
+  // A profile with NO hours, which is the case the field used to be thrown
+  // away in. The old rule dropped `npc_attended` whenever there was no
+  // `dispatch_window`, on the reasoning that a round-the-clock set has no
+  // night hours to mis-fund. That reads as if the missing window narrowed the
+  // set; it widens it to all 24 hours. And the backend now reads a missing
+  // answer as UNATTENDED, so the drop stopped being lossy and started being an
+  // inversion: measured on the repo's NPC fixture with `dispatch_window: None`,
+  // omitting the field gives allowance 0 / draw 0 while `attended=true` gives
+  // 20,000/h and 12,000/h. The operator answered, saw their answer on screen,
+  // and got a plan 12,000/h short of the account they had described.
+  test.describe('a profile with no hours', () => {
+    const ALL_DAY = { 'All day': {} }
+
+    test('carries the answer the operator gave, with no window beside it', async ({ page }) => {
+      const sent = await isolate(page)
+      await seed(page, { profiles: ALL_DAY, windows: {} })
+      await openDayStage(page)
+
+      await page.getByLabel('Who is trading during All day').selectOption('awake')
+
+      await page.getByRole('button', { name: /^Build plan/ }).click()
+      await expect(page.getByText(/^Routes$/)).toBeVisible()
+
+      expect(sent.plan).toHaveLength(1)
+      // The whole assertion: the answer is in the body, and there is no window
+      // to have gated it on.
+      expect(sent.plan[0].npc_attended).toBe(true)
+      expect(sent.plan[0].dispatch_window).toBeNull()
+    })
+
+    test('false rides too, because false is still an answer', async ({ page }) => {
+      const sent = await isolate(page)
+      await seed(page, { profiles: ALL_DAY, windows: {} })
+      await openDayStage(page)
+
+      await page.getByLabel('Who is trading during All day').selectOption('asleep')
+
+      await page.getByRole('button', { name: /^Build plan/ }).click()
+      await expect(page.getByText(/^Routes$/)).toBeVisible()
+
+      expect(sent.plan[0].npc_attended).toBe(false)
+    })
+
+    // Not the refusal a windowed profile gets -- the backend accepts the
+    // request -- so it is said rather than enforced. Being accepted is exactly
+    // what makes it worth saying.
+    test('an unanswered round-the-clock profile is warned about, not refused', async ({ page }) => {
+      const sent = await isolate(page)
+      await seed(page, { profiles: ALL_DAY, windows: {} })
+      await openDayStage(page)
+
+      await expect(page.getByText(/round the clock/i).first()).toBeVisible()
+      await expect(page.getByText(/nobody trading/i).first()).toBeVisible()
+
+      // The plan still builds, and sends nothing it was not told.
+      await page.getByRole('button', { name: /^Build plan/ }).click()
+      await expect(page.getByText(/^Routes$/)).toBeVisible()
+      expect(sent.plan[0]).not.toHaveProperty('npc_attended')
+    })
+
+    // The clock's guess for a set with no window is ASLEEP: round the clock
+    // covers the small hours rather than skipping them.
+    test('the chip offers asleep, because every hour includes the small ones', async ({ page }) => {
+      await isolate(page)
+      await seed(page, { profiles: ALL_DAY, windows: {} })
+      await openDayStage(page)
+
+      await page
+        .getByRole('button', { name: /Round the clock covers the small hours/ })
+        .click()
+
+      expect(await storedAttendance(page)).toEqual({ 'All day': false })
+    })
+
+    test('nothing is said when no village keeps a floor', async ({ page }) => {
+      await isolate(page)
+      await seed(page, { profiles: ALL_DAY, windows: {}, floor: null })
+      await openDayStage(page)
+
+      await expect(page.getByText(/round the clock/i)).toHaveCount(0)
+    })
   })
 
   test('the bar states the active profile answer and leads to the editor', async ({ page }) => {

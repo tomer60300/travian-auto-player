@@ -20,6 +20,14 @@
  * the page gates the Build button on -- a named question on screen beats a 422
  * naming village ids.
  *
+ * A WINDOWLESS profile is not exempt from any of that, which is the correction
+ * this module carries. The 422 does not fire there -- the request would be
+ * accepted -- but a missing answer is now read as UNATTENDED, so a profile with
+ * no hours needs the answer just as much and gets a zero allowance without it.
+ * That is why `npcAttendedField` sends a boolean whether or not there is a
+ * window, and why `suggestedAttendance` guesses asleep for one: round the clock
+ * is all 24 hours, not none of them.
+ *
  * The clock may SUGGEST (`suggestedAttendance`) and may never decide. That
  * asymmetry is the whole reason the field exists.
  *
@@ -34,7 +42,7 @@
  */
 
 import { RESOURCE_LABEL, RESOURCES } from '../constants/planner'
-import { coversSmallHours } from './plannerClock'
+import { coversSmallHours, dispatchWindowFor } from './plannerClock'
 
 /** The four stores, in the game's own order. */
 export const NPC_FEEDSTOCK_RESOURCES = Object.freeze([...RESOURCES])
@@ -88,11 +96,19 @@ export function unansweredAttendance(profilesWithHours, profileAttendance) {
 
 /** What the CLOCK would guess, offered as a chip and never applied by itself.
  *
- * False for a window holding the small hours, true otherwise. A round-the-clock
- * profile suggests true because it has no night hours to mis-fund -- which is
- * also the case where the backend needs no answer at all.
+ * False for a window holding the small hours, true otherwise -- and false for
+ * NO window at all, which is the case this used to get backwards. "A
+ * round-the-clock profile has no night hours to mis-fund" reads as if the
+ * absent window narrowed the set; it widens it. Such a profile owns ALL 24
+ * hours, the eight nobody is at the Marketplace included, and Travian offers
+ * nothing that would confine a repeat interval to part of the day. So the
+ * clock's guess is asleep, which is also the direction the backend's own
+ * default takes (`attended=... else False`, beside its note in
+ * `web/routes/distribution.py`): unattended under-delivers and reports it
+ * through NPC_CAPACITY_SHORT, attended over-commits in silence.
  */
 export function suggestedAttendance(hours) {
+  if (dispatchWindowFor(hours) == null) return false
   return !coversSmallHours(hours)
 }
 
@@ -105,14 +121,23 @@ export function describeAttendance(value) {
 
 /** `npc_attended` for a request body, or nothing at all.
  *
- * Omitted in two cases, and both are the backend's own reading rather than a
- * convenience: with no `dispatch_window` the route set runs round the clock and
- * has no night hours to mis-fund, and an unanswered profile must produce the
- * 422 that names the villages instead of a fabricated boolean. The page refuses
- * to build in the second case, so the 422 is a backstop and not the path.
+ * Omitted for ONE case only: an unanswered profile, which must produce the 422
+ * that names the villages instead of a fabricated boolean. The page refuses to
+ * build in that case, so the 422 is a backstop and not the path.
+ *
+ * It used to be omitted for a windowless profile too, and that was the defect.
+ * The reasoning was "round the clock has no night hours to mis-fund", which is
+ * backwards -- see `suggestedAttendance` -- and it stopped being merely lossy
+ * when the backend changed its reading of an absent answer from ATTENDED to
+ * unattended. Measured on the repo's NPC fixture with `dispatch_window: None`:
+ * omitted gives an allowance of 0 and a draw of 0, `attended=true` gives
+ * 20,000/h and 12,000/h. So the operator answered "you are at the
+ * marketplace", saw their answer on screen, and got a plan 12,000/h short of
+ * the account they had described. A boolean travels now, window or not; the
+ * validator that could refuse it (`_npc_attendance_is_stated`) returns early
+ * when there is no window, so a stated answer is always accepted there.
  */
-export function npcAttendedField({ attended, hasWindow }) {
-  if (!hasWindow) return {}
+export function npcAttendedField(attended) {
   if (typeof attended !== 'boolean') return {}
   return { npc_attended: attended }
 }

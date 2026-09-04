@@ -83,25 +83,43 @@ describe('suggestedAttendance', () => {
     expect(suggestedAttendance(['07:00', '23:00'])).toBe(true)
   })
 
-  it('proposes awake for a round-the-clock profile, which has no night to miss', () => {
-    expect(suggestedAttendance(null)).toBe(true)
+  // "A round-the-clock profile has no night hours to mis-fund" was the old
+  // reading and it is backwards: such a set owns ALL 24 hours, the eight
+  // nobody is at the Marketplace included, and Travian offers nothing to
+  // confine a repeat interval to part of the day. So the honest suggestion is
+  // the one the backend's own default already takes -- see `_npc_policy_for`'s
+  // note beside `attended=... else False` in `web/routes/distribution.py`.
+  it('proposes asleep for a round-the-clock profile, which owns every hour', () => {
+    expect(suggestedAttendance(null)).toBe(false)
+    // The other two shapes `dispatchWindowFor` collapses to null read the same
+    // way, because they produce the same request: no window at all.
+    expect(suggestedAttendance(['08:00', '08:00'])).toBe(false)
+    expect(suggestedAttendance(['not', 'a clock'])).toBe(false)
   })
 })
 
 describe('npcAttendedField', () => {
-  // Omitted, not guessed. With no window the route set runs round the clock and
-  // has no night hours to mis-fund, so the backend reads absent as available.
-  it('omits the field when the profile has no hours', () => {
-    expect(npcAttendedField({ attended: true, hasWindow: false })).toEqual({})
-  })
-
   it('omits the field when nothing has been answered', () => {
-    expect(npcAttendedField({ attended: null, hasWindow: true })).toEqual({})
+    expect(npcAttendedField(null)).toEqual({})
+    expect(npcAttendedField(undefined)).toEqual({})
+    // A stored string is not an answer, on `attendanceFor`'s own rule.
+    expect(npcAttendedField('yes')).toEqual({})
   })
 
   it('sends true and false alike, because false is an answer', () => {
-    expect(npcAttendedField({ attended: true, hasWindow: true })).toEqual({ npc_attended: true })
-    expect(npcAttendedField({ attended: false, hasWindow: true })).toEqual({ npc_attended: false })
+    expect(npcAttendedField(true)).toEqual({ npc_attended: true })
+    expect(npcAttendedField(false)).toEqual({ npc_attended: false })
+  })
+
+  // The field used to be dropped whenever the profile had no `dispatch_window`,
+  // which was merely lossy while the backend read a missing answer as
+  // ATTENDED. It now reads it as unattended, so dropping a true answer there
+  // inverts it: measured on the repo's NPC fixture with `dispatch_window:
+  // None`, omitted gives allowance 0 and draw 0 while `attended=true` gives
+  // 20,000/h and 12,000/h. The operator answers, sees their answer on screen,
+  // and gets a plan 12,000/h short of the account they described.
+  it('sends the answer for a windowless profile, where absent now means false', () => {
+    expect(npcAttendedField(true)).toEqual({ npc_attended: true })
   })
 })
 
