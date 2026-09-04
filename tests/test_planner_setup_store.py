@@ -345,12 +345,17 @@ class TestOnePerUser:
 
 class TestTheVersion:
     def test_a_newer_version_says_so(self, client, account):
-        res = _put(client, account, _minimal(account, version=7))
+        # 8, not 7: v7 became readable when per-profile NPC attendance started
+        # travelling in the document. This case needs a version that is
+        # guaranteed to be beyond this build, so it moves whenever
+        # READABLE_VERSIONS grows -- and the parametrised case below is what
+        # would fail if the two ever disagreed.
+        res = _put(client, account, _minimal(account, version=8))
 
         assert res.status_code == 422, res.text
         assert "NEWER build" in res.text
 
-    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6])
+    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7])
     def test_every_readable_version_is_accepted(self, client, account, version):
         assert _put(client, account, _minimal(account, version=version)).status_code == 200
 
@@ -595,7 +600,9 @@ class TestWhatThePlannerWouldRefuse:
         doc = _realistic(account)
         assert _put(client, account, doc).status_code == 200
 
-        assert _put(client, account, _minimal(account, version=7)).status_code == 422
+        # 8 for the same reason as TestTheVersion's: v7 is readable now, so a
+        # refusal has to be asked for with a version beyond this build.
+        assert _put(client, account, _minimal(account, version=8)).status_code == 422
 
         assert _get(client, account).json()["setup"] == doc
 

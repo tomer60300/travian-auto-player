@@ -89,11 +89,19 @@ router = APIRouter(prefix="/api/distribution", tags=["distribution"])
 
 SETUP_FORMAT = "travian-planner-owned-state"
 
-READABLE_VERSIONS = (1, 2, 3, 4, 5, 6)
+READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7)
 """Versions this build can read. A v1 document simply carries no profiles, a v2
-one no roles, a v3 one no per-village relay answer, a v4 one no merchant cap and
-a v5 one no relay tier, so refusing any of them would strand every export
-written before those travelled."""
+one no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
+v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing any
+of them would strand every export written before those travelled.
+
+v7 carries `npc_attended` per profile. It earned a version rather than riding
+along as an unknown key -- which it mechanically could, since the body is stored
+verbatim and `SetupDocument` ignores extras -- because the harmful path is real:
+a new build writes attendance into a v6 document, an older v6 build reads it,
+silently drops it, and the operator saves from that build. The answer is then
+gone from the shared copy, and this is the one field the code refuses to guess,
+because guessing it funds night routes from trading nobody did."""
 
 MAX_MERCHANTS_PER_VILLAGE = 20
 """Travian's hard ceiling on merchants in one village. The only bound on a

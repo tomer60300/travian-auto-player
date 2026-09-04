@@ -235,7 +235,7 @@ describe('profiles in the setup file', () => {
     // so that an older build refuses a file it would otherwise half-load, and a
     // literal is what makes forgetting the bump a failing test rather than a
     // tautology.
-    expect(setup.version).toBe(6)
+    expect(setup.version).toBe(7)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -344,6 +344,55 @@ describe('mergeSetup with profiles', () => {
     doc.profiles = { Night: { crop: { 99999: { mode: 'absolute', value: 1 } } } }
     const merged = mergeSetup({ setup: roundTrip(doc), villages: VILLAGES })
     expect(merged.profiles.Night).toEqual({})
+  })
+
+  it('carries the per-profile NPC attendance through, including false', () => {
+    // The field that decides whether a night route set is funded at all, and
+    // the setup document had no place for it -- so saving and reloading lost
+    // it silently, on the one answer this codebase refuses to guess. False is
+    // the case that matters: it is an ANSWER ("nobody is trading"), and any
+    // carrier that treats it as absence loses exactly the profile whose
+    // conversion allowance has to be zeroed.
+    const setup = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        profiles: { Night: NIGHT },
+        profileWindows: { Night: ['23:00', '07:00'] },
+        npcAttended: { Day: true, Night: false },
+        exportedAt: STAMP,
+      })
+    )
+    expect(setup.npcAttended).toEqual({ Day: true, Night: false })
+
+    const merged = mergeSetup({ setup, villages: VILLAGES, npcAttended: {} })
+    expect(merged.npcAttended).toEqual({ Day: true, Night: false })
+  })
+
+  it('omits the attendance field entirely when no profile has answered', () => {
+    // Absent is the third state, and it has to survive as absence: an empty
+    // map written into the file would import as "every profile answered
+    // nothing", which reads the same on screen and is a different document.
+    const setup = buildSetup({ villages: VILLAGES, npcAttended: {}, exportedAt: STAMP })
+    expect('npc_attended' in setup).toBe(false)
+  })
+
+  it('leaves a profile the file is silent about exactly as it was', () => {
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, npcAttended: { Night: false }, exportedAt: STAMP })
+    )
+    const merged = mergeSetup({ setup, villages: VILLAGES, npcAttended: { Day: true } })
+    expect(merged.npcAttended).toEqual({ Day: true, Night: false })
+  })
+
+  it('rejects an attendance that is not a boolean rather than guessing one', () => {
+    // `attendanceMapOnly` drops a non-boolean silently on the way out of
+    // localStorage, because an unanswered profile is already named on screen.
+    // A FILE is different: it is the operator asserting an answer, and "yes"
+    // read as an attendance nobody declared is the one outcome worth stopping
+    // for -- the backend's lax `bool` would accept it.
+    const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
+    doc.npc_attended = { Night: 'yes' }
+    expect(() => roundTrip(doc)).toThrow(/not an answer/)
   })
 
   it('carries the windows and the merchant model through', () => {
@@ -2217,7 +2266,7 @@ describe('the merchant cap in the setup file', () => {
     // sixteen merchants where the operator allowed eight; a v5 build dropping a
     // relay tier reports the villages beyond it as unreachable while the answer
     // sits on screen.
-    expect(SETUP_VERSION).toBe(6)
+    expect(SETUP_VERSION).toBe(7)
 
     const older = {
       format: SETUP_FORMAT,

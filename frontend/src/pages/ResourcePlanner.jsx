@@ -1429,6 +1429,12 @@ export default function ResourcePlanner() {
         roles: roleTemplates,
         profiles,
         profileWindows,
+        // The answer that decides whether a night route set is funded at all.
+        // It used to live only in localStorage -- which is per ORIGIN -- so it
+        // did not follow the operator between :80, :8001, the LAN address and
+        // Tailscale the way the hours beside it did, and a save-then-reload
+        // lost it silently. Carrying it is what the v7 bump is for.
+        npcAttended: profileAttendance,
         merchantModel,
         foreignTargets,
         exportedAt: new Date().toISOString(),
@@ -1450,6 +1456,7 @@ export default function ResourcePlanner() {
     roleTemplates,
     profiles,
     profileWindows,
+    profileAttendance,
     merchantModel,
     foreignTargets,
     accountKey,
@@ -1510,6 +1517,7 @@ export default function ResourcePlanner() {
         roles: roleTemplates,
         profiles,
         profileWindows,
+        npcAttended: profileAttendance,
         foreignTargets,
       })
       setTradeOffice(merged.tradeOffice)
@@ -1526,6 +1534,7 @@ export default function ResourcePlanner() {
       setRoleTemplates(merged.roles)
       setProfiles(merged.profiles)
       setProfileWindows(merged.profileWindows)
+      setProfileAttendance(merged.npcAttended)
       // Capacity is server-calibrated, so a file that carries a calibration is
       // more trustworthy than this build's default. Absent, the default stands.
       if (merged.merchantModel) {
@@ -1567,6 +1576,7 @@ export default function ResourcePlanner() {
       mayRelay,
       roleTemplates,
       profiles,
+      profileAttendance,
       profileWindows,
       foreignTargets,
       accountKey,

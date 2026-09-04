@@ -99,15 +99,21 @@ import { NPC_FEEDSTOCK_RESOURCES, isFeedstockList } from './plannerNpc'
 import { namesForVillageIds } from './villageRefs'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 6
+export const SETUP_VERSION = 7
 /** Versions this build can read. A v1 file simply carries no profiles, a v2 one
- * no roles, a v3 one no per-village relay answer, a v4 one no merchant cap and a
- * v5 one no relay tier, so refusing any of them would strand every export
- * written before those travelled. The version still has to rise when a field is
- * added, and in the other direction: a build that cannot read roles must REFUSE
- * a file that has them, or it loads the villages, drops their profiles and plans
- * a different account without saying so. */
-export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6])
+ * no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
+ * v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing
+ * any of them would strand every export written before those travelled. The
+ * version still has to rise when a field is added, and in the other direction:
+ * a build that cannot read roles must REFUSE a file that has them, or it loads
+ * the villages, drops their profiles and plans a different account without
+ * saying so.
+ *
+ * v7 is coupled to the server, which validates the version on write: the
+ * `READABLE_VERSIONS` tuple in `src/travian_api/web/routes/planner_setup.py`
+ * has to gain 7 in the same breath, or every save comes back 422 "NEWER
+ * build". That module's own comment states the coupling from its side. */
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
@@ -805,6 +811,7 @@ export function buildSetup({
   roles,
   profiles,
   profileWindows,
+  npcAttended,
   merchantModel,
   foreignTargets,
   exportedAt,
@@ -894,6 +901,19 @@ export function buildSetup({
   if (roles && Object.keys(roles).length) doc.roles = roles
   if (profileWindows && Object.keys(profileWindows).length) {
     doc.profile_windows = profileWindows
+  }
+  // Beside the hours, because it is a question ABOUT the hours: "who is
+  // trading during this window". A third sibling map keyed by profile name
+  // rather than a field on the window pair, so a profile can carry an answer
+  // before it has hours and the two stay independently absent.
+  //
+  // Omitted when empty on the same rule as the two above, and here the rule is
+  // load-bearing rather than tidy: absent is the THIRD state -- "not answered
+  // yet" -- and it is the state that refuses a plan instead of funding a night
+  // nobody is awake for. An empty map written into the file would import as
+  // every profile having answered nothing, which reads identically on screen.
+  if (npcAttended && Object.keys(npcAttended).length) {
+    doc.npc_attended = npcAttended
   }
   if (merchantModel) doc.merchant_model = merchantModel
   // A tribute is entirely operator-supplied -- the game will not say that an ally
@@ -1192,6 +1212,33 @@ function parseWindows(raw, where) {
   return out
 }
 
+/** One attendance answer per profile: a boolean, or the key is not there.
+ *
+ * `attendanceMapOnly` drops a non-boolean silently on the way out of
+ * localStorage, and rightly: an unanswered profile is already named on screen
+ * and refuses the plan. A FILE is not that. It is the operator asserting an
+ * answer, and the backend's `bool` is lax enough to read a stored `"yes"` as an
+ * attendance nobody declared -- which funds a night's conversion off a string.
+ * Refused here, on the same discipline `npc_feedstock` follows two fields up.
+ */
+function parseAttendance(raw, where) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new SetupFileError(`${where} is not a map of answers.`)
+  }
+  const out = {}
+  for (const [name, value] of Object.entries(raw)) {
+    if (typeof value !== 'boolean') {
+      throw new SetupFileError(
+        `${where}["${name}"] is ${JSON.stringify(value)}, which is not an answer. ` +
+          `It must be true (you are at the marketplace), false (nobody is trading), ` +
+          `or absent to leave the profile unanswered.`
+      )
+    }
+    out[name] = value
+  }
+  return out
+}
+
 /** Parse and validate a setup document. Throws rather than half-loading.
  *
  * Out-of-range levels are rejected, not clamped. Clamping down would be the
@@ -1444,6 +1491,8 @@ export function parseSetup(text) {
   }
   const profileWindows =
     raw.profile_windows == null ? {} : parseWindows(raw.profile_windows, 'profile_windows')
+  const npcAttended =
+    raw.npc_attended == null ? {} : parseAttendance(raw.npc_attended, 'npc_attended')
 
   let merchantModel = null
   if (raw.merchant_model != null) {
@@ -1492,7 +1541,16 @@ export function parseSetup(text) {
       ? null
       : parseForeignTargets(raw.foreign_targets, "foreign_targets")
 
-  return { ...raw, villages, roles, profiles, profileWindows, merchantModel, foreignTargets }
+  return {
+    ...raw,
+    villages,
+    roles,
+    profiles,
+    profileWindows,
+    npcAttended,
+    merchantModel,
+    foreignTargets,
+  }
 }
 
 /** Apply a parsed setup over the current maps, and say exactly what happened.
@@ -1519,6 +1577,7 @@ export function mergeSetup({
   roles,
   profiles,
   profileWindows,
+  npcAttended,
   foreignTargets,
 }) {
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
@@ -1593,6 +1652,7 @@ export function mergeSetup({
   // designed. Profiles the file does not mention are left exactly as they are.
   const nextProfiles = { ...(profiles ?? {}) }
   const nextWindows = { ...(profileWindows ?? {}) }
+  const nextAttendance = { ...(npcAttended ?? {}) }
   const profilesLoaded = []
   const droppedVillages = new Set()
   for (const [name, alloc] of Object.entries(setup.profiles ?? {})) {
@@ -1612,6 +1672,12 @@ export function mergeSetup({
   }
   for (const [name, pair] of Object.entries(setup.profileWindows ?? {})) {
     nextWindows[name] = pair
+  }
+  // Per profile, and merged rather than replaced wholesale: the file wins about
+  // the profiles it names and says nothing about the rest, exactly as the hours
+  // beside it do. False overwrites, because false is an answer.
+  for (const [name, answer] of Object.entries(setup.npcAttended ?? {})) {
+    nextAttendance[name] = answer
   }
 
   // A role the file names replaces the template on screen wholesale, on the
@@ -1639,6 +1705,7 @@ export function mergeSetup({
     roles: nextRoles,
     profiles: nextProfiles,
     profileWindows: nextWindows,
+    npcAttended: nextAttendance,
     merchantModel: setup.merchantModel ?? null,
     // Replaced wholesale, not merged. Merging two tribute lists would either
     // double an obligation or leave a target the operator deleted still being
