@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
+  DEFAULT_BASELINE_FILL,
+  DEFAULT_TARGET_FILL,
   SETUP_FORMAT,
   SETUP_VERSION,
   SetupFileError,
@@ -2300,6 +2302,32 @@ describe('the merchant cap in the setup file', () => {
     })
 
     expect(merged.maxBusy).toEqual({ 20030: 12, 20031: 8 })
+  })
+
+  // The fourth deliberate second copy of a Python value in this file, and
+  // until now the only one with neither a note nor a test. `SETUP_VERSION`,
+  // `MAX_TRADE_OFFICE_LEVEL` and `MAX_MERCHANTS_PER_VILLAGE` are all pinned by
+  // a literal on both sides; this pair was `useState(25)` / `useState(60)`
+  // inside `pages/ResourcePlanner.jsx` against `DEFAULT_BASELINE_FILL = 0.25`
+  // and `DEFAULT_TARGET_FILL = 0.60` in `night_profile.py`, with nothing in
+  // `frontend/src/**/*.test.js*` or `frontend/e2e` naming either.
+  //
+  // The only guard was the on-screen disagreement note, and that needs a day
+  // check to have RUN first: the note compares the boxes against
+  // `dayCheck.pre_night_baseline` / `dayCheck.morning_floor`, so a divergence
+  // is invisible until the operator asks for a full-day check. This pair
+  // already drifted once -- the boxes defaulted to 30/80 while the check
+  // graded against 25/60, so the derivation aimed at one night and the report
+  // described another.
+  it('mirrors the server night thresholds as a literal, on both sides', () => {
+    expect(DEFAULT_BASELINE_FILL).toBe(0.25)
+    expect(DEFAULT_TARGET_FILL).toBe(0.6)
+    // Fractions, matching Python exactly, because that is the unit the
+    // `/night-profile` and `/day-check` bodies carry. The percent the boxes
+    // show is rounded off them -- `0.6 * 100` is 60.00000000000001 in IEEE, and
+    // an input reading that is a different defect.
+    expect(Math.round(DEFAULT_BASELINE_FILL * 100)).toBe(25)
+    expect(Math.round(DEFAULT_TARGET_FILL * 100)).toBe(60)
   })
 
   it('is a version 6 file, and every older one simply carries less', () => {

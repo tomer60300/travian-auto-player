@@ -141,6 +141,36 @@ export const MAX_TRADE_OFFICE_LEVEL = 20
  * file -- see `unreachableCaps`, which checks it against live state. */
 export const MAX_MERCHANTS_PER_VILLAGE = 20
 
+/** Section 6's two switches, as FRACTIONS, mirroring
+ * `src/travian_api/services/distribution/night_profile.py`:
+ * `DEFAULT_BASELINE_FILL = 0.25` and `DEFAULT_TARGET_FILL = 0.60`.
+ *
+ * The fourth deliberate second copy of a Python value in this file, and it had
+ * neither a note nor a test -- unlike `SETUP_VERSION`,
+ * `MAX_TRADE_OFFICE_LEVEL` and `MAX_MERCHANTS_PER_VILLAGE`, all three of which
+ * are pinned by a literal on both sides. The pair lived as `useState(25)` /
+ * `useState(60)` inside the page, so nothing named either and a grep for the
+ * Python constant found one side of it.
+ *
+ * They are ONE pair of quantities seen from either side -- "never overflow
+ * during the night, never arrive empty at morning" -- so the derivation and the
+ * full-day check have to grade against the same two numbers. They have already
+ * disagreed once: the boxes defaulted to 30/80 while the server measured
+ * against 25/60, which made the derivation aim at one night and the report
+ * describe another. The on-screen disagreement note is not a substitute for
+ * this pin, because it compares the boxes against a day check's own response
+ * and is therefore invisible until a check has RUN.
+ *
+ * Fractions rather than percents, because that is the unit
+ * `/distribution/night-profile` and `/distribution/day-check` carry. The boxes
+ * show a percent, ROUNDED off these: `0.6 * 100` is 60.00000000000001 in IEEE,
+ * and an input reading that is its own defect.
+ *
+ * The operator owns both figures and may edit either. These are only where the
+ * boxes start, and section 6 settled them at 0.25 and 0.60 on 2026-09-03. */
+export const DEFAULT_BASELINE_FILL = 0.25
+export const DEFAULT_TARGET_FILL = 0.6
+
 /** Is this a usable ceiling on busy merchants?
  *
  * A whole count of merchants, from 0 to the 20 a village can ever hold. Zero is

@@ -65,6 +65,8 @@ import useLogStore from '../stores/logStore'
 import api from '../api'
 import {
   CONSUMABLE_RESOURCES,
+  DEFAULT_BASELINE_FILL,
+  DEFAULT_TARGET_FILL,
   MAX_MERCHANTS_PER_VILLAGE,
   SetupFileError,
   VILLAGE_ROLES,
@@ -874,15 +876,25 @@ export default function ResourcePlanner() {
   // The two numbers the account cannot supply: how empty the stores actually
   // are at bedtime, and how full they may be at dawn. Everything else the
   // derivation needs it works out for itself.
-  // Section 6's figures, and the same pair the server measures against
-  // (`DEFAULT_BASELINE_FILL` 0.25 / `DEFAULT_TARGET_FILL` 0.60): the operator
-  // spends role villages down to 25% at the day->night switch, and every one of
-  // them must be at 60% on both stores by 07:00. These were 30/80, which made
-  // the derivation aim at one pair while the full-day check graded against the
-  // other -- a night that does not exist. The disagreement note below stays,
-  // because it still earns its place the moment either box is edited.
-  const [baselineFill, setBaselineFill] = useState(25)
-  const [targetFill, setTargetFill] = useState(60)
+  // Section 6's figures, and the same pair the server measures against: the
+  // operator spends role villages down to 25% at the day->night switch, and
+  // every one of them must be at 60% on both stores by 07:00. These were
+  // 30/80, which made the derivation aim at one pair while the full-day check
+  // graded against the other -- a night that does not exist. The disagreement
+  // note below stays, because it still earns its place the moment either box
+  // is edited.
+  //
+  // Imported rather than written as two literals here. They are a deliberate
+  // second copy of `DEFAULT_BASELINE_FILL` / `DEFAULT_TARGET_FILL` in
+  // `night_profile.py`, and they were the only such copy in this app with
+  // neither a note nor a test -- so the constant and its pin live in
+  // `plannerSetup.js` beside the three that already do. A percent on screen, a
+  // fraction on the wire, and the rounding is deliberate: `0.6 * 100` is
+  // 60.00000000000001.
+  const [baselineFill, setBaselineFill] = useState(
+    Math.round(DEFAULT_BASELINE_FILL * 100)
+  )
+  const [targetFill, setTargetFill] = useState(Math.round(DEFAULT_TARGET_FILL * 100))
   const [deriving, setDeriving] = useState(false)
   const [derived, setDerived] = useState(null)
   // Destinations the reconciler must leave alone. Its rule -- active,
@@ -4920,12 +4932,19 @@ export default function ResourcePlanner() {
             {/* These two figures and the full-day check's two thresholds are
                 the same pair of quantities seen from either side -- "never
                 overflow during the night, never arrive empty at morning" --
-                and on this account they do not agree: the boxes above default
-                to 30% and 80% while the check measures against the server's
-                own 25% and 60%. Which pair is right is an OPEN question with
-                the operator, so this names the gap and picks no winner.
-                Shown only once a check has run, because until then there is no
-                second pair to compare against and the note would be noise. */}
+                so a plan derived against one pair and graded against the other
+                describes a night that does not exist. They DID disagree: the
+                boxes defaulted to 30% and 80% while the check measured against
+                the server's own 25% and 60%. They agree now, and the boxes
+                start from `DEFAULT_BASELINE_FILL` / `DEFAULT_TARGET_FILL`
+                rather than from two literals, so the two cannot drift again
+                unnoticed -- `plannerSetup.test.js` pins them.
+                This note is still earned, because the operator may EDIT either
+                box, and the pair they type is theirs. Shown only once a check
+                has run, because until then there is no second pair to compare
+                against -- which is also why the pin is not optional: a
+                divergence in the DEFAULTS would be invisible here until
+                someone asked for a full-day check. */}
             {dayCheck != null &&
               (Math.abs(Number(baselineFill) / 100 - dayCheck.pre_night_baseline) > 0.001 ||
                 Math.abs(Number(targetFill) / 100 - dayCheck.morning_floor) > 0.001) && (
