@@ -479,8 +479,18 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
         assert profile.unmet[Resource.LUMBER] == pytest.approx(40_000.0)
 
     def test_the_crop_draw_honours_the_cap_too(self):
-        # Materials and crop draw down separate branches, so one fix does not
-        # imply the other.
+        """Materials and crop draw down separate branches, so one fix does not
+        imply the other.
+
+        That premise was FALSE for a while and is true again. Both branches were
+        pointed at the hub, so they measured one distance and shared one bound;
+        each now measures where its OWN cargo goes, and in this fixture those
+        differ -- FAR is 6 fields from the hub it sends lumber to (a 1h round
+        trip, 8 turnarounds, 135,000/h) and 4 from the ARMY it sends crop to
+        (0h40, 12 turnarounds, 202,500/h). Both are far above the 5,000/h FAR
+        makes, which is the point: the cap is what decides here, and it has to
+        decide on the crop branch as well.
+        """
         assert self._derive().allocations[Resource.CROP][FAR].value == 0.0
         assert self._derive(cap=0).allocations[Resource.CROP][FAR].value == 5_000.0
 
@@ -848,3 +858,43 @@ class TestEverySenderIsBoundedByWhereItsOwnCargoGoes:
         assert profile.allocations[Resource.LUMBER][ARMY].value == pytest.approx(20_000.0)
         assert profile.drawn_in[Resource.LUMBER] == []
         assert profile.unmet[Resource.LUMBER] == pytest.approx(20_000.0)
+
+    def test_several_consumers_are_reduced_by_demand_and_not_by_the_nearest(self):
+        """The aggregation over a destination SET, which one consumer cannot see.
+
+        Every other test in this class ships to a single consumer, so `min`,
+        `max` and a weighted mean all answer the same thing and the reduction
+        was never exercised. Two consumers at different distances separate
+        them.
+
+        The hub makes 60,000/h with a 7,000/h granary ceiling and 8 shippable
+        merchants carrying 2,500 each. A consumer 1 field away needs 100/h (a
+        0h10 round trip, 48 turnarounds); one 40 fields away needs 40,000/h (a
+        6h40 round trip, ONE turnaround). Weighted by demand the mean hop is
+        (100 x 1 + 40,000 x 40) / 40,100 / 12 = 3.3252h, a 6h65 round trip --
+        so one trip fits and the limit is 8 x 2,500 x 1 / 8 = 2,500/h.
+
+        Reduced by the NEAREST it was 120,000/h, which bound nothing: the
+        ceiling decided instead, the hub was booked to ship 53,000/h -- 21x
+        what reaches the destination that needs it -- and the hammer's whole
+        40,000/h deficit read as covered with `unmet` at 0.
+        """
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=60_000.0, to=0, merch=10),
+            _village(ARMY, "near consumer", 1, 0, crop=-100.0, to=0, merch=10),
+            _village(FAR, "far consumer", 40, 0, crop=-40_000.0, to=0, merch=10),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            consumer_ids=[ARMY, FAR],
+        )
+
+        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(57_500.0)
+        # 40,100/h of demand against 2,500/h shippable, reported rather than
+        # booked as covered.
+        assert profile.unmet[Resource.CROP] == pytest.approx(37_600.0)

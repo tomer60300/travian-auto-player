@@ -260,7 +260,7 @@ def derive_night_profile(
     def ceiling(v: NightVillage, resource: Resource) -> int:
         return round((target_fill - baseline_fill) * v.capacity_for(resource) / window_hours)
 
-    def _destinations(v: NightVillage, resource: Resource) -> list[float]:
+    def _destinations(v: NightVillage, resource: Resource) -> list[tuple[float, float]]:
         """Where this village's cargo of `resource` goes, in one-way hours.
 
         It is a DIFFERENT set per resource, which is why `shed_limit` cannot be
@@ -282,14 +282,31 @@ def derive_night_profile(
         A village is never its own destination: the tile is unique in Travian,
         so a zero hop is the village itself and is dropped rather than allowed
         to read as a free delivery.
+
+        Each hop is paired with the CLAIM on it -- how much the destination
+        needs per hour -- because a bound over destinations at different
+        distances has to be weighted by something, and demand is the only thing
+        that says how the cargo is actually split. See `shed_limit`.
         """
         if resource is not Resource.CROP:
-            hops = [_hours(v, by_id[hub_id], geometry)]
+            # One destination, so its claim is the whole of the cargo.
+            hops = [(_hours(v, by_id[hub_id], geometry), 1.0)]
         else:
-            hops = [_hours(v, by_id[c], geometry) for c in consumers]
+            hops = [
+                (
+                    _hours(v, by_id[c], geometry),
+                    max(0.0, -by_id[c].production.get(Resource.CROP, 0.0)),
+                )
+                for c in consumers
+            ]
             if tribute_at is not None:
-                hops.append(geometry.one_way_minutes((v.x, v.y), tribute_at) / 60.0)
-        return [hop for hop in hops if hop > 0]
+                hops.append(
+                    (
+                        geometry.one_way_minutes((v.x, v.y), tribute_at) / 60.0,
+                        tribute_per_hour,
+                    )
+                )
+        return [(hop, claim) for hop, claim in hops if hop > 0]
 
     def shed_limit(v: NightVillage, resource: Resource) -> float:
         """The most this village can send per hour and still be shippable.
@@ -298,6 +315,41 @@ def derive_night_profile(
         to carry the difference, and how much a fleet moves in a night depends on
         how far it goes: a village one field from its neighbour turns round dozens
         of times, one an hour away twice.
+
+        Over SEVERAL destinations the distance is the DEMAND-WEIGHTED mean of
+        the hops, and the reduction is the whole finding here. This quantity's
+        only job is to be a ceiling, and `min` -- the nearest destination -- is
+        the optimistic end of the range, so it barely ever bound: a hub shedding
+        crop to a consumer 1 field away needing 100/h and one 40 fields away
+        needing 40,000/h was credited 48 turnarounds against the neighbour and
+        booked 53,000/h as shippable, 21x the 2,500/h that actually reaches the
+        destination needing it, with the whole 40,000/h deficit reading as
+        covered. Operator ruling section 1: over-estimating is the dangerous
+        direction.
+
+        Weighted rather than WORST-CASE, which was tried and is wrong in the
+        other direction. The far hop it picks is safe in the sense that any
+        split of the cargo is deliverable at it, but one unreachable
+        destination then zeroes the limit for every reachable one: an ally 60
+        fields off -- a 10h round trip in an 8h night, unpayable at any fleet
+        size -- left the hub unable to ship to the consumer 2 fields away, so
+        its 20,000/h deficit was reported unmet and the village starves while
+        the profile says "keep everything". That is the same harm as the hub
+        distance had, and measured: it fails
+        `test_a_tribute_is_taken_out_of_the_pool_not_added_to_it` (65,000
+        claimed against 40,000 without the tribute) and
+        `test_a_coverable_one_reports_nothing_outstanding` (21,000/h unmet on a
+        1,000/h obligation).
+
+        The weighted mean is merchant-hours conservation, which is what makes
+        it a model rather than a compromise: to ship `S` an hour split by
+        demand shares `w`, destination `i` costs `2 * S * w_i * hop_i /
+        capacity` merchant-hours an hour, so `S <= fleet * capacity / (2 *
+        sum(w_i * hop_i))` -- the same formula below with the mean hop in it.
+        It is never above the `min` bound (a weighted mean is at least the
+        minimum) and never below the worst-case one, and with one destination
+        it IS the single-destination formula, so nothing with one destination
+        moved.
         """
         # Off the injected model, floored exactly as the plan side floors it --
         # understating capacity over-provisions merchants, overstating it
@@ -317,13 +369,23 @@ def derive_night_profile(
         # times fleet x capacity per hour. Worse, the operator's cap is applied
         # just above and then multiplied by that count -- so the "8 busy at 02"
         # ceiling this function exists to honour was negated inside it.
-        one_way = min(_destinations(v, resource), default=0.0)
-        if one_way <= 0:
+        destinations = _destinations(v, resource)
+        if not destinations:
             # Nowhere for this resource to go -- the hub asked about its own
             # materials, or a crop sender on an account with no crop-negative
             # village and no tribute. Sheds nothing, which is the honest reading
             # of a destination that does not exist.
             return 0.0
+        claimed = sum(claim for _, claim in destinations)
+        if claimed > 0:
+            one_way = sum(hop * claim for hop, claim in destinations) / claimed
+        else:
+            # Destinations that need nothing. Nothing is drawn to them, so this
+            # only reaches a FORCED sender shedding to avoid overflow, and no
+            # destination has a larger claim on that cargo than another -- so
+            # they weigh the same. Not zero: they are real places, and a mean
+            # of nothing would read as a free delivery.
+            one_way = sum(hop for hop, _ in destinations) / len(destinations)
         # No `max(1, ...)`. A village whose round trip does not fit the window
         # sheds NOTHING: crediting it one trip promises cargo that would still
         # be in the air at 07:00, which section 6 forbids outright.
