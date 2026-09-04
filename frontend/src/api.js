@@ -24,24 +24,36 @@ function logSource(url) {
   return 'api'
 }
 
-const SENSITIVE_KEYS = ['password', 'access_token', 'token', 'jwt']
+// Nothing a request or a response CARRIES reaches the log store — only its
+// shape. The store is not a private buffer: the Logs page renders every
+// entry's `detail` and its Export button writes the lot to a .jsonl file, so
+// what lands here is in effect published.
+//
+// The planner's bodies are the account itself. /distribution/snapshot and
+// /distribution/plan carry every village's name, coordinates and figures; the
+// /distribution/plan/yaml request carries that same payload; /distribution/setup
+// carries the whole hand-typed configuration in both directions. The backend
+// deliberately logs none of it — the setup-store module has no logger at all
+// and its `__repr__` prints a user id and an account key — so the client must
+// not be the leak the backend refused to be.
+//
+// This SUPERSEDES the per-key redaction that used to run over every body: a
+// password cannot be redacted out of a body that is never written down, and
+// neither can a village name, which no key list would ever have caught.
+// `api.test.js` pins both halves.
+function describePayload(data) {
+  if (data === undefined || data === null) return null
+  if (typeof data === 'string') return `${data.length} chars`
+  if (Array.isArray(data)) return `${data.length} items`
+  if (typeof data === 'object') return `${Object.keys(data).length} fields`
+  return typeof data
+}
 
-// Every body is redacted, not just an allowlist of URLs: the allowlist missed
-// /recon/credentials and logged a plaintext password into the log store,
-// where the Logs page displays and exports it. Recursive, because FastAPI
-// validation errors echo the submitted body back inside nested `input`
-// objects — a 422 on a credentials endpoint would otherwise re-leak the
-// password through the error path.
-function redactSensitive(data) {
-  if (Array.isArray(data)) return data.map(redactSensitive)
-  if (!data || typeof data !== 'object') return data
-  const copy = {}
-  for (const [key, value] of Object.entries(data)) {
-    copy[key] = SENSITIVE_KEYS.includes(key.toLowerCase())
-      ? '[REDACTED]'
-      : redactSensitive(value)
-  }
-  return copy
+// Bodies are gone, so the timing is what is left to tell a slow snapshot from
+// a hung one.
+function elapsed(config) {
+  const startedAt = config?.logStartedAt
+  return typeof startedAt === 'number' ? ` ${Date.now() - startedAt}ms` : ''
 }
 
 function summarizeData(data, maxLen) {
@@ -53,6 +65,28 @@ function summarizeData(data, maxLen) {
   } catch { return '[unserializable]' }
 }
 
+/** The one thing worth keeping from a failure: what the server SAID.
+ *
+ * Read out of the error envelope only, never off the body as a whole.
+ * FastAPI's validation errors echo the rejected value back in `input`, so a
+ * 422 on a plan payload would re-leak the entire payload through the error
+ * path; `loc`, `msg` and `type` name the field and the reason without
+ * repeating the value. A body that is not an error envelope at all (an HTML
+ * gateway page, say) has nothing quotable in it, so axios's own message is
+ * the honest answer.
+ */
+function errorDetail(error) {
+  const detail = error.response?.data?.detail
+  if (typeof detail === 'string') return summarizeData(detail, 500)
+  if (Array.isArray(detail)) {
+    return summarizeData(
+      detail.map((e) => `${(e?.loc || []).join('.')}: ${e?.msg} (${e?.type})`),
+      500
+    )
+  }
+  return error.message
+}
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
@@ -60,8 +94,10 @@ api.interceptors.request.use((config) => {
   }
   const method = (config.method || 'get').toUpperCase()
   const url = config.url || ''
-  const body = config.data ? summarizeData(redactSensitive(config.data), 500) : null
-  useLogStore.getState().addLog('info', logSource(url), `>> ${method} ${url}`, body)
+  config.logStartedAt = Date.now()
+  useLogStore
+    .getState()
+    .addLog('info', logSource(url), `>> ${method} ${url}`, describePayload(config.data))
   return config
 })
 
@@ -71,29 +107,28 @@ api.interceptors.response.use(
   (response) => {
     const method = (response.config.method || 'get').toUpperCase()
     const url = response.config.url || ''
-    const status = response.status
-    const data = redactSensitive(response.data)
-
-    // Build detail summary
-    let detail = null
-    if (Array.isArray(data)) {
-      detail = `[${data.length} items]`
-      if (data.length > 0 && data.length <= 3) detail = summarizeData(data, 800)
-    } else if (data && typeof data === 'object') {
-      detail = summarizeData(data, 800)
-    }
-
-    useLogStore.getState().addLog('success', logSource(url), `<< ${method} ${url} ${status}`, detail)
+    useLogStore
+      .getState()
+      .addLog(
+        'success',
+        logSource(url),
+        `<< ${method} ${url} ${response.status}${elapsed(response.config)}`,
+        describePayload(response.data)
+      )
     return response
   },
   (error) => {
     const url = error.config?.url || ''
     const method = (error.config?.method || 'get').toUpperCase()
     const status = error.response?.status
-    const detail = error.response?.data
-      ? summarizeData(redactSensitive(error.response.data), 500)
-      : error.message
-    useLogStore.getState().addLog('error', logSource(url), `<< ${method} ${url} ${status || 'ERR'}`, detail)
+    useLogStore
+      .getState()
+      .addLog(
+        'error',
+        logSource(url),
+        `<< ${method} ${url} ${status || 'ERR'}${elapsed(error.config)}`,
+        errorDetail(error)
+      )
 
     if (status === 401 && !logoutTriggered) {
       logoutTriggered = true
