@@ -336,8 +336,14 @@ test.describe('the setup on the server', () => {
     await page.getByRole('button', { name: 'Delete it' }).click()
 
     // A 404 on delete is not a failure to report as one: the state it wanted
-    // to reach is the state it is in.
-    await expect(page.getByText(/Nothing was saved on the server/)).toBeVisible()
+    // to reach is the state it is in. Asserted on the TONE and not only on the
+    // words, because the words were already right and sat under
+    // `toast.error` -- the page's own comment said "recorded rather than
+    // reported as a failure" two lines above the red toast that reported it.
+    await expect(page.locator('.toast-success')).toContainText(
+      /Nothing was saved on the server, so there was nothing to forget/
+    )
+    await expect(page.locator('.toast-error')).toHaveCount(0)
     await expect(page.getByText(/Nothing is saved on the server for this account yet/)).toBeVisible()
   })
 

@@ -1907,9 +1907,13 @@ export default function ResourcePlanner() {
     } catch (err) {
       if (err.response?.status === 404) {
         // Already the state it wanted to reach, so it is recorded rather than
-        // reported as a failure.
+        // reported as a failure -- and for four rounds the next line said
+        // `toast.error` two lines under a comment saying exactly that. A forget
+        // that finds nothing forgot nothing AND left the operator where they
+        // asked to be, which is a success with a caveat, not an error: red on
+        // an outcome the operator wanted teaches them to distrust red.
         setServerSetup({ state: 'none' })
-        toast.error('Nothing was saved on the server for this account')
+        toast.success('Nothing was saved on the server, so there was nothing to forget')
         return
       }
       toast.error(errorDetail(err, 'Could not delete the saved setup'))
