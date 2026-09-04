@@ -82,6 +82,7 @@ import {
   isEmptyTemplate,
   isMaxBusyMerchants,
   isStockFloorFraction,
+  merchantModelProblems,
   mergeSetup,
   parseSetup,
   relayFlagsOnly,
@@ -137,6 +138,7 @@ import {
   resolveVillageNames,
   unresolvedProtectedEntries,
 } from '../utils/villageRefs'
+import { describeBlockers, planBlockers } from '../utils/plannerBlockers'
 import { planStatus, relayLegIndex } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
 import { groupWarnings } from '../utils/warningGroups'
@@ -705,6 +707,23 @@ function BudgetBar({ budget, cap }) {
  * selected" button come to 344px, which is 10px past what a 375 viewport's
  * card can give, and without wrapping those 10px became DOCUMENT scroll --
  * on all four resource cards at once. */
+/** The rule under one World & merchants box, said in the cell.
+ *
+ * `merchantModelProblems` decides WHETHER there is one, off the same predicates
+ * the file parser and the plan request use; this only renders it. Two of these
+ * six boxes had no message at all -- an even `map_span` and a `merchant_reserve`
+ * past 20 are both refused by the backend, and the only sign of either was a
+ * 422 on a Build click.
+ */
+function MerchantRule({ id, rule }) {
+  if (!rule) return null
+  return (
+    <span id={id} className="text-warning">
+      {rule}
+    </span>
+  )
+}
+
 function BatchSet({ count, onApply }) {
   const [mode, setMode] = useState('keep')
   const [value, setValue] = useState(0)
@@ -861,6 +880,11 @@ export default function ResourcePlanner() {
   // already the role it wants. Never cleared -- it is a request, and the panel
   // acts on each one exactly once, keyed on the number.
   const [templateFocus, setTemplateFocus] = useState(null)
+  // The cell Build plan's refusal has just sent the operator to, as
+  // `{ label, seq }` -- the accessible name of the control, and the same `seq`
+  // discipline as `templateFocus` above for the same reason: a second press
+  // over the same unfixed cell has to land again.
+  const [cellFocus, setCellFocus] = useState(null)
   // Result of the last setup-file load, kept on screen rather than only in a
   // toast: a file that is missing villages produces a quietly wrong plan, so
   // what it did and did not cover has to stay readable.
@@ -1907,6 +1931,41 @@ export default function ResourcePlanner() {
     [applySetupText, toast]
   )
 
+  // Every cell this page has already outlined and named, gathered so the Build
+  // plan button can refuse instead of posting a request it knows will come back
+  // 422. Same rule and the same predicates as the marks themselves -- see
+  // `plannerBlockers.js` for why it is computed from state rather than swept
+  // out of the DOM.
+  const blockers = useMemo(
+    () =>
+      planBlockers({
+        villages,
+        maxBusy,
+        stockFloors,
+        consumption,
+        villageRoles,
+        roleTemplates,
+        foreignTargets,
+        merchantModel,
+      }),
+    [
+      villages,
+      maxBusy,
+      stockFloors,
+      consumption,
+      villageRoles,
+      roleTemplates,
+      foreignTargets,
+      merchantModel,
+    ]
+  )
+
+  // The six World & merchants boxes, checked against the bounds the file parser
+  // and the plan request already enforce. Two of them -- an even map span and a
+  // reserve past 20 -- were marked NOWHERE before this: the box accepted the
+  // figure, the plan came back 422, and nothing on screen pointed at the cell.
+  const merchantProblems = useMemo(() => merchantModelProblems(merchantModel), [merchantModel])
+
   const buildPlanPayload = useCallback(() => {
     // Both maps are built by tested utils rather than inline here: the seed and
     // the skip rules are the two places a wrong request came from, and neither
@@ -2137,6 +2196,28 @@ export default function ResourcePlanner() {
       )
       return
     }
+    // Every cell the page has already marked, refused rather than posted -- and
+    // for four rounds the attendance answer below was the only guard here. A cap
+    // of 99 on a 19-merchant village rendered "only 19 merchants here", set
+    // `aria-invalid`, and this button posted it anyway; the refusal then arrived
+    // as a 422 naming an internal village id, after a round trip, with nothing
+    // on screen pointing back at the cell. Nothing is sent, the fields and the
+    // villages are named, and the caret goes to the first of them.
+    //
+    // BEFORE the attendance guard, deliberately: a malformed figure is a typo
+    // and a missing attendance answer is a question, and the question is often
+    // asked BECAUSE of the typo -- a stock floor of 99% is still a stock floor
+    // to `attendanceIsRequired`, so the operator was sent to Day & night to
+    // answer for a figure the plan would have refused anyway.
+    if (blockers.length) {
+      toast.error(describeBlockers(blockers))
+      setStage(blockers[0].stage)
+      setCellFocus((prev) => ({
+        label: blockers[0].focusLabel,
+        seq: (prev?.seq ?? 0) + 1,
+      }))
+      return
+    }
     // Section 7's attendance, refused here rather than by the backend. The 422
     // names village ids and a profile the operator cannot see from the button
     // they pressed; this names the profile and the stage that answers it.
@@ -2181,6 +2262,8 @@ export default function ResourcePlanner() {
     // Read by the attendance guard above.
     activeAttendanceOwed,
     activeProfile,
+    // Read by the marked-cell guard above.
+    blockers,
   ])
 
   // Section 10, in one call: the plan request the operator is looking at, plus
@@ -2407,6 +2490,26 @@ export default function ResourcePlanner() {
     () => relayTierProblemsByVillage(relayFor, villages, villageRoles),
     [relayFor, villages, villageRoles]
   )
+
+  // The caret, sent to the cell a refusal named. Imperative and after the stage
+  // has rendered, following the same three steps `RoleTemplates` uses for its
+  // own jump: open whatever disclosure is hiding the control (React does not
+  // track `<details open>`, so it will not write it back), focus without
+  // scrolling, then scroll deliberately -- focus()'s own scrolling brings an
+  // element barely into view at the bottom edge, and these are cells in a table
+  // the operator has to read across.
+  useEffect(() => {
+    if (cellFocus == null) return
+    const target = Array.from(document.querySelectorAll('[aria-label]')).find(
+      (el) => el.getAttribute('aria-label') === cellFocus.label
+    )
+    if (target == null) return
+    for (let node = target.parentElement; node != null; node = node.parentElement) {
+      if (node.tagName === 'DETAILS') node.open = true
+    }
+    target.focus({ preventScroll: true })
+    target.scrollIntoView({ block: 'center', inline: 'nearest' })
+  }, [cellFocus])
 
   // Ascending, then descending, then the account's own order back -- the
   // ordering is never a one-way door. The cycle is computed by a pure helper
@@ -4724,6 +4827,10 @@ export default function ResourcePlanner() {
                 type="number"
                 min="1"
                 aria-label="Merchant base capacity"
+                aria-invalid={merchantProblems.base_capacity ? true : undefined}
+                aria-describedby={
+                  merchantProblems.base_capacity ? 'merchant-problem-base_capacity' : undefined
+                }
                 className="input-field w-24 text-right py-1"
                 value={merchantModel.base_capacity ?? ''}
                 onChange={(e) =>
@@ -4741,6 +4848,10 @@ export default function ResourcePlanner() {
                   }))
                 }
               />
+              <MerchantRule
+                id="merchant-problem-base_capacity"
+                rule={merchantProblems.base_capacity}
+              />
             </label>
             <label className="flex items-center gap-1">
               <span className="text-secondary">Bonus / TO level</span>
@@ -4749,6 +4860,10 @@ export default function ResourcePlanner() {
                 min="0"
                 step="0.05"
                 aria-label="Trade Office bonus per level"
+                aria-invalid={merchantProblems.bonus_per_to_level ? true : undefined}
+                aria-describedby={
+                  merchantProblems.bonus_per_to_level ? 'merchant-problem-bonus_per_to_level' : undefined
+                }
                 className="input-field w-20 text-right py-1"
                 value={merchantModel.bonus_per_to_level ?? ''}
                 onChange={(e) =>
@@ -4759,6 +4874,10 @@ export default function ResourcePlanner() {
                   }))
                 }
               />
+              <MerchantRule
+                id="merchant-problem-bonus_per_to_level"
+                rule={merchantProblems.bonus_per_to_level}
+              />
             </label>
             <label className="flex items-center gap-1">
               <span className="text-secondary">Speed f/h</span>
@@ -4766,6 +4885,10 @@ export default function ResourcePlanner() {
                 type="number"
                 min="1"
                 aria-label="Merchant speed fields per hour override"
+                aria-invalid={merchantProblems.speed_fields_per_hour ? true : undefined}
+                aria-describedby={
+                  merchantProblems.speed_fields_per_hour ? 'merchant-problem-speed_fields_per_hour' : undefined
+                }
                 placeholder={String(snapshot?.speed_fields_per_hour ?? '')}
                 className="input-field w-20 text-right py-1"
                 value={merchantModel.speed_fields_per_hour ?? ''}
@@ -4775,6 +4898,10 @@ export default function ResourcePlanner() {
                     speed_fields_per_hour: e.target.value === '' ? undefined : Number(e.target.value),
                   }))
                 }
+              />
+              <MerchantRule
+                id="merchant-problem-speed_fields_per_hour"
+                rule={merchantProblems.speed_fields_per_hour}
               />
             </label>
             <label className="flex items-center gap-1">
@@ -4789,6 +4916,10 @@ export default function ResourcePlanner() {
                 min="0"
                 max={MAX_MERCHANTS_PER_VILLAGE}
                 aria-label="Merchants held in reserve at every village"
+                aria-invalid={merchantProblems.merchant_reserve ? true : undefined}
+                aria-describedby={
+                  merchantProblems.merchant_reserve ? 'merchant-problem-merchant_reserve' : undefined
+                }
                 placeholder={String(DEFAULT_MERCHANT_MODEL.merchant_reserve)}
                 className="input-field w-20 text-right py-1"
                 value={merchantModel.merchant_reserve ?? ''}
@@ -4798,6 +4929,10 @@ export default function ResourcePlanner() {
                     merchant_reserve: e.target.value === '' ? undefined : Number(e.target.value),
                   }))
                 }
+              />
+              <MerchantRule
+                id="merchant-problem-merchant_reserve"
+                rule={merchantProblems.merchant_reserve}
               />
             </label>
             <label className="flex items-center gap-1">
@@ -4812,6 +4947,10 @@ export default function ResourcePlanner() {
                 min="0"
                 max="99"
                 aria-label="Merchant headroom, percent of each village's budget"
+                aria-invalid={merchantProblems.merchant_headroom ? true : undefined}
+                aria-describedby={
+                  merchantProblems.merchant_headroom ? 'merchant-problem-merchant_headroom' : undefined
+                }
                 placeholder={String(DEFAULT_MERCHANT_MODEL.merchant_headroom * 100)}
                 // w-24, matching the Base capacity box beside it: this box no
                 // longer rounds its own value, so it has to fit two decimals.
@@ -4837,6 +4976,10 @@ export default function ResourcePlanner() {
                   }))
                 }
               />
+              <MerchantRule
+                id="merchant-problem-merchant_headroom"
+                rule={merchantProblems.merchant_headroom}
+              />
             </label>
             <label className="flex items-center gap-1">
               <span className="text-secondary">Map span</span>
@@ -4844,6 +4987,10 @@ export default function ResourcePlanner() {
                 type="number"
                 min="1"
                 aria-label="Map span override"
+                aria-invalid={merchantProblems.map_span ? true : undefined}
+                aria-describedby={
+                  merchantProblems.map_span ? 'merchant-problem-map_span' : undefined
+                }
                 placeholder={String(snapshot?.map_span ?? '')}
                 className="input-field w-20 text-right py-1"
                 value={merchantModel.map_span ?? ''}
@@ -4853,6 +5000,10 @@ export default function ResourcePlanner() {
                     map_span: e.target.value === '' ? undefined : Number(e.target.value),
                   }))
                 }
+              />
+              <MerchantRule
+                id="merchant-problem-map_span"
+                rule={merchantProblems.map_span}
               />
             </label>
           </div>
@@ -5044,32 +5195,49 @@ export default function ResourcePlanner() {
                                 it carries -- and the planner cannot know those
                                 merchants are wanted elsewhere. */}
                             <td className="text-right px-2">
-                              <input
-                                type="text"
-                                aria-label={`Foreign target ${i + 1} excluded origins`}
-                                placeholder="none"
-                                className="input-field w-28 text-right text-xs py-0.5"
-                                value={
-                                  t.exclude_origins_text ??
-                                  namesForVillageIds(t.exclude_origins, villages)
-                                }
-                                onChange={(e) => patch('exclude_origins_text', e.target.value)}
-                              />
                               {/* Named back, so a typo cannot pass for an exclusion.
                                   Silently dropping "2" for "02" would leave the
                                   operator believing a village is excluded while the
-                                  next run draws on it. */}
+                                  next run draws on it.
+                                  Computed ABOVE the input rather than under it so the
+                                  box itself carries `aria-invalid`, like every other
+                                  cell with a rule: `Build plan` gates on exactly the
+                                  cells the page marks, and this one was marked in
+                                  words only -- so the one field whose failure is
+                                  SILENT on the backend was also the one the gate
+                                  could not see. */}
                               {(() => {
-                                const { unknown } = resolveVillageNames(
+                                const typed =
                                   t.exclude_origins_text ??
-                                    namesForVillageIds(t.exclude_origins, villages),
-                                  villages
+                                  namesForVillageIds(t.exclude_origins, villages)
+                                const { unknown } = resolveVillageNames(typed, villages)
+                                const problemId = `exclude-problem-${i}`
+                                return (
+                                  <>
+                                    <input
+                                      type="text"
+                                      aria-label={`Foreign target ${i + 1} excluded origins`}
+                                      aria-invalid={unknown.length ? true : undefined}
+                                      aria-describedby={
+                                        unknown.length ? problemId : undefined
+                                      }
+                                      placeholder="none"
+                                      className="input-field w-28 text-right text-xs py-0.5"
+                                      value={typed}
+                                      onChange={(e) =>
+                                        patch('exclude_origins_text', e.target.value)
+                                      }
+                                    />
+                                    {unknown.length > 0 && (
+                                      <span
+                                        id={problemId}
+                                        className="block text-warning text-xs mt-0.5"
+                                      >
+                                        no village named {unknown.join(', ')}
+                                      </span>
+                                    )}
+                                  </>
                                 )
-                                return unknown.length ? (
-                                  <span className="block text-warning text-xs mt-0.5">
-                                    no village named {unknown.join(', ')}
-                                  </span>
-                                ) : null
                               })()}
                             </td>
                             <td className="text-right px-2 font-mono text-secondary">

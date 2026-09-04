@@ -272,6 +272,95 @@ export function declaresConsumption(spent) {
   return spent != null && Object.keys(spent).length > 0
 }
 
+/* ── The merchant model's own bounds ──────────────────────────────────────
+ *
+ * Six boxes on the World & merchants row, and every bound below is the plan
+ * request's: `merchant_base_capacity` gt 0, `trade_office_bonus_per_level`
+ * ge 0, `merchant_reserve` 0-20, `merchant_headroom` under 1, `map_span` odd
+ * and gt 0, `speed_fields_per_hour` gt 0.
+ *
+ * One predicate each, because three readers have to agree about them and two of
+ * them already did not: `parseSetup` REFUSED a `merchant_reserve` of 25 from a
+ * file while the box beside it accepted the same 25 from a keystroke and sent
+ * it, so one number was invalid on import and valid on typing. `min`/`max` on a
+ * number input bound the spinner and nothing else -- a typed or pasted figure
+ * sails past both -- so the bound has to be a predicate, and it has to be THIS
+ * predicate rather than a second copy of it.
+ */
+
+/** A merchant's cargo, in units. Positive: a capacity of 0 carries nothing. */
+export function isMerchantBaseCapacity(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+}
+
+/** Extra cargo per Trade Office level, as a fraction. 0 is a real answer -- a
+ *  world with no Trade Office scaling -- so only negative is refused. */
+export function isTradeOfficeBonus(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/** Merchants held idle at every village. Whole merchants, and bounded above by
+ *  the 20 a village can ever hold: a reserve past it holds back merchants no
+ *  village has, which takes every budget to 0 while the request still reads as
+ *  valid. */
+export function isMerchantReserve(value) {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_MERCHANTS_PER_VILLAGE
+  )
+}
+
+/** The share of each village's budget left uncommitted, as a FRACTION (the box
+ *  types a percent). Below 1: at 1 the whole budget is held clear and every
+ *  route is billed as crowding, which is not a plan. */
+export function isMerchantHeadroom(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 1
+}
+
+/** The world's width in fields. ODD, because a Travian world is centred on
+ *  0|0 -- an even span shifts every tile index by half a field and silently
+ *  skews every distance the geometry computes from it. */
+export function isMapSpan(value) {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value % 2 === 1
+}
+
+/** A merchant's travel speed in fields per hour. Positive: at 0 nothing ever
+ *  arrives, and the backend refuses it rather than dividing by it. */
+export function isMerchantSpeed(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+}
+
+/** What each merchant-model box is allowed to hold, said in the words the cell
+ *  under it prints.
+ *
+ * Keyed by field so one call answers the whole row, and skipping `null` on the
+ * way: every one of these is an override, and an empty box means "use the
+ * planner's own value" rather than a figure to check. Consumed by the boxes'
+ * own inline messages AND by the gate on Build plan, so the page cannot mark a
+ * cell it then agrees to send.
+ */
+export function merchantModelProblems(model) {
+  const out = {}
+  const check = (field, ok, rule) => {
+    const raw = model?.[field]
+    if (raw == null || raw === '') return
+    if (!ok(Number(raw))) out[field] = rule
+  }
+  check('base_capacity', isMerchantBaseCapacity, 'more than 0')
+  check('bonus_per_to_level', isTradeOfficeBonus, '0 or more')
+  check(
+    'merchant_reserve',
+    isMerchantReserve,
+    `0 to ${MAX_MERCHANTS_PER_VILLAGE} whole merchants`
+  )
+  check('merchant_headroom', isMerchantHeadroom, 'under 100%')
+  check('map_span', isMapSpan, 'odd — a world is centred on 0|0')
+  check('speed_fields_per_hour', isMerchantSpeed, 'more than 0')
+  return out
+}
+
 /** The backend's AllocationMode, which the file must not outrun. */
 export const ALLOCATION_MODES = Object.freeze([
   'keep',
@@ -1639,10 +1728,14 @@ export function parseSetup(text) {
     const m = raw.merchant_model
     const base = Number(m?.base_capacity)
     const bonus = Number(m?.bonus_per_to_level)
-    if (!Number.isFinite(base) || base <= 0) {
+    // The predicates rather than the conditions they replaced, so the box on
+    // the page and this parser cannot disagree about one number -- the defect
+    // this shares with `merchant_reserve` below: 25 was refused from a file and
+    // accepted from a keystroke.
+    if (!isMerchantBaseCapacity(base)) {
       throw new SetupFileError('merchant_model.base_capacity must be a positive number.')
     }
-    if (!Number.isFinite(bonus) || bonus < 0) {
+    if (!isTradeOfficeBonus(bonus)) {
       throw new SetupFileError('merchant_model.bonus_per_to_level must be zero or more.')
     }
     merchantModel = { base_capacity: base, bonus_per_to_level: bonus }
@@ -1654,7 +1747,7 @@ export function parseSetup(text) {
       // Bounded above by the 20 a village can ever hold, matching the
       // backend's `le=20` and the cap's own ceiling: a reserve past it holds
       // back merchants no village has, taking every budget to 0.
-      if (!Number.isInteger(reserve) || reserve < 0 || reserve > MAX_MERCHANTS_PER_VILLAGE) {
+      if (!isMerchantReserve(reserve)) {
         throw new SetupFileError(
           `merchant_model.merchant_reserve is ${JSON.stringify(m.merchant_reserve)}; ` +
             `it must be a whole number of merchants, from 0 to ${MAX_MERCHANTS_PER_VILLAGE}.`
@@ -1666,7 +1759,7 @@ export function parseSetup(text) {
       const headroom = Number(m.merchant_headroom)
       // Below 1, matching the backend's `lt=1.0`: at 1 the entire budget is
       // held clear and every route is billed as crowding, which is not a plan.
-      if (!Number.isFinite(headroom) || headroom < 0 || headroom >= 1) {
+      if (!isMerchantHeadroom(headroom)) {
         throw new SetupFileError(
           `merchant_model.merchant_headroom is ${JSON.stringify(m.merchant_headroom)}; ` +
             `it must be a fraction from 0 up to but not including 1.`
