@@ -503,6 +503,38 @@ const signed = (n) => (n == null ? '—' : `${n > 0 ? '+' : ''}${Math.round(n).t
  *  the third press: the account's own order is the default and has to stay
  *  reachable without a page reload.
  */
+/** A field's reasoning, one click away.
+ *
+ * The controlled-run box's four checkbox labels measured 489, 408, 215 and 300
+ * characters, and the two number inputs sat BETWEEN two of those paragraphs.
+ * The bolded lead clause of each was already the label; the rest is prose that
+ * carries real warnings, so it is disclosed rather than deleted -- the same
+ * mechanism this page uses in nine other places.
+ *
+ * A `<button>` inside `<summary>` would be a control inside a control, so this
+ * is the native disclosure and the SUMMARY carries the accessible name. It
+ * still exposes `role="button"` to the accessibility tree, which is how a test
+ * and a screen reader both reach it by name.
+ *
+ * `pointer-coarse:min-h-11`/`min-w-11` because a "?" glyph is about seven
+ * pixels wide, and item 4 of the UI Definition of Done wants 44px on a coarse
+ * pointer. The desktop layout is untouched: the constraint only applies there.
+ */
+function Why({ label, children }) {
+  return (
+    <details className="text-xs inline-block align-top">
+      <summary
+        className="why-toggle cursor-pointer list-none inline-flex items-center justify-center rounded-full border-default text-secondary hover:text-primary w-4 h-4 leading-none pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+        aria-label={`Why: ${label}`}
+        title={`Why: ${label}`}
+      >
+        ?
+      </summary>
+      <div className="text-secondary mt-1 max-w-md">{children}</div>
+    </details>
+  )
+}
+
 function SortHeader({ label, col, sortKey, sortDir, onSort }) {
   const active = sortKey === col
   return (
@@ -6167,20 +6199,50 @@ export default function ResourcePlanner() {
                 </div>
 
                 {/* Controlled run. A first live run against a real account should
-                    be one chosen route, not whichever one the cap reached first. */}
-                <div className="mb-3 rounded border border-gray-800 p-2">
-                  <p className="text-secondary mb-2 text-[11px]">
+                    be one chosen route, not whichever one the cap reached first.
+
+                    Restructured, and the numbers are why. The four checkbox
+                    labels measured 489, 408, 215 and 300 CHARACTERS, so the box
+                    was a slab of 8pt prose with two number inputs wedged
+                    BETWEEN paragraphs and three more inside a third: about 350
+                    words to read before finding four checkboxes and five boxes,
+                    with no label/field grid anywhere.
+
+                    Every word is kept. The bolded lead clause of each label
+                    already WAS the label, so it stays visible and the rest goes
+                    behind a `?` disclosure -- the same mechanism this page uses
+                    in nine other places -- because the prose carries real
+                    warnings and deleting it would be the wrong fix. The five
+                    inputs get a field grid above the checkboxes, which is the
+                    order the questions are actually answered in: how much may
+                    this run write, then which villages, then how it behaves. */}
+                <div className="mb-3 rounded border-default p-2">
+                  <p className="text-secondary mb-2 text-xs">
                     <strong>Controlled run.</strong> Narrow this run to specific villages — for a
                     first live test, or to retry one village after a failure. Leave the village
                     boxes empty to run the whole plan. A narrowed run is labelled as narrowed in
                     the result.
                   </p>
-                  <div className="flex flex-wrap items-end gap-2">
+                  <div className="controlled-run-fields grid gap-3 md:grid-cols-2 lg:grid-cols-3 mb-3">
                     <label className="text-xs">
-                      <span className="text-secondary block">Routes this run</span>
+                      <span className="text-secondary flex items-center gap-1">
+                        Routes this run
+                        <Why label="Routes this run">
+                          One route is one create REQUEST. 0 asks for reconcile only: read each
+                          origin, disable what the plan no longer wants, and create nothing —
+                          the safe first half of a profile switch. Blank falls back to{' '}
+                          {MAX_ROUTES_PER_RUN}, because blank is unknown and unknown is not 0.
+                        </Why>
+                      </span>
+                      {/* An explicit `aria-label`, because the `Why` disclosure
+                          beside the words is INSIDE this label: without it the
+                          computed accessible name came out "Routes this run
+                          Why: Routes this run". aria-label wins over the label
+                          element's contents, so the name is the field's name. */}
                       <input
                         type="number"
                         min="0"
+                        aria-label="Routes this run"
                         className="input-sm w-24"
                         value={routesPerRun}
                         onChange={(e) => setRoutesPerRun(e.target.value)}
@@ -6190,67 +6252,42 @@ export default function ResourcePlanner() {
                         request; Travian turns it into 24/cycle daily rows, so a
                         cap of 3 routes on 1-hour cycles is 72 rows. */}
                     <label className="text-xs">
-                      <span className="text-secondary block">Max rows this run</span>
-                      {/* "no limit" belongs IN the box. In the label it
-                          described a state the box could be in while the box
-                          itself was empty and unstyled, so the one control on
-                          this bar with nothing to look at was also the one whose
-                          resting value was unbounded. */}
+                      <span className="text-secondary flex items-center gap-1">
+                        Max rows this run
+                        <Why label="Max rows this run">
+                          The unit you actually authorise. Travian turns one “repeat every N
+                          hours” request into 24/N separate daily rows and fires every one, so
+                          three routes on a one-hour cycle is seventy-two rows — and removing
+                          them later means deleting each row. Blank or 0 is no limit, which is
+                          what a whole-day provisioning pass wants.
+                        </Why>
+                      </span>
                       <input
                         type="number"
                         min="0"
+                        aria-label="Max rows this run"
                         placeholder="no limit"
                         className="input-sm w-28"
                         value={maxGameRows}
                         onChange={(e) => setMaxGameRows(e.target.value)}
                       />
                     </label>
-                    <label className="text-xs flex items-start gap-2 max-w-md">
-                      <input
-                        type="checkbox"
-                        className="mt-0.5"
-                        checked={wholeDay}
-                        onChange={(e) => setWholeDay(e.target.checked)}
-                      />
-                      <span className="text-secondary">
-                        <span className="text-primary">
-                          Whole day — execute all profiles at once.
-                        </span>{' '}
-                        Plans every profile in its own hours and creates both route
-                        sets in one pass, reconciled together: a Night row is never
-                        &ldquo;stale&rdquo; to a Day-eyed run. Both sets then coexist
-                        in the game — disjoint by departure time — so the account
-                        runs around the clock with <strong>no daily switching</strong>.
-                        The reconcile sweep also <em>creates</em> as it goes in this
-                        mode, so one pass over the villages provisions the whole day.
-                        Needs hours on every profile; the trim below is forced on.
-                      </span>
-                    </label>
-                    <label className="text-xs flex items-start gap-2 max-w-md">
-                      <input
-                        type="checkbox"
-                        className="mt-0.5"
-                        checked={pruneToWindow || wholeDay}
-                        disabled={wholeDay}
-                        onChange={(e) => setPruneToWindow(e.target.checked)}
-                      />
-                      <span className="text-secondary">
-                        <span className="text-primary">Trim the fan-out to the profile hours.</span>{' '}
-                        Travian has no setting that confines a route to part of the
-                        day: &ldquo;repeat every N hours&rdquo; becomes 24/N daily rows
-                        and every one of them fires. This deletes the rows departing
-                        outside the profile hours after
-                        the route is created, which is what makes the window real —
-                        and cuts the row footprint to the share of the day it covers.
-                        Untick only for a round-the-clock profile.
-                      </span>
-                    </label>
                     <label className="text-xs">
-                      <span className="text-secondary block">
-                        Never disable (ids or x|y, comma-separated)
+                      <span className="text-secondary flex items-center gap-1">
+                        Never disable
+                        <Why label="Never disable">
+                          Destinations whose live routes are never switched off, however the plan
+                          sees them. Village ids (<span className="font-mono">53629</span>) or
+                          coordinates (<span className="font-mono">46|133</span>), comma
+                          separated — coordinates because a hand-made route to a foreign target
+                          has no usable village id. Without it the reconciler switches such a
+                          route off, you switch it on, and the next run switches it off again.
+                          Narrows only what is DISABLED, never what is created.
+                        </Why>
                       </span>
                       <input
                         type="text"
+                        aria-label="Never disable"
                         className="input-sm w-56"
                         placeholder="none"
                         value={protectDestinations}
@@ -6294,37 +6331,94 @@ export default function ResourcePlanner() {
                       />
                     </label>
                   </div>
-                  <label className="mt-2 flex items-center gap-2 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={disableExisting}
-                      onChange={(e) => setDisableExisting(e.target.checked)}
-                    />
-                    <span>
-                      Also disable routes the plan no longer wants.{' '}
-                      <span className="text-secondary">
+
+                  {/* How the run behaves. One line each, with the paragraph the
+                      line used to carry kept behind its `?`. */}
+                  <div className="space-y-2 border-t-default pt-2">
+                    <div className="flex items-start gap-2">
+                      <label className="text-xs flex items-start gap-2 flex-1">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={wholeDay}
+                          onChange={(e) => setWholeDay(e.target.checked)}
+                        />
+                        <span className="text-primary">Whole day — execute all profiles at once</span>
+                      </label>
+                      <Why label="Whole day">
+                        Plans every profile in its own hours and creates both route sets in one
+                        pass, reconciled together: a Night row is never &ldquo;stale&rdquo; to a
+                        Day-eyed run. Both sets then coexist in the game — disjoint by departure
+                        time — so the account runs around the clock with{' '}
+                        <strong>no daily switching</strong>. The reconcile sweep also{' '}
+                        <em>creates</em> as it goes in this mode, so one pass over the villages
+                        provisions the whole day. Needs hours on every profile; the trim below is
+                        forced on.
+                      </Why>
+                    </div>
+
+                    <div className="flex items-start gap-2">
+                      <label className="text-xs flex items-start gap-2 flex-1">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={pruneToWindow || wholeDay}
+                          disabled={wholeDay}
+                          onChange={(e) => setPruneToWindow(e.target.checked)}
+                        />
+                        <span className="text-primary">
+                          Trim the fan-out to the profile hours
+                        </span>
+                      </label>
+                      <Why label="Trim the fan-out to the profile hours">
+                        Travian has no setting that confines a route to part of the day:
+                        &ldquo;repeat every N hours&rdquo; becomes 24/N daily rows and every one
+                        of them fires. This deletes the rows departing outside the profile hours
+                        after the route is created, which is what makes the window real — and
+                        cuts the row footprint to the share of the day it covers. Untick only for
+                        a round-the-clock profile.
+                      </Why>
+                    </div>
+
+                    <div className="flex items-start gap-2">
+                      <label className="text-xs flex items-start gap-2 flex-1">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={disableExisting}
+                          onChange={(e) => setDisableExisting(e.target.checked)}
+                        />
+                        <span className="text-primary">
+                          Also disable routes the plan no longer wants
+                        </span>
+                      </label>
+                      <Why label="Also disable routes the plan no longer wants">
                         Untick for a create-only run — then the only thing it changes in the game
                         is the route it creates. Leave ticked for normal use, or old routes pile
                         up alongside new ones.
-                      </span>
-                    </span>
-                  </label>
-                  <label className="mt-2 flex items-center gap-2 text-xs">
-                    <input
-                      type="checkbox"
-                      checked={updateDrifted}
-                      onChange={(e) => setUpdateDrifted(e.target.checked)}
-                    />
-                    <span>
-                      Correct cargo on routes that have drifted.{' '}
-                      <span className="text-secondary">
+                      </Why>
+                    </div>
+
+                    <div className="flex items-start gap-2">
+                      <label className="text-xs flex items-start gap-2 flex-1">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={updateDrifted}
+                          onChange={(e) => setUpdateDrifted(e.target.checked)}
+                        />
+                        <span className="text-primary">
+                          Correct cargo on routes that have drifted
+                        </span>
+                      </label>
+                      <Why label="Correct cargo on routes that have drifted">
                         A route is created once, but the plan moves every time production does.
                         Without this, live routes keep the amounts they were created with and
                         slowly stop matching the sheet. Off by default because it overwrites a
                         route you may have tuned in-game on purpose.
-                      </span>
-                    </span>
-                  </label>
+                      </Why>
+                    </div>
+                  </div>
                 </div>
 
                 {!plan.feasible && (

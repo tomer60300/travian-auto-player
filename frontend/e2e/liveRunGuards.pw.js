@@ -65,7 +65,7 @@ test.describe('the row cap the page explains is on by default', () => {
     await seed(page)
     await openPlan(page)
 
-    const box = page.getByLabel('Max rows this run')
+    const box = page.getByLabel('Max rows this run', { exact: true })
     // A default the operator can see and change, not an empty box over a
     // sentence in a label.
     await expect(box).not.toHaveValue('')
@@ -86,7 +86,7 @@ test.describe('the row cap the page explains is on by default', () => {
     })
     await seed(page)
     await openPlan(page)
-    await page.getByLabel('Max rows this run').fill('')
+    await page.getByLabel('Max rows this run', { exact: true }).fill('')
     await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
     await expect(page.getByText(/route\(s\) would be created/)).toBeVisible()
 
@@ -109,7 +109,7 @@ test.describe('a protect_destinations typo is undetectable by the server', () =>
     await seed(page)
     await openPlan(page)
 
-    await page.getByLabel('Never disable').fill('4688')
+    await page.getByLabel('Never disable', { exact: true }).fill('4688')
     await expect(page.getByText('no village named 4688 — did you mean 46|88?')).toBeVisible()
   })
 
@@ -120,7 +120,7 @@ test.describe('a protect_destinations typo is undetectable by the server', () =>
     await seed(page)
     await openPlan(page)
 
-    await page.getByLabel('Never disable').fill('46|133')
+    await page.getByLabel('Never disable', { exact: true }).fill('46|133')
     await expect(page.getByText(/no village named/)).toHaveCount(0)
   })
 
@@ -129,7 +129,7 @@ test.describe('a protect_destinations typo is undetectable by the server', () =>
     await seed(page)
     await openPlan(page)
 
-    await page.getByLabel('Never disable').fill('20011')
+    await page.getByLabel('Never disable', { exact: true }).fill('20011')
     await expect(page.getByText(/no village named/)).toHaveCount(0)
   })
 
@@ -148,7 +148,7 @@ test.describe('a protect_destinations typo is undetectable by the server', () =>
     await seed(page)
     await openPlan(page)
 
-    await page.getByLabel('Never disable').fill('4688')
+    await page.getByLabel('Never disable', { exact: true }).fill('4688')
     await expect(page.getByText(/no village named 4688/)).toBeVisible()
     await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
     await expect(page.getByText(/route\(s\) would be created/)).toBeVisible()
@@ -563,5 +563,105 @@ test.describe('the Plan stage leads with the verdict, not with an empty history'
       }
     })
     expect(at.lastRun).toBeGreaterThan(at.verdict)
+  })
+})
+
+test.describe('the controlled run is a form, not a slab of prose', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  // The four labels, measured: 489 characters (Whole day), 408 (Trim the
+  // fan-out), 215 (Also disable), 300 (Correct cargo). Their bolded lead clause
+  // already IS the label; the rest is prose, and it carries real warnings that
+  // must not be deleted.
+  const ROWS = [
+    { lead: 'Whole day', prose: /Plans every profile in its own hours/ },
+    { lead: 'Trim the fan-out to the profile hours', prose: /24\/N daily rows/ },
+    { lead: 'Also disable routes the plan no longer wants', prose: /create-only run/ },
+    { lead: 'Correct cargo on routes that have drifted', prose: /tuned in-game on purpose/ },
+  ]
+
+  test('each checkbox reads as one label, with its prose behind a disclosure', async ({ page }) => {
+    await isolate(page)
+    await seed(page)
+    await openPlan(page)
+
+    for (const row of ROWS) {
+      const label = page.getByText(row.lead, { exact: false }).first()
+      await expect(label).toBeVisible()
+      const visible = (await label.innerText()).trim()
+      // The whole point: what is on screen before anything is clicked is the
+      // label, not four paragraphs of it.
+      expect(visible.length, `"${row.lead}" reads as a label, not an essay`).toBeLessThan(80)
+      // And the prose is still there, one click away, not deleted: in the DOM
+      // inside a closed <details>, so present but not on screen.
+      await expect(page.getByText(row.prose).first()).toHaveCount(1)
+      await expect(page.getByText(row.prose).first()).not.toBeVisible()
+    }
+  })
+
+  test('the prose is kept, and opening the disclosure shows it', async ({ page }) => {
+    await isolate(page)
+    await seed(page)
+    await openPlan(page)
+
+    for (const row of ROWS) {
+      // A native <summary>, so it is reached by its accessible name rather
+      // than by a role: a <button> inside a <summary> would be a control inside
+      // a control.
+      await page.getByLabel(`Why: ${row.lead}`).click()
+      await expect(page.getByText(row.prose).first()).toBeVisible()
+    }
+  })
+
+  test('the five boxes are a field grid above the checkboxes', async ({ page }) => {
+    await isolate(page)
+    await seed(page)
+    await openPlan(page)
+
+    const layout = await page.locator('.controlled-run-fields').evaluate((el) => ({
+      display: getComputedStyle(el).display,
+      inputs: el.querySelectorAll('input').length,
+      checkboxes: el.querySelectorAll('input[type="checkbox"]').length,
+    }))
+    expect(layout.display).toBe('grid')
+    expect(layout.inputs).toBe(5)
+    // The two number inputs were wedged BETWEEN paragraphs and three more sat
+    // inside a third; the grid is fields only.
+    expect(layout.checkboxes).toBe(0)
+
+    // And the grid comes first in reading order.
+    const at = await page.evaluate(() => {
+      const t = document.body.innerText
+      return { rows: t.indexOf('Max rows this run'), whole: t.indexOf('Whole day') }
+    })
+    expect(at.rows).toBeLessThan(at.whole)
+  })
+
+  test('every disclosure toggle is a 44px target on a coarse pointer', async ({ browser }) => {
+    // Item 4 of the UI Definition of Done. A "?" glyph is about seven pixels
+    // wide, so this is the one that a new affordance most easily gets wrong.
+    const context = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    })
+    const page = await context.newPage()
+    await isolate(page)
+    await seed(page)
+    await openPlan(page)
+
+    const sizes = await page.locator('.why-toggle').evaluateAll((nodes) =>
+      nodes.map((el) => {
+        const r = el.getBoundingClientRect()
+        return { w: Math.round(r.width), h: Math.round(r.height) }
+      }),
+    )
+    if (globalThis.process?.env?.MEASURE) console.log('\nwhy toggles:', JSON.stringify(sizes))
+    expect(sizes.length).toBeGreaterThanOrEqual(4)
+    for (const size of sizes) {
+      expect(size.w).toBeGreaterThanOrEqual(44)
+      expect(size.h).toBeGreaterThanOrEqual(44)
+    }
+    await context.close()
   })
 })

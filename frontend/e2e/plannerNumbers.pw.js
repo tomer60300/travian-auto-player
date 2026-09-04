@@ -361,7 +361,7 @@ test.describe('a blank box is unknown; a typed zero is an answer', () => {
     await page.goto('/resource-planner')
     await buildPlan(page, sent)
 
-    await page.getByLabel('Routes this run').fill('0')
+    await page.getByLabel('Routes this run', { exact: true }).fill('0')
     await page.getByRole('button', { name: /^Preview \(0 requests\)$/ }).click()
     await expect.poll(() => sent.execute.length).toBe(1)
 
