@@ -1,6 +1,157 @@
 # Changelog
 
-## [Unreleased] — 2026-09-03
+## [Unreleased] — 2026-09-04
+
+### Added — Distribution planner: the requirements spec is operable from the UI
+
+Sections 6, 7, 9 and 10 of the operator's spec had no implementation at all.
+They do now, and the planner page was rebuilt around the order a plan is
+actually assembled rather than around the endpoints it calls.
+
+- **Night rules (spec §6).** Every night movement must be home before the
+  profile switch: `night_overrun_minutes` prices each route's last in-window
+  dispatch plus its round trip against the night's close, and `NIGHT_OVERRUN`
+  (critical) names the route, the clock and the overrun. The beat is reshaped
+  first and only refuses when no phase closes the night — it will not drop a
+  firing, because the cargo was sized for the firings the plan counted.
+- **The fill pair is 25% / 60%**, from 30% / 80%. One constant does both jobs:
+  the room between baseline and target is what the night may ship, and the
+  target *is* the morning floor. "Never overflow during the night, never arrive
+  empty at morning" is one statement read from either side, and two constants
+  could disagree.
+- **`overnight` is declared, not derived.** A window that wraps midnight is
+  still the default reading, but the operator's declaration wins. Deriving it
+  alone was wrong in both directions: the half of a split night *after*
+  midnight wraps in neither direction, so §6 applied to neither half and the
+  60% floor was measured at midnight; and a near-24h day profile wraps, which
+  silently suspended the latency target all day.
+- **The 2-hour latency target does not bind at night.** `None` is exactly "no
+  target", which also skips the pass that buys speed with merchants — the one
+  thing a night that must end empty cannot afford.
+- **NPC balancing (spec §7).** `services/distribution/npc.py`. The allowance is
+  a rate built from rates — what a village retains of the resources it is not
+  drawing on — so neither window length nor warehouse capacity can move it. The
+  draw is a **cap consumed only against unmet demand**, never an addend, so a
+  floor on a quiet village costs nothing. The reservoir is finite in both
+  replays and the feedstock store is debited 1:1, which is what makes the
+  700,000-crop trigger honest. `NPC_CAPACITY_SHORT` is critical and blocks
+  execute.
+- **Crop-profile drift (spec §9).** `RoleTemplate.assumed_crop_per_hour` — may
+  be negative, `0` is the claim "breaks even", absent means "do not check me" —
+  compared against the snapshot as `|actual − assumed| / |assumed|` past a 20%
+  threshold. A warning, never a blocker: the profiles are hand-kept constants
+  and drift is expected. A sign flip is reported as a gap *and* named in words.
+- **Confirm-then-export (spec §10).** `/plan` returns a `plan_digest` over the
+  response it showed; `/plan/yaml` re-plans, re-digests and **409s naming both
+  digests** unless they agree, so the document either is the plan that was read
+  or does not exist. The file is named for the plan, not the moment.
+- **Server-side setup storage.** `GET`/`PUT`/`DELETE
+  /api/distribution/setup?account_key=…`, one saved setup per user per account,
+  stored verbatim and validated on `PUT` by reading the document *as* a
+  `PlanRequest` so the rules are the planner's own rather than a second copy.
+  `localStorage` is per origin, and the same app on `:80`, `:8001`, the LAN
+  address and Tailscale kept four independent copies.
+- **The document format went v6 → v9.** v7 carries per-profile
+  `npc_attended`, v8 per-profile `overnight`, v9 the account-wide
+  `reserved_window`. Each earned a version rather than riding along as an
+  unknown key: all three are answers the planner refuses to guess, and a build
+  that cannot read one drops it silently — after which the operator saves from
+  that build and the answer is gone from the shared copy.
+- **A reserved marketplace window.** Arrivals avoid the operator's manual NPC
+  burst where any phase can manage it, ranked below "send at all" and "be home
+  by the switch", and a warning names the route when geometry forces one in.
+- **A four-stage planner page** — Account, Targets, Day & night, Plan — each
+  answering one question, in the order a plan is assembled. Role templates were
+  promoted out of a collapsed disclosure: a village's targets are resolved
+  *from* its role, so the role's figures cannot be a footnote to the grid that
+  shows their consequences.
+- **An undo for a live run.** `/routes/revert-plan` was unreachable and the
+  `trace_id` that keys it was discarded. The last-run panel now asks what
+  undoing would take before offering to do it.
+
+### Fixed — Distribution planner
+
+- **`/execute` and `/day-check` planned the same profile against different
+  latency targets** — 16h and 2h for a 07:00–23:00 day. The operator reviewed a
+  sheet built from short cycles and small batches, and the writing endpoint
+  recomputed with longer cycles and bigger batches into the same stores. Now
+  `min(standing target, window length)`, derived once: a window may tighten the
+  target, never loosen it.
+- **The night shed limit measured to the nearest village, not the destination.**
+  A neighbour one field away yielded 47 turnarounds in an 8h night, so the
+  "limit" came out around six times fleet × capacity per hour — and because the
+  operator's `max_busy_merchants` is clamped on and then multiplied by that
+  count, the ceiling this function exists to honour was negated inside it. The
+  `max(1, …)` trip floor is gone too: a village whose round trip does not fit
+  the window now sheds nothing. Where the hub itself is the sender, the bound is
+  the distance to the consumers or the tribute point — where its crop actually
+  goes.
+- **An unreadable bulk toggle was reported as total success.** A soft-block page
+  or an HTML error body during a revert reported `disabled: 24 route(s)` while
+  twenty-four rows kept shipping. `ToggleResponseUnreadable` now distinguishes
+  "I could not check" from "the game refused nothing", as the read side already
+  did, and the disable and enable messages differ because the consequences do.
+- **Failed writes and reads did not bill the shared daily request ceiling** —
+  including a Gold Club refusal, which returns "skipped" after the request went
+  out. The ceiling is shared with the farm-list and oasis loops, so
+  under-counting here licensed those to overspend.
+- **The 429 backoff was switched off along with request pacing.** A server
+  saying "slow down" is not a stealth preference; the penalty is now served
+  whichever way the pacing flag is set.
+- **The whole-day merchant boundary check ignored the reserve** and sat *after*
+  the dry-run return, so the preview an operator authorises a live run from
+  never showed it. Both endpoints now share it and measure against
+  `merchant_budget(reserve)`.
+- **`MERCHANT_MODEL_UNCALIBRATED` offered a village whose Trade Office nobody
+  typed** as the place to read the merchant base from. Following that on a
+  village that is really level 13 makes the base 3.6× too high, and every route
+  is then sized to cargo the merchants cannot carry.
+- **A round-the-clock route set was assumed attended.** It has all 24 hours,
+  including the eight nobody is at the Marketplace. It now defaults to
+  unattended, which under-delivers and says so rather than over-committing in
+  silence.
+- **Two adjacent functions computed a floored village's net rate differently**,
+  so the continuous check read a drawn warehouse as draining forever and a
+  feedstock granary as banking crop it was trading away.
+- **The setup store accepted a document the page would then refuse**, and the
+  two crop-drift comparison shapes that look right and are not are refuted in
+  the code rather than left to be rediscovered.
+
+### Fixed — Planner UI
+
+- **Seven inputs had no styling at all.** `.input-sm` was named on seven
+  controls and its only rule sat inside a mobile media query. Measured at 1440:
+  16px tall, transparent, no border, no padding. Five of the seven are the
+  live-run safety controls, and "Max rows this run" — empty by default — was
+  invisible: there was nothing on screen to click.
+- **The default live run bounded routes at 3 and game rows at infinity**, which
+  is 72 rows on a 1-hour cycle.
+- **A `Never disable` typo was undetectable by page and server.** `4688` for
+  `46|88` is shape-valid as a village id, so the page now resolves entries
+  against the village list — the server does not hold it.
+- **Four `window.confirm` dialogs became `ConfirmDialog`**, including the live
+  write. Chrome's "prevent this page from creating additional dialogs" makes
+  every later `confirm()` return `false`, so the live button silently did
+  nothing.
+- **A stated NPC attendance answer was thrown away** when a profile had no
+  window — which inverted the answer once absence began to mean "unattended".
+- **`overnight` was unreachable from the app.** The backend learned the
+  distinction and nothing sent it, so a split night still got the broken answer.
+- **A disabled field did not look disabled, anywhere.** Chrome greys a disabled
+  input by its own `color`, which an author declaration beats, so twenty value
+  boxes that ignore typing looked identical to editable ones.
+- **Five empty-vs-zero defects**, the worst being `Routes this run = 0` — which
+  the backend documents as "reconcile only, create nothing" — falling through to
+  three live route creations.
+- **The plan survived edits it was computed from.** `relay_for` and
+  `prune_to_window` were in the payload and in neither invalidation list, so the
+  sheet went on describing a relay tier that had just been replaced.
+- **Identity columns now pin wherever a table really overflows**, measured
+  rather than gated on a breakpoint; nine controls gained accessible names; and
+  the client log store no longer records request or response bodies, which had
+  come to include the whole plan document and every village name and coordinate.
+
+## [Previous] — 2026-09-03
 
 ### Added — Resource Distribution Planner: operator-declared village state
 

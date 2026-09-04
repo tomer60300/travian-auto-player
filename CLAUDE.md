@@ -103,10 +103,13 @@ Every task MUST follow this exact pipeline. Do not skip steps.
 ### Phase 3: Verify
 
 Scope the gate to what you actually changed. Budget a couple of minutes for the
-full backend suite in parallel (`-n 8`), not one: measured 2026-09-03 on this
-machine, 107s warm to 199s cold across three runs of 1,911 tests, and 99s over
-2,031 tests later the same day — against 235–240s serial. Even at two minutes,
-running it to verify a Markdown edit verifies nothing and is pure waste.
+full backend suite in parallel (`-n 8`), not one: measured 2026-09-04 on this
+machine, **102s warm over 2,431 tests** — and it stayed near two minutes as the
+suite grew from 1,911 tests (107s warm, 199s cold) through 2,031 (99s) the day
+before, against 235–240s serial. The wall time is dominated by the slowest few
+cases, not the count, so adding tests has cost far less than it looks like it
+should. Even at two minutes, running it to verify a Markdown edit verifies
+nothing and is pure waste.
 
 **Always:**
 1. Backend linting, if any Python changed: `uv run ruff check . && uv run ruff format --check .`

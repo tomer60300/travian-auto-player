@@ -264,7 +264,7 @@ Expected vs actual stock trajectory; detect silently failing routes, new/chiefed
 
 ## 14. Hardness
 
-Multi-commodity min-cost flow with integer cycle and merchant variables plus per-node capacity — NP-hard in general. N=20 is small, so: cluster → assign hubs → per-route cycle sweep → local improvement. MILP (HiGHS/CBC via PuLP) later.
+Multi-commodity min-cost flow with integer cycle and merchant variables plus per-node capacity — NP-hard in general. N=26 is small, so: cluster → assign hubs → per-route cycle sweep → local improvement. MILP (HiGHS/CBC via PuLP) later.
 
 ## 15. Known issues & guards
 
@@ -304,7 +304,7 @@ Multi-commodity min-cost flow with integer cycle and merchant variables plus per
 
 ## Appendix A — Regression fixture
 
-The current 20-village plan is the optimizer's golden test case: net production, coords, TO levels, allocation targets in; route set, per-village merchant pool, total ~115 merchants, all villages ≤ 18 out. Exercises: an army village with large negative net crop, a `remainder` village, a stranded village, two sub-hubs, a priority village held at 3/20, a foreign crop tribute, sub-20-merchant villages, and unknown TO defaulting to 0.
+The frozen 20-village fixture is the optimizer's golden test case (frozen at the size it was cut, deliberately -- see the note below; the account is now 26): net production, coords, TO levels, allocation targets in; route set, per-village merchant pool, total ~115 merchants, all villages ≤ 18 out. Exercises: an army village with large negative net crop, a `remainder` village, a stranded village, two sub-hubs, a priority village held at 3/20, a foreign crop tribute, sub-20-merchant villages, and unknown TO defaulting to 0.
 
 ---
 
@@ -369,7 +369,7 @@ Checked and ruled out:
 - the same sweep yields **Marketplace level for free**, settling open question #2 without a second mechanism
 - and warehouse/granary levels (`gid 10`/`11`) if capacity is ever wanted from levels rather than the Capacity tab
 
-At 22 villages that is a 22-request one-off, re-run only when a village is added. Treating TO as OWNED state (§5.2) is the right call; the scan just costs half what the doc budgets.
+At 26 villages that is a 26-request one-off, re-run only when a village is added. Treating TO as OWNED state (§5.2) is the right call; the scan just costs half what the doc budgets.
 
 **Cheaper long-term option, phase 2 only:** once routes are applied, capacity is *observable* — Travian reports how many merchants a given cargo consumed, so `cap = cargo / merchants` recovers it with zero extra requests and self-heals when a TO is upgraded. That also removes the staleness nag in §5.3 entirely. Worth designing toward.
 
@@ -415,7 +415,7 @@ Consequence for cold-start: `first_delivery_hours` is a WORST-CASE upper bound (
 
 - **§3.1 speed 12 f/h is tribe-specific.** Correct for Teutons; if the tool ever handles another account it belongs with the base capacity in a per-tribe table, not in global CONFIG.
 - **Open question #4 (map span) is answered: 401.** It was answerable from data already held, and it was answered from a captured create request rather than from coordinates — see Part IV §4.12 for the proof and for why nobody should "fix" it to 801. `docs/05-map-system.md` covers the map system.
-- **Appendix A's fixture must be frozen, not live.** The account has already gone 20 → 22 villages; a golden test that reads current state stops being a regression test.
+- **Appendix A's fixture must be frozen, not live.** The account has already gone 20 → 22 → 26 villages; a golden test that reads current state stops being a regression test.
 - **Merchant reserve interacts with foreign tribute.** §7.3's permanently committed merchants must be subtracted *before* the reserve, or a tribute-paying village silently ends up with no idle merchants.
 - **§7.2's "shipped vs target" is the highest-value guard in the document** (it caused the same error twice). It should be enforced in the data model — store the gap and derive the target — not left to a UI label.
 
@@ -450,7 +450,7 @@ One table, one row per village. Columns: name · coords · role · net W/C/I/Cr 
 - **Net crop is signed and coloured**, negative in red with the empty-time beside it. Never show an unsigned crop rate.
 - **Owned vs fetched is visible.** Fetched cells are plain; owned/editable cells (TO, role, priority flag) carry a subtle edit affordance. That makes §5.2's safety model legible instead of documentation.
 - **TO cell has three states:** a number, `0 (assumed)`, and `unknown — scan`. The third is not silently treated as 0 in the UI even though the optimizer floors it, so the user can see what the plan is guessing.
-- Row action **"Scan buildings (1 request)"** for a single village; a header action for a full sweep with the cost stated (`Scan 22 villages (22 requests)`).
+- Row action **"Scan buildings (1 request)"** for a single village; a header action for a full sweep with the cost stated (`Scan 26 villages (26 requests)`).
 - Validation from §5.4 appears **on the offending row**, not in a list underneath.
 
 ### Stage 2 — Allocate
@@ -975,6 +975,261 @@ centred on 0|0, so its width is always odd, and an even span shifts every tile
 index by half a field silently.
 
 ---
+
+## 4.13 The night rules (profile §6)
+
+Four rules, all of which used to be prose.
+
+**Everything home before the switch.** `schedule.night_overrun_minutes(scheduled,
+window, night_end)` prices a route's last *in-window* dispatch plus its full
+round trip against the night's close, in minutes; zero or below is a clear road.
+`Category.NIGHT_OVERRUN` (CRITICAL) names the route, the clock it last leaves
+at, the round trip and the overrun. `build_beat` reshapes first — its placement
+score gained a `home` term ranked below "send at all" and above the reserved
+window — and only reports when no phase closes the night. The one fix it will
+not apply is dropping a firing: the cargo was sized for the firings the plan
+counted, so trimming under-delivers in silence.
+
+**The fill pair is 0.25 and 0.60.** `night_profile.DEFAULT_BASELINE_FILL` and
+`DEFAULT_TARGET_FILL`, from 0.30 / 0.80. One constant does both jobs on the
+target side, deliberately: the room between baseline and target bounds what the
+night may ship *into* a store, and the same figure is the floor every role
+village must have reached by 07:00. "Never overflow during the night, never
+arrive empty at morning" is one statement seen from either side, and two
+constants could disagree. The ceiling is
+`(target − baseline) × capacity / window_hours`.
+
+Who holds a floor: `roles.keeps_a_morning_floor(role)` → DEF, TROOPS_OFF,
+FULL_OFF. Deliberately narrower than `default_may_relay`, which counts the
+capital in — relay is about a job a leg in transit disturbs, the floor is about
+waking able to build.
+
+**The 2-hour latency target does not bind at night.** `craft_plan` passes
+`latency_target = None` for a declared night, and `None` is exactly "no target":
+it skips both the `Category.LATENCY` findings and
+`_spend_idle_merchants_on_latency`, the pass that buys speed by spending
+merchants. That pass is the one a night which must end empty cannot afford.
+
+**`overnight` is declared, not derived.**
+`night_profile.is_night_window(window, *, overnight=None)` — a window that wraps
+past midnight is still the fallback reading, but the declaration wins, and a
+`None` window (round the clock) is never the night whatever is declared. Fields:
+`PlanRequest.overnight`, `DaySegmentInput.overnight`, `PlannerConfig.overnight`,
+all `bool | None`. Declaring it with no hours is a 422.
+
+*What to look for:* deriving it from the wrap alone was wrong in **both**
+directions, and both shapes are legal input. The half of a split night *after*
+midnight — `(0, 420)` — wraps in neither direction, so §6 applied to neither
+half; and because the detected half was the pre-midnight `(1380, 0)`, the 60%
+floor was measured **at midnight**. Conversely a near-24h day profile
+`(420, 419)` wraps, which silently suspended the latency target all day.
+
+**A split night is read from both ends.** `_one_night_run(night_segments)`
+requires the declared halves to chain end-to-start: the opening is the half
+whose start is no other half's end (exactly one, or it gives up), and the
+closing is reached by chaining forward. Picking the closing by "the half no
+other starts at" looks order-free and is not — a gap between halves, or a second
+window declared overnight, makes every candidate qualify as both ends and then
+list position decides. When the halves do not form one run, `/day-check` says so
+and skips the two state rules rather than answering against an arbitrary piece.
+
+The 25% baseline is measured at the opening half; the 60% floor is measured
+against the profile that **starts at the closing half's end** — usually the
+morning profile — not against the closing night half itself.
+
+*Direction of danger: quiet.* The derivation is what the operator writes into
+the active profile, while `NIGHT_OVERRUN` is raised by the planner on routes
+this profile has already called shippable.
+
+## 4.14 NPC balancing (profile §7)
+
+`services/distribution/npc.py`. Two mechanisms kept apart, because conflating
+them is what produced the first build's defects.
+
+```
+allowance_per_hour(v) = Σ_{r ∉ drawn(v)} max(0, target₁_per_hour(v, r))
+ship = target − own − draw          # the draw is a CAP, never an addend
+```
+
+**The allowance is a rate built from rates** — what the village retains of the
+resources it is *not* drawing on — so neither window length nor warehouse
+capacity appears in it. **The draw is consumed only against unmet demand**, so a
+floor on a quiet village costs nothing. **The reservoir is finite in both
+replays**, refilled at the allowance, zero while unattended, booked as an inflow
+so `net_gain_per_day` stays true, and **the feedstock store is debited 1:1** —
+that debit is what makes the 700,000-crop trigger at the capital honest.
+
+`stock_floor_fraction` keeps its name and wire contract and means the **buffer
+level** only (`fraction × warehouse_capacity`, materials, warehouse). `0.0 ≡
+None` at every layer. A granary is not NPC-fed.
+
+Three of the first build's mistakes are pinned so they cannot return: a **level
+modelled as a rate** (`capacity × fraction / window_hours`, so a shorter window
+*raised* the claim), supply that was **compulsory** (an addend every non-KEEP
+mode shipped away), and an **infinite reservoir** in the replay.
+
+**Triggers.** `NPC_CROP_BANKED` (note) at `CROP_FEEDSTOCK_TRIGGER = 700_000`,
+strict `>`. `NPC_WOOD_LOW` (warning) reads the village's **own declared floor**
+rather than an invented threshold — profile §5's "warehouse assumed ≥25% stocked
+on wood" *is* that floor — so a village with no floor gets no reading at all.
+Both are reporting triggers: the planner does not press the NPC button.
+
+**`npc_attended` is required, never guessed.** Per segment on `/day-check` and a
+whole-day `/execute`; required on `/plan`, `/execute` and `/night-profile`
+whenever a floor meets a `dispatch_window`. A round-the-clock set (no window) is
+**not** exempt and defaults to **unattended** — it has all 24 hours, including
+the eight nobody is at the Marketplace, and Travian offers nothing to confine a
+repeat interval to part of the day. It is not a 422 there only because a setup
+*document* is validated through the same model and carries no window.
+
+*Direction of danger: quiet and over-committing.* Nothing downstream catches an
+optimistic reading — `simulate_day` tops the store up at every departure minute
+including 03:00, and `NPC_CAPACITY_SHORT` is measured against that same cap. So
+the direction of the default *is* the guard. `NPC_CAPACITY_SHORT` is CRITICAL,
+weighed, and blocks `/execute`.
+
+## 4.15 Crop-profile drift (profile §9)
+
+`roles.crop_drift_findings`, threshold `CROP_DRIFT_THRESHOLD = 0.20`, quoted
+from §9 at the constant. Compares the snapshot's `crop_per_hour` against
+`RoleTemplate.assumed_crop_per_hour` — the operator's own reading of what a
+village of that role nets. May be **negative** (01 reads −5,880/h); `0.0` is the
+real claim "breaks even"; absent means no assumption and the village is not
+checked.
+
+Deviation is `|actual − assumed| / |assumed|`, and the two tempting alternatives
+are refuted in the docstring. Comparing *magnitudes* scores "assumed −5,880,
+actual +5,880" as 0% drift, when that is the single most important change the
+figure can undergo. A *signed ratio* inverts against a negative denominator, so
+a village that got worse reads as improving. The predicate is written as
+`abs(gap) <= threshold * abs(claim)`, so an assumed 0/h needs no special case
+and is never divided by; the wording changes instead.
+
+A WARNING, never a blocker: these are hand-kept constants and drift is expected.
+`crop_negative_by_design` deliberately does **not** silence it — a profile
+behind a designed deficit is the likeliest figure on the account to have moved.
+
+## 4.16 Confirm, then export (profile §10)
+
+§10 asks for "readable plan first → operator confirms → then generate YAML".
+Nothing on this server holds a computed plan — `/plan` is pure and stateless,
+which is what makes tuning a target free — so there is no plan to fetch by id,
+and trusting a plan posted back is what `/execute` already refuses.
+
+So `/plan` returns `plan_digest`: sha256 over the whole response with that field
+excluded, canonicalised as `json.dumps(sort_keys=True, separators=(",", ":"))`.
+`POST /plan/yaml` takes the `PlanRequest` plus a required
+`expected_plan_digest`, re-plans, re-digests, and **409s naming both digests**
+unless they agree. The document therefore either *is* the plan that was read or
+does not exist. A malformed digest is a 422 rather than a 409, so a mistyped
+token does not send the operator re-reading a plan that never moved.
+
+The document is deterministic — no timestamp, hostname or run id anywhere — and
+the file is named for the plan (`distribution-plan-<digest[:12]>.yaml`), not the
+moment, so two downloads of one plan are one file. Twelve sections, `inputs`
+among them, so a file is self-describing a month later and re-plans to the same
+digest.
+
+## 4.17 The setup document, stored server-side
+
+`GET`/`PUT`/`DELETE /api/distribution/setup?account_key=…`. One saved setup per
+user per account — a composite primary key on `planner_setups`, not a preset
+library. Stored and returned **verbatim**: `buildSetup` omits every field it has
+no answer for, and a store that re-serialised a validated model would write
+`may_relay: null` and `trade_office_level: 0` onto every row, turning "nothing
+declared" into a declaration.
+
+**A document the planner would refuse is refused on `PUT`**, by building a
+`PlanRequest` out of it and letting its own validators speak — not by restating
+the rules. The half that is about the *account* rather than the document ("is
+this village real", "does it field that many merchants") has no answer without a
+snapshot and is deliberately left to the next `/plan`.
+
+Why it exists: `localStorage` is scoped to an **origin**, so the same app on
+`:80`, `:8001`, the LAN address and over Tailscale kept four independent copies.
+
+**Format versions.** v7 carries per-profile `npc_attended`, v8 per-profile
+`overnight`, v9 the account-wide `reserved_window`. Each earned a version rather
+than riding along as an unknown key — which all three mechanically could, since
+the body is stored verbatim and `SetupDocument` ignores extras — because the
+harmful path is identical: a build that cannot read one drops it silently, the
+operator saves from that build, and the answer is gone from the shared copy.
+Older documents load with the field absent; newer ones are **refused, never
+upgraded**, and the version is stored as given.
+
+*Known gap:* only v9's `reserved_window` is a declared field on `SetupDocument`.
+`npc_attended` and `overnight` survive as ignored extras, so they get no
+server-side type check — a `"yes"` where a boolean belongs would store.
+
+## 4.18 The reserved marketplace window
+
+`reserved_window`, minutes past midnight on the wire and `HH:MM` in the
+document, threaded to `build_beat`. It is a **soft scheduling preference ranked
+third** — behind "send at all" and "be home by the switch" — not a refusal: each
+route's dispatch minute is chosen so its arrivals miss the window wherever any
+phase can manage it, and `Category.RESERVED_WINDOW` (WARNING) names the route
+when geometry forces one in. Wrapping past midnight is supported; a zero-width
+window is legal and simply omitted from the request.
+
+It exists because the operator's NPC burst is a manual action at a Marketplace,
+and merchants landing during it compete for the same attention.
+
+## 4.19 One latency target per profile *(fixed defect)*
+
+`/execute` used to override `max_latency_hours` per segment with the window's
+own length while `/day-check` kept the standing top-level value. A 07:00–23:00
+day was therefore planned against **16h** by the endpoint that writes and **2h**
+by the endpoint the operator reviews with — and the comment above the override
+claimed the opposite.
+
+The consequence is the §I.6.2 burst: the operator reads a clean sheet built from
+short cycles and small batches, `/execute` recomputes on the cheapest longer
+cycles, and bigger batches land in the same stores. What gets written is a route
+set whose burst behaviour nothing simulated. A 60-minute profile inverts it —
+1.0h in `/execute` against 2.0h in `/day-check`, so `/execute` could buy
+merchants and report `over_budget` on a plan `/day-check` passed.
+
+Now derived once inside `_plan_account` as
+`min(standing target, window length)`: a window may **tighten** the standing
+target, never loosen it. Taking a 16h window *as* the target disables the
+objective outright, since no route can miss 16h; ignoring the window leaves a
+60-minute profile aiming at a lag it has no hours to absorb. `None` still means
+"no target", so a declared night is unaffected.
+
+## 4.20 Writes and reads that were not what they claimed *(fixed defects)*
+
+**An unreadable bulk toggle was reported as total success.**
+`_rejected_routes` returned "nothing rejected" for any body it could not parse,
+and the caller reads that as "all N went through". A soft-block page, a gpack
+revision or an HTML error body during a **revert** therefore reported
+`disabled: 24 route(s)` while twenty-four rows kept shipping — a revert complete
+on paper with the account still draining a sender. `ToggleResponseUnreadable`
+now draws the same distinction the read side already drew with
+`MarketplaceUnreadable`: "I could not check" and "the game refused nothing" are
+different answers. `routes: []` is still a clean success. The disable and enable
+messages differ because the consequences do — an unreadable disable sends the
+operator to look, an unreadable enable says a later run can repair it.
+
+*Worth knowing before the first live run:* `docs/15-gold-club-features.md`
+records that only the **disable** direction of the bulk toggle was ever
+observed, and that the `routes[].error` shape was read off the game's own
+JavaScript bundle rather than an observed response. So the exception's trigger
+rests on a shape that has not been seen in a real reply.
+
+**Failed writes and reads did not bill the shared request ceiling.** Billing ran
+only on the success path, so a `NetworkError` — and a Gold Club refusal, which
+returns "skipped" *after* the request went out — cost the account a real request
+and a real throttler gap and were counted as nothing. The ceiling is shared with
+the farm-list and oasis loops, so under-reporting here licensed those to
+overspend. Billing now sits in a `finally` inside each request's own `try`, so
+"exactly once" holds by construction rather than by inspection.
+
+**The 429 backoff was switched off along with request pacing.** The pacing
+switch is the operator's and its default is safe, but the same flag guarded
+every penalty, so with pacing off a 429 produced no backoff at all. A server
+saying "slow down" is not a stealth preference. The penalty is now served
+whichever way the flag is set; the inter-request gap and burst rules stay off,
+which is the deliberate half.
 
 ## Immediate next actions
 
