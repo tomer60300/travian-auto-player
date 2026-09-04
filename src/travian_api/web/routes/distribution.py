@@ -4150,6 +4150,21 @@ async def _plan_account(
         if dividing:
             allowed_cycles = dividing
 
+    # The profile's own hours may TIGHTEN the standing latency target and never
+    # loosen it, and the arithmetic lives here so every caller gets the same
+    # answer for the same window -- /plan, /day-check and /execute alike.
+    #
+    # Both directions were wrong before, in opposite ways. Taking the window as
+    # the target loosened a 16h day profile to a 16h target, which no route can
+    # miss: the latency pass never fires, flows land on the cheapest (longest)
+    # cycles and the batches into every store grow, with nothing having
+    # simulated the bursts. Ignoring the window left a 60-minute profile aiming
+    # at a 2h delivery lag it has no hours to absorb. So the tighter of the two
+    # binds. `None` stays exactly "no target" -- the window cannot invent one.
+    latency_target = body.max_latency_hours
+    if latency_target is not None and effective_window is not None:
+        latency_target = min(latency_target, _window_minutes(effective_window) / 60.0)
+
     config = PlannerConfig(
         geometry=MapGeometry(span=body.map_span, speed_fields_per_hour=body.speed_fields_per_hour),
         merchant_model=MerchantModel(
@@ -4159,7 +4174,7 @@ async def _plan_account(
         merchant_reserve=body.merchant_reserve,
         merchant_headroom=body.merchant_headroom,
         cycles=allowed_cycles,
-        max_latency_hours=body.max_latency_hours,
+        max_latency_hours=latency_target,
         min_arrival_gap_minutes=body.min_arrival_gap_minutes,
         reserved_window=body.reserved_window,
         # The explicit argument wins (the day check passes each segment's own
@@ -5349,16 +5364,13 @@ async def post_execute(
                     # that WRITES, so a night profile must be funded by the
                     # trading that happens overnight -- none of it.
                     "npc_attended": segment.npc_attended,
-                    # Latency is judged against the profile's own hours: an
-                    # 8-hour night cannot be asked to meet a 16-hour day's
-                    # target, nor vice versa.
-                    "max_latency_hours": (
-                        (
-                            (segment.window[1] - segment.window[0]) % MINUTES_PER_DAY
-                            or MINUTES_PER_DAY
-                        )
-                        / 60.0
-                    ),
+                    # Latency is NOT overridden here. It used to be replaced by
+                    # the segment's own window length, which /day-check does not
+                    # do -- so one body was planned against a 2h target by the
+                    # endpoint the operator reviews and a 16h one by the endpoint
+                    # that writes, and the route set that landed was not the one
+                    # anybody simulated. The window's tightening now happens
+                    # inside `_plan_account`, which both endpoints go through.
                 }
             )
             planned_segments.append(

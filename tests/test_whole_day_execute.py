@@ -20,6 +20,7 @@ was written):
   keep its hands off rows the other profile's create just made.
 """
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +28,7 @@ from pydantic import ValidationError
 
 from travian_api.services.distribution.allocation import Resource
 from travian_api.web.routes import distribution as dist_module
-from travian_api.web.routes.distribution import ExecuteRequest
+from travian_api.web.routes.distribution import DayCheckRequest, ExecuteRequest, post_day_check
 
 from .test_distribution_execute import (
     _MINUTES_PER_DAY,
@@ -425,3 +426,136 @@ class TestOneVisitReportsItselfHonestly:
             "and still disable the stale route on the village the plan skips"
         )
         assert sorted(res.swept_origins) == [20003, 20011], res.swept_origins
+
+
+# -- One latency target per segment, whichever endpoint plans it --------------
+
+
+def _planned_latency(run):
+    """The ``max_latency_hours`` each handler actually plans each window with.
+
+    Spied on the ``PlannerConfig`` the handler builds rather than inferred from
+    the response, because that object IS the answer: /day-check returns
+    trajectories and /execute returns route actions, so no shared field of the
+    two responses carries the target either of them planned against.
+    """
+    seen: dict[tuple[int, int] | None, float | None] = {}
+    real = dist_module.PlannerConfig
+
+    def spy(**kwargs):
+        seen[kwargs.get("dispatch_window")] = kwargs.get("max_latency_hours")
+        return real(**kwargs)
+
+    with _patch(dist_module, "PlannerConfig", spy):
+        run()
+    return seen
+
+
+def _crop_to_11():
+    return {
+        "crop": {
+            "20003": {"mode": "absolute", "value": 0},
+            "20011": {"mode": "remainder"},
+        }
+    }
+
+
+def _shared_payload():
+    """One body both endpoints accept, with a real route in it to plan.
+
+    03 makes 9,000 crop an hour and keeps none of it; 11 is the remainder and
+    takes the lot, ten fields away. Day runs 07:00-23:00 (16h) and Night
+    23:00-07:00 (8h), which is the operator's own pair.
+    """
+    return {
+        "snapshot": [
+            {
+                "village_id": 20003,
+                "name": "03",
+                "x": 0,
+                "y": 0,
+                "merchants_total": 20,
+                "merchants_free": 20,
+                "lumber_per_hour": 0,
+                "clay_per_hour": 0,
+                "iron_per_hour": 0,
+                "crop_per_hour": 9000,
+                "crop_stock": 10000,
+                "granary_capacity": 400000,
+                "warehouse_capacity": 400000,
+            },
+            {
+                "village_id": 20011,
+                "name": "11",
+                "x": 10,
+                "y": 0,
+                "merchants_total": 20,
+                "merchants_free": 20,
+                "lumber_per_hour": 0,
+                "clay_per_hour": 0,
+                "iron_per_hour": 0,
+                "crop_per_hour": 0,
+                "crop_stock": 10000,
+                "granary_capacity": 400000,
+                "warehouse_capacity": 400000,
+            },
+        ],
+        "config": [{"village_id": 20003, "trade_office_level": 10}],
+        "prune_to_window": True,
+        "segments": [
+            {"name": "Day", "window": list(DAY), "allocations": _crop_to_11()},
+            {"name": "Night", "window": list(NIGHT), "allocations": _crop_to_11()},
+        ],
+    }
+
+
+def _executed_latency(payload):
+    return _planned_latency(
+        lambda: _execute(
+            ExecuteRequest.model_validate({**payload, "dry_run": True}), connected=False
+        )
+    )
+
+
+class TestOneLatencyTargetPerSegment:
+    """/execute writes the plan /day-check was reviewed as, latency included.
+
+    Both handlers plan every segment through `_plan_account`, and the latency
+    pass buys shorter cycles (smaller batches, more merchants in flight) to meet
+    a target. Give the two endpoints different targets for one window and they
+    build different route sets from one body: the operator reads a clean day
+    picture off short cycles and small batches, and the write lands long cycles
+    and big batches into the same stores -- the burst overflow nothing
+    simulated.
+    """
+
+    def test_execute_and_day_check_plan_a_segment_against_the_same_target(self):
+        payload = _shared_payload()
+
+        checked = _planned_latency(
+            lambda: asyncio.run(
+                post_day_check(DayCheckRequest.model_validate(payload), SimpleNamespace(id=1))
+            )
+        )
+        executed = _executed_latency(payload)
+
+        assert executed == checked, (
+            "the endpoint that WRITES must plan each profile against the target "
+            "the endpoint the operator REVIEWS with used"
+        )
+
+    def test_a_long_window_keeps_the_standing_target_rather_than_loosening_to_it(self):
+        """A 16h day window taken as the target disables the latency objective
+        for the whole day: no route can miss it, so the pass never fires."""
+        assert _executed_latency(_shared_payload())[DAY] == 2.0
+
+    def test_a_window_shorter_than_the_standing_target_tightens_it(self):
+        """The other direction is real: a delivery cannot be two hours late
+        inside a one-hour profile, so the window binds where it is tighter."""
+        payload = _shared_payload()
+        payload["segments"] = [
+            {"name": "Hour", "window": [420, 480], "allocations": _crop_to_11()},
+            {"name": "Rest", "window": [480, 420], "allocations": _crop_to_11()},
+        ]
+
+        assert _executed_latency(payload)[(420, 480)] == 1.0
