@@ -29,6 +29,7 @@ import FullDayCheck from './FullDayCheck'
 import NightOverrunTable from './NightOverrunTable'
 import NpcBalancePanel from './NpcBalancePanel'
 import PlanExport from './PlanExport'
+import RevertRunPanel from './RevertRunPanel'
 import SetupStorage from './SetupStorage'
 import UnallocatedPanel from './UnallocatedPanel'
 
@@ -403,5 +404,121 @@ describe('SetupStorage', () => {
     expect(out).toContain('Save setup to file')
     expect(out).toContain('Load setup from file')
     expect(out).toContain('0 Travian requests')
+  })
+})
+
+// ── RevertRunPanel ───────────────────────────────────────────────────
+//
+// Behind two gates `pagesRender.test.jsx` cannot pass -- a snapshot AND a
+// recorded live run -- and it is the panel whose whole job is to say what a
+// button did NOT do. `must_delete_by_hand` is the half no button covers, so
+// what is asserted here is that it is said, and said first.
+
+const REVERT = {
+  trace_id: 'abc123def456',
+  steps: ['village 53629: delete route 9001'],
+  created: { 53629: [9001] },
+  disabled_now: { 53629: [9001] },
+  deleted_now: {},
+  must_delete_by_hand: { 53629: [9001] },
+  restore_state: { 53629: ['route 8800 -> enabled'] },
+  clean: false,
+  requests_used: 4,
+  problems: [],
+}
+
+describe('RevertRunPanel', () => {
+  const VS = [{ village_id: 53629, name: '02' }]
+  const noop = () => {}
+  const panel = (props) =>
+    text(
+      <RevertRunPanel
+        traceId="abc123def456"
+        state={null}
+        villages={VS}
+        onCheck={noop}
+        onDisable={noop}
+        onDelete={noop}
+        {...props}
+      />
+    )
+  const answered = (result) => ({
+    state: { traceId: 'abc123def456', busy: false, result, error: null },
+  })
+
+  it('offers only the read-only check before anything has been read', () => {
+    const out = panel({})
+
+    expect(out).toContain('Check what undoing this would take')
+    // Reverting is deliberately not a single button: neither write is offered
+    // until the read-only answer has said what there is to undo.
+    expect(out).not.toContain('Disable those routes now')
+    expect(out).not.toContain('Delete those routes for good')
+  })
+
+  it('prices the check, because it is not free', () => {
+    // Every origin the run touched costs two game requests to re-read, and
+    // every other action on this page states its cost before spending it.
+    expect(panel({})).toMatch(/2 requests per village the run touched/)
+  })
+
+  it('leads with what a human has to remove, even after a successful disable', () => {
+    // A successful disable is exactly when the outstanding rows get forgotten:
+    // the routes have stopped shipping, so nothing on screen feels urgent.
+    const out = panel(answered(REVERT))
+
+    expect(out).toMatch(/1 route\(s\) must be deleted by hand/)
+    expect(out).toContain('02: 9001')
+    expect(out.indexOf('must be deleted by hand')).toBeLessThan(out.indexOf('Disabled just now'))
+    // Named by name, not by id: nobody running the account knows which village
+    // 53629 is.
+    expect(out).toContain('02: route 8800 -&gt; enabled')
+    expect(out).toMatch(/4 game request\(s\) spent/)
+  })
+
+  it('says the delete disables too, rather than pretending to be narrower', () => {
+    const out = panel(answered(REVERT))
+
+    expect(out).toContain('Disable those routes now (reversible)')
+    expect(out).toContain('Delete those routes for good (disables first)')
+  })
+
+  it('offers no writes when there is nothing to undo', () => {
+    const out = panel(
+      answered({ ...REVERT, clean: true, must_delete_by_hand: {}, disabled_now: {} })
+    )
+
+    expect(out).toContain('every village reads as it did before this run')
+    expect(out).not.toContain('Delete those routes for good')
+  })
+
+  it('renders one answer under one heading only', () => {
+    // Keyed by trace id. A history row's steps under another run's heading
+    // would be the worst possible wrong reading in this panel.
+    const out = text(
+      <RevertRunPanel
+        traceId="zzz999zzz999"
+        state={{ traceId: 'abc123def456', busy: false, result: REVERT, error: null }}
+        villages={VS}
+        onCheck={noop}
+        onDisable={noop}
+        onDelete={noop}
+      />
+    )
+
+    expect(out).not.toContain('must be deleted by hand')
+  })
+
+  it('shows a refusal where the operator asked, not as a toast', () => {
+    const out = panel({
+      state: {
+        traceId: 'abc123def456',
+        busy: false,
+        result: null,
+        error: 'No trace for run abc123def456.',
+      },
+    })
+
+    expect(out).toContain('No trace for run abc123def456.')
   })
 })

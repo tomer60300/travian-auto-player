@@ -56,6 +56,7 @@ import NightOverrunTable from '../components/NightOverrunTable'
 import NpcBalancePanel from '../components/NpcBalancePanel'
 import PlanDiagnostics from '../components/PlanDiagnostics'
 import PlanExport from '../components/PlanExport'
+import RevertRunPanel from '../components/RevertRunPanel'
 import RoleTemplates from '../components/RoleTemplates'
 import SetupStorage from '../components/SetupStorage'
 import ScrollableTable from '../components/ScrollableTable'
@@ -863,6 +864,18 @@ export default function ResourcePlanner() {
   const [confirmDeleteProfile, setConfirmDeleteProfile] = useState(null)
   const [profileNaming, setProfileNaming] = useState(null)
   const [confirmLive, setConfirmLive] = useState(false)
+  // What undoing one live run would take: `{ traceId, busy, result, error }`.
+  // One at a time, keyed by the trace id, so opening the undo for a history row
+  // replaces the answer rather than showing one run's steps under another's
+  // heading.
+  const [revert, setRevert] = useState(null)
+  // Which history row's undo is open, if any. Separate from `revert` because a
+  // row can be chosen before anything has been read for it.
+  const [revertRun, setRevertRun] = useState(null)
+  // `{ traceId, deleting }` while the operator is being asked. Disabling is
+  // reversible and deleting is not, so they are separate opt-ins -- and the
+  // endpoint disables before it deletes, so `deleting` implies both.
+  const [confirmRevert, setConfirmRevert] = useState(null)
   const [dayCheck, setDayCheck] = useState(null)
   const [dayChecking, setDayChecking] = useState(false)
   // Invalidates an in-flight day-check when its inputs change, so a stale
@@ -2247,6 +2260,63 @@ export default function ResourcePlanner() {
     }
   }, [toast])
 
+  /** Ask `/routes/revert-plan` what undoing one run would take, or do it.
+   *
+   * Read-only FIRST, always: `apply_disable` and `apply_delete` both default to
+   * false on the wire and the panel offers them only once the read-only answer
+   * has said what there is. That is the endpoint's own design -- "reverting is
+   * deliberately not a single button" -- and it is also the only way the
+   * operator can see `must_delete_by_hand` before deciding, which is the half
+   * no button covers.
+   *
+   * Read-only is not free. Every origin the run touched costs two game requests
+   * to re-read, and every step here is confirmed by reading the page back, so
+   * the buttons carry their price the way every other action on this page does.
+   */
+  const requestRevert = useCallback(
+    async (traceId, applyDisable, applyDelete) => {
+      if (!traceId) return
+      setRevert({ traceId, busy: true, result: null, error: null })
+      try {
+        const res = await api.post(
+          '/distribution/routes/revert-plan',
+          {
+            trace_id: traceId,
+            apply_disable: applyDisable,
+            apply_delete: applyDelete,
+            // The span the route ids were read against. Wrong, and every
+            // destination resolves to the wrong tile.
+            ...(Number(merchantModel.map_span) || snapshot?.map_span
+              ? { map_span: Number(merchantModel.map_span) || snapshot?.map_span }
+              : {}),
+          },
+          // Two paced reads per origin plus a write and its verifying re-read;
+          // the same headroom the reconcile sweep takes.
+          { timeout: 180000 }
+        )
+        setRevert({ traceId, busy: false, result: res.data, error: null })
+        const wrote = applyDisable || applyDelete
+        if (!wrote) return
+        const outstanding = Object.keys(res.data.must_delete_by_hand ?? {}).length
+        if (res.data.problems?.length) {
+          toast.error(res.data.problems[0])
+        } else if (outstanding) {
+          toast.error(`Routes at ${outstanding} village(s) still need deleting by hand`)
+        } else {
+          toast.success('The run is undone — nothing left outstanding')
+        }
+      } catch (err) {
+        setRevert({
+          traceId,
+          busy: false,
+          result: null,
+          error: errorDetail(err, 'Could not read what undoing this run would take'),
+        })
+      }
+    },
+    [merchantModel, snapshot, toast]
+  )
+
   // Reads the same fields the rows render, so the strip can never disagree
   // with the table beneath it.
   const health = useMemo(
@@ -2405,6 +2475,13 @@ export default function ResourcePlanner() {
           const record = {
             at: new Date().toISOString(),
             account: requestedFor,
+            // The handle to this run's own undo. `/routes/revert-plan` needs
+            // the trace id to read the pre-write inventory -- the only record
+            // of what each village looked like before the run, because the game
+            // returns no id when it creates a route. The app received it and
+            // threw it away, so a run that wrote 72 game rows had no in-app
+            // path back.
+            traceId: res.data.trace_id ?? null,
             created: res.data.created,
             remaining: res.data.remaining,
             counts,
@@ -5747,6 +5824,7 @@ export default function ResourcePlanner() {
                     <th className="text-right px-2">Rows</th>
                     <th className="text-right px-2">Disabled</th>
                     <th className="text-left px-2">Result</th>
+                    <th className="text-left px-2">Undo</th>
                   </tr>
                 </thead>
                 <tbody className="font-mono">
@@ -5779,10 +5857,41 @@ export default function ResourcePlanner() {
                                   .join(' · ')
                               : 'clean'}
                       </td>
+                      {/* `run_id` IS the trace id `/routes/revert-plan` takes,
+                          so the undo is not limited to whichever run this
+                          browser happens to have recorded in localStorage. */}
+                      <td className="px-2">
+                        <button
+                          type="button"
+                          className="btn-secondary btn-xs"
+                          onClick={() => setRevertRun(r.run_id)}
+                        >
+                          Undo this run
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              {revertRun && (
+                <div className="card-danger p-2">
+                  <p className="text-xs font-semibold">
+                    Undoing the run of{' '}
+                    {new Date(
+                      runHistory.runs.find((r) => r.run_id === revertRun)?.started_at ?? Date.now()
+                    ).toLocaleString()}{' '}
+                    <span className="font-mono text-secondary">({revertRun})</span>
+                  </p>
+                  <RevertRunPanel
+                    traceId={revertRun}
+                    state={revert}
+                    villages={villages}
+                    onCheck={(id) => requestRevert(id, false, false)}
+                    onDisable={(id) => setConfirmRevert({ traceId: id, deleting: false })}
+                    onDelete={(id) => setConfirmRevert({ traceId: id, deleting: true })}
+                  />
+                </div>
+              )}
               <button className="btn-secondary btn-xs" onClick={loadRunHistory}>
                 Refresh (0 requests)
               </button>
@@ -5826,6 +5935,35 @@ export default function ResourcePlanner() {
                   </li>
                 ))}
               </ul>
+              {/* The way back. `/routes/revert-plan` has existed all along and
+                  was unreachable, because the one handle it accepts -- this
+                  run's trace id -- was dropped on the floor. */}
+              {lastRun.traceId ? (
+                <details className="mt-3 border-t-default pt-2">
+                  <summary className="cursor-pointer text-primary">
+                    Undo the last live run
+                  </summary>
+                  <div className="mt-2">
+                    <RevertRunPanel
+                      traceId={lastRun.traceId}
+                      state={revert}
+                      villages={villages}
+                      onCheck={(id) => requestRevert(id, false, false)}
+                      onDisable={(id) => setConfirmRevert({ traceId: id, deleting: false })}
+                      onDelete={(id) => setConfirmRevert({ traceId: id, deleting: true })}
+                    />
+                  </div>
+                </details>
+              ) : (
+                <p className="text-secondary mt-3 border-t-default pt-2">
+                  This run was recorded before this build kept the run&apos;s trace id, so there
+                  is nothing to undo it with. The trace id is what
+                  <span className="font-mono"> /routes/revert-plan </span>
+                  reads the pre-run inventory by, and the game returns no id when it creates a
+                  route — so without it there is no record of what each village held before.
+                  Later runs carry it.
+                </p>
+              )}
             </div>
           </details>
         </div>
@@ -6817,6 +6955,50 @@ export default function ResourcePlanner() {
         cancelText="Cancel"
         onConfirm={commitProfileName}
         onCancel={() => setProfileNaming(null)}
+      />
+
+      <ConfirmDialog
+        open={confirmRevert != null}
+        title={
+          confirmRevert?.deleting
+            ? 'Delete the routes this run created'
+            : 'Disable the routes this run created'
+        }
+        message={
+          confirmRevert?.deleting ? (
+            <>
+              <p className="text-danger">
+                This is the one irreversible action here. A disabled route can be switched back
+                on; a deleted one cannot.
+              </p>
+              <p className="mt-3">
+                They are disabled first regardless, so they stop shipping even if the removal then
+                fails. Every step is confirmed by re-reading the page, and anything still standing
+                afterwards is named.
+              </p>
+            </>
+          ) : (
+            <>
+              <p>
+                The routes this run created stop shipping. Reversible — a disabled route can be
+                switched back on in the game, and this leaves the rows there to look at.
+              </p>
+              <p className="mt-3 text-secondary">
+                They still need deleting afterwards, by you or by the delete button, and the
+                outstanding rows are named once this finishes.
+              </p>
+            </>
+          )
+        }
+        confirmText={confirmRevert?.deleting ? 'Delete them' : 'Disable them'}
+        cancelText="Not yet"
+        variant="danger"
+        onConfirm={() => {
+          const asked = confirmRevert
+          setConfirmRevert(null)
+          if (asked) requestRevert(asked.traceId, true, asked.deleting)
+        }}
+        onCancel={() => setConfirmRevert(null)}
       />
 
       <ConfirmDialog

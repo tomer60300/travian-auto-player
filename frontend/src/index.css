@@ -625,6 +625,24 @@ h1, h2, h3 {
 .bg-surface { background-color: var(--bg-surface); }
 .bg-card { background-color: var(--bg-card); }
 
+/* A card that is about to change something irreversibly. The one tinted,
+   bordered surface on a page, so the write path is what the eye finds among
+   eleven cards of identical weight.
+
+   `color-mix` over `--bg-card` rather than a hardcoded `rgba(186,26,26,0.12)`
+   like `.status-badge-error` above: the wash is DERIVED from the same
+   `--md-error-container` the toast and the dialog take, so it flips with the
+   theme instead of being two hand-tuned literals that can drift from it. 35%
+   because `--md-error-container` at full strength (#FFDAD6 / #93000A) is a
+   background for `--md-on-error-container` text and would fight the
+   `--text-primary` a card's own content uses. Mixed with `--bg-card` and not
+   `transparent`, so the surface stays opaque over whatever is behind it. */
+.card-danger {
+  border: 1px solid var(--md-error);
+  border-radius: 12px;
+  background-color: color-mix(in srgb, var(--md-error-container) 35%, var(--bg-card));
+}
+
 .border-default { border: 1px solid var(--border); }
 .border-b-default { border-bottom: 1px solid var(--border); }
 .border-t-default { border-top: 1px solid var(--border); }

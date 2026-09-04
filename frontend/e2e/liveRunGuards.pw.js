@@ -22,7 +22,7 @@
 
 import { expect, test } from '@playwright/test'
 
-import { PREVIEW, isolate, openPlan, seed } from './plannerHarness'
+import { KEY, PREVIEW, isolate, openPlan, seed } from './plannerHarness'
 
 /** Drive a preview and hand back the body `/distribution/execute` was sent. */
 async function previewBody(page) {
@@ -258,5 +258,234 @@ test.describe('the gate on a live write is in the app, not the browser chrome', 
     await dialog.getByRole('textbox').fill('Night')
     await dialog.getByRole('button', { name: /^(Create|Add|Confirm)/ }).click()
     await expect(page.getByLabel('Allocation profile')).toHaveValue('Night')
+  })
+})
+
+test.describe('the undo for a live run is reachable, and the app keeps its key', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  /** What a LIVE run answers with. `trace_id` is the handle the undo needs. */
+  const LIVE = {
+    ...PREVIEW,
+    dry_run: false,
+    created: 1,
+    created_game_rows: 6,
+    actions: [{ ...PREVIEW.actions[0], status: 'created', detail: 'route 9001' }],
+  }
+
+  /** The read-only answer: what undoing would take, having changed nothing. */
+  const REVERT_READONLY = {
+    trace_id: LIVE.trace_id,
+    steps: [
+      'village 20002: 1 route was created by this run',
+      'village 20002: delete route 9001',
+    ],
+    created: { 20002: [9001] },
+    disabled_now: {},
+    deleted_now: {},
+    must_delete_by_hand: { 20002: [9001] },
+    restore_state: { 20002: ['route 8800 -> enabled'] },
+    clean: false,
+    requests_used: 2,
+    problems: [],
+  }
+
+  /** Drive a live run to completion, so the last-run panel exists. */
+  async function afterLiveRun(page) {
+    const bodies = []
+    await isolate(page, (path, route) => {
+      if (path.endsWith('/distribution/execute')) {
+        return route.request().postDataJSON().dry_run ? PREVIEW : LIVE
+      }
+      if (path.endsWith('/routes/revert-plan')) {
+        bodies.push(route.request().postDataJSON())
+        return REVERT_READONLY
+      }
+      return undefined
+    })
+    await seed(page)
+    await openPlan(page)
+    await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
+    await page.getByRole('button', { name: /^Disable old routes & create/ }).click()
+    await page.getByRole('button', { name: /^Go live/ }).click()
+    await expect(page.getByText(/^Last live trade-route run/)).toBeVisible()
+    return bodies
+  }
+
+  /** Open the last-run panel and then its undo disclosure. */
+  async function openUndo(page) {
+    await page.getByText(/^Last live trade-route run/).click()
+    await page.getByText(/^Undo the last live run/).click()
+  }
+
+  test('the trace id is persisted with the run it identifies', async ({ page }) => {
+    // `ExecuteResponse.trace_id` is real and `grep -n "trace_id" frontend/src`
+    // returned zero hits: the app received the handle to its own undo and threw
+    // it away, so a run that wrote 72 game rows had no in-app path back.
+    await afterLiveRun(page)
+
+    const stored = await page.evaluate(
+      (key) => JSON.parse(localStorage.getItem(`planner_last_live_run::${key}`)),
+      KEY,
+    )
+    expect(stored.traceId).toBe(LIVE.trace_id)
+  })
+
+  test('the read-only check goes first, and changes nothing', async ({ page }) => {
+    const bodies = await afterLiveRun(page)
+
+    await openUndo(page)
+    await page.getByRole('button', { name: /^Check what undoing this would take/ }).click()
+    await expect(page.getByText(/must be deleted by hand/i)).toBeVisible()
+
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0].trace_id).toBe(LIVE.trace_id)
+    expect(bodies[0].apply_disable).toBe(false)
+    expect(bodies[0].apply_delete).toBe(false)
+  })
+
+  test('what a human has to remove is the prominent part', async ({ page }) => {
+    // `must_delete_by_hand` is the half no button covers. Buried, it is the one
+    // thing an operator would leave undone.
+    await afterLiveRun(page)
+
+    await openUndo(page)
+    await page.getByRole('button', { name: /^Check what undoing this would take/ }).click()
+
+    await expect(page.getByText(/9001/).first()).toBeVisible()
+    await expect(page.getByText(/route 8800 -> enabled/)).toBeVisible()
+    await expect(page.getByText(/2 game request/)).toBeVisible()
+  })
+
+  test('the two apply toggles are offered only after the check, and ask first', async ({
+    page,
+  }) => {
+    const bodies = await afterLiveRun(page)
+
+    await openUndo(page)
+    // Nothing to apply until the read-only answer says what there is.
+    await expect(page.getByRole('button', { name: /^Disable those routes now/ })).toHaveCount(0)
+
+    await page.getByRole('button', { name: /^Check what undoing this would take/ }).click()
+    await page.getByRole('button', { name: /^Disable those routes now/ }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await page.getByRole('button', { name: /^Disable them/ }).click()
+
+    expect(bodies).toHaveLength(2)
+    expect(bodies[1].apply_disable).toBe(true)
+    expect(bodies[1].apply_delete).toBe(false)
+  })
+
+  test('deleting is its own opt-in, because it cannot be undone', async ({ page }) => {
+    const bodies = await afterLiveRun(page)
+
+    await openUndo(page)
+    await page.getByRole('button', { name: /^Check what undoing this would take/ }).click()
+    await page.getByRole('button', { name: /^Delete those routes for good/ }).click()
+    await page.getByRole('button', { name: /^Delete them/ }).click()
+
+    expect(bodies).toHaveLength(2)
+    // Disable comes with it: the endpoint disables before deleting, so the
+    // routes stop shipping even if the removal then fails.
+    expect(bodies[1].apply_disable).toBe(true)
+    expect(bodies[1].apply_delete).toBe(true)
+  })
+
+  test('the must-delete box is measurably tinted and bordered', async ({ page }) => {
+    // The claim in "prominent" is visual, so it is measured. `.card-danger` is
+    // the only tinted, bordered surface on the page; if it computed to the same
+    // background as the card behind it, the box would be a heading in a wall of
+    // 8pt prose -- which is the defect the whole item is about.
+    await afterLiveRun(page)
+
+    await openUndo(page)
+    await page.getByRole('button', { name: /^Check what undoing this would take/ }).click()
+    await expect(page.getByText(/must be deleted by hand/i)).toBeVisible()
+
+    const box = await page.locator('.card-danger').first().evaluate((el) => {
+      const cs = getComputedStyle(el)
+      const card = getComputedStyle(el.closest('.card'))
+      return {
+        background: cs.backgroundColor,
+        borderWidth: cs.borderTopWidth,
+        borderColor: cs.borderTopColor,
+        radius: cs.borderTopLeftRadius,
+        cardBackground: card.backgroundColor,
+      }
+    })
+    if (globalThis.process?.env?.MEASURE) console.log('\n.card-danger:', JSON.stringify(box))
+
+    expect(parseFloat(box.borderWidth)).toBe(1)
+    // --md-error, light theme.
+    expect(box.borderColor).toBe('rgb(186, 26, 26)')
+    expect(box.radius).toBe('12px')
+    // Derived from --md-error-container over --bg-card, so it is not the card.
+    expect(box.background).not.toBe(box.cardBackground)
+    expect(box.background).not.toMatch(/^(transparent|rgba\(0, 0, 0, 0\))$/)
+  })
+
+  test('a run recorded before the app kept trace ids says so', async ({ page }) => {
+    // The honest state for an existing record, rather than a button that 404s.
+    await isolate(page)
+    await seed(page, {
+      planner_last_live_run: {
+        at: new Date().toISOString(),
+        created: 1,
+        problems: [],
+        disables: [],
+        routes: [{ from: '02', to: '11', at: '4|0', status: 'created', detail: '' }],
+      },
+    })
+    await page.goto('/resource-planner')
+
+    await page.getByText(/^Last live trade-route run/).click()
+    await expect(page.getByText(/kept the run's trace id/)).toBeVisible()
+    await expect(page.getByText(/^Undo the last live run/)).toHaveCount(0)
+  })
+
+  test('a past run in the history can reach its own undo', async ({ page }) => {
+    // `run_id` on a /run-history row is the same identifier, so the undo is not
+    // limited to whichever run this browser happens to have recorded.
+    const bodies = []
+    await isolate(page, (path, route) => {
+      if (path.includes('/distribution/run-history')) {
+        return {
+          runs: [
+            {
+              run_id: 'aaa111bbb222',
+              started_at: new Date().toISOString(),
+              created: 2,
+              created_game_rows: 12,
+              disabled: 0,
+              complete: true,
+              failed: false,
+              needs_attention: false,
+            },
+          ],
+          rollup: {
+            runs: 1,
+            total_created: 2,
+            total_problems: 0,
+            total_created_unverified: 0,
+            failed_runs: 0,
+            repeat_problem_villages: [],
+          },
+        }
+      }
+      if (path.endsWith('/routes/revert-plan')) {
+        bodies.push(route.request().postDataJSON())
+        return { ...REVERT_READONLY, trace_id: 'aaa111bbb222' }
+      }
+      return undefined
+    })
+    await seed(page)
+    await page.goto('/resource-planner')
+
+    await page.getByText(/^Run history/).click()
+    await page.getByRole('button', { name: /^Undo this run/ }).first().click()
+    await page.getByRole('button', { name: /^Check what undoing this would take/ }).click()
+
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0].trace_id).toBe('aaa111bbb222')
   })
 })
