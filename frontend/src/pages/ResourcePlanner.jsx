@@ -73,6 +73,7 @@ import {
   MAX_DAY_SEGMENTS,
   MAX_MERCHANTS_PER_VILLAGE,
   SetupFileError,
+  TRAVIAN_REPEAT_INTERVALS,
   VILLAGE_ROLES,
   allocationsForRequest,
   buildSetup,
@@ -220,9 +221,6 @@ const MAX_GAME_ROWS_PER_RUN = 24
 // chunk of five at roughly 40-70 seconds — comfortably inside one request, which
 // is the whole reason the sweep is chunked at all.
 const SWEEP_VILLAGES_PER_CHUNK = 5
-// Travian's repeat interval is a closed set of the divisors of 24. Offering
-// anything else would plan a cadence the create payload cannot express.
-const TRAVIAN_REPEAT_INTERVALS = [1, 2, 3, 4, 6, 8, 12, 24]
 // `planStatus()`'s tone, as the verdict banner's tone class. Mapped rather than
 // interpolated, because the three tones are a closed set the CSS declares and a
 // template string would silently produce a class that does not exist.
