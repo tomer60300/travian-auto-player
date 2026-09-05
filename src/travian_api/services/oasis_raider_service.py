@@ -129,7 +129,14 @@ class OasisRaiderService:
         t_start = time.monotonic()
         stats: dict = {
             "total": 0,
+            # `sent` counts raids the game actually accepted. A dry run used to
+            # increment it, so a 5-oasis dry run and a 5-oasis live run
+            # produced identical summaries -- and the summary card
+            # (`OasisRaider.jsx`) is what survives the scroll, while
+            # handleStart(true)/handleStart(false) are two adjacent buttons.
             "sent": 0,
+            "would_send": 0,
+            "dry_run": bool(config.dry_run),
             "skipped_animals": [],
             "skipped_troops": 0,
             "skipped_random": 0,
@@ -456,7 +463,7 @@ class OasisRaiderService:
                     f"Would raid ({oasis.x}|{oasis.y}): {raid_troops_str} | Oasis troops: {troops_str}",
                     "info",
                 )
-                stats["sent"] += 1
+                stats["would_send"] += 1
             else:
                 await send_log(
                     "RAID",
@@ -522,8 +529,10 @@ class OasisRaiderService:
                 )
                 break
 
-            # Check max raids limit
-            if config.max_targets > 0 and stats["sent"] >= config.max_targets:
+            # Check max raids limit. Counts both kinds of run: a dry run no
+            # longer increments `sent`, and gating on that alone would leave a
+            # dry run of a capped config unbounded.
+            if config.max_targets > 0 and stats["sent"] + stats["would_send"] >= config.max_targets:
                 await send_log(
                     "DONE",
                     "🎯",
