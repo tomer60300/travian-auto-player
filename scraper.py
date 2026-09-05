@@ -14,13 +14,41 @@ import os
 from datetime import datetime
 
 BASE = "https://ts1.x1.europe.travian.com"
-JWT = "REDACTED - this token was committed to a public repository and must be rotated; supply it from the environment instead"
 
-COOKIES = {"JWT": JWT}
+# The session token comes from the environment, never from this file. It used to
+# be a string literal here, in a tracked file of a public repository; a token in
+# git history cannot be revoked by deleting the line, so the account password
+# was the only real fix. Nothing should put one back.
+JWT_ENV_VAR = "TRAVIAN_SCRAPER_JWT"
+
 HEADERS = {"Content-Type": "application/json", "X-Version": "389"}
 SESSION = requests.Session()
-SESSION.cookies.update(COOKIES)
 SESSION.headers.update(HEADERS)
+
+
+def authenticate():
+    """Put the session token on SESSION, or refuse to run.
+
+    Called before the first request rather than at import, so importing this
+    module -- to read a function out of it, or to check it parses -- needs no
+    token and touches nothing.
+    """
+    token = (os.environ.get(JWT_ENV_VAR) or "").strip()
+    if not token:
+        raise SystemExit(
+            "\n".join(
+                [
+                    f"{JWT_ENV_VAR} is not set, so there is no session to scrape with.",
+                    "Copy the JWT cookie out of a logged-in browser session on "
+                    f"{BASE} and export it:",
+                    f"    export {JWT_ENV_VAR}='<the JWT cookie value>'",
+                    f"    PowerShell: $env:{JWT_ENV_VAR}='<the JWT cookie value>'",
+                    "Do not put it in a file in this repository.",
+                ]
+            )
+        )
+    SESSION.cookies.set("JWT", token)
+
 
 # Template variable mappings
 TRIBE_MAP = {
@@ -310,6 +338,7 @@ if __name__ == "__main__":
     
     # Quick auth test
     print("Testing auth...")
+    authenticate()
     resp = SESSION.post(f"{BASE}/api/v1/graphql", json={"query": "{ownPlayer{name}}"})
     try:
         name = resp.json()["data"]["ownPlayer"]["name"]
