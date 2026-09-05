@@ -427,6 +427,14 @@ export function nightBlockers({ baselineFill, targetFill } = {}) {
  * Names the fields and the villages, because the 422 this replaces named
  * neither in words anyone running the account uses. The count is of FIELDS, not
  * of cells: it has to match the list that follows it.
+ *
+ * "What ITS FIELD accepts", not "what the plan accepts". This renders all three
+ * lists above, and only one of them is the plan: the controlled-run boxes ride
+ * on `/execute` and the fill pair on `/night-profile`, so an operator who
+ * pasted 51 into "Routes this run" was told their figure was outside what the
+ * plan accepts -- about a box `Build plan` deliberately never reads. Every
+ * entry carries a `field` and the rule that field enforces, which is what makes
+ * the new wording true of each audience rather than merely vague about them.
  */
 export function describeBlockers(blockers) {
   const parts = (blockers ?? []).map(
@@ -434,7 +442,7 @@ export function describeBlockers(blockers) {
   )
   const lead =
     parts.length === 1
-      ? 'One figure on this page is outside what the plan accepts'
-      : `${parts.length} figures on this page are outside what the plan accepts`
+      ? 'One figure on this page is outside what its field accepts'
+      : `${parts.length} figures on this page are outside what their fields accept`
   return `${lead}, so nothing was sent: ${parts.join('; ')}.`
 }

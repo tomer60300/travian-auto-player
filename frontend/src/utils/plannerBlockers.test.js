@@ -226,7 +226,7 @@ describe('describeBlockers', () => {
         },
       ])
     ).toBe(
-      'One figure on this page is outside what the plan accepts, so nothing was sent: ' +
+      'One figure on this page is outside what its field accepts, so nothing was sent: ' +
         'Most merchants busy at once (11) — 0 to 20, and no more than the village fields.'
     )
   })
@@ -238,8 +238,38 @@ describe('describeBlockers', () => {
         { field: 'Map span', rule: 'odd', villages: [] },
       ])
     ).toBe(
-      '2 figures on this page are outside what the plan accepts, so nothing was sent: ' +
+      '2 figures on this page are outside what their fields accept, so nothing was sent: ' +
         'Stock floor % (02) — 0–95%; Map span — odd.'
+    )
+  })
+
+  // The lead used to say "outside what THE PLAN accepts", which was true of the
+  // only list that existed when it was written. It now renders three, and two of
+  // them are not plan inputs at all: the controlled-run boxes ride on `/execute`
+  // and the fill pair rides on `/night-profile`. An operator who pasted 51 into
+  // "Routes this run" was told their figure was outside what the plan accepts —
+  // about a box `Build plan` deliberately never reads.
+  it('is true of the run-control boxes, which are not plan inputs', () => {
+    expect(describeBlockers(runBlockers({ routesPerRun: '51' }))).toBe(
+      'One figure on this page is outside what its field accepts, so nothing was sent: ' +
+        'Routes this run — 0 to 50.'
+    )
+  })
+
+  it('is true of the night-fill pair, which reaches /night-profile alone', () => {
+    expect(describeBlockers(nightBlockers({ baselineFill: '99', targetFill: '101' }))).toBe(
+      '2 figures on this page are outside what their fields accept, so nothing was sent: ' +
+        'Emptied to % — 0 to 95%; Full to % — above 0% and up to 100%.'
+    )
+  })
+
+  // The one shape that is neither a bound nor a range: an entry the server
+  // cannot parse. "Outside what its field accepts" has to cover that too, since
+  // `Never disable` reports the ENTRIES rather than village names.
+  it('is true of a malformed Never disable entry', () => {
+    expect(describeBlockers(runBlockers({ protectDestinations: '46|abc' }))).toBe(
+      'One figure on this page is outside what its field accepts, so nothing was sent: ' +
+        'Never disable (46|abc) — a village id, or coordinates like 46|133.'
     )
   })
 })
