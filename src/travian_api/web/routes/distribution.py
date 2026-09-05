@@ -271,6 +271,13 @@ class SnapshotResponse(BaseModel):
 
 
 class AllocationInput(BaseModel):
+    # `extra: "forbid"`, for the reason `ExecuteRequest` gives at length: a
+    # key this server does not understand must be a 422, never a silent
+    # discard. That guarantee stopped at the top level -- an
+    # `exclude_origins_text` planted on a foreign target inside an
+    # otherwise-valid /execute body was accepted and dropped.
+    model_config = {"extra": "forbid"}
+
     mode: AllocationMode
     value: float = 0.0
 
@@ -290,6 +297,13 @@ class RoleTemplate(BaseModel):
     grid can mark the cell rather than silently showing a figure that differs
     from the profile the operator believes is running.
     """
+
+    # `extra: "forbid"`, for the reason `ExecuteRequest` gives at length: a
+    # key this server does not understand must be a 422, never a silent
+    # discard. That guarantee stopped at the top level -- an
+    # `exclude_origins_text` planted on a foreign target inside an
+    # otherwise-valid /execute body was accepted and dropped.
+    model_config = {"extra": "forbid"}
 
     allocations: dict[Resource, AllocationInput] = Field(
         default={},
@@ -446,6 +460,13 @@ class RoleTemplate(BaseModel):
 
 class VillageConfig(BaseModel):
     """Operator-owned state the game will not tell us."""
+
+    # `extra: "forbid"`, for the reason `ExecuteRequest` gives at length: a
+    # key this server does not understand must be a 422, never a silent
+    # discard. That guarantee stopped at the top level -- an
+    # `exclude_origins_text` planted on a foreign target inside an
+    # otherwise-valid /execute body was accepted and dropped.
+    model_config = {"extra": "forbid"}
 
     village_id: int
     role: Role | None = Field(
@@ -716,6 +737,13 @@ class ForeignTarget(BaseModel):
     Supplied by hand because nothing in the game tells us about it: a name to
     recognise it by, where it is, and how much crop per hour was promised.
     """
+
+    # `extra: "forbid"`, for the reason `ExecuteRequest` gives at length: a
+    # key this server does not understand must be a 422, never a silent
+    # discard. That guarantee stopped at the top level -- an
+    # `exclude_origins_text` planted on a foreign target inside an
+    # otherwise-valid /execute body was accepted and dropped.
+    model_config = {"extra": "forbid"}
 
     name: str = Field(min_length=1)
     x: int
@@ -2069,6 +2097,13 @@ class PlanResponse(BaseModel):
 
 class DaySegmentInput(BaseModel):
     """One allocation profile plus the hours of the day it actually runs."""
+
+    # `extra: "forbid"`, for the reason `ExecuteRequest` gives at length: a
+    # key this server does not understand must be a 422, never a silent
+    # discard. That guarantee stopped at the top level -- an
+    # `exclude_origins_text` planted on a foreign target inside an
+    # otherwise-valid /execute body was accepted and dropped.
+    model_config = {"extra": "forbid"}
 
     name: str = Field(min_length=1)
     window: tuple[int, int]

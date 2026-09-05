@@ -2085,6 +2085,34 @@ class TestTheWriteEndpointRejectsWhatItDoesNotUnderstand:
         assert res.actions
         assert res.filtered_to is None
 
+    @pytest.mark.parametrize(
+        ("model", "kwargs"),
+        [
+            ("ForeignTarget", {"name": "A", "x": 1, "y": 2, "crop_per_hour": 100}),
+            ("VillageConfig", {"village_id": 20003}),
+            ("AllocationInput", {"mode": "keep", "value": 0}),
+            ("RoleTemplate", {}),
+            (
+                "DaySegmentInput",
+                {"name": "Day", "window": [420, 1380], "allocations": {}},
+            ),
+        ],
+    )
+    def test_a_nested_model_refuses_an_unknown_key_too(self, model, kwargs):
+        # `extra: "forbid"` reached only the top level, so the guarantee it
+        # claims -- "a 422 is the only safe answer to a parameter this endpoint
+        # does not understand" -- stopped one level down. Measured: an
+        # `exclude_origins_text` key planted on a foreign target inside an
+        # otherwise-valid /execute body was accepted and dropped.
+        from pydantic import ValidationError
+
+        from travian_api.web.routes import distribution as _dist
+
+        cls = getattr(_dist, model)
+        cls.model_validate(kwargs)  # the control: the known keys still validate
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            cls.model_validate({**kwargs, "exclude_origins_text": "20002"})
+
 
 class TestCreatedMeansVerifiedNotAccepted:
     """`POST /trade-routes` answers 200 with an EMPTY body.
