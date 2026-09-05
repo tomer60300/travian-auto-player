@@ -711,7 +711,9 @@ test.describe('the reserved NPC-burst window survives being saved', () => {
 
     expect(saved.reserved_window).toEqual(['20:00', '21:00'])
     // Both halves of the bump, or a fresh export answers 422 "NEWER build".
-    expect(saved.version).toBe(9)
+    // 10 since the window prune landed; the reserved window this test is about
+    // is what took it to 9.
+    expect(saved.version).toBe(10)
   })
 
   test('and comes back out of it', async ({ page }) => {

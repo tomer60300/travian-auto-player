@@ -85,7 +85,12 @@ test.describe('a setup the plan refuses is not saved either', () => {
     // the operator pressed Save, nothing happened, and nothing said why.
     const reason = page.getByRole('status').filter({ hasText: /Map span/ })
     await expect(reason).toBeVisible()
-    await expect(reason).toContainText('odd')
+    await expect(reason).toContainText('refuse to read the document back')
+    // It names the CELL and not the bound. The bound is under the box already,
+    // and `Build plan`'s own refusal prints it in full -- restating it here put
+    // the same sentence on screen twice whenever a plan had just been refused,
+    // which is what `planGate.pw.js` and `legibility.pw.js` both caught.
+    await expect(reason).not.toContainText('centred on 0|0')
     // Named to a screen reader too, not only to the eye.
     await expect(saveToServer(page)).toHaveAttribute('aria-describedby', /.+/)
     await expect(saveToFile(page)).toHaveAttribute('aria-describedby', /.+/)

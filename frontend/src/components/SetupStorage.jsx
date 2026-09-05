@@ -136,13 +136,17 @@ export default function SetupStorage({
 
 /** One blocker as the panel says it: the column heading, and where it is wrong.
  *
- * The same two pieces `describeBlockers` prints, without its lead sentence --
- * that one is about a plan that was not sent, and this is about a document that
- * would not be readable. Both are built from the blocker entries rather than a
- * second description of the same rules. */
+ * The RULE is deliberately left out, and so are `describeBlockers`' parentheses.
+ * That refusal is about a plan that was not sent and it prints the bound in
+ * full; this is about a document that would not be readable, and it only has to
+ * say which cell to go to -- the cell itself carries the bound, under the box.
+ * Repeating the whole sentence would put the same words on screen twice
+ * whenever a plan has just been refused, which is the shape the Plan-stage
+ * redesign was undoing four panels down. */
 function describeBlockedField(blocker) {
-  const where = blocker.villages.length ? ` (${blocker.villages.join(', ')})` : ''
-  return `${blocker.field}${where} — ${blocker.rule}`
+  return blocker.villages.length
+    ? `${blocker.field} at ${blocker.villages.join(', ')}`
+    : blocker.field
 }
 
 function statusTone(state) {
