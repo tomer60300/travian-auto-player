@@ -9098,6 +9098,7 @@ async def post_execute(
                                         "two reads of this marketplace did not agree, so "
                                         "the replacement may exist after all"
                                     )
+                                _live_here: list[ExistingRoute] = []
                                 if not _give_up:
                                     _live_here = [
                                         e for e in after if _k in _existing_keys(e) and e.visible
