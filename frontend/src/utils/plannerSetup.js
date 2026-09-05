@@ -992,6 +992,42 @@ export function describeConsumption(spent) {
 /** Travian's repeat interval, which is a closed set of the divisors of 24. */
 export const TRAVIAN_REPEAT_INTERVALS = Object.freeze([1, 2, 3, 4, 6, 8, 12, 24])
 
+/** The role templates as a DOCUMENT carries them: materials only.
+ *
+ * `stripStoredCropSpends`' twin, one level up. Crop cannot be declared as a
+ * spend -- the snapshot's crop rate is already net of troop upkeep, so a
+ * declared crop spend subtracts the same troops twice -- and the input stopped
+ * offering it, which leaves a figure an older build stored with no box to clear
+ * it from.
+ *
+ * The REQUEST path has stripped it since `rolesForRequest`, and the document
+ * path did not. So the plan ran, the save came back 422 on
+ * `roles.def.consumption`, and the export wrote a file `parseRoleTemplate`
+ * refuses -- the operator's backup unreadable by their own build, over a figure
+ * they cannot see.
+ *
+ * A template whose ONLY spend was crop is left declaring nothing rather than
+ * dropped: its allocations are the reason it exists, and section 2.1's one
+ * profile stands in for four defensive villages. A template with no
+ * `consumption` key at all keeps none, because writing `{}` in would make a
+ * template that says nothing look like one declaring a spend of nothing.
+ *
+ * No receipt, unlike the village-level twin, and the difference is that there
+ * is nothing on screen to reconcile: the request has been dropping this figure
+ * all along, so the document catching up changes no plan.
+ */
+export function storedRoleTemplates(templates) {
+  const out = {}
+  for (const [role, template] of Object.entries(templates ?? {})) {
+    if (!template || typeof template !== 'object' || template.consumption == null) {
+      out[role] = template
+      continue
+    }
+    out[role] = { ...template, consumption: materialSpendOnly(template.consumption) ?? {} }
+  }
+  return out
+}
+
 /** The foreign targets as a DOCUMENT carries them: exclusions RESOLVED to ids.
  *
  * The page holds each exclusion twice -- `exclude_origins` as ids, and
@@ -1130,7 +1166,12 @@ export function buildSetup({
   // 2.1's one profile for four defensive villages), so losing them to a cleared
   // origin makes the plan read four defensive villages as keeping their own
   // production -- a tenth of what they need -- with nothing on screen to say so.
-  if (roles && Object.keys(roles).length) doc.roles = roles
+  //
+  // Through `storedRoleTemplates`, so a stored crop spend cannot travel: the
+  // request path has stripped it since `rolesForRequest`, while this one wrote
+  // it raw -- the plan ran, the save 422'd on `roles.<role>.consumption`, and
+  // the export wrote a file this file's own parser refuses.
+  if (roles && Object.keys(roles).length) doc.roles = storedRoleTemplates(roles)
   if (profileWindows && Object.keys(profileWindows).length) {
     doc.profile_windows = profileWindows
   }

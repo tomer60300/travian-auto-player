@@ -1333,6 +1333,48 @@ describe('roles and role templates in the setup file', () => {
     expect(() => roundTrip(doc)).toThrow(/crop allocation target/)
   })
 
+  // The village-level twin of this has been stripped since `materialSpendOnly`:
+  // the input no longer offers crop, so a figure an older build stored can be
+  // neither seen nor cleared. A ROLE TEMPLATE's was stripped for the REQUEST
+  // (`rolesForRequest`) and written to the document raw, so the plan ran, the
+  // save came back 422 on `roles.def.consumption`, and the export wrote a file
+  // this same parser refuses -- over a figure with no box to clear it from.
+  it('strips a stored crop spend out of a template on the way into the document', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      roles: { def: { allocations: {}, consumption: { lumber: 8372, crop: 2200 } } },
+      exportedAt: STAMP,
+    })
+
+    expect(setup.roles.def.consumption).toEqual({ lumber: 8372 })
+    expect(() => roundTrip(setup)).not.toThrow()
+  })
+
+  it('leaves a template whose only spend was crop declaring nothing', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      roles: { def: { allocations: { lumber: { mode: 'keep', value: 0 } }, consumption: { crop: 2200 } } },
+      exportedAt: STAMP,
+    })
+
+    // The template itself survives -- its allocations are the reason it exists.
+    expect(setup.roles.def.allocations).toEqual({ lumber: { mode: 'keep', value: 0 } })
+    expect(setup.roles.def.consumption).toEqual({})
+    expect(() => roundTrip(setup)).not.toThrow()
+  })
+
+  it('leaves a template that declares no spend at all untouched', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      roles: { feeder: { allocations: {}, may_relay: true } },
+      exportedAt: STAMP,
+    })
+
+    // Absent stays absent: writing `consumption: {}` in would make a template
+    // that says nothing look like one that declares a spend of nothing.
+    expect('consumption' in setup.roles.feeder).toBe(false)
+  })
+
   it('rejects a negative spend in a template', () => {
     const doc = {
       format: SETUP_FORMAT,
