@@ -367,7 +367,7 @@ class TestBeatSpacing:
         assert beat.warnings == ()
 
 
-ACCOUNT_SIZES = [1, 2, 3, 6, 12, 22, 23, 35]
+ACCOUNT_SIZES = [1, 2, 3, 6, 12, 22, 23, pytest.param(35, marks=pytest.mark.slow)]
 
 
 def make_inputs(village_count: int, seed: int):
