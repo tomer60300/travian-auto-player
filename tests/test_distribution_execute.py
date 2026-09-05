@@ -5345,6 +5345,110 @@ class TestARefusedReplacementPutsTheOldRoutesBack:
         assert [a.status for a in res.actions] == ["created"], [a.detail for a in res.actions]
 
 
+class _ADualPutOneRowBack(_FakeLiveSvc):
+    """Another session switched ONE of the rows this run disabled back on,
+    between the disable and the restore."""
+
+    async def create_route(self, route, *, stop_check=None):
+        result = await super().create_route(route, stop_check=stop_check)
+        for row in self._existing.get(route.origin_village_id, []):
+            if not row.active:
+                row.active = True
+                break
+        return result
+
+
+class TestAPartlyReEnabledDestinationIsStillRestored:
+    """ "Every old row is still off" was never the right guard.
+
+    The bulk PUT states each row's target state (`enabled: true`), so a row that
+    is already on is a no-op in the same request -- pinned in
+    tests/test_trade_route_payload.py, because if that body FLIPPED instead, this
+    whole restore would switch off the rows a dual had just put back and could
+    not be automatic at all.
+
+    Given that it sets, refusing to restore because one row came back on leaves
+    the destination in the worst state available: seven rows off, one on, no
+    replacement, and a problem line telling a human to sort it out. The guard
+    that matters is the one the write-ahead record supports -- the old rows are
+    still there and still describe the configuration it recorded -- and the
+    enabled flag is precisely the field the restore is about to change.
+
+    What the run must not do is CLAIM it switched on a row that was already on.
+    """
+
+    def _run(self, svc):
+        return _run_live(
+            svc,
+            _one_mismatched_destination(),
+            max_routes_per_run=50,
+            max_game_rows_per_run=0,
+        )
+
+    def _svc(self):
+        return _ADualPutOneRowBack(
+            existing=_mismatched_rows(), create_status="failed", phantom_creates=True
+        )
+
+    def test_one_row_already_back_on_does_not_abandon_the_other_seven(self):
+        svc = self._svc()
+
+        res = self._run(svc)
+
+        assert svc.enabled == [(20003, ((10, 0),) * 8)], svc.enabled
+        assert all(e.active for e in svc._existing[20003]), "the destination ships again"
+        assert not any("could not put them back automatically" in p for p in res.problems), (
+            res.problems
+        )
+
+    def test_the_record_separates_the_no_ops_from_this_runs_work(self):
+        svc = self._svc()
+
+        res = self._run(svc)
+
+        (event,) = [e for e in _trace_events(res.trace_path) if e["kind"] == "restored"]
+        assert event["already_enabled_ids"] == [710000], event
+        assert event["enabled_by_request_ids"] == list(range(710001, 710008)), event
+        assert event["restoration_completed"] is True, event
+
+    def test_the_operator_line_counts_only_the_rows_this_run_switched_on(self):
+        svc = self._svc()
+
+        res = self._run(svc)
+
+        (line,) = [line for line in res.re_enables if "restored" in line]
+        assert "restored 7 disabled row(s)" in line, line
+        assert "1 were already back on" in line, line
+
+    def test_a_wholly_disabled_destination_still_reads_as_all_this_runs_work(self):
+        """The control: with no dual in play nothing is a no-op."""
+        svc = _FakeLiveSvc(
+            existing=_mismatched_rows(), create_status="failed", phantom_creates=True
+        )
+
+        res = self._run(svc)
+
+        (event,) = [e for e in _trace_events(res.trace_path) if e["kind"] == "restored"]
+        assert event["already_enabled_ids"] == [], event
+        assert event["enabled_by_request_ids"] == list(range(710000, 710008)), event
+        assert event["restoration_completed"] is True, event
+
+    def test_a_refused_restore_is_not_completed(self):
+        svc = _ADualPutOneRowBack(
+            existing=_mismatched_rows(),
+            create_status="failed",
+            phantom_creates=True,
+            enable_status="failed",
+        )
+
+        res = self._run(svc)
+
+        (event,) = [e for e in _trace_events(res.trace_path) if e["kind"] == "restore_failed"]
+        assert event["restoration_completed"] is False, event
+        # The row the dual put back is on; the seven this run asked for are not.
+        assert event["still_off"] == list(range(710001, 710008)), event
+
+
 class TestTheDisableRecordSaysWhatHappenedToEachRow:
     """`rows_disabled` is the write-ahead chain's closing half, and the only
     record of what was switched off if the run dies before it can rebuild.

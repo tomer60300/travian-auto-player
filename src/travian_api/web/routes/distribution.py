@@ -9205,9 +9205,21 @@ async def post_execute(
                                                 e.visible,
                                             )
 
+                                        # The enabled flag is deliberately NOT
+                                        # part of the configuration compared
+                                        # here. It is the one field this restore
+                                        # exists to change, and requiring every
+                                        # old row to be still OFF made a dual
+                                        # that switched one back on abandon the
+                                        # other seven -- leaving the worst state
+                                        # available: no replacement, one row
+                                        # shipping, seven dark. The bulk PUT
+                                        # states each row's target state rather
+                                        # than flipping it, so a row already on
+                                        # is a no-op in the same request.
                                         if sorted(_config(e) for e in _live_here) != sorted(
                                             _config(e) for e in _old
-                                        ) or any(e.active for e in _live_here):
+                                        ):
                                             _give_up = (
                                                 "the marketplace no longer matches the record "
                                                 "taken before the disable"
@@ -9237,11 +9249,20 @@ async def post_execute(
                                     )
                                     continue
                                 _old_ids = sorted(e.route_id for e in _live_here)
+                                # Rows that were already back on when this run
+                                # got here. The PUT covers them and changes
+                                # nothing for them, so they must never be
+                                # counted as work this run did: "restored 8" over
+                                # seven writes describes an account that does not
+                                # exist, and it is the count an operator would
+                                # reconcile a suspicious marketplace against.
+                                _already_on = sorted(e.route_id for e in _live_here if e.active)
                                 trace.event(
                                     "restore_attempted",
                                     origin=origin,
                                     destination=str(_k),
                                     route_ids=_old_ids,
+                                    already_enabled_ids=_already_on,
                                     reason=replaceable.get(_k, ""),
                                 )
                                 _back = await svc.enable_routes(
@@ -9279,17 +9300,22 @@ async def post_execute(
                                         f"({exc}). Check this destination in game."
                                     )
                                     continue
-                                _still_off = sorted(
-                                    e.route_id
-                                    for e in _checked
-                                    if e.route_id in set(_old_ids) and not e.active
-                                )
+                                # Every old row shown ON by the confirming read.
+                                # A row the page no longer shows at all has not
+                                # been switched back on either, so it belongs
+                                # here rather than passing as restored: the
+                                # question is what the marketplace HOLDS, not
+                                # what it denies.
+                                _on_now = {e.route_id for e in _checked if e.active}
+                                _still_off = [i for i in _old_ids if i not in _on_now]
                                 if _still_off:
                                     trace.event(
                                         "restore_failed",
                                         origin=origin,
                                         destination=str(_k),
                                         still_off=_still_off,
+                                        already_enabled_ids=_already_on,
+                                        restoration_completed=False,
                                         detail=(
                                             ""
                                             if _back is None
@@ -9304,16 +9330,25 @@ async def post_execute(
                                         f"in game."
                                     )
                                     continue
+                                _switched = [i for i in _old_ids if i not in set(_already_on)]
                                 trace.event(
                                     "restored",
                                     origin=origin,
                                     destination=str(_k),
                                     route_ids=_old_ids,
+                                    already_enabled_ids=_already_on,
+                                    enabled_by_request_ids=_switched,
+                                    restoration_completed=True,
                                 )
                                 re_enables.append(
                                     f"{village_label(origin, names)} -> {_label}: restored "
-                                    f"{len(_old_ids)} disabled row(s) after the replacement "
+                                    f"{len(_switched)} disabled row(s) after the replacement "
                                     f"was refused"
+                                    + (
+                                        f"; {len(_already_on)} were already back on"
+                                        if _already_on
+                                        else ""
+                                    )
                                 )
                                 # The line that said this destination is
                                 # receiving nothing, and told the operator to

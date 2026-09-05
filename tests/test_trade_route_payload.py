@@ -202,6 +202,31 @@ class TestToggleBody:
         payload = service._build_toggle_payload([1, 2], active=True)
         assert all(entry["enabled"] is True for entry in payload["routes"])
 
+    def test_a_bulk_enable_states_the_target_state_it_does_not_flip(self):
+        """Whether a refused replacement may be undone automatically turns on
+        this one property.
+
+        The body names each row's DESIRED state (`enabled: true`), so sending a
+        row that is already on is a no-op. Were it a flip -- "toggle these ids"
+        -- the same request would switch OFF every row a concurrent session had
+        already put back, and the run would have to prove every old row was
+        still disabled before it dared write. It cannot prove that: the page it
+        read is a moment old. So the restore would not be safe at all.
+        """
+        service, client = _service()
+        routes = [
+            ExistingRoute(route_id=i, dest_village_id=20044, dest_x=5, dest_y=6, active=False)
+            for i in (11, 12)
+        ]
+        asyncio.run(service.enable_routes(20031, routes))
+
+        (verb, url, body) = client.sent[0]
+        assert (verb, url) == ("PUT", "/api/v1/trade-routes")
+        assert body["routes"] == [{"enabled": True, "id": 11}, {"enabled": True, "id": 12}]
+        # Every entry carries the state, so the request is idempotent: sending
+        # it twice leaves the same rows on.
+        assert all(set(entry) == {"enabled", "id"} for entry in body["routes"]), body
+
     def test_it_is_a_PUT_to_the_collection_not_a_toggle_group_POST(self):
         # The earlier guess was POST /api/v1/trade-routes/toggle-group. Both
         # the verb and the path were wrong.
