@@ -63,7 +63,8 @@ UNIT_DISPLAY_NAME: dict[str, str] = {
 
 # Safety floor: a single slot cannot claim more than this fraction of the
 # village's available supply of that unit. Prevents one slot from draining V3
-# of all its TKs.
+# of all its TKs. Enforced on the live wave path (plan_waves_for_target) and on
+# the single-placement path (compute_placement_score).
 SUPPLY_CLAIM_CAP = 0.90
 
 # Carry safety multiplier when sizing a wave to cover the empirical cranny.
@@ -362,7 +363,11 @@ def plan_waves_for_target(
             unit_carry=carry,
         )
         avail = int(troop_supplies.get((village, unit), 0))
-        if count > avail:
+        # SUPPLY_CLAIM_CAP, on the path the planner actually takes. `avail` is
+        # what is LEFT after earlier waves, so the cap binds the second target
+        # through a village as well as the first -- otherwise "90% of the
+        # opening supply" would let two slots between them take all of it.
+        if count > avail * SUPPLY_CLAIM_CAP:
             continue
         seen_vu.add((village, unit))
         last_arrival = arrival_min
