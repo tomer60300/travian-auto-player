@@ -2474,20 +2474,24 @@ class TestAbsenceIsNeverFinalisedFromAnUnstablePair:
 class TestThePlanCannotEmitTwoRoutesTheReadBackCannotTellApart:
     """The invariant the whole attribution rests on, stated and checked.
 
-    The matcher claims each new live row for the create that made it using three
-    discriminators: the destination key, the departure minute, and -- at a shared
-    minute -- the exact cargo. Two routes to ONE destination with identical cargo
-    on overlapping minutes defeat all three, and the arbitrary split that follows
-    decides which action is reported created, which rows the trim keeps and which
-    it DELETES.
+    The read-back settles a create per DESTINATION, against the complete
+    expected pre-trim multiset of (departure minute, cargo). Two routes to one
+    destination therefore no longer have to be separable row by row: a pair that
+    lands in full is settled by the multiset matching, a pair one of whose
+    creates produced nothing is settled by elimination when only one of them
+    wants exactly the missing rows, and anything else is reported
+    `indeterminate` and left untrimmed rather than split arbitrarily.
 
-    Nothing the planner emits today is such a pair. That is an assumption until
-    something checks it, and the failure mode of the assumption going stale is
-    rows vanishing from a real account, discovered afterwards.
+    What remains unsafe is the pair even that has nothing to work with:
+    identical cargo on an IDENTICAL full pre-trim fan-out, with different
+    windows that overlap. Both creates then want the same rows at the same
+    minutes with the same amounts, and the trim is asked to keep rows for both
+    at a minute both windows claim. Nothing the planner emits today is such a
+    pair -- an assumption until something checks it, whose failure mode is rows
+    vanishing from a real account.
 
-    Measured on the minutes that SURVIVE each route's window, and with exact
-    duplicates excluded -- both forced by plans this app already ships, and both
-    pinned below so the exclusions cannot be widened by accident.
+    Two exclusions, both forced by plans this app already ships, and both pinned
+    below so they cannot be widened by accident.
     """
 
     def _pair(self, first_minute, second_minute, *, second_cargo=None, dest=20011):
@@ -2595,9 +2599,24 @@ class TestThePlanCannotEmitTwoRoutesTheReadBackCannotTellApart:
             segment="",
         )
 
-    def test_two_cycles_sharing_one_surviving_minute_are_ambiguous(self):
-        # 6h from 100 is {100, 460, 820, 1180}; 3h from 100 contains 100 too.
+    def test_two_cycles_that_merely_overlap_are_settled_by_the_destination(self):
+        """6h from 100 is {100, 460, 820, 1180} and 3h from 100 contains all
+        four, so a per-ROW matcher cannot separate them -- which is why this pair
+        used to be refused. The destination's own multiset can: the two expect
+        different rows, so whichever of them produced nothing is exactly the
+        shortfall and is settled by elimination. Refusing it would refuse a plan
+        the settlement handles."""
         pair = [self._route(cycle=6, minute=100), self._route(cycle=3, minute=100)]
+
+        assert dist_module._matcher_ambiguity(pair) is None
+
+    def test_an_identical_fanout_under_overlapping_windows_is_refused(self):
+        """The one pair nothing can separate: same cargo, the same 24 departure
+        minutes, and windows that both claim some of them."""
+        pair = [
+            self._route(cycle=1, minute=420, window=(0, 1440)),
+            self._route(cycle=1, minute=480, window=(420, 1380)),
+        ]
 
         assert dist_module._matcher_ambiguity(pair) is not None
 

@@ -822,3 +822,113 @@ class TestATwoRouteDestinationCannotBeRebuiltAtACapOfOne:
             (20011, 4),
             (20011, 1),
         }
+
+
+class _SomeCreatesMakeNothing(_FakeLiveSvc):
+    """The game answers `created` and produces no rows, for chosen cycles.
+
+    The empty 200 that means "accepted and silently did nothing" is
+    indistinguishable from success, and on a shared destination it is also
+    indistinguishable from the OTHER profile's create having made those rows.
+    """
+
+    def __init__(self, barren=(), **kw):
+        super().__init__(**kw)
+        self._barren = set(barren)
+
+    async def create_route(self, route, *, stop_check=None):
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        if route.cycle_hours in self._barren:
+            self.created.append(route)
+            return RouteActionResult(route.origin_village_id, route.dest_x, route.dest_y, "created")
+        return await super().create_route(route, stop_check=stop_check)
+
+
+class _OnlyTheFirstCreateLands(_FakeLiveSvc):
+    """The first create to a destination makes its rows; a later one to the same
+    destination is answered `created` and produces nothing."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self._served: set[int] = set()
+
+    async def create_route(self, route, *, stop_check=None):
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        if route.dest_village_id in self._served:
+            self.created.append(route)
+            return RouteActionResult(route.origin_village_id, route.dest_x, route.dest_y, "created")
+        self._served.add(route.dest_village_id)
+        return await super().create_route(route, stop_check=stop_check)
+
+
+def _twin_accounts():
+    """Two hourly routes to one destination with the SAME cargo, one per
+    profile. Their pre-trim fan-outs are identical -- every minute of the day --
+    so nothing but a COUNT can tell their rows apart, and the count can only
+    speak when both landed."""
+    day = _sheet_row(20003, 20011, cycle=1, minute=8 * 60, crop=2000)
+    night = _sheet_row(20003, 20011, cycle=1, minute=23 * 60, crop=2000)
+    return {tuple(DAY): _account([day]), tuple(NIGHT): _account([night])}
+
+
+class TestOneDestinationIsSettledAsAWhole:
+    """The read-back runs BEFORE the trim, so every row a create made is still
+    on the page -- including the ones the trim is about to remove.
+
+    Attributing those rows one create at a time is guesswork on a shared
+    destination: an hourly fan-out covers every minute a 4-hourly one has, so
+    the profile whose rows never landed can claim the other's and be reported
+    `created` over nothing, while the profile that really did the work is
+    reported short. The verdict is therefore taken per DESTINATION, against the
+    complete expected PRE-TRIM multiset of (departure minute, cargo). Equal
+    means every create landed; short by exactly one distinguishable create means
+    that one did not; anything else is not attributed at all.
+    """
+
+    def test_a_barren_create_is_found_by_elimination_not_by_stealing_rows(self):
+        """Day's create produces nothing while Night's fans out across every
+        minute of the day. Day's six minutes are all present -- as NIGHT's rows,
+        carrying Night's cargo -- so a per-row matcher hands them to Day and
+        reports two creates where one happened."""
+        svc = _SomeCreatesMakeNothing(barren={4})
+
+        res = _run_union(svc)
+
+        by_cycle = {(a.destination, a.cycle_hours): a for a in res.actions}
+        assert by_cycle[(20011, 4)].status == "not_created", by_cycle[(20011, 4)].detail
+        assert by_cycle[(20011, 1)].status == "created", by_cycle[(20011, 1)].detail
+        assert by_cycle[(20011, 1)].observed_game_rows == 24, by_cycle[(20011, 1)]
+
+    def test_two_indistinguishable_creates_that_both_landed_are_both_created(self):
+        svc = _FakeLiveSvc()
+
+        res = _run_union(svc, accounts=_twin_accounts())
+
+        assert [a.status for a in res.actions] == ["created", "created"], [
+            (a.segment, a.status, a.detail) for a in res.actions
+        ]
+
+    def test_two_indistinguishable_creates_where_one_landed_are_both_indeterminate(self):
+        """48 rows were expected and 24 arrived. They fit either profile exactly,
+        so which create made them is unknowable -- and assigning them arbitrarily
+        decides which action is reported created AND which rows the trim keeps."""
+        svc = _OnlyTheFirstCreateLands()
+
+        res = _run_union(svc, accounts=_twin_accounts())
+
+        assert [a.status for a in res.actions] == ["indeterminate", "indeterminate"], [
+            (a.segment, a.status, a.detail) for a in res.actions
+        ]
+
+    def test_an_unattributable_destination_is_never_trimmed(self):
+        """The trim keeps the rows the surviving minutes want and DELETES the
+        rest. With the destination unattributed there is no telling which rows
+        those are, so nothing there may be deleted."""
+        svc = _OnlyTheFirstCreateLands()
+
+        res = _run_union(svc, accounts=_twin_accounts())
+
+        assert svc.deleted == [], "an unattributed destination is left exactly as it is"
+        assert any("could not be attributed" in p for p in res.problems), res.problems

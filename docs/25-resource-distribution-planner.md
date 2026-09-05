@@ -1645,6 +1645,30 @@ plan. `read_back_disagreed` now carries **both snapshots**, not just a reason
 string: when nothing on a page is final, the recovery question is which rows
 moved between the two reads, and only the rows answer it.
 
+**A destination is settled as a whole, not one row at a time.** The read-back
+runs BEFORE the trim, so every row a create made is still on the page —
+including the ones the trim is about to remove. Attributing those rows per
+create was guesswork on a shared destination, because an hourly fan-out covers
+every minute a 4-hourly one has: a whole-day run whose *Day* create produced
+nothing had it claim six of Night's rows, report itself `created` over nothing,
+and leave Night reported eighteen rows short — and the pooled trim then kept and
+DELETED on that same split. The verdict is now taken per destination against the
+complete expected **pre-trim multiset** of (departure minute, cargo). Every
+expected row present means every create landed; short by exactly the rows of one
+create that no other create wants means that one produced nothing, by
+elimination; anything else attributes nothing at all — the creates become
+`indeterminate`, the destination is named in `problems` and **is not trimmed**,
+because there is no telling which rows the trim would be removing.
+
+The invariant that guarded the old matcher is narrowed to match. Two routes to
+one destination no longer have to be separable row by row, so the plan is
+refused only for the pair nothing can separate at any stage: identical cargo on
+an **identical** full pre-trim fan-out with different windows that overlap. Two
+cycles that merely overlap are now allowed — the destination's multiset says
+which of them is missing — and the whole-day pair keeps its exclusion for a
+sharper reason than before: its windows are *disjoint*, so every surviving
+minute belongs to exactly one route and the trim's decision is determined.
+
 **Going live for the first time is its own document.**
 [`docs/26-first-live-run.md`](26-first-live-run.md) is the step-by-step
 protocol these fixes earned — what to settle before anything touches the game,

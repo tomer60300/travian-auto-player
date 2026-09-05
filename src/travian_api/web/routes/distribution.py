@@ -5722,37 +5722,46 @@ def _fanout_minutes(route: PlannedRoute) -> set[int]:
     }
 
 
+def _within_window(minute: int, window: tuple[int, int] | None) -> bool:
+    """Does this minute of the day fall inside the profile's hours?
+
+    A route with no window keeps every departure, so `None` covers every minute.
+    """
+    if window is None:
+        return True
+    start, end = window
+    return (start <= minute < end) if start <= end else (minute >= start or minute < end)
+
+
 def _matcher_ambiguity(routes: Sequence[PlannedRoute]) -> str | None:
-    """Two planned routes the read-back matcher could not tell apart, or None.
+    """Two planned routes NOTHING downstream could tell apart, or None.
 
-    The matcher attributes each new live row to the create that made it using
-    three discriminators: the destination key, the departure minute, and -- at a
-    minute two routes share -- the exact cargo. Two routes to ONE destination
-    carrying identical cargo on overlapping minutes defeat all three, so their
-    rows are split arbitrarily. That is not a cosmetic misattribution: the split
-    decides which action is reported created, which rows the window trim keeps,
-    and which it DELETES.
+    The read-back settles a create per DESTINATION, against the complete
+    expected pre-trim multiset of (departure minute, cargo) -- so two routes to
+    one destination no longer have to be separable ROW by row. A pair that lands
+    in full is settled by the multiset matching; a pair one of whose creates
+    produced nothing is settled by elimination when only one of them wants
+    exactly the missing rows; and anything else is reported `indeterminate` and
+    left untrimmed rather than split arbitrarily. All three are safe.
 
-    Measured on the minutes that SURVIVE each route's own window, not on the raw
-    24/N fan-out, and with exact duplicates excluded. Both exclusions are forced
-    by plans this app already ships and must keep working:
+    What remains unsafe is the pair for which even that has nothing to work
+    with: identical cargo on an IDENTICAL full pre-trim fan-out, with different
+    windows that overlap. Then the two creates want the same rows at the same
+    minutes with the same amounts, the trim is asked to keep rows for both at a
+    minute both windows claim, and no evidence of any kind separates them. That
+    is a malformed plan, and it is refused before a single request goes out.
 
+    Two exclusions, both forced by plans this app already ships:
+
+    * two plan rows identical in every field (two foreign targets at one tile)
+      are the same route, not two the settlement must separate: the reconciler
+      creates it once;
     * a whole-day run plans one destination once per profile, and two hourly
-      routes fan out across every minute of the day BEFORE the trim -- so on the
-      raw fan-out every shared destination of a whole-day plan looks ambiguous.
-      What lands is disjoint, because each route is trimmed to its own profile's
-      hours, and the trim is pooled per destination against exactly these
-      surviving minutes;
-    * two plan rows that are identical in every field (two foreign targets at
-      one tile) are not two routes the matcher must tell apart: they are the
-      same route, the reconciler creates it once, and an arbitrary split between
-      two identical claims misattributes nothing.
-
-    What is left is the real hazard: one destination, one cargo, two DIFFERENT
-    schedules whose surviving rows collide. Nothing the planner emits today does
-    that. This states it as a checked invariant rather than an assumption, so a
-    future planner change cannot silently invalidate the matcher and be
-    discovered as rows disappearing from a real account.
+      routes fan out across every minute of the day. Their windows are DISJOINT,
+      so every surviving minute belongs to exactly one of them, the pooled trim's
+      decision is determined, and a short landing degrades to `indeterminate`
+      rather than to a wrong delete. Refusing that would refuse the ordinary
+      whole-day plan.
     """
     by_key: dict[int | tuple[int, int], list[PlannedRoute]] = {}
     for route in routes:
@@ -5770,13 +5779,22 @@ def _matcher_ambiguity(routes: Sequence[PlannedRoute]) -> str | None:
                     second.window,
                 ):
                     continue  # the same route twice, not two the matcher must separate
-                shared = sorted(set(_planned_minutes(first)) & set(_planned_minutes(second)))
+                fanout = _fanout_minutes(first)
+                if fanout != _fanout_minutes(second):
+                    # Different rows are expected of them, so the destination's
+                    # own multiset says which of the two is missing.
+                    continue
+                shared = sorted(
+                    m
+                    for m in fanout
+                    if _within_window(m, first.window) and _within_window(m, second.window)
+                )
                 if not shared:
                     continue
                 return (
                     f"village {first.origin_village_id} -> {first.dest_name}: "
-                    f"the plan wants two routes with identical cargo whose rows share "
-                    f"departure minute(s) {shared} — "
+                    f"the plan wants two routes with identical cargo and the same "
+                    f"departure minutes, both surviving at minute(s) {shared} — "
                     f"{first.cycle_hours}h from minute {first.dispatch_minute}"
                     + (f" ({first.segment})" if first.segment else "")
                     + f" and {second.cycle_hours}h from minute {second.dispatch_minute}"
@@ -5880,6 +5898,89 @@ def _stable_rows(rows: Sequence[ExistingRoute]) -> Counter:
         )
         for e in rows
     )
+
+
+def _cargo_key(cargo: Mapping | None) -> tuple:
+    """A cargo comparable across a plan row and a marketplace row.
+
+    Zero amounts dropped (the plan carries them, the page does not) and the
+    resource stringified (the plan holds `Resource`, the page holds whatever the
+    parser produced).
+    """
+    return tuple(sorted((str(r), a) for r, a in (cargo or {}).items() if a))
+
+
+def _expected_rows(route: PlannedRoute) -> Counter:
+    """(departure minute, cargo) for every row this create should make.
+
+    PRE-trim, because the read-back that settles a create runs before the trim
+    and sees the whole fan-out.
+    """
+    key = _cargo_key(route.cargo)
+    return Counter((m, key) for m in _fanout_minutes(route))
+
+
+def _settle_by_destination(
+    creates: Sequence[tuple[RouteActionResponse, PlannedRoute]],
+    fresh: Sequence[ExistingRoute],
+) -> dict[int, str]:
+    """Did each create land? Decided per DESTINATION, never one row at a time.
+
+    Returns "landed" / "absent" / "ambiguous" per action id.
+
+    A row carries no record of which request made it, so on a destination served
+    by ONE create the question does not arise: every new row there is that
+    create's, and the only verdict is whether there are any. On a destination
+    served by SEVERAL -- a whole-day run plans one destination once per profile
+    -- picking a row for a create is guesswork, and it was guesswork with
+    consequences: an hourly fan-out covers every minute a 4-hourly one has, so
+    the create that produced NOTHING could claim the other's rows, be reported
+    `created` over nothing, and take those rows out of the other's count. The
+    trim then keeps and DELETES on the same mistaken split.
+
+    So the destination is settled as a whole, against the complete expected
+    pre-trim multiset of (departure minute, cargo):
+
+    * every expected row present -> every create landed. Extra rows beyond the
+      24/N model are still reported, but they do not make the landing doubtful;
+    * short by exactly the rows of ONE create, and no other create wants exactly
+      those rows -> that create is the one that produced nothing, by elimination;
+    * anything else -> nothing here is attributed. The creates become
+      `indeterminate` and this destination is left untrimmed, rather than split
+      arbitrarily and then deleted from.
+
+    Pre-existing rows are excluded on both sides: they are separated from this
+    run's work by route id, which is stronger evidence than any multiset.
+    """
+    by_key: dict[int | tuple[int, int], list[tuple[RouteActionResponse, PlannedRoute]]] = {}
+    for action, route in creates:
+        by_key.setdefault(_desired_key(route), []).append((action, route))
+    verdicts: dict[int, str] = {}
+    for key, group in by_key.items():
+        rows = [e for e in fresh if key in _existing_keys(e)]
+        if len(group) == 1:
+            verdicts[id(group[0][0])] = "landed" if rows else "absent"
+            continue
+        wanted = {id(action): _expected_rows(route) for action, route in group}
+        expected: Counter = Counter()
+        for one in wanted.values():
+            expected += one
+        missing = expected - Counter((_row_minute(e), _cargo_key(e.cargo)) for e in rows)
+        if not missing:
+            for action, _route in group:
+                verdicts[id(action)] = "landed"
+            continue
+        # Exactly one create wants exactly the rows that are absent. Two creates
+        # wanting them (identical cargo on an identical fan-out) leaves both
+        # candidates, which is the ambiguous case rather than a coin toss.
+        candidates = [action for action, _route in group if wanted[id(action)] == missing]
+        if len(candidates) == 1:
+            for action, _route in group:
+                verdicts[id(action)] = "absent" if action is candidates[0] else "landed"
+            continue
+        for action, _route in group:
+            verdicts[id(action)] = "ambiguous"
+    return verdicts
 
 
 def _row_snapshot(rows: Sequence[ExistingRoute]) -> list[dict]:
@@ -8260,6 +8361,63 @@ async def post_execute(
                                         first_rows=_row_snapshot(_first),
                                         second_rows=_row_snapshot(_again_rows),
                                     )
+
+                            # ── Whose rows are these? ───────────────────────
+                            #
+                            # Settled per DESTINATION against the complete
+                            # expected pre-trim multiset, not per row: the
+                            # read-back runs before the trim, so rows the trim
+                            # will remove still participate, and a create that
+                            # produced nothing could otherwise claim a
+                            # co-destination create's rows. Everything below --
+                            # the promotions, the refusals, the trim -- reads
+                            # this rather than the greedy split, which is kept
+                            # only for the row COUNTS of a destination that did
+                            # settle.
+                            _verdicts = _settle_by_destination(
+                                [*created_here, *attempted_here], fresh
+                            )
+                            _ambiguous_keys = {
+                                _desired_key(route)
+                                for action, route in [*created_here, *attempted_here]
+                                if _verdicts.get(id(action)) == "ambiguous"
+                            }
+                            landed_here = [
+                                (action, route)
+                                for action, route in attempted_here
+                                if _verdicts.get(id(action)) == "landed"
+                            ]
+                            # Row COUNTS come from the greedy split, but only
+                            # over the creates the destination settled as
+                            # landed. Left unfiltered it hands rows to a create
+                            # that produced none -- the 4-hourly fan-out is a
+                            # subset of the hourly one, so a barren Day create
+                            # claims six of Night's rows and Night is reported
+                            # eighteen short.
+                            fresh, observed_by_action = _attribute(
+                                after,
+                                created_here=[
+                                    (action, route)
+                                    for action, route in created_here
+                                    if _verdicts.get(id(action)) == "landed"
+                                ],
+                                attempted_here=landed_here,
+                            )
+                            for _key_a in sorted(_ambiguous_keys, key=str):
+                                problems.append(
+                                    f"{village_label(origin, names)} -> "
+                                    f"{village_label(_key_a, names) if isinstance(_key_a, int) else _key_a}"
+                                    f": this run wrote more than one route here and the rows on "
+                                    f"the page could not be attributed to them — nothing was "
+                                    f"deleted and no create was called created or refused. "
+                                    f"Check this destination in game."
+                                )
+                                trace.event(
+                                    "destination_unattributable",
+                                    origin=origin,
+                                    destination=str(_key_a),
+                                    rows=[e.route_id for e in fresh if _key_a in _existing_keys(e)],
+                                )
                             if (
                                 stable_read_back
                                 and body.prune_to_window
@@ -8294,6 +8452,12 @@ async def post_execute(
                                 # fire, which is exactly a capped whole-day pass.
                                 for _created_action, _route in [*created_here, *landed_here]:
                                     del _created_action  # only _route is used here
+                                    if _desired_key(_route) in _ambiguous_keys:
+                                        # Nothing here is attributed, so the
+                                        # surviving-minute multiset this trim
+                                        # deletes against is not known to be the
+                                        # right one. Reported above; left alone.
+                                        continue
                                     if _route.window is not None:
                                         _created_keys.setdefault(_desired_key(_route), []).append(
                                             _route
@@ -8629,6 +8793,26 @@ async def post_execute(
                             for action, _route in attempted_here:
                                 if id(action) in _landed_ids:
                                     continue
+                                if _verdicts.get(id(action)) == "ambiguous":
+                                    # Its destination did not settle, so absence
+                                    # here is not measured either. Same state as
+                                    # an unstable page and for the same reason:
+                                    # nothing about this create is known.
+                                    action.status = "indeterminate"
+                                    action.detail = (
+                                        "the create's answer died and this destination's "
+                                        "rows could not be attributed, so whether it landed "
+                                        "is unknown; the next run settles it"
+                                    )
+                                    attempt_ledger[ledger_index[id(action)]] = "indeterminate"
+                                    trace.event(
+                                        "create_indeterminate",
+                                        origin=origin,
+                                        destination=str(_desired_key(_route)),
+                                        reason="destination_unattributable",
+                                        rows_still_charged=charged_rows[id(action)],
+                                    )
+                                    continue
                                 if not stable_read_back:
                                     # ABSENCE measured on a page that would not
                                     # hold still is not evidence of a refusal.
@@ -8692,6 +8876,27 @@ async def post_execute(
                                     stopped_early = False
                                     failure_stopped_run = False
                             for action, route in created_here:
+                                if _verdicts.get(id(action)) == "ambiguous":
+                                    # The game answered `created` and rows are
+                                    # on the page -- just not rows this run can
+                                    # say are THIS create's. Calling it created
+                                    # would be a claim about a route nobody
+                                    # identified, and `observed_game_rows` stays
+                                    # None because nothing was measured for it.
+                                    action.status = "indeterminate"
+                                    action.detail = (
+                                        "the create was accepted, but this destination's "
+                                        "rows could not be attributed to the routes written "
+                                        "here; the next run settles it"
+                                    )
+                                    outstanding += 1
+                                    trace.event(
+                                        "create_indeterminate",
+                                        origin=origin,
+                                        destination=str(_desired_key(route)),
+                                        reason="destination_unattributable",
+                                    )
+                                    continue
                                 _rows = observed_by_action.get(id(action), [])
                                 observed = len(_rows)
                                 # Recorded whether it is what was predicted or
@@ -8701,7 +8906,7 @@ async def post_execute(
                                 action.live_game_rows = len(
                                     [r for r in _rows if r not in pruned_ids]
                                 )
-                                if observed:
+                                if _verdicts.get(id(action)) == "landed":
                                     if observed != action.game_rows:
                                         # The fan-out model is what every other
                                         # number rests on -- merchants tied up,
