@@ -2229,7 +2229,12 @@ export default function ResourcePlanner() {
   const canaryUnmet = canaryConditions.filter((c) => !c.ok)
   const canaryReady = canaryUnmet.length === 0
 
-  /** Tick it and the five controls the flag fixes are already right.
+  /** Tick it and the four controls the flag fixes are already right.
+   *
+   * Four, not five: the fan-out trim is the fifth condition and is DERIVED off
+   * the tick a few dozen lines up rather than written back, because
+   * `pruneToWindow` is a plan input and setting it would clear the plan out
+   * from under the tick that set it.
    *
    * A preset, not a claim: `canaryConditions` still reads the controls, so a
    * value that drifts afterwards shows as unmet and holds the button. The row
@@ -2253,8 +2258,9 @@ export default function ResourcePlanner() {
 
   /** The row budget follows the pair, because 24/N is a fact about the route the
    *  pair selects and not about the box. Done on the id boxes' own change rather
-   *  than in an effect: an effect writing four controls would fire on every
-   *  unrelated render of this page. */
+   *  than in an effect, because the box stays editable: an effect would overwrite
+   *  a figure the operator was in the middle of typing. Where box and plan
+   *  disagree the eighth condition says so and names the number. */
   const setCanaryPair = useCallback(
     (origin, destination) => {
       setOnlyOrigin(origin)
@@ -7777,9 +7783,10 @@ export default function ResourcePlanner() {
                         request, so nothing is read and nothing is written by a refused canary.
                         Create-only and exactly one route: no disable, no trim, no cargo rewrite,
                         so the run has no delete path at all and everything it does is undoable by
-                        switching rows off. Ticking it sets the five controls it fixes and takes{' '}
+                        switching rows off. Ticking it sets the controls it fixes and takes{' '}
                         <strong>Max rows this run</strong> off the plan’s own route — “1 route”
-                        was never “1 row”, because Travian turns one create into 24/N daily rows.
+                        was never “1 row”, because Travian turns one create into 24/N separate
+                        daily rows.
                       </Why>
                     </div>
 
