@@ -4,10 +4,11 @@ import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from travian_api.config import settings
 from travian_api.web.auth import (
     create_access_token,
     get_current_user,
@@ -63,7 +64,27 @@ async def register(
     db: AsyncSession = Depends(get_db),
     _rate: None = Depends(auth_limiter),
 ):
-    """Create a new user account and return a JWT."""
+    """Create a new user account and return a JWT.
+
+    Open while the ``users`` table is empty, so a fresh install bootstraps its
+    first account; closed afterwards unless ``TRAVIAN_ALLOW_REGISTRATION`` says
+    otherwise. It used to be open to anyone who could reach the port -- both
+    servers bind 0.0.0.0 and the only gate was a 10-per-minute rate limit --
+    and a stranger's token, while it buys no Travian session (no
+    ``TravianCredential`` row, so every game route 403s), is still a valid
+    24-hour JWT on the rest of the surface.
+    """
+    if not settings.allow_registration:
+        existing = await db.execute(select(func.count()).select_from(User))
+        if (existing.scalar_one_or_none() or 0) > 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Registration is closed. This deployment already has an "
+                    "account; set TRAVIAN_ALLOW_REGISTRATION=true to add another."
+                ),
+            )
+
     # Check for duplicate username
     result = await db.execute(select(User).where(User.username == body.username))
     if result.scalar_one_or_none() is not None:

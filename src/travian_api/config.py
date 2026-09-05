@@ -97,6 +97,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Registration is otherwise open to anyone who can reach the port, and both
+    # servers bind 0.0.0.0. Defaults OFF: the first account is exempt (the
+    # route lets registration through while the users table is empty), so a
+    # fresh install still bootstraps and an operator who already has an account
+    # cannot be locked out by this. Turn it on only to add another account, and
+    # turn it off again.
+    allow_registration: bool = Field(
+        default=False,
+        description=(
+            "Allow POST /api/users/register once at least one account exists. "
+            "The first account is always allowed, so a fresh install can "
+            "bootstrap without setting this."
+        ),
+    )
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
