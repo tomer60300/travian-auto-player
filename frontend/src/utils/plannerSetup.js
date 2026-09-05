@@ -129,6 +129,27 @@
  * the backend's `bool` is lax enough to read `"no"` as TRUE, which would switch
  * the prune back on and delete rows over a string nobody can see.
  *
+ * Version 11 adds `merchant_model_measured`, and it is the one field here that
+ * records work done IN THE GAME which the game does not record.
+ * MERCHANT_MODEL_UNCALIBRATED fires whenever `trade_office_bonus_per_level`
+ * still equals the shipped 0.20 and any village has a Trade Office. That is the
+ * right warning for an untouched account and unanswerable for one whose
+ * operator read a Marketplace capacity at two Trade Office levels and found
+ * 0.20 to be correct: agreeing with the default is indistinguishable from never
+ * having looked, so the finding could never be cleared by doing the very thing
+ * it asks for. This is the operator saying they looked.
+ *
+ * Nothing here could re-derive it, and dropped it brings the finding back on
+ * every plan -- the criterion `reserved_window` earned v9 for and
+ * `prune_to_window` v10, met by a field with no other way of existing.
+ *
+ * Written ONLY when true, which is the opposite of `prune_to_window` above and
+ * for the opposite reason: that switch rests ON, so its `false` is an answer
+ * worth carrying, while this one rests OFF -- the finding's own default, which
+ * the server lifts from an absent field with `bool(None)`. Refused rather than
+ * coerced all the same (`StrictBool` on the server): a value nobody typed as a
+ * boolean must not silence a finding about the figure that sizes every cargo.
+ *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
  */
@@ -145,7 +166,7 @@ import { NPC_FEEDSTOCK_RESOURCES, isFeedstockList } from './plannerNpc'
 import { excludedOriginIds, namesForVillageIds } from './villageRefs'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 10
+export const SETUP_VERSION = 11
 /** Versions this build can read. A v1 file simply carries no profiles, a v2 one
  * no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
  * v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing
@@ -164,7 +185,7 @@ export const SETUP_VERSION = 10
  * readable list AND two refusals that have to be asked for with a version
  * beyond this build. Bumping one side alone is the failure this note exists to
  * prevent. */
-export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
@@ -1398,6 +1419,7 @@ export function buildSetup({
   overnight,
   reservedWindow,
   pruneToWindow,
+  merchantModelMeasured,
   merchantModel,
   foreignTargets,
   exportedAt,
@@ -1560,6 +1582,19 @@ export function buildSetup({
   // an absent field has to mean "this document says nothing" rather than OFF --
   // otherwise every v9 document would import as a decision nobody made.
   if (typeof pruneToWindow === 'boolean') doc.prune_to_window = pruneToWindow
+  // v11, and the one answer here that records work done IN THE GAME which the
+  // game does not record: the operator read a Marketplace capacity at two Trade
+  // Office levels and found the shipped +20%/level right.
+  // MERCHANT_MODEL_UNCALIBRATED tests "still equal to the shipped 0.20", which
+  // a MEASURED 0.20 also satisfies, so without this the finding can never be
+  // cleared by doing the very thing it asks for.
+  //
+  // ONLY when true, which is the opposite of `prune_to_window` above and for
+  // the opposite reason: that switch rests ON, so its `false` is an answer
+  // worth carrying. This one rests OFF -- the finding's own default, and what
+  // the server lifts from an absent field with `bool(None)` -- so a written
+  // `false` would say nothing an absent field does not.
+  if (merchantModelMeasured === true) doc.merchant_model_measured = true
   // The levers the operator actually TYPED. A blank box means "use the
   // planner's own", which the plan path has always read correctly -- the field
   // is omitted from the request and the backend's default stands -- while this
@@ -2222,6 +2257,26 @@ export function parseSetup(text) {
     }
     pruneToWindow = raw.prune_to_window
   }
+  // null is "this document does not say", and it is the state a v10 file is in.
+  // It reads the same as `false` at the request -- the server lifts an absent
+  // field with `bool(None)` -- but not at the MERGE, where a document that says
+  // nothing must leave an acknowledgement on screen alone.
+  //
+  // Refused rather than coerced, on `parseAttendance`'s reasoning: the server's
+  // field is `StrictBool`, so a hand-edited "yes" would be a 422 on save, and
+  // coercing it here would silence a finding about the figure that sizes every
+  // cargo on the strength of a value nobody typed as a boolean.
+  let merchantModelMeasured = null
+  if (raw.merchant_model_measured != null) {
+    if (typeof raw.merchant_model_measured !== 'boolean') {
+      throw new SetupFileError(
+        `merchant_model_measured is ${JSON.stringify(raw.merchant_model_measured)}, which is ` +
+          `not an answer. It must be true (the base capacity and the Trade Office bonus were ` +
+          `read off the game's Marketplace send form), or absent to say nothing about it.`
+      )
+    }
+    merchantModelMeasured = raw.merchant_model_measured
+  }
 
   let merchantModel = null
   if (raw.merchant_model != null) {
@@ -2348,6 +2403,7 @@ export function parseSetup(text) {
     overnight,
     reservedWindow,
     pruneToWindow,
+    merchantModelMeasured,
     merchantModel,
     foreignTargets,
   }
@@ -2381,6 +2437,7 @@ export function mergeSetup({
   overnight,
   reservedWindow,
   pruneToWindow,
+  merchantModelMeasured,
   foreignTargets,
 }) {
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
@@ -2527,6 +2584,11 @@ export function mergeSetup({
     // document knows nothing about the prune, so loading one must not switch
     // it. `??` and not `||`, because `false` is the answer that changes a run.
     pruneToWindow: setup.pruneToWindow ?? pruneToWindow ?? true,
+    // The same rule, resting the other way: a v10 document knows nothing about
+    // the acknowledgement, so loading one must not clear one the operator has
+    // on screen. `false` and not `null` at the end of the chain, because the
+    // page renders a checkbox and a checkbox has two states.
+    merchantModelMeasured: setup.merchantModelMeasured ?? merchantModelMeasured ?? false,
     // Replaced wholesale, not merged. Merging two tribute lists would either
     // double an obligation or leave a target the operator deleted still being
     // shipped to. A file with no targets leaves what is on screen alone.

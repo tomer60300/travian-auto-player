@@ -242,15 +242,15 @@ describe('profiles in the setup file', () => {
       merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
       exportedAt: STAMP,
     })
-    // 10 since the window prune landed (9 was the reserved NPC-burst window, 8
-    // the overnight declaration, 7 the per-profile NPC attendance, 6 profile
-    // section 5's declared relay tier, 5 the per-village merchant cap, 4
-    // `may_relay`, 3 the role templates). Pinned to a literal on purpose: the
-    // version has to rise
+    // 11 since the measured merchant model landed (10 was the window prune, 9
+    // the reserved NPC-burst window, 8 the overnight declaration, 7 the
+    // per-profile NPC attendance, 6 profile section 5's declared relay tier, 5
+    // the per-village merchant cap, 4 `may_relay`, 3 the role templates).
+    // Pinned to a literal on purpose: the version has to rise
     // whenever a field is added, so that an older build refuses a file it would
     // otherwise half-load, and a literal is what makes forgetting the bump a
     // failing test rather than a tautology.
-    expect(setup.version).toBe(10)
+    expect(setup.version).toBe(11)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -771,6 +771,92 @@ describe('the window prune travels in the setup (v10)', () => {
     const silent = roundTrip({ format: SETUP_FORMAT, version: 9, villages: [] })
     expect(mergeSetup({ setup: silent, villages: VILLAGES, pruneToWindow: false }).pruneToWindow)
       .toBe(false)
+  })
+})
+
+// The acknowledgement that the merchant model was read off the game, and the
+// one thing in this document that records work done IN THE GAME that the game
+// does not record. MERCHANT_MODEL_UNCALIBRATED fires whenever
+// `trade_office_bonus_per_level` still equals the shipped 0.20 and any village
+// has a Trade Office -- a test a MEASURED 0.20 also satisfies, so an operator
+// who read a Marketplace capacity at two levels, found the default right and
+// typed it back got the same warning for ever. Nothing here could re-derive it,
+// and dropped it brings the finding back on every plan.
+describe('the measured merchant model travels in the setup (v11)', () => {
+  it('carries the acknowledgement', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      merchantModelMeasured: true,
+      exportedAt: STAMP,
+    })
+
+    expect(setup.merchant_model_measured).toBe(true)
+    expect(roundTrip(setup).merchantModelMeasured).toBe(true)
+  })
+
+  it('leaves it out when nobody has said so, because absent IS unmeasured', () => {
+    // The opposite of `prune_to_window` beside it, and for the opposite reason:
+    // that switch rests ON, so its `false` is an answer worth carrying. This one
+    // rests OFF -- the finding's own default -- so a written `false` would say
+    // nothing an absent field does not, and the backend lifts absent with
+    // `bool(None)`.
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      merchantModelMeasured: false,
+      exportedAt: STAMP,
+    })
+
+    expect('merchant_model_measured' in setup).toBe(false)
+    expect(roundTrip(setup).merchantModelMeasured).toBeNull()
+  })
+
+  it('reads a v10 document as saying nothing about it', () => {
+    // A build that never wrote the field is not an operator who declined to
+    // measure -- and the two plan the same, which is precisely why the box has
+    // to be UNTICKED rather than absent-and-forgotten when one loads.
+    const doc = { format: SETUP_FORMAT, version: 10, villages: [] }
+
+    expect(roundTrip(doc).merchantModelMeasured).toBeNull()
+  })
+
+  it('refuses anything that is not a boolean, rather than coercing it', () => {
+    // `StrictBool` on the server, and the same discipline every other owned
+    // answer here follows: pydantic's lax `bool` reads "yes" as True, and a
+    // value nobody typed as a boolean must not silence a finding about the
+    // figure that sizes every cargo.
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.merchant_model_measured = 'yes'
+
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+    expect(() => roundTrip(doc)).toThrow(/merchant_model_measured/)
+  })
+
+  it('lets the document win where it has one, and says nothing where it does not', () => {
+    const carried = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        tradeOffice: { 20030: 1 },
+        merchantModelMeasured: true,
+        exportedAt: STAMP,
+      })
+    )
+    expect(
+      mergeSetup({ setup: carried, villages: VILLAGES, merchantModelMeasured: false })
+        .merchantModelMeasured
+    ).toBe(true)
+
+    // A v10 document knows nothing about it, so loading one must not clear an
+    // acknowledgement the operator has on screen.
+    const silentDoc = roundTrip({ format: SETUP_FORMAT, version: 10, villages: [] })
+    expect(
+      mergeSetup({ setup: silentDoc, villages: VILLAGES, merchantModelMeasured: true })
+        .merchantModelMeasured
+    ).toBe(true)
+    // And with nothing on either side it is unmeasured, never null: the page
+    // renders a checkbox, and a checkbox has two states.
+    expect(mergeSetup({ setup: silentDoc, villages: VILLAGES }).merchantModelMeasured).toBe(false)
   })
 })
 
@@ -2640,10 +2726,11 @@ describe('the merchant cap in the setup file', () => {
     expect(Math.round(DEFAULT_TARGET_FILL * 100)).toBe(60)
   })
 
-  it('is a version 10 file, and every older one simply carries less', () => {
+  it('is a version 11 file, and every older one simply carries less', () => {
     // Retitled at every bump -- v4 (the per-village merchant cap), v5, v6
     // (section 5's declared relay tier), v7, v8, v9 for the reserved NPC-burst
-    // window, and v10 for the window prune. The contract is the RULE, not the
+    // window, v10 for the window prune, and v11 for the measured merchant
+    // model. The contract is the RULE, not the
     // number: the version rises whenever a field is added, so a build that
     // cannot read the new one REFUSES a file it would otherwise half-load. A v4
     // build silently dropping a cap plans sixteen merchants where the operator
@@ -2651,8 +2738,10 @@ describe('the merchant cap in the setup file', () => {
     // beyond it as unreachable while the answer sits on screen; a v8 build
     // dropping the reserved window puts the manual NPC burst back into
     // competition with arrivals; a v9 build dropping the prune leaves every
-    // out-of-window firing live in the game.
-    expect(SETUP_VERSION).toBe(10)
+    // out-of-window firing live in the game; a v10 build dropping the
+    // acknowledgement asks the operator for a reading they have already taken,
+    // on every plan.
+    expect(SETUP_VERSION).toBe(11)
 
     const older = {
       format: SETUP_FORMAT,
@@ -3167,13 +3256,14 @@ describe('the reserved NPC-burst window in the setup file', () => {
       exportedAt: STAMP,
     })
 
-    // 10 since the window prune landed (9 was the reserved window this block is
-    // about, 8 the overnight declaration, 7 the per-profile NPC attendance, 6
-    // the relay tier). Pinned to a literal on purpose: the version has to rise
+    // 11 since the measured merchant model landed (10 was the window prune, 9
+    // the reserved window this block is about, 8 the overnight declaration, 7
+    // the per-profile NPC attendance, 6 the relay tier). Pinned to a literal on
+    // purpose: the version has to rise
     // whenever a field is added, so that an older build refuses a file it would
     // otherwise half-load, and a literal is what makes forgetting the bump a
     // failing test rather than a tautology.
-    expect(setup.version).toBe(10)
+    expect(setup.version).toBe(11)
     expect(setup.reserved_window).toEqual(['20:00', '21:00'])
     expect(roundTrip(setup).reservedWindow).toEqual(['20:00', '21:00'])
   })

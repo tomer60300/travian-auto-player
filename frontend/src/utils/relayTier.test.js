@@ -205,15 +205,15 @@ describe('the relay tier in the setup file', () => {
   it('rides the round trip, and the version rose for it', () => {
     const setup = buildSetup({ villages: VILLAGES, relayFor: TIER, exportedAt: STAMP })
 
-    // 10 since the window prune landed (9 was the reserved NPC-burst window, 8
-    // the overnight declaration, 7 the per-profile NPC attendance, 6 the relay
-    // tier this file is about, 5 the merchant cap, 4 `may_relay`, 3 the role
-    // templates).
+    // 11 since the measured merchant model landed (10 was the window prune, 9
+    // the reserved NPC-burst window, 8 the overnight declaration, 7 the
+    // per-profile NPC attendance, 6 the relay tier this file is about, 5 the
+    // merchant cap, 4 `may_relay`, 3 the role templates).
     // Pinned to a literal on purpose: the version has to rise whenever a field
     // is added, so that an older build refuses a file it would otherwise
     // half-load, and a literal is what makes forgetting the bump a failing test
     // rather than a tautology.
-    expect(setup.version).toBe(10)
+    expect(setup.version).toBe(11)
     expect(setup.villages.find((v) => v.village_id === 18).relay_for).toEqual([11, 17])
     expect(setup.villages.find((v) => v.village_id === 14).relay_for).toEqual([19])
     expect(roundTrip(setup).villages.find((v) => v.village_id === 18).relay_for).toEqual([11, 17])
