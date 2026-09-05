@@ -312,6 +312,7 @@ In-depth docs live under `docs/`:
 | **Resumable cross-device operations** | [`docs/22-resumable-operations.md`](docs/22-resumable-operations.md) |
 | **Stealth vs performance — design decisions** | [`docs/23-stealth-decisions.md`](docs/23-stealth-decisions.md) |
 | **Resource distribution planner** | [`docs/25-resource-distribution-planner.md`](docs/25-resource-distribution-planner.md) |
+| **First live run of the distribution planner** | [`docs/26-first-live-run.md`](docs/26-first-live-run.md) |
 | Changelog | [`CHANGELOG.md`](CHANGELOG.md) |
 
 ## Known Limitations
