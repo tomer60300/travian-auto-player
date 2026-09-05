@@ -1003,7 +1003,7 @@ class TradeRouteService:
         if stop_check is not None and (reason := stop_check()):
             return RouteActionResult(origin_village_id, 0, 0, "stopped", reason)
         try:
-            await self.http_client.delete_json(
+            response = await self.http_client.delete_json(
                 "/api/v1/trade-routes",
                 data=payload,
                 request_type="fetch",
@@ -1016,6 +1016,28 @@ class TradeRouteService:
         finally:
             # A failed delete cost a real request; see create_route.
             self._log_activity(started)
+
+        # Read like the toggles read theirs. The return used to be discarded, so
+        # every 2xx was `deleted` -- a body naming per-route errors, an HTML
+        # soft-block, or a non-object included. Both callers verify by re-reading
+        # the marketplace, but the execute path only re-read on `deleted`, which
+        # this always was: one call site from being the only guard on the one
+        # irreversible operation here.
+        try:
+            rejected = self._rejected_routes(response)
+        except ToggleResponseUnreadable as exc:
+            detail = (
+                f"delete of {len(routes)} route(s) cannot be confirmed: {exc}. The request "
+                f"returned success, so some or all may already be gone -- the page has to "
+                f"say which."
+            )
+            self._trace_write("delete", origin_village_id, "unreadable", started, payload, detail)
+            return RouteActionResult(origin_village_id, 0, 0, "unverified", detail)
+        if rejected:
+            detail = f"{len(rejected)} of {len(routes)} route(s) rejected: {rejected}"
+            self._trace_write("delete", origin_village_id, "partial", started, payload, detail)
+            return RouteActionResult(origin_village_id, 0, 0, "failed", detail)
+
         self._trace_write("delete", origin_village_id, "deleted", started, payload)
         return RouteActionResult(origin_village_id, 0, 0, "deleted", f"{len(routes)} route(s)")
 

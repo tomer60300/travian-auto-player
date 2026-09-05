@@ -288,6 +288,42 @@ class TestItCanFinishTheUndoItself:
         assert any("STILL THERE" in p for p in res.problems)
         assert res.must_delete_by_hand == {20003: [555]}, "so it stays on the manual list"
 
+    def test_an_unverifiable_delete_is_settled_by_the_read_back(self):
+        # The endpoint re-reads the page one line later; refusing on the response
+        # shape threw that away and told the operator to delete by hand rows the
+        # game had already removed.
+        trace = _trace_with(20003, [])
+        svc = self._svc(after_delete=[])
+
+        async def _delete(vid, routes, *, stop_check=None):
+            svc.calls.append("delete")
+            svc._confirm_after = svc._after_delete
+            return RouteActionResult(vid, 0, 0, "unverified", "cannot be confirmed (test)")
+
+        svc.delete_routes = _delete
+
+        res = _call(trace, svc, apply_disable=True, apply_delete=True)
+
+        assert res.deleted_now == {20003: [555]}
+        assert res.must_delete_by_hand == {}
+        assert res.problems == []
+
+    def test_an_unverifiable_delete_that_left_the_rows_is_still_reported(self):
+        trace = _trace_with(20003, [])
+        svc = self._svc(after_delete=[ExistingRoute(555, 30540, active=False)])
+
+        async def _delete(vid, routes, *, stop_check=None):
+            svc.calls.append("delete")
+            svc._confirm_after = svc._after_delete
+            return RouteActionResult(vid, 0, 0, "unverified", "cannot be confirmed (test)")
+
+        svc.delete_routes = _delete
+
+        res = _call(trace, svc, apply_disable=True, apply_delete=True)
+
+        assert res.deleted_now == {}
+        assert any("STILL THERE" in p for p in res.problems)
+
     def test_without_the_opt_in_nothing_is_deleted(self):
         trace = _trace_with(20003, [])
         svc = self._svc(after_delete=[])

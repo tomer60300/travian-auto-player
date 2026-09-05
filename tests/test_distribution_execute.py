@@ -273,6 +273,10 @@ class _FakeLiveSvc:
         confirm_raises=None,
         rows_per_create=None,
         delete_status="deleted",
+        # Whether the rows really went, INDEPENDENTLY of what the answer said --
+        # the same split `disable_applies` makes, and for the same case: a 200
+        # whose body could not be read over rows that are now gone.
+        delete_applies=None,
     ):
         # phantom_creates models the failure a 200 with an empty body cannot
         # rule out: the game accepts the create and produces no route.
@@ -293,6 +297,9 @@ class _FakeLiveSvc:
         self._existing = existing or {}
         self._create_status = create_status
         self._delete_status = delete_status
+        self._delete_applies = (
+            delete_status == "deleted" if delete_applies is None else delete_applies
+        )
         self._disable_status = disable_status
         self._disable_applies = (
             disable_status == "disabled" if disable_applies is None else disable_applies
@@ -362,14 +369,13 @@ class _FakeLiveSvc:
             return RouteActionResult(vid, 0, 0, "stopped", reason)
         ids = {r.route_id for r in routes}
         self.deleted.append((vid, tuple(sorted(ids))))
+        if self._delete_applies:
+            # Actually gone. The read-back is what the production code trusts, so
+            # a double that recorded the call and left the rows in place would
+            # let a broken delete pass.
+            self._existing[vid] = [e for e in self._existing.get(vid, []) if e.route_id not in ids]
         if self._delete_status != "deleted":
-            # A refused/stopped/unreadable delete leaves every row in place --
-            # which is the whole point of the case: the rows keep departing.
-            return RouteActionResult(vid, 0, 0, self._delete_status, "delete refused (test)")
-        # Actually gone. The read-back is what the production code trusts, so a
-        # double that recorded the call and left the rows in place would let a
-        # broken delete pass.
-        self._existing[vid] = [e for e in self._existing.get(vid, []) if e.route_id not in ids]
+            return RouteActionResult(vid, 0, 0, self._delete_status, "delete unconfirmed (test)")
         return RouteActionResult(vid, 0, 0, "deleted")
 
     async def confirm_routes(self, vid, *, map_span=None):
@@ -3223,6 +3229,42 @@ class TestAFailedWindowPruneIsNotSilent:
 
         assert any("outside the profile" in p for p in res.problems), res.problems
         assert any("stopped early" in p.lower() for p in res.problems), res.problems
+
+
+class TestAnUnverifiablePruneIsSettledByLookingAtTheMarketplace:
+    """A DELETE whose body could not be read is not a failed delete.
+
+    `docs/15` records the empty 200 as the normal shape on this account, so
+    `unverified` is the expected answer, not an exception. It is settled the
+    same way an unverified disable is: the run re-reads the page and decides
+    from state -- gone means pruned, still there means a problem.
+    """
+
+    def _run(self, svc):
+        return _run_live(
+            svc,
+            _account(
+                [_row_with_cycle(20003, -1, 1, 23 * 60 + 30)],
+                {20003: (0, 0), -1: (40, 40)},
+                {20003: "03", -1: "A"},
+            ),
+            max_routes_per_run=50,
+            dispatch_window=[23 * 60, 7 * 60],
+            prune_to_window=True,
+        )
+
+    def test_rows_the_game_really_removed_read_as_pruned(self):
+        svc = _FakeLiveSvc(delete_status="unverified", delete_applies=True)
+        res = self._run(svc)
+
+        assert res.problems == [], res.problems
+        assert any("pruned" in d for d in res.disables), res.disables
+
+    def test_rows_still_on_the_page_are_reported(self):
+        svc = _FakeLiveSvc(delete_status="unverified", delete_applies=False)
+        res = self._run(svc)
+
+        assert any("STILL THERE" in p for p in res.problems), res.problems
 
 
 class TestTheRowBudgetCountsWhatSurvives:

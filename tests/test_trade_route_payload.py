@@ -429,6 +429,57 @@ class TestTheDeleteBodyMatchesTheClient:
         assert len(client.logged_activity) == 1
 
 
+class TestTheDeleteReadsItsOwnResponse:
+    """The one destructive call read nothing back from its own answer.
+
+    `delete_routes` discarded `delete_json`'s return, so every 2xx was
+    `deleted` -- including a body naming per-route errors, an HTML soft-block,
+    or anything that is not an object at all. Both callers verify by re-reading
+    the marketplace, but the execute path only re-read on `status == "deleted"`,
+    which this always was: one call site away from being the only guard.
+    """
+
+    def _service_returning(self, body):
+        client = _RecordingClient()
+
+        async def _delete(url, *, data=None, **kw):
+            client.sent.append(("DELETE", url, data))
+            return body
+
+        client.delete_json = _delete
+        return TradeRouteService(client, live_enabled=True, reconciler_verified=True), client
+
+    def _routes(self, n=3):
+        return [
+            ExistingRoute(route_id=i, dest_village_id=20044, dest_x=0, dest_y=0)
+            for i in range(1, n + 1)
+        ]
+
+    def test_a_clean_response_is_a_clean_delete(self):
+        service, _ = self._service_returning({"routes": [{"id": 1}, {"id": 2}, {"id": 3}]})
+        assert asyncio.run(service.delete_routes(20031, self._routes())).status == "deleted"
+
+    def test_a_rejected_route_makes_the_whole_delete_a_failure(self):
+        service, _ = self._service_returning(
+            {"routes": [{"id": 1}, {"id": 2, "error": "nope"}, {"id": 3}]}
+        )
+        result = asyncio.run(service.delete_routes(20031, self._routes()))
+
+        assert result.status == "failed"
+        assert "1 of 3" in result.detail
+        assert "[2]" in result.detail
+
+    def test_a_body_we_cannot_read_is_unverified_not_deleted(self):
+        # Same third verdict the toggles carry, for the same reason: the request
+        # returned success, so the rows are probably gone -- and "probably" is
+        # not "deleted". The caller re-reads the page and decides from state.
+        for body in ({}, None, {"other": 1}, "not json at all"):
+            service, _ = self._service_returning(body)
+            result = asyncio.run(service.delete_routes(20031, self._routes()))
+            assert result.status == "unverified", f"body {body!r} must not read as success"
+            assert "cannot be confirmed" in result.detail
+
+
 class TestTheBulkToggleReadsItsOwnResponse:
     """The toggle, unlike the create, answers with a body -- and the game's own
     client reads it, counting entries with an `error`. Ignoring it meant a

@@ -5334,7 +5334,7 @@ async def post_revert_plan(
                     f"{plan.manual_delete_ids} ({exc}); they must be removed by hand"
                 )
                 continue
-            if removed is None or removed.status != "deleted":
+            if removed is None or removed.status not in ("deleted", "unverified"):
                 detail = removed.detail if removed is not None else "no request was made"
                 problems.append(
                     f"village {origin}: delete failed ({detail}); the route(s) "
@@ -7328,11 +7328,18 @@ async def post_execute(
                                             f"prune {len(_ids)} out-of-window row(s) "
                                             f"({exc}); the route ships round the clock"
                                         )
-                                    if _res is not None and _res.status == "deleted":
+                                    if _res is not None and _res.status in (
+                                        "deleted",
+                                        "unverified",
+                                    ):
                                         # Verified like every other write here: a
                                         # delete that reports success and leaves the
                                         # rows behind is the same class of false
-                                        # outcome as an unverified create.
+                                        # outcome as an unverified create. An
+                                        # UNREADABLE answer is settled the same
+                                        # way -- the request returned success, and
+                                        # the page is what says whether the rows
+                                        # went.
                                         _survivors: list[int] = []
                                         try:
                                             _left = await svc.confirm_routes(
