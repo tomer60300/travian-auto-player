@@ -79,6 +79,7 @@ import {
   describeRelayFor,
   describeRelayPermission,
   describeSpendSource,
+  foreignTargetIsDraft,
   isConsumptionRate,
   isEmptyTemplate,
   isMaxBusyMerchants,
@@ -368,19 +369,12 @@ const LS_RESERVED_WINDOW = 'planner_reserved_window'
 // Only complete rows go to the backend: a half-typed target would 422 the
 // whole request, and the operator is mid-edit, not in error. Shared by the
 // plan build and the full-day check so both see the same tributes.
-/** A coordinate the operator actually typed. Blank is not 0.
- *
- * `Number('') || 0` turned a cleared box into (0|0) -- the middle of the map --
- * while the box on screen still read blank, so a half-typed tribute was planned
- * against a village that is not where it is, with the distance, the cycle and
- * the merchant count all computed from the wrong tile. A row missing one is a
- * draft, on exactly the rule its missing name or crop rate already followed.
- */
-const hasCoord = (value) => String(value).trim() !== '' && Number.isFinite(Number(value))
-
-const foreignTargetIsDraft = (t) =>
-  !String(t.name).trim() || !(Number(t.crop_per_hour) > 0) || !hasCoord(t.x) || !hasCoord(t.y)
-
+// `foreignTargetIsDraft` moved to `plannerSetup.js`, where the DOCUMENT writer
+// can reach it too. It lived here, so `buildSetup` had no way to apply it and
+// wrote a fresh "+ Add target" row into the document verbatim -- which made the
+// whole setup unsaveable until the row was finished or deleted. One predicate,
+// three readers: the request below, the table's "incomplete" badge, and the
+// document.
 const usableForeignTargets = (targets, villages = []) =>
   targets
     .filter((t) => !foreignTargetIsDraft(t))

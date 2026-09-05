@@ -1028,6 +1028,61 @@ export function storedRoleTemplates(templates) {
   return out
 }
 
+/** One `HH:MM` box, filled in. The single copy of this shape in the file --
+ *  `parseClockPair` reads it too, because two copies of a clock-time regex is
+ *  how one of them comes to accept "6am". */
+const isClockTime = (value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value))
+
+/** The profile windows a DOCUMENT can carry: both boxes typed.
+ *
+ * A window is two `HH:MM` inputs, so there is a moment where only one of them
+ * is filled in. The REQUEST has always handled it -- `dispatchWindowFor`
+ * collapses the unusable shapes to null and `buildSegments` skips the profile --
+ * while the writer stored the pair raw, and `["07:00", ""]` is refused by this
+ * file's own `parseClockPair` and by the server's `_ClockTime`. So "Save setup
+ * to server" failed for as long as one box was mid-edit.
+ *
+ * NOT `dispatchWindowFor`, deliberately: that also collapses a ZERO-WIDTH pair,
+ * because a request has nothing to do with one. A document is what the operator
+ * typed, both boxes are filled, and the parser and the server both take it --
+ * dropping it would lose typed state over a rule that belongs to the request.
+ */
+export function storedProfileWindows(windows) {
+  const out = {}
+  for (const [name, pair] of Object.entries(windows ?? {})) {
+    if (!Array.isArray(pair) || pair.length !== 2) continue
+    if (!pair.every(isClockTime)) continue
+    out[name] = [String(pair[0]), String(pair[1])]
+  }
+  return out
+}
+
+/** A coordinate the operator actually typed. Blank is not 0.
+ *
+ * `Number('') || 0` turned a cleared box into (0|0) -- the middle of the map --
+ * while the box on screen still read blank, so a half-typed tribute was planned
+ * against a village that is not where it is, with the distance, the cycle and
+ * the merchant count all computed from the wrong tile.
+ */
+const hasCoord = (value) => String(value).trim() !== '' && Number.isFinite(Number(value))
+
+/** Is this row the operator mid-edit rather than an obligation?
+ *
+ * `+ Add target` seeds a row with no name, no rate and 0|0, and it is filled in
+ * from there. Shared by the plan request, the table's own "incomplete" badge and
+ * the document writer, so all three agree about which rows exist -- it lived in
+ * the page, where the document writer could not reach it, which is how a fresh
+ * draft came to make the whole setup unsaveable.
+ */
+export function foreignTargetIsDraft(target) {
+  return (
+    !String(target?.name ?? '').trim() ||
+    !(Number(target?.crop_per_hour) > 0) ||
+    !hasCoord(target?.x) ||
+    !hasCoord(target?.y)
+  )
+}
+
 /** The foreign targets as a DOCUMENT carries them: exclusions RESOLVED to ids.
  *
  * The page holds each exclusion twice -- `exclude_origins` as ids, and
@@ -1051,11 +1106,34 @@ export function storedRoleTemplates(templates) {
  * list would only make the document look like it had an answer.
  */
 export function storedForeignTargets(targets, villages) {
-  return (targets ?? []).map((target) => {
-    const { exclude_origins_text: _typed, exclude_origins: _ids, ...rest } = target
-    const excluded = excludedOriginIds(target, villages)
-    return excluded.length ? { ...rest, exclude_origins: excluded } : rest
-  })
+  return (targets ?? [])
+    // A draft is the operator mid-edit, not in error, so it is left out rather
+    // than refused -- the same rule and the same predicate the plan request
+    // uses. Written raw, pressing "+ Add target" made the whole setup
+    // unsaveable: the PUT 422'd on `name` and `crop_per_hour`, and the export
+    // wrote a file `parseForeignTargets` refuses with "has no name".
+    .filter((target) => !foreignTargetIsDraft(target))
+    .map((target) => {
+      const excluded = excludedOriginIds(target, villages)
+      // Rebuilt field by field, as the request row is, so what the page happens
+      // to be holding cannot leak into the document. The boxes hand back
+      // STRINGS, and a string is what broke the cadence: the select writes
+      // `e.target.value`, so going back to "any" stored `''`, `Number('')` is 0,
+      // and 0 is not one of Travian's repeat intervals -- refused by the parser
+      // and by the server over a control reading "any" on screen.
+      return {
+        name: String(target.name).trim(),
+        x: Number(target.x),
+        y: Number(target.y),
+        crop_per_hour: Number(target.crop_per_hour),
+        safety_margin_pct: Number(target.safety_margin_pct) || 0,
+        route_eligible: Boolean(target.route_eligible),
+        ...(Number(target.max_cycle_hours) > 0
+          ? { max_cycle_hours: Number(target.max_cycle_hours) }
+          : {}),
+        ...(excluded.length ? { exclude_origins: excluded } : {}),
+      }
+    })
 }
 
 export class SetupFileError extends Error {}
@@ -1172,9 +1250,12 @@ export function buildSetup({
   // it raw -- the plan ran, the save 422'd on `roles.<role>.consumption`, and
   // the export wrote a file this file's own parser refuses.
   if (roles && Object.keys(roles).length) doc.roles = storedRoleTemplates(roles)
-  if (profileWindows && Object.keys(profileWindows).length) {
-    doc.profile_windows = profileWindows
-  }
+  // Only the pairs with both boxes filled in. A half-typed window is the
+  // operator mid-edit, and written raw it made the whole document unsaveable:
+  // `["07:00", ""]` is refused by `parseClockPair` here and by `_ClockTime` on
+  // the server.
+  const windows = storedProfileWindows(profileWindows)
+  if (Object.keys(windows).length) doc.profile_windows = windows
   // Beside the hours, because it is a question ABOUT the hours: "who is
   // trading during this window". A third sibling map keyed by profile name
   // rather than a field on the window pair, so a profile can carry an answer
@@ -1533,7 +1614,7 @@ function parseClockPair(pair, where) {
     throw new SetupFileError(`${where} must be a [start, end] pair.`)
   }
   for (const t of pair) {
-    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(t))) {
+    if (!isClockTime(t)) {
       throw new SetupFileError(`${where} has "${t}", which is not HH:MM.`)
     }
   }

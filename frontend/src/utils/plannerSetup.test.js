@@ -676,6 +676,113 @@ describe('a typed exclusion survives the document round trip', () => {
   })
 })
 
+// `+ Add target` seeds a row with no name, no rate and 0|0 for coordinates, and
+// the operator fills it in from there. The REQUEST has always dropped such a row
+// -- `usableForeignTargets` filters on `foreignTargetIsDraft`, and the badge in
+// the table reads off the same predicate -- while the document wrote it raw. So
+// pressing "+ Add target" made the whole setup unsaveable until the row was
+// finished or deleted: the PUT 422'd on `name` and `crop_per_hour`, and the
+// export wrote a file `parseForeignTargets` refuses ("has no name").
+//
+// A draft is the operator mid-edit, not in error, so it is left out rather than
+// refused -- which is what every other half-typed cell in this document does.
+describe('a half-typed foreign target does not block the document', () => {
+  const REAL = {
+    name: '01Arb',
+    x: 46,
+    y: 133,
+    crop_per_hour: 25700,
+    safety_margin_pct: 0,
+    route_eligible: true,
+  }
+  const DRAFT = { name: '', x: 0, y: 0, crop_per_hour: '', safety_margin_pct: 5, route_eligible: false }
+
+  it('writes the finished target and leaves the draft out', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      foreignTargets: [REAL, DRAFT],
+      exportedAt: STAMP,
+    })
+
+    expect(setup.foreign_targets).toEqual([REAL])
+    expect(() => roundTrip(setup)).not.toThrow()
+  })
+
+  it('omits the field entirely when every row is a draft', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 5 },
+      foreignTargets: [DRAFT],
+      exportedAt: STAMP,
+    })
+
+    expect('foreign_targets' in setup).toBe(false)
+  })
+
+  it('drops a cadence the operator selected and then cleared', () => {
+    // The select writes `e.target.value`, so going back to "any" stores `''`.
+    // `Number('')` is 0, which is not one of Travian's repeat intervals, so the
+    // parser refused the file and the backend refused the save over a control
+    // that reads "any" on screen.
+    const cleared = [{ ...REAL, max_cycle_hours: '' }]
+    const setup = buildSetup({ villages: VILLAGES, foreignTargets: cleared, exportedAt: STAMP })
+
+    expect('max_cycle_hours' in setup.foreign_targets[0]).toBe(false)
+    expect(roundTrip(setup).foreignTargets[0].max_cycle_hours).toBeNull()
+  })
+
+  it('keeps a cadence that was actually chosen, as a number', () => {
+    const chosen = [{ ...REAL, max_cycle_hours: '8' }]
+    const setup = buildSetup({ villages: VILLAGES, foreignTargets: chosen, exportedAt: STAMP })
+
+    expect(setup.foreign_targets[0].max_cycle_hours).toBe(8)
+  })
+})
+
+// A profile window is two `HH:MM` boxes, so there is a moment where only one is
+// typed. The REQUEST has always handled it -- `dispatchWindowFor` collapses the
+// unusable shapes to null and `buildSegments` skips the profile -- while the
+// document wrote the pair raw, and `["07:00", ""]` is refused by this file's own
+// `parseClockPair` and by the server's `_ClockTime`. "Save setup to server"
+// therefore failed for as long as one box was mid-edit.
+describe('a half-typed profile window does not block the document', () => {
+  it('writes the finished windows and leaves the half-typed one out', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      profileWindows: { Day: ['07:00', '23:00'], Night: ['23:00', ''] },
+      exportedAt: STAMP,
+    })
+
+    expect(setup.profile_windows).toEqual({ Day: ['07:00', '23:00'] })
+    expect(() => roundTrip(setup)).not.toThrow()
+  })
+
+  it('omits the map entirely when no profile has a usable pair', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 5 },
+      profileWindows: { Day: ['', ''] },
+      exportedAt: STAMP,
+    })
+
+    expect('profile_windows' in setup).toBe(false)
+  })
+
+  // NOT `dispatchWindowFor`, deliberately. That helper also collapses a
+  // ZERO-WIDTH pair, because a request has nothing to do with one -- but a
+  // document is what the operator typed, both boxes are filled, and the parser
+  // and the server both accept it. Dropping it would lose typed state.
+  it('keeps a zero-width pair, which is typed rather than half-typed', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      profileWindows: { Day: ['07:00', '07:00'] },
+      exportedAt: STAMP,
+    })
+
+    expect(setup.profile_windows).toEqual({ Day: ['07:00', '07:00'] })
+  })
+})
+
 describe('allocation values are whole units', () => {
   it('rounds a raw-computation float from a file to something an input box can hold', () => {
     // Seen live: a stored 43726.200918351606 rendered verbatim in the Value
