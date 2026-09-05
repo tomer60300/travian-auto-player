@@ -6239,6 +6239,21 @@ async def post_execute(
     requests and, like /plan, is auth-only — it never resolves a live session, so
     it works offline. Only ``execution_mode: "live"`` writes.
     """
+    # Consent to write, resolved ONCE from the request exactly as it arrived,
+    # before anything derives another model from it. `dry_run` is validated
+    # against this on the way in and is never read again anywhere below: a
+    # second field that could still decide is a second way to get this wrong.
+    #
+    # Once, and off `body`, because `_execution_mode_is_unambiguous` decides
+    # from `model_fields_set` -- request-boundary provenance and nothing else.
+    # `model_copy(update=...)`, which the whole-day path uses to build a
+    # per-segment body, marks the fields it updates as explicitly set; a
+    # `model_dump()` -> re-validate round trip emits every default and makes all
+    # of them look explicit. Reading the mode off a model derived from the body
+    # could therefore reach a different answer than the operator gave, on the
+    # one endpoint where the answer is "may this touch a real account".
+    requested_mode = body.execution_mode
+    live_run = requested_mode == "live"
     if body.segments:
         # One optimizer pass per profile, each in its own hours -- identical to
         # how /day-check plans them, so execute and the day picture can never
@@ -6499,10 +6514,8 @@ async def post_execute(
         else:
             protected_ids.add(int(_text))
 
-    # `execution_mode` alone. `dry_run` is validated against it on the way in
-    # and is never read here: a second field that could still decide is a second
-    # way to get this wrong.
-    if body.execution_mode == "preview":
+    # The mode resolved at the top of this handler, never re-read here.
+    if not live_run:
         # Zero game requests: the exact routes already on each marketplace are
         # unknown here, so this previews the DESIRED plan against a worst-case
         # empty marketplace (first `cap` created, the rest deferred). The live
@@ -6767,7 +6780,7 @@ async def post_execute(
         # server was even allowed to honour it. Three separate facts: a trace
         # that records only the outcome cannot answer "was this run asked for?"
         # afterwards, which is the question a surprise write raises.
-        execution_mode_requested=body.execution_mode,
+        execution_mode_requested=requested_mode,
         execution_mode_resolved="live",
         env_brake_open=live_enabled,
         live_enabled=live_enabled,

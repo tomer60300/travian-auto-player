@@ -430,6 +430,107 @@ class TestConsentToWriteIsNamedNotInferred:
         assert res.status_code == 422, res.text
 
 
+class TestTheModeIsResolvedOnceAtTheBoundary:
+    """Consent to write is read from the request as it ARRIVED, once.
+
+    `_execution_mode_is_unambiguous` decides from `model_fields_set`, which is
+    request-boundary provenance and nothing else: `model_copy(update=...)` --
+    which the whole-day path uses to build a per-segment body -- marks the fields
+    it updates as explicitly set, and any `model_dump()` -> re-validate round
+    trip emits every default and makes ALL of them look explicit. A handler that
+    re-reads `execution_mode` or `dry_run` off a model derived from the body can
+    therefore reach a different answer than the one the operator gave, on the one
+    endpoint where the answer is "may this touch a real account".
+
+    So the mode is resolved once, at the top, into a plain local, and everything
+    below reads that.
+    """
+
+    def test_the_handler_reads_the_mode_off_the_body_exactly_once(self):
+        """A structural pin, because the failure it guards against is invisible
+        in behaviour until the day some derived model is passed where `body` is
+        expected."""
+        import ast
+        import inspect
+        import textwrap
+
+        from travian_api.web.routes import distribution as dist_module
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(dist_module.post_execute)))
+        reads = [
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "body"
+            and node.attr in ("execution_mode", "dry_run")
+        ]
+
+        assert reads.count("execution_mode") == 1, (
+            f"post_execute reads body.execution_mode {reads.count('execution_mode')} "
+            f"times; it must be resolved once into a local and read from there"
+        )
+        assert "dry_run" not in reads, (
+            "post_execute reads body.dry_run; `dry_run` never decides anything, "
+            "and a second field that could still decide is a second way to get "
+            "this wrong"
+        )
+
+    def test_dry_run_null_is_refused_rather_than_read_as_omitted(self, client):
+        """`null` is not "unset". Treating it as omission would make
+        `{"dry_run": null}` mean whatever the default means, which is the exact
+        inference this field was demoted for."""
+        res = client.post(
+            "/api/distribution/execute",
+            json=_plan_body(dry_run=None, max_routes_per_run=5),
+        )
+
+        assert res.status_code == 422, res.text
+
+    def test_a_null_mode_is_refused(self, client):
+        res = client.post(
+            "/api/distribution/execute",
+            json=_plan_body(execution_mode=None, max_routes_per_run=5),
+        )
+
+        assert res.status_code == 422, res.text
+
+    # ── The sweep's own request shape ──────────────────────────────────────
+    #
+    # The account-wide reconcile is the request that touches every village, and
+    # the page sends it as its own shape: `reconcile_all_origins` with a
+    # per-chunk origin cap. Pinned here end to end, because a mode resolved
+    # anywhere but the boundary would be resolved on the body this shape builds.
+
+    def _sweep(self, **extra):
+        return _plan_body(
+            reconcile_all_origins=True,
+            max_origins_per_run=5,
+            max_routes_per_run=5,
+            **extra,
+        )
+
+    def test_the_sweep_shape_with_live_takes_the_live_branch(self, client):
+        res = client.post("/api/distribution/execute", json=self._sweep(execution_mode="live"))
+
+        # No connected session on this fixture, so the live branch's first gate
+        # answers 403. A 200 would mean it previewed.
+        assert res.status_code == 403, res.text
+        assert "Not connected" in str(res.json()["detail"])
+
+    def test_the_same_sweep_shape_without_the_mode_previews(self, client):
+        res = client.post("/api/distribution/execute", json=self._sweep())
+
+        assert res.status_code == 200, res.text
+        assert res.json()["dry_run"] is True
+
+    def test_the_same_sweep_shape_with_dry_run_false_alone_is_refused(self, client):
+        res = client.post("/api/distribution/execute", json=self._sweep(dry_run=False))
+
+        assert res.status_code == 422, res.text
+        assert "execution_mode" in str(res.json()["detail"])
+
+
 class TestTheRunHistoryContract:
     def test_run_history_serialises(self, client):
         res = client.get("/api/distribution/run-history", params={"limit": 5})

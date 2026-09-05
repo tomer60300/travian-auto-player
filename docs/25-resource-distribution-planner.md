@@ -1700,6 +1700,22 @@ the disable's **own** read-back — which the run already takes, at that point,
 to decide whether it may create on top — so nothing extra is read, and a row
 that read-back could not see is `unknown` rather than assumed.
 
+**Consent to write is resolved once, at the boundary.**
+`_execution_mode_is_unambiguous` decides from `model_fields_set`, which is
+request-boundary provenance and nothing else — and the handler derives models
+from the body: `model_copy(update=...)` builds a per-segment body for a
+whole-day run and marks the fields it updates as explicitly set, while any
+`model_dump()` → re-validate round trip emits every default and makes *all* of
+them look explicit (a live body round-tripped that way now carries an explicit
+`dry_run: true` and is refused as contradictory). Reading `execution_mode` off
+a derived model could therefore reach a different answer than the operator
+gave, on the one endpoint where the answer is "may this touch a real account".
+The mode is now read off `body` exactly **once**, into a plain local, and
+`dry_run` is not read in the handler at all — pinned by a structural test that
+parses the handler rather than by behaviour, because the failure it guards
+against is invisible until the day a derived model is passed where `body` is
+expected.
+
 **Going live for the first time is its own document.**
 [`docs/26-first-live-run.md`](26-first-live-run.md) is the step-by-step
 protocol these fixes earned — what to settle before anything touches the game,
