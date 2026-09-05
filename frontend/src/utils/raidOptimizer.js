@@ -203,6 +203,42 @@ function capRange(unit, invK) {
   return Math.min(invK, invK >= 150 ? 150 : 100)
 }
 
+// Phase 1's cost is the PRODUCT of its five per-unit bounds. capRange() alone
+// still lets that product reach the billions for a real, all-five-slots-full
+// Teuton stockpile (1500/200/800/60/400 -> 150/20/150/40/130 -> ~2.5B), which
+// locks up whatever thread runs it for tens of seconds to minutes. Phase 2
+// (R-based bottleneck-tight enumeration, below) already covers every
+// Pareto-optimal packet phase 1's caps can't reach, so shrinking phase 1
+// further than capRange() costs no correctness -- only exhaustiveness in the
+// mid-band it exists to cover, and only once the naive product is already
+// too large to be a "mid-band, small-packet" search in any useful sense.
+const PHASE1_BUDGET = 1_000_000
+
+// Scale five independent per-unit caps down together (proportionally, in
+// log-space) so the product of (cap+1) fits `budget`, without any cap ever
+// exceeding its own raw value. A no-op whenever the raw product already fits
+// -- which covers every case capRange() was tuned against, including the
+// small early-game army this file's own comment measures at ~600k.
+function fitCapsToBudget(rawCaps, budget) {
+  const rawProduct = rawCaps.reduce((p, c) => p * (c + 1), 1)
+  if (rawProduct <= budget) return rawCaps
+
+  const scale = Math.pow(budget / rawProduct, 1 / rawCaps.length)
+  const caps = rawCaps.map((c) => Math.min(c, Math.max(0, Math.round((c + 1) * scale) - 1)))
+
+  // Rounding can still leave the product a hair over budget -- trim the
+  // currently-largest cap down by one at a time until it fits.
+  let product = caps.reduce((p, c) => p * (c + 1), 1)
+  while (product > budget) {
+    let idx = 0
+    for (let i = 1; i < caps.length; i++) if (caps[i] > caps[idx]) idx = i
+    if (caps[idx] <= 0) break
+    product = (product / (caps[idx] + 1)) * caps[idx]
+    caps[idx] -= 1
+  }
+  return caps
+}
+
 // Composition id string used for rank lookups.
 function compId(v) {
   return UNITS.map((u) => v.p[u.key]).join(',')
@@ -351,11 +387,13 @@ export function findCompositions(inv, defZero, defBudget, budget, smithyLv) {
 
   // ── PHASE 1 ─ exhaustive small-packet sweep (gated by defZero > 0) ──
   if (defZero > 0) {
-    const maxC  = capRange(UNIT_BY_KEY.c,  inv.c)
-    const maxSp = capRange(UNIT_BY_KEY.sp, inv.sp)
-    const maxA  = capRange(UNIT_BY_KEY.a,  inv.a)
-    const maxPa = capRange(UNIT_BY_KEY.pa, inv.pa)
-    const maxT  = capRange(UNIT_BY_KEY.t,  inv.t)
+    const [maxC, maxSp, maxA, maxPa, maxT] = fitCapsToBudget([
+      capRange(UNIT_BY_KEY.c,  inv.c),
+      capRange(UNIT_BY_KEY.sp, inv.sp),
+      capRange(UNIT_BY_KEY.a,  inv.a),
+      capRange(UNIT_BY_KEY.pa, inv.pa),
+      capRange(UNIT_BY_KEY.t,  inv.t),
+    ], PHASE1_BUDGET)
 
     // Precomputed maxOFF from deeper loop levels, for subtree pruning.
     const maxOffAfterC  = maxSp * atkSp + maxA * atkA + maxPa * atkPa + maxT * atkT

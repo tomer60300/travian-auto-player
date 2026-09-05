@@ -489,15 +489,34 @@ export default function RaidOptimizer() {
   const totalInv     = c + sp + a + pa + t
   const invalidDefs  = defBudget < defZero
   const invalidBudget = budget < 0
+  // REFUSES while the troop read is unaccounted for. Computing here would
+  // produce four ranked deployments off numbers nobody supplied.
+  const canCompute = !troopsError && totalInv > 0 && !invalidDefs && !invalidBudget
 
-  const result = useMemo(() => {
-    // REFUSES while the troop read is unaccounted for. Computing here would
-    // produce four ranked deployments off numbers nobody supplied.
-    if (troopsError || totalInv === 0 || invalidDefs || invalidBudget) {
-      return { balance: null, raids: null, zero: null, death: null, atks: null }
+  const [result, setResult] = useState({ balance: null, raids: null, zero: null, death: null, atks: null })
+  const [computing, setComputing] = useState(false)
+
+  // `findCompositions` is bounded (raidOptimizer.js's PHASE1_BUDGET keeps its
+  // search under a second even for a real, all-five-slots-full army), but it
+  // is still a synchronous JS loop -- run inside a render-phase `useMemo` it
+  // blocked the commit that would have shown the operator's own typed input
+  // until it finished. A real Teuton army pushed that past two minutes with
+  // the tab frozen throughout. Computing in an effect instead lets the
+  // browser paint first (including a loading state), and `setTimeout` defers
+  // the actual search to its own macrotask so that paint isn't skipped.
+  useEffect(() => {
+    if (!canCompute) {
+      setResult({ balance: null, raids: null, zero: null, death: null, atks: null })
+      setComputing(false)
+      return
     }
-    return findCompositions(inv, defZero, defBudget, budget, smithyLv)
-  }, [inv, defZero, defBudget, budget, smithyLv, totalInv, invalidDefs, invalidBudget, troopsError])
+    setComputing(true)
+    const handle = setTimeout(() => {
+      setResult(findCompositions(inv, defZero, defBudget, budget, smithyLv))
+      setComputing(false)
+    }, 0)
+    return () => clearTimeout(handle)
+  }, [inv, defZero, defBudget, budget, smithyLv, canCompute])
 
   const tribeMismatch = tribeId != null && tribeId !== 2
   const hasResult = !!result.balance
@@ -614,6 +633,8 @@ export default function RaidOptimizer() {
             <><strong>Empty inventory.</strong> Enter at least one troop count or auto-fill.</>
           ) : invalidDefs ? (
             <><strong>Invalid:</strong> Budget DEF ({defBudget}) must be ≥ Zero-Cas DEF ({defZero}).</>
+          ) : computing && !hasResult ? (
+            <>Computing strategies…</>
           ) : !hasResult ? (
             <>
               Inventory: <strong>{invStr}</strong> &nbsp;|&nbsp;
@@ -635,7 +656,11 @@ export default function RaidOptimizer() {
       {/* Primary results */}
       <div className="flex justify-between items-baseline mb-4 border-b border-default pb-2">
         <h3 className="heading-gold text-lg" style={{ color: STRAT_COLOR.balance }}>OPTIMAL DEPLOYMENTS</h3>
-        {hasResult && (
+        {computing ? (
+          <span className="text-[0.65rem] tracking-[0.15em] uppercase text-secondary font-mono flex items-center gap-2">
+            <span className="spinner spinner-sm" /> Computing…
+          </span>
+        ) : hasResult && (
           <span className="text-[0.65rem] tracking-[0.15em] uppercase text-secondary font-mono">
             4 strategies{totalAlts > 0 ? ` · ${totalAlts} alts` : ''}
           </span>
@@ -657,6 +682,11 @@ export default function RaidOptimizer() {
               budget={budget} defBudget={defBudget} atks={result.atks} />
           </div>
         </>
+      ) : computing ? (
+        <div className="card text-center py-12 border-dashed">
+          <div className="spinner spinner-md" style={{ margin: '0 auto' }} />
+          <div className="font-semibold uppercase tracking-wider mt-3">Computing strategies…</div>
+        </div>
       ) : troopsError ? (
         <div className="card text-center py-12 border-dashed">
           <div className="font-semibold uppercase tracking-wider">Nothing to optimise yet</div>
