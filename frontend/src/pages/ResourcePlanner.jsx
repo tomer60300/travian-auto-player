@@ -4718,6 +4718,16 @@ export default function ResourcePlanner() {
                               {allowed != null && (
                                 <button
                                   type="button"
+                                  // The row it belongs to, in the name -- the
+                                  // same rule as the checkboxes above it and
+                                  // for the same reason: on 26 villages this is
+                                  // 26 buttons all called "Lift restriction",
+                                  // and neither a screen-reader user nor a
+                                  // `getByRole` locator can tell whose
+                                  // restriction one lifts. The visible words
+                                  // stay inside the fuller name, so speech
+                                  // input can still say what is on the button.
+                                  aria-label={`Lift restriction for ${v.name}`}
                                   className="underline mt-1"
                                   onClick={() =>
                                     setShipOnlyTo((prev) => {
@@ -4803,6 +4813,9 @@ export default function ResourcePlanner() {
                               {forwards != null && (
                                 <button
                                   type="button"
+                                  // Named like "Lift restriction" beside it,
+                                  // and duplicated just as widely.
+                                  aria-label={`Stop relaying for ${v.name}`}
                                   className="underline mt-1"
                                   onClick={() =>
                                     setRelayFor((prev) => {

@@ -85,6 +85,43 @@ test.describe('every control says what it acts on', () => {
     ).toHaveCount(0)
   })
 
+  // Same family as the checkboxes above, and reported on the same account: the
+  // two picker panels each end in a button whose name says WHAT it does and not
+  // what it does it to. On 26 villages that is 26 buttons called "Lift
+  // restriction" and 26 called "Stop relaying", none of which says whose
+  // restriction is being lifted -- and either a screen-reader user or a
+  // `getByRole` locator has to guess.
+  test('"Lift restriction" names the village whose restriction it lifts', async ({ page }) => {
+    await openAccount(page, { planner_ship_only_to: { 20002: [20011], 20011: [] } })
+    await openEveryPicker(page)
+
+    await expect(page.getByRole('button', { name: 'Lift restriction for 02' })).toHaveCount(1)
+    await expect(page.getByRole('button', { name: 'Lift restriction for 11' })).toHaveCount(1)
+    await expect(
+      page.getByRole('button', { name: 'Lift restriction', exact: true })
+    ).toHaveCount(0)
+  })
+
+  test('"Stop relaying" does the same', async ({ page }) => {
+    await openAccount(page, { planner_relay_for: { 20002: [20011], 20011: [20002] } })
+    await openEveryPicker(page)
+
+    await expect(page.getByRole('button', { name: 'Stop relaying for 02' })).toHaveCount(1)
+    await expect(page.getByRole('button', { name: 'Stop relaying for 11' })).toHaveCount(1)
+    await expect(page.getByRole('button', { name: 'Stop relaying', exact: true })).toHaveCount(0)
+  })
+
+  // The visible text is still "Lift restriction", so the accessible name has to
+  // contain it -- WCAG 2.5.3, and the reason speech input can still say what is
+  // on the button.
+  test('the visible words survive inside the fuller name', async ({ page }) => {
+    await openAccount(page, { planner_ship_only_to: { 20002: [20011] } })
+    await openEveryPicker(page)
+
+    const button = page.getByRole('button', { name: 'Lift restriction for 02' })
+    await expect(button).toHaveText('Lift restriction')
+  })
+
   test('the two window editors do not share a name', async ({ page }) => {
     await isolate(page)
     await seed(page, { planner_profiles: { Day: {}, Night: {} } })
