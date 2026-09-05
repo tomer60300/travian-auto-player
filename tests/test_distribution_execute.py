@@ -1804,6 +1804,42 @@ class TestAnOffScheduleDestinationIsOnlyDisabledIfItCanBeRebuilt:
         assert self._still_active(svc, starved)
         assert res.problems, "a destination left diverging is never silent"
 
+    def _emptied(self, svc):
+        return [d for d in (20011, 20019) if not self._still_active(svc, d)]
+
+    def test_a_refused_rebuild_names_the_destination_it_emptied(self):
+        # Reserving the budget is necessary and not sufficient. The reservation
+        # is spent whatever the game ANSWERS, so a refused create leaves the
+        # destination switched off and receiving nothing at all -- and a single
+        # refusal is below the consecutive-failure limit, so nothing else says a
+        # word. Measured before the fix: created=0, disables=['03: disabled 8
+        # route(s)'], problems=[] -- a green run over a village that has stopped
+        # being supplied.
+        svc = _FakeLiveSvc(existing=self._existing(), create_status="failed", phantom_creates=True)
+        res = _run_live(
+            svc, _two_destination_account(), disable_existing=True, max_routes_per_run=1
+        )
+
+        emptied = self._emptied(svc)
+        assert len(emptied) == 1, "exactly one destination was reserved and switched off"
+        name = {20011: "11", 20019: "19"}[emptied[0]]
+        assert any(name in problem for problem in res.problems), (
+            f"nothing names {name}, whose rows this run switched off and could not "
+            f"replace: {res.problems}"
+        )
+
+    def test_a_rebuild_that_landed_after_a_dead_answer_is_not_reported_as_emptied(self):
+        # The other half: same refused answer, but the rows are on the page --
+        # the read-back promotes the create, so the destination IS supplied and
+        # the line above must be withdrawn rather than left standing.
+        svc = _FakeLiveSvc(existing=self._existing(), create_status="failed")
+        res = _run_live(
+            svc, _two_destination_account(), disable_existing=True, max_routes_per_run=1
+        )
+
+        assert self._emptied(svc) == [], "the rebuild landed, so nothing is left empty"
+        assert not any("REFUSED the replacement" in p for p in res.problems), res.problems
+
 
 class TestAControlledRunCanTargetOnePair:
     """The first live run against a real account must be exactly one chosen route.

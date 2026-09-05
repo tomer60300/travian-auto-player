@@ -6875,6 +6875,12 @@ async def post_execute(
                     # refused, and are settled by the same read-back every other
                     # write here is settled by.
                     attempted_here: list[tuple[RouteActionResponse, PlannedRoute]] = []
+                    # Problem lines raised because a refused create left a
+                    # destination whose rows this run had already switched off,
+                    # keyed by the action that raised them: if the read-back
+                    # then shows the route landed, the destination is supplied
+                    # after all and the line has to go.
+                    refused_replacements: dict[int, str] = {}
                     # Rows the window prune removed AND confirmed gone. Only
                     # these are discounted from the footprint: a prune whose own
                     # read-back failed proves nothing, and over-reporting the
@@ -7247,6 +7253,27 @@ async def post_execute(
                         failed_action = _action(row, route, "failed", result.detail)
                         actions.append(failed_action)
                         attempted_here.append((failed_action, route))
+                        if destination in replaceable:
+                            # The reservation bought this destination a create;
+                            # it did not buy it a route. Its diverging rows were
+                            # switched off before the create fired and the game
+                            # said no, so it is now receiving NOTHING -- and one
+                            # refusal is below _CONSECUTIVE_FAILURE_LIMIT, so
+                            # without this line the run reports an empty
+                            # `problems` list over a village that has stopped
+                            # being supplied. The read-back below promotes the
+                            # action and drops this line again if the rows
+                            # turn out to have landed after all.
+                            _refused_problem = (
+                                f"{village_label(origin, names)} -> "
+                                f"{failed_action.destination_name}: this run switched off its "
+                                f"diverging route(s) ({replaceable[destination]}) and the game "
+                                f"REFUSED the replacement ({result.detail}). That destination "
+                                f"is now receiving nothing — re-run to rebuild it, or "
+                                f"re-enable its old rows in game."
+                            )
+                            problems.append(_refused_problem)
+                            refused_replacements[id(failed_action)] = _refused_problem
                         consecutive_failures += 1
                         if consecutive_failures >= _CONSECUTIVE_FAILURE_LIMIT:
                             # Whatever is refusing these is not going to stop
@@ -7707,6 +7734,12 @@ async def post_execute(
                                     "marketplace read-back shows the route: it landed"
                                 )
                                 outstanding -= 1
+                                # It is supplied after all, so the "switched off
+                                # and could not replace" line raised when the
+                                # answer failed is no longer true.
+                                _refused = refused_replacements.pop(id(action), None)
+                                if _refused is not None and _refused in problems:
+                                    problems.remove(_refused)
                                 # Charged now that the rows are known to exist.
                                 # The failure branch refunded them on the
                                 # assumption nothing had reached the game.
