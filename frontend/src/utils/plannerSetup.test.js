@@ -233,14 +233,15 @@ describe('profiles in the setup file', () => {
       merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
       exportedAt: STAMP,
     })
-    // 9 since the reserved NPC-burst window landed (8 was the overnight
-    // declaration, 7 the per-profile NPC attendance, 6 profile section 5's
-    // declared relay tier, 5 the per-village merchant cap, 4 `may_relay`, 3 the
-    // role templates). Pinned to a literal on purpose: the version has to rise
+    // 10 since the window prune landed (9 was the reserved NPC-burst window, 8
+    // the overnight declaration, 7 the per-profile NPC attendance, 6 profile
+    // section 5's declared relay tier, 5 the per-village merchant cap, 4
+    // `may_relay`, 3 the role templates). Pinned to a literal on purpose: the
+    // version has to rise
     // whenever a field is added, so that an older build refuses a file it would
     // otherwise half-load, and a literal is what makes forgetting the bump a
     // failing test rather than a tautology.
-    expect(setup.version).toBe(9)
+    expect(setup.version).toBe(10)
     expect(setup.profiles.Night.crop[20030].value).toBe(-8694)
     expect(setup.profile_windows.Night).toEqual(['23:00', '07:00'])
     expect(setup.merchant_model.base_capacity).toBe(2500)
@@ -686,6 +687,84 @@ describe('a typed exclusion survives the document round trip', () => {
 //
 // A draft is the operator mid-edit, not in error, so it is left out rather than
 // refused -- which is what every other half-typed cell in this document does.
+// The window prune decides whether `/execute` DELETES game rows: Travian fans
+// "repeat every N hours" into 24/N individually deletable rows, and the prune is
+// what removes the ones departing outside the profile. It lived as
+// `useState(true)` alone -- carried by NEITHER persistence path, which is the
+// exact criterion that earned `reserved_window` its v9 bump -- so an operator
+// who turned it off saw it back ON after a reload, and the next run left every
+// out-of-window firing in place.
+describe('the window prune travels in the setup (v10)', () => {
+  it('carries a deliberate OFF, which is the answer that changes a run', () => {
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      pruneToWindow: false,
+      exportedAt: STAMP,
+    })
+
+    expect(setup.prune_to_window).toBe(false)
+    expect(roundTrip(setup).pruneToWindow).toBe(false)
+  })
+
+  it('carries an explicit ON too, because both are answers', () => {
+    // Unlike every other optional field here, `false` is not "absent". The
+    // resting state of this switch is ON, so a document that omits it must not
+    // be read as OFF -- and one that says ON must survive the trip.
+    const setup = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      pruneToWindow: true,
+      exportedAt: STAMP,
+    })
+
+    expect(setup.prune_to_window).toBe(true)
+    expect(roundTrip(setup).pruneToWindow).toBe(true)
+  })
+
+  it('reads a v9 document as saying nothing about it', () => {
+    // A build that never wrote the field is not a build that turned it off.
+    const doc = {
+      format: SETUP_FORMAT,
+      version: 9,
+      villages: [],
+    }
+
+    expect(roundTrip(doc).pruneToWindow).toBeNull()
+  })
+
+  it('refuses anything that is not a boolean, rather than coercing it', () => {
+    // The same discipline `npc_attended` and `overnight` follow, and for a
+    // consequence of the same size: the backend's `bool` is lax enough to read
+    // `"no"` as TRUE, so a hand-edited document could switch the prune back on
+    // and delete rows over a string nobody can see.
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.prune_to_window = 'no'
+
+    expect(() => roundTrip(doc)).toThrow(SetupFileError)
+    expect(() => roundTrip(doc)).toThrow(/prune_to_window/)
+  })
+
+  it('lets the document win where it has one, and says nothing where it does not', () => {
+    const carried = roundTrip(
+      buildSetup({
+        villages: VILLAGES,
+        tradeOffice: { 20030: 1 },
+        pruneToWindow: false,
+        exportedAt: STAMP,
+      })
+    )
+    expect(mergeSetup({ setup: carried, villages: VILLAGES, pruneToWindow: true }).pruneToWindow)
+      .toBe(false)
+
+    // A v9 document knows nothing about the switch, so loading one must not
+    // move it -- the same rule the reserved window follows.
+    const silent = roundTrip({ format: SETUP_FORMAT, version: 9, villages: [] })
+    expect(mergeSetup({ setup: silent, villages: VILLAGES, pruneToWindow: false }).pruneToWindow)
+      .toBe(false)
+  })
+})
+
 describe('a half-typed foreign target does not block the document', () => {
   const REAL = {
     name: '01Arb',
@@ -2552,17 +2631,19 @@ describe('the merchant cap in the setup file', () => {
     expect(Math.round(DEFAULT_TARGET_FILL * 100)).toBe(60)
   })
 
-  it('is a version 9 file, and every older one simply carries less', () => {
+  it('is a version 10 file, and every older one simply carries less', () => {
     // Retitled at every bump -- v4 (the per-village merchant cap), v5, v6
-    // (section 5's declared relay tier), v7, v8, and v9 for the reserved
-    // NPC-burst window. The contract is the RULE, not the number: the version
-    // rises whenever a field is added, so a build that cannot read the new one
-    // REFUSES a file it would otherwise half-load. A v4 build silently dropping
-    // a cap plans sixteen merchants where the operator allowed eight; a v5
-    // build dropping a relay tier reports the villages beyond it as unreachable
-    // while the answer sits on screen; a v8 build dropping the reserved window
-    // puts the manual NPC burst back into competition with arrivals.
-    expect(SETUP_VERSION).toBe(9)
+    // (section 5's declared relay tier), v7, v8, v9 for the reserved NPC-burst
+    // window, and v10 for the window prune. The contract is the RULE, not the
+    // number: the version rises whenever a field is added, so a build that
+    // cannot read the new one REFUSES a file it would otherwise half-load. A v4
+    // build silently dropping a cap plans sixteen merchants where the operator
+    // allowed eight; a v5 build dropping a relay tier reports the villages
+    // beyond it as unreachable while the answer sits on screen; a v8 build
+    // dropping the reserved window puts the manual NPC burst back into
+    // competition with arrivals; a v9 build dropping the prune leaves every
+    // out-of-window firing live in the game.
+    expect(SETUP_VERSION).toBe(10)
 
     const older = {
       format: SETUP_FORMAT,
@@ -3040,12 +3121,13 @@ describe('the reserved NPC-burst window in the setup file', () => {
       exportedAt: STAMP,
     })
 
-    // 9 since the reserved window landed (8 was the overnight declaration, 7
-    // the per-profile NPC attendance, 6 the relay tier). Pinned to a literal on
-    // purpose: the version has to rise whenever a field is added, so that an
-    // older build refuses a file it would otherwise half-load, and a literal is
-    // what makes forgetting the bump a failing test rather than a tautology.
-    expect(setup.version).toBe(9)
+    // 10 since the window prune landed (9 was the reserved window this block is
+    // about, 8 the overnight declaration, 7 the per-profile NPC attendance, 6
+    // the relay tier). Pinned to a literal on purpose: the version has to rise
+    // whenever a field is added, so that an older build refuses a file it would
+    // otherwise half-load, and a literal is what makes forgetting the bump a
+    // failing test rather than a tautology.
+    expect(setup.version).toBe(10)
     expect(setup.reserved_window).toEqual(['20:00', '21:00'])
     expect(roundTrip(setup).reservedWindow).toEqual(['20:00', '21:00'])
   })

@@ -109,6 +109,26 @@
  * LAN address and Tailscale -- the exact failure the page's own copy warns
  * about two panels earlier.
  *
+ * Version 10 adds `prune_to_window`, and it is the field with the sharpest
+ * consequence of any here: it decides whether `/execute` DELETES game rows.
+ * Travian cannot confine a route to part of the day, but its fan-out can be
+ * trimmed -- "repeat every N hours" is 24/N individually deletable rows, and
+ * the prune is what removes the ones departing outside the profile.
+ *
+ * It earns the version on exactly the criterion `reserved_window` did, and it
+ * met that criterion harder: it lived as a `useState(true)` inside the page and
+ * was carried by NEITHER persistence path, not even localStorage. So an
+ * operator who turned it off saw it back ON after a reload, and the next run
+ * left every out-of-window firing in place -- a window the plan treats as
+ * enforced while the game ignores it.
+ *
+ * A BOOLEAN at the top level, and the one field here whose `false` is the
+ * answer worth carrying: the resting state of the switch is ON, so a document
+ * that omits it must be read as saying nothing rather than as saying OFF.
+ * Refused rather than coerced, like `npc_attended` and `overnight` beside it --
+ * the backend's `bool` is lax enough to read `"no"` as TRUE, which would switch
+ * the prune back on and delete rows over a string nobody can see.
+ *
  * Everything here is pure, including the timestamp, which is passed in rather
  * than read. That keeps the round trip testable without a browser.
  */
@@ -125,7 +145,7 @@ import { NPC_FEEDSTOCK_RESOURCES, isFeedstockList } from './plannerNpc'
 import { excludedOriginIds, namesForVillageIds } from './villageRefs'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
-export const SETUP_VERSION = 9
+export const SETUP_VERSION = 10
 /** Versions this build can read. A v1 file simply carries no profiles, a v2 one
  * no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
  * v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing
@@ -144,7 +164,7 @@ export const SETUP_VERSION = 9
  * readable list AND two refusals that have to be asked for with a version
  * beyond this build. Bumping one side alone is the failure this note exists to
  * prevent. */
-export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9])
+export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
@@ -1158,6 +1178,7 @@ export function buildSetup({
   npcAttended,
   overnight,
   reservedWindow,
+  pruneToWindow,
   merchantModel,
   foreignTargets,
   exportedAt,
@@ -1304,6 +1325,22 @@ export function buildSetup({
   if (Array.isArray(reservedWindow) && reservedWindow.length === 2) {
     doc.reserved_window = [String(reservedWindow[0]), String(reservedWindow[1])]
   }
+  // v10, and the field whose loss costs the most of any here: it decides
+  // whether `/execute` DELETES game rows. Travian cannot confine a route to
+  // part of the day, but its fan-out can be trimmed -- "repeat every N hours"
+  // is 24/N individually deletable rows -- and this is what removes the ones
+  // departing outside the profile.
+  //
+  // It was carried by NEITHER persistence path, not even localStorage: it lived
+  // as a `useState(true)` inside the page, so an operator who turned it off saw
+  // it back ON after a reload and the next run left every out-of-window firing
+  // in place.
+  //
+  // BOTH polarities are written, which is what makes this the one boolean here
+  // that is not omitted-when-false. The resting state of the switch is ON, so
+  // an absent field has to mean "this document says nothing" rather than OFF --
+  // otherwise every v9 document would import as a decision nobody made.
+  if (typeof pruneToWindow === 'boolean') doc.prune_to_window = pruneToWindow
   // The levers the operator actually TYPED. A blank box means "use the
   // planner's own", which the plan path has always read correctly -- the field
   // is omitted from the request and the backend's default stands -- while this
@@ -1946,6 +1983,26 @@ export function parseSetup(text) {
   // accepting it here would write a file the server will not take.
   const reservedWindow =
     raw.reserved_window == null ? null : parseClockPair(raw.reserved_window, 'reserved_window')
+  // null is the THIRD state -- "this document does not say" -- and it is the
+  // one a v9 file is in. A build that never wrote the field is not a build that
+  // turned the prune off, and reading it as off would delete nothing on the
+  // next run while the plan reported a window it was enforcing.
+  //
+  // Refused rather than coerced, on `parseAttendance`'s reasoning and for a
+  // sharper consequence: the backend's `bool` reads `"no"` as TRUE, so a
+  // hand-edited document could switch the prune back ON and start deleting game
+  // rows over a string nobody can see.
+  let pruneToWindow = null
+  if (raw.prune_to_window != null) {
+    if (typeof raw.prune_to_window !== 'boolean') {
+      throw new SetupFileError(
+        `prune_to_window is ${JSON.stringify(raw.prune_to_window)}, which is not an ` +
+          `answer. It must be true (trim the firings that depart outside the window), ` +
+          `false (leave every firing in place), or absent to say nothing about it.`
+      )
+    }
+    pruneToWindow = raw.prune_to_window
+  }
 
   let merchantModel = null
   if (raw.merchant_model != null) {
@@ -2069,6 +2126,7 @@ export function parseSetup(text) {
     npcAttended,
     overnight,
     reservedWindow,
+    pruneToWindow,
     merchantModel,
     foreignTargets,
   }
@@ -2101,6 +2159,7 @@ export function mergeSetup({
   npcAttended,
   overnight,
   reservedWindow,
+  pruneToWindow,
   foreignTargets,
 }) {
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
@@ -2243,6 +2302,10 @@ export function mergeSetup({
     // document knows nothing about this field, so loading one must not wipe the
     // window the operator has on screen.
     reservedWindow: setup.reservedWindow ?? reservedWindow ?? null,
+    // The same rule, and here it is load-bearing rather than tidy: a v9
+    // document knows nothing about the prune, so loading one must not switch
+    // it. `??` and not `||`, because `false` is the answer that changes a run.
+    pruneToWindow: setup.pruneToWindow ?? pruneToWindow ?? true,
     // Replaced wholesale, not merged. Merging two tribute lists would either
     // double an obligation or leave a target the operator deleted still being
     // shipped to. A file with no targets leaves what is on screen alone.

@@ -365,6 +365,17 @@ const LS_OVERNIGHT = 'planner_overnight'
 // is per profile because the operator is awake for some windows and not
 // others. Owned: nothing in the game states when someone sits down to trade.
 const LS_RESERVED_WINDOW = 'planner_reserved_window'
+// Whether a run TRIMS the firings that depart outside the profile's window.
+// Travian cannot confine a route to part of the day, but its fan-out can be
+// cut: "repeat every N hours" is 24/N individually deletable rows, and this is
+// what deletes the ones outside the hours. Account-wide, like the reserved
+// window above it.
+//
+// It was carried by NEITHER persistence path -- not localStorage and not the
+// document -- so an operator who turned it off saw it back ON after a reload
+// and the next run left every out-of-window firing live in the game. The
+// criterion that earned `reserved_window` its v9 bump, met harder.
+const LS_PRUNE_TO_WINDOW = 'planner_prune_to_window'
 
 // Only complete rows go to the backend: a half-typed target would 422 the
 // whole request, and the operator is mid-edit, not in error. Shared by the
@@ -1134,6 +1145,7 @@ export default function ResourcePlanner() {
       setProfileAttendance({})
       setProfileOvernight({})
       setReservedWindow(null)
+      setPruneToWindow(true)
       setForeignTargets([])
       setMayRelay({})
       setMaxBusy({})
@@ -1169,6 +1181,11 @@ export default function ResourcePlanner() {
     // section 6's rules would then govern a profile nobody named.
     setProfileOvernight(overnightMapOnly(loadJson(`${LS_OVERNIGHT}::${accountKey}`, {})))
     setReservedWindow(loadJson(`${LS_RESERVED_WINDOW}::${accountKey}`, null))
+    // Defaults to ON, because OFF is the broken case: the window is a fiction
+    // the game ignores unless the firings outside it are deleted. A stored
+    // non-boolean is read as the default rather than coerced -- `Boolean('no')`
+    // is true, and this switch deletes game rows.
+    setPruneToWindow(loadJson(`${LS_PRUNE_TO_WINDOW}::${accountKey}`, true) !== false)
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
     setRelayFor(loadJson(`${LS_RELAY_FOR}::${accountKey}`, {}))
@@ -1279,6 +1296,10 @@ export default function ResourcePlanner() {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_RESERVED_WINDOW), reservedWindow)
   }, [reservedWindow, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_PRUNE_TO_WINDOW), pruneToWindow)
+  }, [pruneToWindow, hydratedKey, accountKey, storageKey])
   // A day-check result is a pure function of these inputs; the moment any of
   // them changes it describes a day that will never happen. Without this, the
   // green all-clear banner could sit on screen after the operator changed
@@ -1672,6 +1693,12 @@ export default function ResourcePlanner() {
         // saved document, whose top level held every other owned field and not
         // this one.
         reservedWindow,
+        // The window prune, and v10. The field with the sharpest consequence
+        // of any in the document: it decides whether `/execute` DELETES game
+        // rows. It was carried by neither persistence path -- not even
+        // localStorage -- so an operator who turned it off got it back ON after
+        // a reload and the next run left every out-of-window firing in place.
+        pruneToWindow,
         merchantModel,
         foreignTargets,
         exportedAt: new Date().toISOString(),
@@ -1696,6 +1723,7 @@ export default function ResourcePlanner() {
     profileAttendance,
     profileOvernight,
     reservedWindow,
+    pruneToWindow,
     merchantModel,
     foreignTargets,
     accountKey,
@@ -1743,6 +1771,7 @@ export default function ResourcePlanner() {
         npcAttended: profileAttendance,
         overnight: profileOvernight,
         reservedWindow,
+        pruneToWindow,
         foreignTargets,
       })
       setTradeOffice(merged.tradeOffice)
@@ -1765,6 +1794,9 @@ export default function ResourcePlanner() {
       // window and says nothing where it does not, so a v8 file cannot wipe the
       // one on screen.
       setReservedWindow(merged.reservedWindow)
+      // Same rule: a v9 document says nothing about the prune, so loading one
+      // must not switch it. `mergeSetup` has already decided that.
+      setPruneToWindow(merged.pruneToWindow)
       // Capacity is server-calibrated, so a file that carries a calibration is
       // more trustworthy than this build's default. Absent, the default stands.
       if (merged.merchantModel) {
@@ -1810,6 +1842,7 @@ export default function ResourcePlanner() {
       profileOvernight,
       profileWindows,
       reservedWindow,
+      pruneToWindow,
       foreignTargets,
       toast,
     ]
