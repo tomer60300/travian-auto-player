@@ -441,6 +441,14 @@ h1, h2, h3 {
   outline-offset: 2px;
 }
 
+/* The same ring for the plain-text controls above that carry none of the
+   five classes it is otherwise wired to: "Lift restriction", "Stop
+   relaying" and the Relays-for `<summary>` in ResourcePlanner.jsx. */
+.link-action:focus-visible {
+  outline: 2px solid var(--md-primary);
+  outline-offset: 2px;
+}
+
 /* ── Layout ── */
 
 .top-bar {

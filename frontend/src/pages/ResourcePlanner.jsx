@@ -4748,7 +4748,7 @@ export default function ResourcePlanner() {
                                   // stay inside the fuller name, so speech
                                   // input can still say what is on the button.
                                   aria-label={`Lift restriction for ${v.name}`}
-                                  className="underline mt-1"
+                                  className="underline mt-1 link-action"
                                   onClick={() =>
                                     setShipOnlyTo((prev) => {
                                       const next = { ...prev }
@@ -4784,7 +4784,7 @@ export default function ResourcePlanner() {
                           <>
                           <details className={picker}>
                             <summary
-                              className={`cursor-pointer whitespace-nowrap pointer-coarse:min-h-11 ${
+                              className={`cursor-pointer whitespace-nowrap pointer-coarse:min-h-11 link-action ${
                                 problems.length
                                   ? 'text-danger'
                                   : forwards?.length
@@ -4837,7 +4837,7 @@ export default function ResourcePlanner() {
                                   // Named like "Lift restriction" beside it,
                                   // and duplicated just as widely.
                                   aria-label={`Stop relaying for ${v.name}`}
-                                  className="underline mt-1"
+                                  className="underline mt-1 link-action"
                                   onClick={() =>
                                     setRelayFor((prev) => {
                                       const next = { ...prev }
