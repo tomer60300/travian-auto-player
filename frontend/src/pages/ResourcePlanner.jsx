@@ -71,7 +71,11 @@ import {
   DEFAULT_MERCHANT_MODEL,
   DEFAULT_TARGET_FILL,
   MAX_DAY_SEGMENTS,
+  MAX_GAME_ROWS_PER_RUN_CEILING,
   MAX_MERCHANTS_PER_VILLAGE,
+  MAX_ROUTES_PER_RUN_CEILING,
+  MAX_STOCK_FLOOR_FRACTION,
+  MAX_TRADE_OFFICE_LEVEL,
   SetupFileError,
   TRAVIAN_REPEAT_INTERVALS,
   VILLAGE_ROLES,
@@ -86,7 +90,9 @@ import {
   isConsumptionRate,
   isEmptyTemplate,
   isMaxBusyMerchants,
+  isSafetyMarginPct,
   isStockFloorFraction,
+  isTradeOfficeLevel,
   merchantModelProblems,
   mergeSetup,
   parseSetup,
@@ -144,7 +150,7 @@ import {
   resolveVillageNames,
   unresolvedProtectedEntries,
 } from '../utils/villageRefs'
-import { describeBlockers, planBlockers } from '../utils/plannerBlockers'
+import { describeBlockers, nightBlockers, planBlockers, runBlockers } from '../utils/plannerBlockers'
 import { planStatus, relayLegIndex, verdictSummary } from '../utils/plannerFindings'
 import { routeSheetRow, routeSheetText } from '../utils/plannerSheet'
 import { groupWarnings } from '../utils/warningGroups'
@@ -1977,6 +1983,8 @@ export default function ResourcePlanner() {
     () =>
       planBlockers({
         villages,
+        tradeOffice,
+        cropCeilings,
         maxBusy,
         stockFloors,
         consumption,
@@ -1987,6 +1995,8 @@ export default function ResourcePlanner() {
       }),
     [
       villages,
+      tradeOffice,
+      cropCeilings,
       maxBusy,
       stockFloors,
       consumption,
@@ -1995,6 +2005,48 @@ export default function ResourcePlanner() {
       foreignTargets,
       merchantModel,
     ]
+  )
+
+  // The three controlled-run boxes, which no other gate on this page could see:
+  // they are not plan inputs and not setup-document fields, so `planBlockers`
+  // has nothing to say about them and refusing `Build plan` over one would
+  // refuse a request they have no bearing on. They ride on `/execute` alone.
+  const runIssues = useMemo(
+    () => runBlockers({ routesPerRun, maxGameRows, protectDestinations }),
+    [routesPerRun, maxGameRows, protectDestinations]
+  )
+  // Keyed by FIELD so a cell can ask about itself without re-deriving the rule
+  // -- the same arrangement `merchantProblems` gives the World & merchants row.
+  const runProblems = useMemo(
+    () => Object.fromEntries(runIssues.map((b) => [b.field, b.rule])),
+    [runIssues]
+  )
+
+  // And the night-fill pair, which reaches `/night-profile` alone. The pair rule
+  // -- the target must sit above the baseline -- is the one bound neither box
+  // could ever have carried as an attribute, because it is a statement about
+  // both of them.
+  const nightIssues = useMemo(
+    () => nightBlockers({ baselineFill, targetFill }),
+    [baselineFill, targetFill]
+  )
+  const nightProblems = useMemo(() => {
+    const byField = Object.fromEntries(nightIssues.map((b) => [b.field, b.rule]))
+    return { baseline_fill: byField['Emptied to %'], target_fill: byField['Full to %'] }
+  }, [nightIssues])
+
+  // The refusal every gated button shares: nothing sent, the fields and the
+  // villages named in words the operator uses, the stage switched to the one
+  // that mounts the cell and the caret dropped into it. `buildPlan` carried
+  // this inline and was the only button that carried it at all -- so a figure
+  // the plan refused was posted verbatim by the full-day check beside it.
+  const refuseBlockers = useCallback(
+    (issues) => {
+      toast.error(describeBlockers(issues))
+      setStage(issues[0].stage)
+      setCellFocus((prev) => ({ label: issues[0].focusLabel, seq: (prev?.seq ?? 0) + 1 }))
+    },
+    [toast]
   )
 
   // The six World & merchants boxes, checked against the bounds the file parser
@@ -2253,12 +2305,7 @@ export default function ResourcePlanner() {
     // to `attendanceIsRequired`, so the operator was sent to Day & night to
     // answer for a figure the plan would have refused anyway.
     if (blockers.length) {
-      toast.error(describeBlockers(blockers))
-      setStage(blockers[0].stage)
-      setCellFocus((prev) => ({
-        label: blockers[0].focusLabel,
-        seq: (prev?.seq ?? 0) + 1,
-      }))
+      refuseBlockers(blockers)
       return
     }
     // Section 7's attendance, refused here rather than by the backend. The 422
@@ -2314,6 +2361,7 @@ export default function ResourcePlanner() {
     activeProfile,
     // Read by the marked-cell guard above.
     blockers,
+    refuseBlockers,
   ])
 
   // Section 10, in one call: the plan request the operator is looking at, plus
@@ -2643,6 +2691,23 @@ export default function ResourcePlanner() {
         )
         return
       }
+      // The run panel's own three boxes, which nothing else on this page could
+      // refuse: `max_routes_per_run`, `max_game_rows_per_run` and
+      // `protect_destinations` are not plan inputs, so `Build plan` never saw
+      // them and their `min`/`max` bounded the spinner alone. A pasted 51 went
+      // out and came back a 422; a "Never disable" entry the server cannot
+      // parse refused the WHOLE run over a protection the operator added for
+      // safety. Preview is gated too, deliberately: the figures it echoes back
+      // are the ones the live run will use, so a preview of a request the
+      // server refuses is a rehearsal of nothing.
+      //
+      // The marked cells go first, on `buildPlan`'s own ordering rule -- a
+      // malformed figure is a typo and the run controls are a decision.
+      const gate = [...blockers, ...runIssues]
+      if (gate.length) {
+        refuseBlockers(gate)
+        return
+      }
       const requestedFor = accountKey
       // Staleness guard (same as buildPlan): if the operator edits an input or
       // switches account while a request is in flight, a stale response must
@@ -2778,6 +2843,10 @@ export default function ResourcePlanner() {
       protectDestinations,
       disableExisting,
       updateDrifted,
+      // Read by the marked-cell and run-control guard above.
+      blockers,
+      runIssues,
+      refuseBlockers,
     ],
   )
 
@@ -2826,6 +2895,21 @@ export default function ResourcePlanner() {
       )
       return
     }
+    // And what each box will take once it is not blank. `min`/`max` bounded the
+    // spinner alone, so a typed 101 posted `target_fill: 1.01` — and the PAIR
+    // rule (`_target_is_above_baseline`) is one no attribute could ever have
+    // carried, because it is a statement about both boxes at once: equal fills
+    // leave the night no room for anything to arrive in.
+    if (nightIssues.length) {
+      refuseBlockers(nightIssues)
+      return
+    }
+    // A figure the plan itself refuses, refused here too: the derivation posts
+    // `buildPlanPayload()` under it, so every marked cell rides along.
+    if (blockers.length) {
+      refuseBlockers(blockers)
+      return
+    }
     setDeriving(true)
     try {
       const res = await api.post('/distribution/night-profile', {
@@ -2866,6 +2950,10 @@ export default function ResourcePlanner() {
     toast,
     activeAttendanceOwed,
     activeProfile,
+    // Read by the two guards above.
+    nightIssues,
+    blockers,
+    refuseBlockers,
   ])
 
   // ── Reconciliation sweep ────────────────────────────────────────────────
@@ -3291,6 +3379,14 @@ export default function ResourcePlanner() {
   const runDayCheck = async () => {
     const requestedFor = accountKey
     const requestedRev = dayCheckInputRev.current
+    // The same marked cells `Build plan` refuses over, and for a sharper
+    // reason: this request carries `buildPlanPayload()` verbatim AND the crop
+    // alert levels typed in the table below it, so a figure the plan would not
+    // send was posted from here without the button ever hesitating.
+    if (blockers.length) {
+      refuseBlockers(blockers)
+      return
+    }
     const { segments, skipped, unanswered } = buildSegments()
     if (!segments.length) {
       toast.error('No profile has hours set — give each profile its window first')
@@ -4409,21 +4505,44 @@ export default function ResourcePlanner() {
                     <td className="text-right px-2">
                       {/* Owned, not fetched — editable, and blank means "unknown",
                           which the planner floors to 0 rather than guessing up. */}
-                      <input
-                        type="number"
-                        min="0"
-                        max="20"
-                        aria-label={`Trade Office level for ${v.name}`}
-                        placeholder="?"
-                        className="input-field w-20 text-right text-xs py-1"
-                        value={tradeOffice[v.village_id] ?? ''}
-                        onChange={(e) =>
-                          setTradeOffice((prev) => ({
-                            ...prev,
-                            [v.village_id]: e.target.value === '' ? undefined : Number(e.target.value),
-                          }))
-                        }
-                      />
+                      {(() => {
+                        const level = tradeOffice[v.village_id]
+                        const invalid = level != null && !isTradeOfficeLevel(level)
+                        const problemId = `trade-office-problem-${v.village_id}`
+                        return (
+                          <>
+                            <input
+                              type="number"
+                              min="0"
+                              max={MAX_TRADE_OFFICE_LEVEL}
+                              aria-label={`Trade Office level for ${v.name}`}
+                              aria-invalid={invalid || undefined}
+                              aria-describedby={invalid ? problemId : undefined}
+                              placeholder="?"
+                              className="input-field w-20 text-right text-xs py-1"
+                              value={level ?? ''}
+                              onChange={(e) =>
+                                setTradeOffice((prev) => ({
+                                  ...prev,
+                                  [v.village_id]:
+                                    e.target.value === '' ? undefined : Number(e.target.value),
+                                }))
+                              }
+                            />
+                            {/* `min`/`max` bound the SPINNER and nothing else, so a
+                                typed or pasted 21 sailed past both and posted
+                                `trade_office_level: 21` — refused as a server 422
+                                naming a pydantic field path, after a round trip,
+                                with nothing on screen pointing at this cell.
+                                Browser-confirmed before the predicate went in. */}
+                            {invalid && (
+                              <span id={problemId} className="block text-warning text-xs mt-0.5">
+                                a whole level from 0 to {MAX_TRADE_OFFICE_LEVEL}
+                              </span>
+                            )}
+                          </>
+                        )
+                      })()}
                     </td>
                     <td className="text-right px-2">
                       {(() => {
@@ -5390,15 +5509,39 @@ export default function ResourcePlanner() {
                               />
                             </td>
                             <td className="text-right px-2">
-                              <input
-                                type="number"
-                                min="0"
-                                max="100"
-                                aria-label={`Foreign target ${i + 1} safety margin`}
-                                className="input-field w-20 text-right text-xs py-0.5"
-                                value={t.safety_margin_pct}
-                                onChange={(e) => patch('safety_margin_pct', e.target.value)}
-                              />
+                              {(() => {
+                                const margin = t.safety_margin_pct
+                                const invalid =
+                                  margin != null &&
+                                  margin !== '' &&
+                                  !isSafetyMarginPct(Number(margin))
+                                const problemId = `margin-problem-${i}`
+                                return (
+                                  <>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      max="100"
+                                      aria-label={`Foreign target ${i + 1} safety margin`}
+                                      aria-invalid={invalid || undefined}
+                                      aria-describedby={invalid ? problemId : undefined}
+                                      className="input-field w-20 text-right text-xs py-0.5"
+                                      value={margin}
+                                      onChange={(e) =>
+                                        patch('safety_margin_pct', e.target.value)
+                                      }
+                                    />
+                                    {invalid && (
+                                      <span
+                                        id={problemId}
+                                        className="block text-warning text-xs mt-0.5"
+                                      >
+                                        0 to 100
+                                      </span>
+                                    )}
+                                  </>
+                                )
+                              })()}
                             </td>
                             {/* Cadence. The planner satisfies a RATE, and prefers
                                 the cheapest cycle that meets it -- so an hourly
@@ -6178,19 +6321,32 @@ export default function ResourcePlanner() {
                   viewport -- the page slid 111px sideways, which is item 1 of
                   the UI Definition of Done. */}
               <div className="flex flex-wrap items-end gap-3">
+                {/* Both boxes carry an explicit `aria-label`, because the caret
+                    a refusal sends here is matched against one — and because
+                    the computed name was "Emptied to %", which the pair rule's
+                    message ("above the emptied-to figure") has to be able to
+                    name back. */}
                 <label className="text-xs">
                   <span className="text-secondary block mb-1">Emptied to</span>
                   <span className="flex items-baseline gap-1">
                     <input
                       type="number"
                       min="0"
-                      max="90"
+                      max={MAX_STOCK_FLOOR_FRACTION * 100}
+                      aria-label="Emptied to %"
+                      aria-invalid={nightProblems.baseline_fill ? true : undefined}
+                      aria-describedby={nightProblems.baseline_fill ? 'baseline-problem' : undefined}
                       className="input-sm w-16 text-right"
                       value={baselineFill}
                       onChange={(e) => setBaselineFill(e.target.value)}
                     />
                     <span className="text-secondary">%</span>
                   </span>
+                  {nightProblems.baseline_fill && (
+                    <span id="baseline-problem" className="block text-warning text-xs mt-0.5">
+                      {nightProblems.baseline_fill}
+                    </span>
+                  )}
                 </label>
                 <span className="text-secondary text-xs pb-2">→</span>
                 <label className="text-xs">
@@ -6200,12 +6356,20 @@ export default function ResourcePlanner() {
                       type="number"
                       min="10"
                       max="100"
+                      aria-label="Full to %"
+                      aria-invalid={nightProblems.target_fill ? true : undefined}
+                      aria-describedby={nightProblems.target_fill ? 'target-problem' : undefined}
                       className="input-sm w-16 text-right"
                       value={targetFill}
                       onChange={(e) => setTargetFill(e.target.value)}
                     />
                     <span className="text-secondary">%</span>
                   </span>
+                  {nightProblems.target_fill && (
+                    <span id="target-problem" className="block text-warning text-xs mt-0.5">
+                      {nightProblems.target_fill}
+                    </span>
+                  )}
                 </label>
                 <button
                   type="button"
@@ -6904,11 +7068,24 @@ export default function ResourcePlanner() {
                       <input
                         type="number"
                         min="0"
+                        max={MAX_ROUTES_PER_RUN_CEILING}
                         aria-label="Routes this run"
+                        aria-invalid={runProblems['Routes this run'] ? true : undefined}
+                        aria-describedby={
+                          runProblems['Routes this run'] ? 'routes-per-run-problem' : undefined
+                        }
                         className="input-sm w-24"
                         value={routesPerRun}
                         onChange={(e) => setRoutesPerRun(e.target.value)}
                       />
+                      {runProblems['Routes this run'] && (
+                        <span
+                          id="routes-per-run-problem"
+                          className="block text-warning text-xs mt-0.5"
+                        >
+                          {runProblems['Routes this run']}
+                        </span>
+                      )}
                     </label>
                     {/* The unit that actually lands in the game. A "route" is a
                         request; Travian turns it into 24/cycle daily rows, so a
@@ -6927,12 +7104,25 @@ export default function ResourcePlanner() {
                       <input
                         type="number"
                         min="0"
+                        max={MAX_GAME_ROWS_PER_RUN_CEILING}
                         aria-label="Max rows this run"
+                        aria-invalid={runProblems['Max rows this run'] ? true : undefined}
+                        aria-describedby={
+                          runProblems['Max rows this run'] ? 'max-game-rows-problem' : undefined
+                        }
                         placeholder="no limit"
                         className="input-sm w-28"
                         value={maxGameRows}
                         onChange={(e) => setMaxGameRows(e.target.value)}
                       />
+                      {runProblems['Max rows this run'] && (
+                        <span
+                          id="max-game-rows-problem"
+                          className="block text-warning text-xs mt-0.5"
+                        >
+                          {runProblems['Max rows this run']}
+                        </span>
+                      )}
                     </label>
                     <label className="text-xs">
                       <span className="text-secondary flex items-center gap-1">
@@ -6950,11 +7140,28 @@ export default function ResourcePlanner() {
                       <input
                         type="text"
                         aria-label="Never disable"
+                        aria-invalid={runProblems['Never disable'] ? true : undefined}
+                        aria-describedby={
+                          runProblems['Never disable'] ? 'protect-shape-problem' : undefined
+                        }
                         className="input-sm w-56"
                         placeholder="none"
                         value={protectDestinations}
                         onChange={(e) => setProtectDestinations(e.target.value)}
                       />
+                      {/* The SHAPE, which is the half the server checks and 422s
+                          on. The "no village named" note below answers the other
+                          half — whether a shape-valid entry names anything on
+                          this account — and skips everything with a `|` in it,
+                          so "46|abc" was flagged by neither. */}
+                      {runProblems['Never disable'] && (
+                        <span
+                          id="protect-shape-problem"
+                          className="block text-warning text-xs mt-0.5"
+                        >
+                          {runProblems['Never disable']}
+                        </span>
+                      )}
                       {/* Named back, exactly as the foreign-target exclusion
                           field does it. The server can only check the SHAPE
                           here -- it does not hold this account's village list --

@@ -31,14 +31,21 @@
 import { RESOURCE_LABEL, ROLE_LABEL } from '../constants/planner'
 import {
   CONSUMABLE_RESOURCES,
+  MAX_GAME_ROWS_PER_RUN_CEILING,
   MAX_MERCHANTS_PER_VILLAGE,
+  MAX_ROUTES_PER_RUN_CEILING,
+  MAX_TRADE_OFFICE_LEVEL,
   VILLAGE_ROLES,
   isAssumedCropRate,
   isConsumptionRate,
+  isCropCeiling,
   isEmptyTemplate,
   isMaxBusyMerchants,
+  isSafetyMarginPct,
   isStockFloorFraction,
+  isTradeOfficeLevel,
   merchantModelProblems,
+  nightFillProblems,
   resolvedSpend,
   unreachableCaps,
 } from './plannerSetup'
@@ -68,7 +75,7 @@ const MERCHANT_MODEL_FIELDS = Object.freeze({
 })
 
 /**
- * Every marked cell, in reading order: Account first, then Targets.
+ * Every marked cell, in reading order: Account, then Targets, then Day & night.
  *
  * One entry per FIELD rather than per cell, with the villages it is wrong at
  * named — the operator fixes a column, and "Most merchants busy at once — 11,
@@ -86,6 +93,8 @@ const MERCHANT_MODEL_FIELDS = Object.freeze({
  */
 export function planBlockers({
   villages = [],
+  tradeOffice = {},
+  cropCeilings = {},
   maxBusy = {},
   stockFloors = {},
   consumption = {},
@@ -114,6 +123,18 @@ export function planBlockers({
     stage: 'snapshot',
     villages: rolesMissing.map(named),
     focusLabel: rolesMissing.length ? `Role for ${named(rolesMissing[0])}` : null,
+  })
+
+  const badLevels = villages.filter((v) => {
+    const level = tradeOffice[v.village_id]
+    return level != null && !isTradeOfficeLevel(level)
+  })
+  add({
+    field: 'Trade Office',
+    rule: `a whole level from 0 to ${MAX_TRADE_OFFICE_LEVEL}`,
+    stage: 'snapshot',
+    villages: badLevels.map(named),
+    focusLabel: badLevels.length ? `Trade Office level for ${named(badLevels[0])}` : null,
   })
 
   // Two rules on one column, and they are told apart because they lead to
@@ -196,6 +217,30 @@ export function planBlockers({
       : null,
   })
 
+  // The margin rides on the same row as the exclusions above, and is refused
+  // for the server's reason rather than the exclusions': a tribute shipped at
+  // 150% is a 422 on `foreign_targets.N.safety_margin_pct`, which names an
+  // index into a list the operator sees as a table of ally names.
+  const badMargins = []
+  foreignTargets.forEach((target, index) => {
+    const raw = target?.safety_margin_pct
+    // Blank is the 0 the backend defaults to, not a figure to check -- the same
+    // rule `merchantModelProblems` follows for an empty override box.
+    if (raw == null || raw === '') return
+    if (!isSafetyMarginPct(Number(raw))) {
+      badMargins.push({ index, name: target?.name || `target ${index + 1}` })
+    }
+  })
+  add({
+    field: 'Margin %',
+    rule: '0 to 100',
+    stage: 'snapshot',
+    villages: badMargins.map(({ name }) => name),
+    focusLabel: badMargins.length
+      ? `Foreign target ${badMargins[0].index + 1} safety margin`
+      : null,
+  })
+
   for (const [field, rule] of Object.entries(merchantModelProblems(merchantModel))) {
     out.push({
       field: MERCHANT_MODEL_FIELDS[field],
@@ -238,7 +283,133 @@ export function planBlockers({
     }
   }
 
+  // ── Day & night ───────────────────────────────────────────────────────
+  // The crop alert is typed on the stage that reads it, two stages from the
+  // Account table it used to live in -- so its refusal has to send the caret
+  // there rather than to `snapshot`.
+  const badCeilings = villages.filter((v) => {
+    const ceiling = cropCeilings[v.village_id]
+    return ceiling != null && !isCropCeiling(ceiling)
+  })
+  add({
+    field: 'Crop stock alert',
+    rule: '0 or more',
+    stage: 'day',
+    villages: badCeilings.map(named),
+    focusLabel: badCeilings.length
+      ? `Crop stock alert level for ${named(badCeilings[0])}`
+      : null,
+  })
+
   return out
+}
+
+/** Is this "Never disable" entry a shape the reconciler can match against?
+ *
+ * Backend twin: `ExecuteRequest._protected_entries_are_parseable` in
+ * `src/travian_api/web/routes/distribution.py`, transcribed rule for rule --
+ * a village id, or coordinates either side of a `|`, with a leading minus
+ * allowed on each half because a world is centred on 0|0. The server REFUSES a
+ * malformed entry rather than dropping it, and the reason is the same one the
+ * cell's own "no village named ..." note gives: an entry that protects nothing
+ * while looking like it does means the operator switches a hand-made route back
+ * on and the next run switches it off again.
+ *
+ * `unresolvedProtectedEntries` in `villageRefs.js` answers the OTHER half --
+ * whether a shape-valid entry names anything on this account -- and skips
+ * everything containing a `|`. So "46|abc" was flagged by neither.
+ */
+function isProtectedEntry(raw) {
+  const entry = String(raw ?? '').trim()
+  const bar = entry.indexOf('|')
+  if (bar === -1) return /^\d+$/.test(entry) && Number(entry) > 0
+  // `-*` rather than `-?`: Python's `lstrip("-")` strips every leading hyphen,
+  // so the server accepts "--5" and a stricter regex here would refuse a figure
+  // the request would have taken.
+  const coordinate = /^-*\d+$/
+  return coordinate.test(entry.slice(0, bar).trim()) && coordinate.test(entry.slice(bar + 1).trim())
+}
+
+/** What the box is allowed to hold, as a whole count with a ceiling.
+ *
+ * Blank is skipped, never refused: every one of these boxes documents a
+ * fallback for an empty box in its own copy, and `routeCap` / the payload
+ * builders implement it. Blank is unknown, and unknown is not out of range.
+ */
+function wholeCountProblem(raw, ceiling) {
+  if (String(raw ?? '').trim() === '') return null
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 0 || value > ceiling) return `0 to ${ceiling}`
+  return null
+}
+
+/** The controlled-run boxes, which no other gate on this page could see.
+ *
+ * Separate from `planBlockers` because the audience is different, not because
+ * the mechanism is: these three figures are not plan inputs and not setup
+ * document fields, so refusing `Build plan` or `Save setup` over one would
+ * refuse a request they have no bearing on. They ride on `/execute` alone, so
+ * this is what Preview and the live run consult -- the same predicates the
+ * cells mark themselves with, the same entry shape, and `describeBlockers`
+ * renders both.
+ */
+export function runBlockers({ routesPerRun, maxGameRows, protectDestinations } = {}) {
+  const out = []
+  const routes = wholeCountProblem(routesPerRun, MAX_ROUTES_PER_RUN_CEILING)
+  if (routes) {
+    out.push({
+      field: 'Routes this run',
+      rule: routes,
+      stage: 'plan',
+      villages: [],
+      focusLabel: 'Routes this run',
+    })
+  }
+  const rows = wholeCountProblem(maxGameRows, MAX_GAME_ROWS_PER_RUN_CEILING)
+  if (rows) {
+    out.push({
+      field: 'Max rows this run',
+      rule: rows,
+      stage: 'plan',
+      villages: [],
+      focusLabel: 'Max rows this run',
+    })
+  }
+  const malformed = String(protectDestinations ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .filter((entry) => !isProtectedEntry(entry))
+  if (malformed.length) {
+    out.push({
+      field: 'Never disable',
+      rule: 'a village id, or coordinates like 46|133',
+      stage: 'plan',
+      // The ENTRIES rather than village names: nothing resolved them to a
+      // village, which is the whole finding.
+      villages: malformed,
+      focusLabel: 'Never disable',
+    })
+  }
+  return out
+}
+
+/** The two night-fill boxes, which ride on `/night-profile` alone.
+ *
+ * Same reasoning as `runBlockers`: `Derive from stores` is the only button
+ * these figures reach, so they are the only thing they may refuse. The pair
+ * rule is here rather than on either box because it is a statement about both,
+ * and it is reported on the target -- the figure the operator moves to fix it.
+ */
+export function nightBlockers({ baselineFill, targetFill } = {}) {
+  const FIELDS = { baseline_fill: 'Emptied to %', target_fill: 'Full to %' }
+  return Object.entries(nightFillProblems({ baselineFill, targetFill })).map(([field, rule]) => ({
+    field: FIELDS[field],
+    rule,
+    stage: 'day',
+    villages: [],
+    focusLabel: FIELDS[field],
+  }))
 }
 
 /** The refusal, in one sentence the operator can act on.

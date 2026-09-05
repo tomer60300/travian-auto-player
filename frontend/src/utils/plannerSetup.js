@@ -169,6 +169,102 @@ export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
 
+/** Is this a usable Trade Office level?
+ *
+ * A whole level from 0 to the 20 the building goes to. 0 is an answer, not a
+ * blank -- it is what the planner floors an unknown level to, and understating
+ * capacity over-provisions merchants, which is safe.
+ *
+ * Backend twin: `VillageConfig.trade_office_level` in
+ * `src/travian_api/web/routes/distribution.py` (`ge=0, le=20`). Shared by the
+ * file parser and the planner's input so the two cannot disagree -- the box
+ * carried `min="0" max="20"`, which bounds the SPINNER and nothing else: typing
+ * 21 posted `trade_office_level: 21` with `aria-invalid` unset and came back a
+ * server 422. Browser-confirmed.
+ */
+export function isTradeOfficeLevel(value) {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return false
+  return value >= 0 && value <= MAX_TRADE_OFFICE_LEVEL
+}
+
+/** Is this a usable crop stock alert level?
+ *
+ * A stock figure, so zero or more and finite. 0 is deliberately accepted: it
+ * says "tell me the moment this village holds no crop at all", which is the
+ * most urgent alert there is and exactly the one a truthiness gate swallows.
+ *
+ * Backend twin: `DayCheckRequest.crop_ceilings` in
+ * `src/travian_api/web/routes/distribution.py`. Shared by the file parser --
+ * which has refused a negative ceiling since it was written -- and the box,
+ * which did not. The same asymmetry the merchant-model note above records.
+ */
+export function isCropCeiling(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/** Is this a usable safety margin on a foreign tribute?
+ *
+ * A percentage of the promise to ship on top of it, so 0 to 100. Backend twin:
+ * `ForeignTarget.safety_margin_pct` in
+ * `src/travian_api/web/routes/distribution.py` (`ge=0, le=100`).
+ */
+export function isSafetyMarginPct(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100
+}
+
+/** The backend's ceiling on how many ROUTES one run may create.
+ *
+ * Backend twin: `ExecuteRequest.max_routes_per_run` in
+ * `src/travian_api/web/routes/distribution.py` (`le=50`). Pinned by a literal
+ * on both sides, like `MAX_TRADE_OFFICE_LEVEL` and `MAX_DAY_SEGMENTS`. */
+export const MAX_ROUTES_PER_RUN_CEILING = 50
+
+/** The backend's ceiling on how many route ROWS one run may put in the game.
+ *
+ * Backend twin: `ExecuteRequest.max_game_rows_per_run` in
+ * `src/travian_api/web/routes/distribution.py` (`le=2000`). The unit the
+ * operator actually authorises: Travian turns one "repeat every N hours"
+ * request into 24/N separate daily rows. */
+export const MAX_GAME_ROWS_PER_RUN_CEILING = 2000
+
+/** What the two night-fill boxes are allowed to hold, in the words the cells
+ *  print, keyed by the request field so one call answers the pair.
+ *
+ * A BLANK box is skipped rather than refused: `buildNightProfile` already
+ * refuses the pair in its own words ("a blank box is not 0%"), and a bound
+ * message on an empty box would be a second, wronger answer to the same state.
+ *
+ * The operator types PERCENTS and the request carries fractions, so the bounds
+ * are stated here in the unit of the box. Backend twins, all in
+ * `src/travian_api/web/routes/distribution.py`:
+ *   * `NightProfileRequest.baseline_fill` -- `ge=0`, `le=MAX_STOCK_FLOOR_FRACTION`
+ *   * `NightProfileRequest.target_fill` -- `gt=0`, `le=1.0`
+ *   * `NightProfileRequest._target_is_above_baseline` -- the pair rule, which is
+ *     the one neither box could ever have expressed on its own: equal fills
+ *     leave no room for anything to arrive in.
+ */
+export function nightFillProblems({ baselineFill, targetFill } = {}) {
+  const out = {}
+  const typed = (raw) => (String(raw ?? '').trim() === '' ? null : Number(raw))
+  const baseline = typed(baselineFill)
+  const target = typed(targetFill)
+  const ceiling = MAX_STOCK_FLOOR_FRACTION * 100
+  if (baseline != null && (!Number.isFinite(baseline) || baseline < 0 || baseline > ceiling)) {
+    out.baseline_fill = `0 to ${ceiling}%`
+  }
+  if (target != null && (!Number.isFinite(target) || target <= 0 || target > 100)) {
+    out.target_fill = 'above 0% and up to 100%'
+  } else if (
+    target != null &&
+    baseline != null &&
+    Number.isFinite(baseline) &&
+    target <= baseline
+  ) {
+    out.target_fill = 'above the emptied-to figure, or the night has no room to fill'
+  }
+  return out
+}
+
 /** The four account-wide merchant levers, as the planner itself defaults them.
  *
  * A second copy of four backend values, and the sharpest of the duplicated
@@ -1514,7 +1610,7 @@ function parseForeignTargets(raw, where) {
       )
     }
     const margin = entry.safety_margin_pct == null ? 0 : Number(entry.safety_margin_pct)
-    if (!Number.isFinite(margin) || margin < 0 || margin > 100) {
+    if (!isSafetyMarginPct(margin)) {
       throw new SetupFileError(`${at} ("${name}") has a safety margin outside 0-100.`)
     }
     // Rebuilt field by field, so anything not named here is DROPPED. That is how
@@ -1844,7 +1940,7 @@ export function parseSetup(text) {
     }
     if (row.trade_office_level != null) {
       const level = Number(row.trade_office_level)
-      if (!Number.isInteger(level) || level < 0 || level > MAX_TRADE_OFFICE_LEVEL) {
+      if (!isTradeOfficeLevel(level)) {
         throw new SetupFileError(
           `${where} has Trade Office level ${row.trade_office_level}; ` +
             `it must be a whole number from 0 to ${MAX_TRADE_OFFICE_LEVEL}.`
@@ -1869,7 +1965,7 @@ export function parseSetup(text) {
     }
     if (row.crop_ceiling != null) {
       const ceiling = Number(row.crop_ceiling)
-      if (!Number.isFinite(ceiling) || ceiling < 0) {
+      if (!isCropCeiling(ceiling)) {
         throw new SetupFileError(`${where} has a negative or non-numeric crop ceiling.`)
       }
       parsed.crop_ceiling = ceiling

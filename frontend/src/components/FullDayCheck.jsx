@@ -1,5 +1,6 @@
 import NightOverrunTable from './NightOverrunTable'
 import ScrollableTable from './ScrollableTable'
+import { isCropCeiling } from '../utils/plannerSetup'
 
 const RESOURCE_LABEL = { lumber: 'Lumber', clay: 'Clay', iron: 'Iron', crop: 'Crop' }
 
@@ -239,15 +240,40 @@ export default function FullDayCheck({
                         {t.daily_net == null ? '—' : signed(t.daily_net)}
                       </td>
                       <td className="text-right px-2">
-                        <input
-                          type="number"
-                          min="0"
-                          aria-label={`Crop stock alert level for ${t.village_name}`}
-                          placeholder="none"
-                          className="input-field w-28 text-right text-xs py-1"
-                          value={cropCeilings?.[t.village_id] ?? ''}
-                          onChange={(e) => onCropCeiling(t.village_id, e.target.value)}
-                        />
+                        {(() => {
+                          const ceiling = cropCeilings?.[t.village_id]
+                          const invalid = ceiling != null && !isCropCeiling(ceiling)
+                          const problemId = `crop-ceiling-problem-${t.village_id}`
+                          return (
+                            <>
+                              <input
+                                type="number"
+                                min="0"
+                                aria-label={`Crop stock alert level for ${t.village_name}`}
+                                aria-invalid={invalid || undefined}
+                                aria-describedby={invalid ? problemId : undefined}
+                                placeholder="none"
+                                className="input-field w-28 text-right text-xs py-1"
+                                value={ceiling ?? ''}
+                                onChange={(e) => onCropCeiling(t.village_id, e.target.value)}
+                              />
+                              {/* `parseSetup` has refused a negative ceiling
+                                  since it was written and this box did not:
+                                  `min="0"` bounds the spinner and nothing else,
+                                  so a typed -5 rode into `crop_ceilings` and
+                                  came back a 422. 0 stays an answer — "tell me
+                                  the moment this village holds no crop". */}
+                              {invalid && (
+                                <span
+                                  id={problemId}
+                                  className="block text-warning text-xs mt-0.5"
+                                >
+                                  0 or more
+                                </span>
+                              )}
+                            </>
+                          )
+                        })()}
                       </td>
                     </tr>
                   )

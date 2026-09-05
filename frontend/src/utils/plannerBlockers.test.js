@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { describeBlockers, planBlockers, MERCHANT_MODEL_LABELS } from './plannerBlockers'
+import {
+  describeBlockers,
+  nightBlockers,
+  planBlockers,
+  runBlockers,
+  MERCHANT_MODEL_LABELS,
+} from './plannerBlockers'
 
 const CAPITAL = 20002
 const DEF_A = 20011
@@ -235,5 +241,189 @@ describe('describeBlockers', () => {
       '2 figures on this page are outside what the plan accepts, so nothing was sent: ' +
         'Stock floor % (02) — 0–95%; Map span — odd.'
     )
+  })
+})
+
+
+// ─── Boxes whose only bound was the spinner ─────────────────────────────────
+//
+// `min`/`max` on a number input bound the SPINNER and nothing else: a typed or
+// pasted figure sails past both, `aria-invalid` stays null, and the request
+// goes out to be refused as a server 422 -- which names a pydantic field path
+// and arrives after a round trip. Browser-confirmed for the Trade Office box:
+// typing 21 posted `trade_office_level: 21`.
+describe('the boxes that only had a spinner bound', () => {
+  it('refuses a Trade Office level past 20, naming the village', () => {
+    const blockers = planBlockers({ villages: VILLAGES, tradeOffice: { [DEF_A]: 21 } })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({
+      field: 'Trade Office',
+      stage: 'snapshot',
+      villages: ['11'],
+      focusLabel: 'Trade Office level for 11',
+    })
+  })
+
+  it('refuses a negative or fractional Trade Office level too', () => {
+    expect(
+      planBlockers({ villages: VILLAGES, tradeOffice: { [CAPITAL]: -1, [DEF_A]: 3.5 } })[0]
+        .villages
+    ).toEqual(['02', '11'])
+  })
+
+  it('accepts 0 and 20, which are both real answers', () => {
+    expect(
+      planBlockers({ villages: VILLAGES, tradeOffice: { [CAPITAL]: 0, [DEF_A]: 20 } })
+    ).toEqual([])
+  })
+
+  // The same asymmetry the merchant-model comment says was fixed: `parseSetup`
+  // has refused a negative ceiling since it was written, and the box did not.
+  it('refuses a negative crop stock alert, on the stage that mounts it', () => {
+    const blockers = planBlockers({ villages: VILLAGES, cropCeilings: { [CAPITAL]: -5 } })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({
+      field: 'Crop stock alert',
+      stage: 'day',
+      villages: ['02'],
+      focusLabel: 'Crop stock alert level for 02',
+    })
+  })
+
+  // 0 is the answer "tell me when this store is empty", which is exactly the
+  // village whose alert matters most.
+  it('accepts a crop alert of 0', () => {
+    expect(planBlockers({ villages: VILLAGES, cropCeilings: { [CAPITAL]: 0 } })).toEqual([])
+  })
+
+  it('refuses a foreign-target safety margin outside 0-100', () => {
+    const blockers = planBlockers({
+      villages: VILLAGES,
+      foreignTargets: [
+        { name: 'Ally', x: 1, y: 2, crop_per_hour: 100, safety_margin_pct: 150 },
+      ],
+    })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({
+      field: 'Margin %',
+      stage: 'snapshot',
+      villages: ['Ally'],
+      focusLabel: 'Foreign target 1 safety margin',
+    })
+  })
+
+  it('leaves a blank margin alone, because blank is the 0 the backend defaults to', () => {
+    expect(
+      planBlockers({
+        villages: VILLAGES,
+        foreignTargets: [{ name: 'Ally', x: 1, y: 2, crop_per_hour: 100, safety_margin_pct: '' }],
+      })
+    ).toEqual([])
+  })
+})
+
+describe('runBlockers', () => {
+  it('says nothing about an untouched run panel', () => {
+    expect(runBlockers()).toEqual([])
+    expect(runBlockers({ routesPerRun: '3', maxGameRows: '24', protectDestinations: '' })).toEqual(
+      []
+    )
+  })
+
+  it('refuses more than 50 routes in one run', () => {
+    const blockers = runBlockers({ routesPerRun: '51' })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({
+      field: 'Routes this run',
+      stage: 'plan',
+      villages: [],
+      focusLabel: 'Routes this run',
+    })
+  })
+
+  // 0 is "reconcile only", documented by the backend and offered by the box.
+  it('keeps 0 meaning 0', () => {
+    expect(runBlockers({ routesPerRun: '0' })).toEqual([])
+    expect(runBlockers({ routesPerRun: '50' })).toEqual([])
+  })
+
+  // Blank falls back to the page default, which is what the box's own copy says.
+  it('leaves a blank route cap alone', () => {
+    expect(runBlockers({ routesPerRun: '' })).toEqual([])
+  })
+
+  it('refuses more than 2000 game rows in one run', () => {
+    const blockers = runBlockers({ maxGameRows: '2001' })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({
+      field: 'Max rows this run',
+      stage: 'plan',
+      focusLabel: 'Max rows this run',
+    })
+  })
+
+  it('keeps blank and 0 meaning no limit', () => {
+    expect(runBlockers({ maxGameRows: '' })).toEqual([])
+    expect(runBlockers({ maxGameRows: '0' })).toEqual([])
+    expect(runBlockers({ maxGameRows: '2000' })).toEqual([])
+  })
+
+  // The SHAPE, which is all the server can check -- and it 422s rather than
+  // dropping, because an entry that protects nothing while looking like it does
+  // is how a hand-made route gets switched off on the very next run.
+  it('refuses a protected entry that is neither a village id nor coordinates', () => {
+    const blockers = runBlockers({ protectDestinations: '53629, ally hub, 46|133' })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({
+      field: 'Never disable',
+      stage: 'plan',
+      villages: ['ally hub'],
+      focusLabel: 'Never disable',
+    })
+  })
+
+  it('accepts ids, negative coordinates and stray whitespace', () => {
+    expect(runBlockers({ protectDestinations: ' 53629 , -46|133 , 12|-8 ,, ' })).toEqual([])
+  })
+
+  it('refuses 0 as an id and a half-typed coordinate', () => {
+    expect(runBlockers({ protectDestinations: '0' })[0].villages).toEqual(['0'])
+    expect(runBlockers({ protectDestinations: '46|' })[0].villages).toEqual(['46|'])
+  })
+})
+
+describe('nightBlockers', () => {
+  it('says nothing about the pair the boxes start on', () => {
+    expect(nightBlockers({ baselineFill: 25, targetFill: 60 })).toEqual([])
+  })
+
+  // Blank is refused by `buildNightProfile` in its own words -- "a blank box is
+  // not 0%" -- so it is not a bound violation here.
+  it('leaves a blank box to the blank-box refusal', () => {
+    expect(nightBlockers({ baselineFill: '', targetFill: '' })).toEqual([])
+  })
+
+  it('refuses a baseline past 95%', () => {
+    const blockers = nightBlockers({ baselineFill: '96', targetFill: '99' })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({
+      field: 'Emptied to %',
+      stage: 'day',
+      focusLabel: 'Emptied to %',
+    })
+  })
+
+  it('refuses a target of 0 or past 100%', () => {
+    expect(nightBlockers({ baselineFill: '0', targetFill: '0' })[0].field).toBe('Full to %')
+    expect(nightBlockers({ baselineFill: '25', targetFill: '101' })[0].field).toBe('Full to %')
+  })
+
+  // The backend's own `_target_is_above_baseline`: equal leaves no room for
+  // anything to arrive in.
+  it('refuses a target that is not above the baseline', () => {
+    const blockers = nightBlockers({ baselineFill: '60', targetFill: '60' })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({ field: 'Full to %', focusLabel: 'Full to %' })
+    expect(nightBlockers({ baselineFill: '60', targetFill: '25' })).toHaveLength(1)
   })
 })
