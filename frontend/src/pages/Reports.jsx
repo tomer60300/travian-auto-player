@@ -249,7 +249,7 @@ function RaidTargetAnalyzer() {
 
   const confidenceClass = (c) => {
     if (!c) return 'text-secondary'
-    if (c === 'high') return 'text-green'
+    if (c === 'high') return 'text-success'
     if (c === 'medium') return 'text-gold'
     return 'text-secondary'
   }
@@ -258,12 +258,18 @@ function RaidTargetAnalyzer() {
 
   return (
     <div className="card mb-6">
-      <h3
-        className="heading-gold text-base mb-0 flex items-center justify-between cursor-pointer select-none"
-        onClick={() => setCollapsed((c) => !c)}
-      >
-        <span>Raid Target Analyzer</span>
-        <span className="text-secondary text-sm font-normal">{collapsed ? '[ + ]' : '[ - ]'}</span>
+      <h3 className="heading-gold text-base mb-0">
+        <button
+          type="button"
+          onClick={() => setCollapsed((c) => !c)}
+          aria-expanded={!collapsed}
+          className="link-action inherit-type w-full flex items-center justify-between bg-transparent border-none cursor-pointer select-none"
+        >
+          <span>Raid Target Analyzer</span>
+          <span className="text-secondary text-sm font-normal" aria-hidden="true">
+            {collapsed ? '[ + ]' : '[ - ]'}
+          </span>
+        </button>
       </h3>
 
       {collapsed ? null : <>
@@ -605,7 +611,15 @@ export default function Reports() {
               <div key={id}>
                 <div
                   className={`report-row text-sm${isExpanded ? ' row-selected' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={isExpanded}
                   onClick={() => toggleReport(id)}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter' && e.key !== ' ') return
+                    e.preventDefault()
+                    toggleReport(id)
+                  }}
                 >
                   <span className="text-xs text-secondary">
                     {report.date_str || formatDate(report.date || report.time || report.timestamp)}

@@ -988,8 +988,17 @@ function SortableHeader({ label, field, sortField, sortDir, onSort, className = 
   const active = sortField === field
   const arrow = active ? (sortDir === 'asc' ? ' \u25B2' : ' \u25BC') : ''
   return (
-    <th onClick={() => onSort(field)} className={`sortable ${active ? 'sort-active' : ''} ${className}`}>
-      {label}{arrow}
+    <th
+      aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+      className={`sortable ${active ? 'sort-active' : ''} ${className}`}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(field)}
+        className="link-action inherit-type bg-transparent border-none cursor-pointer"
+      >
+        {label}{arrow}
+      </button>
     </th>
   )
 }

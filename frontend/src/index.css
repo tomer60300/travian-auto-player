@@ -535,6 +535,18 @@ h1, h2, h3 {
   min-height: 44px;
 }
 
+/* A control that has been wrapped around existing heading or table-header text
+   so it can take a keyboard (WCAG 2.1.1) must not also restyle it. These
+   inherit everything from the cell they now sit in, so the only visible change
+   is that the app's focus ring can land on them. */
+.inherit-type {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-align: inherit;
+  padding: 0;
+}
+
 /* The theme control, beside it in the top bar and to the same rule: item 4 of
    the UI Definition of Done applies to every viewport for a button, not only
    to coarse pointers, and this one is a glyph with no text to grow it. */

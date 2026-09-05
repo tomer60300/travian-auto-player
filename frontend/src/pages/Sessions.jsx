@@ -447,7 +447,17 @@ function SessionCard({ session, onClick, onRerun }) {
         <span className="text-lg font-mono text-secondary" style={{ minWidth: 36, textAlign: 'center' }}>
           {typeIcons[session.session_type] || '[?]'}
         </span>
-        <div className="flex-1 min-w-0 cursor-pointer" onClick={onClick}>
+        <div
+          className="flex-1 min-w-0 cursor-pointer link-action"
+          role="button"
+          tabIndex={0}
+          onClick={onClick}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return
+            e.preventDefault()
+            onClick()
+          }}
+        >
           <div className="flex items-center gap-2">
             <span className="text-primary font-medium truncate">
               {session.label}

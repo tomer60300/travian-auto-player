@@ -54,6 +54,10 @@ export async function isolateApp(page, extra = {}) {
     return route.abort('blockedbyclient')
   })
   // Nothing here plays a socket back; a page that opens one gets it closed.
+  // A spec that DOES need to play one back must register its own
+  // `routeWebSocket` AFTER calling this -- Playwright matches the most
+  // recently registered route first, so registering before is silently
+  // overridden by this line.
   await page.routeWebSocket(/.*/, (ws) => ws.close())
   await page.addInitScript(() => localStorage.setItem('token', 'e2e-not-a-real-token'))
 }
