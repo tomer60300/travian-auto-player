@@ -19,10 +19,13 @@
  *      Reconcile rendered above it, and the diagnostic disclosures being visited
  *      in a different order than they stack.
  *
- * Walked here with real Tab presses, at 375 and 1440, with every disclosure
- * forced open and every value box made editable so nothing is skipped for being
- * disabled or collapsed: the tables come out in row order, the role rows read
- * left to right, and Preview precedes Reconcile both on screen and in the DOM.
+ * Walked here with real Tab presses. The Targets tables at 1440 with every
+ * village on an explicit mode, so the value box beside each mode select is
+ * editable and therefore visited at all; the role templates with the panel
+ * forced open and a template that fills every box; the Plan stage at 375 AND
+ * 1440 with every disclosure open. The tables come out in row order, the role
+ * rows read left to right, and Preview precedes Reconcile both on screen and in
+ * the DOM at both widths.
  *
  * The likely cause of all three is the measurement rather than the page.
  * TABBING SCROLLS. Moving focus into an off-screen control makes the browser
