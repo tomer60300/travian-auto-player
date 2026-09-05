@@ -51,6 +51,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import ConfirmDialog from '../components/ConfirmDialog'
 import DayNightPanel from '../components/DayNightPanel'
+import FetchError from '../components/FetchError'
 import FullDayCheck from '../components/FullDayCheck'
 import NightOverrunTable from '../components/NightOverrunTable'
 import NpcBalancePanel from '../components/NpcBalancePanel'
@@ -1101,6 +1102,11 @@ export default function ResourcePlanner() {
   // the two disagree the 422 is the answer -- so its sentence, which names the
   // condition that failed, must outlive a toast.
   const [canaryRefusal, setCanaryRefusal] = useState(null)
+  // Every OTHER execution refusal, preview or live -- the run panel's own
+  // persistent alert, on the page whose next click writes to a real account.
+  // A toast expires; this stays until the next attempt (dry or live) clears
+  // it, same as `canaryRefusal` above for its one narrower case.
+  const [execRefusal, setExecRefusal] = useState(null)
   // Run history from the app's own execution traces (zero game requests).
   const [runHistory, setRunHistory] = useState(null)
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -2992,6 +2998,7 @@ export default function ResourcePlanner() {
       // The previous refusal described the request that earned it. Cleared as
       // this one leaves, so a stale sentence never sits under a run that went.
       if (!dryRun) setCanaryRefusal(null)
+      setExecRefusal(null)
       setExecuting(true)
       try {
         const res = await api.post('/distribution/execute', {
@@ -3136,8 +3143,12 @@ export default function ResourcePlanner() {
         const detail = errorDetail(err, dryRun ? 'Preview failed' : 'Execution failed')
         // On the page, not only in a toast that closes itself. The server is the
         // authority on the eight conditions and its sentence names the one that
-        // failed, which is the actionable half.
+        // failed, which is the actionable half. A live canary refusal keeps its
+        // own narrower, differently-worded alert; every OTHER refusal (preview,
+        // or a live run without canary) gets the general one below -- one alert
+        // per refusal, never both for the same one.
         if (!dryRun && canary) setCanaryRefusal(detail)
+        else setExecRefusal(detail)
         toast.error(detail)
       } finally {
         setExecuting(false)
@@ -7961,6 +7972,14 @@ export default function ResourcePlanner() {
                     )}
                   </div>
                 )}
+
+                {/* Persists until the next attempt (dry or live) clears it --
+                    see `executePlan`'s catch. A toast alone expires after 4s,
+                    so a refused PREVIEW read as if nothing had been attempted
+                    at all the moment the operator looked away; `execResult`
+                    is untouched by a refusal and keeps whatever it held
+                    before, so this is the only place the attempt is recorded. */}
+                {execRefusal && <FetchError what={execRefusal} />}
 
                 {execResult && (
                   <>
