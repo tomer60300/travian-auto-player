@@ -69,13 +69,13 @@ test.describe('the day holds twelve profiles', () => {
     // Renaming and deleting are untouched: neither changes the count upward,
     // and DELETE is the way back under the cap.
     await expect(page.getByRole('button', { name: 'Rename' })).toBeEnabled()
-    await expect(page.getByRole('button', { name: 'Delete' })).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Delete profile P01' })).toBeEnabled()
   })
 
   test('deleting one opens the door again', async ({ page }) => {
     await openPlanner(page, FULL)
 
-    await page.getByRole('button', { name: 'Delete' }).click()
+    await page.getByRole('button', { name: 'Delete profile P01' }).click()
     await page.getByRole('button', { name: /Delete/ }).last().click()
 
     await expect(addProfile(page)).toBeEnabled()

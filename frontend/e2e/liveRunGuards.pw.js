@@ -253,7 +253,7 @@ test.describe('the gate on a live write is in the app, not the browser chrome', 
     await seed(page, { planner_profiles: { Day: {}, Night: {} } })
     await page.goto('/resource-planner')
 
-    await page.getByRole('button', { name: 'Delete' }).click()
+    await page.getByRole('button', { name: 'Delete profile Day' }).click()
     await expect(page.getByRole('dialog')).toContainText('Day')
     expect(natives).toEqual([])
   })

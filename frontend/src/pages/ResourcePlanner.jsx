@@ -3990,6 +3990,7 @@ export default function ResourcePlanner() {
         </button>
         <button
           className="btn-secondary btn-xs"
+          aria-label={`Delete profile ${activeProfile}`}
           onClick={() => setConfirmDeleteProfile(activeProfile)}
           disabled={profileNames.length <= 1}
         >

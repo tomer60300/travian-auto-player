@@ -173,3 +173,22 @@ test.describe('the day and night table says what the plan will do', () => {
     await expect(page.getByText(/skipped by the day check/)).toHaveCount(1)
   })
 })
+
+// Pre-existing, not from the redesign: the profile toolbar's "Delete" sits in
+// an always-visible bar above the stage tabs, and names only what it does,
+// never which profile. Two profiles, a non-default one active, so the fix
+// can only pass by reading the ACTIVE profile rather than a hardcoded name.
+test.describe('the profile toolbar', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  test('"Delete" names the profile it deletes', async ({ page }) => {
+    await isolate(page)
+    await seed(page, {
+      planner_profiles: { Day: {}, Night: {} },
+      planner_active_profile: 'Night',
+    })
+    await page.goto('/resource-planner')
+
+    await expect(page.getByRole('button', { name: 'Delete profile Night' })).toHaveCount(1)
+  })
+})
