@@ -1669,6 +1669,24 @@ which of them is missing — and the whole-day pair keeps its exclusion for a
 sharper reason than before: its windows are *disjoint*, so every surviving
 minute belongs to exactly one route and the trim's decision is determined.
 
+**A wholly refused replacement is put back, under guard.** Disable was chosen
+over delete on the off-schedule path *because* it is reversible, and the
+reversibility was never used: a destination whose rebuild the game refused was
+left dark — old rows off, no new ones — under a `problems` line telling a human
+to go and switch them back on. The rows are still there and the write-ahead
+record says exactly what they were, so the run now does it: **one** re-enable of
+exactly the recorded row ids, verified by a read, traced
+`restore_attempted` → `restored` / `restore_failed`, and reported under
+`re_enables`. It is all-or-nothing and heavily guarded, because an automatic
+write over a half-known state is worse than a dark village: every reserved
+replacement create must have been written and have produced nothing, the page
+must have read the same way twice, no replacement row may exist, and the
+destination must still be exactly what the record describes. A part-written
+rebuild, an `indeterminate` create, or a destination that changed underneath is
+`replacement_abandoned` with the reason and left for a human — switching old
+rows back on beside a new route that may exist would ship two schedules at once,
+which is the state disable-and-recreate exists to avoid.
+
 **Going live for the first time is its own document.**
 [`docs/26-first-live-run.md`](26-first-live-run.md) is the step-by-step
 protocol these fixes earned — what to settle before anything touches the game,

@@ -39,6 +39,7 @@ from .test_distribution_execute import (
     _FakeLiveSvc,
     _fanned,
     _patch,
+    _trace_events,
 )
 
 NIGHT = (23 * 60, 7 * 60)
@@ -932,3 +933,60 @@ class TestOneDestinationIsSettledAsAWhole:
 
         assert svc.deleted == [], "an unattributed destination is left exactly as it is"
         assert any("could not be attributed" in p for p in res.problems), res.problems
+
+
+class TestAPartlyWrittenReplacementIsNeverUndoneAutomatically:
+    """A whole-day destination is rebuilt with TWO routes, and the automatic
+    restore is all-or-nothing.
+
+    When one of them landed and the other did not, switching the old rows back
+    on would put the destination's old schedule alongside the new one and ship
+    both at once -- the exact state disable-and-recreate exists to avoid. The
+    run says so and leaves it for a human.
+    """
+
+    def _mismatched(self):
+        return {
+            20003: _fanned(
+                20011,
+                10,
+                0,
+                cycle_hours=3,
+                dispatch_minute=100,
+                start_id=800000,
+                cargo={Resource.CROP: 4000},
+            )
+        }
+
+    class _NightIsRefused(_FakeLiveSvc):
+        async def create_route(self, route, *, stop_check=None):
+            from travian_api.services.trade_route_service import RouteActionResult
+
+            if route.cycle_hours == 1:
+                return RouteActionResult(
+                    route.origin_village_id, route.dest_x, route.dest_y, "failed", "refused (test)"
+                )
+            return await super().create_route(route, stop_check=stop_check)
+
+    def test_a_half_written_rebuild_is_abandoned_not_restored(self):
+        svc = self._NightIsRefused(existing=self._mismatched())
+
+        res = _run_union(svc, body=_segments_body(max_routes_per_run=2))
+
+        assert svc.enabled == [], "the old rows stay off while the new Day route ships"
+        kinds = [e["kind"] for e in _trace_events(res.trace_path)]
+        assert "restore_attempted" not in kinds, kinds
+        assert "replacement_abandoned" in kinds, kinds
+        assert any("part-written" in p for p in res.problems), res.problems
+
+    def test_a_wholly_refused_rebuild_of_both_routes_is_restored(self):
+        """The control: with neither route written the destination is dark, and
+        putting its old rows back is unambiguous."""
+        svc = _FakeLiveSvc(
+            existing=self._mismatched(), create_status="failed", phantom_creates=True
+        )
+
+        res = _run_union(svc, body=_segments_body(max_routes_per_run=2))
+
+        assert svc.enabled == [(20003, ((10, 0),) * 8)], svc.enabled
+        assert any("restored" in line for line in res.re_enables), res.re_enables

@@ -252,6 +252,16 @@ every row the panel lists under **Routes this run switched, to put back** to
 the state its arrow names, and bring the response and a screenshot to the
 review.
 
+The by-hand put-back is now for what the run could **not** reverse itself. A
+destination the run emptied to rebuild, whose every replacement create came to
+nothing, is switched back on by the run: one re-enable of exactly the row ids
+the write-ahead record named, verified by a read, reported under `re_enables`
+as "restored N disabled row(s)". It is deliberately all-or-nothing — a
+part-written rebuild, an `indeterminate` create, or a destination that no
+longer matches the record is left off and named in `problems` instead, because
+switching old rows back on beside a new route that may exist would ship two
+schedules at once.
+
 ## 3. Prove the undo once, on purpose
 
 With the single route confirmed correct, undo it anyway. The undo is **three
@@ -322,7 +332,12 @@ before the next step is taken.
    from 4.2: a diverging destination is disabled only when the same run can
    fund its rebuild in both creates and rows (`add3978`); the rest are left
    running and reported. A `problems` line ending an origin with zero active
-   rows is a stop.
+   rows is a stop. Where a funded rebuild is refused outright, the run puts
+   the destination's old rows back itself and says so in `re_enables` — read
+   that line as "this destination is where it started", not as a new route.
+   Where it could not (part-written, indeterminate, or the destination changed
+   underneath), `problems` names it and the destination really is dark until
+   you act.
 4. **Reconcile all villages**, with creates on. The page runs the sweep five
    villages per pass with human pauses; `swept_origins` / `unswept_origins`
    and `next_chunk_wait_seconds` tell you where it is. Never drive the sweep
@@ -394,6 +409,7 @@ The next morning, read:
 | a `problems` line saying the game made N rows, not the M the cycle predicts | the 24/N row model every merchant figure rests on does not hold here | stop and re-plan; this invalidates merchants committed, shipments per day and the row budget, not just this route |
 | `not_created` > 0 | the game accepted the create and made no route; the plan believes cargo is moving that is not | stop; read the marketplace before any re-create |
 | `created_unverified` > 0 | a create's answer was unreadable and the read-back did not settle it | read the marketplace before any other write |
+| an action with status `indeterminate` | the run could not tell whether the route exists: the create's answer died and the page would not read the same way twice, or a shared destination's rows could not be attributed | read that destination in the marketplace; the next run reconciles it either way, and nothing there was trimmed or restored |
 | `stopped_early` | a captcha, the activity budget, a failed read, or a prune that stopped | stop; for a captcha, solve it in a browser first, then retry; for the others, read the trace |
 | rows in the game > `live_game_rows` | the trim did not hold; checkable as a total only while the run is one origin and one destination — from step 4.2 on, compare per action at a village you have opened, not the run total | stop; the response names the rows still departing |
 | a `disables` entry you did not predict | the plan moved or dropped a destination | undo, protect or re-plan |

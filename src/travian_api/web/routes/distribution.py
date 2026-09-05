@@ -5958,8 +5958,14 @@ def _settle_by_destination(
     verdicts: dict[int, str] = {}
     for key, group in by_key.items():
         rows = [e for e in fresh if key in _existing_keys(e)]
+        if not rows:
+            # Nothing landed here at all, which is not ambiguous however many
+            # creates went out: none of them made anything.
+            for action, _route in group:
+                verdicts[id(action)] = "absent"
+            continue
         if len(group) == 1:
-            verdicts[id(group[0][0])] = "landed" if rows else "absent"
+            verdicts[id(group[0][0])] = "landed"
             continue
         wanted = {id(action): _expected_rows(route) for action, route in group}
         expected: Counter = Counter()
@@ -7105,6 +7111,12 @@ async def post_execute(
                     # switched off but not what was going to take its place is
                     # half a note.
                     replacement_plan: dict[int | tuple[int, int], list[PlannedRoute]] = {}
+                    # The rows themselves, as they were read before the disable
+                    # went out -- the same set the write-ahead record describes.
+                    # Disable was chosen over delete because it is REVERSIBLE,
+                    # and reversing it needs the row objects, not a description
+                    # of them.
+                    replacement_old_rows: dict[int | tuple[int, int], list[ExistingRoute]] = {}
                     # Why a mismatched destination's rebuild could NOT be
                     # reserved, keyed by destination, so the blocked action and
                     # the problem line give the operator the same remedy.
@@ -7298,6 +7310,7 @@ async def post_execute(
                             _going = [e for e in stale if _k in _existing_keys(e)]
                             if not _going:
                                 continue
+                            replacement_old_rows[_k] = list(_going)
                             trace.event(
                                 "replacement_started",
                                 origin=origin,
@@ -7567,6 +7580,11 @@ async def post_execute(
                     # actually fired. What is left over when the loop ends was
                     # switched off and never rebuilt.
                     rebuild_fired: set[int | tuple[int, int]] = set()
+                    # Every action a `replaceable` destination's rebuild
+                    # produced, so the end of the run can ask "did ALL of them
+                    # come to nothing?" -- which is the only state in which
+                    # switching the old rows back on is safe.
+                    replacement_actions: dict[int | tuple[int, int], list[RouteActionResponse]] = {}
                     # Rows the window prune removed AND confirmed gone. Only
                     # these are discounted from the footprint: a prune whose own
                     # read-back failed proves nothing, and over-reporting the
@@ -7977,6 +7995,8 @@ async def post_execute(
                             action = _action(row, route, "created", result.detail)
                             actions.append(action)
                             created_here.append((action, route))
+                            if destination in replaceable:
+                                replacement_actions.setdefault(destination, []).append(action)
                             satisfied_route_ids.add(id(route))
                             claimed_this_visit.setdefault(destination, Counter()).update(
                                 _mine_minutes
@@ -8024,6 +8044,7 @@ async def post_execute(
                         attempted_here.append((failed_action, route))
                         charged_rows[id(failed_action)] = would_add
                         if destination in replaceable:
+                            replacement_actions.setdefault(destination, []).append(failed_action)
                             # The reservation bought this destination a create;
                             # it did not buy it a route. Its diverging rows were
                             # switched off before the create fired and the game
@@ -8319,9 +8340,26 @@ async def post_execute(
                             _instability = ""
                             _first = after
                             _again_rows: list[ExistingRoute] = []
-                            if not _as_planned(
-                                created_here, attempted_here, fresh, observed_by_action
-                            ) or (body.prune_to_window and (created_here or landed_here)):
+                            # A destination this run emptied whose replacement
+                            # create went out and left NO new row is a candidate
+                            # for being put back. Putting it back is a WRITE, and
+                            # every write here needs two agreeing snapshots
+                            # first -- so the candidacy has to be known before
+                            # the stabilising read is decided on. Nothing extra
+                            # is read when there is no candidate.
+                            _maybe_restore = any(
+                                _k in disabled_keys
+                                and _k in rebuild_fired
+                                and not any(_k in _existing_keys(e) for e in fresh)
+                                for _k in replaceable
+                            )
+                            if (
+                                not _as_planned(
+                                    created_here, attempted_here, fresh, observed_by_action
+                                )
+                                or (body.prune_to_window and (created_here or landed_here))
+                                or _maybe_restore
+                            ):
                                 try:
                                     _again = await svc.confirm_routes(
                                         origin, map_span=body.map_span
@@ -8940,6 +8978,196 @@ async def post_execute(
                                     f"create but no route appeared. Nothing was created "
                                     f"here; do not assume otherwise."
                                 )
+
+                            # ── Put back what the rebuild failed to replace ──
+                            #
+                            # Disable was chosen over delete on this path
+                            # BECAUSE it is reversible, and the reversibility
+                            # was never used: a destination whose replacement
+                            # the game refused was left dark -- old rows off,
+                            # no new ones -- under a problem line telling a
+                            # human to go and switch them back on. The rows are
+                            # still there and the write-ahead record says
+                            # exactly what they were, so this run can do it.
+                            #
+                            # Guarded, because an automatic write over a
+                            # half-known state is worse than a dark village.
+                            # EVERY replacement create must have been written
+                            # and have come to nothing, the page must have been
+                            # read twice the same way, no replacement row may
+                            # exist, and the destination must still be exactly
+                            # what the record describes. Anything else -- a
+                            # partial rebuild, an indeterminate create, a
+                            # destination that changed underneath -- is
+                            # abandoned for a human, which is where this path
+                            # was before.
+                            for _k in sorted(replacement_actions, key=str):
+                                if _k not in disabled_keys or _k not in rebuild_fired:
+                                    continue
+                                _old = replacement_old_rows.get(_k, [])
+                                _acts = replacement_actions[_k]
+                                _label = (
+                                    village_label(_k, names) if isinstance(_k, int) else str(_k)
+                                )
+                                _states = {a.status for a in _acts}
+                                if _states <= {"created"}:
+                                    continue  # the rebuild worked; nothing to undo
+                                _give_up = ""
+                                if not _old:
+                                    _give_up = "no record of the rows that were switched off"
+                                elif not _states <= {"failed", "not_created"}:
+                                    _give_up = (
+                                        f"the replacement is part-written "
+                                        f"({', '.join(sorted(_states))}); switching the old "
+                                        f"rows back on would ship two schedules at once"
+                                    )
+                                elif len(_acts) != len(replacement_plan.get(_k, [])):
+                                    _give_up = (
+                                        "not every route the plan reserved for this "
+                                        "destination was written"
+                                    )
+                                elif not stable_read_back:
+                                    _give_up = (
+                                        "two reads of this marketplace did not agree, so "
+                                        "the replacement may exist after all"
+                                    )
+                                if not _give_up:
+                                    _live_here = [
+                                        e for e in after if _k in _existing_keys(e) and e.visible
+                                    ]
+                                    if any(e.route_id not in before_ids for e in _live_here):
+                                        _give_up = "the replacement left rows here after all"
+                                    else:
+
+                                        def _config(e: ExistingRoute) -> tuple:
+                                            return (
+                                                e.route_id,
+                                                e.dest_village_id,
+                                                e.dest_x,
+                                                e.dest_y,
+                                                _cargo_key(e.cargo),
+                                                _row_minute(e),
+                                                e.visible,
+                                            )
+
+                                        if sorted(_config(e) for e in _live_here) != sorted(
+                                            _config(e) for e in _old
+                                        ) or any(e.active for e in _live_here):
+                                            _give_up = (
+                                                "the marketplace no longer matches the record "
+                                                "taken before the disable"
+                                            )
+                                if _give_up:
+                                    trace.event(
+                                        "replacement_abandoned",
+                                        origin=origin,
+                                        destination=str(_k),
+                                        reason=f"not restored automatically: {_give_up}",
+                                    )
+                                    problems.append(
+                                        f"{village_label(origin, names)} -> {_label}: this "
+                                        f"run switched off its diverging route(s) and could "
+                                        f"not put them back automatically — {_give_up}. "
+                                        f"Check this destination in game."
+                                    )
+                                    continue
+                                if reason := _stop_reason():
+                                    stopped_early = True
+                                    problems.append(reason)
+                                    trace.event(
+                                        "replacement_abandoned",
+                                        origin=origin,
+                                        destination=str(_k),
+                                        reason="the run stopped before the restore was written",
+                                    )
+                                    continue
+                                _old_ids = sorted(e.route_id for e in _live_here)
+                                trace.event(
+                                    "restore_attempted",
+                                    origin=origin,
+                                    destination=str(_k),
+                                    route_ids=_old_ids,
+                                    reason=replaceable.get(_k, ""),
+                                )
+                                _back = await svc.enable_routes(
+                                    origin, _live_here, stop_check=_stop_reason
+                                )
+                                if _back is not None and _back.status == "stopped":
+                                    stopped_early = True
+                                    problems.append(_back.detail)
+                                    trace.event(
+                                        "restore_failed",
+                                        origin=origin,
+                                        destination=str(_k),
+                                        detail=_back.detail,
+                                    )
+                                    continue
+                                # The page decides, exactly as it does for every
+                                # other write here: an "enabled" answer over rows
+                                # that are still off is the same false outcome as
+                                # an accepted create that produced nothing.
+                                try:
+                                    _checked = await svc.confirm_routes(
+                                        origin, map_span=body.map_span
+                                    )
+                                except (NetworkError, MarketplaceUnreadable) as exc:
+                                    trace.event(
+                                        "restore_failed",
+                                        origin=origin,
+                                        destination=str(_k),
+                                        detail=f"the confirming read failed: {exc}",
+                                    )
+                                    problems.append(
+                                        f"{village_label(origin, names)} -> {_label}: the old "
+                                        f"route(s) {_old_ids} could not be switched back on "
+                                        f"with any certainty — the confirming read failed "
+                                        f"({exc}). Check this destination in game."
+                                    )
+                                    continue
+                                _still_off = sorted(
+                                    e.route_id
+                                    for e in _checked
+                                    if e.route_id in set(_old_ids) and not e.active
+                                )
+                                if _still_off:
+                                    trace.event(
+                                        "restore_failed",
+                                        origin=origin,
+                                        destination=str(_k),
+                                        still_off=_still_off,
+                                        detail=(
+                                            ""
+                                            if _back is None
+                                            else f"{_back.status} {_back.detail}".strip()
+                                        ),
+                                    )
+                                    problems.append(
+                                        f"{village_label(origin, names)} -> {_label}: the "
+                                        f"replacement was refused and the old route(s) "
+                                        f"{_still_off} could not be switched back on. That "
+                                        f"destination is receiving nothing — re-enable them "
+                                        f"in game."
+                                    )
+                                    continue
+                                trace.event(
+                                    "restored",
+                                    origin=origin,
+                                    destination=str(_k),
+                                    route_ids=_old_ids,
+                                )
+                                re_enables.append(
+                                    f"{village_label(origin, names)} -> {_label}: restored "
+                                    f"{len(_old_ids)} disabled row(s) after the replacement "
+                                    f"was refused"
+                                )
+                                # The line that said this destination is
+                                # receiving nothing, and told the operator to
+                                # re-enable its old rows in game. Both halves
+                                # are now false.
+                                for _a in _acts:
+                                    _withdrawn = refused_replacements.pop(id(_a), None)
+                                    if _withdrawn is not None and _withdrawn in problems:
+                                        problems.remove(_withdrawn)
 
                 # Between VILLAGES, not between requests. The throttler already
                 # spaces requests and SessionTempo already drifts the pace, but

@@ -1915,26 +1915,30 @@ class TestAnOffScheduleDestinationIsOnlyDisabledIfItCanBeRebuilt:
     def _emptied(self, svc):
         return [d for d in (20011, 20019) if not self._still_active(svc, d)]
 
-    def test_a_refused_rebuild_names_the_destination_it_emptied(self):
+    def test_a_refused_rebuild_puts_the_destination_it_emptied_back(self):
         # Reserving the budget is necessary and not sufficient. The reservation
         # is spent whatever the game ANSWERS, so a refused create leaves the
         # destination switched off and receiving nothing at all -- and a single
         # refusal is below the consecutive-failure limit, so nothing else says a
-        # word. Measured before the fix: created=0, disables=['03: disabled 8
-        # route(s)'], problems=[] -- a green run over a village that has stopped
-        # being supplied.
+        # word. Measured before that was fixed: created=0, disables=['03:
+        # disabled 8 route(s)'], problems=[] -- a green run over a village that
+        # has stopped being supplied.
+        #
+        # Naming it was the first half. The second is that the disable is
+        # REVERSIBLE and the rows are still there, so a wholly refused rebuild is
+        # now put back rather than named and left. It is still accounted for --
+        # in `re_enables` instead of `problems` -- and a restore the game refuses
+        # goes back to naming it (see TestARefusedReplacementPutsTheOldRoutesBack).
         svc = _FakeLiveSvc(existing=self._existing(), create_status="failed", phantom_creates=True)
         res = _run_live(
             svc, _two_destination_account(), disable_existing=True, max_routes_per_run=1
         )
 
-        emptied = self._emptied(svc)
-        assert len(emptied) == 1, "exactly one destination was reserved and switched off"
-        name = {20011: "11", 20019: "19"}[emptied[0]]
-        assert any(name in problem for problem in res.problems), (
-            f"nothing names {name}, whose rows this run switched off and could not "
-            f"replace: {res.problems}"
-        )
+        assert self._emptied(svc) == [], "a wholly refused rebuild leaves nothing dark"
+        restored = [line for line in res.re_enables if "restored" in line]
+        assert len(restored) == 1, res.re_enables
+        assert any(name in restored[0] for name in ("11", "19")), restored
+        assert not any("receiving nothing" in problem for problem in res.problems), res.problems
 
     def test_a_stop_between_the_disable_and_the_rebuild_names_the_destination(self):
         # `_stop_reason()` is re-checked before EVERY create, which is right --
@@ -5001,3 +5005,151 @@ class TestAnUnreadableReEnableSaysWhatTheGameSaid:
         )
 
         assert any("rejected: [901, 902]" in problem for problem in res.problems), res.problems
+
+
+def _one_mismatched_destination():
+    """One origin, one own destination the plan wants on a 6h cycle."""
+    return _account(
+        [_row_with_cycle(20003, 20011, 6, 100)],
+        {20003: (0, 0), 20011: (10, 0)},
+        {20003: "03", 20011: "11"},
+    )
+
+
+def _mismatched_rows():
+    """Eight 3h rows where the plan wants four 6h ones: diverging, so the
+    reconciler disables the destination and rebuilds it."""
+    return {20003: _fanned(20011, 10, 0, cycle_hours=3, dispatch_minute=100, start_id=710000)}
+
+
+class TestARefusedReplacementPutsTheOldRoutesBack:
+    """Disable was chosen over delete because it is REVERSIBLE. Never using that
+    reversibility wasted the property.
+
+    A destination whose rows run a schedule the plan does not want is emptied and
+    refilled in two requests. When the second one is refused the village is left
+    receiving NOTHING -- its old rows off, no new ones -- and the run's answer
+    was a problem line telling a human to go and switch them back on. The rows
+    are still there, still disabled, still exactly as they were recorded before
+    the disable went out: the run can put them back itself.
+
+    Guarded, because an automatic write on a half-known state is worse than a
+    dark village: every replacement create must be settled and REFUSED, a stable
+    read-back must show zero replacement rows, and the old rows must still be
+    exactly what the write-ahead record says they were. Anything else -- a
+    partial rebuild, an indeterminate create, a destination that changed
+    underneath -- is abandoned for a human.
+    """
+
+    def _run(self, svc, **kw):
+        kw.setdefault("max_routes_per_run", 50)
+        kw.setdefault("max_game_rows_per_run", 0)
+        return _run_live(svc, _one_mismatched_destination(), **kw)
+
+    def test_a_wholly_refused_replacement_restores_the_old_rows(self):
+        svc = _FakeLiveSvc(
+            existing=_mismatched_rows(), create_status="failed", phantom_creates=True
+        )
+
+        res = self._run(svc)
+
+        assert svc.enabled == [(20003, ((10, 0),) * 8)], svc.enabled
+        assert all(e.active for e in svc._existing[20003]), "the old rows are shipping again"
+        assert any("restored" in line for line in res.re_enables), res.re_enables
+
+    def test_the_restore_is_traced_from_attempt_to_outcome(self):
+        svc = _FakeLiveSvc(
+            existing=_mismatched_rows(), create_status="failed", phantom_creates=True
+        )
+
+        res = self._run(svc)
+
+        kinds = [e["kind"] for e in _trace_events(res.trace_path)]
+        assert kinds.count("restore_attempted") == 1, kinds
+        assert kinds.count("restored") == 1, kinds
+        assert "restore_failed" not in kinds, kinds
+
+    def test_the_receiving_nothing_line_is_withdrawn(self):
+        """It said the destination is receiving nothing and told the operator to
+        re-enable its old rows in game. Both halves are now false."""
+        svc = _FakeLiveSvc(
+            existing=_mismatched_rows(), create_status="failed", phantom_creates=True
+        )
+
+        res = self._run(svc)
+
+        assert not any("receiving nothing" in p for p in res.problems), res.problems
+
+    def test_a_restore_the_game_refuses_is_reported(self):
+        svc = _FakeLiveSvc(
+            existing=_mismatched_rows(),
+            create_status="failed",
+            phantom_creates=True,
+            enable_status="failed",
+        )
+
+        res = self._run(svc)
+
+        kinds = [e["kind"] for e in _trace_events(res.trace_path)]
+        assert "restore_failed" in kinds, kinds
+        assert any("could not be switched back on" in p for p in res.problems), res.problems
+
+    def test_a_destination_that_changed_underneath_is_not_restored(self):
+        """The write-ahead record is the only description of what was switched
+        off. If the marketplace no longer matches it, this run does not know what
+        it would be turning on."""
+
+        class _ARowVanished(_FakeLiveSvc):
+            """Someone deleted one of the old rows in another tab while this run
+            was between its two requests."""
+
+            async def disable_routes(self, vid, routes, *, stop_check=None):
+                result = await super().disable_routes(vid, routes, stop_check=stop_check)
+                self._existing[vid] = self._existing[vid][:-1]
+                return result
+
+        svc = _ARowVanished(
+            existing=_mismatched_rows(), create_status="failed", phantom_creates=True
+        )
+
+        res = self._run(svc)
+
+        assert svc.enabled == [], "nothing is switched on against a record that no longer holds"
+        kinds = [e["kind"] for e in _trace_events(res.trace_path)]
+        assert "replacement_abandoned" in kinds, kinds
+        assert any("no longer matches" in p for p in res.problems), res.problems
+
+    def test_an_indeterminate_replacement_is_never_restored(self):
+        """An indeterminate create may already be in the game. Switching the old
+        rows back on would then ship BOTH schedules at once, which is the exact
+        state disable-and-recreate exists to avoid."""
+
+        class _Unsettled(_FakeLiveSvc):
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._reads = 0
+
+            async def confirm_routes(self, vid, *, map_span=None):
+                rows = await super().confirm_routes(vid, map_span=map_span)
+                self._reads += 1
+                if self._reads % 2 == 1:
+                    return rows[:-1]
+                return rows
+
+        svc = _Unsettled(existing=_mismatched_rows(), create_status="failed", phantom_creates=True)
+
+        res = self._run(svc)
+
+        assert [a.status for a in res.actions] == ["indeterminate"], [
+            (a.status, a.detail) for a in res.actions
+        ]
+        assert svc.enabled == [], "an unsettled replacement is never undone automatically"
+
+    def test_a_replacement_that_landed_is_left_alone(self):
+        """The control: a rebuild that worked must not be undone."""
+        svc = _FakeLiveSvc(existing=_mismatched_rows())
+
+        res = self._run(svc)
+
+        assert svc.enabled == [], svc.enabled
+        assert [a.status for a in res.actions] == ["created"], [a.detail for a in res.actions]
