@@ -32,7 +32,7 @@ import { CAPITAL, KEY, PLAN, PREVIEW, isolate, seed } from './plannerHarness'
  *  the base capacity on this row and the Trade Office bonus one disclosure in.
  *  A checkbox called "measured" would be an operator asserting they know not
  *  what. */
-export const MEASURED = 'I read the base capacity and the bonus off the Marketplace send form'
+const MEASURED = 'I read the base capacity and the bonus off the Marketplace send form'
 
 const measured = (page) => page.getByRole('checkbox', { name: MEASURED })
 

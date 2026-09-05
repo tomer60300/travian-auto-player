@@ -1841,10 +1841,13 @@ export default function ResourcePlanner() {
       // must not switch it. `mergeSetup` has already decided that.
       setPruneToWindow(merged.pruneToWindow)
       // And the same rule again: a v10 document says nothing about the reading,
-      // so loading one must not clear an acknowledgement on screen. Set BEFORE
-      // the merchant model below it, because writing those boxes through the
-      // page's own handlers is what unticks this -- and a document is not an
-      // operator editing a figure.
+      // so loading one must not clear an acknowledgement on screen.
+      //
+      // Order does not matter beside the `setMerchantModel` below it, and that
+      // is worth saying because the two figures it writes are the ones an EDIT
+      // withdraws this over: the withdrawal lives in those boxes' own
+      // `onChange`, which a direct `setMerchantModel` never runs. A document
+      // restoring a calibration is not an operator typing over one.
       setMerchantModelMeasured(merged.merchantModelMeasured)
       // Capacity is server-calibrated, so a file that carries a calibration is
       // more trustworthy than this build's default. Absent, the default stands.
