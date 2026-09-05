@@ -7232,6 +7232,12 @@ async def post_execute(
                             route.window,
                         )
                         if row_cap and rows_written + _held_rows + would_add > row_cap:
+                            # A route needing more rows than the WHOLE budget is
+                            # not waiting its turn: no run at this setting can
+                            # ever create it. Left as a bare deferral it read as
+                            # ordinary back-pressure, and a sweep asked the
+                            # caller back for another pass for ever.
+                            _never_fits = would_add > row_cap
                             trace.decision(
                                 origin=origin,
                                 destination=destination,
@@ -7240,8 +7246,18 @@ async def post_execute(
                                     f"row budget: {rows_written}/{row_cap} rows used"
                                     + (f" and {_held_rows} reserved" if _held_rows else "")
                                     + f", this {row.cycle_hours}h route needs {would_add} more"
+                                    + (" — more than the whole budget" if _never_fits else "")
                                 ),
                             )
+                            if _never_fits:
+                                problems.append(
+                                    f"{village_label(origin, names)} -> "
+                                    f"{village_label(row.destination, names)}: this "
+                                    f"{row.cycle_hours}h route fans out to {would_add} game "
+                                    f"row(s) and 'max rows this run' is {row_cap}, so no run at "
+                                    f"this budget can ever create it — raise it to at least "
+                                    f"{would_add}."
+                                )
                             deferred.append((row, route))
                             continue
                         # Re-check before EVERY create, not once per origin: a
@@ -7995,9 +8011,14 @@ async def post_execute(
         # happen: "swept" quietly meant "swept but only partly provisioned".
         # Gated on `cap` as well, because a reconcile-only sweep defers every
         # route by construction and can never make progress on them.
+        # ...and on PROGRESS, not merely on `deferred`: a route whose surviving
+        # fan-out exceeds `max_game_rows_per_run` is deferred by every run
+        # alike, so `deferred` is never empty and the contract had no
+        # termination guarantee at all. A pass that attempted no create is a
+        # pass the next one would repeat exactly.
         next_chunk_wait_seconds=(
             _chunk_gap_seconds()
-            if unswept or (body.reconcile_all_origins and cap and deferred)
+            if unswept or (body.reconcile_all_origins and cap and deferred and attempts)
             else None
         ),
         warnings=warnings,

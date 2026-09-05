@@ -3103,6 +3103,30 @@ class TestASweptAccountWithDeferredCreatesGetsAnotherPass:
         assert res.unswept_origins == []
         assert res.next_chunk_wait_seconds is None
 
+    def test_a_sweep_that_can_never_fund_the_rest_stops_asking(self):
+        # `deferred` is not progress. A route whose surviving fan-out exceeds
+        # the WHOLE row budget is deferred by every run alike, so the sweep
+        # asked the caller back for ever: measured over five passes, created=0
+        # from pass 3 on and a wait every time. The shipped UI survives it by
+        # breaking after two identical `remaining` values; any other caller
+        # re-reads every village indefinitely.
+        svc = _FakeLiveSvc(existing={20011: []})
+        res = _run_live(
+            svc,
+            self._two_routes(),
+            max_routes_per_run=50,
+            max_game_rows_per_run=3,  # a 6h route is 4 rows: neither ever fits
+            reconcile_all_origins=True,
+        )
+
+        assert svc.created == [], "3 rows cannot hold a 4-row route"
+        assert res.remaining == 2
+        assert res.unswept_origins == []
+        assert res.next_chunk_wait_seconds is None, (
+            "another pass would defer exactly the same routes"
+        )
+        assert any("raise it to at least 4" in p for p in res.problems), res.problems
+
     def test_a_sweep_with_nothing_left_asks_for_nothing(self):
         svc = _FakeLiveSvc(existing={20011: []})
         res = _run_live(
