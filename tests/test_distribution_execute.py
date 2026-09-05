@@ -1978,6 +1978,180 @@ class TestAnOffScheduleDestinationIsOnlyDisabledIfItCanBeRebuilt:
         assert not any("REFUSED the replacement" in p for p in res.problems), res.problems
 
 
+def _trace_events(path):
+    from pathlib import Path
+
+    return [
+        json.loads(line)
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+class TestAReplacedDestinationLeavesARecoveryRecordBeforeItIsEmptied:
+    """The worst interruption on this path is the process dying between the
+    disable and the create.
+
+    A replaced destination is emptied and refilled in two requests. If the run
+    ends in between -- a kill, a worker reload, a crash -- the destination is
+    receiving NOTHING, and the run's own problems list, which is built at the
+    end, was never returned. The trace is the only thing that survives that, so
+    the complete OLD configuration has to be recorded and flushed BEFORE the
+    disable goes out.
+
+    `ExecutionTrace._write` already flushes every event, so the ORDERING is the
+    whole of it -- and the ordering is what these measure, by reading the file at
+    the moment the disable is sent rather than at the end of the run.
+    """
+
+    def _existing(self):
+        # Eight 3h rows to each destination where the plan wants four 6h ones.
+        return {
+            20003: _fanned(
+                20011,
+                10,
+                0,
+                cycle_hours=3,
+                dispatch_minute=100,
+                start_id=710000,
+                cargo={Resource.CROP: 250},
+            )
+            + _fanned(
+                20019,
+                20,
+                0,
+                cycle_hours=3,
+                dispatch_minute=700,
+                start_id=720000,
+                cargo={Resource.CROP: 250},
+            )
+        }
+
+    def _run(self, svc, **kw):
+        kw.setdefault("max_routes_per_run", 1)
+        return _run_live(svc, _two_destination_account(), disable_existing=True, **kw)
+
+    def test_the_record_is_on_disk_before_the_disable_is_sent(self):
+        class _WatchingSvc(_FakeLiveSvc):
+            """Snapshots the trace file at the moment the disable goes out.
+
+            Asserting the event's presence at the END of a run proves nothing --
+            an event written afterwards is exactly the bug."""
+
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self.at_disable = None
+
+            async def disable_routes(self, vid, routes, *, stop_check=None):
+                if self.at_disable is None:
+                    self.at_disable = _trace_events(self.trace.path)
+                return await super().disable_routes(vid, routes, stop_check=stop_check)
+
+        svc = _WatchingSvc(existing=self._existing())
+        self._run(svc)
+
+        assert svc.at_disable is not None, "the disable must have been sent"
+        started = [e for e in svc.at_disable if e["kind"] == "replacement_started"]
+        assert started, (
+            "no replacement_started was on disk when the rows were switched off: "
+            f"{[e['kind'] for e in svc.at_disable]}"
+        )
+
+    def test_the_record_carries_the_whole_old_configuration(self):
+        svc = _FakeLiveSvc(existing=self._existing())
+        res = self._run(svc)
+
+        started = [e for e in _trace_events(res.trace_path) if e["kind"] == "replacement_started"]
+        assert len(started) == 1, "one destination is reserved at a cap of one"
+        record = started[0]
+        assert record["origin"] == 20003
+        # Eight rows on a 3h cycle, each with everything needed to put it back by
+        # hand: the id, what it shipped, when it left, whether it was on.
+        assert record["old_row_count"] == 8
+        assert record["implied_cycle_hours"] == 3, "24/8 is the cycle to re-enter in game"
+        first = {20011: 100, 20019: 700}[int(record["destination"])]
+        assert sorted(r["dispatch_minute"] for r in record["old_rows"]) == sorted(
+            (first + i * 180) % 1440 for i in range(8)
+        )
+        for row in record["old_rows"]:
+            assert row["cargo"] == {"crop": 250}, row
+            assert row["active"] is True
+            assert row["route_id"] > 0
+        # And what was going to take their place, so the record is a plan and not
+        # just an epitaph.
+        assert record["planned"] == [
+            {"cycle_hours": 6, "dispatch_minute": first, "cargo": {"crop": 100}}
+        ]
+
+    def test_the_refused_path_leaves_the_whole_sequence(self):
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        class _RefusingSvc(_FakeLiveSvc):
+            async def create_route(self, route, *, stop_check=None):
+                self.created.append(route)
+                return RouteActionResult(
+                    route.origin_village_id,
+                    route.dest_x,
+                    route.dest_y,
+                    "failed",
+                    "route limit reached (test)",
+                )
+
+        svc = _RefusingSvc(existing=self._existing())
+        res = self._run(svc)
+
+        kinds = [e["kind"] for e in _trace_events(res.trace_path)]
+        order = [
+            kinds.index(k)
+            for k in ("replacement_started", "rows_disabled", "create_attempted", "refused")
+        ]
+        assert order == sorted(order), kinds
+        refused = next(e for e in _trace_events(res.trace_path) if e["kind"] == "refused")
+        assert refused["detail"] == "route limit reached (test)", refused
+        assert refused["origin"] == 20003
+        assert refused["status"] == "failed"
+
+    def test_a_disable_that_did_not_land_still_closes_the_first_half(self):
+        """`rows_disabled` is written whatever the game answered. Without it a
+        refused disable would leave a dangling record over rows that are still
+        shipping -- a recovery alarm for a destination that was never emptied."""
+        svc = _FakeLiveSvc(existing=self._existing(), disable_status="failed")
+        res = self._run(svc)
+
+        events = _trace_events(res.trace_path)
+        assert [e["kind"] for e in events].count("replacement_started") == 1
+        (row_event,) = [e for e in events if e["kind"] == "rows_disabled"]
+        assert row_event["status"] == "failed"
+        assert row_event["route_ids"], "the ids it asked to switch off are the record"
+
+    def test_a_create_the_game_made_is_recorded_as_created(self):
+        svc = _FakeLiveSvc(existing=self._existing())
+        res = self._run(svc)
+
+        kinds = [e["kind"] for e in _trace_events(res.trace_path)]
+        assert "created" in kinds and "refused" not in kinds, kinds
+
+    def test_a_run_that_stops_before_the_rebuild_closes_the_record(self):
+        """A write-ahead record with no ending means "interrupted, recover by
+        hand". That reading only works if every ending the run CAN reach is
+        written -- including the one where it gives up on purpose."""
+        svc = _FakeLiveSvc(existing=self._existing())
+        _disable = svc.disable_routes
+
+        async def _exhaust_the_budget_after_disabling(vid, routes, *, stop_check=None):
+            result = await _disable(vid, routes, stop_check=stop_check)
+            svc.budget_ok = False
+            return result
+
+        svc.disable_routes = _exhaust_the_budget_after_disabling
+        res = self._run(svc, max_routes_per_run=50)
+
+        kinds = [e["kind"] for e in _trace_events(res.trace_path)]
+        assert svc.created == [], "no replacement was written"
+        assert kinds.count("replacement_started") == 2, kinds
+        assert kinds.count("replacement_abandoned") == 2, kinds
+
+
 class TestAControlledRunCanTargetOnePair:
     """The first live run against a real account must be exactly one chosen route.
 

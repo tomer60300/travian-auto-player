@@ -6778,6 +6778,11 @@ async def post_execute(
                     # cannot be funded keeps its rows and is reported diverging,
                     # exactly as create-only mode reports it.
                     replaceable: dict[int | tuple[int, int], str] = {}
+                    # The routes reserved to replace each one, for the
+                    # write-ahead record: a recovery note that says what was
+                    # switched off but not what was going to take its place is
+                    # half a note.
+                    replacement_plan: dict[int | tuple[int, int], list[PlannedRoute]] = {}
                     # Why a mismatched destination's rebuild could NOT be
                     # reserved, keyed by destination, so the blocked action and
                     # the problem line give the operator the same remedy.
@@ -6810,6 +6815,10 @@ async def post_execute(
                                 reserved_attempts += len(_pairs)
                                 reserved_rows += _needs_rows
                                 replaceable[_k] = _why
+                                # Kept for the write-ahead record below: what
+                                # this run intends to put in place of the rows
+                                # it is about to switch off.
+                                replacement_plan[_k] = [_p for _r, _p in _pairs]
                                 continue
                             # WHY it could not be reserved, in the operator's
                             # own controls. "Raise the budget or re-run" was
@@ -6943,8 +6952,78 @@ async def post_execute(
                                 problems.append(reason)
                                 deferred.extend(desired)
                                 continue
+                        # ── Write-ahead, and this order is the whole point ──
+                        #
+                        # A replaced destination is emptied and refilled in two
+                        # requests, and the worst thing that can happen to this
+                        # path is the process dying between them: the rows are
+                        # off, nothing has taken their place, and the run's own
+                        # problems list -- built at the end -- was never
+                        # returned. The trace is the only thing that survives
+                        # that, so the complete OLD configuration is recorded
+                        # and flushed BEFORE the disable is sent, not after it
+                        # comes back. `ExecutionTrace._write` flushes every
+                        # event, so ordering is all this needs.
+                        #
+                        # A record with no terminating event means "interrupted
+                        # between the disable and the create -- recover by
+                        # hand". Every ending this run can reach IS written
+                        # (`rows_disabled` whatever the game answered, then
+                        # `created` / `refused` / `create_not_sent` /
+                        # `replacement_abandoned`), so a dangling record is
+                        # evidence of a death and not of an ordinary refusal.
+                        for _k in replaceable:
+                            _going = [e for e in stale if _k in _existing_keys(e)]
+                            if not _going:
+                                continue
+                            trace.event(
+                                "replacement_started",
+                                origin=origin,
+                                destination=str(_k),
+                                reason=replaceable[_k],
+                                # Travian turns "repeat every N hours" into 24/N
+                                # rows, so the row COUNT is the cycle the
+                                # operator would have to re-enter by hand.
+                                old_row_count=len(_going),
+                                implied_cycle_hours=(
+                                    24 // len(_going) if 24 % len(_going) == 0 else None
+                                ),
+                                old_rows=[
+                                    {
+                                        "route_id": e.route_id,
+                                        "dest_village_id": e.dest_village_id,
+                                        "dest_x": e.dest_x,
+                                        "dest_y": e.dest_y,
+                                        "cargo": e.cargo,
+                                        "dispatch_minute": _row_minute(e),
+                                        "departure_at": e.departure_at,
+                                        "active": e.active,
+                                        "visible": e.visible,
+                                    }
+                                    for e in _going
+                                ],
+                                planned=[
+                                    {
+                                        "cycle_hours": _p.cycle_hours,
+                                        "dispatch_minute": _p.dispatch_minute,
+                                        "cargo": _p.cargo,
+                                    }
+                                    for _p in replacement_plan.get(_k, [])
+                                ],
+                            )
                         disabled = await svc.disable_routes(origin, stale, stop_check=_stop_reason)
                         if disabled is not None:
+                            # Immediately and whatever it says: this closes the
+                            # first half of the chain, and a chain that stops
+                            # here on anything but success means the rows are
+                            # still shipping.
+                            trace.event(
+                                "rows_disabled",
+                                origin=origin,
+                                route_ids=sorted(e.route_id for e in stale),
+                                status=disabled.status,
+                                detail=disabled.detail,
+                            )
                             line = (
                                 f"{village_label(origin, names)}: "
                                 f"{disabled.status} {disabled.detail}"
@@ -7542,6 +7621,20 @@ async def post_execute(
                             reserved_attempts -= 1
                             reserved_rows -= would_add
                             rebuild_fired.add(destination)
+                        # Write-ahead, like the disable above: the create is
+                        # recorded and flushed BEFORE it goes out, so a run that
+                        # dies mid-request leaves evidence that something may
+                        # already be in the game. `wrote` is the service's
+                        # AFTER-the-answer event and cannot say that.
+                        trace.event(
+                            "create_attempted",
+                            origin=origin,
+                            destination=str(destination),
+                            cycle_hours=route.cycle_hours,
+                            dispatch_minute=route.dispatch_minute,
+                            rows=would_add,
+                            replacing=destination in replaceable,
+                        )
                         result = await svc.create_route(route, stop_check=_stop_reason)
                         if result.status == "stopped":
                             # Stopped after the pacing wait, before the POST —
@@ -7550,6 +7643,12 @@ async def post_execute(
                             rows_written -= would_add
                             stopped_early = True
                             problems.append(result.detail)
+                            trace.event(
+                                "create_not_sent",
+                                origin=origin,
+                                destination=str(destination),
+                                detail=result.detail,
+                            )
                             deferred.extend(desired[i:])
                             break
                         if result.status == "created":
@@ -7561,8 +7660,25 @@ async def post_execute(
                                 _mine_minutes
                             )
                             attempt_ledger.append("succeeded")
+                            trace.event(
+                                "created",
+                                origin=origin,
+                                destination=str(destination),
+                                detail=result.detail,
+                            )
                             continue
                         outstanding += 1
+                        # `skipped` (Gold Club) and `failed` alike: the request
+                        # went out and no route came of it. A `refused` here can
+                        # still be superseded by `unanswered_create_landed`
+                        # below, which is the read-back correcting a dead answer.
+                        trace.event(
+                            "refused",
+                            origin=origin,
+                            destination=str(destination),
+                            status=result.status,
+                            detail=result.detail,
+                        )
                         if result.status == "skipped":
                             # Gold Club is required and missing — an account-level
                             # block. Report it as "blocked" (distinct from an
@@ -7656,6 +7772,16 @@ async def post_execute(
                             f"run switched off its diverging route(s) ({replaceable[_k]}) and "
                             f"stopped before writing the replacement. That destination is "
                             f"receiving nothing until a later run rebuilds it."
+                        )
+                        # The write-ahead record's other ending: the run gave up
+                        # on purpose. Written so that a record with NO ending
+                        # means the process died, which is a different recovery
+                        # and needs to be distinguishable from this one.
+                        trace.event(
+                            "replacement_abandoned",
+                            origin=origin,
+                            destination=str(_k),
+                            reason="the run stopped before the replacement was written",
                         )
 
                     # ── Did the game actually make them? ────────────────────
