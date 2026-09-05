@@ -4,9 +4,11 @@ Every value below exists twice: once in Python and once in
 `frontend/src`. That is not a defect to tidy away -- the page has to know a
 bound before it posts, or the operator types a figure and gets a pydantic 422
 that names no control -- but a copy nothing asserts is a copy that has already
-drifted. `MAX_TRADE_OFFICE_LEVEL`, `MAX_MERCHANTS_PER_VILLAGE`, the fill pair
-and `READABLE_VERSIONS` were already pinned this way on both sides; these are
-the ones that were not.
+drifted. The fill pair (`tests/test_night_window_constraints.py`) and
+`READABLE_VERSIONS` (`tests/test_planner_setup_store.py`, parametrised) were
+already pinned this way on both sides; everything else here was not --
+including `MAX_TRADE_OFFICE_LEVEL` and `MAX_MERCHANTS_PER_VILLAGE`, which an
+earlier version of this docstring claimed were.
 
 The sharpest is `DEFAULT_MERCHANT_MODEL`. The page seeds from its own constant
 and sends **all four figures explicitly**, so changing a default here does not
@@ -25,6 +27,7 @@ from travian_api.services.distribution.merchants import DAILY_BEAT_CYCLES, EUROP
 from travian_api.services.distribution.optimizer import (
     DEFAULT_MERCHANT_HEADROOM,
     DEFAULT_MERCHANT_RESERVE,
+    MAX_TRADE_OFFICE_LEVEL,
 )
 from travian_api.web.routes.distribution import (
     MAX_DAY_SEGMENTS,
@@ -34,6 +37,7 @@ from travian_api.web.routes.distribution import (
     NightProfileRequest,
     VillageConfig,
 )
+from travian_api.web.routes.planner_setup import MAX_MERCHANTS_PER_VILLAGE
 
 
 def _bound(model, field, key):
@@ -108,6 +112,28 @@ class TestTheBoundsThePageHasToKnowBeforeItPosts:
 
     def test_a_run_may_leave_two_thousand_rows_at_most(self):
         assert _bound(ExecuteRequest, "max_game_rows_per_run", "le") == 2000
+
+    def test_the_row_budget_a_run_gets_by_default_is_twenty_four(self):
+        # Twin: `MAX_GAME_ROWS_PER_RUN` in `ResourcePlanner.jsx`, which seeds
+        # the box. This is a DEFAULT, not a ceiling, and it is the one figure
+        # here the page can leave out of the request entirely -- so a change on
+        # one side alone silently moves what an omitted field means. 24 is the
+        # largest footprint a single create can make (hourly), so no route is
+        # ever permanently unfundable at it.
+        assert ExecuteRequest.model_fields["max_game_rows_per_run"].default == 24
+
+    def test_a_trade_office_reaches_level_twenty(self):
+        # Twin: `MAX_TRADE_OFFICE_LEVEL` in plannerSetup.js. `optimizer` owns
+        # the figure -- the upgrade search walks up to it -- and the request
+        # field carried a bare 20 of its own until this pinned them together.
+        assert MAX_TRADE_OFFICE_LEVEL == 20
+        assert _bound(VillageConfig, "trade_office_level", "le") == MAX_TRADE_OFFICE_LEVEL
+
+    def test_a_village_reserves_at_most_twenty_merchants(self):
+        # Twin: `MAX_MERCHANTS_PER_VILLAGE` in plannerSetup.js. Travian's own
+        # ceiling, which makes the cap case a tautology -- but the page marks
+        # the cell on it, so the two copies still have to agree.
+        assert MAX_MERCHANTS_PER_VILLAGE == 20
 
     def test_a_safety_margin_is_a_percentage(self):
         assert _bound(ForeignTarget, "safety_margin_pct", "le") == 100

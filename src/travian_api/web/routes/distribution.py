@@ -85,6 +85,7 @@ from travian_api.services.distribution.optimizer import (
     DEFAULT_MERCHANT_RESERVE,
     MAX_IMPROVE_PASSES,
     MAX_RELAY_HOPS,
+    MAX_TRADE_OFFICE_LEVEL,
     MIN_SEND_FILL,
     VillageState,
     merchant_ceiling_clause,
@@ -465,7 +466,10 @@ class VillageConfig(BaseModel):
     trade_office_level: int = Field(
         default=0,
         ge=0,
-        le=20,
+        # Travian's own ceiling, and `optimizer` already exports it -- a bare 20
+        # here was a third copy of the same number with nothing tying it to the
+        # upgrade search that reads it.
+        le=MAX_TRADE_OFFICE_LEVEL,
         description=(
             "Unknown levels must default to 0: understating capacity "
             "over-provisions merchants, which is safe, while overstating it "
