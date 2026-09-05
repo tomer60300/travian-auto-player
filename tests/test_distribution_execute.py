@@ -3608,6 +3608,58 @@ class TestRoutesTheOperatorWantsLeftAlone:
 
         assert len(svc.created) == 2, "creates are untouched by a disable exemption"
 
+    def _protected_but_drifted(self):
+        # The plan's own schedule, so the destination is SATISFIED and the run
+        # reaches the cargo check -- but hand-set amounts, which is what a
+        # hand-made route has.
+        return _FakeLiveSvc(
+            existing={
+                20003: _fanned(
+                    20011,
+                    10,
+                    0,
+                    cycle_hours=6,
+                    dispatch_minute=100,
+                    start_id=700000,
+                    cargo={Resource.CROP: 9999},
+                )
+            }
+        )
+
+    def test_a_protected_routes_cargo_is_not_rewritten_either(self):
+        # The exemption says "left untouched" -- and then the drift check
+        # collected the same active rows, found the hand-set cargo different
+        # from the plan's, and rewrote them. Every rewrite also stamps
+        # `deliveries: 1`, so an ally route the operator built at deliveries 3
+        # silently drops to a third of its volume and nothing downstream
+        # detects it.
+        svc = self._protected_but_drifted()
+        res = _run_live(
+            svc,
+            _own_village_account(),
+            disable_existing=True,
+            max_routes_per_run=50,
+            update_drifted=True,
+            protect_destinations=["20011"],
+        )
+
+        assert svc.updated == [], "a protected row's cargo is the operator's, not the plan's"
+        assert res.updates == []
+        assert any("protected" in w.lower() for w in res.warnings), res.warnings
+
+    def test_the_same_cargo_is_rewritten_without_the_exemption(self):
+        # The control, so the exemption cannot quietly become "never update".
+        svc = self._protected_but_drifted()
+        _run_live(
+            svc,
+            _own_village_account(),
+            disable_existing=True,
+            max_routes_per_run=50,
+            update_drifted=True,
+        )
+
+        assert svc.updated, "an unprotected drifted row is still corrected"
+
     def test_a_malformed_entry_is_rejected_rather_than_ignored(self):
         # Silently dropping "4688" (a typo for 46|88) would leave the operator
         # believing a route was protected when it was not -- and the next run

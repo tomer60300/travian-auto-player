@@ -7052,7 +7052,34 @@ async def post_execute(
                                 and destination in _existing_keys(e)
                                 and _row_minute(e) in _mine
                             ]
+                            # "Left untouched" has to mean the cargo too. A
+                            # protected route is a hand-made one, so its amounts
+                            # ALWAYS look drifted -- and every rewrite also
+                            # stamps `deliveries: 1`, so an ally route built at
+                            # deliveries 3 silently dropped to a third of its
+                            # volume with nothing downstream detecting it.
+                            _protected_live = [
+                                e
+                                for e in live
+                                if _is_protected(e, protected_ids, protected_coords)
+                            ]
+                            live = [e for e in live if e not in _protected_live]
                             drifted = [e for e in live if cargo_has_drifted(e.cargo, route.cargo)]
+                            if (
+                                body.update_drifted
+                                and _protected_live
+                                and any(
+                                    cargo_has_drifted(e.cargo, route.cargo)
+                                    for e in _protected_live
+                                )
+                            ):
+                                warnings.append(
+                                    f"{village_label(origin, names)} -> "
+                                    f"{village_label(row.destination, names)}: "
+                                    f"{len(_protected_live)} protected row(s) carry cargo the "
+                                    f"plan did not set; left as they are because the "
+                                    f"destination is protected"
+                                )
                             if drifted and body.update_drifted and updates_done >= cap:
                                 # Bounded like every other write. These fired one
                                 # paced PUT per desired route with no cap, so a
