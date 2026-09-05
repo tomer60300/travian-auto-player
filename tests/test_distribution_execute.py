@@ -1841,6 +1841,25 @@ class TestAnOffScheduleDestinationIsOnlyDisabledIfItCanBeRebuilt:
         assert self._still_active(svc, starved)
         assert res.problems, "a destination left diverging is never silent"
 
+    def test_a_filter_excluded_mismatch_is_not_blamed_on_the_budget(self):
+        # `_pairs` comes from `desired`, so a destination the run's own filter
+        # dropped has no pairs and can never be reserved -- correctly, since a
+        # filtered run must not disable what it cannot recreate. The refusal
+        # blamed the budget for it, which sends the operator to raise a limit
+        # that was never the cause.
+        svc = _FakeLiveSvc(existing=self._existing())
+        res = _run_live(
+            svc,
+            _two_destination_account(),
+            disable_existing=True,
+            max_routes_per_run=50,
+            only_destinations=[20011],
+        )
+
+        line = next(p for p in res.problems if "19" in p)
+        assert "filter" in line, line
+        assert "budget" not in line, line
+
     def _emptied(self, svc):
         return [d for d in (20011, 20019) if not self._still_active(svc, d)]
 

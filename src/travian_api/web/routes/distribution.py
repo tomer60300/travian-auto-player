@@ -6559,6 +6559,10 @@ async def post_execute(
                     # cannot be funded keeps its rows and is reported diverging,
                     # exactly as create-only mode reports it.
                     replaceable: dict[int | tuple[int, int], str] = {}
+                    # Why a mismatched destination's rebuild could NOT be
+                    # reserved, keyed by destination, so the blocked action and
+                    # the problem line give the operator the same remedy.
+                    unfundable: dict[int | tuple[int, int], str] = {}
                     reserved_attempts = 0  # creates owed to `replaceable`, unspent
                     reserved_rows = 0  # and the rows those creates will add
                     if body.disable_existing and mismatched:
@@ -6588,20 +6592,48 @@ async def post_execute(
                                 reserved_rows += _needs_rows
                                 replaceable[_k] = _why
                                 continue
+                            # WHY it could not be reserved, in the operator's
+                            # own controls. "Raise the budget or re-run" was
+                            # wrong in three of the four cases: a filtered-out
+                            # destination is not a budget question at all, and a
+                            # destination needing more routes (or more rows)
+                            # than the whole per-run limit can never be
+                            # reconciled by re-running, however many times.
+                            _label_k = village_label(_k, names) if isinstance(_k, int) else _k
+                            if not _pairs:
+                                _remedy = (
+                                    "this run's filters excluded that destination, so it could "
+                                    "not be recreated and was not switched off — drop the filter "
+                                    "to reconcile it"
+                                )
+                            elif len(_pairs) > cap:
+                                _remedy = (
+                                    f"this destination needs {len(_pairs)} route(s) created "
+                                    f"together and 'routes this run' is {cap}, so re-running "
+                                    f"will not help — raise it to at least {len(_pairs)}"
+                                )
+                            elif row_cap and _needs_rows > row_cap:
+                                _remedy = (
+                                    f"replacing it needs {_needs_rows} game row(s) and 'max rows "
+                                    f"this run' is {row_cap}, so re-running will not help — "
+                                    f"raise it to at least {_needs_rows}"
+                                )
+                            else:
+                                _remedy = (
+                                    "this run's budget is already spent — re-run to rebuild it"
+                                )
+                            unfundable[_k] = _remedy
                             problems.append(
                                 f"{village_label(origin, names)}: left the diverging route(s) "
-                                f"to {village_label(_k, names) if isinstance(_k, int) else _k} "
-                                f"running ({_why}); this run cannot fund their replacement, and "
-                                f"switching them off without rebuilding them would stop the "
-                                f"shipments altogether"
+                                f"to {_label_k} running ({_why}); switching them off without "
+                                f"rebuilding them would stop the shipments altogether. "
+                                f"{_remedy[0].upper()}{_remedy[1:]}"
                             )
                             trace.decision(
                                 origin=origin,
                                 destination=_k,
                                 decision="blocked",
-                                reason=(
-                                    "schedule mismatch this run's create budget cannot replace"
-                                ),
+                                reason="schedule mismatch left in place: " + _remedy,
                             )
 
                     # Honeypots (hidden) would be ignored entirely — neither
@@ -6930,8 +6962,11 @@ async def post_execute(
                             _remedy = (
                                 "run with 'also disable' to replace them"
                                 if not body.disable_existing
-                                else "the rows were left running because this run could not "
-                                "fund the replacement; raise the per-run budget or re-run"
+                                else "the rows were left running because the replacement could "
+                                "not be reserved: "
+                                + unfundable.get(
+                                    destination, "this run's budget is already spent — re-run"
+                                )
                             )
                             trace.decision(
                                 origin=origin,

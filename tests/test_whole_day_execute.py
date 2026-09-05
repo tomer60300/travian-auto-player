@@ -708,3 +708,58 @@ class TestTwoProfilesCannotShareAName:
             "Night after midnight",
             "Day",
         ]
+
+
+class TestATwoRouteDestinationCannotBeRebuiltAtACapOfOne:
+    """The reserve funds a mismatched destination's rebuild whole or not at all.
+
+    A whole-day union routinely wants TWO routes to one destination -- Day's and
+    Night's -- so at `max_routes_per_run=1`, the documented safe first live
+    test, `len(pairs) == 2 > cap == 1` for ever: six consecutive passes created
+    nothing and the destination kept its wrong rows, while the refusal offered
+    "raise the per-run budget or re-run". Re-running can never help.
+    """
+
+    def _mismatched(self):
+        # Eight 3h rows where the union wants a 4h Day route and an hourly Night
+        # one -- one destination, two routes, diverging.
+        return {
+            20003: _fanned(
+                20011,
+                10,
+                0,
+                cycle_hours=3,
+                dispatch_minute=100,
+                start_id=800000,
+                cargo={Resource.CROP: 4000},
+            )
+        }
+
+    def test_the_refusal_names_the_cap_that_would_work(self):
+        svc = _FakeLiveSvc(existing=self._mismatched())
+        res = _run_union(svc, body=_segments_body(max_routes_per_run=1))
+
+        line = next(p for p in res.problems if "diverging" in p)
+        assert "2 route(s) created together" in line, line
+        assert "re-running will not help" in line, line
+        assert "raise it to at least 2" in line, line
+
+    def test_the_blocked_action_gives_the_same_remedy(self):
+        svc = _FakeLiveSvc(existing=self._mismatched())
+        res = _run_union(svc, body=_segments_body(max_routes_per_run=1))
+
+        blocked = [a for a in res.actions if a.status == "blocked"]
+        assert len(blocked) == 2, [(a.destination, a.status) for a in res.actions]
+        assert all("re-running will not help" in a.detail for a in blocked), [
+            a.detail for a in blocked
+        ]
+
+    def test_the_cap_it_names_actually_reconciles_the_destination(self):
+        # The control: at 2, the destination this run switched off is rebuilt.
+        svc = _FakeLiveSvc(existing=self._mismatched())
+        _run_union(svc, body=_segments_body(max_routes_per_run=2))
+
+        assert {(r.dest_village_id, r.cycle_hours) for r in svc.created} == {
+            (20011, 4),
+            (20011, 1),
+        }
