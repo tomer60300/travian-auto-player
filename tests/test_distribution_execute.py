@@ -2600,6 +2600,210 @@ class TestAnUnreliableMarketplaceStopsTheRunWritingToOtherVillages:
         assert not any("marketplace reads disagreed" in p for p in res.problems), res.problems
 
 
+class _OneRowNeverShows(_FakeLiveSvc):
+    """A marketplace that steadily omits ONE row of a two-route destination.
+
+    Steadily, so both reads of it agree and `stable_read_back` stays true: what
+    this page cannot answer is ATTRIBUTION, not stability. The destination's
+    expected pre-trim multiset is short by rows no single create wants exactly,
+    so `_settle_by_destination` returns `ambiguous` and every create here is
+    `indeterminate`.
+    """
+
+    def __init__(self, *, hide_dest, hide_minute, **kw):
+        super().__init__(**kw)
+        self._hide_dest = hide_dest
+        self._hide_minute = hide_minute
+
+    async def confirm_routes(self, vid, *, map_span=None):
+        rows = await super().confirm_routes(vid, map_span=map_span)
+        return [
+            e
+            for e in rows
+            if not (
+                e.dest_village_id == self._hide_dest
+                and e.departure_at
+                and (e.departure_at // 60) % _MINUTES_PER_DAY == self._hide_minute
+            )
+        ]
+
+
+class _RefusedHereUnattributableThere(_OneRowNeverShows):
+    """One destination's create is refused outright; another's rows cannot be
+    attributed. Both on the same marketplace, in one run."""
+
+    def __init__(self, *, refuse_dest, **kw):
+        super().__init__(**kw)
+        self._refuse = refuse_dest
+
+    async def create_route(self, route, *, stop_check=None):
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        if route.dest_village_id == self._refuse:
+            self.created.append(route)
+            return RouteActionResult(
+                route.origin_village_id, route.dest_x, route.dest_y, "failed", "refused (test)"
+            )
+        return await super().create_route(route, stop_check=stop_check)
+
+
+def _one_origin_two_destinations_one_unattributable():
+    """One origin. 11 takes a single 6h route; 19 takes two whose expected rows
+    overlap in nothing, so a page short of one 19 row can say only that SOME of
+    them are missing -- which is exactly the ambiguous verdict."""
+    return _account(
+        [
+            _row_with_cycle(20003, 20011, 6, 100),
+            _row_with_cycle(20003, 20019, 24, 200),
+            _row_with_cycle(20003, 20019, 12, 260),
+        ],
+        {20003: (0, 0), 20011: (10, 0), 20019: (20, 0)},
+        {20003: "03", 20011: "11", 20019: "19"},
+    )
+
+
+class TestNothingIsDeletedFromAPageThisRunCouldNotRead:
+    """The circuit breaker stopped the run before the NEXT village. It did not
+    stop the writes this origin still had left.
+
+    An unattributable destination is a fact about the PAGE, not about that
+    destination: the same read is what the window trim decides against for every
+    other destination on it. So the run went on to DELETE a neighbouring
+    destination's rows using a page it had just declared it could not read --
+    a destructive decision taken from the one piece of evidence that had already
+    failed.
+
+    The trim is refused for the whole origin now, in its own words: a
+    marketplace that could not be attributed is a different state from a run
+    that hit its failure limit, and folding the two together would lose the only
+    instruction that helps.
+    """
+
+    def _run(self, svc):
+        return _run_live(
+            svc,
+            _one_origin_two_destinations_one_unattributable(),
+            max_routes_per_run=50,
+            max_game_rows_per_run=0,
+            dispatch_window=[0, 300],
+            prune_to_window=True,
+        )
+
+    def test_the_trim_deletes_nothing_anywhere_on_that_page(self):
+        svc = _OneRowNeverShows(hide_dest=20019, hide_minute=980)
+
+        res = self._run(svc)
+
+        assert [a.status for a in res.actions if a.destination == 20019] == [
+            "indeterminate",
+            "indeterminate",
+        ], [(a.destination, a.status) for a in res.actions]
+        assert svc.deleted == [], (
+            "11's rows were deleted on the strength of a read that could not attribute 19's"
+        )
+
+    def test_the_response_says_the_trim_was_skipped_and_why(self):
+        svc = _OneRowNeverShows(hide_dest=20019, hide_minute=980)
+
+        res = self._run(svc)
+
+        assert any(
+            "could not be attributed" in p and "nothing was deleted here" in p for p in res.problems
+        ), res.problems
+
+    def test_the_rows_left_departing_round_the_clock_are_named(self):
+        """A skipped trim leaves rows outside the profile hours. The run says
+        which, or the operator reads a run that looks trimmed."""
+        svc = _OneRowNeverShows(hide_dest=20019, hide_minute=980)
+
+        res = self._run(svc)
+
+        assert any("depart outside the profile hours" in p for p in res.problems), res.problems
+
+    def test_a_page_that_attributed_everything_still_trims(self):
+        """The control: nothing about an ordinary origin changes."""
+        svc = _FakeLiveSvc()
+
+        res = self._run(svc)
+
+        assert svc.deleted, "an attributable page is still trimmed"
+        assert not any("nothing was deleted here" in p for p in res.problems), res.problems
+
+    def test_no_cargo_is_rewritten_on_that_page_either(self):
+        """The other write this origin could owe. `update_cargo` is issued from
+        the destination loop, which runs BEFORE the read-back that settles the
+        page -- so an origin that goes unattributable can never reach one.
+        Pinned rather than guarded: the ordering is the guarantee, and a guard
+        placed after it would be unreachable code claiming to be a safety."""
+        svc = _OneRowNeverShows(
+            hide_dest=20019,
+            hide_minute=980,
+            existing={20003: _fanned(20011, 10, 0, dispatch_minute=100, cargo={Resource.CROP: 7})},
+        )
+
+        res = self._run(svc)
+
+        assert any(a.status == "indeterminate" for a in res.actions), [
+            (a.destination, a.status) for a in res.actions
+        ]
+        assert svc.updated == [], svc.updated
+
+
+class TestARestoreIsCompensationNotForwardProgress:
+    """The one write an unreadable page does NOT refuse.
+
+    Putting back rows this run switched off is not forward progress: it returns
+    a destination to the state the write-ahead record describes, and refusing it
+    leaves that destination dark. So it is allowed exactly where its own guard
+    held -- every replacement create settled and refused, a stable read-back, no
+    replacement row, and the old rows still matching the record -- whatever the
+    same page could not say about some OTHER destination.
+    """
+
+    def test_the_old_rows_go_back_on_though_another_destination_is_unsettled(self):
+        svc = _RefusedHereUnattributableThere(
+            refuse_dest=20011,
+            hide_dest=20019,
+            hide_minute=980,
+            existing={
+                20003: _fanned(20011, 10, 0, cycle_hours=3, dispatch_minute=100, start_id=710000)
+            },
+        )
+
+        res = _run_live(
+            svc,
+            _one_origin_two_destinations_one_unattributable(),
+            max_routes_per_run=50,
+            max_game_rows_per_run=0,
+        )
+
+        assert svc.enabled == [(20003, ((10, 0),) * 8)], svc.enabled
+        assert any("restored" in line for line in res.re_enables), res.re_enables
+
+    def test_a_restore_whose_own_guard_failed_is_still_refused(self):
+        """The boundary: an UNSTABLE page fails the restore's own guard, and no
+        amount of "it is only compensation" lets it through."""
+
+        class _Unsettled(_FakeLiveSvc):
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._reads = 0
+
+            async def confirm_routes(self, vid, *, map_span=None):
+                rows = await super().confirm_routes(vid, map_span=map_span)
+                self._reads += 1
+                return rows[:-1] if self._reads % 2 == 1 else rows
+
+        svc = _Unsettled(existing=_mismatched_rows(), create_status="failed", phantom_creates=True)
+
+        res = _run_live(
+            svc, _one_mismatched_destination(), max_routes_per_run=50, max_game_rows_per_run=0
+        )
+
+        assert svc.enabled == [], "an unsettled replacement is never undone automatically"
+        assert res.problems, res.problems
+
+
 class TestThePlanCannotEmitTwoRoutesTheReadBackCannotTellApart:
     """The invariant the whole attribution rests on, stated and checked.
 

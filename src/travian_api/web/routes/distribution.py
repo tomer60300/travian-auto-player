@@ -8692,6 +8692,36 @@ async def post_execute(
                                 for action, route in [*created_here, *attempted_here]
                                 if _verdicts.get(id(action)) == "ambiguous"
                             }
+                            # ── The pre-mutation gate for this origin ───────
+                            #
+                            # Whatever this marketplace holds, this run could
+                            # not read it: either two reads of it disagreed, or
+                            # its rows could not be attributed to the creates
+                            # that went out. Both are facts about the PAGE, and
+                            # the page is the single piece of evidence every
+                            # write still owed here would be decided from -- so
+                            # the refusal covers every destination that read
+                            # returned, not only the one that could not be
+                            # settled. Skipping just the unattributable
+                            # destination left the trim DELETING a neighbour's
+                            # rows on the strength of a read the run had already
+                            # declared unusable.
+                            #
+                            # Its own state, never folded into the
+                            # failure-limit wording: "the game refused N in a
+                            # row" is a claim about the game and its remedy is
+                            # different. Consulted by the trim below; the
+                            # restore answers the stable half of it in its own
+                            # per-destination guard, because putting rows back
+                            # is compensation rather than forward progress.
+                            _uncertain_here = (
+                                "two reads of this marketplace did not agree"
+                                if not stable_read_back
+                                else "this marketplace's rows could not be attributed to "
+                                "the routes this run wrote"
+                                if _ambiguous_keys
+                                else ""
+                            )
                             landed_here = [
                                 (action, route)
                                 for action, route in attempted_here
@@ -8729,7 +8759,7 @@ async def post_execute(
                                     rows=[e.route_id for e in fresh if _key_a in _existing_keys(e)],
                                 )
                             if (
-                                stable_read_back
+                                not _uncertain_here
                                 and body.prune_to_window
                                 and (created_here or landed_here)
                             ):
@@ -8762,12 +8792,6 @@ async def post_execute(
                                 # fire, which is exactly a capped whole-day pass.
                                 for _created_action, _route in [*created_here, *landed_here]:
                                     del _created_action  # only _route is used here
-                                    if _desired_key(_route) in _ambiguous_keys:
-                                        # Nothing here is attributed, so the
-                                        # surviving-minute multiset this trim
-                                        # deletes against is not known to be the
-                                        # right one. Reported above; left alone.
-                                        continue
                                     if _route.window is not None:
                                         _created_keys.setdefault(_desired_key(_route), []).append(
                                             _route
@@ -8909,7 +8933,7 @@ async def post_execute(
                                         route_ids=_ids,
                                         status=getattr(_res, "status", None),
                                     )
-                            if not stable_read_back:
+                            if _uncertain_here:
                                 # The trim was skipped, so say what is still
                                 # departing round the clock rather than leaving
                                 # a run that looks trimmed. Named from the LATER
@@ -8927,10 +8951,12 @@ async def post_execute(
                                     and _row_minute(_kept[_id]) not in set(_planned_minutes(route))
                                 )
                                 _line = (
-                                    f"{village_label(origin, names)}: two reads of this "
-                                    f"marketplace did not agree ({_instability}), so nothing "
-                                    f"was deleted here — a delete on an unsettled page can "
-                                    f"remove a row this run had just made."
+                                    f"{village_label(origin, names)}: {_uncertain_here}"
+                                    + (f" ({_instability})" if _instability else "")
+                                    + ", so nothing was deleted here — a delete decided "
+                                    "from a page this run could not read can remove a row "
+                                    "it had just made, at any destination that read "
+                                    "returned."
                                 )
                                 if _strays:
                                     _line += (
@@ -9324,6 +9350,20 @@ async def post_execute(
                                         "destination was written"
                                     )
                                 elif not stable_read_back:
+                                    # The restore's own share of the
+                                    # pre-mutation gate `_uncertain_here`
+                                    # states. It reads the STABLE half only,
+                                    # and deliberately: putting rows back is
+                                    # compensation, not forward progress, so a
+                                    # destination that independently satisfied
+                                    # this guard is restored even when some
+                                    # OTHER destination on the same page could
+                                    # not be attributed -- refusing it there
+                                    # would leave a village dark over a fact
+                                    # about a neighbour. Its own ambiguity is
+                                    # already caught above: an ambiguous create
+                                    # is `indeterminate`, which is not in
+                                    # {failed, not_created}.
                                     _give_up = (
                                         "two reads of this marketplace did not agree, so "
                                         "the replacement may exist after all"
