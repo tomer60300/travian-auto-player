@@ -81,6 +81,7 @@ from travian_api.services.distribution.npc import (
 )
 from travian_api.services.distribution.optimizer import (
     DEFAULT_MERCHANT_HEADROOM,
+    DEFAULT_MERCHANT_RESERVE,
     MAX_IMPROVE_PASSES,
     MAX_RELAY_HOPS,
     MIN_SEND_FILL,
@@ -109,6 +110,7 @@ from travian_api.services.distribution.run_history import (
     summarise_runs,
 )
 from travian_api.services.distribution.schedule import (
+    DEFAULT_MIN_ARRIVAL_GAP_MINUTES,
     MINUTES_PER_DAY,
     last_night_dispatch,
     night_overrun_minutes,
@@ -162,10 +164,50 @@ _CONSECUTIVE_FAILURE_LIMIT = 2
 # The real ceiling is cost, not arithmetic: each one is its own optimizer run.
 MAX_DAY_SEGMENTS = 12
 
+# The most of a warehouse a village may declare it keeps stocked by NPC trading,
+# and the fullest a store may be assumed to be when the operator goes to bed.
+# One constant because it is one rule -- a store that is 100% "kept" has no room
+# for anything to arrive in -- and it was written as a bare `le=0.95` in two
+# unrelated field definitions with nothing tying them together.
+MAX_STOCK_FLOOR_FRACTION = 0.95
+
 NEGLIGIBLE_DRIFT_PER_DAY = 1.0
 
 DEFAULT_MAP_SPAN = 401
 DEFAULT_SPEED_FIELDS_PER_HOUR = 12.0
+
+
+def _clock(minute: int) -> str:
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+def _overlapping_windows(windows: Sequence[tuple[int, int]]) -> str | None:
+    """The refusal for two profiles that run at the same time, or None.
+
+    One helper and one sentence. The rule was written twice -- once as a model
+    validator on `ExecuteRequest` and once inline in the `/day-check` handler --
+    with two loops and two renderings of the same fact: "minute 1320" on the
+    endpoint that writes and "22:00" on the one that reports. The operator reads
+    the same clock either way.
+
+    Overlap is what makes the whole-day union work at all: each profile's rows
+    are told apart by their departure MINUTE, so two profiles covering one minute
+    creates rows the run itself then classifies as somebody else's mismatch.
+    """
+    covered: set[int] = set()
+    for start, end in windows:
+        span = set(
+            range(start, end) if start < end else [*range(start, MINUTES_PER_DAY), *range(end)]
+        )
+        clash = covered & span
+        if clash:
+            return (
+                f"profile windows overlap around {_clock(min(clash))}: two "
+                f"profiles cannot run at the same time"
+            )
+        covered |= span
+    return None
+
 
 # Merchant travel speed is tribe-specific (fields/hour). Wrong speed inflates
 # travel time -> sets_in_flight -> merchant counts, and can flip over_budget.
@@ -472,7 +514,7 @@ class VillageConfig(BaseModel):
     stock_floor_fraction: float | None = Field(
         default=None,
         ge=0.0,
-        le=0.95,
+        le=MAX_STOCK_FLOOR_FRACTION,
         description=(
             "Fraction of warehouse capacity this village keeps stocked by NPC "
             "trading — LUMBER, CLAY and IRON only, never crop, because a "
@@ -761,7 +803,7 @@ class PlanRequest(BaseModel):
         default=EUROPE2_TEUTON.bonus_per_trade_office_level, ge=0
     )
     merchant_reserve: int = Field(
-        default=2,
+        default=DEFAULT_MERCHANT_RESERVE,
         ge=0,
         le=20,
         description=(
@@ -787,7 +829,7 @@ class PlanRequest(BaseModel):
         ),
     )
     max_latency_hours: float | None = 2.0
-    min_arrival_gap_minutes: int = Field(default=3, ge=0)
+    min_arrival_gap_minutes: int = Field(default=DEFAULT_MIN_ARRIVAL_GAP_MINUTES, ge=0)
     # Odd only. A Travian world is centred on 0|0, so its width is always odd;
     # an even span shifts every tile index by half a field, which silently
     # skews every distance MapGeometry computes from it.
@@ -2131,19 +2173,9 @@ class ExecuteRequest(PlanRequest):
             )
         # Two profiles cannot run at the same time -- an overlap would create
         # rows this run itself then classifies as someone else's mismatch.
-        covered: set[int] = set()
-        for segment in self.segments:
-            start, end = segment.window
-            span = set(
-                range(start, end) if start < end else [*range(start, MINUTES_PER_DAY), *range(end)]
-            )
-            clash = covered & span
-            if clash:
-                raise ValueError(
-                    f"profile windows overlap around minute {min(clash)}: two "
-                    f"profiles cannot run at the same time"
-                )
-            covered |= span
+        overlap = _overlapping_windows([segment.window for segment in self.segments])
+        if overlap is not None:
+            raise ValueError(overlap)
         return self
 
     only_origins: list[int] | None = Field(
@@ -3212,10 +3244,6 @@ class DayCheckResponse(BaseModel):
     )
 
 
-def _clock(minute: int) -> str:
-    return f"{minute // 60:02d}:{minute % 60:02d}"
-
-
 class NightProfileRequest(PlanRequest):
     """Derive a night profile from the account's own shape. Zero game requests.
 
@@ -3232,7 +3260,7 @@ class NightProfileRequest(PlanRequest):
     baseline_fill: float = Field(
         default=DEFAULT_BASELINE_FILL,
         ge=0.0,
-        le=0.95,
+        le=MAX_STOCK_FLOOR_FRACTION,
         description=(
             "How full each store is when the operator goes to bed, as a fraction. "
             "The one number the account cannot supply, and the one everything else "
@@ -3641,21 +3669,9 @@ async def post_day_check(
         )
 
     # Overlapping windows would double-ship: two profiles cannot run at once.
-    minutes_covered: set[int] = set()
-    for segment in body.segments:
-        start, end = segment.window
-        span = range(start, end) if start < end else [*range(start, MINUTES_PER_DAY), *range(end)]
-        span = set(span)
-        clash = minutes_covered & span
-        if clash:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"profile windows overlap around {_clock(min(clash))}: two profiles "
-                    f"cannot run at the same time"
-                ),
-            )
-        minutes_covered |= span
+    overlap = _overlapping_windows([segment.window for segment in body.segments])
+    if overlap is not None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=overlap)
 
     names = {v.village_id: v.name for v in body.snapshot}
     rate_field = {

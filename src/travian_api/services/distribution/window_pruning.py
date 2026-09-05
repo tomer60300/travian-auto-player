@@ -26,7 +26,10 @@ from __future__ import annotations
 from typing import Protocol, Sequence
 
 SECONDS_PER_DAY = 86_400
-MINUTES_PER_DAY = 1_440
+# No MINUTES_PER_DAY here. It was declared as `1_440` beside `schedule.py`'s
+# `24 * 60` -- two spellings of one quantity, in two modules, with nothing
+# tying them together -- and nothing in this one ever read it. `schedule.py`
+# owns it, and this module deliberately depends on no clock at all.
 
 
 class _Row(Protocol):
