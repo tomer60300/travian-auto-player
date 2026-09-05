@@ -202,10 +202,11 @@ test.describe('the night derivation sits beside the hours it derives from', () =
     // Day is 07:00-23:00 by default: 16 of 24 hours.
     await expect(page.getByText(/This profile runs 16h of the day/)).toBeVisible()
 
-    // `.first()`: the profile bar and the Day & night table both carry a
-    // control named "Day window start", which is a duplicate accessible name on
-    // that stage -- reported, not fixed here.
-    await page.getByLabel('Day window start').first().fill('22:00')
+    // The PROFILE BAR's box, named as such. Both it and the Day & night table
+    // carry a start-of-window control for the shown profile, and until each one
+    // said where it lives they shared the accessible name "Day window start" --
+    // so this reached one of two identical names by `.first()`.
+    await page.getByLabel('Day window start, profile bar').fill('22:00')
     await expect(page.getByText(/This profile runs 16h of the day/)).toHaveCount(0)
   })
 })
