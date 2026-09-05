@@ -260,6 +260,29 @@ def derive_night_profile(
     def ceiling(v: NightVillage, resource: Resource) -> int:
         return round((target_fill - baseline_fill) * v.capacity_for(resource) / window_hours)
 
+    def _trips(one_way_hours: float) -> int:
+        """Complete round trips one merchant fits in the window.
+
+        Never rounded up. A merchant cannot make a fraction of a trip, and
+        crediting the fraction promises cargo that would still be in the air at
+        07:00 -- which section 6 forbids outright.
+        """
+        if one_way_hours <= 0:
+            return 0
+        return int(window_hours // (2 * one_way_hours))
+
+    def _anyone_reaches(point: tuple[int, int]) -> bool:
+        """Whether ANY village could complete a round trip to `point` tonight.
+
+        A destination nobody can reach and return from is not demand the night
+        can cover at any fleet size, so its claim is reported outstanding rather
+        than pooled with the rest -- where a single lump of demand let a sender
+        bounded by its OWN reachable destinations be booked to cover it.
+        """
+        return any(
+            _trips(geometry.one_way_minutes((v.x, v.y), point) / 60.0) > 0 for v in by_id.values()
+        )
+
     def _destinations(v: NightVillage, resource: Resource) -> list[tuple[float, float]]:
         """Where this village's cargo of `resource` goes, in one-way hours.
 
@@ -350,6 +373,22 @@ def derive_night_profile(
         minimum) and never below the worst-case one, and with one destination
         it IS the single-destination formula, so nothing with one destination
         moved.
+
+        Conservation is NECESSARY AND NOT SUFFICIENT, which is the second
+        reduction here. It lets merchant-time split fractionally across trips of
+        different lengths, and a merchant cannot make 0.6 of a trip: two
+        consumers needing 30,000/h each, one 2 fields away and one 30, conserve
+        merchant-hours exactly at 60,750/h -- while the far one needs 26.7 round
+        trips of 5h and eighteen merchants can make eighteen. 9,750/h of a
+        hammer's deficit read as covered. So every destination also carries its
+        own integral bound, `S <= fleet * capacity * floor(H / (2 * hop_i)) /
+        (w_i * H)`, and the limit is the smallest of all of them.
+
+        A destination NO round trip reaches is dropped from the set rather than
+        allowed to zero the bound -- that is the `max` regression from the other
+        side, and it removes only its own claim: `_anyone_reaches` keeps it out
+        of the pooled demand, so it lands in `unmet` instead of being covered by
+        a sender that cannot get there.
         """
         # Off the injected model, floored exactly as the plan side floors it --
         # understating capacity over-provisions merchants, overstating it
@@ -369,28 +408,39 @@ def derive_night_profile(
         # times fleet x capacity per hour. Worse, the operator's cap is applied
         # just above and then multiplied by that count -- so the "8 busy at 02"
         # ceiling this function exists to honour was negated inside it.
-        destinations = _destinations(v, resource)
-        if not destinations:
+        destinations = [(hop, claim, _trips(hop)) for hop, claim in _destinations(v, resource)]
+        # A destination no round trip reaches takes no cargo at all, so it is
+        # neither served nor weighed. Its claim is kept out of the pooled demand
+        # by `_anyone_reaches`, so dropping it here cannot make it read covered.
+        reachable = [(hop, claim, trips) for hop, claim, trips in destinations if trips > 0]
+        if not reachable:
             # Nowhere for this resource to go -- the hub asked about its own
-            # materials, or a crop sender on an account with no crop-negative
-            # village and no tribute. Sheds nothing, which is the honest reading
-            # of a destination that does not exist.
+            # materials, a crop sender on an account with no crop-negative
+            # village and no tribute, or every destination further than a night.
+            # Sheds nothing, which is the honest reading either way.
             return 0.0
-        claimed = sum(claim for _, claim in destinations)
+        claimed = sum(claim for _, claim, _ in reachable)
         if claimed > 0:
-            one_way = sum(hop * claim for hop, claim in destinations) / claimed
+            shares = [claim / claimed for _, claim, _ in reachable]
         else:
             # Destinations that need nothing. Nothing is drawn to them, so this
             # only reaches a FORCED sender shedding to avoid overflow, and no
             # destination has a larger claim on that cargo than another -- so
             # they weigh the same. Not zero: they are real places, and a mean
             # of nothing would read as a free delivery.
-            one_way = sum(hop for hop, _ in destinations) / len(destinations)
-        # No `max(1, ...)`. A village whose round trip does not fit the window
-        # sheds NOTHING: crediting it one trip promises cargo that would still
-        # be in the air at 07:00, which section 6 forbids outright.
-        trips = int(window_hours // (2 * one_way))
-        return fleet * capacity * trips / window_hours
+            shares = [1.0 / len(reachable)] * len(reachable)
+        one_way = sum(hop * share for (hop, _, _), share in zip(reachable, shares))
+        # No `max(1, ...)` on either bound. A village whose round trip does not
+        # fit the window sheds NOTHING: crediting it one trip promises cargo that
+        # would still be in the air at 07:00, which section 6 forbids outright.
+        conserved = fleet * capacity * _trips(one_way) / window_hours
+        # And each destination's own share has to be a whole number of trips.
+        integral = min(
+            fleet * capacity * trips / (share * window_hours)
+            for (_, _, trips), share in zip(reachable, shares)
+            if share > 0
+        )
+        return min(conserved, integral)
 
     def capped(v: NightVillage, resource: Resource) -> int:
         """Its ceiling, never asking for more export than it can ship."""
@@ -487,12 +537,29 @@ def derive_night_profile(
 
     # ── Crop ─────────────────────────────────────────────────────────────────
     crop: dict[int, Allocation] = {}
-    demand = tribute_per_hour
+    demand = 0.0
+    # Claims no village can complete a round trip to tonight. Held apart from
+    # `demand` because `demand` is a single pool and `shed_limit` is bounded by
+    # each sender's OWN reachable destinations -- so pooling them let a sender
+    # be booked to cover a place it cannot get to and back from, and the
+    # obligation read as paid. Reported as outstanding instead.
+    unservable = 0.0
+    if tribute_per_hour > 0:
+        # No coordinates means nothing to judge: the tribute is not a
+        # destination for `_destinations` either, so it bounds nobody.
+        if tribute_at is not None and not _anyone_reaches(tribute_at):
+            unservable += tribute_per_hour
+        else:
+            demand += tribute_per_hour
     for vid in consumers:
         # Break even: end the night at the fill it started, which is what stops
         # the profile drifting from night to night.
         crop[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=0.0)
-        demand += -by_id[vid].production.get(Resource.CROP, 0.0)
+        claim = -by_id[vid].production.get(Resource.CROP, 0.0)
+        if claim > 0 and not _anyone_reaches((by_id[vid].x, by_id[vid].y)):
+            unservable += claim
+        else:
+            demand += claim
 
     forced_crop: list[int] = []
     for vid, village in by_id.items():
@@ -586,7 +653,13 @@ def derive_night_profile(
     claimed = sum(a.value for a in crop.values())
     residual = produced - tribute_per_hour - claimed
     over_claimed = 0.0
-    if residual < 0 and demand <= 0:
+    # Everything still owed after the draw: what nobody had the capacity for,
+    # plus what nobody could reach. The trim is for ROUNDING, so it only runs
+    # when the night owes nothing -- an unreachable consumer's whole deficit is
+    # not a rounding error, and trimming it would take crop off a retention and
+    # ship it nowhere.
+    outstanding = max(0.0, demand) + unservable
+    if residual < 0 and outstanding <= 0:
         largest = max(crop, key=lambda vid: crop[vid].value)
         # Never more than that entry actually holds. The trim builds another
         # absolute retention, and `Allocation` refuses a negative one, so a
@@ -613,7 +686,7 @@ def derive_night_profile(
     profile.allocations[Resource.CROP] = crop
     profile.forced_senders[Resource.CROP] = sorted(forced_crop)
     profile.drawn_in[Resource.CROP] = drawn_crop
-    # Disjoint by construction: the trim above only runs when `demand <= 0`, so
-    # at most one of the two terms is ever non-zero.
-    profile.unmet[Resource.CROP] = max(0.0, demand) + over_claimed
+    # Disjoint by construction: the trim above only runs when nothing is
+    # outstanding, so at most one of the two terms is ever non-zero.
+    profile.unmet[Resource.CROP] = outstanding + over_claimed
     return profile

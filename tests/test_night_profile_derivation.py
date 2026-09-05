@@ -105,7 +105,9 @@ class TestItNeverOverClaimsTheAccount:
         )
 
     def test_a_tribute_is_taken_out_of_the_pool_not_added_to_it(self):
-        with_tribute = _derive(tribute_per_hour=10_000.0, tribute_at=(60, 0))
+        # 4 fields out, so the obligation is actually payable: at (60|0) it is a
+        # 10h round trip in an 8h night and the account rightly keeps the crop.
+        with_tribute = _derive(tribute_per_hour=10_000.0, tribute_at=(4, 0))
         without = _derive()
         claimed_with = sum(a.value for a in with_tribute.allocations[Resource.CROP].values())
         claimed_without = sum(a.value for a in without.allocations[Resource.CROP].values())
@@ -153,8 +155,152 @@ class TestUnmeetableDemandIsReported:
         assert profile.unmet[Resource.CROP] > 0
 
     def test_a_coverable_one_reports_nothing_outstanding(self):
-        profile = _derive(tribute_per_hour=1_000.0, tribute_at=(60, 0))
+        # 4 fields: a 40-minute round trip, so the 1,000/h really is coverable.
+        # It used to be asserted at (60|0) -- a 10h round trip inside an 8h
+        # night, which no fleet of any size can make -- and passed because the
+        # demand-weighted mean hop booked ten trips' worth of a journey nobody
+        # can complete. The premise contradicted the module's own
+        # no-partial-trip rule; see the case below for what (60|0) means.
+        profile = _derive(tribute_per_hour=1_000.0, tribute_at=(4, 0))
         assert profile.unmet[Resource.CROP] == pytest.approx(0.0)
+
+    def test_a_tribute_no_round_trip_reaches_is_outstanding_however_small(self):
+        # 60 fields at 12 f/h is a 10h round trip. Zero complete trips in an 8h
+        # window means zero crop delivered, whatever the fleet -- so the whole
+        # obligation is outstanding, and a small one is exactly the case a
+        # weighted mean over a NEAR consumer used to swallow.
+        profile = _derive(tribute_per_hour=1_000.0, tribute_at=(60, 0))
+        assert profile.unmet[Resource.CROP] == pytest.approx(1_000.0)
+
+    def test_the_hub_still_keeps_what_it_cannot_deliver(self):
+        # And it is not quietly shed: crop shipped nowhere is crop lost.
+        with_far = _derive(tribute_per_hour=1_000.0, tribute_at=(60, 0))
+        without = _derive()
+        assert (
+            with_far.allocations[Resource.CROP][HUB].value
+            == without.allocations[Resource.CROP][HUB].value
+        )
+
+
+class TestNoDestinationIsPromisedAFractionOfATrip:
+    """Merchant-hours conservation is necessary, not sufficient.
+
+    `S <= fleet * capacity / (2 * sum(w_i * hop_i))` lets merchant-time split
+    fractionally across trips of different lengths, and a merchant cannot make
+    0.6 of a trip. Two consumers needing the same amount, one 2 fields away and
+    one 30, conserve merchant-hours exactly at 60,750/h -- and the far one needs
+    26.7 trips of 5h each while eighteen merchants can make eighteen. So a
+    hammer's whole 9,750/h shortfall read as covered.
+
+    The per-destination bound is `S <= fleet * capacity * floor(H / (2*hop_i)) /
+    (w_i * H)` for every destination, taken alongside the weighted mean rather
+    than instead of it -- `max` over the hops was tried and zeroes every
+    reachable destination whenever one is unreachable.
+    """
+
+    NEAR = 11
+    FARR = 12
+
+    def _villages(self):
+        # Trade Office 13 puts a merchant at 9,000; 20 merchants less the
+        # reserve of 2 is a fleet of 18. The hub's granary is large enough that
+        # its ceiling does not force it, so the draw is what bounds it.
+        return [
+            _village(HUB, "hub", 0, 0, crop=100_000.0, gr=1_600_000, to=13),
+            _village(self.NEAR, "near", 2, 0, crop=-30_000.0, to=13),
+            _village(self.FARR, "hammer", 30, 0, crop=-30_000.0, to=13),
+        ]
+
+    def _profile(self):
+        return derive_night_profile(
+            self._villages(),
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            consumer_ids=[self.NEAR, self.FARR],
+        )
+
+    def test_the_shortfall_the_mean_hid_is_reported(self):
+        # 18 merchants x 9,000 x 1 complete trip to the hammer = 162,000 over
+        # the night, and the hammer's half of the split is what caps the whole
+        # send: 40,500/h against 60,000/h of demand.
+        assert self._profile().unmet[Resource.CROP] == pytest.approx(19_500.0)
+
+    def test_the_hub_keeps_what_it_cannot_deliver(self):
+        assert self._profile().allocations[Resource.CROP][HUB].value == pytest.approx(59_500.0)
+
+    def test_every_destination_gets_a_whole_number_of_trips(self):
+        """The property, checked directly rather than through the total.
+
+        For each destination: the trips its share needs must not exceed the
+        trips the fleet can make to it.
+        """
+        import math
+
+        profile = self._profile()
+        hub = self._villages()[0]
+        shipped = 100_000.0 - profile.allocations[Resource.CROP][HUB].value
+        window, capacity, fleet = 8.0, 9_000.0, 18
+        claims = {self.NEAR: 30_000.0, self.FARR: 30_000.0}
+        hops = {self.NEAR: 2 / 12.0, self.FARR: 30 / 12.0}
+        total_claim = sum(claims.values())
+        for vid, claim in claims.items():
+            share = claim / total_claim
+            needed = math.ceil(shipped * window * share / capacity)
+            available = fleet * int(window // (2 * hops[vid]))
+            assert needed <= available, (vid, needed, available)
+        assert hub.production[Resource.CROP] == 100_000.0
+
+    def test_one_destination_is_unchanged_by_the_new_bound(self):
+        """With a single destination the share is 1 and the two bounds are the
+        same formula, so nothing with one destination may move."""
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=100_000.0, gr=1_600_000, to=13),
+            _village(self.FARR, "hammer", 30, 0, crop=-30_000.0, to=13),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            consumer_ids=[self.FARR],
+        )
+
+        # 18 x 9,000 x 1 trip / 8h = 20,250/h, all of it to the hammer.
+        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(79_750.0)
+        assert profile.unmet[Resource.CROP] == pytest.approx(9_750.0)
+
+    def test_an_unreachable_destination_does_not_zero_the_reachable_ones(self):
+        """The regression `max` over the hops caused, pinned from the other side.
+
+        An ally 60 fields off is a 10h round trip: unpayable at any fleet size.
+        It must remove its OWN claim from what the night can deliver and leave
+        the consumer 2 fields away exactly as shippable as it was.
+        """
+        # A granary large enough that the hub's own ceiling does not force it,
+        # so the draw is the only thing deciding what it sheds.
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=100_000.0, gr=4_000_000, to=13),
+            _village(self.NEAR, "near", 2, 0, crop=-20_000.0, to=13),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            consumer_ids=[self.NEAR],
+            tribute_per_hour=1_000.0,
+            tribute_at=(60, 0),
+        )
+
+        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(80_000.0)
+        assert profile.unmet[Resource.CROP] == pytest.approx(1_000.0)
 
 
 class TestTheLibraryContractSurvivesANegativeProducer:
