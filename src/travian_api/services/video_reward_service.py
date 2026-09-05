@@ -356,6 +356,28 @@ class VideoRewardService:
                 safe_to_retry=False,
             )
 
+            if not isinstance(ends_data, dict) or "response_text" in ends_data:
+                # post_json hands back {"response_text": ...} for a body that
+                # was not JSON (an HTML soft-block, a maintenance page), and a
+                # non-dict at all for some other JSON shape (e.g. a bare
+                # array). Neither names a refusal -- ends_data.get("error")
+                # is simply absent on the first, and raises AttributeError on
+                # the second -- so both used to fall through to (or crash
+                # past) the success return below. This POST already went out
+                # and is non-idempotent, so the honest verdict is the one
+                # this codebase gives every other write's unreadable answer
+                # (farm_list_service._check_mutation,
+                # trade_route_service.ToggleResponseUnreadable): unverified,
+                # never a silent success.
+                return VideoRewardResult(
+                    False,
+                    reward_type,
+                    "Claim answered with a body the game's own shape is not in, so "
+                    "whether the reward was granted cannot be read; it may already "
+                    "have taken effect",
+                    str(ends_data),
+                )
+
             if ends_data.get("error"):
                 return VideoRewardResult(
                     False,
