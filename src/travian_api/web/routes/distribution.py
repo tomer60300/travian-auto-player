@@ -6190,6 +6190,24 @@ async def post_execute(
     # that the response can only summarise; a run that disabled the wrong route
     # would look identical in the response to one that disabled the right one.
     trace = ExecutionTrace()
+    if not trace.enabled:
+        # `ExecutionTrace.__init__` catches OSError, warns and carries on with
+        # tracing off -- right for observability, wrong here. The trace is the
+        # ONLY record of what this run put in a real account: the game returns
+        # no id when it creates a route, so `/revert-plan` reconstructs what to
+        # undo by diffing against the pre-write inventory the trace holds.
+        # Without it the run is unrevertible, and the 500 handler below would
+        # hand the operator a trace_id that 404s. Refused before the first game
+        # request; a dry run never reaches here and is unaffected.
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"This run's execution trace could not be opened in "
+                f"{execution_trace.TRACE_DIR}, so nothing it wrote could be undone "
+                f"afterwards. Nothing was attempted. Fix the trace directory and "
+                f"run again."
+            ),
+        )
     svc.trace = trace
     trace.event(
         "run_start",
@@ -7858,7 +7876,19 @@ async def post_execute(
         # never be misread as having cleared the account.
         swept_origins=swept,
         unswept_origins=unswept,
-        next_chunk_wait_seconds=(_chunk_gap_seconds() if unswept else None),
+        # A sweep is unfinished while villages are unvisited -- and ALSO while it
+        # holds creates the per-chunk budget deferred. The caller's loop breaks
+        # on a null wait, so with `unswept` alone the unfiltered pass it
+        # documents ("every village swept, whole-day creates still deferred, go
+        # back without only_origins so they get their turn") could never
+        # happen: "swept" quietly meant "swept but only partly provisioned".
+        # Gated on `cap` as well, because a reconcile-only sweep defers every
+        # route by construction and can never make progress on them.
+        next_chunk_wait_seconds=(
+            _chunk_gap_seconds()
+            if unswept or (body.reconcile_all_origins and cap and deferred)
+            else None
+        ),
         warnings=warnings,
         problems=problems,
     )

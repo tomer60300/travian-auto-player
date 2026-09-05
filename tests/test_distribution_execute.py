@@ -2875,6 +2875,116 @@ class TestABoundedSweepSaysWhatItDidNotReach:
         assert swept.swept_origins == [20003, 20011]
 
 
+class TestALiveRunWithNoTraceRefusesToStart:
+    """No trace means no undo, and the trace can fail to open in silence.
+
+    `ExecutionTrace.__init__` catches `OSError`, logs a warning and carries on
+    with tracing off -- correct for observability, wrong for THIS run: the trace
+    is the only record of what a live execution put in a real account, because
+    the game returns no id when it creates a route. Without it `/revert-plan`
+    has nothing to compare against, and its own 500 handler points the operator
+    at a trace_id that will 404.
+    """
+
+    def _blocked_trace_dir(self, tmp_path):
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory", encoding="utf-8")
+        return blocker / "traces"
+
+    def test_a_live_run_refuses_when_the_trace_cannot_be_written(self, tmp_path):
+        svc = _FakeLiveSvc()
+        with (
+            _patch(dist_module.execution_trace, "TRACE_DIR", self._blocked_trace_dir(tmp_path)),
+            pytest.raises(HTTPException) as caught,
+        ):
+            _run_live(svc, _own_village_account(), max_routes_per_run=50)
+
+        assert caught.value.status_code == 500
+        assert "trace" in caught.value.detail.lower()
+
+    def test_nothing_is_written_to_the_game(self, tmp_path):
+        svc = _FakeLiveSvc()
+        with (
+            _patch(dist_module.execution_trace, "TRACE_DIR", self._blocked_trace_dir(tmp_path)),
+            contextlib.suppress(HTTPException),
+        ):
+            _run_live(svc, _own_village_account(), max_routes_per_run=50)
+
+        assert svc.created == [] and svc.listed == [], (
+            "the refusal must come before the first game request"
+        )
+
+    def test_a_dry_run_is_unaffected(self, tmp_path):
+        # A preview writes nothing to the account, so there is nothing to undo
+        # and no reason to refuse it.
+        with _patch(dist_module.execution_trace, "TRACE_DIR", self._blocked_trace_dir(tmp_path)):
+            res = _execute(_exec_body(dry_run=True), svc=_dry_svc())
+
+        assert res.dry_run is True
+        assert res.actions
+
+
+class TestASweptAccountWithDeferredCreatesGetsAnotherPass:
+    """The frontend's sweep loop documents an UNFILTERED pass, and it could not
+    happen.
+
+    Once every village is swept but whole-day creates are still deferred by the
+    per-chunk budget, the loop goes back without `only_origins` so those creates
+    get their turn. But it breaks on `!wait`, and the wait was `None` whenever
+    `unswept_origins` was empty -- so the pass the comment describes was
+    unreachable, and "swept" quietly meant "swept but only partly provisioned".
+    """
+
+    def _two_routes(self):
+        return _account(
+            [_row(20003, -1, 40, 40, 100), _row(20003, -2, 50, 50, 700)],
+            {20003: (0, 0), 20011: (10, 0), -1: (40, 40), -2: (50, 50)},
+            {20003: "03", 20011: "11", -1: "A", -2: "B"},
+        )
+
+    def test_a_finished_sweep_still_holding_creates_asks_the_caller_back(self):
+        svc = _FakeLiveSvc(existing={20011: []})
+        res = _run_live(
+            svc,
+            self._two_routes(),
+            max_routes_per_run=1,
+            max_game_rows_per_run=0,
+            reconcile_all_origins=True,
+        )
+
+        assert res.unswept_origins == [], "every village was visited"
+        assert res.remaining >= 1, "and a create is still owed"
+        assert res.next_chunk_wait_seconds is not None
+
+    def test_a_reconcile_only_sweep_is_still_finished(self):
+        # `max_routes_per_run=0` defers every route by construction and creates
+        # nothing ever, so asking the caller back would be an endless loop over
+        # a run that cannot make progress.
+        svc = _FakeLiveSvc(existing={20011: []})
+        res = _run_live(
+            svc,
+            self._two_routes(),
+            max_routes_per_run=0,
+            reconcile_all_origins=True,
+        )
+
+        assert res.unswept_origins == []
+        assert res.next_chunk_wait_seconds is None
+
+    def test_a_sweep_with_nothing_left_asks_for_nothing(self):
+        svc = _FakeLiveSvc(existing={20011: []})
+        res = _run_live(
+            svc,
+            self._two_routes(),
+            max_routes_per_run=50,
+            max_game_rows_per_run=0,
+            reconcile_all_origins=True,
+        )
+
+        assert (res.unswept_origins, res.remaining) == ([], 0)
+        assert res.next_chunk_wait_seconds is None
+
+
 class TestASweepDoesNotReadAsASweep:
     """The traffic SHAPE is the tell, not the request spacing.
 
