@@ -788,7 +788,7 @@ class TestRolesReachEveryPlanningPath:
                 DayCheckRequest.model_validate(
                     payload
                     | {
-                        "prune_to_window": False,
+                        "prune_to_window": True,
                         "segments": [
                             {"name": "All day", "window": [0, 1439], "allocations": allocations}
                         ],

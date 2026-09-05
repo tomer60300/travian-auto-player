@@ -675,6 +675,7 @@ class TestTwoProfilesCannotShareAName:
         with pytest.raises(ValidationError, match="name"):
             DayCheckRequest.model_validate(
                 {
+                    "prune_to_window": True,
                     **_shared_payload(),
                     "segments": [
                         {"name": "Night", "window": [22 * 60, 23 * 60], "allocations": {}},

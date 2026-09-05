@@ -177,6 +177,7 @@ class TestDayCheckEndpoint:
     def test_the_ceiling_breach_names_the_village_the_hour_and_the_profile(self):
         body = DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": [
                     self._village(1, "02", crop=20_000, crop_stock=60_000, granary=800_000),
                     self._village(2, "03", crop=-2_000, crop_stock=90_000, granary=240_000),
@@ -227,6 +228,7 @@ class TestDayCheckEndpoint:
         exactly as POST /plan ships it."""
         body = DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": [
                     self._village(1, "02", crop=3_000, crop_stock=50_000, granary=200_000)
                 ],
@@ -261,6 +263,7 @@ class TestDayCheckEndpoint:
         silently would just move the optimism, so it must be said out loud."""
         body = DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": [
                     self._village(1, "02", crop=3_000, crop_stock=50_000, granary=200_000)
                 ],
@@ -287,6 +290,7 @@ class TestDayCheckEndpoint:
         nothing and fall through to 'all clear'."""
         body = DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": [
                     self._village(1, "02", crop=1_000, crop_stock=50_000, granary=800_000),
                     self._village(2, "03", crop=1_000, crop_stock=50_000, granary=800_000),
@@ -313,6 +317,7 @@ class TestDayCheckEndpoint:
         so instead of merely looking complete."""
         body = DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": [
                     self._village(1, "02", crop=5_000, crop_stock=10_000, granary=800_000),
                     self._village(2, "05", crop=None, crop_stock=79_000, granary=80_000),
@@ -335,6 +340,7 @@ class TestDayCheckEndpoint:
     def test_a_stock_already_above_its_alert_is_worded_as_standing(self):
         body = DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": [
                     self._village(1, "02", crop=-2_000, crop_stock=373_000, granary=800_000)
                 ],
@@ -355,6 +361,7 @@ class TestDayCheckEndpoint:
     def test_overlapping_windows_are_rejected(self):
         body = DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": [self._village(1, "02", 1000, 0, 80_000)],
                 "segments": [
                     {"name": "Day", "window": [0, 720], "allocations": {}},
@@ -378,10 +385,50 @@ class TestDayCheckEndpoint:
             assert getattr(parameter.default, "dependency", None) is not get_travian_session
 
 
+class TestSegmentsRequireThePrune:
+    """The rule `ExecuteRequest._segments_are_coherent` already makes.
+
+    `segments` is min_length=1 here, so this endpoint is ALWAYS segmented --
+    and the only segmented /execute is the whole-day run, which forces the
+    prune on. `prune_to_window` is not cosmetic on the plan path: it narrows
+    `allowed_cycles` to the divisors of the window length, and the replay
+    simulates only the in-window firings. Without it the check the operator
+    reviews was planned on the full cycle set with every firing simulated while
+    the run that writes was planned on divisor cycles with the out-of-window
+    rows deleted -- different cycles, different merchant counts, different row
+    counts.
+    """
+
+    def _payload(self, **extra):
+        return {
+            "snapshot": [],
+            "segments": [{"name": "Day", "window": [420, 1380], "allocations": {}}],
+            **extra,
+        }
+
+    def test_a_segmented_check_without_the_prune_is_refused(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="segments require prune_to_window"):
+            DayCheckRequest.model_validate(self._payload())
+
+    def test_saying_so_explicitly_is_refused_the_same_way(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="segments require prune_to_window"):
+            DayCheckRequest.model_validate(self._payload(prune_to_window=False))
+
+    def test_with_the_prune_it_validates(self):
+        body = DayCheckRequest.model_validate(self._payload(prune_to_window=True))
+
+        assert body.prune_to_window is True
+
+
 class TestTheCropCeilingIsAStockLevel:
     def _body(self, ceilings):
         return {
             "snapshot": [],
+            "prune_to_window": True,
             "segments": [{"name": "Day", "window": [420, 1380], "allocations": {}}],
             "crop_ceilings": ceilings,
         }
@@ -514,7 +561,7 @@ class TestNarrowProfileWindow:
     the farm banked the lot: a starved receiver and a hoarding sender, silently.
     """
 
-    def _body(self):
+    def _body(self, window=(20 * 60, 22 * 60)):
         def village(vid, name, crop, x, y):
             return {
                 "village_id": vid,
@@ -534,6 +581,7 @@ class TestNarrowProfileWindow:
 
         return DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": [
                     village(1, "capital", crop=0, x=0, y=0),
                     village(2, "farm", crop=200, x=20, y=15),
@@ -541,7 +589,7 @@ class TestNarrowProfileWindow:
                 "segments": [
                     {
                         "name": "Burst",
-                        "window": [20 * 60, 22 * 60],
+                        "window": list(window),
                         "allocations": {
                             "crop": {
                                 "1": {"mode": "remainder"},
@@ -558,18 +606,28 @@ class TestNarrowProfileWindow:
 
         capital = next(v for v in res.villages if v.village_id == 1 and v.resource is Resource.CROP)
         farm = next(v for v in res.villages if v.village_id == 2 and v.resource is Resource.CROP)
-        # One 6h batch is 1,200 crop. That is all a 2h profile can host, but it
-        # must actually land -- the window-blind beat delivered nothing at all.
-        assert capital.daily_net == pytest.approx(1_200, rel=0.01), (
+        # A 120-minute window admits a 1h or a 2h cycle -- /day-check now
+        # requires the prune, and the prune narrows the cycle set to the
+        # divisors of the window, so the 6h cycle this used to be planned on is
+        # no longer offered. One 2h batch is 400 crop, and it must actually
+        # land: the window-blind beat delivered nothing at all.
+        assert capital.daily_net == pytest.approx(400, rel=0.01), (
             f"the capital receives {capital.daily_net:,.0f}/day; the route sends "
             f"nothing inside the profile's hours"
         )
-        assert farm.daily_net == pytest.approx(4_800 - 1_200, rel=0.01), (
+        assert farm.daily_net == pytest.approx(4_800 - 400, rel=0.01), (
             "what leaves the farm must be what lands at the capital"
         )
 
     def test_a_cycle_longer_than_the_profile_warns_under_its_name(self):
-        res = asyncio.run(post_day_check(self._body(), SimpleNamespace(id=1)))
+        # 121 minutes: no Travian repeat interval divides it, so the cycle set
+        # falls back to the full one and a 6h cycle can still be chosen inside a
+        # two-hour profile. (At a round 120 the prune's divisor rule now keeps
+        # the planner off such a cycle in the first place, which is the point of
+        # requiring the prune here.)
+        res = asyncio.run(
+            post_day_check(self._body(window=(20 * 60, 22 * 60 + 1)), SimpleNamespace(id=1))
+        )
 
         # Two findings now describe a 6h cycle in a 2h profile, and they say
         # different things: this one is the UNDER-delivery (it fires at most once

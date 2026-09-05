@@ -473,6 +473,7 @@ def random_account(seed: int, *, with_profiles: bool) -> Account:
     if with_profiles:
         shape = PROFILE_SHAPES[seed % len(PROFILE_SHAPES)]
         day_request = DayCheckRequest(
+            prune_to_window=True,
             snapshot=snapshot,
             config=config,
             foreign_targets=tributes,
@@ -666,6 +667,7 @@ def adversarial_accounts() -> list[Account]:
     ]
     e_config = [VillageConfig(village_id=v.village_id) for v in e]
     one_minute = DayCheckRequest(
+        prune_to_window=True,
         snapshot=e,
         config=e_config,
         segments=[
@@ -1065,6 +1067,7 @@ def case_account(index: int) -> Account:
         max_latency_hours=2.0,
     )
     day_request = DayCheckRequest(
+        prune_to_window=True,
         snapshot=snapshot,
         config=config,
         max_latency_hours=2.0,

@@ -1242,6 +1242,7 @@ class TestShipOnlyTo:
         payload = self._payload(ship_only_to=[self.FAR])
         body = DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": payload["snapshot"],
                 "config": payload["config"],
                 "segments": [
@@ -1444,9 +1445,9 @@ class TestStockFundedSupply:
         payload = self._payload()
         body = DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": payload["snapshot"],
                 "config": payload["config"],
-                "prune_to_window": True,
                 "segments": [
                     {
                         "name": "Day",
@@ -1471,9 +1472,9 @@ class TestStockFundedSupply:
         with pytest.raises(ValidationError, match="npc_attended"):
             DayCheckRequest.model_validate(
                 {
+                    "prune_to_window": True,
                     "snapshot": payload["snapshot"],
                     "config": payload["config"],
-                    "prune_to_window": True,
                     "segments": [
                         {"name": "Day", "window": self.DAY, "allocations": payload["allocations"]}
                     ],
@@ -1488,9 +1489,9 @@ class TestStockFundedSupply:
         night = [23 * 60, 7 * 60]
         body = DayCheckRequest.model_validate(
             {
+                "prune_to_window": True,
                 "snapshot": payload["snapshot"],
                 "config": payload["config"],
-                "prune_to_window": True,
                 "segments": [
                     {
                         "name": "Night",
@@ -1945,7 +1946,7 @@ class TestConsumptionProfiles:
             if model is DayCheckRequest:
                 allocations = payload.pop("allocations")
                 payload |= {
-                    "prune_to_window": False,
+                    "prune_to_window": True,
                     "segments": [
                         {"name": "All day", "window": [0, 1439], "allocations": allocations}
                     ],
@@ -2029,7 +2030,7 @@ class TestConsumptionProfiles:
                 DayCheckRequest.model_validate(
                     payload
                     | {
-                        "prune_to_window": False,
+                        "prune_to_window": True,
                         "segments": [
                             {"name": "All day", "window": [0, 1439], "allocations": allocations}
                         ],

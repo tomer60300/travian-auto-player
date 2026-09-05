@@ -641,6 +641,7 @@ def _day_check_body(*, crop_stock, material_stock):
 
     return DayCheckRequest.model_validate(
         {
+            "prune_to_window": True,
             "snapshot": [village(HUB, "02", 0, 0), village(ARMY, "03", 1, 0)],
             "config": [
                 {"village_id": HUB, "role": "capital"},
@@ -736,6 +737,7 @@ def _split_night_body(*, declared: bool):
 
     return DayCheckRequest.model_validate(
         {
+            "prune_to_window": True,
             "snapshot": [village(HUB, "02", 0, 1_000), village(ARMY, "03", 60, 0)],
             "config": [{"village_id": HUB}, {"village_id": ARMY}],
             "segments": [
@@ -824,6 +826,7 @@ def _pieces_body(pieces):
 
     return DayCheckRequest.model_validate(
         {
+            "prune_to_window": True,
             "snapshot": [village(HUB, "02", 0, 90_000), village(ARMY, "03", 1, 10_000)],
             "config": [
                 {"village_id": HUB, "role": "capital"},
@@ -951,6 +954,7 @@ def _split_night_shipping_doc(one_way_fields, *, after_midnight_start=0, roles=F
         }
     }
     return {
+        "prune_to_window": True,
         "snapshot": [
             village(HUB, "02", 0, 1_000),
             village(ARMY, "03", one_way_fields, 0),

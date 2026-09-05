@@ -3205,6 +3205,30 @@ class DayCheckRequest(PlanRequest):
         return value
 
     @model_validator(mode="after")
+    def _segments_require_the_prune(self) -> "DayCheckRequest":
+        """The same rule `ExecuteRequest._segments_are_coherent` makes.
+
+        `segments` is `min_length=1` here, so this endpoint is ALWAYS
+        segmented -- and the only segmented `/execute` is the whole-day run,
+        which forces the prune on. `prune_to_window` is not cosmetic on the
+        plan path: it narrows `allowed_cycles` to the divisors of the window
+        length, and the replay below simulates only the in-window firings. So
+        without it the full-day check the operator reviews is planned on the
+        full cycle set with every firing simulated, while the run that writes
+        is planned on divisor cycles with the out-of-window rows deleted --
+        different cycles, different merchant counts, different row counts, and
+        the same "the plan reviewed was not the plan written" shape the
+        segmented `/execute` refusal exists to close.
+        """
+        if not self.prune_to_window:
+            raise ValueError(
+                "segments require prune_to_window: a profile's hours are only real "
+                "once the out-of-window rows are deleted, and a check planned "
+                "without it describes a different day than the run that writes"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _every_segment_states_npc_attendance(self) -> "DayCheckRequest":
         """The hours live on the segments, so attendance does too.
 

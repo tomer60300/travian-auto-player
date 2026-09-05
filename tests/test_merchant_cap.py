@@ -420,6 +420,7 @@ class TestTheSchemaGuardsTheCap:
         for model in (PlanRequest, DayCheckRequest, ExecuteRequest, NightProfileRequest):
             body = _payload(caps={HUB: 8}, snapshot=unread)
             if model is DayCheckRequest:
+                body["prune_to_window"] = True
                 body["segments"] = [
                     {"name": "All day", "window": [0, 1439], "allocations": body.pop("allocations")}
                 ]
@@ -708,7 +709,7 @@ class TestTheCapReachesEveryPlanningPath:
                     DayCheckRequest.model_validate(
                         body
                         | {
-                            "prune_to_window": False,
+                            "prune_to_window": True,
                             "segments": [
                                 {"name": "All day", "window": [0, 1439], "allocations": allocations}
                             ],
