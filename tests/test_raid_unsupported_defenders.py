@@ -24,6 +24,7 @@ The golden numbers below are the pre-fix output, recorded so the refusal cannot
 quietly change the arithmetic for a garrison that IS scorable.
 """
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -34,6 +35,7 @@ from travian_api.models.raid_analyzer import (
     TargetVillageState,
 )
 from travian_api.services.raid_analyzer_service import (
+    T_REGEN,
     RaidAnalyzerService,
     calculate_score,
     calculate_score_v2,
@@ -152,3 +154,33 @@ def test_scoring_is_untouched_for_recognised_defenders(label):
             rec.round_trip_minutes,
             rec.est_loot,
         ) == expected
+
+
+# ── R7: regen decay is a ceiling on the scouted stock, not a multiplier ────
+
+# No test in the suite (before these two) ever set `last_raid_time`, so
+# `t_raid is None` was always true and `calculate_score_v2` never ran the
+# `eff_R = R * min(1.0, t_raid / T_REGEN)` line at all.
+
+
+def test_a_recently_raided_target_is_valued_at_what_regrew():
+    """A target raided half a regen window ago has about half its stock back."""
+    state = _state({})  # empty village, 5,000 raidable
+    state.last_raid_time = datetime.now() - timedelta(hours=T_REGEN / 2)
+
+    rec = calculate_score_v2(state, 0, 0)
+    assert rec is not None
+    # `abs=2` tolerance: `hours_since` reads the wall clock between the two
+    # lines above, so pinning an exact float here would be the same defect
+    # Job 2 found in test_rate_limit_penalty.
+    assert rec.est_loot == pytest.approx(2500, abs=2), "half a regen window, half the stock"
+
+
+def test_a_long_unraided_target_is_valued_at_its_stock_and_no_more():
+    """A target left alone for two regen windows is worth its stock, not double it."""
+    state = _state({})
+    state.last_raid_time = datetime.now() - timedelta(hours=T_REGEN * 2)
+
+    rec = calculate_score_v2(state, 0, 0)
+    assert rec is not None
+    assert rec.est_loot == 5000, "the scouted stock is the ceiling, not a starting point"
