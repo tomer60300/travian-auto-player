@@ -246,13 +246,21 @@ export const PREVIEW = {
   warnings: [],
   updates: [],
   filtered_to: null,
+  // The shape `/routes/execute` forecasts, in the order it builds it and with
+  // the arithmetic it uses: `estimated_total` is creates + reads + verify reads
+  // + THREE per trimming origin (its stabilising read, its batched delete and
+  // the read confirming that delete), and the max adds one disable PUT per
+  // visited origin plus one stabilising read per creating origin that does not
+  // already pay for one. 1 + 1 + 1 + 3 = 6, and 6 + 1 + 1 - 1 = 7.
   requests_forecast: {
-    estimated_total: 4,
-    estimated_total_max: 6,
     marketplace_reads: 1,
     creates: 1,
     verify_reads: 1,
+    stabilise_reads: 1,
     trim_deletes: 1,
+    trim_verify_reads: 1,
+    estimated_total: 6,
+    estimated_total_max: 7,
   },
   trace_id: 'abc123def456',
 }

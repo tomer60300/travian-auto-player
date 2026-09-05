@@ -7710,6 +7710,10 @@ export default function ResourcePlanner() {
                         )}
                       </p>
                     )}
+                    {/* Every term the server forecasts, so the breakdown sums
+                        to the estimate printed beside it. Four of the six were
+                        shown before `stabilise_reads` existed, and the list was
+                        already two short per trimming village. */}
                     {execResult.dry_run &&
                       execResult.requests_forecast?.estimated_total > 0 && (
                         <p className="text-xs mb-2">
@@ -7721,8 +7725,25 @@ export default function ResourcePlanner() {
                           — {execResult.requests_forecast.marketplace_reads} read(s),{' '}
                           {execResult.requests_forecast.creates} create(s),{' '}
                           {execResult.requests_forecast.verify_reads} verify read(s),{' '}
-                          {execResult.requests_forecast.trim_deletes} trim(s) — plus up to one
-                          batched disable per village, decided by what the marketplace holds.
+                          {execResult.requests_forecast.stabilise_reads} stabilising read(s),{' '}
+                          {execResult.requests_forecast.trim_deletes} trim(s) and{' '}
+                          {execResult.requests_forecast.trim_verify_reads} confirming read(s) —
+                          plus up to one batched disable per village, decided by what the
+                          marketplace holds.
+                        </p>
+                      )}
+                    {/* Its own line, because it is the one term that buys
+                        nothing visible: it is a read taken purely so the delete
+                        after it is safe, and an unexplained number in a bill
+                        reads as overhead somebody could remove. */}
+                    {execResult.dry_run &&
+                      execResult.requests_forecast?.stabilise_reads > 0 && (
+                        <p className="text-xs text-secondary mb-2">
+                          {execResult.requests_forecast.stabilise_reads} of those are{' '}
+                          <strong>stabilising read(s)</strong>: one extra marketplace read before
+                          any trim, so a delete never runs on a snapshot that disagrees with its
+                          predecessor. A page still settling can list a row this very run had just
+                          made — deleting from it would remove the work instead of the overrun.
                         </p>
                       )}
                     {execResult.dry_run && (
