@@ -13,7 +13,7 @@
  *
  * NO BACKEND AND NO GAME REQUEST: `plannerHarness.isolate` answers what the
  * shell asks for and aborts everything else fail-closed, and the only execute
- * path driven is the PREVIEW, which is `dry_run: true` and mocked besides.
+ * path driven is the PREVIEW, which writes nothing and is mocked besides.
  *
  * Running it:
  *   cd frontend
@@ -312,7 +312,7 @@ test.describe('the undo for a live run is reachable, and the app keeps its key',
     const bodies = []
     await isolate(page, (path, route) => {
       if (path.endsWith('/distribution/execute')) {
-        return route.request().postDataJSON().dry_run ? PREVIEW : LIVE
+        return route.request().postDataJSON().execution_mode === 'live' ? LIVE : PREVIEW
       }
       if (path.endsWith('/routes/revert-plan')) {
         bodies.push(route.request().postDataJSON())

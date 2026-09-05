@@ -2834,7 +2834,14 @@ export default function ResourcePlanner() {
       try {
         const res = await api.post('/distribution/execute', {
           ...buildExecutePayload(),
-          dry_run: dryRun,
+          // The MODE, and never the superseded boolean beside it.
+          // `ExecuteRequest.execution_mode` is what the handler reads;
+          // `ExecuteRequest.dry_run` is kept for older callers and
+          // `_execution_mode_is_unambiguous` refuses both ways of stating the
+          // two at once -- `dry_run: false` without a live mode, and
+          // `dry_run: true` with one. Sending only the mode is the one shape
+          // that can be neither.
+          execution_mode: dryRun ? 'preview' : 'live',
           disable_existing: disableExisting,
           max_routes_per_run: routeCap(routesPerRun),
           // Targeting a single pair is how a first live run against a real
@@ -3094,8 +3101,8 @@ export default function ResourcePlanner() {
   // server picks its length so the client is not returning on a metronome.
   const runReconcileSweep = useCallback(async () => {
     // The same gate `executePlan` opens with, and this was the one write path
-    // without it: the sweep checked only that a plan existed and then posted
-    // `dry_run: false`. So every marked cell Preview refuses -- an unparseable
+    // without it: the sweep checked only that a plan existed and then went
+    // straight to a live run. So every marked cell Preview refuses -- an unparseable
     // "Never disable" entry, an even `map_span` that decides what a marketplace
     // row's map id turns back into, an unresolved "Not from" exclusion -- went
     // straight to a live, disabling run. It is also the one write button that
@@ -3124,7 +3131,12 @@ export default function ResourcePlanner() {
           '/distribution/execute',
           {
             ...buildExecutePayload(),
-            dry_run: false,
+            // Live by construction: this path exists to switch routes off in
+            // the game. It sent a bare `dry_run: false`, which
+            // `ExecuteRequest._execution_mode_is_unambiguous` now refuses
+            // outright -- the boolean alone is not consent, so the sweep would
+            // have 422'd on every chunk without ever saying what it meant.
+            execution_mode: 'live',
             disable_existing: true,
             // Whole-day mode provisions as it sweeps -- one read per village
             // serves reconcile AND create, which is the entire point of the

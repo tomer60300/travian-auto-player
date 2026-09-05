@@ -331,7 +331,7 @@ test.describe('a figure past the bound is marked and not sent', () => {
   // The RECONCILIATION SWEEP, which was the only write path with no client gate
   // at all: `executePlan` opens with `[...blockers, ...runIssues]` -- for the
   // preview as well as the live run -- and this one checked only that a plan
-  // existed and then posted `dry_run: false`. So every marked cell Preview
+  // existed and then went straight to a live run. So every marked cell Preview
   // refuses went straight to a live, disabling run, on the one write button that
   // carries no live-run confirmation either.
   test('the sweep refuses a malformed "Never disable" the same way Preview does', async ({

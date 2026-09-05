@@ -348,7 +348,7 @@ test.describe('one page state reaches every request that carries the field', () 
       await expect.poll(() => sent.execute.length).toBe(1)
 
       // The sweep, which is the one write path that reaches `/execute` without
-      // going through Preview -- and posts `dry_run: false`.
+      // going through Preview -- and is live by construction.
       await page.getByRole('button', { name: 'Reconcile all villages' }).click()
       await expect.poll(() => sent.execute.length).toBe(2)
 

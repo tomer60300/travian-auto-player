@@ -33,7 +33,7 @@
  *
  * NO BACKEND AND NO GAME REQUEST: every `/api` call is either answered here or
  * ABORTED, and the snapshot is seeded into localStorage rather than fetched.
- * The only execute path driven is the PREVIEW, which is `dry_run: true`, and
+ * The only execute path driven is the PREVIEW, which writes nothing, and
  * it is answered from this file.
  *
  * Running it:
@@ -352,7 +352,7 @@ test.describe('the overnight declaration', () => {
     await expect.poll(() => sent.execute.length).toBe(1)
 
     // Zero game requests: the preview is a dry run, and this file answered it.
-    expect(sent.execute[0].dry_run).toBe(true)
+    expect(sent.execute[0].execution_mode).toBe('preview')
     expect(sent.execute[0].segments.map((s) => [s.name, s.overnight])).toEqual([
       ['Day', undefined],
       ['Night early', undefined],

@@ -78,9 +78,9 @@ async function previewOf(page, response) {
 async function liveRunOf(page, response) {
   await isolate(page, (path, route) =>
     path.endsWith('/distribution/execute')
-      ? route.request().postDataJSON().dry_run
-        ? TRIMMED_PREVIEW
-        : response
+      ? route.request().postDataJSON().execution_mode === 'live'
+        ? response
+        : TRIMMED_PREVIEW
       : undefined,
   )
   await seed(page)

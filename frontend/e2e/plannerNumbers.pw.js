@@ -29,9 +29,9 @@
  * NO BACKEND AND NO GAME REQUEST, on the same two mechanisms every spec here
  * uses: every `/api` call is either answered by the route handler or ABORTED
  * fail-closed, and the snapshot is seeded into localStorage rather than
- * fetched. The only execute path driven is the PREVIEW, which is `dry_run:
- * true` and mocked besides -- nothing in this file can reach :8001, let alone
- * the game.
+ * fetched. The only execute path driven is the PREVIEW, which writes nothing
+ * and is mocked besides -- nothing in this file can reach :8001, let alone the
+ * game.
  *
  * Running it:
  *   cd frontend
@@ -374,7 +374,7 @@ test.describe('a blank box is unknown; a typed zero is an answer', () => {
     await page.getByRole('button', { name: /^Preview \(0 requests\)$/ }).click()
     await expect.poll(() => sent.execute.length).toBe(1)
 
-    expect(sent.execute[0].dry_run).toBe(true)
+    expect(sent.execute[0].execution_mode).toBe('preview')
     expect(sent.execute[0].max_routes_per_run).toBe(0)
   })
 })
