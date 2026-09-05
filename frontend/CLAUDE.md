@@ -151,15 +151,31 @@ Concretely, in a `.jsx` file under `src/`:
 - Do **not** inline a hex literal. If a colour is missing from the token set, add the token to
   both `:root` and `[data-theme="dark"]` in index.css first, then consume it.
 
-Known outstanding violations as of 2026-09-05 (re-counted; the 640px mobile bucket no longer
-exists — `.input-sm` was the last thing in it and now has a base rule) — fix opportunistically when you are already
-editing the file, never as a drive-by refactor:
+Known outstanding violations, re-counted **2026-09-05** after the planner review-hardening
+commits (the 640px mobile bucket no longer exists — `.input-sm` was the last thing in it and
+now has a base rule) — fix opportunistically when you are already editing the file, never as a
+drive-by refactor:
 
-- 60 raw hex literals: `pages/RaidOptimizer.jsx` (27), `components/LogDrawer.jsx` (14),
+- **63 raw hex literals**: `pages/RaidOptimizer.jsx` (27), `components/LogDrawer.jsx` (14),
   `pages/ResourcePlanner.jsx` (13), `components/ResourceBar.jsx` (4),
-  `components/MobileNav.jsx` (3)
-- 76 Tailwind palette utilities, worst offenders `border-gray-800` (8) and `border-gray-700`
-  (9) — both are dark-theme greys that render as near-black hairlines on a light surface.
+  `components/MobileNav.jsx` (3), `pages/Sessions.jsx` (1), `components/Layout.jsx` (1)
+- **78 Tailwind palette utilities**: `pages/ResourcePlanner.jsx` (26),
+  `components/LogDrawer.jsx` (24), `pages/Logs.jsx` (15), `pages/OasisRaider.jsx` (9),
+  `pages/AutoScout.jsx` (2), `pages/Buildings.jsx` (1), `components/DayNightPanel.jsx` (1).
+  Worst offenders `border-gray-700` (9) and `border-gray-800` (9) — both are dark-theme greys
+  that render as near-black hairlines on a light surface.
+
+Count them with these, from `frontend/`, so a later recount is comparable rather than a fresh
+guess (the previous entry gave a headline of 60 over a breakdown summing to 61, and missed two
+files):
+
+```
+grep -rPo "(?<!&)#[0-9a-fA-F]{3,8}\b" src --include=*.jsx --include=*.js | wc -l
+grep -rPo "\b(text|bg|border|ring|from|to|via|divide|outline|decoration|placeholder|shadow|accent|caret|fill|stroke)-(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-(50|[1-9]00|950)\b" src --include=*.jsx --include=*.js | wc -l
+```
+
+The `(?<!&)` on the first is load-bearing: without it HTML numeric entities such as `&#128202;`
+and `&#9650;` are counted as colours and the total reads 68.
 
 ## UI Definition of Done
 
@@ -169,10 +185,15 @@ against the running app, not against the diff.
 1. **Responsive** — renders correctly at 375px, 768px and 1440px wide. No horizontal page
    scroll at 375px; wide tables scroll inside their own container, not the body.
 2. **Keyboard** — every interactive element is reachable by Tab, in an order that matches the
-   visual order, and operable by Enter/Space. A visible focus state on each one
-   (`outline: 2px solid var(--md-primary); outline-offset: 2px`, as `.btn-primary:focus-visible`
-   and `.input-field:focus-visible` both do). No `outline: none` without a replacement
-   indicator.
+   visual order, and operable by Enter/Space. A visible focus state on each one:
+   `outline: 2px solid var(--md-primary); outline-offset: 2px`, which is what
+   `.btn-primary`, `.btn-secondary`, `.input-field`, `.input-sm` and `.link-action` each
+   declare on `:focus-visible`. `.tab-btn:focus-visible` takes the same ring at
+   `outline-offset: -2px`, inset so the tab strip does not clip it. `.link-action` is the one
+   to reach for when a control is plain text and carries none of the other four classes —
+   that is why it exists: "Lift restriction", "Stop relaying" and the Relays-for `<summary>`
+   in `ResourcePlanner.jsx` had no ring at all until it did. No `outline: none` without a
+   replacement indicator.
 3. **Contrast** — meets WCAG AA: 4.5:1 for text under 18.66px/24px, 3:1 for larger text and for
    the non-text boundary of a control. Verify in **both** themes; a token pair that passes in
    light can fail in dark.
