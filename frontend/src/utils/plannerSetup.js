@@ -122,7 +122,7 @@ import { RESOURCE_LABEL, ROLE_LABEL } from '../constants/planner'
 // wire format, which is exactly what that note exists to prevent. The
 // dependency runs one way only; nothing in `plannerNpc.js` reads this file.
 import { NPC_FEEDSTOCK_RESOURCES, isFeedstockList } from './plannerNpc'
-import { namesForVillageIds } from './villageRefs'
+import { excludedOriginIds, namesForVillageIds } from './villageRefs'
 
 export const SETUP_FORMAT = 'travian-planner-owned-state'
 export const SETUP_VERSION = 9
@@ -992,6 +992,36 @@ export function describeConsumption(spent) {
 /** Travian's repeat interval, which is a closed set of the divisors of 24. */
 export const TRAVIAN_REPEAT_INTERVALS = Object.freeze([1, 2, 3, 4, 6, 8, 12, 24])
 
+/** The foreign targets as a DOCUMENT carries them: exclusions RESOLVED to ids.
+ *
+ * The page holds each exclusion twice -- `exclude_origins` as ids, and
+ * `exclude_origins_text` as whatever is in the input box, so it can hold a
+ * half-finished name. Only the ids are a wire field. Writing the page's targets
+ * verbatim therefore put a typed exclusion into the document as text alone, and
+ * `parseForeignTargets` reads only the ids, so it came back empty: the operator
+ * excluded a hub from a tribute, saved, reloaded, and the hub supplied it again
+ * with nothing on screen saying the answer had gone.
+ *
+ * `excludedOriginIds` is the same resolution the plan request uses, imported
+ * rather than restated -- its rule is that the typed text wins where it EXISTS,
+ * even empty, because clearing the box is a deliberate act, while a target
+ * loaded from a file has ids and no text at all.
+ *
+ * The text itself is NOT written. A document carries answers, not the state of
+ * an input box, and a name the account does not have resolves to nothing --
+ * which the cell already marks and `planBlockers` already refuses the plan over.
+ * Omitted when it resolves to nothing at all, on the same rule the rest of this
+ * file follows: the parser reads absent as "no exclusion", so writing an empty
+ * list would only make the document look like it had an answer.
+ */
+export function storedForeignTargets(targets, villages) {
+  return (targets ?? []).map((target) => {
+    const { exclude_origins_text: _typed, exclude_origins: _ids, ...rest } = target
+    const excluded = excludedOriginIds(target, villages)
+    return excluded.length ? { ...rest, exclude_origins: excluded } : rest
+  })
+}
+
 export class SetupFileError extends Error {}
 
 /** Build the exportable document. Villages with nothing typed are left out. */
@@ -1156,7 +1186,13 @@ export function buildSetup({
   // A tribute is entirely operator-supplied -- the game will not say that an ally
   // needs 25,700 crop an hour -- and it drives real routes. Losing it to a cleared
   // origin means the obligation silently stops being planned for.
-  if (foreignTargets && foreignTargets.length) doc.foreign_targets = foreignTargets
+  //
+  // Through `storedForeignTargets` rather than verbatim, because the page holds
+  // each exclusion as ids AND as the text in its input box, and only the ids are
+  // a wire field. Written raw, a typed exclusion reached the document as text
+  // alone and came back out of the parser as nothing.
+  const targets = storedForeignTargets(foreignTargets, villages)
+  if (targets.length) doc.foreign_targets = targets
   return doc
 }
 

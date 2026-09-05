@@ -606,6 +606,76 @@ describe('foreign targets keep their cadence controls', () => {
   })
 })
 
+// A TYPED exclusion is the operator excluding a hub from a tribute, and it lived
+// only as `exclude_origins_text` -- the half of the pair the input box holds so
+// it can carry a half-finished name. `buildSetup` wrote the page's targets
+// verbatim, so the document carried the text and no ids; `parseForeignTargets`
+// rebuilds field by field and reads only `exclude_origins`, so it came back
+// empty. The operator excluded the hub, saved, reloaded, and the hub supplied
+// the tribute again with nothing on screen saying the answer had gone.
+//
+// The same denylist `94892ed` fixed on the backend ("the origin exclusion only
+// ever bound the greedy seed"), failing from the other end.
+describe('a typed exclusion survives the document round trip', () => {
+  const TYPED = [
+    {
+      name: '01Arb',
+      x: 46,
+      y: 133,
+      crop_per_hour: 47167,
+      safety_margin_pct: 0,
+      route_eligible: true,
+      exclude_origins: [],
+      exclude_origins_text: 'V05, V16',
+    },
+  ]
+
+  it('resolves the typed names to ids on the way into the document', () => {
+    const setup = buildSetup({ villages: VILLAGES, foreignTargets: TYPED, exportedAt: STAMP })
+
+    expect(setup.foreign_targets[0].exclude_origins).toEqual([20031, 20032])
+    // The text is a draft the input box owns, not an answer: the document
+    // carries what was RESOLVED, which is what the plan request carries too.
+    expect('exclude_origins_text' in setup.foreign_targets[0]).toBe(false)
+  })
+
+  it('comes back out of the parser as the same two villages', () => {
+    const setup = roundTrip(
+      buildSetup({ villages: VILLAGES, foreignTargets: TYPED, exportedAt: STAMP })
+    )
+
+    expect(setup.foreignTargets[0].exclude_origins).toEqual([20031, 20032])
+  })
+
+  it('keeps a stored exclusion the operator never retyped', () => {
+    // `excludedOriginIds`' own rule: the text wins where it EXISTS, even empty,
+    // because clearing the box is deliberate — but a target loaded from a file
+    // has ids and no text at all, and those must not be dropped.
+    const stored = [{ ...TYPED[0], exclude_origins: [20031], exclude_origins_text: undefined }]
+    delete stored[0].exclude_origins_text
+    const setup = buildSetup({ villages: VILLAGES, foreignTargets: stored, exportedAt: STAMP })
+
+    expect(setup.foreign_targets[0].exclude_origins).toEqual([20031])
+  })
+
+  it('drops a cleared box rather than falling back to what the file said', () => {
+    const cleared = [{ ...TYPED[0], exclude_origins: [20031], exclude_origins_text: '' }]
+    const setup = buildSetup({ villages: VILLAGES, foreignTargets: cleared, exportedAt: STAMP })
+
+    expect('exclude_origins' in setup.foreign_targets[0]).toBe(false)
+  })
+
+  it('leaves an unresolvable name out rather than inventing an id for it', () => {
+    // The cell already marks this and `planBlockers` already refuses the plan
+    // over it. What must not happen is a document claiming an exclusion that
+    // resolves to nothing.
+    const typo = [{ ...TYPED[0], exclude_origins_text: 'V05, no-such-village' }]
+    const setup = buildSetup({ villages: VILLAGES, foreignTargets: typo, exportedAt: STAMP })
+
+    expect(setup.foreign_targets[0].exclude_origins).toEqual([20031])
+  })
+})
+
 describe('allocation values are whole units', () => {
   it('rounds a raw-computation float from a file to something an input box can hold', () => {
     // Seen live: a stored 43726.200918351606 rendered verbatim in the Value
