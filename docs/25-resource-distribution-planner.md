@@ -1421,7 +1421,11 @@ Now derived once inside `_plan_account` as
 target, never loosen it. Taking a 16h window *as* the target disables the
 objective outright, since no route can miss 16h; ignoring the window leaves a
 60-minute profile aiming at a lag it has no hours to absorb. `None` still means
-"no target", so a declared night is unaffected.
+"no target", so a declared night is unaffected. **The clamped figure is now in
+the response** rather than only rounded into finding prose: `/plan` carries it
+as `latency_target_hours`, and `/day-check` carries one per profile as
+`segments[].latency_target_hours` — `/execute` has no per-segment plan summary
+to put it on.
 
 **There is now exactly one place the target comes from.** The page sends no
 `max_latency_hours` on **any** path — `/plan`, `/day-check`, `/night-profile`,

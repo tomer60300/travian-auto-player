@@ -747,6 +747,32 @@ class TestPlanRespectsTheProfileWindow:
             )
 
 
+class TestTheLatencyTargetIsInTheResponse:
+    """The target the routes were shaped by, as a number the caller can read.
+
+    The page sends no `max_latency_hours` on any path (§4.19), so the figure
+    that binds is the standing default tightened by the profile's own window --
+    and the only trace of it was `2h` rounded into a finding message, which
+    nothing can read back. A caller comparing two profiles could not tell
+    whether a shorter cycle came from the window or from the target.
+    """
+
+    def _plan(self, **update):
+        body = _plan_request(
+            {"lumber": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}}
+        ).model_copy(update=update)
+        return asyncio.run(post_plan(body))
+
+    def test_a_sixteen_hour_window_reports_the_standing_target(self):
+        # A window may only TIGHTEN it, so 16h leaves the 2h default standing.
+        assert self._plan(dispatch_window=(420, 1380)).latency_target_hours == 2.0
+
+    def test_an_hour_long_profile_reports_the_window_that_tightened_it(self):
+        # The exact clamped value, not the standing one and not the rounded
+        # prose: `min(2.0, 60 / 60)`.
+        assert self._plan(dispatch_window=(600, 660)).latency_target_hours == 1.0
+
+
 class TestPlanDiagnostics:
     """/plan must answer "should I care?" before it answers "about what?".
 

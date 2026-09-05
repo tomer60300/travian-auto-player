@@ -2032,6 +2032,22 @@ class PlanResponse(BaseModel):
     shortfalls: list[ShortfallResponse]
     unallocated: list[UnallocatedResponse]
     total_merchants: int
+    latency_target_hours: float | None = Field(
+        description=(
+            "The delivery-lag target this plan was built against, in hours: "
+            "`min(the request's max_latency_hours, the dispatch window's own "
+            "length)`. A window may TIGHTEN the standing target and never loosen "
+            "it (section 4.19), and the page sends no target of its own, so this "
+            "is normally the standing 2h default. Reported because nothing else "
+            "carried it -- the only trace was the figure rounded to whole hours "
+            "inside whichever finding messages happened to fire, so a caller "
+            "could not tell a shorter cycle bought by the target from one forced "
+            "by the window. `null` is exactly 'no target'. An OVERNIGHT profile "
+            "is planned with the target suspended whatever this says (section 6 "
+            "waives it for hours nobody is waiting through); the figure there is "
+            "the clamped target the profile would otherwise have carried."
+        )
+    )
     feasible: bool = Field(
         description=(
             "Whether the sheet can be carried out. Kept as the field every caller "
@@ -3382,9 +3398,31 @@ class VillageDayResponse(BaseModel):
     settled: bool
 
 
+class SegmentPlanResponse(BaseModel):
+    """What one profile's own plan was built against, named by the profile."""
+
+    name: str
+    latency_target_hours: float | None = Field(
+        description=(
+            "The same figure `PlanResponse.latency_target_hours` carries, for "
+            "THIS profile: the standing target clamped by this segment's own "
+            "hours. One number cannot say it for the whole day -- a 16h day and "
+            "an 8h night planned from one body are clamped separately."
+        )
+    )
+
+
 class DayCheckResponse(BaseModel):
     villages: list[VillageDayResponse]
     warnings: list[str]
+    segments: list[SegmentPlanResponse] = Field(
+        description=(
+            "One row per profile, in the order they were sent. Carries what the "
+            "segment's own plan was clamped to, which is what makes two "
+            "profiles' route sets comparable: a shorter cycle in the night may "
+            "be the window's doing rather than the plan's."
+        )
+    )
     morning_floor: float = Field(
         default=DEFAULT_TARGET_FILL,
         description=(
@@ -4219,6 +4257,15 @@ async def post_day_check(
             )
 
     return DayCheckResponse(
+        # Paired with `planned` rather than recomputed: the clamp lives in
+        # `_plan_account`, and a second application of it here would be a second
+        # answer to the question this field exists to settle.
+        segments=[
+            SegmentPlanResponse(
+                name=segment.name, latency_target_hours=account.config.max_latency_hours
+            )
+            for segment, account in zip(body.segments, planned, strict=True)
+        ],
         morning_floor=DEFAULT_TARGET_FILL,
         pre_night_baseline=DEFAULT_BASELINE_FILL,
         morning_shortfalls=_fill_rows(morning_short, names),
@@ -5159,6 +5206,10 @@ def _plan_response(account: _PlannedAccount) -> PlanResponse:
             for resource, rp in sorted(plan.resource_plans.items(), key=lambda kv: kv[0].value)
         ],
         total_merchants=plan.total_merchants,
+        # Off the config the plan was actually built with, for the same reason
+        # `night_overruns` reads its window from there: the request's own field
+        # is what was ASKED for, and the window may have tightened it since.
+        latency_target_hours=config.max_latency_hours,
         feasible=plan.is_feasible,
         # Built from the COMPLETE finding list, not plan.findings: overflow,
         # starvation and busy merchants are computed here, and they are precisely

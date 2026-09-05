@@ -385,6 +385,69 @@ class TestDayCheckEndpoint:
             assert getattr(parameter.default, "dependency", None) is not get_travian_session
 
 
+class TestEverySegmentReportsTheTargetItWasPlannedAgainst:
+    """Each profile is clamped by its OWN hours, so one figure cannot say it.
+
+    §4.19: the window may tighten the standing target and never loosen it, and
+    the clamp happens per segment inside `_plan_account`. A day and a night
+    planned from one body therefore aim at two different numbers, and until now
+    the response said neither -- the only trace was `2h` rounded into whichever
+    finding messages happened to fire.
+    """
+
+    def _village(self, vid, lumber):
+        return {
+            "village_id": vid,
+            "name": f"0{vid}",
+            "x": 0,
+            "y": vid,
+            "merchants_total": 20,
+            "merchants_free": 20,
+            "lumber_per_hour": lumber,
+            "clay_per_hour": 0,
+            "iron_per_hour": 0,
+            "crop_per_hour": 0,
+            "warehouse_capacity": 400_000,
+            "granary_capacity": 400_000,
+        }
+
+    def _run(self, **extra):
+        body = DayCheckRequest.model_validate(
+            {
+                "prune_to_window": True,
+                "snapshot": [self._village(1, 2_000), self._village(2, 500)],
+                "segments": [
+                    {
+                        "name": "Day",
+                        "window": [420, 1380],
+                        "allocations": {"lumber": {"1": {"mode": "remainder"}}},
+                    },
+                    {"name": "Night", "window": [1380, 420], "allocations": {}},
+                ],
+                **extra,
+            }
+        )
+        return asyncio.run(post_day_check(body, SimpleNamespace(id=1)))
+
+    def test_each_segment_is_named_with_the_target_its_plan_used(self):
+        res = self._run()
+
+        # Neither window is shorter than the standing 2h, so both keep it --
+        # and both are stated, rather than the day standing in for the night.
+        assert [(s.name, s.latency_target_hours) for s in res.segments] == [
+            ("Day", 2.0),
+            ("Night", 2.0),
+        ]
+
+    def test_a_caller_supplied_target_is_reported_as_each_window_clamped_it(self):
+        # The one line §4.19 offers an API caller: send 24 and each segment's
+        # own hours are the only thing that binds. 16h and 8h, not 24 twice.
+        assert [s.latency_target_hours for s in self._run(max_latency_hours=24).segments] == [
+            16.0,
+            8.0,
+        ]
+
+
 class TestSegmentsRequireThePrune:
     """The rule `ExecuteRequest._segments_are_coherent` already makes.
 
