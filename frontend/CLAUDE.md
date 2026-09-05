@@ -134,7 +134,7 @@ neutral-black in dark:
 
 ### Breakpoints
 
-`<= 640px` mobile overrides · `<= 767px` mobile layout (bottom tab bar, log drawer) ·
+`<= 767px` mobile layout (bottom tab bar, log drawer) ·
 `768px-1023px` tablet (sidebar 200px) · `>= 1024px` desktop (sidebar 220px). Plus
 `@media (pointer: coarse)` for touch sizing, which is orthogonal to width — do not merge them.
 
@@ -151,13 +151,14 @@ Concretely, in a `.jsx` file under `src/`:
 - Do **not** inline a hex literal. If a colour is missing from the token set, add the token to
   both `:root` and `[data-theme="dark"]` in index.css first, then consume it.
 
-Known outstanding violations as of 2026-09-01 — fix opportunistically when you are already
+Known outstanding violations as of 2026-09-05 (re-counted; the 640px mobile bucket no longer
+exists — `.input-sm` was the last thing in it and now has a base rule) — fix opportunistically when you are already
 editing the file, never as a drive-by refactor:
 
-- 60 raw hex literals: `pages/RaidOptimizer.jsx` (27), `components/LogDrawer.jsx` (15),
+- 60 raw hex literals: `pages/RaidOptimizer.jsx` (27), `components/LogDrawer.jsx` (14),
   `pages/ResourcePlanner.jsx` (13), `components/ResourceBar.jsx` (4),
-  `components/MobileNav.jsx` (1)
-- 76 Tailwind palette utilities, worst offenders `border-gray-800` (15) and `border-gray-700`
+  `components/MobileNav.jsx` (3)
+- 76 Tailwind palette utilities, worst offenders `border-gray-800` (8) and `border-gray-700`
   (9) — both are dark-theme greys that render as near-black hairlines on a light surface.
 
 ## UI Definition of Done

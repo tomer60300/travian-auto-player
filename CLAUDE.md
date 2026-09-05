@@ -77,7 +77,7 @@ Automates Travian Legends gameplay: farming, scouting, build queues, military, r
 The frontend is plain JavaScript, so there is no `any` rule to enforce. Match the existing
 export style instead of imposing a new one:
 - Default export for React components, pages, and Zustand stores (plus the axios instance in
-  `src/api.js`) — that is all 43 `export default` declarations in `frontend/src` today, and
+  `src/api.js`) — that is all 54 `export default` declarations in `frontend/src` today, and
   `src/App.jsx` imports them that way.
 - Named exports for hooks, utilities, and constants (`src/hooks/`, `src/utils/`, `src/constants/`,
   `src/ws.js`, `src/logStream.js`).

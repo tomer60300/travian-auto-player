@@ -304,7 +304,7 @@ Multi-commodity min-cost flow with integer cycle and merchant variables plus per
 
 ## Appendix A — Regression fixture
 
-The frozen 20-village fixture is the optimizer's golden test case (frozen at the size it was cut, deliberately -- see the note below; the account is now 26): net production, coords, TO levels, allocation targets in; route set, per-village merchant pool, total ~115 merchants, all villages ≤ 18 out. Exercises: an army village with large negative net crop, a `remainder` village, a stranded village, two sub-hubs, a priority village held at 3/20, a foreign crop tribute, sub-20-merchant villages, and unknown TO defaulting to 0.
+The golden fixture (`tests/fixtures/distribution_account.json`, `tests/test_distribution_golden.py`) is a **23-village account that is invented, not captured** — this repository is public, so no real account state belongs in it — pinned at `SEED_TOTAL_MERCHANTS = 233`, `MAX_TOTAL_MERCHANTS = 211`, `MAX_OVER_BUDGET_EXCESS = 52`. It is frozen deliberately (see the note below) and is not the live 26-village account. An earlier draft of this paragraph quoted a 20-village plan at ~115 merchants that no longer exists in the repo. Exercises: an army village with large negative net crop, a `remainder` village, a stranded village, two sub-hubs, a priority village held at 3/20, a foreign crop tribute, sub-20-merchant villages, and unknown TO defaulting to 0.
 
 ---
 
@@ -755,39 +755,28 @@ whitelist cannot stop a tribute, and the plan raises `WHITELIST_VS_TRIBUTE` when
 one is supplied from a restricted village, so the exemption is visible on the
 plan that used it rather than only in a tooltip.
 
-## 4.5 `stock_floor_fraction` — shipping from stock, not only from production
+## 4.5 `stock_floor_fraction` — a buffer level the NPC allowance draws against
 
 The fraction of its warehouse capacity a village keeps stocked by NPC trading
-(0…0.95). A village the operator NPCs back to a floor can ship from that stock,
-so the plan may ask it to.
+(0…0.95). **Materials only** — a granary is not NPC-fed — and `0.0 ≡ None` at
+every layer: a zero fraction declares nothing.
 
-A floor is a **level** and the allocation layer needs a **rate**, so the level
-is spread across the window the profile actually runs:
+It is a **level**, and only a level. What a floored village may ship beyond its
+production is not derived from the floor at all; it is the NPC allowance of
+§4.14 — a rate built from what the village retains of the resources it is *not*
+drawing on — consumed as a cap against unmet demand, from a reservoir that is
+finite in both replays and debited 1:1. The floor is the buffer that reservoir
+refills toward, and `NPC_CAPACITY_SHORT` is what fires when the allowance
+cannot cover the gap.
 
-```
-supplement_per_hour = stock_floor_fraction × warehouse_capacity / window_hours
-```
-
-30% of a 1,200,000 warehouse is 360,000, which over a 16-hour day is 22,500/h of
-extra supply and over an 8-hour night is 45,000/h. Where no window is set the
-divisor is 24. **Materials only** — a granary is not NPC-fed, so crop is never
-supplemented. A floor set on a village with no warehouse capacity in the
-snapshot is a 422: the level cannot be turned into a rate.
-
-It raises `available_per_hour`, never `total_production`: every figure reported
-to the operator as "production" reads the production, and percentage targets
-stay a share of production so that changing one village's floor does not move
-every other village's target. `ship_per_hour` is measured against *available*,
-which is what lets such a village ship more than it makes.
-
-The same floor is also a floor in the day simulation: a village NPC'd back to a
-level never runs its warehouse down, so its departures are funded in full.
-Modelling it as an ordinary store made every stock-funded route ship a fraction
-of its cargo and understated the receivers' whole day.
-
-Note what this does **not** yet model: the reservoir is treated as
-inexhaustible within the window. Sizing it as finite — a draw cap and a genuine
-buffer — is a decided-but-unbuilt redesign, not current behaviour.
+*This section used to describe a different model,* and its worked example is
+worth keeping as the thing not to rebuild: `stock_floor_fraction × capacity /
+window_hours` turned the level into a rate, so 30% of a 1,200,000 warehouse read
+as 22,500/h over a 16-hour day and 45,000/h over an 8-hour night — a **shorter
+window raised the claim**, the supply was compulsory (an addend every non-KEEP
+mode shipped away), and the replay's reservoir was infinite. Three independent
+reviewers converged on those three defects and the model was replaced, not
+patched. The field's own Pydantic description records the same history.
 
 ## 4.6 `consumption_per_hour` — materials only, and crop is refused by design
 
@@ -870,9 +859,12 @@ stop a village shipping.
 
 ## 4.8 `village_nets` in the plan response
 
-Per village, per resource: `own_per_hour`, `supplement_per_hour`,
-`target_per_hour`, `ship_per_hour`, `consumption_per_hour` and the resulting
-`net_per_hour`, all read straight off `VillageAllocation`.
+Per village, per resource: `own_per_hour`, `npc_allowance_per_hour` (the
+ceiling the floor could fund), `npc_draw_per_hour` (what the plan actually
+spent against it — the two are different quantities and the UI must never show
+the first as the second), `target_per_hour`, `ship_per_hour`,
+`consumption_per_hour` and the resulting `net_per_hour`, all read straight off
+`VillageAllocation`. `supplement_per_hour` was retired with the model in §4.5.
 
 It exists because the net had no reader at all and the allocation grid
 recomputed `target − consumption` in JavaScript instead. Two implementations of
@@ -912,11 +904,12 @@ fixture has one destination, and a 2×2 swap needs two.
 ## 4.10 `ABSOLUTE` is a retention target, not a consumption figure
 
 ```
-ship_per_hour = target_per_hour − available_per_hour
+ship_per_hour = target_per_hour − own_per_hour − npc_draw_per_hour
 ```
 
-where `available` is the village's own production plus any stock supplement
-(§4.5). The village ends up **retaining** the target; the figure already
+The draw is subtracted, never added: a village drawing on its floor ships *less*
+from production, not more (§4.14). There is no `available_per_hour`. The village
+ends up **retaining** the target; the figure already
 includes its own production, so a target is not a delivery quota.
 
 The operator's own words on village 01: *"It means that it gets absolute of
