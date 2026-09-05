@@ -13,6 +13,7 @@ from dataclasses import replace
 
 import pytest
 
+from travian_api.services.distribution import optimizer
 from travian_api.services.distribution.allocation import (
     MATERIALS,
     Allocation,
@@ -1200,6 +1201,76 @@ class TestRelayGraphStaysShallow:
                 f"village {hub} forwards crop on to another hub {downstream & hubs}; "
                 f"that is a relay chain, not a single hop"
             )
+
+
+class TestASinkIsOneObligationNotSeveral:
+    """A route into a village with no merchants of its own -- a foreign tribute
+    -- weighs four ordinary routes in the route-count term. The comment states
+    why: "a tribute split across several villages is several routes to create
+    and watch for one obligation", and the operator runs those by hand.
+
+    The weight only ever decides where merchants tie, because merchants outrank
+    the route count. Where they do tie, splitting the tribute is otherwise free:
+    the account below serves it from one supplier at weight 4 and from two at
+    weight 1, on the same eight merchants either way. Every existing tribute
+    fixture has one supplier by construction, so the weight never bound and any
+    positive number would have passed.
+    """
+
+    SINK = 9
+
+    def _account(self):
+        def village(vid, x, y, merchants, office, crop):
+            return VillageState(
+                vid,
+                x,
+                y,
+                merchant_count=merchants,
+                trade_office_level=office,
+                crop_per_hour=crop,
+            )
+
+        villages = {
+            1: village(1, 16, 25, 12, 0, 1_000.0),
+            2: village(2, 26, 10, 20, 5, 1_000.0),
+            3: village(3, -37, 20, 12, 5, 1_000.0),
+            4: village(4, 38, 35, 20, 0, 0.0),
+            self.SINK: village(self.SINK, 14, -10, 0, 0, 0.0),
+        }
+        production = {1: 1_000.0, 2: 1_000.0, 3: 1_000.0, 4: 0.0, self.SINK: 0.0}
+        allocations = {
+            1: Allocation(AllocationMode.ABSOLUTE, 0.0),
+            2: Allocation(AllocationMode.ABSOLUTE, 0.0),
+            3: Allocation(AllocationMode.ABSOLUTE, 0.0),
+            4: Allocation(AllocationMode.REMAINDER),
+            self.SINK: Allocation(AllocationMode.ABSOLUTE, 900.0),
+        }
+        return villages, {Resource.CROP: resolve_resource(Resource.CROP, production, allocations)}
+
+    def _plan(self):
+        villages, plans = self._account()
+        return build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+    def _into_the_sink(self, plan):
+        return [r for r in plan.routes if r.destination == self.SINK]
+
+    def test_the_tribute_is_served_by_one_supplier(self):
+        assert len(self._into_the_sink(self._plan())) == 1
+
+    def test_without_the_weight_the_same_account_splits_it(self, monkeypatch):
+        """The control, and the reason the test above is about the weight rather
+        than about a fixture that happened to have one obvious supplier. The
+        merchant count is identical, so nothing but the route-count term can
+        have decided it."""
+        consolidated = self._plan()
+
+        monkeypatch.setattr(optimizer, "SINK_ROUTE_WEIGHT", 1)
+        split = self._plan()
+
+        assert len(self._into_the_sink(split)) >= 2
+        assert split.total_merchants == consolidated.total_merchants, (
+            "the split must be merchant-neutral, or merchants decided it and not the weight"
+        )
 
 
 class TestBreakpointCandidates:
