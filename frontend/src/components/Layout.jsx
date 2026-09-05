@@ -108,7 +108,9 @@ export default function Layout() {
   // Show loading while checking connection status
   if (!statusChecked) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-base gap-4">
+      // Reserves the fixed top bar's 64px, the same way <main> does below and
+      // for the same reason: see the comment there.
+      <div className="min-h-screen pt-[64px] flex flex-col items-center justify-center bg-base gap-4">
         <span className="text-secondary text-sm">
           Checking connection...
         </span>
@@ -331,8 +333,17 @@ export default function Layout() {
       )}
 
       {/* Main content */}
+      {/* `pt-[64px]`, not `mt-[64px]`. A top MARGIN here collapsed straight
+          out through the layout root and #root to BODY, so the document itself
+          sat at y=0 until React mounted and then jumped to y=64: measured as
+          BODY moving [0,900] -> [64,836], worth 0.0711 of CLS at 375/768 and
+          0.0444 at 1440 on every one of the 13 pages this layout wraps, before
+          any page had rendered anything of its own. It was the single largest
+          shift on all three of the pages the census flagged, and it was not
+          theirs. Padding does not collapse; with `border-box` the box measures
+          exactly what the margin version measured. */}
       <main
-        className={`main-content min-h-[calc(100vh-64px)] mt-[64px] transition-[margin-left] duration-200 ${connected ? '' : 'ml-0'}`}
+        className={`main-content min-h-screen pt-[64px] transition-[margin-left] duration-200 ${connected ? '' : 'ml-0'}`}
         style={connected ? { marginLeft: sidebarWidth } : undefined}
       >
         <Outlet />

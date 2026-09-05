@@ -6,6 +6,7 @@ import { useToast } from '../components/Toast'
 import ConfirmDialog from '../components/ConfirmDialog'
 import useGameStore from '../stores/gameStore'
 import FetchError from '../components/FetchError'
+import SkeletonRows from '../components/SkeletonRows'
 import { readErrorDetail } from '../utils/fetchError'
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -43,7 +44,18 @@ function queueToYaml(items, villageId) {
 }
 
 // ── Construction Queue (in-progress builds) ──────────────────────────
-function ConstructionQueue({ queue }) {
+/* `loading` renders the panel at the size it is about to be, instead of
+   returning null and then appearing. It returns null for an empty queue, so
+   until the first read landed this section had NO height at all and then took
+   one -- pushing the whole two-column builder below it down by 86px at 768
+   with one in-progress item and 200px with two. That was the largest remaining
+   shift on this page.
+
+   Two rows is the reservation because two is what a Travian village builds at
+   once outside the Roman split queue, so it is the common steady state rather
+   than a guess. A one-item queue shrinks the panel by a row when it lands,
+   which is a real but much smaller shift; a three-item queue grows it by one. */
+function ConstructionQueue({ queue, loading }) {
   const [snapTime, setSnapTime] = useState(Date.now)
   const [now, setNow] = useState(Date.now)
   useEffect(() => {
@@ -53,6 +65,14 @@ function ConstructionQueue({ queue }) {
     return () => clearInterval(id)
   }, [queue])
 
+  if (loading) {
+    return (
+      <div className="mb-4 p-3 bg-surface rounded-lg border-default">
+        <h4 className="text-xs font-semibold text-secondary uppercase tracking-wider mb-2">In Progress</h4>
+        <SkeletonRows rows={2} height={20} gap={6} label="Loading the construction queue" />
+      </div>
+    )
+  }
   if (!queue || queue.length === 0) return null
   const elapsed = Math.floor((now - snapTime) / 1000)
 
@@ -421,7 +441,12 @@ export default function BuildQueue() {
 
   // Local building/queue state (fetched per-village, not from global store)
   const [buildings, setBuildings] = useState([])
-  const [buildingsLoading, setBuildingsLoading] = useState(false)
+  // TRUE from the first render, not false. A mount effect always fetches, so
+  // starting false meant first paint reserved nothing, the skeleton appeared a
+  // tick later, and the content replaced it a tick after that -- two shifts
+  // where there should be none, and the reason the reservation below did not
+  // help until this line changed.
+  const [buildingsLoading, setBuildingsLoading] = useState(true)
   const [buildingsError, setBuildingsError] = useState(null)
   const [constructionQueue, setConstructionQueue] = useState([])
 
@@ -450,7 +475,9 @@ export default function BuildQueue() {
 
   // Fetch buildings + queue for the selected village (no global switch)
   const fetchLocalData = useCallback(async (vid) => {
-    if (!vid) return
+    // Clears the initial `true` above: with no village there is nothing to
+    // read, and the skeleton must not sit there for ever.
+    if (!vid) { setBuildingsLoading(false); return }
     const token = `${vid}::${accountKeyRef.current}`
     fetchTokenRef.current = token
     setBuildingsLoading(true)
@@ -635,7 +662,7 @@ export default function BuildQueue() {
       </div>
 
       {/* Construction queue (in-progress) */}
-      <ConstructionQueue queue={constructionQueue} />
+      <ConstructionQueue queue={constructionQueue} loading={buildingsLoading} />
 
       {/* Main layout: buildings list + queue builder.
           Stacked until there is room for two columns. As `flex` at every
@@ -660,9 +687,10 @@ export default function BuildQueue() {
             </button>
           </div>
           {buildingsLoading ? (
-            <div className="flex items-center gap-2 py-8 justify-center">
-              <div className="spinner spinner-sm" /><span className="text-secondary text-sm">Loading...</span>
-            </div>
+            // 10 rows at `.building-slot`'s own height (0.75rem padding either
+            // side of a 14px line, plus the 1px border and the 4px gap), which
+            // fills the pane to its 600px cap.
+            <SkeletonRows rows={10} height={44} gap={4} label="Loading village buildings" />
           ) : buildingsError ? (
             <FetchError
               what="Could not read this village's buildings"

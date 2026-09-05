@@ -7,6 +7,7 @@ import ConfirmDialog from '../components/ConfirmDialog'
 import { MapCoord } from '../components/MapCoord'
 import useGameStore from '../stores/gameStore'
 import FetchError from '../components/FetchError'
+import SkeletonRows from '../components/SkeletonRows'
 import { readErrorDetail } from '../utils/fetchError'
 
 // ---------------------------------------------------------------------------
@@ -695,9 +696,11 @@ export default function FarmLists() {
 
           {/* Table of lists */}
           {loading ? (
-            <p className="text-secondary italic py-2">
-              Loading...
-            </p>
+            // A header row plus six list rows at `.data-table`'s own row
+            // height. The one-line "Loading..." it replaces reserved nothing,
+            // so the detail panel and the loop controls under it jumped by
+            // ~180px at 768 when the lists landed.
+            <SkeletonRows rows={7} height={38} gap={2} label="Loading farm lists" />
           ) : listsError ? (
             <FetchError
               what="Could not read your farm lists"
