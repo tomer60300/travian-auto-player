@@ -271,9 +271,11 @@ test.describe('FarmLists', () => {
       page.getByRole('alert').filter({ hasText: 'Could not read your farm lists' })
     ).toBeVisible()
     await expect(page.getByText('Travian returned 503').first()).toBeVisible()
-    // The toast was the only signal, and it expires; 4.5s later the page read
-    // exactly like the empty state. Asserted past that lifetime.
-    await page.waitForTimeout(5000)
+    // The toast was the only signal, and it expires (4s, Toast.jsx); 4.5s later
+    // the page read exactly like the empty state. Waiting on the toast's own
+    // exit rather than a fixed sleep asserts past that lifetime without ever
+    // waiting longer than the toast actually takes.
+    await expect(page.getByRole('region', { name: 'Notifications' })).toHaveCount(0)
     await expect(page.getByText('No farm lists found. Create one above.')).toHaveCount(0)
     await expect(
       page.getByRole('alert').filter({ hasText: 'Could not read your farm lists' })
