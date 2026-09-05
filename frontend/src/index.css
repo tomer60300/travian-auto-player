@@ -69,6 +69,35 @@
   --status-waiting: #7D5700;
   --status-idle: #79747E;
 
+  /* Raid-optimizer functional colours. The five Teuton unit hues and the four
+     strategy hues are INDICATORS, not decoration -- the operator reads a
+     composition by colour -- so they are tokens rather than being folded into
+     the semantic set. They were 27 hex literals inline in RaidOptimizer.jsx,
+     drawn as text straight onto --bg-card with no contrast check ever run:
+     24 of 84 sampled text nodes failed AA in light theme (1.58-3.48:1) and 10
+     failed in dark (2.17-4.31:1), the only place in the census where the same
+     literal failed in BOTH.
+
+     Each hue is preserved and only its LIGHTNESS moved, per theme, to the
+     first step that clears 4.6:1 against BOTH --bg-card and --bg-base. So the
+     memorised olive/steel/amber/violet/blood identities survive. The dark
+     values are mostly the originals -- they were picked for a dark surface to
+     begin with, which is exactly why they failed on a light one. */
+  --raid-club: #657137;
+  --raid-spear: #5A6C82;
+  --raid-axe: #985E09;
+  --raid-paladin: #8A51B3;
+  --raid-tk: #A83232;
+  --raid-strat-raids: #95601E;
+  --raid-muted: #5A5040;
+  --raid-ok: #476E2D;
+  --raid-warn: #975C21;
+  /* Text ON one of the accents above, as a filled chip. The accents invert
+     across the themes, so this one does too: white on the dark light-theme
+     accent (5.33:1 on the palest of them), near-black on the light dark-theme
+     accent (10.78:1). */
+  --raid-on-accent: #FFFFFF;
+
   /* Elevation shadows — purple-tinted for theme cohesion */
   --elevation-1: 0 1px 3px rgba(103,80,164,0.1), 0 4px 12px rgba(103,80,164,0.07);
   --elevation-1-border: rgba(103,80,164,0.1);
@@ -127,6 +156,17 @@
   --status-error: #FFB4AB;
   --status-waiting: #FFDDB3;
   --status-idle: #938F99;
+
+  --raid-club: #8A9A4B;
+  --raid-spear: #8A9AAE;
+  --raid-axe: #F5B454;
+  --raid-paladin: #B08ACC;
+  --raid-tk: #D77878;
+  --raid-strat-raids: #D4892C;
+  --raid-muted: #A09179;
+  --raid-ok: #68A243;
+  --raid-warn: #D17F2E;
+  --raid-on-accent: #0C0A08;
 
   --elevation-1: 0 1px 3px rgba(0,0,0,0.25), 0 4px 12px rgba(0,0,0,0.2);
   --elevation-1-border: rgba(208,188,255,0.08);

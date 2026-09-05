@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import api from '../api'
 import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
@@ -21,19 +21,21 @@ const LS_KEY = 'raidopt_state_v2'
 // Per-unit color tokens — functional indicators, not theme decoration.
 // Same hues as the standalone optimizer so memorised colours carry over.
 const UNIT_COLOR = {
-  c:  '#8a9a4b',  // olive — Clubswinger
-  sp: '#8a9aae',  // steel — Spearman
-  a:  '#f5b454',  // amber — Axeman
-  pa: '#b08acc',  // violet — Paladin
-  t:  '#a83232',  // blood — Teutonic Knight
+  c:  'var(--raid-club)',     // olive — Clubswinger
+  sp: 'var(--raid-spear)',    // steel — Spearman
+  a:  'var(--raid-axe)',      // amber — Axeman
+  pa: 'var(--raid-paladin)',  // violet — Paladin
+  t:  'var(--raid-tk)',       // blood — Teutonic Knight
 }
 
 // Per-strategy palette — used by the four cards + their alternative sections.
+// Three of the four deliberately share a unit hue, which is how it has always
+// been: balance/axe amber, zero/spear steel, death/club olive.
 const STRAT_COLOR = {
-  balance: '#f5b454', // amber-bright
-  raids:   '#d4892c', // amber
-  zero:    '#8a9aae', // steel
-  death:   '#8a9a4b', // olive
+  balance: 'var(--raid-axe)',          // amber-bright
+  raids:   'var(--raid-strat-raids)',  // amber
+  zero:    'var(--raid-spear)',        // steel
+  death:   'var(--raid-club)',         // olive
 }
 
 const STRATEGY_META = {
@@ -91,7 +93,7 @@ function CompositionPills({ p, size = 'lg' }) {
     .map((u) => (
       <span key={u.key} className="font-bold" style={{ color: UNIT_COLOR[u.key] }}>
         {p[u.key]}
-        <span className="ml-0.5 text-[0.6em] tracking-widest opacity-80">{u.short.toUpperCase()}</span>
+        <span className="ml-0.5 text-[0.6em] tracking-widest">{u.short.toUpperCase()}</span>
       </span>
     ))
   if (parts.length === 0) parts.push(<span key="empty" className="text-secondary">(empty)</span>)
@@ -106,7 +108,7 @@ function CompositionPills({ p, size = 'lg' }) {
       {parts.flatMap((node, i) =>
         i === 0
           ? [node]
-          : [<span key={`x${i}`} className="mx-1.5 text-secondary opacity-50 font-normal">+</span>, node]
+          : [<span key={`x${i}`} className="mx-1.5 text-secondary font-normal">+</span>, node]
       )}
     </div>
   )
@@ -149,12 +151,12 @@ function LossPathDescription({ v, budget, defBudget, atks }) {
     segments.push(
       <span key={`b${i}`}>
         {isPastBudget && (
-          <span className="font-bold uppercase text-[0.65rem] tracking-wider mr-1" style={{ color: '#5a5040', fontStyle: 'italic' }}>
+          <span className="font-bold uppercase text-[0.65rem] tracking-wider mr-1" style={{ color: 'var(--raid-muted)', fontStyle: 'italic' }}>
             beyond scope
           </span>
         )}
         {violatesBudget && (
-          <span className="font-bold uppercase text-[0.65rem] tracking-wider mr-1" style={{ color: '#a83232' }}>
+          <span className="font-bold uppercase text-[0.65rem] tracking-wider mr-1" style={{ color: 'var(--danger)' }}>
             ⚠ over budget
           </span>
         )}
@@ -176,9 +178,11 @@ function LossPathDescription({ v, budget, defBudget, atks }) {
           key="marker"
           className="inline-block px-1.5 py-0.5 ml-1 text-[0.65rem] font-bold uppercase tracking-wider rounded-sm border"
           style={{
-            color: ok ? '#5a8c3a' : '#a83232',
-            borderColor: ok ? '#5a8c3a' : '#a83232',
-            backgroundColor: ok ? 'rgba(90,140,58,0.10)' : 'rgba(168,50,50,0.10)',
+            color: ok ? 'var(--raid-ok)' : 'var(--danger)',
+            borderColor: ok ? 'var(--raid-ok)' : 'var(--danger)',
+            backgroundColor: ok
+              ? 'color-mix(in srgb, var(--raid-ok) 6%, transparent)'
+              : 'color-mix(in srgb, var(--danger) 6%, transparent)',
           }}
         >
           ⟵ at your budget DEF ({defBudget}): {c.toLocaleString()}r per raid, {ok ? 'within budget' : 'over budget'}
@@ -206,9 +210,9 @@ function LossPathDescription({ v, budget, defBudget, atks }) {
           key="marker-overbuilt"
           className="inline-block px-1.5 py-0.5 ml-1 text-[0.65rem] font-bold uppercase tracking-wider rounded-sm border"
           style={{
-            color: '#5a8c3a',
-            borderColor: '#5a8c3a',
-            backgroundColor: 'rgba(90,140,58,0.10)',
+            color: 'var(--raid-ok)',
+            borderColor: 'var(--raid-ok)',
+            backgroundColor: 'color-mix(in srgb, var(--raid-ok) 6%, transparent)',
           }}
         >
           ⟵ at your budget DEF ({defBudget}): 0r per raid, no casualties
@@ -218,7 +222,7 @@ function LossPathDescription({ v, budget, defBudget, atks }) {
   }
 
   return segments.flatMap((node, i) =>
-    i === 0 ? [node] : [<span key={`sep${i}`} className="text-secondary opacity-60 mx-1.5">·</span>, node],
+    i === 0 ? [node] : [<span key={`sep${i}`} className="text-secondary mx-1.5">·</span>, node],
   )
 }
 
@@ -260,15 +264,20 @@ function StrategyCard({ v, strategy, featured, budget, defBudget, atks }) {
       className="card relative"
       style={{
         borderColor: accent,
+        // `color-mix`, not `${accent}1A`: the accents are `var()` references
+        // now, and a CSS variable cannot carry a concatenated 8-digit-hex
+        // alpha suffix the way a literal could.
         background: featured
-          ? `linear-gradient(135deg, ${accent}1A 0%, transparent 65%)`
-          : `linear-gradient(135deg, ${accent}14 0%, transparent 60%)`,
-        boxShadow: featured ? `0 0 24px ${accent}10` : undefined,
+          ? `linear-gradient(135deg, color-mix(in srgb, ${accent} 10%, transparent) 0%, transparent 65%)`
+          : `linear-gradient(135deg, color-mix(in srgb, ${accent} 8%, transparent) 0%, transparent 60%)`,
+        boxShadow: featured
+          ? `0 0 24px color-mix(in srgb, ${accent} 6%, transparent)`
+          : undefined,
       }}
     >
       <div
         className="absolute -top-2.5 left-4 px-2.5 py-0.5 text-[0.6rem] font-bold tracking-[0.28em] rounded-sm whitespace-nowrap"
-        style={{ background: accent, color: '#0c0a08' }}
+        style={{ background: accent, color: 'var(--raid-on-accent)' }}
       >
         {meta.label}
       </div>
@@ -290,7 +299,7 @@ function StrategyCard({ v, strategy, featured, budget, defBudget, atks }) {
 
       <div
         className="px-3 py-2 text-xs leading-relaxed border-l-2 bg-surface mb-2"
-        style={{ borderColor: diesUnit ? UNIT_COLOR[v.dies] : '#5a5040' }}
+        style={{ borderColor: diesUnit ? UNIT_COLOR[v.dies] : 'var(--raid-muted)' }}
       >
         <LossPathDescription v={v} budget={budget} defBudget={defBudget} atks={atks} />
       </div>
@@ -323,19 +332,19 @@ function AlternativeCard({ v, rank }) {
     ))
   return (
     <div className="card relative">
-      <div className="absolute top-2.5 right-3 font-bold text-base text-secondary opacity-60">#{rank}</div>
+      <div className="absolute top-2.5 right-3 font-bold text-base text-secondary">#{rank}</div>
       <div className="mb-3">
         <CompositionPills p={v.p} size="md" />
       </div>
       <div className="grid grid-cols-4 gap-1.5 text-xs mb-2">
-        <StatBlock label="Raids" value={v.raids} valueColor="#f5b454" />
+        <StatBlock label="Raids" value={v.raids} valueColor={STRAT_COLOR.balance} />
         <StatBlock label="0-Cas" value={v.maxZero} />
         <StatBlock label="Budget" value={v.maxBudget} />
         <StatBlock label="Loss/r" value={v.costAtBudget.toLocaleString()} />
       </div>
       <div
         className="px-2 py-1 text-[0.7rem] border-l-2 bg-surface mb-1"
-        style={{ borderColor: diesUnit ? UNIT_COLOR[v.dies] : '#5a5040' }}
+        style={{ borderColor: diesUnit ? UNIT_COLOR[v.dies] : 'var(--raid-muted)' }}
       >
         First cas →{' '}
         <span
@@ -353,12 +362,20 @@ function AlternativeCard({ v, rank }) {
 }
 
 function NumberField({ label, color, value, setValue, hint, min = 0, max }) {
+  // `htmlFor`/`id`, because the <label> is a SIBLING of the input rather than
+  // wrapping it -- so all thirteen of this page's spinbuttons (five troop
+  // counts, five smithy levels, three defence fields) had NO accessible name
+  // at all, confirmed live against the census's AX tree. `useId` rather than
+  // the label text: two fields could share a label, and a generated id cannot
+  // collide with anything else on the page.
+  const id = useId()
   return (
     <div>
-      <label className="block text-[0.6rem] tracking-[0.18em] uppercase mb-1.5" style={{ color }}>
+      <label htmlFor={id} className="block text-[0.6rem] tracking-[0.18em] uppercase mb-1.5" style={{ color }}>
         {label}
       </label>
       <input
+        id={id}
         type="number"
         className="input-field font-bold text-base"
         style={{ color }}
@@ -371,7 +388,7 @@ function NumberField({ label, color, value, setValue, hint, min = 0, max }) {
           setValue(max != null ? Math.min(max, clamped) : clamped)
         }}
       />
-      {hint && <div className="text-[0.6rem] mt-1 tracking-wide opacity-60" style={{ color }}>{hint}</div>}
+      {hint && <div className="text-[0.6rem] mt-1 tracking-wide" style={{ color }}>{hint}</div>}
     </div>
   )
 }
@@ -513,7 +530,7 @@ export default function RaidOptimizer() {
       </div>
 
       {tribeMismatch && (
-        <div className="card mb-4 border-l-4" style={{ borderLeftColor: '#c97a2c' }}>
+        <div className="card mb-4 border-l-4" style={{ borderLeftColor: 'var(--warning)' }}>
           <div className="text-sm">
             <strong>Heads up:</strong> the optimizer math is hardcoded for Teuton units
             (Clubswinger / Spearman / Axeman / Paladin / Teutonic Knight). Your active
@@ -559,7 +576,7 @@ export default function RaidOptimizer() {
         </div>
 
         <div className="text-[0.6rem] tracking-[0.3em] uppercase text-secondary mt-5 mb-2 border-b border-dashed border-default pb-1">
-          Smithy Levels <span className="opacity-60 italic tracking-normal normal-case ml-1">// per unit type (0–20)</span>
+          Smithy Levels <span className="italic tracking-normal normal-case ml-1 text-secondary">// per unit type (0–20)</span>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <NumberField label="Club Smithy"  color={UNIT_COLOR.c}  value={smC}  setValue={setSmC}  max={20}
@@ -578,9 +595,9 @@ export default function RaidOptimizer() {
           Defense Constraints
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 max-w-3xl">
-          <NumberField label="Zero-Cas DEF" color="#5a8c3a" value={defZero}   setValue={setDefZero}   hint="No losses up to this DEF" />
-          <NumberField label="Budget DEF"   color="#c97a2c" value={defBudget} setValue={setDefBudget} hint="Losses ≤ budget at this DEF" min={1} />
-          <NumberField label="Budget (r)"   color="#c97a2c" value={budget}    setValue={setBudget}    hint="Max resource loss per raid" />
+          <NumberField label="Zero-Cas DEF" color="var(--raid-ok)" value={defZero}   setValue={setDefZero}   hint="No losses up to this DEF" />
+          <NumberField label="Budget DEF"   color="var(--raid-warn)" value={defBudget} setValue={setDefBudget} hint="Losses ≤ budget at this DEF" min={1} />
+          <NumberField label="Budget (r)"   color="var(--raid-warn)" value={budget}    setValue={setBudget}    hint="Max resource loss per raid" />
         </div>
 
         <div
@@ -602,7 +619,7 @@ export default function RaidOptimizer() {
               Inventory: <strong>{invStr}</strong> &nbsp;|&nbsp;
               Smithy: <strong>{smithyStr}</strong> &nbsp;|&nbsp;
               0-cas ≤ DEF <strong>{defZero}</strong>, ≤<strong>{budget.toLocaleString()}r</strong> loss at DEF <strong>{defBudget}</strong>{' '}
-              &nbsp;|&nbsp; <span style={{ color: '#a83232' }}>No composition satisfies both constraints.</span>
+              &nbsp;|&nbsp; <span style={{ color: 'var(--danger)' }}>No composition satisfies both constraints.</span>
             </>
           ) : (
             <>
@@ -675,7 +692,7 @@ export default function RaidOptimizer() {
                 <div className="flex items-center gap-3 mb-2 border-b border-default pb-1">
                   <span
                     className="px-2 py-0.5 text-[0.6rem] font-bold tracking-[0.25em] rounded-sm"
-                    style={{ background: STRAT_COLOR[key], color: '#0c0a08' }}
+                    style={{ background: STRAT_COLOR[key], color: 'var(--raid-on-accent)' }}
                   >
                     {meta.altLabel}
                   </span>
