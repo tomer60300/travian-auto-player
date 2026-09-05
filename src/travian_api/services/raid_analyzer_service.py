@@ -393,6 +393,7 @@ def calculate_score(
 # State reconstruction
 # ---------------------------------------------------------------------------
 
+
 def reconstruct_state(
     coord_key: Tuple[int, int],
     reports: List[Dict[str, Any]],
