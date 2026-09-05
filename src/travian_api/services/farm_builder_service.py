@@ -49,6 +49,30 @@ DEF_MAX = 219
 
 SLOT_LIMIT = 100  # Travian farm list cap
 
+# The transport refuses to re-send a `safe_to_retry=False` write whose answer
+# never arrived, and says so in the message it raises (`http_client.post_json`
+# and `post_form`). `military_service._send_troops` swallows that same failure
+# into `TroopSendResult.raw_response`, so its wording is the only evidence
+# either write site in this service has.
+_LOST_ANSWER_MARKERS = ("non-retryable", "may already have taken effect")
+
+# The one troop-send failure proven to be PRE-dispatch: step 1 (troop
+# selection) came back without a confirmation form, so the POST that actually
+# dispatches was never issued. Same predicate `auto_scout_service` gates its
+# own retry on.
+_PRE_DISPATCH_MARKER = "No confirmation form"
+
+
+def answer_was_lost(detail: str) -> bool:
+    """True when a write's answer never arrived, so the write may have landed.
+
+    "It failed" and "it went through" are indistinguishable for these, which is
+    exactly why the transport will not re-send them — and why neither may this
+    service. The honest verdict is ``unverified``, not ``failed``.
+    """
+    lowered = detail.lower()
+    return any(marker in lowered for marker in _LOST_ANSWER_MARKERS)
+
 
 def lookup_troop_row(def_val: int, tribe: str) -> Optional[Dict[str, int]]:
     """Return the troop dict for a given def value, or None if out of range."""
@@ -667,6 +691,7 @@ class FarmBuilderService:
             success = False
             travel_s = 0
             travel_str = ""
+            send_detail = ""
             for attempt in range(3):
                 try:
                     result = await self._military.send_scouts(
@@ -680,15 +705,29 @@ class FarmBuilderService:
                     travel_str = result.travel_time or ""
                     if success:
                         break
+                    send_detail = result.raw_response
                 except Exception as exc:
                     logger.warning("scout send (%s,%s) attempt %d: %s", x, y, attempt + 1, exc)
+                    send_detail = str(exc)
+                # A scout dispatch is non-idempotent, which is why
+                # `_send_troops` opts out of transport retries: a lost answer
+                # may mean the scouts LEFT. Re-sending here defeated that and
+                # measured three scouts on one coordinate for one requested
+                # scout. Only a failure proven to be pre-dispatch may go again.
+                if _PRE_DISPATCH_MARKER not in send_detail:
+                    break
                 if attempt < 2:
                     from ..stealth.timing import HumanTiming as _HT_local
 
                     await asyncio.sleep(_HT_local.micro_jitter(5.0, 0.35))
             if not success:
-                defense_failed[(x, y)] = "scout_send_failed"
-                await send_log("FB-DEFENSE", "⚠️", f"({x},{y}) scout_send_failed", "warning")
+                verdict = (
+                    "scout_send_unverified" if answer_was_lost(send_detail) else "scout_send_failed"
+                )
+                defense_failed[(x, y)] = verdict
+                await send_log(
+                    "FB-DEFENSE", "⚠️", f"({x},{y}) {verdict}: {send_detail[:200]}", "warning"
+                )
                 continue
             # Parse travel time
             if travel_str:
@@ -993,14 +1032,20 @@ class FarmBuilderService:
                             per_list_count[list_id] = SLOT_LIMIT
                             list_id, list_name = await _overflow_list(bname)
                             continue
-                        if attempt < 2:
-                            # Jittered retry — fixed 5s every time is a tell.
-                            await asyncio.sleep(_HT.micro_jitter(5.0, 0.35))
-                        else:
-                            fail_add.append({"x": x, "y": y, "reason": f"add_slot_failed: {err}"})
-                            await send_log(
-                                "FB-ASSIGN", "❌", f"({x},{y}) add_slot_failed: {err}", "error"
-                            )
+                        # `add_slot` is non-idempotent: `farm_list_service`
+                        # opts out of transport retries because a retry after a
+                        # committed add duplicates the slot, and the transport
+                        # refuses to re-send it for the same reason. Re-sending
+                        # it here defeated both — a lost answer put three
+                        # identical slots in the list and reported one failure.
+                        # Nothing available here proves the add did not land, so
+                        # this attempt is the only one.
+                        verdict = (
+                            "add_slot_unverified" if answer_was_lost(err) else "add_slot_failed"
+                        )
+                        fail_add.append({"x": x, "y": y, "reason": f"{verdict}: {err}"})
+                        await send_log("FB-ASSIGN", "❌", f"({x},{y}) {verdict}: {err}", "error")
+                        break
                 if not ok and not fail_add or (fail_add and fail_add[-1]["x"] != x):
                     pass  # already handled above
 
