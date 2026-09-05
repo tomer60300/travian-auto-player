@@ -114,6 +114,27 @@ async def get_construction_queue(
     }
 
 
+def _build_action_response(result) -> dict:
+    """Shape a build action's result for the API, keeping its reason.
+
+    ``raw_response`` itself is dropped: it can be a whole HTML page, and the
+    payload is not the place for one. But it is the ONLY diagnostic the result
+    carries, and dropping it outright made a gold guard that fired, a missing
+    upgrade link, a lost connection and a rejected build all the same
+    `200 {"success": false, "building_name": "Unknown", ...}` — the dropped
+    text in the measured case being `BLOCKED: Construction queue already has
+    [Warehouse Lv6]. Upgrading now would cost gold`.
+
+    A failure therefore carries a truncated ``error``, and a success carries
+    none.
+    """
+    data = result.model_dump()
+    raw = (data.pop("raw_response", None) or "").strip()
+    if not data.get("success"):
+        data["error"] = raw[:200] if raw else "the build action failed and gave no reason"
+    return data
+
+
 @router.post("/upgrade")
 async def upgrade_building(
     body: UpgradeRequest,
@@ -138,11 +159,7 @@ async def upgrade_building(
             detail=f"Failed to upgrade building: {exc}",
         )
 
-    data = result.model_dump()
-    # Strip raw_response from the API output — it can be very large and is only
-    # useful for internal debugging.
-    data.pop("raw_response", None)
-    return data
+    return _build_action_response(result)
 
 
 @router.post("/construct")
@@ -209,9 +226,7 @@ async def construct_building(
             detail=f"Failed to construct building: {exc}",
         )
 
-    data = result.model_dump()
-    data.pop("raw_response", None)
-    return data
+    return _build_action_response(result)
 
 
 @router.get("/{slot_id}")
