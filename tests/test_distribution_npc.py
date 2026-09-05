@@ -25,6 +25,8 @@ from travian_api.services.distribution.allocation import (
     AllocationError,
     AllocationMode,
     Resource,
+    ResourcePlan,
+    VillageAllocation,
 )
 from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import EUROPE2_TEUTON
@@ -39,7 +41,11 @@ from travian_api.services.distribution.npc import (
     evaluate_triggers,
 )
 from travian_api.services.distribution.optimizer import VillageState
-from travian_api.services.distribution.planner import PlannerConfig, craft_plan
+from travian_api.services.distribution.planner import (
+    DistributionPlan,
+    PlannerConfig,
+    craft_plan,
+)
 from travian_api.web.routes import distribution as dist
 from travian_api.web.routes.distribution import PlanRequest, post_plan
 
@@ -684,6 +690,76 @@ class TestBothStoreChecksNetTheConversion:
 
         for resource in Resource:
             assert continuous[HUB][resource] == pytest.approx(trigger[HUB][resource]), resource
+
+
+class TestOnlyAMaterialDrawIsAConversion:
+    """`_npc_store_deltas` charges the feedstock stores for what was converted,
+    and only a MATERIAL draw is a conversion -- crop is never drawn, because a
+    granary is not NPC-fed.
+
+    The guard cannot be reached through `_plan_account`: `NpcReserve` refuses
+    `drawn={CROP}` outright, so no real plan carries a crop draw. That makes it
+    a guard whose invariant lives in another module, and pinning it against the
+    plan builder would only be re-testing the refusal. Built by hand instead,
+    which is the only way to ask this function the question: if a crop draw ever
+    did reach here, the village's own iron and crop stores must not be debited
+    for a trade nobody made.
+    """
+
+    CROP_DRAW = 1_000.0
+
+    def _plan(self):
+        def allocation_for(resource: Resource, draw: float) -> ResourcePlan:
+            return ResourcePlan(
+                resource=resource,
+                total_production=0.0,
+                total_npc_allowance=0.0,
+                total_npc_draw=draw,
+                villages=(
+                    VillageAllocation(
+                        village_id=HUB,
+                        mode=AllocationMode.ABSOLUTE,
+                        own_per_hour=0.0,
+                        target_per_hour=0.0,
+                        npc_draw_per_hour=draw,
+                    ),
+                ),
+                remainder_village_id=None,
+                unallocated=0.0,
+                findings=(),
+            )
+
+        return DistributionPlan(
+            npc={
+                HUB: NpcReserve(
+                    village_id=HUB,
+                    floor_level=40_000.0,
+                    allowance_per_day=24_000.0,
+                    sources=(Resource.CROP, Resource.IRON),
+                    shares=(0.5, 0.5),
+                    drawn=frozenset({Resource.LUMBER}),
+                )
+            },
+            resource_plans={
+                resource: allocation_for(
+                    resource, self.CROP_DRAW if resource is Resource.CROP else 0.0
+                )
+                for resource in Resource
+            },
+        )
+
+    def test_the_granary_is_credited_the_draw_in_full(self):
+        deltas = dist._npc_store_deltas(self._plan())
+
+        assert deltas[HUB][Resource.CROP] == pytest.approx(self.CROP_DRAW), (
+            "a crop draw is a credit, never netted against a conversion it did not pay for"
+        )
+
+    def test_no_feedstock_store_pays_for_it(self):
+        deltas = dist._npc_store_deltas(self._plan())
+
+        for resource in MATERIALS:
+            assert deltas[HUB][resource] == pytest.approx(0.0), resource
 
 
 class TestAttendanceCannotBeDefaulted:

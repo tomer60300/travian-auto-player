@@ -362,6 +362,30 @@ class TestTheUnionRefusesWhatItCannotKeepStraight:
         with pytest.raises(ValidationError, match="dispatch_window"):
             _segments_body(dispatch_window=[1380, 420])
 
+    def test_a_stock_floor_with_no_attendance_is_refused(self):
+        """The /plan twin of this rule is covered; the copy on the endpoint that
+        WRITES was not. Whether the operator is awake to do the NPC trading
+        decides whether each profile's routes are funded, and on a whole-day run
+        the hours live on the segments, so PlanRequest's own check cannot see
+        them."""
+        with pytest.raises(ValidationError, match="npc_attended"):
+            _segments_body(
+                config=[
+                    {"village_id": 20003, "trade_office_level": 10, "stock_floor_fraction": 0.30}
+                ],
+            )
+
+    def test_a_stock_floor_with_attendance_on_every_segment_is_accepted(self):
+        """The pass case, which is what proves the refusal above fires for the
+        stated reason and not from some other field on the payload."""
+        _segments_body(
+            config=[{"village_id": 20003, "trade_office_level": 10, "stock_floor_fraction": 0.30}],
+            segments=[
+                {"name": "Day", "window": list(DAY), "allocations": {}, "npc_attended": True},
+                {"name": "Night", "window": list(NIGHT), "allocations": {}, "npc_attended": False},
+            ],
+        )
+
     def test_an_infeasible_segment_is_named_in_the_refusal(self):
         bad_night = _account([NIGHT_ROUTE])
         bad_night.plan.is_feasible = False
@@ -639,6 +663,35 @@ class TestTheProfilesTogetherHonourTheMerchantReserve:
         )
 
         assert self._boundary(executed.warnings) == self._boundary(checked.warnings)
+
+    def test_a_breach_of_exactly_one_merchant_is_reported(self):
+        """The fixture above breaches by two, so an off-by-one in the comparison
+        walks straight through it -- and one merchant short is exactly the case
+        section VII.6 is about: the village that cannot answer a defensive call
+        by hand at 01:00. At a fleet of 8 the budget is 6 against the pair's
+        standing 4 + 3, i.e. `total == budget + 1` precisely."""
+        res = _execute(
+            ExecuteRequest.model_validate(
+                {**_with_fleet(_shared_payload(), 8, 2), "dry_run": True}
+            ),
+            connected=False,
+        )
+
+        (warning,) = self._boundary(res.warnings)
+        assert "commit 7 merchants against a budget of 6" in warning, warning
+
+    def test_a_fleet_with_exactly_enough_says_nothing(self):
+        """Its pair, and the one that makes the comparison a `>` rather than a
+        `>=`: at a fleet of 9 the budget is 7 against the same 7 committed, so
+        the reserve survives and there is nothing to report."""
+        res = _execute(
+            ExecuteRequest.model_validate(
+                {**_with_fleet(_shared_payload(), 9, 2), "dry_run": True}
+            ),
+            connected=False,
+        )
+
+        assert not self._boundary(res.warnings), res.warnings
 
     def test_a_fleet_with_room_for_the_reserve_says_nothing(self):
         res = _execute(
