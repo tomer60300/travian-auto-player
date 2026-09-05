@@ -98,15 +98,16 @@ Every task MUST follow this exact pipeline. Do not skip steps.
 3. Do NOT build the frontend. On this repo a build IS a production deploy: `npm run build`
    writes `src/travian_api/web/static`, which the server on :80 serves directly, and that
    directory is untracked — so there is nothing to revert to. Frontend verification is eslint
-   plus vitest (Phase 3 step 5). Deploying is a separate, explicit step the operator authorises.
+   plus vitest, and Playwright where the change has a spec (Phase 3 step 5). Deploying is a
+   separate, explicit step the operator authorises.
 
 ### Phase 3: Verify
 
 Scope the gate to what you actually changed. Budget a couple of minutes for the
-full backend suite in parallel (`-n 8`), not one: measured 2026-09-04 on this
-machine, **102s warm over 2,431 tests** — and it stayed near two minutes as the
-suite grew from 1,911 tests (107s warm, 199s cold) through 2,031 (99s) the day
-before, against 235–240s serial. The wall time is dominated by the slowest few
+full backend suite in parallel (`-n 8`), not one: measured 2026-09-05 on this
+machine, **135s over 2,646 tests** (2,646 passed, 2 skipped) — and it has stayed
+near two minutes as the suite grew from 1,911 tests (107s warm, 199s cold)
+through 2,031 (99s), 2,431 (102s) and 2,573 (129s), against 235–240s serial. The wall time is dominated by the slowest few
 cases, not the count, so adding tests has cost far less than it looks like it
 should. Even at two minutes, running it to verify a Markdown edit verifies
 nothing and is pure waste.
@@ -145,6 +146,12 @@ nothing and is pure waste.
 **Frontend changed:**
 5. `cd frontend && npx eslint . --max-warnings=20 && npm test`
    No build: see the Phase 2 note — building deploys to :80.
+   `npm test` is vitest. There is also a tracked Playwright suite — 45 specs
+   under `frontend/e2e/*.pw.js` with `frontend/playwright.config.js` — which
+   drives the real page against stubbed endpoints and is what the distribution
+   planner's own gates are written in. Run the specs your change touches
+   (`npx playwright test <name>`); the whole suite takes 13–17 minutes, so run
+   it before a hand-off rather than on every iteration.
 
 **Docs, comments or CI YAML only:** none of the above apply beyond a sanity
 read. Do not run the test suite.
