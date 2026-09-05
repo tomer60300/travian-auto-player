@@ -81,9 +81,7 @@ def _service(monkeypatch, oases):
     monkeypatch.setattr(svc, "_human_think_delay", _no_think)
     monkeypatch.setattr(svc, "_take_micro_break", _no_break)
     monkeypatch.setattr(svc, "_simulate_map_browsing", _no_browse)
-    monkeypatch.setattr(
-        "travian_api.services.oasis_raider_service._sample_burst_size", lambda: 999
-    )
+    monkeypatch.setattr("travian_api.services.oasis_raider_service._sample_burst_size", lambda: 999)
     monkeypatch.setattr(
         "travian_api.services.oasis_raider_service.BROWSE_FREQ_MIN", 999, raising=False
     )
