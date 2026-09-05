@@ -113,9 +113,9 @@ async def _never_stop():
     return False
 
 
-def _run(farm_svc, military, reports):
+def _run(farm_svc, military, reports, survivors=SURVIVORS, check_stop=_never_stop):
     svc = _service(farm_svc, military, reports)
-    return asyncio.run(svc.run_full(CONFIG, SURVIVORS, _noop_log, _never_stop))
+    return asyncio.run(svc.run_full(CONFIG, survivors, _noop_log, check_stop))
 
 
 # ── add_slot ──────────────────────────────────────────────────────────────
@@ -197,3 +197,39 @@ def test_a_pre_dispatch_failure_is_still_retried():
     farm_svc = _FarmSvc()
     _run(farm_svc, military, _Reports(combat_strength=None))
     assert military.sends == [(10, 20), (10, 20), (10, 20)]
+
+
+# ── F9: a stop during the assign phase is a STOPPED run ──────────────────
+
+
+def test_a_stop_during_the_assign_phase_is_reported_as_stopped():
+    """`ws/farm_builder` reads `report.get("stopped")` to pick the final state.
+
+    The assign phase's `if await check_stop(): break` broke only the INNER
+    record loop (so it skipped to the next bucket rather than ending the run)
+    and the report carried no `stopped` key at all. A stop after 2 of 6 adds
+    was pushed to the UI and persisted in `FarmBuilderRunHistory.status` as
+    `completed` with `added=2`, and there is no total-vs-added reconciliation
+    on the page. Every other early return in the service returns
+    `{"stopped": True}`.
+    """
+    survivors = [
+        {"x": 10 + i, "y": 20, "assigned_bucket": "A", "population": 100} for i in range(6)
+    ]
+    farm_svc = _FarmSvc()
+
+    async def _stop_after_two_adds():
+        return len(farm_svc.adds) >= 2
+
+    report = _run(
+        farm_svc,
+        _Military(None),
+        _Reports(),
+        survivors=survivors,
+        check_stop=_stop_after_two_adds,
+    )
+
+    assert len(farm_svc.adds) == 2, "the stop arrived after 2 of 6"
+    assert report.get("stopped") is True
+    assert report["added"] == 2
+    assert report["total_targets"] == 6

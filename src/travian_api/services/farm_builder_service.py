@@ -894,9 +894,21 @@ class FarmBuilderService:
                     return entry["list_id"], entry["final_name"]
             return None, None
 
+        assign_stopped = False
         for bname, recs in real_buckets.items():
+            if assign_stopped:
+                break
             for r in recs:
                 if await check_stop():
+                    # This `break` used to leave the OUTER bucket loop running,
+                    # so a stop merely skipped to the next bucket — and the
+                    # report carried no `stopped` key at all, which
+                    # `ws/farm_builder` reads to choose the final state. A stop
+                    # here was pushed to the UI and persisted in
+                    # FarmBuilderRunHistory as `completed` with a partial
+                    # `added` count. Every other early return in this service
+                    # returns {"stopped": True}.
+                    assign_stopped = True
                     break
 
                 x, y = r["x"], r["y"]
@@ -1057,6 +1069,7 @@ class FarmBuilderService:
 
         duration = round(time.monotonic() - t_start, 1)
         report = {
+            "stopped": assign_stopped,
             "duration_s": duration,
             "total_targets": len(all_targets),
             "added": len(added),
