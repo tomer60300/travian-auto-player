@@ -126,7 +126,16 @@ test('Sessions: a session card opens from the keyboard', async ({ page }) => {
   })
   await page.goto('/sessions')
 
-  const card = page.getByRole('button', { name: /Build queue run/ })
+  // Located as a DIV with `role="button"`, not by name. Since
+  // `moreNames.pw.js`'s fix the card's two sibling buttons are named "View
+  // logs for Build queue run" and "Rerun Build queue run", so matching the
+  // label resolves to three elements -- and the card's own computed name
+  // ("Build queue run sess-1 ...") is built from its whole subtree, which is
+  // not a stable thing to anchor on. What IS stable is that the clickable
+  // region is the only non-BUTTON element carrying the button role.
+  const card = page.locator('div[role="button"][tabindex="0"]')
+  await expect(card).toHaveCount(1)
+  await expect(card).toHaveAccessibleName(/Build queue run/)
   await card.focus()
   await expect(card).toBeFocused()
   await page.keyboard.press('Enter')
