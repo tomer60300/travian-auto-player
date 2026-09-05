@@ -313,6 +313,8 @@ In-depth docs live under `docs/`:
 | **Stealth vs performance — design decisions** | [`docs/23-stealth-decisions.md`](docs/23-stealth-decisions.md) |
 | **Resource distribution planner** | [`docs/25-resource-distribution-planner.md`](docs/25-resource-distribution-planner.md) |
 | **First live run of the distribution planner** | [`docs/26-first-live-run.md`](docs/26-first-live-run.md) |
+| **Failure-class map — planner and execute path** | [`docs/27-bug-map.md`](docs/27-bug-map.md) |
+| **Production readiness checklist** | [`docs/28-production-readiness.md`](docs/28-production-readiness.md) |
 | Changelog | [`CHANGELOG.md`](CHANGELOG.md) |
 
 ## Known Limitations

@@ -163,7 +163,7 @@ writing. Sixty-odd commits, almost all of them corrections.
   it cannot tell a measured 0.20 from an untouched one: an operator who read a
   Marketplace capacity at two Trade Office levels, found the default right and
   typed it back got the same warning for ever, asking them to do the thing they
-  had just done. `PlanRequest.merchant_model_measured` is the operator saying
+  had just done. `PlanRequest.merchant_capacity_measured` is the operator saying
   they looked. It silences that one finding and **nothing else**; no bound, no
   budget and no other figure moves. It travels in the setup document as **v11**
   and is unticked automatically when either figure is edited.
@@ -177,6 +177,16 @@ writing. Sixty-odd commits, almost all of them corrections.
   stop rules the review earned: what to settle before anything touches the game,
   what to read in the dry run, one route on a village you can watch, a rehearsed
   undo, and the four-step widening.
+- **`docs/27-bug-map.md`** — the failure classes this review found in the
+  planner and its execute path, each with the symbol it was found in, the defect
+  as measured, the commit that closed it and the test that pins it; plus what is
+  deliberately not covered (the four unverified game facts and the eight
+  observations the canary must produce) and the open operator decisions.
+- **`docs/28-production-readiness.md`** — the operational gate beside `docs/26`:
+  the credential that is committed and how to find the others, the live database
+  under `create_all` with no migrations, the two servers and why a frontend build
+  is a deploy, the live-flag class and what a preview-only day needs, and what to
+  read after a crash mid-run.
 
 ### Changed
 
