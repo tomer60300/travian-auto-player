@@ -912,6 +912,34 @@ class PlanRequest(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _foreign_targets_are_on_the_map(self) -> "PlanRequest":
+        """A target's coordinates have to exist on this world.
+
+        Cross-checked here because the bound is the request's own `map_span`
+        and `ForeignTarget` cannot see it. A typed 450 on a 401-wide map is not
+        a far target, it is a place that is not there -- and the geometry used
+        to FOLD it: `span - raw` goes negative and `hypot` takes the absolute
+        value, so (450|0) read as 49 fields from the centre, a five-minute
+        haul. Now load-bearing on every target (25b3fe5), which decides which
+        villages can reach it and therefore what the plan does.
+
+        Named per target, because "x out of range" over a table of allies is
+        one cell nobody can find.
+        """
+        limit = (self.map_span - 1) // 2
+        off_map = [
+            f"{t.name} ({t.x}|{t.y})"
+            for t in self.foreign_targets
+            if abs(t.x) > limit or abs(t.y) > limit
+        ]
+        if off_map:
+            raise ValueError(
+                f"foreign target(s) {', '.join(off_map)} are off a {self.map_span}-wide "
+                f"map: coordinates run -{limit}..+{limit}"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _relay_tier_is_one_hop_of_non_role_villages(self) -> "PlanRequest":
         """Profile section 5's tier, refused wherever it cannot mean anything.
 

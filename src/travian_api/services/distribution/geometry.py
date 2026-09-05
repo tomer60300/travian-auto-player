@@ -52,8 +52,22 @@ class MapGeometry:
             raise ValueError(f"speed must be positive, got {self.speed_fields_per_hour}")
 
     def _axis_delta(self, a: int, b: int) -> int:
-        """Shortest separation on one wrapped axis."""
+        """Shortest separation on one wrapped axis.
+
+        A raw separation wider than the map is not a distance, it is a
+        coordinate that does not exist on this world: `span - raw` goes
+        negative, `min` returns it, and `math.hypot` takes the absolute value --
+        so (450|0) against (0|0) on a 401-wide map read as 49 fields, a
+        five-minute haul to nowhere. Refused rather than folded, because a
+        foreign target's coordinates decide which villages can reach it and
+        therefore what the plan does.
+        """
         raw = abs(a - b)
+        if raw > self.span:
+            raise ValueError(
+                f"{a} and {b} are {raw} fields apart, which is off a {self.span}-wide map: "
+                f"coordinates run -{(self.span - 1) // 2}..+{(self.span - 1) // 2}"
+            )
         return min(raw, self.span - raw)
 
     def distance(self, origin: Coord, target: Coord) -> float:

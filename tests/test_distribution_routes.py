@@ -351,6 +351,24 @@ class TestForeignTribute:
             f"a route originates at a foreign sink: {[(r.origin, r.destination) for r in res.rows]}"
         )
 
+    def test_a_target_off_the_map_is_refused_rather_than_wrapped(self):
+        """450 on a 401-wide map is not a far ally, it is a place that is not
+        there -- and the wrap FOLDED it: `span - raw` goes negative and `hypot`
+        takes the absolute value, so (450|0) read as 49 fields from the centre,
+        a five-minute haul. The target's coordinates decide which villages can
+        reach it, so the plan is built on that number."""
+        payload = self._body().model_dump()
+        payload["foreign_targets"] = [{"name": "Nowhere", "x": 450, "y": 0, "crop_per_hour": 500.0}]
+        with pytest.raises(ValidationError, match="off a 401-wide map"):
+            PlanRequest.model_validate(payload)
+
+    def test_the_widest_legal_coordinate_is_still_accepted(self):
+        """The boundary: -200..+200 is the whole of a 401-wide world."""
+        payload = self._body().model_dump()
+        payload["foreign_targets"] = [{"name": "Edge", "x": 200, "y": -200, "crop_per_hour": 500.0}]
+
+        assert PlanRequest.model_validate(payload).foreign_targets[0].x == 200
+
     def test_an_ineligible_target_is_a_manual_transfer_not_a_route(self):
         """Travian only allows routes to own / WW / alliance-artifact villages.
         An ordinary foreign village must not be emitted as an executable route;

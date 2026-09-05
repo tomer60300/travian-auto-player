@@ -64,3 +64,17 @@ class TestValidation:
     def test_invalid_geometry_is_rejected(self, span, speed):
         with pytest.raises(ValueError):
             MapGeometry(span=span, speed_fields_per_hour=speed)
+
+    def test_a_coordinate_off_the_map_is_refused_not_folded(self):
+        """`min(raw, span - raw)` goes NEGATIVE once raw exceeds the span, and
+        `hypot` takes the absolute value of it -- so (450|0) against (0|0) on a
+        401-wide map read as 49 fields, a five-minute haul to a place that is
+        not on the map at all. Now load-bearing: a foreign target's coordinates
+        decide which villages can reach it and therefore what gets planned."""
+        with pytest.raises(ValueError, match="off a 401-wide map"):
+            EUROPE.distance((0, 0), (450, 0))
+
+    def test_the_widest_legal_separation_is_still_measured(self):
+        """The boundary, so the refusal cannot creep inwards: -200 to 200 is
+        400 apart raw and one field by the wrap."""
+        assert EUROPE.distance((-200, 0), (200, 0)) == pytest.approx(1.0)
