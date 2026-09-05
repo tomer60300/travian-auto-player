@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import useGameStore from '../stores/gameStore'
 import VillageSelector from '../components/VillageSelector'
 import ResourceBar from '../components/ResourceBar'
+import FetchError from '../components/FetchError'
 
 const TRIBE_NAMES = {
   1: 'Romans',
@@ -146,7 +147,9 @@ function SkeletonCard({ height = 'h-24' }) {
 
 export default function Dashboard() {
   const resources = useGameStore((s) => s.resources)
+  const resourcesError = useGameStore((s) => s.resourcesError)
   const constructionQueue = useGameStore((s) => s.constructionQueue)
+  const queueError = useGameStore((s) => s.queueError)
   const activeVillageId = useGameStore((s) => s.activeVillageId)
   const fetchResources = useGameStore((s) => s.fetchResources)
   const fetchBuildings = useGameStore((s) => s.fetchBuildings)
@@ -192,21 +195,30 @@ export default function Dashboard() {
         {/* Player info is always available immediately from connect response */}
         <PlayerInfoCard />
 
-        {/* Resources — skeleton until loaded */}
+        {/* Resources — skeleton until loaded, and a named failure if the read
+            did not come back. A failed read used to leave `resources` null,
+            which renders the same blank bar as a village with no data. */}
         <div>
           <h3 className="heading-gold text-base mb-2">Resources</h3>
-          {resourcesReady ? (
+          {resourcesError ? (
+            <FetchError what="Could not read this village's resources" detail={resourcesError} onRetry={fetchResources} />
+          ) : resourcesReady ? (
             <ResourceBar resources={resources} />
           ) : (
             <SkeletonCard height="h-16" />
           )}
         </div>
 
-        {/* Construction queue — skeleton until loaded */}
-        {queueReady ? (
+        {/* Construction queue — skeleton until loaded. The empty sentence is
+            reachable only when the read actually SUCCEEDED and came back
+            empty; a failure said "No active operations" too, which is a claim
+            about the game we had not been able to make. */}
+        {queueError ? (
+          <FetchError what="Could not read the construction queue" detail={queueError} onRetry={fetchQueue} />
+        ) : queueReady ? (
           <>
             <ConstructionQueueSummary queue={constructionQueue} />
-            {(!constructionQueue || constructionQueue.length === 0) && resourcesReady && (
+            {(!constructionQueue || constructionQueue.length === 0) && resourcesReady && !resourcesError && (
               <div className="card p-6 text-center">
                 <p className="text-secondary text-sm">No active operations. Start something from the actions below.</p>
               </div>

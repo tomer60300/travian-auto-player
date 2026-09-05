@@ -39,6 +39,14 @@ function storeVillageId(key, id) {
 // default. Every call that acts on a village sends its village_id explicitly;
 // the backend default only changes on an explicit user switch.
 
+// The server's own words when it sent any, and a sentence of our own when it
+// did not (a network failure has no body). Always a string: `detail` can be a
+// Pydantic validation LIST, which React would refuse to render.
+function readErrorDetail(e, fallback) {
+  const detail = e?.response?.data?.detail
+  return typeof detail === 'string' && detail ? detail : fallback
+}
+
 let _checkingStatus = false
 
 const useGameStore = create((set, get) => ({
@@ -52,10 +60,18 @@ const useGameStore = create((set, get) => ({
   // storage key) is known.
   activeVillageId: null,
   resources: null,
+  // A failed read is NOT an empty one. `resources: null` and
+  // `constructionQueue: []` used to be the whole of the state after a failure,
+  // which is byte-for-byte what a village with nothing building looks like --
+  // so Dashboard could not tell "the game is idle" from "we could not ask the
+  // game", and Buildings' queue section vanished without a word. These two
+  // carry the reason, alongside `buildingsError`, which already did it right.
+  resourcesError: null,
   buildings: [],
   buildingsLoading: false,
   buildingsError: null,
   constructionQueue: [],
+  queueError: null,
 
   connect: async (serverUrl, username, password) => {
     const res = await api.post('/travian/connect', {
@@ -192,6 +208,7 @@ const useGameStore = create((set, get) => ({
     const vid = get().activeVillageId
     if (!vid) return
     const stamp = fetchStamp(get())
+    set({ resourcesError: null });
     try {
       const res = await api.get('/buildings/resources', { params: { village_id: vid } });
       // Drop a response the user has since switched away from — a different
@@ -203,6 +220,7 @@ const useGameStore = create((set, get) => ({
       }
     } catch (e) {
       console.warn('fetchResources failed:', e);
+      set({ resourcesError: readErrorDetail(e, 'Failed to load resources') });
       get()._handleFetchError(e);
     }
   },
@@ -234,6 +252,7 @@ const useGameStore = create((set, get) => ({
     const vid = get().activeVillageId
     if (!vid) return
     const stamp = fetchStamp(get())
+    set({ queueError: null });
     try {
       const res = await api.get('/buildings/queue', { params: { village_id: vid } });
       if (fetchStamp(get()) !== stamp) return;
@@ -244,6 +263,7 @@ const useGameStore = create((set, get) => ({
       set({ constructionQueue: arr });
     } catch (e) {
       console.warn('fetchQueue failed:', e);
+      set({ queueError: readErrorDetail(e, 'Failed to load the construction queue') });
       get()._handleFetchError(e);
     }
   },

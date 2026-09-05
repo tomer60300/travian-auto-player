@@ -3,6 +3,7 @@ import useGameStore from '../stores/gameStore'
 import { useToast } from '../components/Toast'
 import ConfirmDialog from '../components/ConfirmDialog'
 import VillageSelector from '../components/VillageSelector'
+import FetchError from '../components/FetchError'
 import api from '../api'
 
 function formatTimeRemaining(seconds) {
@@ -38,7 +39,14 @@ const CATEGORY_TO_CLASS = {
   empty: 'btype-empty',
 }
 
-const ConstructionQueuePanel = memo(function ConstructionQueuePanel({ queue }) {
+/* The queue half of this page. `error` is rendered by the SAME card as the
+   queue itself, under the same heading, because this panel returns null for
+   an empty queue and a failed read left the queue empty -- so the whole
+   section vanished, heading and all, with nothing on screen saying the read
+   had even been attempted. Worse than its own empty state, and the one half
+   of this page the census found unhandled: the building LIST beside it has
+   had `buildingsError` + Retry all along. */
+const ConstructionQueuePanel = memo(function ConstructionQueuePanel({ queue, error, onRetry }) {
   const [snapTime, setSnapTime] = useState(Date.now)
   const [now, setNow] = useState(Date.now)
   useEffect(() => {
@@ -48,7 +56,7 @@ const ConstructionQueuePanel = memo(function ConstructionQueuePanel({ queue }) {
     return () => clearInterval(id)
   }, [queue])
 
-  if (!queue || queue.length === 0) return null
+  if (!error && (!queue || queue.length === 0)) return null
   const elapsed = Math.floor((now - snapTime) / 1000)
 
   return (
@@ -56,26 +64,34 @@ const ConstructionQueuePanel = memo(function ConstructionQueuePanel({ queue }) {
       <h3 className="heading-gold text-base mb-3 flex items-center gap-2">
         {'\uD83D\uDD28'} Construction Queue
       </h3>
-      <div className="flex flex-col gap-2">
-        {queue.map((item, idx) => {
-          const baseRemaining = item.remaining_seconds ?? item.time_remaining ?? item.seconds_remaining
-          const remaining = Math.max(0, (baseRemaining || 0) - elapsed)
-          const doneAt = new Date(Date.now() + remaining * 1000)
-          const doneStr = doneAt.toLocaleTimeString('en-US', { hour12: false })
-          return (
-            <div key={item.event_id ?? `${item.building_name}-${idx}`} className="surface-row">
-              <span className="text-sm text-primary">
-                {item.building_name || item.name || 'Building'} {'\u2192'} Level{' '}
-                {item.target_level ?? item.level ?? '?'}
-              </span>
-              <span className="text-xs text-warning font-mono">
-                {formatTimeRemaining(remaining)}
-                <span className="text-xs text-secondary ml-2">Done at {doneStr}</span>
-              </span>
-            </div>
-          )
-        })}
-      </div>
+      {error ? (
+        <FetchError
+          what="Could not read the construction queue"
+          detail={error}
+          onRetry={onRetry}
+        />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {queue.map((item, idx) => {
+            const baseRemaining = item.remaining_seconds ?? item.time_remaining ?? item.seconds_remaining
+            const remaining = Math.max(0, (baseRemaining || 0) - elapsed)
+            const doneAt = new Date(Date.now() + remaining * 1000)
+            const doneStr = doneAt.toLocaleTimeString('en-US', { hour12: false })
+            return (
+              <div key={item.event_id ?? `${item.building_name}-${idx}`} className="surface-row">
+                <span className="text-sm text-primary">
+                  {item.building_name || item.name || 'Building'} {'\u2192'} Level{' '}
+                  {item.target_level ?? item.level ?? '?'}
+                </span>
+                <span className="text-xs text-warning font-mono">
+                  {formatTimeRemaining(remaining)}
+                  <span className="text-xs text-secondary ml-2">Done at {doneStr}</span>
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 })
@@ -297,6 +313,7 @@ export default function Buildings() {
   const buildingsLoading = useGameStore((s) => s.buildingsLoading)
   const buildingsError = useGameStore((s) => s.buildingsError)
   const constructionQueue = useGameStore((s) => s.constructionQueue)
+  const queueError = useGameStore((s) => s.queueError)
   const activeVillageId = useGameStore((s) => s.activeVillageId)
   const fetchBuildings = useGameStore((s) => s.fetchBuildings)
   const fetchQueue = useGameStore((s) => s.fetchQueue)
@@ -461,7 +478,7 @@ export default function Buildings() {
         </div>
       </div>
 
-      <ConstructionQueuePanel queue={constructionQueue} />
+      <ConstructionQueuePanel queue={constructionQueue} error={queueError} onRetry={fetchQueue} />
 
       <BuildingDetailPanel
         selectedSlot={selectedSlot}

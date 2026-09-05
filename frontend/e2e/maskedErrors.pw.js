@@ -1,0 +1,108 @@
+/**
+ * A failed read must not read like an empty one.
+ *
+ * The wave-4 census's most common defect, live-confirmed on 7 of 15 pages: the
+ * error variant and the empty variant of the same page rendered byte-for-byte
+ * the same text. Two were worse than that -- Buildings' queue section vanished
+ * entirely on failure (no heading, no message), and Reports rendered nothing at
+ * all, not even its own empty sentence.
+ *
+ * Each test here drives the SAME page twice against two fixtures, an empty one
+ * and a failing one, and asserts three things:
+ *
+ *   1. the empty variant still says what it always said (no regression on the
+ *      empty state, which several of these pages get right);
+ *   2. the error variant says something the empty variant does not;
+ *   3. the error variant does NOT say what the empty variant says -- the actual
+ *      defect. A page that renders both is still telling the user the game is
+ *      idle when what happened is that we could not ask it.
+ *
+ * A toast does not satisfy (2): the census confirmed live that 4.5s later the
+ * page reads exactly like the empty state again. The assertions run after the
+ * toast's own lifetime where a toast is the only thing on screen.
+ *
+ * NO BACKEND AND NO GAME REQUEST: see `appHarness.js`. `{ status: 500 }` in a
+ * fixture is how the failing variant is driven -- still a fulfilled route,
+ * never a real request.
+ *
+ * Running it:
+ *   cd frontend
+ *   npx playwright test maskedErrors
+ */
+
+import { expect, test } from '@playwright/test'
+
+import { CAPITAL, isolateApp } from './appHarness'
+
+const RESOURCES = { wood: 1200, clay: 1100, iron: 900, crop: 800, warehouse: 8000, granary: 8000 }
+const EMPTY_QUEUE = { village_id: CAPITAL, queue: [] }
+const NO_BUILDINGS = { village_id: CAPITAL, buildings: [] }
+const BOOM = { status: 500, json: { detail: 'Travian returned 503' } }
+
+test.describe('Dashboard', () => {
+  test('a resource read that failed is not a village with no resources', async ({ page }) => {
+    await isolateApp(page, {
+      '/buildings/resources': RESOURCES,
+      '/buildings/queue': EMPTY_QUEUE,
+      '/buildings': NO_BUILDINGS,
+    })
+    await page.goto('/')
+    await expect(page.getByText('No active operations.', { exact: false })).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('both failed reads are named, and the idle sentence is withdrawn', async ({ page }) => {
+    await isolateApp(page, {
+      '/buildings/resources': BOOM,
+      '/buildings/queue': BOOM,
+      '/buildings': NO_BUILDINGS,
+    })
+    await page.goto('/')
+
+    await expect(
+      page.getByRole('alert').filter({ hasText: "Could not read this village's resources" })
+    ).toBeVisible()
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Could not read the construction queue' })
+    ).toBeVisible()
+    // The server's own words, not only ours.
+    await expect(page.getByText('Travian returned 503').first()).toBeVisible()
+    // Two Retry buttons, one per failed read.
+    await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(2)
+
+    // The defect: "No active operations" is a claim about the game, and we
+    // never got to ask it.
+    await expect(page.getByText('No active operations.', { exact: false })).toHaveCount(0)
+  })
+})
+
+test.describe('Buildings', () => {
+  test('an empty queue renders no queue section and no alert', async ({ page }) => {
+    await isolateApp(page, {
+      '/buildings/queue': EMPTY_QUEUE,
+      '/buildings': { village_id: CAPITAL, buildings: [{ slot_id: 1, name: 'Woodcutter', level: 3 }] },
+    })
+    await page.goto('/buildings')
+    await expect(page.getByRole('heading', { name: 'Building Slots' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: /Construction Queue/ })).toHaveCount(0)
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('the queue section stays on screen, named, when its own read fails', async ({ page }) => {
+    await isolateApp(page, {
+      '/buildings/queue': BOOM,
+      '/buildings': { village_id: CAPITAL, buildings: [{ slot_id: 1, name: 'Woodcutter', level: 3 }] },
+    })
+    await page.goto('/buildings')
+
+    // The heading is the half that used to disappear with the section.
+    await expect(page.getByRole('heading', { name: /Construction Queue/ })).toBeVisible()
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Could not read the construction queue' })
+    ).toBeVisible()
+    await expect(page.getByText('Travian returned 503')).toBeVisible()
+    // The building LIST beside it is unaffected -- it already had its own
+    // error path and this fixture answers it successfully.
+    await expect(page.getByRole('button', { name: /Woodcutter/ })).toBeVisible()
+  })
+})
