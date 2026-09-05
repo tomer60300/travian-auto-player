@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 from ..clients.http_client import HttpClient
 from ..concurrency import KeyedLock
+from ..exceptions import TravianError
 from ..models.farm_list import (
     FarmList,
     FarmListSendResult,
@@ -15,6 +16,18 @@ from ..models.farm_list import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class SendResponseUnreadable(TravianError):
+    """A farm-list send answered with a body its per-target outcomes are not in.
+
+    Raised instead of returning "no targets were dispatched", because the
+    caller cannot tell those apart: zero results satisfied its
+    troops-exhausted test, so an empty 200, an HTML soft-block or a missing
+    ``lists`` key stopped the whole send and advanced the round-robin cursor
+    past targets the game was never asked about.
+    """
+
 
 # GraphQL fragment used for every farm-list fetch
 _FARM_LIST_FRAGMENT = """
@@ -217,24 +230,73 @@ class FarmListService:
             request_type="xhr",
         )
 
-        error = resp.get("error", "")
+        error = resp.get("error", "") if isinstance(resp, dict) else ""
         if error:
             return [
                 FarmListSendTargetResult(id=sid, status="error", error=error) for sid in slot_ids
             ]
 
-        result_lists = resp.get("lists", [])
-        targets = []
-        if result_lists:
-            for t in result_lists[0].get("targets", []):
-                targets.append(
-                    FarmListSendTargetResult(
-                        id=t.get("id", 0),
-                        status=t.get("status", "unknown"),
-                        error=t.get("error") or "",
-                    )
+        try:
+            return self._dispatched_targets(resp)
+        except SendResponseUnreadable as exc:
+            logger.warning(
+                "Farm list %d: the send of %d target(s) cannot be confirmed: %s",
+                list_id,
+                len(slot_ids),
+                exc,
+            )
+            return [
+                FarmListSendTargetResult(
+                    id=sid,
+                    status="unverified",
+                    error=f"send unverified: {exc}",
                 )
-        return targets
+                for sid in slot_ids
+            ]
+
+    @staticmethod
+    def _dispatched_targets(resp: object) -> List[FarmListSendTargetResult]:
+        """Per-target outcomes inside an otherwise-successful send.
+
+        Shape: ``lists[0].targets[]``, each entry carrying a ``status`` and an
+        optional ``error``. A body this cannot be read out of raises
+        :class:`SendResponseUnreadable` rather than returning ``[]``, for the
+        reason :class:`~travian_api.services.trade_route_service.ToggleResponseUnreadable`
+        exists on the trade-route side: "I could not check" and "the game
+        dispatched nothing worth reporting" are different answers.
+
+        Returning ``[]`` collapsed them, and the caller's exhaustion test
+        (``batch_sent == 0 and batch_troop_errors == len(batch_results)``) then
+        read ``0 == 0`` as "troops are exhausted" -- an assertion about the game
+        made on no evidence, which stopped the send and advanced the cursor past
+        targets that were never raided.
+        """
+        if not isinstance(resp, dict):
+            raise SendResponseUnreadable(
+                f"the send answered with {type(resp).__name__}, not an object"
+            )
+        result_lists = resp.get("lists")
+        if not isinstance(result_lists, list) or not result_lists:
+            raise SendResponseUnreadable(
+                "the send's answer carried no 'lists' array, so which targets the game "
+                "dispatched cannot be read"
+            )
+        first = result_lists[0]
+        entries = first.get("targets") if isinstance(first, dict) else None
+        if not isinstance(entries, list) or not entries:
+            raise SendResponseUnreadable(
+                "the send's answer named no targets, so which targets the game "
+                "dispatched cannot be read"
+            )
+        return [
+            FarmListSendTargetResult(
+                id=t.get("id", 0),
+                status=t.get("status", "unknown"),
+                error=t.get("error") or "",
+            )
+            for t in entries
+            if isinstance(t, dict)
+        ]
 
     async def send_farm_list(
         self,
@@ -382,7 +444,7 @@ class FarmListService:
                 batch_troop_errors = sum(
                     1 for t in batch_results if t.error and "troops" in t.error.lower()
                 )
-                if batch_sent == 0 and batch_troop_errors == len(batch_results):
+                if batch_results and batch_sent == 0 and batch_troop_errors == len(batch_results):
                     troops_exhausted = True
                     # Advance cursor PAST the depleted batch — without this,
                     # the next cycle retries the exact same empty slots first
