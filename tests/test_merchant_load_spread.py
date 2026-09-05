@@ -278,7 +278,7 @@ class TestTheSoftCapSpreadsLoad:
         )
 
     @pytest.mark.parametrize("headroom", [0.10, 0.20, 0.35])
-    @pytest.mark.parametrize("seed", [0, 1, 3, 8])
+    @pytest.mark.parametrize("seed", [pytest.param(0, marks=pytest.mark.slow), 1, 3, 8])
     def test_headroom_never_makes_a_feasible_plan_infeasible(
         self, seed: int, headroom: float
     ) -> None:

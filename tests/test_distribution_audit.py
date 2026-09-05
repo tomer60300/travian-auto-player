@@ -158,6 +158,7 @@ def _post_plan(request):
 class TestOracleAgreement:
     """Two independent implementations of the same physics must agree."""
 
+    @pytest.mark.slow
     @pytest.mark.parametrize("seed", [0, 1, 2, 3, 7, 13])
     def test_simulate_day_matches_the_oracle(self, seed: int) -> None:
         account = random_account(seed, with_profiles=False)
@@ -311,7 +312,7 @@ class TestGeneratedProfilesTileTheDay:
 
 
 class TestPlanArithmetic:
-    @pytest.mark.parametrize("seed", [0, 2, 3, 5, 8, 13])
+    @pytest.mark.parametrize("seed", [0, 2, 3, pytest.param(5, marks=pytest.mark.slow), 8, 13])
     def test_no_village_ships_more_than_it_makes_plus_what_arrives(self, seed: int) -> None:
         """Conservation at every node: outbound <= own positive production +
         inbound. A relay hub forwards cargo it never grew, so the ceiling has to
@@ -642,7 +643,19 @@ class TestKnownDefects:
         assert events[0].net_gain_per_day == pytest.approx(24_000.0, abs=1.0)
         assert events[0].wasted_per_day == pytest.approx(24_000.0, abs=1.0)
 
-    @pytest.mark.parametrize("seed", [55, 0, 3, 5, 6, 8, 9, 29])
+    @pytest.mark.parametrize(
+        "seed",
+        [
+            55,
+            0,
+            3,
+            pytest.param(5, marks=pytest.mark.slow),
+            6,
+            8,
+            pytest.param(9, marks=pytest.mark.slow),
+            pytest.param(29, marks=pytest.mark.slow),
+        ],
+    )
     def test_relabelling_does_not_change_the_plan(self, seed: int) -> None:
         """RESOLVED 2026-09-02. Renumber the villages and the plan is the same.
 
@@ -670,6 +683,7 @@ class TestKnownDefects:
 
         assert plan_signature(relabelled, mapping) == plan_signature(original)
 
+    @pytest.mark.slow
     def test_two_villages_on_one_tile_are_separable_only_by_id(self) -> None:
         """The one limit of the geographic tie-breaks, stated rather than hidden.
 
@@ -704,6 +718,7 @@ class TestKnownDefects:
             "depend on which of them was picked"
         )
 
+    @pytest.mark.slow
     def test_co_located_villages_can_move_the_cost_as_well_as_the_split(self) -> None:
         """The other half of the limit above, which the seed-20 case understated.
 
