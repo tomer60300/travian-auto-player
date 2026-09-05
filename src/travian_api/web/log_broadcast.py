@@ -42,6 +42,12 @@ def _format_record(record: logging.LogRecord) -> dict[str, Any]:
         "message": record.getMessage(),
         "detail": detail,
         "logger": record.name,
+        # Whatever the call site attached with `extra={"user_id": n}`; None
+        # when it attached nothing, which means the record is server-wide.
+        # The key was absent entirely before, so `push` could not tell an
+        # untagged record from a malformed one and dropped every one of them
+        # for every scoped subscriber -- i.e. for every /ws/logs viewer.
+        "user_id": getattr(record, "user_id", None),
     }
 
 
@@ -97,19 +103,24 @@ class LogStreamManager:
     def push(self, entry: dict) -> None:
         """Push a log entry to the ring buffer and matching subscribers.
 
-        Delivery rules: an entry is sent to a subscriber when:
-        - Both entry and subscriber have the same ``user_id``, OR
-        - The subscriber has no ``user_id`` filter (admin/system viewer).
-        Entries without ``user_id`` (generic Python logger output) are
-        only delivered to unscoped subscribers — never to user-scoped
-        ones — to prevent cross-user log leakage.
+        One delivery rule, and it is the same one :meth:`subscribe` and
+        :meth:`get_history` state: an entry with no ``user_id`` is
+        **server-wide** and goes to every subscriber; an entry tagged with a
+        ``user_id`` goes to unscoped subscribers and to that user's.
+
+        The cost of that rule, stated where the rule is: a record about one
+        user must say so by attaching ``extra={"user_id": n}`` at the call
+        site, or every viewer sees it. The alternative -- dropping untagged
+        entries for scoped subscribers -- is what the code used to do, and
+        since every record from the Python logging handler is untagged, it
+        dropped all of them and left the log panel permanently near-empty.
         """
         entry_user = entry.get("user_id")
         with self._lock:
             self._buffer.append(entry)
             for sub_id, (q, sub_user) in self._subscribers.items():
-                # Scoped subscriber only sees entries tagged with their user_id
-                if sub_user is not None and (entry_user is None or entry_user != sub_user):
+                # Scoped subscriber sees its own entries and the server-wide ones
+                if sub_user is not None and entry_user is not None and entry_user != sub_user:
                     continue
                 # Deliver: unscoped subscriber sees everything, or user_id matches
                 try:
@@ -126,8 +137,8 @@ class LogStreamManager:
 
         Args:
             subscriber_id: Unique ID for this subscription (e.g., id(websocket)).
-            user_id: If set, only receive logs tagged with this user_id
-                (plus system logs that have no user_id).
+            user_id: If set, receive logs tagged with this user_id plus the
+                server-wide ones that carry no user_id. See :meth:`push`.
 
         Returns:
             An asyncio.Queue that will receive matching log dicts.
@@ -147,14 +158,16 @@ class LogStreamManager:
 
         Args:
             count: Maximum number of entries to return.
-            user_id: If set, only return entries for that user (plus
-                system entries that have no user_id).
+            user_id: If set, return entries for that user plus the
+                server-wide ones that carry no user_id. Same rule as
+                :meth:`push`, so the catch-up and the live stream agree --
+                they used not to agree with their own docstrings or with
+                each other's.
         """
         with self._lock:
             items = list(self._buffer)
         if user_id is not None:
-            # Only return entries explicitly tagged with this user_id (no cross-user leakage)
-            items = [e for e in items if e.get("user_id") == user_id]
+            items = [e for e in items if e.get("user_id") in (None, user_id)]
         return items[-count:]
 
 
