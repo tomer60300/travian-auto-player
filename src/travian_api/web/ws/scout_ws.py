@@ -468,55 +468,80 @@ def _build_auto_scout_coro(config: dict):
         try:
             preflight_troops = await session.military_service.get_available_troops(village_id)
             available_scouts = preflight_troops.get(scout_unit, 0)
-        except Exception:
-            available_scouts = -1
+        except Exception as exc:
+            # The pre-flight IS the only cap on how many scouts this sweep
+            # dispatches. Falling through to the uncapped loop turned "I could
+            # not check how many scouts you have" into "there is no limit", and
+            # pushed no frame at all, so nothing in the stream said the cap had
+            # been skipped. Refuse instead, preserving the round-robin cursor
+            # so a retry loses nothing.
+            logger.warning("AutoScout pre-flight troop read failed: %s", exc)
+            ctx.push(
+                {
+                    "type": "preflight_failed",
+                    "fatal": True,
+                    "message": (
+                        f"Could not read how many {scout_unit} are idle ({exc}). The sweep "
+                        "was refused rather than dispatched uncapped to "
+                        f"{original_total} target(s)."
+                    ),
+                }
+            )
+            ctx.push(
+                {
+                    "type": "complete",
+                    "total_sent": 0,
+                    "successful": 0,
+                    "next_start_index": start_index,
+                }
+            )
+            return
 
         scouts_per_target = amount * (2 if scout_type == "both" else 1)
 
-        if available_scouts >= 0:
-            max_targets = available_scouts // scouts_per_target if scouts_per_target > 0 else 0
+        max_targets = available_scouts // scouts_per_target if scouts_per_target > 0 else 0
+        ctx.push(
+            {
+                "type": "scout_preflight",
+                "available": available_scouts,
+                "needed_per_target": scouts_per_target,
+                "can_send_to": max_targets,
+                "total_targets": original_total,
+            }
+        )
+
+        if max_targets == 0:
             ctx.push(
                 {
-                    "type": "scout_preflight",
-                    "available": available_scouts,
-                    "needed_per_target": scouts_per_target,
-                    "can_send_to": max_targets,
-                    "total_targets": original_total,
+                    "type": "scouts_exhausted",
+                    "available": 0,
+                    "message": f"No scouts available (0 {scout_unit} idle)",
+                    "sent_so_far": 0,
+                    "successful": 0,
                 }
             )
-
-            if max_targets == 0:
-                ctx.push(
-                    {
-                        "type": "scouts_exhausted",
-                        "available": 0,
-                        "message": f"No scouts available (0 {scout_unit} idle)",
-                        "sent_so_far": 0,
-                        "successful": 0,
-                    }
-                )
-                ctx.push(
-                    {
-                        "type": "complete",
-                        "total_sent": 0,
-                        "successful": 0,
-                        "next_start_index": start_index,
-                    }
-                )
-                return
-            if max_targets < len(tiles):
-                tiles = tiles[:max_targets]
-                ctx.push(
-                    {
-                        "type": "scouts_capped",
-                        "available": available_scouts,
-                        "can_send_to": max_targets,
-                        "total_targets": original_total,
-                        "message": (
-                            f"Only {available_scouts} scouts idle — capped to {max_targets} targets"
-                        ),
-                    }
-                )
+            ctx.push(
+                {
+                    "type": "complete",
+                    "total_sent": 0,
+                    "successful": 0,
+                    "next_start_index": start_index,
+                }
+            )
+            return
+        if max_targets < len(tiles):
+            tiles = tiles[:max_targets]
+            ctx.push(
+                {
+                    "type": "scouts_capped",
+                    "available": available_scouts,
+                    "can_send_to": max_targets,
+                    "total_targets": original_total,
+                    "message": (
+                        f"Only {available_scouts} scouts idle — capped to {max_targets} targets"
+                    ),
+                }
+            )
 
         total = len(tiles)
 

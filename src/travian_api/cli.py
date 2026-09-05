@@ -2148,10 +2148,13 @@ def scout_auto(
         0, "--duration", "-d", help="Total minutes to loop (0=forever, requires --interval)"
     ),
     check_available: bool = typer.Option(
-        False,
-        "--check-available",
+        True,
+        "--check-available/--no-check-available",
         "-c",
-        help="Check available scouts first, send only what you have, skip round if 0",
+        help=(
+            "Check available scouts first, send only what you have, skip round if 0. "
+            "On by default: --no-check-available dispatches to every target uncapped"
+        ),
     ),
 ):
     """Scan the map, filter targets, and send scouts automatically."""

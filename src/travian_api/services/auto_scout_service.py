@@ -1088,7 +1088,7 @@ class AutoScoutService:
         village_id: Optional[int] = None,
         tribe_id: int = 2,
         delay_between: float = 0.5,
-        check_available: bool = False,
+        check_available: bool = True,
     ) -> List[Dict]:
         """
         Send scouts to a list of targets using the 2-step troop form.
@@ -1100,9 +1100,13 @@ class AutoScoutService:
             village_id: Source village ID
             tribe_id: Player tribe (1=Roman, 2=Teuton, 3=Gaul)
             delay_between: Seconds between sends to avoid rate limiting
-            check_available: If True, query available scouts first and only
-                             send to as many targets as scouts allow. If 0
-                             scouts are available, skip entirely.
+            check_available: Query available scouts first and only send to as
+                             many targets as scouts allow; if 0 are available,
+                             skip entirely. Defaults to True because the
+                             alternative is an UNCAPPED sweep: with it off,
+                             every target is dispatched to regardless of how
+                             many scouts exist, and the refusals come back one
+                             per target from the game.
         """
         from ..constants import SCOUT_UNITS
         from ..services.military_service import MilitaryService
