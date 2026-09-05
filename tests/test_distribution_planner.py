@@ -15,12 +15,13 @@ from travian_api.services.distribution.allocation import (
     AllocationMode,
     Resource,
 )
+from travian_api.services.distribution.findings import Category
 from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import EUROPE2_TEUTON
 from travian_api.services.distribution.optimizer import Route, VillageState
 from travian_api.services.distribution.planner import PlannerConfig, SheetRow, craft_plan
 from travian_api.services.distribution.rounding import round_preserving_total
-from travian_api.services.distribution.schedule import MINUTES_PER_DAY, build_beat
+from travian_api.services.distribution.schedule import MINUTES_PER_DAY, _window_length, build_beat
 
 CONFIG = PlannerConfig(
     geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
@@ -272,6 +273,15 @@ class TestProfileWindow:
         with pytest.raises(ValueError):
             build_beat((self._route(6),), dispatch_window=(600, 600))
 
+    def test_a_window_that_wraps_midnight_is_as_long_as_it_looks(self):
+        """The operator's own 23:00-00:00 night half is sixty minutes long. Read
+        as ``abs(end - start)`` it is 1,380 -- the whole day but that hour --
+        which is the figure the phase search spans and the figure the
+        out-of-window finding quotes back to him."""
+        assert _window_length((23 * 60, 0)) == 60
+        assert _window_length((23 * 60, 7 * 60)) == 480
+        assert _window_length((7 * 60, 23 * 60)) == 960, "and a window that does not wrap is plain"
+
 
 class TestBeatSpacing:
     def _route(self, origin: int) -> Route:
@@ -328,6 +338,21 @@ class TestBeatSpacing:
         )
 
         assert any("its own" in w for w in beat.warnings)
+
+    def test_the_default_arrival_gap_is_the_one_a_caller_gets(self):
+        """Every other caller in the suite passes the target explicitly, so the
+        DEFAULT is unpinned in both directions -- no constant assertion, and no
+        test that omits the argument and then measures what it got. Five daily
+        routes into one village through a ten-minute dispatch window cannot be
+        spaced further than two minutes apart, so the target must be missed and
+        the miss must be reported against the three minutes it defaults to."""
+        beat = build_beat(
+            tuple(self._route(origin) for origin in range(1, 6)), dispatch_window=(0, 10)
+        )
+
+        crowded = [f for f in beat.findings if f.category is Category.ARRIVAL_GAP]
+        assert crowded, "arrivals two minutes apart are inside the default target"
+        assert "3 min target" in crowded[0].message, crowded[0].message
 
     def test_the_sweep_keeps_the_widest_spacing_not_the_first_legal_one(self):
         """Two daily routes into one village have 720 minutes of room; stopping

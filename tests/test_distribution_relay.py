@@ -25,7 +25,13 @@ import pytest
 from travian_api.services.distribution.allocation import Resource
 from travian_api.services.distribution.findings import Category, Severity
 from travian_api.services.distribution.optimizer import Route, relay_findings, relay_hubs
-from travian_api.services.distribution.schedule import MINUTES_PER_DAY, build_beat, time_relays
+from travian_api.services.distribution.schedule import (
+    MINUTES_PER_DAY,
+    ScheduledRoute,
+    _wait_for_next,
+    build_beat,
+    time_relays,
+)
 
 NAMES = {22: "V22", 23: "V23", 2: "V02", 17: "V17", 18: "V18"}
 
@@ -292,6 +298,44 @@ class TestThePlanReportsThem:
     def test_the_finding_carries_the_hours_for_ranking(self):
         findings = self._findings([_route(22, 2, cycle=8), _route(2, 17, cycle=8)])
         assert "17.0h" in findings[0].detail
+
+
+class TestTheSecondsRelayTimingTurnsOn:
+    """Two pairs, and each pair exists because its two halves must DIFFER.
+
+    A 6.4-minute trip leaving at 00:00 lands at 00:06:24. Displayed, that is
+    00:06; used to decide an ordering, 00:06 is 24 seconds too early and the
+    forwarding merchant leaves without the cargo, which waits a whole cycle --
+    up to most of a day inside a profile window. So ``arrival_minutes`` rounds
+    and ``exact_arrival_minutes`` must not, and a send in the very instant of an
+    arrival counts as missing it rather than catching it.
+
+    Nothing pinned either half before: every ``one_way_minutes`` in the schedule
+    and relay fixtures is a whole number of minutes, where rounding changes
+    nothing, and ``_staleness`` -- what the search optimises -- had the
+    same-instant rule asserted while ``_wait_for_next`` -- what the operator is
+    told -- did not.
+    """
+
+    def _leg(self, one_way: float) -> ScheduledRoute:
+        return ScheduledRoute(route=_route(22, 2, one_way=one_way), dispatch_minute=0)
+
+    def test_the_exact_arrival_keeps_the_seconds(self):
+        assert self._leg(6.4).exact_arrival_minutes[0] == pytest.approx(6.4)
+
+    def test_the_displayed_arrival_is_the_rounded_one(self):
+        leg = self._leg(6.4)
+
+        assert leg.arrival_minutes[0] == 6
+        assert leg.arrival_minutes[0] != leg.exact_arrival_minutes[0], (
+            "the two properties exist because they differ; rounding both collapses the fix"
+        )
+
+    def test_a_send_in_the_same_instant_has_not_caught_the_cargo(self):
+        assert _wait_for_next(60.0, (60,)) == MINUTES_PER_DAY
+
+    def test_a_send_a_minute_later_has(self):
+        assert _wait_for_next(60.0, (61,)) == pytest.approx(1.0)
 
 
 class TestTimingAgainstTheRealSchedule:
