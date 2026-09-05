@@ -3369,6 +3369,57 @@ class TestTheRowFootprintCanBeCappedNotJustTheRequestCount:
 
         assert len(svc.created) == 2, "no row budget means the old behaviour exactly"
 
+    def test_a_dead_answer_holds_its_charge_until_the_read_back_settles_it(self):
+        # The refund fired on the `failed` ANSWER and the re-charge only at the
+        # end-of-origin read-back, so every create in between spent rows that
+        # were already in the game. Five 4h routes are six rows each: at a
+        # 24-row budget the run created all five and left THIRTY.
+        account = _account(
+            [_row_with_cycle(20003, -(i + 1), 4, 100 + i * 10) for i in range(5)],
+            {20003: (0, 0), **{-(i + 1): (40 + i, 40) for i in range(5)}},
+            {20003: "03", **{-(i + 1): f"A{i}" for i in range(5)}},
+        )
+
+        class _FirstAnswerDies(_FakeLiveSvc):
+            async def create_route(self, route, *, stop_check=None):
+                result = await super().create_route(route, stop_check=stop_check)
+                if len(self.created) == 1:
+                    return SimpleNamespace(status="failed", detail="answer lost (test)")
+                return result
+
+        svc = _FirstAnswerDies()
+        _run_live(svc, account, max_routes_per_run=50, max_game_rows_per_run=24)
+
+        rows = sum(len(v) for v in svc._existing.values())
+        assert rows <= 24, f"the run left {rows} rows against a budget of 24"
+
+    def test_a_create_that_really_was_refused_never_overspends_either(self):
+        # The other half. The read-back finds nothing, so the charge held while
+        # the answer was unknown is released -- at the read-back, not when the
+        # answer arrived, so nothing fired in between could spend it. The cost
+        # is one route deferred to a later run, which is the only direction
+        # that cannot leave more rows than the operator agreed to.
+        account = _account(
+            [_row_with_cycle(20003, -(i + 1), 4, 100 + i * 10) for i in range(5)],
+            {20003: (0, 0), **{-(i + 1): (40 + i, 40) for i in range(5)}},
+            {20003: "03", **{-(i + 1): f"A{i}" for i in range(5)}},
+        )
+
+        class _FirstIsRefused(_FakeLiveSvc):
+            async def create_route(self, route, *, stop_check=None):
+                if not self.created:
+                    self.created.append(route)
+                    return SimpleNamespace(status="failed", detail="refused (test)")
+                return await super().create_route(route, stop_check=stop_check)
+
+        svc = _FirstIsRefused()
+        res = _run_live(svc, account, max_routes_per_run=50, max_game_rows_per_run=24)
+
+        assert sum(len(v) for v in svc._existing.values()) == 18, (
+            "three 6-row routes, plus six rows held for a create the page never showed"
+        )
+        assert res.remaining >= 1, "the route the held charge deferred is reported, not lost"
+
     def test_a_landed_dead_answer_is_charged_the_same_rows_it_refunded(self):
         # The create path charges and refunds the POST-PRUNE surviving count; the
         # read-back that rehabilitates a landed create re-charged the PRE-PRUNE

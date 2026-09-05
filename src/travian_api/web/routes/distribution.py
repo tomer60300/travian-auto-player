@@ -6940,13 +6940,16 @@ async def post_execute(
                     # then shows the route landed, the destination is supplied
                     # after all and the line has to go.
                     refused_replacements: dict[int, str] = {}
-                    # What the failure branch refunded to the row budget for
-                    # each attempted create, keyed by its action. A read-back
-                    # that finds the rows re-charges exactly this and not the
-                    # observed count: the budget is spent in rows that SURVIVE
-                    # the window trim, and the fan-out a create makes before the
-                    # trim is up to three times that.
-                    refunded_rows: dict[int, int] = {}
+                    # What each attempted create charged the row budget,
+                    # keyed by its action. The charge STANDS until the read-back
+                    # settles whether the rows landed: refunding on the `failed`
+                    # answer let every create in between spend rows that were
+                    # already in the game -- five 4h routes at a 24-row budget
+                    # left thirty. Refunded below only for a create the page
+                    # shows nothing for; a read-back that could not run leaves
+                    # the charge, which over-reports the footprint and is the
+                    # safe direction.
+                    charged_rows: dict[int, int] = {}
                     # `replaceable` destinations whose replacement create was
                     # actually fired. What is left over when the loop ends was
                     # switched off and never rebuilt.
@@ -7059,9 +7062,7 @@ async def post_execute(
                             # deliveries 3 silently dropped to a third of its
                             # volume with nothing downstream detecting it.
                             _protected_live = [
-                                e
-                                for e in live
-                                if _is_protected(e, protected_ids, protected_coords)
+                                e for e in live if _is_protected(e, protected_ids, protected_coords)
                             ]
                             live = [e for e in live if e not in _protected_live]
                             drifted = [e for e in live if cargo_has_drifted(e.cargo, route.cargo)]
@@ -7069,8 +7070,7 @@ async def post_execute(
                                 body.update_drifted
                                 and _protected_live
                                 and any(
-                                    cargo_has_drifted(e.cargo, route.cargo)
-                                    for e in _protected_live
+                                    cargo_has_drifted(e.cargo, route.cargo) for e in _protected_live
                                 )
                             ):
                                 warnings.append(
@@ -7361,16 +7361,18 @@ async def post_execute(
                             gold_club_blocked = True
                             deferred.extend(desired[i + 1 :])
                             break
-                        # Nothing reached the game, so the footprint budget must
-                        # not stay charged for it. `attempts` deliberately does --
-                        # a refused write is still a write attempted, and pacing
-                        # counts attempts -- but rows only exist if the game made
-                        # them.
-                        rows_written -= would_add
+                        # `failed` is NOT evidence that nothing was created --
+                        # a session-expiry redirect, a reset connection or a
+                        # curl failure all produce it over a write that may
+                        # already have taken effect. So the rows stay charged
+                        # against the budget until the read-back below says
+                        # otherwise. `attempts` is charged either way: a refused
+                        # write is still a write attempted, and pacing counts
+                        # attempts.
                         failed_action = _action(row, route, "failed", result.detail)
                         actions.append(failed_action)
                         attempted_here.append((failed_action, route))
-                        refunded_rows[id(failed_action)] = would_add
+                        charged_rows[id(failed_action)] = would_add
                         if destination in replaceable:
                             # The reservation bought this destination a create;
                             # it did not buy it a route. Its diverging rows were
@@ -7931,19 +7933,26 @@ async def post_execute(
                                     if failure_stopped_run:
                                         stopped_early = False
                                         failure_stopped_run = False
-                                # Charged now that the rows are known to exist.
-                                # The failure branch refunded them on the
-                                # assumption nothing had reached the game, and
-                                # this puts back exactly what it refunded --
-                                # `observed` is the PRE-trim fan-out, which is
-                                # not the unit the budget is spent in.
-                                rows_written += refunded_rows[id(action)]
+                                # The charge this create made when it fired
+                                # stands: the rows are on the page. Nothing to
+                                # add here -- and `observed` would be the wrong
+                                # unit anyway, being the PRE-trim fan-out.
                                 trace.event(
                                     "unanswered_create_landed",
                                     origin=origin,
                                     destination=str(_desired_key(route)),
                                     rows=observed,
                                 )
+                            _landed_ids = {id(_a) for _a, _ in landed_here}
+                            for action, _route in attempted_here:
+                                if id(action) in _landed_ids:
+                                    continue
+                                # The page shows nothing for it, so the game
+                                # really did refuse it and the rows it was
+                                # charged for do not exist. Released now and not
+                                # when the answer arrived, so no create fired in
+                                # between could spend them.
+                                rows_written -= charged_rows[id(action)]
                             for action, route in created_here:
                                 key = _desired_key(route)
                                 _rows = observed_by_action.get(id(action), [])
