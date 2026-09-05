@@ -3,6 +3,8 @@ import api from '../api'
 import VillageSelector from '../components/VillageSelector'
 import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
+import FetchError from '../components/FetchError'
+import { readErrorDetail } from '../utils/fetchError'
 import {
   UNITS,
   UNIT_BY_KEY,
@@ -375,6 +377,8 @@ function NumberField({ label, color, value, setValue, hint, min = 0, max }) {
   )
 }
 
+const TROOPS_UNREAD = "Could not read this village's troops"
+
 export default function RaidOptimizer() {
   const tribeId = useGameStore((s) => s.tribeId)
   const activeVillageId = useGameStore((s) => s.activeVillageId)
@@ -409,7 +413,19 @@ export default function RaidOptimizer() {
   }, [defZero, defBudget, budget, smC, smSp, smA, smPa, smT])
 
   const [fetching, setFetching] = useState(false)
+  // The read either happened or it did not, and this page must not pretend.
+  // The five troop counts START at fabricated defaults (1000 clubs, 1000 TKs),
+  // the mount auto-fill overwrites them, and when it failed it did so with
+  // `showToast = false` -- so a failed read left those invented numbers on
+  // screen and the optimizer computed a full, confident four-strategy table
+  // from them, with nothing anywhere saying they were not the operator's real
+  // army. The most concerning finding of the whole wave-4 census, because it
+  // is the one page that does not fail visibly at all.
+  const [troopsError, setTroopsError] = useState(null)
   const autoFilledRef = useRef(false)
+
+  // Typing a count is the operator vouching for it, so the refusal lifts.
+  const vouched = (setter) => (v) => { setTroopsError(null); setter(v) }
 
   const fetchTroops = async (showToast = true) => {
     if (!activeVillageId) return
@@ -432,8 +448,10 @@ export default function RaidOptimizer() {
         smithyMsg = ' (no smithy built)'
       }
 
+      setTroopsError(null)
       if (showToast) toast.success(`Loaded current troop counts${smithyMsg}`)
-    } catch {
+    } catch (e) {
+      setTroopsError(readErrorDetail(e, TROOPS_UNREAD))
       if (showToast) toast.error('Could not load troops — enter manually')
     } finally {
       setFetching(false)
@@ -457,11 +475,13 @@ export default function RaidOptimizer() {
   const invalidBudget = budget < 0
 
   const result = useMemo(() => {
-    if (totalInv === 0 || invalidDefs || invalidBudget) {
+    // REFUSES while the troop read is unaccounted for. Computing here would
+    // produce four ranked deployments off numbers nobody supplied.
+    if (troopsError || totalInv === 0 || invalidDefs || invalidBudget) {
       return { balance: null, raids: null, zero: null, death: null, atks: null }
     }
     return findCompositions(inv, defZero, defBudget, budget, smithyLv)
-  }, [inv, defZero, defBudget, budget, smithyLv, totalInv, invalidDefs, invalidBudget])
+  }, [inv, defZero, defBudget, budget, smithyLv, totalInv, invalidDefs, invalidBudget, troopsError])
 
   const tribeMismatch = tribeId != null && tribeId !== 2
   const hasResult = !!result.balance
@@ -512,15 +532,26 @@ export default function RaidOptimizer() {
           </button>
         </div>
 
+        {troopsError && (
+          <div className="mb-3">
+            <FetchError
+              what="Troop counts unread — the numbers below are placeholders, not your army"
+              detail={troopsError}
+              onRetry={() => fetchTroops(true)}
+              retryLabel="Read troops again"
+            />
+          </div>
+        )}
+
         <div className="text-[0.6rem] tracking-[0.3em] uppercase text-secondary mb-2 border-b border-dashed border-default pb-1">
           Available Troops
         </div>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-          <NumberField label="Clubswingers" color={UNIT_COLOR.c}  value={c}  setValue={setC}  hint="ATK 40 · 250r · car 60" />
-          <NumberField label="Axemen"       color={UNIT_COLOR.a}  value={a}  setValue={setA}  hint="ATK 60 · 490r · car 50" />
-          <NumberField label="Spearmen"     color={UNIT_COLOR.sp} value={sp} setValue={setSp} hint="ATK 10 · 340r · car 40" />
-          <NumberField label="Paladins"     color={UNIT_COLOR.pa} value={pa} setValue={setPa} hint="ATK 55 · 1005r · car 110" />
-          <NumberField label="TKs"          color={UNIT_COLOR.t}  value={t}  setValue={setT}  hint="ATK 150 · 1525r · car 80" />
+          <NumberField label="Clubswingers" color={UNIT_COLOR.c}  value={c}  setValue={vouched(setC)}  hint="ATK 40 · 250r · car 60" />
+          <NumberField label="Axemen"       color={UNIT_COLOR.a}  value={a}  setValue={vouched(setA)}  hint="ATK 60 · 490r · car 50" />
+          <NumberField label="Spearmen"     color={UNIT_COLOR.sp} value={sp} setValue={vouched(setSp)} hint="ATK 10 · 340r · car 40" />
+          <NumberField label="Paladins"     color={UNIT_COLOR.pa} value={pa} setValue={vouched(setPa)} hint="ATK 55 · 1005r · car 110" />
+          <NumberField label="TKs"          color={UNIT_COLOR.t}  value={t}  setValue={vouched(setT)}  hint="ATK 150 · 1525r · car 80" />
         </div>
 
         <div className="text-[0.6rem] tracking-[0.3em] uppercase text-secondary mt-5 mb-2 border-b border-dashed border-default pb-1">
@@ -552,7 +583,13 @@ export default function RaidOptimizer() {
           className="mt-4 px-3 py-2 text-xs border-l-2 bg-surface leading-relaxed"
           style={{ borderColor: STRAT_COLOR.raids }}
         >
-          {totalInv === 0 ? (
+          {troopsError ? (
+            <>
+              <strong>No strategies computed.</strong> The troop read failed, so the counts
+              above are this page&apos;s own defaults. Retry the read, or type your real
+              counts over them.
+            </>
+          ) : totalInv === 0 ? (
             <><strong>Empty inventory.</strong> Enter at least one troop count or auto-fill.</>
           ) : invalidDefs ? (
             <><strong>Invalid:</strong> Budget DEF ({defBudget}) must be ≥ Zero-Cas DEF ({defZero}).</>
@@ -599,6 +636,13 @@ export default function RaidOptimizer() {
               budget={budget} defBudget={defBudget} atks={result.atks} />
           </div>
         </>
+      ) : troopsError ? (
+        <div className="card text-center py-12 border-dashed">
+          <div className="font-semibold uppercase tracking-wider">Nothing to optimise yet</div>
+          <div className="text-xs text-secondary mt-1">
+            The troop read failed, so there are no real counts to design a force from.
+          </div>
+        </div>
       ) : (
         <div className="card text-center py-12 border-dashed">
           <div className="text-3xl mb-2 opacity-50">⚠</div>

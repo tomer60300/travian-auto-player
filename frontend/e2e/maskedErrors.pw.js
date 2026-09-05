@@ -172,3 +172,58 @@ test.describe("AutoScout's background account", () => {
     await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
   })
 })
+
+test.describe('RaidOptimizer', () => {
+  // FLAT `t1..t10`, and the smithy under `research` -- the shapes
+  // `inventoryFromTroopsAPI` / `smithyFromAPI` actually read. The counts are
+  // the page's own defaults on purpose: the census's point is that these exact
+  // numbers produce a confident four-strategy table, so a fixture that
+  // supplies them proves the success path renders what the failure path used
+  // to render for free.
+  const TROOPS = { t1: 1000, t6: 1000 }
+  const SMITHY = { found: true, research: { t1: 5, t6: 14 } }
+
+  test('a successful read designs a force', async ({ page }) => {
+    await isolateApp(page, { '/military/troops': TROOPS, '/military/smithy': SMITHY })
+    await page.goto('/raid-optimizer')
+    await expect(page.getByRole('heading', { name: 'OPTIMAL DEPLOYMENTS' })).toBeVisible()
+    await expect(page.getByText('strategies', { exact: false }).first()).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('a failed read refuses to compute, and says the numbers are not the army', async ({
+    page,
+  }) => {
+    await isolateApp(page, { '/military/troops': BOOM, '/military/smithy': BOOM })
+    await page.goto('/raid-optimizer')
+
+    // The mount auto-fill passes `showToast = false`, so before this fix there
+    // was NO signal of any kind -- not even an expiring toast.
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Troop counts unread' })
+    ).toBeVisible()
+    await expect(page.getByText('Travian returned 503')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Read troops again' })).toBeVisible()
+
+    // The defect: a full four-strategy table computed from 1000 clubs and
+    // 1000 TKs that nobody supplied.
+    await expect(page.getByText('4 strategies')).toHaveCount(0)
+    await expect(page.getByText('No strategies computed.')).toBeVisible()
+    await expect(page.getByText('Nothing to optimise yet')).toBeVisible()
+    // And not the OTHER wrong answer either: "no valid composition" is a claim
+    // about an army we never read.
+    await expect(page.getByText('No valid composition found')).toHaveCount(0)
+  })
+
+  test('typing a real count over the placeholder lifts the refusal', async ({ page }) => {
+    await isolateApp(page, { '/military/troops': BOOM, '/military/smithy': BOOM })
+    await page.goto('/raid-optimizer')
+    await expect(page.getByText('No strategies computed.')).toBeVisible()
+
+    await page.getByRole('spinbutton').first().fill('850')
+
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(page.getByText('No strategies computed.')).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'OPTIMAL DEPLOYMENTS' })).toBeVisible()
+  })
+})
