@@ -675,6 +675,49 @@ h1, h2, h3 {
   }
 }
 
+/* Every OTHER checkbox and radio in the app -- the rule above reaches
+   `.touch-target`, which is worn by planner table rows and nothing else, so on
+   nine pages the census measured the browser-native **13x13** in a label box as
+   small as 85x16 (Logs, "Show details"). Two separate requirements, so two
+   rules:
+
+   the CONTROL gets 24px, WCAG 2.5.8's minimum, unconditionally on a coarse
+   pointer. It is the same number and the same query as `.touch-target`'s, at
+   lower specificity, so the table rule still wins where it applies and nothing
+   there changes. `flex-shrink: 0` because these sit in flex label rows whose
+   text can be 293px wide;
+
+   the HIT AREA gets 44px, WCAG 2.5.5, from the `<label>` -- which is what makes
+   the whole row clickable to begin with. A label inside a table goes back to 0
+   and keeps the 24px exemption the block above documents, with cell padding
+   around it.
+
+   Selected with `:has()` rather than by adding one class at each of the nineteen
+   sites: the wrappers are a mix of `.check-label`, `.check-label-secondary`,
+   `.loop-chip` and hand-rolled flex, and folding them into one class would
+   silently move their font sizes and gaps -- an unlayered `.check-label`
+   `font-size` beats a `text-xs` in the markup, which is the trap this file's own
+   header warns about. This way the geometry moves and nothing else does, and a
+   site the census could not read at the source level is covered too. */
+@media (pointer: coarse) {
+  input[type="checkbox"],
+  input[type="radio"] {
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+  }
+  label:has(> input[type="checkbox"]),
+  label:has(> input[type="radio"]) {
+    min-height: 44px;
+  }
+  td label:has(> input[type="checkbox"]),
+  td label:has(> input[type="radio"]),
+  th label:has(> input[type="checkbox"]),
+  th label:has(> input[type="radio"]) {
+    min-height: 0;
+  }
+}
+
 .bg-base { background-color: var(--bg-base); }
 .bg-surface { background-color: var(--bg-surface); }
 .bg-card { background-color: var(--bg-card); }
