@@ -259,3 +259,70 @@ def test_a_refused_upgrade_appears_in_the_results():
     assert failed["building"] == NAME
     assert failed["slot_id"] == SLOT
     assert "notEnough" in failed["error"]
+
+
+# ── B6: a busy queue is re-polled, not slept through ───────────────────────
+
+
+def test_a_busy_queue_is_re_polled_on_the_poll_interval(monkeypatch):
+    """`execute_plan` had no test at all. `min(remaining + 5, poll_interval_s)`
+    caps the sleep to the poll cadence; `max` would sleep out the ENTIRE
+    remaining construction time in one go, leaving a queue that finishes
+    early unattended for as long as the build was going to take.
+    """
+    from travian_api.services import build_queue_service as bq
+
+    class _Busy(_Game):
+        async def get_construction_queue(self, village_id=None):
+            return [
+                QueueItem(
+                    event_id="e1",
+                    building_name=NAME,
+                    target_level=5,
+                    remaining_seconds=3600,
+                )
+            ]
+
+    slept: list[float] = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(bq.asyncio, "sleep", _record)
+    monkeypatch.setattr(bq.HumanTiming, "micro_jitter", staticmethod(lambda s, **k: s))
+
+    svc = BuildQueueService(_Http())
+    svc.building_service = _Busy([])
+    asyncio.run(svc.execute_plan(_plan(), poll_interval_s=30, max_wait_s=90))
+
+    assert slept == [30, 30, 30], (
+        f"an hour of queue must not become one {max(slept, default=0):.0f}s sleep"
+    )
+
+
+# ── B7: two builds close together on the same account are staggered ───────
+
+
+def test_builds_within_a_minute_of_each_other_are_staggered(monkeypatch):
+    """`_stagger_account_build` has no test at all. The mutant under guard
+    inverts the gate (`gap < 60.0` -> `gap > 60.0`), so the stagger fires
+    only when the builds were already far apart -- exactly backwards.
+    """
+    from travian_api.services import build_queue_service as bq
+
+    slept: list[float] = []
+
+    async def _record(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(bq.asyncio, "sleep", _record)
+    monkeypatch.setattr(bq.HumanTiming, "delay", staticmethod(lambda *a, **k: 45.0))
+    monkeypatch.setattr(bq, "_last_account_build_action_ts", {})
+
+    client = _Http()
+    client.stealth_enabled = True  # the module-level function early-returns without it
+    asyncio.run(bq._stagger_account_build(client))
+    assert slept == [], "the first build on an account has nothing to stagger behind"
+
+    asyncio.run(bq._stagger_account_build(client))
+    assert slept == [45.0], "the second, moments later, does"

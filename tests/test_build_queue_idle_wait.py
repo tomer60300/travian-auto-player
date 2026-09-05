@@ -71,6 +71,30 @@ def test_transient_branches_are_single_heavy_tail_around_poll():
         assert 3.0 <= w <= 450.0
 
 
+def test_both_causes_at_once_fall_through_to_the_plain_re_poll(monkeypatch):
+    """Resource-short's 2-10 minute pause is for a purely economic wait.
+
+    With a no-checksum item in the same cycle the cause is ambiguous, so the
+    loop re-polls on the human-paced interval instead of freezing the queue.
+    Neither guarded branch (`any_no_checksum and not any_resource_short` /
+    `any_resource_short and not any_no_checksum`) matches when both are true,
+    so this must fall through to the plain "No items completed" tail.
+    """
+    from travian_api.services import build_queue_service as bq
+
+    monkeypatch.setattr(bq.HumanTiming, "delay", staticmethod(lambda mean, **k: float(mean)))
+    reason, wait_s = bq._resolve_idle_wait(
+        any_no_checksum=True,
+        any_resource_short=True,
+        next_prio=1,
+        poll_interval_s=30.0,
+        stealth_enabled=True,
+    )
+
+    assert "No items completed" in reason
+    assert wait_s == 30.0
+
+
 def test_resource_short_clamp_boundaries(monkeypatch):
     """Deterministic boundary guard: resource-short wait clamps to [120, 600]s
     regardless of the underlying heavy-tailed draw (and is never re-delayed)."""
