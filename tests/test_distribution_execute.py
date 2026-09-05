@@ -801,6 +801,43 @@ def _two_origin_account():
     )
 
 
+def _four_route_two_origin_account():
+    """Two origins, two routes each -- enough for one origin to trip the
+    consecutive-failure limit while a second origin is still unvisited."""
+    rows = tuple(
+        SheetRow(
+            origin=origin,
+            destination=destination,
+            cargo={Resource.CROP: 100},
+            cycle_hours=6,
+            dispatch_minute=minute,
+            arrival_minute=0,
+            merchants=2,
+        )
+        for origin, destination, minute in (
+            (20003, -1, 100),
+            (20003, -2, 700),
+            (20011, -3, 200),
+            (20011, -4, 800),
+        )
+    )
+    plan = SimpleNamespace(is_feasible=True, warnings=(), rows=rows)
+    return SimpleNamespace(
+        plan=plan,
+        names={20003: "03", 20011: "11", -1: "A", -2: "B", -3: "C", -4: "D"},
+        coords={
+            20003: (0, 0),
+            20011: (10, 0),
+            -1: (40, 40),
+            -2: (50, 50),
+            -3: (60, 60),
+            -4: (70, 70),
+        },
+        warnings=[],
+        dropped_allocations=[],
+    )
+
+
 def _row(origin, destination, x, y, dispatch_minute=0):
     return SheetRow(
         origin=origin,
@@ -2118,6 +2155,46 @@ class TestACreateWhoseAnswerDiedIsSettledByTheMarketplace:
 
         assert svc.confirmed == [20003], "the create's fate is settled by re-reading the page"
 
+    def test_a_run_whose_creates_all_landed_is_not_reported_as_refused(self):
+        # Two dead answers in a row trip _CONSECUTIVE_FAILURE_LIMIT, which
+        # stops the run BEFORE the read-back settles either of them. The
+        # read-back then promotes both to `created` -- and the verdict that
+        # stopped the run stood, so the response said "the game refused 2
+        # create(s) in a row" over two routes it had just reported creating.
+        svc = _FakeLiveSvc(create_status="failed")
+        res = _run_live(
+            svc, _two_destination_account(), disable_existing=False, max_routes_per_run=50
+        )
+
+        assert res.created == 2, [a.status for a in res.actions]
+        assert res.problems == [], res.problems
+
+    def test_the_stop_it_caused_is_lifted_so_the_next_origin_still_runs(self):
+        # The material cost: `stopped_early` skips every remaining origin, so a
+        # flaky connection capped an account-wide run at two creates and
+        # deferred the rest -- exactly the case the read-back exists for.
+        svc = _FakeLiveSvc(create_status="failed")
+        res = _run_live(
+            svc, _four_route_two_origin_account(), disable_existing=False, max_routes_per_run=50
+        )
+
+        assert {r.origin_village_id for r in svc.created} == {20003, 20011}, (
+            "the second origin was skipped by a stop the read-back withdrew"
+        )
+        assert res.created == 4
+        assert res.remaining == 0
+
+    def test_a_genuine_refusal_still_stops_the_run(self):
+        # The control: nothing landed, so the verdict is true and must stand.
+        svc = _FakeLiveSvc(create_status="failed", phantom_creates=True)
+        res = _run_live(
+            svc, _four_route_two_origin_account(), disable_existing=False, max_routes_per_run=50
+        )
+
+        assert res.created == 0
+        assert any("refused 2 create(s) in a row" in p for p in res.problems), res.problems
+        assert any("stopped early" in p for p in res.problems), res.problems
+
     def test_a_landed_creates_fan_out_is_still_pruned_to_the_window(self):
         # The rows exist, so they depart round the clock unless the trim runs --
         # the trim keyed off `created_here` alone, so an unanswered create left
@@ -3411,7 +3488,11 @@ class TestTheRunStopsFiringWhenTheGameKeepsRefusing:
     """
 
     def test_a_run_of_failures_stops_the_run(self):
-        svc = _FakeLiveSvc(create_status="failed")
+        # `phantom_creates` because this is about creates the game REALLY
+        # refused: a `failed` answer over rows that landed is settled by the
+        # read-back and withdraws both the verdict and the stop, so a double
+        # that fans the rows out would be measuring the opposite case.
+        svc = _FakeLiveSvc(create_status="failed", phantom_creates=True)
         res = _run_live(svc, _three_origin_account(), max_routes_per_run=50)
 
         assert len(svc.created) <= _CONSECUTIVE_FAILURE_LIMIT, (

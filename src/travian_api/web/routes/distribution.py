@@ -6237,6 +6237,13 @@ async def post_execute(
     visited = 0  # marketplaces read this run
     rows_written = 0  # route ROWS this run has put in the game
     consecutive_failures = 0  # create refusals in a row, across origins
+    # The "the game refused N create(s) in a row" verdict while it stands: the
+    # problem line it appended, and whether it is what stopped the run. A
+    # `failed` create is not evidence that nothing was created -- the read-back
+    # settles that -- so both have to be revisable, or a dropped answer that
+    # actually landed keeps a run capped at _CONSECUTIVE_FAILURE_LIMIT creates.
+    failure_problem: str | None = None
+    failure_stopped_run = False
     swept: list[int] = []  # villages actually reconciled (read) this run
     unswept: list[int] = []  # villages a reconcile sweep did not reach
     outstanding = 0  # creates attempted but not completed (failed / Gold Club)
@@ -7279,14 +7286,20 @@ async def post_execute(
                             # Whatever is refusing these is not going to stop
                             # refusing within this run. Give up here rather than
                             # working through the rest of the sheet against it.
+                            # Recorded, not just reported: the read-back below
+                            # may show the "refused" creates on the page, and
+                            # then neither the verdict nor the stop it caused
+                            # is true any more.
+                            failure_stopped_run = not stopped_early
                             stopped_early = True
-                            problems.append(
+                            failure_problem = (
                                 f"{village_label(origin, names)}: the game refused "
                                 f"{consecutive_failures} create(s) in a row "
                                 f"({result.detail}). Stopping rather than firing more "
                                 f"— check the village's route limit in game before "
                                 f"re-running."
                             )
+                            problems.append(failure_problem)
                             trace.event(
                                 "consecutive_failures",
                                 origin=origin,
@@ -7740,6 +7753,25 @@ async def post_execute(
                                 _refused = refused_replacements.pop(id(action), None)
                                 if _refused is not None and _refused in problems:
                                     problems.remove(_refused)
+                                # Nor is the streak this create was counted
+                                # into. Left standing, a run that created
+                                # everything it attempted still reported the
+                                # game as refusing the writes -- and, worse,
+                                # kept the stop that verdict caused, which
+                                # skips every remaining origin. A flaky
+                                # connection capped every run at two creates.
+                                if consecutive_failures:
+                                    consecutive_failures -= 1
+                                if (
+                                    failure_problem is not None
+                                    and consecutive_failures < _CONSECUTIVE_FAILURE_LIMIT
+                                ):
+                                    if failure_problem in problems:
+                                        problems.remove(failure_problem)
+                                    failure_problem = None
+                                    if failure_stopped_run:
+                                        stopped_early = False
+                                        failure_stopped_run = False
                                 # Charged now that the rows are known to exist.
                                 # The failure branch refunded them on the
                                 # assumption nothing had reached the game.
