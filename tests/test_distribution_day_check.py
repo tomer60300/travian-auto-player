@@ -378,6 +378,30 @@ class TestDayCheckEndpoint:
             assert getattr(parameter.default, "dependency", None) is not get_travian_session
 
 
+class TestTheCropCeilingIsAStockLevel:
+    def _body(self, ceilings):
+        return {
+            "snapshot": [],
+            "segments": [{"name": "Day", "window": [420, 1380], "allocations": {}}],
+            "crop_ceilings": ceilings,
+        }
+
+    def test_a_negative_ceiling_is_refused(self):
+        # An alert level is a stock, so it cannot be below empty. `SetupVillage`
+        # already bounds `crop_ceiling` at ge=0 and the page's own parser
+        # refuses a negative one, so an unbounded map here meant a figure that
+        # saved, exported, and then could not be read back.
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError) as caught:
+            DayCheckRequest.model_validate(self._body({"1": -1}))
+        assert "crop_ceilings" in str(caught.value)
+
+    def test_zero_is_still_a_ceiling(self):
+        body = DayCheckRequest.model_validate(self._body({"1": 0}))
+        assert body.crop_ceilings == {1: 0.0}
+
+
 class TestImpactTimeAttribution:
     """Cargo belongs to the profile it LANDS in, not the one that sent it.
 

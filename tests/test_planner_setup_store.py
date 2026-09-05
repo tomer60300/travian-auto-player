@@ -344,21 +344,74 @@ class TestOnePerUser:
         assert _get(client, account).status_code == 200
 
 
+class TestABlankMerchantLeverMeansThePlannersOwn:
+    """Clearing Base capacity or Bonus made the whole setup unsaveable.
+
+    Blank means "use the planner's own", which is how the PLAN path already
+    reads it -- `buildPlanPayload` omits the field entirely. But
+    `MerchantModelIn` made both REQUIRED, so a cleared box answered 422 "Field
+    required" over a figure the operator had deliberately not supplied, with no
+    cell marked to say which.
+    """
+
+    def test_a_model_with_neither_figure_saves(self, client, account):
+        doc = _minimal(account, merchant_model={"merchant_reserve": 2})
+
+        assert _put(client, account, doc).status_code == 200, _put(client, account, doc).text
+
+    def test_the_absent_figures_are_not_written_back(self, client, account):
+        # The document round trips verbatim: a store that filled in the default
+        # would turn "nothing declared" into a declaration, which is the one
+        # thing the page reads differently from a typed number.
+        _put(client, account, _minimal(account, merchant_model={"merchant_reserve": 2}))
+
+        assert _get(client, account).json()["setup"]["merchant_model"] == {"merchant_reserve": 2}
+
+    def test_a_figure_the_planner_refuses_is_still_refused(self, client, account):
+        # Optional is not unchecked: zero capacity is not "unstated".
+        doc = _minimal(account, merchant_model={"base_capacity": 0, "bonus_per_to_level": 0.2})
+
+        res = _put(client, account, doc)
+
+        assert res.status_code == 422, res.text
+
+
 class TestTheVersion:
     def test_a_newer_version_says_so(self, client, account):
-        # 10, not 9: v9 became readable when the reserved NPC-burst window
-        # started travelling in the document. This case needs a version that is
+        # 11, not 10: v10 became readable when `prune_to_window` started
+        # travelling in the document. This case needs a version that is
         # guaranteed to be beyond this build, so it moves whenever
         # READABLE_VERSIONS grows -- and the parametrised case below is what
         # would fail if the two ever disagreed.
-        res = _put(client, account, _minimal(account, version=10))
+        res = _put(client, account, _minimal(account, version=11))
 
         assert res.status_code == 422, res.text
         assert "NEWER build" in res.text
 
-    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8, 9])
+    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
     def test_every_readable_version_is_accepted(self, client, account, version):
         assert _put(client, account, _minimal(account, version=version)).status_code == 200
+
+    def test_the_prune_answer_round_trips(self, client, account):
+        # It decides whether /execute DELETES game rows, and it was carried by
+        # neither persistence path -- the exact criterion `reserved_window`
+        # earned v9 for. Lost, an older build reads the document, drops the
+        # answer, and the operator saves from that build.
+        doc = _minimal(account, version=10, prune_to_window=False)
+        assert _put(client, account, doc).status_code == 200, doc
+
+        assert _get(client, account).json()["setup"]["prune_to_window"] is False
+
+    def test_the_prune_answer_is_not_coerced_from_a_string(self, client, account):
+        # `StrictBool`, for the reason `npc_attended` and `overnight` carry it:
+        # pydantic's lax bool reads "no" as False, and a value nobody typed as a
+        # boolean must not become an answer about deleting rows from the game.
+        doc = _minimal(account, version=10, prune_to_window="no")
+
+        res = _put(client, account, doc)
+
+        assert res.status_code == 422, res.text
+        assert "prune_to_window" in res.text, res.text
 
     def test_the_reserved_window_round_trips(self, client, account):
         # The one owned answer neither persistence path carried. It lived only
@@ -676,6 +729,45 @@ class TestWhatThePlannerWouldRefuse:
         # itself was still being refused as a newer build.
         assert "reserved_window" in res.text, res.text
 
+    def test_an_even_map_span(self, client, account):
+        # A world is centred on 0|0, so its width is odd. `/plan` refuses an even
+        # span; the document declared neither `map_span` nor the merchant speed,
+        # so `_as_plan_request` never lifted them and the save returned 200 --
+        # after which the page's own parser refused the file forever.
+        doc = _minimal(
+            account,
+            merchant_model={"base_capacity": 2500, "bonus_per_to_level": 0.2, "map_span": 400},
+        )
+
+        res = _put(client, account, doc)
+
+        assert res.status_code == 422, res.text
+        assert "odd" in res.text, res.text
+
+    def test_an_odd_map_span_is_accepted_and_round_trips(self, client, account):
+        doc = _minimal(
+            account,
+            merchant_model={"base_capacity": 2500, "bonus_per_to_level": 0.2, "map_span": 401},
+        )
+
+        assert _put(client, account, doc).status_code == 200, doc
+        assert _get(client, account).json()["setup"]["merchant_model"]["map_span"] == 401
+
+    def test_a_merchant_speed_of_zero(self, client, account):
+        doc = _minimal(
+            account,
+            merchant_model={
+                "base_capacity": 2500,
+                "bonus_per_to_level": 0.2,
+                "speed_fields_per_hour": 0,
+            },
+        )
+
+        res = _put(client, account, doc)
+
+        assert res.status_code == 422, res.text
+        assert "speed_fields_per_hour" in res.text, res.text
+
     def test_a_merchant_headroom_of_one(self, client, account):
         doc = _minimal(
             account,
@@ -728,9 +820,9 @@ class TestWhatThePlannerWouldRefuse:
         doc = _realistic(account)
         assert _put(client, account, doc).status_code == 200
 
-        # 10 for the same reason as TestTheVersion's: v9 is readable now, so a
+        # 11 for the same reason as TestTheVersion's: v10 is readable now, so a
         # refusal has to be asked for with a version beyond this build.
-        assert _put(client, account, _minimal(account, version=10)).status_code == 422
+        assert _put(client, account, _minimal(account, version=11)).status_code == 422
 
         assert _get(client, account).json()["setup"] == doc
 

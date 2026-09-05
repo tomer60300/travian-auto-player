@@ -19,6 +19,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
@@ -3085,12 +3086,15 @@ class DayCheckRequest(PlanRequest):
             "so 1,440 one-minute profiles would otherwise validate."
         ),
     )
-    crop_ceilings: dict[int, float] = Field(
+    crop_ceilings: dict[int, Annotated[float, Field(ge=0)]] = Field(
         default={},
         description=(
             "Operator alert level for a village's crop stock, below capacity -- "
             "typically an NPC trigger. Crossing it is reported with the hour and "
-            "the profile that was running."
+            "the profile that was running. Never negative: a stock cannot sit "
+            "below empty, `SetupVillage.crop_ceiling` is bounded the same way, "
+            "and the page's own parser refuses one -- so an unbounded figure "
+            "here saved and exported into a file it could not read back."
         ),
     )
 
@@ -5184,6 +5188,13 @@ class RevertPlanRequest(BaseModel):
         ),
     )
     map_span: int = Field(default=DEFAULT_MAP_SPAN, gt=0)
+
+    # The same rule `PlanRequest` applies, and it belongs here most: this is the
+    # one endpoint that removes rows for good, and the span is what turns a
+    # marketplace row's map id back into coordinates. An even one shifts every
+    # tile by half a field, so a route the plan wanted reads as a route to
+    # somewhere else -- and `apply_delete` acts on that reading.
+    _span_is_odd = field_validator("map_span")(PlanRequest._span_is_odd.__func__)
 
 
 class RevertPlanResponse(BaseModel):

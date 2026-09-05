@@ -89,7 +89,7 @@ router = APIRouter(prefix="/api/distribution", tags=["distribution"])
 
 SETUP_FORMAT = "travian-planner-owned-state"
 
-READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9)
+READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 """Versions this build can read. A v1 document simply carries no profiles, a v2
 one no roles, a v3 one no per-village relay answer, a v4 one no merchant cap, a
 v5 one no relay tier and a v6 one no per-profile NPC attendance, so refusing any
@@ -113,7 +113,12 @@ unchecked and the 60% morning floor is measured against the wrong minute. Losing
 with merchants landing -- and that one was carried by NEITHER persistence path
 before v9, living only in the page's localStorage, which is per browser origin
 and so does not follow the operator between :80, :8001, the LAN address and
-Tailscale."""
+Tailscale.
+
+v10 carries `prune_to_window`, on exactly the criterion `reserved_window`
+earned v9 for: it was carried by neither persistence path either, and it
+decides whether `/execute` DELETES rows from the game -- the only destructive
+answer in the whole document."""
 
 MAX_MERCHANTS_PER_VILLAGE = 20
 """Travian's hard ceiling on merchants in one village. The only bound on a
@@ -208,14 +213,30 @@ class MerchantModelIn(BaseModel):
 
     Only the shapes are declared here. Every BOUND is the plan request's --
     `merchant_base_capacity` gt 0, `trade_office_bonus_per_level` ge 0,
-    `merchant_reserve` 0-20, `merchant_headroom` under 1 -- applied by
-    :func:`_as_plan_request`, so there is one copy of each.
+    `merchant_reserve` 0-20, `merchant_headroom` under 1, `map_span` odd,
+    `speed_fields_per_hour` gt 0 -- applied by :func:`_as_plan_request`, so
+    there is one copy of each.
+
+    ALL of them optional, absent meaning "use the planner's own", which is how
+    the PLAN path already reads a cleared box: `buildPlanPayload` omits the
+    field entirely and the default in `PlanRequest` decides. `base_capacity` and
+    `bonus_per_to_level` were required here alone, so clearing either made the
+    whole setup unsaveable -- a 422 "Field required" over a figure the operator
+    had deliberately not supplied, with no cell marked to say which.
     """
 
-    base_capacity: int
-    bonus_per_to_level: float
+    base_capacity: int | None = None
+    bonus_per_to_level: float | None = None
     merchant_reserve: int | None = None
     merchant_headroom: float | None = None
+    # The world and the merchants that cross it. `buildSetup` writes the whole
+    # merchant model, these two included, and nothing here declared them -- so
+    # `_as_plan_request` never lifted them and `_span_is_odd` never saw them. An
+    # even span saved with a 200, came back out of GET unchanged, and the page's
+    # own parser then refused the document forever: "merchant_model.map_span is
+    # 400". A document the planner would refuse is refused HERE.
+    map_span: int | None = None
+    speed_fields_per_hour: float | None = None
 
 
 class SetupDocument(BaseModel):
@@ -268,6 +289,14 @@ class SetupDocument(BaseModel):
     # some windows and not others, while when they sit down to trade is not a
     # property of a window at all. Absent means "reserve nothing".
     reserved_window: tuple[_ClockTime, _ClockTime] | None = None
+    # Whether a live run TRIMS each route's fan-out to its profile's hours --
+    # which means deleting rows from the game, the one destructive answer this
+    # document carries. Carried by neither persistence path before v10, which is
+    # the criterion `reserved_window` earned v9 for. `StrictBool` for the reason
+    # the two maps above carry it: pydantic's lax bool reads the STRING "no" as
+    # False, and a value nobody typed as a boolean must not decide whether rows
+    # are removed. Absent is "not answered", not "do not prune".
+    prune_to_window: StrictBool | None = None
     merchant_model: MerchantModelIn | None = None
     foreign_targets: list[ForeignTarget] = []
 
@@ -333,12 +362,20 @@ def _as_plan_request(doc: SetupDocument) -> PlanRequest:
     names = {row.village_id: row.name for row in doc.villages if row.name}
     levers: dict[str, float] = {}
     if doc.merchant_model is not None:
-        levers["merchant_base_capacity"] = doc.merchant_model.base_capacity
-        levers["trade_office_bonus_per_level"] = doc.merchant_model.bonus_per_to_level
-        if doc.merchant_model.merchant_reserve is not None:
-            levers["merchant_reserve"] = doc.merchant_model.merchant_reserve
-        if doc.merchant_model.merchant_headroom is not None:
-            levers["merchant_headroom"] = doc.merchant_model.merchant_headroom
+        # Absent means "use the planner's own", so an omitted lever is omitted
+        # from the request too rather than sent as None -- the plan path reads a
+        # cleared box exactly this way.
+        for field, lever in (
+            ("base_capacity", "merchant_base_capacity"),
+            ("bonus_per_to_level", "trade_office_bonus_per_level"),
+            ("merchant_reserve", "merchant_reserve"),
+            ("merchant_headroom", "merchant_headroom"),
+            ("map_span", "map_span"),
+            ("speed_fields_per_hour", "speed_fields_per_hour"),
+        ):
+            value = getattr(doc.merchant_model, field)
+            if value is not None:
+                levers[lever] = value
     return PlanRequest(
         snapshot=[
             VillageSnapshot(village_id=vid, name=names.get(vid, ""), x=0, y=0)

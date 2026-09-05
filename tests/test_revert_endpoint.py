@@ -217,6 +217,20 @@ class TestItRefusesRatherThanGuesses:
             with pytest.raises(ValidationError):
                 dist.RevertPlanRequest(trace_id=bad, origins=[1])
 
+    def test_an_even_map_span_is_refused_as_the_plan_refuses_it(self):
+        # A world is centred on 0|0, so its width is odd; an even span shifts
+        # every tile index by half a field and silently skews every distance
+        # derived from it. `/plan` has refused that from the start. The UNDO --
+        # the one endpoint here that deletes rows for good, and the one that
+        # needs correct tiles most -- took the same field and checked nothing.
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            dist.RevertPlanRequest(trace_id="a" * 12, map_span=400)
+
+    def test_an_odd_span_is_still_accepted(self):
+        assert dist.RevertPlanRequest(trace_id="a" * 12, map_span=401).map_span == 401
+
     def test_a_run_that_read_nothing_has_nothing_to_revert(self):
         trace = execution_trace.ExecutionTrace()
         trace.event("run_start")
