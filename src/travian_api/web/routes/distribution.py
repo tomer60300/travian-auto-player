@@ -2476,6 +2476,83 @@ class ExecuteRequest(PlanRequest):
             "sessions instead of one long burst."
         ),
     )
+    canary: bool = Field(
+        default=False,
+        description=(
+            "The first live run against a real account, enforced by the server "
+            "rather than by a checklist. Create-only and exactly one route: "
+            'requires execution_mode "live", one `only_origins` and one '
+            "`only_destinations` entry, `max_routes_per_run` 1, "
+            "`disable_existing` false, `prune_to_window` false with no "
+            "`segments` (so the run has no delete path at all), "
+            "`update_drifted` false, and `max_game_rows_per_run` equal to that "
+            "one route's own fan-out (24/N). Anything else is a 422 naming the "
+            "condition that failed. Off for every ordinary run, which none of "
+            "these conditions touches."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _canary_is_the_smallest_live_run(self) -> "ExecuteRequest":
+        """Every condition docs/26 asks the operator to get right by hand.
+
+        A checklist is not a control. Each line of it is one the operator can
+        mistype, and this is the endpoint that writes to a real account -- the
+        worst place to discover a typo. `canary: true` states the intent and the
+        server refuses anything that does not match it, naming the condition so
+        the answer is actionable rather than "invalid".
+
+        The row budget is the one condition this validator cannot finish: 24/N
+        depends on the plan's cycle, which is computed server-side. It is
+        checked in `post_execute`, against the plan, before the first request.
+        """
+        if not self.canary:
+            return self
+        if self.execution_mode != "live":
+            raise ValueError(
+                'canary is a live-run control: it requires execution_mode: "live". '
+                "A preview writes nothing, so there is nothing for it to make safe."
+            )
+        if self.only_origins is None or len(self.only_origins) != 1:
+            raise ValueError(
+                "canary requires exactly one origin: send only_origins with a single "
+                "village id, so the run cannot reach a village nobody chose."
+            )
+        if self.only_destinations is None or len(self.only_destinations) != 1:
+            raise ValueError(
+                "canary requires exactly one destination: send only_destinations with "
+                "a single village id."
+            )
+        if self.max_routes_per_run != 1:
+            raise ValueError(
+                f"canary requires max_routes_per_run: 1, not {self.max_routes_per_run}. "
+                "One route is the whole point: the first live run is a measurement, "
+                "not a provisioning pass."
+            )
+        if self.disable_existing:
+            raise ValueError(
+                "canary requires disable_existing: false. A first live run must not "
+                "switch off routes it did not create — that is the half of this "
+                "endpoint whose consequences are hardest to see from the response."
+            )
+        if self.segments:
+            raise ValueError(
+                "canary requires no segments: a whole-day run writes both profiles "
+                "and trims each against its own hours, which is several routes and a "
+                "delete path. Run one profile's single route first."
+            )
+        if self.prune_to_window:
+            raise ValueError(
+                "canary requires prune_to_window: false. The trim DELETES rows, and a "
+                "first live run must have no delete path at all — everything it does "
+                "should be undoable by switching rows off."
+            )
+        if self.update_drifted:
+            raise ValueError(
+                "canary requires update_drifted: false. Rewriting the cargo of routes "
+                "that already exist is a write against rows this run did not make."
+            )
+        return self
 
 
 class RouteActionResponse(BaseModel):
@@ -6497,6 +6574,38 @@ async def post_execute(
                 ),
             )
 
+    if body.canary:
+        # The last canary condition, and the only one the request alone cannot
+        # decide: `max_routes_per_run: 1` is not "one row". Travian turns one
+        # create into 24/N daily rows, so the same request is 1 row on a 24h
+        # cycle and 24 on an hourly one -- and what the operator authorises for
+        # a first live run is the FOOTPRINT they may have to delete by hand.
+        # Checked here because 24/N comes from the plan, and before any request
+        # because a refusal after the write would be no protection at all.
+        if len(items) != 1:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"canary requires the filters to select exactly one route; this "
+                    f"plan gives {len(items)} for origin {body.only_origins} -> "
+                    f"destination {body.only_destinations}. Nothing was attempted. "
+                    f"Preview the plan and pick a pair it ships exactly one route "
+                    f"between."
+                ),
+            )
+        canary_rows = _game_rows(items[0][0].cycle_hours)
+        if body.max_game_rows_per_run != canary_rows:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"canary requires max_game_rows_per_run to equal this route's own "
+                    f"fan-out: a {items[0][0].cycle_hours}h cycle is {canary_rows} daily "
+                    f"row(s), and the request authorised "
+                    f"{body.max_game_rows_per_run}. Nothing was attempted. Send "
+                    f"max_game_rows_per_run: {canary_rows}."
+                ),
+            )
+
     def _action(
         row: SheetRow, route: PlannedRoute, status_: str, detail: str = ""
     ) -> RouteActionResponse:
@@ -6834,6 +6943,10 @@ async def post_execute(
         execution_mode_requested=requested_mode,
         execution_mode_resolved="live",
         env_brake_open=live_enabled,
+        # Recorded next to them because a canary is a claim about the SHAPE of
+        # this run, and the shape is what a later reader has to take on trust:
+        # the response summarises, the trace is the evidence.
+        canary=body.canary,
         live_enabled=live_enabled,
         reconciler_verified=svc.reconciler_verified,
         disable_existing=body.disable_existing,
@@ -7040,11 +7153,24 @@ async def post_execute(
                             # against exactly what was there beforehand. Captured
                             # here because this read already happened -- deriving
                             # it later would cost another request per village.
+                            # RAW, not a projection of it. The three keys the
+                            # revert path joins on answered "which rows are new
+                            # and which changed state"; they cannot answer "what
+                            # did this row ship, and when" -- which is the
+                            # question a run that went wrong actually raises,
+                            # and by then the page no longer shows the old
+                            # answer. The rest of the row costs nothing to keep
+                            # here and cannot be recovered later at any price.
                             inventory=[
                                 {
                                     "route_id": e.route_id,
                                     "dest": e.dest_village_id,
                                     "active": e.active,
+                                    "dest_x": e.dest_x,
+                                    "dest_y": e.dest_y,
+                                    "cargo": e.cargo,
+                                    "dispatch_minute": _row_minute(e),
+                                    "visible": e.visible,
                                 }
                                 for e in existing
                             ],
@@ -8814,6 +8940,15 @@ async def post_execute(
                                 # 24/N fan-out model held on this account.
                                 rows_forecast=sum(a.game_rows for a, _ in created_here),
                                 new_route_ids=[e.route_id for e in fresh],
+                                # The page as it stood after this origin's
+                                # writes, in full. The ids alone say which rows
+                                # are this run's; they do not say what those
+                                # rows ship or when, and that is exactly what
+                                # `origin_read`'s inventory is diffed against.
+                                # Only recorded until now when the two reads
+                                # DISAGREED, which is the one case where the
+                                # snapshot proves least.
+                                rows=_row_snapshot(after),
                             )
                             # A stale route we believe we switched off must
                             # actually be off. If it is still active the plan's

@@ -172,34 +172,61 @@ unexpected:
 
 Paste the whole response somewhere you can compare against later.
 
-## 2. One route, live, on a village you can watch
+## 2. The create-only canary: one route, live, on a village you can watch
 
-Pick one origin whose marketplace you will open in the game immediately after
-the run. Prefer a village with **no existing trade routes**: **Also disable
-routes the plan no longer wants** is ticked by default and the run will switch
-off every stale row on the origin it visits. If no such village exists, untick
-it for this run, or list every existing destination under **Never disable**
-first. Leave **Correct cargo on routes that have drifted** unticked.
+The first write is one create and nothing else. Not because a larger run would
+probably be fine, but because every other thing this endpoint does — switching
+rows off, deleting them, rewriting their cargo — fails in a different way, and
+a run that does two of them at once cannot tell you which one went wrong.
 
-Set:
+That shape is a control now, not a checklist. Send `canary: true` and the
+server refuses the request unless **every** one of these holds, naming the one
+that failed:
 
-| control | value | why |
+| condition | value | why |
 |---|---|---|
-| **Only origin (village id)** | the one village | one marketplace to read afterwards |
+| `execution_mode` | `"live"` | a preview writes nothing, so there is nothing for the flag to make safe |
+| **Only origin (village id)** | exactly one | one marketplace to read afterwards |
+| **Only destination (village id)** | exactly one | the run's whole footprint is one destination's rows |
 | **Routes this run** | `1` | one create, one verify |
-| **Max rows this run** | leave the default (24) | the largest fan-out one create can produce, so one route cannot exceed it |
-| **Never disable** | every destination you are not ready to lose | the disable half is the one that was silent |
-| **Also disable routes the plan no longer wants** | unticked, unless the village has no routes | nothing is switched off that you have not seen |
-| **Whole day** | on | the same plan you confirmed in step 1 |
+| **Also disable routes the plan no longer wants** | unticked | nothing is switched off that you have not seen |
+| **Whole day** off, so **Trim the fan-out to the profile hours** is off | unticked | the trim DELETEs; a first live run must have no delete path at all |
+| **Correct cargo on routes that have drifted** | unticked | it writes to rows this run did not make |
+| **Max rows this run** | the route's own fan-out: 24 ÷ its cycle hours | "1 route" is not "1 row" |
+
+The last one is checked against the plan rather than against the request: the
+server computes 24/N for the single route the filters selected, refuses any
+other figure, and refuses the run outright if the filters select no route or
+more than one. `max_routes_per_run: 1` never meant one row — Travian turns one
+create into 24/N daily rows — and that arithmetic is the footprint you would
+have to delete by hand if this goes wrong. A 1 h cycle is 24 rows from one
+request.
+
+Note what the flag costs: **Whole day** must be off, so the route this writes
+is planned for one profile's hours rather than the union step 1 confirmed.
+Preview that single profile on its own first and check the one route the
+filters leave against step 1's `actions` for the same pair. They should agree
+on destination and cargo; the repeat interval may differ, because a profile
+planned alone is planned against its own window.
+
+The page has no canary tick yet — the field rides in the `/routes/execute`
+request — so set the controls above by hand and send `canary: true` with them.
+The refusals are how you find out you missed one, and they arrive before the
+first game request: nothing is read and nothing is written by a refused canary.
+
+Pick the origin as a village whose marketplace you will open in the game
+immediately after the run, and prefer one with **no existing trade routes** —
+not because the run would touch them (it cannot; the disable box is unticked
+and the flag enforces it) but because it makes the after-check unambiguous.
 
 Set `TRAVIAN_TRADE_ROUTE_LIVE=true` in `.env` (or unset it; true is the
 default), stop any running loops, and reconnect the session. Press
 **Preview (0 requests)** once more and confirm the response
 shows `live_enabled: true` with `dry_run: true`. That pair is the only proof
-you have of which mode you are in. Then press the red run button beneath it —
-**Create 1 route, disable nothing (~N requests)** with the disable box
-unticked, **Disable old routes & create 1 (~N requests)** with it ticked — and
-confirm the dialog, whose own button reads **Go live (~N requests)**.
+you have of which mode you are in. Then press the red run button beneath it,
+which on a canary reads **Create 1 route, disable nothing (~N requests)**
+because the disable box is unticked, and confirm the dialog, whose own button
+reads **Go live (~N requests)**.
 
 Read the response:
 
@@ -208,8 +235,9 @@ Read the response:
   read-back could not settle it: go to the game **before** doing anything
   else. If `not_created` is 1, the game accepted the write and made no route;
   that is worse, and a second create on top is how duplicates accumulate.
-- `problems` empty. `disables` empty, or exactly what step 1 predicted for
-  this origin.
+- `problems` empty, and `disables` empty — not "as predicted": a canary
+  disables nothing, so a single line here means the flag did not do its job
+  and is itself a stop.
 - `trace_id` present. Write it down; it is the handle for **Undo this run**.
 - The spend, against the forecast you kept from step 1: expect the live run
   to be higher on reads, because each marketplace read is two page loads and
@@ -219,32 +247,77 @@ Read the response:
 
 1. The route exists, to the planned destination, with the planned cargo per
    resource and the planned repeat interval.
-2. Count the rows **to the planned destination**. The game's count must be at
-   most `live_game_rows`; equal is the normal answer. Response higher than the
-   game means the trim worked and its confirming read did not — note it, it
-   is not a failure. Game higher than the response is a stop.
-3. Nothing else on this village changed except the `disables` the response
-   listed.
+2. Count the rows **to the planned destination**. On the canary this is an
+   equality and nothing else: nothing was trimmed, so `created_game_rows`,
+   `live_game_rows`, **Max rows this run** and the game's own count are all
+   the same number — 24 ÷ the cycle. Any disagreement is a stop, in either
+   direction. (From step 4 on, once the trim is in play, the rule relaxes to
+   "the game's count is at most `live_game_rows`": a response higher than the
+   game means the trim worked and its confirming read did not, which is worth
+   a note rather than a stop.)
+3. Nothing else on this village changed at all — no row switched off, none
+   deleted, no cargo rewritten. That is the whole claim a create-only run
+   makes, and this is where it is checked.
 4. Merchants are **not** readable now: the route has not departed, and the
    free/total cell shows only who is idle at this instant. What the plan
    promised is in its own per-village merchant table, committed against the
    fleet minus the reserve. The game-side check belongs in step 5.
 
-Then open the trace by `trace_id` and find the `window_pruned` event. Its
-`status` is the first real observation of what a trade-route DELETE answers
-with: the delete's response shape was taken from the game's bulk-toggle
-handler and has never been seen on this account. `deleted` means the shape
-applies; `unverified` means it does not and the code settled the delete purely
-by read-back. Either is safe. Record which. The event exists only if rows
-were actually due for removal: a route whose whole fan-out already falls
-inside its window produces none, and that absence means nothing needed
-trimming, not that the trim failed.
+Then open the trace by `trace_id`. `run_start` records `canary: true` beside
+`execution_mode_requested`, `execution_mode_resolved` and `env_brake_open`, so
+the record answers "was this run asked for, and was the server allowed to
+honour it" without reference to anything outside the file. `origin_read`
+carries the pre-write inventory in full — every row's id, destination, cargo,
+departure minute, enabled and visible flags — and the `verified` event carries
+the page as it stood after the write in the same shape. Those two are the
+before and after; keep the trace.
 
 This first route is also the **canary for the game's read-after-write
 consistency**: every run now reads a marketplace a second time before it
 deletes anything, and `read_back_disagreed` events in the trace are the
 measurement — none across the widening steps means the page settles before the
 read-back, and even one means it does not and the trim is deferring itself.
+One such event now also stops the run before it reaches the next village, and
+says so in `problems`: once a marketplace has stopped agreeing with itself,
+every later verdict this run would reach rests on a page that would not hold
+still.
+
+**Restoration gets its own canary, later.** A destination whose rows diverge
+from the plan is emptied and rebuilt in two writes, and when the second is
+refused the run switches the old rows back on itself. That is a write over
+rows that already existed and that this run did not create, which is a
+different reversibility from a create's: getting it wrong leaves a destination
+running a schedule nobody chose rather than one route too many. So rehearse it
+alone, after step 3 and before step 4.3, on a destination you are willing to
+lose for an hour: `canary` **off** (the flag forbids disabling, which is the
+mechanism under test), one **Only origin** and one **Only destination**, that
+destination chosen because step 4.2's `problems` named it as diverging,
+**Routes this run** `1`, **Also disable routes the plan no longer wants**
+ticked, **Trim the fan-out** still off, and **Max rows this run** set to the
+rebuild's own fan-out. Read `re_enables` for the "restored N disabled row(s)"
+line, then the trace's `restore_attempted` and `restored` events:
+`already_enabled_ids` are rows that were already back on and that the request
+therefore changed nothing about, `enabled_by_request_ids` are the ones this run
+switched, and `restoration_completed` is whether the confirming read found
+every old row on afterwards. The counts in the line are the second set only.
+
+**Deletion gets its own canary, later still.** The window trim is the one thing
+here that removes a row for good, and no delete has ever been seen against this
+account. Rehearse it alone, after the restoration canary: `canary` **off**,
+one **Only origin**, one **Only destination**, **Routes this run** `1`, **Also
+disable routes the plan no longer wants** unticked, **Whole day** on (which
+forces **Trim the fan-out to the profile hours**) with a profile whose window
+excludes part of that route's fan-out — otherwise there is nothing to delete —
+and **Max rows this run** set to the count that SURVIVES the trim, not the
+whole fan-out. Then open the trace and find the `window_pruned` event. Its
+`status` is the first real observation of what a trade-route DELETE answers
+with: the delete's response shape was taken from the game's bulk-toggle
+handler and has never been seen here. `deleted` means the shape applies;
+`unverified` means it does not and the code settled the delete purely by
+read-back. Either is safe. Record which. The event exists only if rows were
+actually due for removal, so its absence means nothing needed trimming rather
+than that the trim failed — which is exactly why the window has to be chosen
+to exclude some of the fan-out before this proves anything.
 
 If any game check is false, stop. Undo as §3 describes — Check, then Disable,
 then Delete — confirm in the game that the route is gone, put back by hand
@@ -256,11 +329,16 @@ The by-hand put-back is now for what the run could **not** reverse itself. A
 destination the run emptied to rebuild, whose every replacement create came to
 nothing, is switched back on by the run: one re-enable of exactly the row ids
 the write-ahead record named, verified by a read, reported under `re_enables`
-as "restored N disabled row(s)". It is deliberately all-or-nothing — a
-part-written rebuild, an `indeterminate` create, or a destination that no
-longer matches the record is left off and named in `problems` instead, because
-switching old rows back on beside a new route that may exist would ship two
-schedules at once.
+as "restored N disabled row(s)". What stops it is evidence that the
+replacement may exist after all — a part-written rebuild, an `indeterminate`
+create, an unstable read-back, or a destination whose rows no longer match the
+record. Those are left off and named in `problems` instead, because switching
+old rows back on beside a new route that may exist would ship two schedules at
+once. A row a dual switched back on in the meantime is **not** one of those: the
+enabled flag is the field the restore exists to change, and the bulk PUT states
+each row's target state rather than flipping it, so the already-on row is a
+no-op in the same request. The line then reads "restored N disabled row(s); M
+were already back on", and the trace's `already_enabled_ids` says which.
 
 ## 3. Prove the undo once, on purpose
 
@@ -319,8 +397,9 @@ minutes matching what the game made.
 Each step is the previous one plus more; each response is read as in step 2
 before the next step is taken.
 
-1. **Routes this run** = 3, still filtered to the one origin. Confirm all three
-   in the game.
+1. **Routes this run** = 3, still filtered to the one origin. Drop `canary`
+   here: the flag permits exactly one route and will refuse this run by name.
+   Confirm all three in the game.
 2. Clear **Only origin**, **Routes this run** = 3, and **Also disable routes
    the plan no longer wants** **unticked**. The run now visits villages in
    plan order and creates at most 3, and switches nothing off. Read the
@@ -410,7 +489,8 @@ The next morning, read:
 | `not_created` > 0 | the game accepted the create and made no route; the plan believes cargo is moving that is not | stop; read the marketplace before any re-create |
 | `created_unverified` > 0 | a create's answer was unreadable and the read-back did not settle it | read the marketplace before any other write |
 | an action with status `indeterminate` | the run could not tell whether the route exists: the create's answer died and the page would not read the same way twice, or a shared destination's rows could not be attributed | read that destination in the marketplace; the next run reconciles it either way, and nothing there was trimmed or restored |
-| `stopped_early` | a captcha, the activity budget, a failed read, or a prune that stopped | stop; for a captcha, solve it in a browser first, then retry; for the others, read the trace |
+| `stopped_early` | a captcha, the activity budget, a failed read, a prune that stopped, or a marketplace that stopped agreeing with itself | stop; for a captcha, solve it in a browser first, then retry; for the others, read the trace |
+| a `problems` line saying the marketplace reads disagreed at a village | the page would not read the same way twice, so the run wrote to no village after that one | read that village in the game, then re-run once the marketplace is quiet; the villages it skipped are in `actions` as `deferred` |
 | rows in the game > `live_game_rows` | the trim did not hold; checkable as a total only while the run is one origin and one destination — from step 4.2 on, compare per action at a village you have opened, not the run total | stop; the response names the rows still departing |
 | a `disables` entry you did not predict | the plan moved or dropped a destination | undo, protect or re-plan |
 | the game shows a row the response does not | reconciliation is wrong about the account | stop; this is a review finding, not an operator error |

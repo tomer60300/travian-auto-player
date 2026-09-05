@@ -2930,6 +2930,297 @@ class TestTheWriteEndpointRejectsWhatItDoesNotUnderstand:
             cls.model_validate({**kwargs, "exclude_origins_text": "20002"})
 
 
+def _canary_payload(**overrides):
+    """The smallest live run this server accepts, as a raw request body.
+
+    Written out rather than derived from `_exec_body` because every field here
+    is load-bearing: the point of the canary flag is that the SERVER checks the
+    shape, so a helper that quietly supplied a missing control would be testing
+    the helper.
+    """
+    payload = {
+        "snapshot": [
+            {
+                "village_id": 20003,
+                "name": "03",
+                "x": 0,
+                "y": 0,
+                "merchants_total": 20,
+                "merchants_free": 20,
+                "lumber_per_hour": 2000,
+                "clay_per_hour": 1000,
+                "iron_per_hour": 1000,
+                "crop_per_hour": 3000,
+            },
+            {
+                "village_id": 20011,
+                "name": "11",
+                "x": 10,
+                "y": 0,
+                "merchants_total": 20,
+                "merchants_free": 20,
+                "lumber_per_hour": 500,
+                "clay_per_hour": 500,
+                "iron_per_hour": 500,
+                "crop_per_hour": 3000,
+            },
+        ],
+        "allocations": {
+            "crop": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}
+        },
+        "execution_mode": "live",
+        "canary": True,
+        "only_origins": [20003],
+        "only_destinations": [20011],
+        "max_routes_per_run": 1,
+        "disable_existing": False,
+        "max_game_rows_per_run": 4,
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestTheCanaryFlagIsTheFirstLiveRunEnforcedByTheServer:
+    """docs/26 describes the first write against a real account as a list of
+    settings to get right by hand. A checklist is not a control: every condition
+    on it is one the operator can mistype, and the one endpoint that writes to a
+    real account is the worst place to find out.
+
+    `canary: true` states the intent, and the server refuses the request unless
+    every condition of that intent holds. Create-only, one route, one origin,
+    one destination, and a row budget equal to exactly that route's fan-out --
+    so a mistyped cycle cannot turn "one route" into twenty-four rows.
+
+    Each refusal names the condition it failed. A 422 that says "invalid" would
+    send the operator back to the same checklist.
+    """
+
+    def _refused(self, **overrides):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError) as exc:
+            ExecuteRequest.model_validate(_canary_payload(**overrides))
+        return str(exc.value)
+
+    def test_the_smallest_run_validates(self):
+        body = ExecuteRequest.model_validate(_canary_payload())
+
+        assert body.canary is True
+        assert body.execution_mode == "live"
+
+    def test_the_flag_is_off_by_default(self):
+        body = ExecuteRequest.model_validate(_canary_payload(canary=False))
+
+        assert body.canary is False
+
+    def test_an_ordinary_run_is_not_forced_into_the_canary_shape(self):
+        """The control: none of these conditions applies to a run that did not
+        claim to be a canary."""
+        body = _exec_body(dry_run=False, max_routes_per_run=50)
+
+        assert body.canary is False
+
+    def test_a_preview_canary_is_refused(self):
+        assert 'execution_mode: "live"' in self._refused(execution_mode="preview")
+
+    def test_more_than_one_origin_is_refused(self):
+        assert "one origin" in self._refused(only_origins=[20003, 20011])
+
+    def test_an_unfiltered_origin_is_refused(self):
+        assert "one origin" in self._refused(only_origins=None)
+
+    def test_more_than_one_destination_is_refused(self):
+        assert "one destination" in self._refused(only_destinations=[20011, 20019])
+
+    def test_an_unfiltered_destination_is_refused(self):
+        assert "one destination" in self._refused(only_destinations=None)
+
+    def test_a_larger_route_cap_is_refused(self):
+        assert "max_routes_per_run" in self._refused(max_routes_per_run=3)
+
+    def test_disabling_existing_routes_is_refused(self):
+        assert "disable_existing" in self._refused(disable_existing=True)
+
+    def test_a_window_trim_is_refused(self):
+        # The trim DELETES. A first live run must have no delete path at all,
+        # so its own mistakes stay reversible.
+        assert "prune_to_window" in self._refused(prune_to_window=True)
+
+    def test_a_whole_day_run_is_refused(self):
+        assert "segments" in self._refused(
+            segments=[
+                {"name": "Day", "window": [420, 1380], "allocations": {}},
+                {"name": "Night", "window": [1380, 420], "allocations": {}},
+            ],
+            prune_to_window=True,
+            allocations={},
+        )
+
+    def test_rewriting_drifted_cargo_is_refused(self):
+        assert "update_drifted" in self._refused(update_drifted=True)
+
+
+class TestTheCanaryRowBudgetIsTheRoutesOwnFanOut:
+    """`max_routes_per_run: 1` is not "one row". Travian turns one create into
+    24/N daily rows, so the same request is 1 row on a 24h cycle and 24 on an
+    hourly one -- and the operator authorising a first live run is authorising a
+    FOOTPRINT they may have to delete by hand.
+
+    The server therefore checks the budget against the plan it is about to
+    execute, not against the request alone: it must equal exactly the fan-out of
+    the one route the filters selected. And it must select exactly one.
+    """
+
+    def _account(self, *rows):
+        return _account(
+            rows or (_row_with_cycle(20003, 20011, 6, 100),),
+            {20003: (0, 0), 20011: (10, 0), 20019: (20, 0)},
+            {20003: "03", 20011: "11", 20019: "19"},
+        )
+
+    def _run(self, account, **kw):
+        kw.setdefault("canary", True)
+        kw.setdefault("only_origins", [20003])
+        kw.setdefault("only_destinations", [20011])
+        kw.setdefault("max_routes_per_run", 1)
+        kw.setdefault("disable_existing", False)
+        kw.setdefault("max_game_rows_per_run", 4)
+        return _run_live(_FakeLiveSvc(), account, **kw)
+
+    def test_the_matching_budget_runs(self):
+        res = self._run(self._account())
+
+        assert [a.status for a in res.actions] == ["created"], [a.detail for a in res.actions]
+        assert res.created_game_rows == 4, "a 6h cycle is four daily rows"
+
+    def test_a_budget_that_is_not_the_fan_out_is_refused(self):
+        with pytest.raises(HTTPException) as exc:
+            self._run(self._account(), max_game_rows_per_run=24)
+
+        assert exc.value.status_code == 422
+        assert "max_game_rows_per_run" in exc.value.detail
+        assert "4" in exc.value.detail
+
+    def test_an_unbounded_budget_is_refused(self):
+        with pytest.raises(HTTPException) as exc:
+            self._run(self._account(), max_game_rows_per_run=0)
+
+        assert exc.value.status_code == 422
+
+    def test_a_filter_selecting_no_route_is_refused(self):
+        with pytest.raises(HTTPException) as exc:
+            self._run(self._account(), only_destinations=[20019])
+
+        assert exc.value.status_code == 422
+        assert "exactly one" in exc.value.detail
+
+    def test_a_filter_selecting_two_routes_is_refused(self):
+        account = self._account(
+            _row_with_cycle(20003, 20011, 6, 100),
+            _row_with_cycle(20003, 20011, 12, 400),
+        )
+        with pytest.raises(HTTPException) as exc:
+            self._run(account)
+
+        assert exc.value.status_code == 422
+        assert "exactly one" in exc.value.detail
+
+    def test_nothing_reached_the_game_when_it_was_refused(self):
+        svc = _FakeLiveSvc()
+
+        async def _plan(_body):
+            return self._account()
+
+        with (
+            _patch(dist_module, "_plan_account", _plan),
+            _patch(dist_module.random, "shuffle", lambda seq: None),
+            pytest.raises(HTTPException),
+        ):
+            _execute(
+                _exec_body(
+                    dry_run=False,
+                    canary=True,
+                    only_origins=[20003],
+                    only_destinations=[20011],
+                    max_routes_per_run=1,
+                    disable_existing=False,
+                    max_game_rows_per_run=24,
+                ),
+                svc=svc,
+            )
+
+        assert svc.listed == [], "the refusal happens before the first marketplace read"
+        assert svc.created == []
+
+
+class TestTheCanaryRunIsFullyRecoverableFromItsTrace:
+    """The first live run is the one whose record has to be complete: nobody
+    yet knows what this account's marketplace does, and the trace is the only
+    evidence there will be.
+
+    So the run says it was a canary, says what mode was asked for and what the
+    server's own brake allowed, keeps the pre-write inventory in FULL (not a
+    projection of it), and keeps the page as it looked after the write.
+    """
+
+    def _run(self, svc):
+        return _run_live(
+            svc,
+            _account(
+                [_row_with_cycle(20003, 20011, 6, 100)],
+                {20003: (0, 0), 20011: (10, 0)},
+                {20003: "03", 20011: "11"},
+            ),
+            canary=True,
+            only_origins=[20003],
+            only_destinations=[20011],
+            max_routes_per_run=1,
+            disable_existing=False,
+            max_game_rows_per_run=4,
+        )
+
+    def _events(self, res, kind):
+        return [e for e in _trace_events(res.trace_path) if e["kind"] == kind]
+
+    def test_the_run_start_records_the_canary_and_the_brake(self):
+        res = self._run(_FakeLiveSvc())
+
+        (start,) = self._events(res, "run_start")
+        assert start["canary"] is True, start
+        assert start["execution_mode_requested"] == "live", start
+        assert start["execution_mode_resolved"] == "live", start
+        assert start["env_brake_open"] is True, start
+
+    def test_an_ordinary_run_records_the_flag_as_false(self):
+        res = _run_live(_FakeLiveSvc(), _two_origin_account(), max_routes_per_run=50)
+
+        (start,) = self._events(res, "run_start")
+        assert start["canary"] is False, start
+
+    def test_the_pre_write_inventory_is_the_whole_row(self):
+        svc = _FakeLiveSvc(existing={20003: _fanned(20044, 99, 98, cargo={Resource.CROP: 500})})
+
+        res = self._run(svc)
+
+        (read,) = self._events(res, "origin_read")
+        row = read["inventory"][0]
+        # The three the revert path already joined on...
+        assert {"route_id", "dest", "active"} <= set(row), row
+        # ...and the rest of the row, so "what was there before" is answerable
+        # without a second read that no longer shows the same page.
+        assert row["dispatch_minute"] == 100, row
+        assert row["cargo"] == {"crop": 500}, row
+        assert (row["dest_x"], row["dest_y"]) == (99, 98), row
+        assert row["visible"] is True, row
+
+    def test_the_page_after_the_write_is_kept_too(self):
+        res = self._run(_FakeLiveSvc())
+
+        (verified,) = self._events(res, "verified")
+        assert len(verified["rows"]) == 4, verified
+        assert {"route_id", "dispatch_minute", "cargo", "active"} <= set(verified["rows"][0])
+
+
 class TestCreatedMeansVerifiedNotAccepted:
     """`POST /trade-routes` answers 200 with an EMPTY body.
 
