@@ -645,8 +645,9 @@ export default function FarmLists() {
               />
             </div>
             <div className="w-[180px] shrink-0">
-              <label className="field-label">Village</label>
+              <label className="field-label" htmlFor="new-list-village">Village</label>
               <select
+                id="new-list-village"
                 className="input-field cursor-pointer"
                 value={newListVillage}
                 onChange={(e) => setNewListVillage(e.target.value)}
@@ -793,8 +794,9 @@ export default function FarmLists() {
             {/* Add Target form */}
             <div className="flex gap-2 items-end flex-wrap mb-4 p-3 bg-surface rounded-md border-default">
               <div className="w-20 shrink-0">
-                <label className="field-label">X</label>
+                <label className="field-label" htmlFor="target-x">X</label>
                 <input
+                  id="target-x"
                   className="input-field"
                   type="number"
                   value={targetX}
@@ -803,8 +805,9 @@ export default function FarmLists() {
                 />
               </div>
               <div className="w-20 shrink-0">
-                <label className="field-label">Y</label>
+                <label className="field-label" htmlFor="target-y">Y</label>
                 <input
+                  id="target-y"
                   className="input-field"
                   type="number"
                   value={targetY}
@@ -941,6 +944,7 @@ export default function FarmLists() {
                         <input
                           type="checkbox"
                           className="checkbox-gold"
+                          aria-label="Select all targets"
                           checked={selectedSlotIds.size > 0 && selectedSlotIds.size === filteredSortedSlots.length}
                           onChange={() => selectedSlotIds.size === filteredSortedSlots.length ? deselectAllSlots() : selectAllSlots()}
                         />
@@ -975,7 +979,13 @@ export default function FarmLists() {
                       return (
                         <tr key={slotId} className={`${selectedSlotIds.has(slotId) ? 'row-selected' : ''} ${inactive ? 'opacity-50' : ''}`}>
                           <td onClick={(e) => e.stopPropagation()}>
-                            <input type="checkbox" className="checkbox-gold" checked={selectedSlotIds.has(slotId)} onChange={() => toggleSlotSelection(slotId)} />
+                            <input
+                              type="checkbox"
+                              className="checkbox-gold"
+                              aria-label={`Select target (${slot.x}, ${slot.y})`}
+                              checked={selectedSlotIds.has(slotId)}
+                              onChange={() => toggleSlotSelection(slotId)}
+                            />
                           </td>
                           <td className="font-mono text-primary whitespace-nowrap"><MapCoord x={slot.x} y={slot.y} separator="," /></td>
                           <td className="text-primary">{slot.name ?? '---'}</td>
@@ -1018,7 +1028,12 @@ export default function FarmLists() {
                             })()}
                           </td>
                           <td className="text-center">
-                            <button className="btn-danger btn-xs" disabled={deletingTargetId === slotId} onClick={() => setDeleteTargetConfirm(slotId)}>
+                            <button
+                              className="btn-danger btn-xs"
+                              disabled={deletingTargetId === slotId}
+                              onClick={() => setDeleteTargetConfirm(slotId)}
+                              aria-label={`Delete target (${slot.x}, ${slot.y})`}
+                            >
                               {deletingTargetId === slotId ? '...' : 'Del'}
                             </button>
                           </td>
@@ -1079,8 +1094,9 @@ export default function FarmLists() {
           {/* Interval & duration */}
           <div className="flex gap-3 items-end flex-wrap mb-3">
             <div className="w-[140px] shrink-0">
-              <label className="field-label">Interval (seconds)</label>
+              <label className="field-label" htmlFor="loop-interval">Interval (seconds)</label>
               <input
+                id="loop-interval"
                 className="input-field"
                 type="number"
                 min="10"
@@ -1090,8 +1106,9 @@ export default function FarmLists() {
               />
             </div>
             <div className="w-[140px] shrink-0">
-              <label className="field-label">Duration (min, 0=forever)</label>
+              <label className="field-label" htmlFor="loop-duration">Duration (min, 0=forever)</label>
               <input
+                id="loop-duration"
                 className="input-field"
                 type="number"
                 min="0"
