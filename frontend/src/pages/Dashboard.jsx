@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, memo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import useGameStore from '../stores/gameStore'
-import VillageSelector from '../components/VillageSelector'
 import ResourceBar from '../components/ResourceBar'
 import FetchError from '../components/FetchError'
 
@@ -188,7 +187,12 @@ export default function Dashboard() {
     <div className="p-6 max-w-5xl mx-auto">
       <div className="flex justify-between items-center mb-5">
         <h2 className="heading-gold text-2xl">Dashboard</h2>
-        <VillageSelector />
+        {/* No <VillageSelector/> here. The page used to embed its own, which
+            duplicated the layout's -- same store action, same "Active village"
+            name, so two comboboxes with that exact name were visible at once at
+            every width. Same fix AutoScout took in 5a62dd1; the
+            sidebar/mobile-top-bar selector already covers every breakpoint (see
+            components/Layout.jsx). */}
       </div>
 
       <div className="flex flex-col gap-4">

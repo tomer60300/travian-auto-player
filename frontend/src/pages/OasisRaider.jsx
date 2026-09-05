@@ -1,7 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useResumableOperation } from '../hooks/useResumableOperation'
 import { useToast } from '../components/Toast'
-import VillageSelector from '../components/VillageSelector'
 import useGameStore from '../stores/gameStore'
 import { TRIBE_TROOPS } from '../constants/troops'
 
@@ -233,7 +232,12 @@ export default function OasisRaider() {
       <div className="flex justify-between items-center mb-5">
         <h2 className="heading-gold text-2xl">Oasis Raider</h2>
         <div className="flex items-center gap-3">
-          <VillageSelector />
+          {/* No <VillageSelector/> here. The page used to embed its own, which
+              duplicated the layout's -- same store action, same "Active village"
+              name, so two comboboxes with that exact name were visible at once at
+              every width. Same fix AutoScout took in 5a62dd1; the
+              sidebar/mobile-top-bar selector already covers every breakpoint (see
+              components/Layout.jsx). */}
           <span className={`status-dot ${st.dot}`} />
           <span className="text-sm text-secondary">{st.label}</span>
         </div>

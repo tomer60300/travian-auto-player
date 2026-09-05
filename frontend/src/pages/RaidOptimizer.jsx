@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import api from '../api'
-import VillageSelector from '../components/VillageSelector'
 import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
 import FetchError from '../components/FetchError'
@@ -505,7 +504,12 @@ export default function RaidOptimizer() {
             Teuton · Multi-Strategy Force Designer · K = 1.5 · Smithy-Aware
           </div>
         </div>
-        <VillageSelector />
+        {/* No <VillageSelector/> here. The page used to embed its own, which
+            duplicated the layout's -- same store action, same "Active village"
+            name, so two comboboxes with that exact name were visible at once at
+            every width. Same fix AutoScout took in 5a62dd1; the
+            sidebar/mobile-top-bar selector already covers every breakpoint (see
+            components/Layout.jsx). */}
       </div>
 
       {tribeMismatch && (

@@ -2,7 +2,6 @@ import { useEffect, useState, useRef, useCallback, memo } from 'react'
 import useGameStore from '../stores/gameStore'
 import { useToast } from '../components/Toast'
 import ConfirmDialog from '../components/ConfirmDialog'
-import VillageSelector from '../components/VillageSelector'
 import FetchError from '../components/FetchError'
 import api from '../api'
 
@@ -474,7 +473,12 @@ export default function Buildings() {
           >
             {exporting ? 'Exporting...' : 'Download Player Status'}
           </button>
-          <VillageSelector />
+          {/* No <VillageSelector/> here. The page used to embed its own, which
+              duplicated the layout's -- same store action, same "Active village"
+              name, so two comboboxes with that exact name were visible at once at
+              every width. Same fix AutoScout took in 5a62dd1; the
+              sidebar/mobile-top-bar selector already covers every breakpoint (see
+              components/Layout.jsx). */}
         </div>
       </div>
 

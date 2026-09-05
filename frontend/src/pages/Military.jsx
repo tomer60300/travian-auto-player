@@ -3,7 +3,6 @@ import api from '../api'
 import useGameStore from '../stores/gameStore'
 import { useToast } from '../components/Toast'
 import ConfirmDialog from '../components/ConfirmDialog'
-import VillageSelector from '../components/VillageSelector'
 import { TRIBE_TROOPS, DEFAULT_TROOPS } from '../constants/troops'
 
 export default function Military() {
@@ -166,7 +165,12 @@ export default function Military() {
     <div className="p-6">
       <div className="flex items-center justify-between mb-6 flex-wrap gap-4">
         <h2 className="heading-gold text-2xl">Military</h2>
-        <VillageSelector />
+        {/* No <VillageSelector/> here. The page used to embed its own, which
+            duplicated the layout's -- same store action, same "Active village"
+            name, so two comboboxes with that exact name were visible at once at
+            every width. Same fix AutoScout took in 5a62dd1; the
+            sidebar/mobile-top-bar selector already covers every breakpoint (see
+            components/Layout.jsx). */}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
