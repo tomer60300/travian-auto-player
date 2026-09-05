@@ -944,7 +944,17 @@ class RaidAnalyzerService:
         all_gql: Dict[str, Dict[str, Any]] = {}
         for i in range(0, len(scout_ids), BATCH):
             batch = scout_ids[i : i + BATCH]
-            meta = await self.reports_service.fetch_report_batch_metadata(batch)
+            try:
+                meta = await self.reports_service.fetch_report_batch_metadata(batch)
+            except Exception as e:
+                # Same shape as the village-metadata batch below: counted and
+                # named, rather than silently indistinguishable from a batch
+                # the game had no metadata for.
+                logger.warning("GQL report metadata batch failed: %s", e)
+                warnings.append(f"GQL report metadata batch failed for {len(batch)} report(s): {e}")
+                result.reports_fetched_fail += len(batch)
+                result.failed_report_ids.extend(batch)
+                continue
             all_gql.update(meta)
 
         coords_set: set[Tuple[int, int]] = set()

@@ -201,8 +201,14 @@ class ReportsService:
             return metadata
 
         except Exception as e:
-            logger.warning(f"Failed to fetch report metadata: {e}")
-            return {}
+            # NOT `return {}`: the caller cannot tell that apart from "the game
+            # named no metadata for these reports", so a village whose metadata
+            # could not be read was filtered as though it had none. Raising
+            # lets the analyzer count it and put it in the `warnings` list it
+            # already renders, the way its sibling village-metadata batch does.
+            raise ReportError(
+                f"Failed to fetch metadata for {len(report_ids[:250])} report(s): {e}"
+            ) from e
 
     async def fetch_alliance_reports(
         self,
