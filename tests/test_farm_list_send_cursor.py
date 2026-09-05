@@ -159,8 +159,16 @@ def test_a_half_failed_batch_advances_the_cursor_by_what_landed():
                             "targets": [
                                 {"id": slot_ids[0], "status": "sent"},
                                 {"id": slot_ids[1], "status": "sent"},
-                                {"id": slot_ids[2], "status": "error", "error": "Not enough troops"},
-                                {"id": slot_ids[3], "status": "error", "error": "Not enough troops"},
+                                {
+                                    "id": slot_ids[2],
+                                    "status": "error",
+                                    "error": "Not enough troops",
+                                },
+                                {
+                                    "id": slot_ids[3],
+                                    "status": "error",
+                                    "error": "Not enough troops",
+                                },
                             ]
                         }
                     ]
@@ -191,8 +199,12 @@ def test_a_batch_refused_for_mixed_reasons_is_not_troop_exhaustion():
         async def post_json(self, url, data=None, **kwargs):
             slot_ids = list(data["lists"][0]["targets"])
             self.sent_batches.append(slot_ids)
-            errors = ["Not enough troops", "captcha required",
-                      "captcha required", "captcha required"]
+            errors = [
+                "Not enough troops",
+                "captcha required",
+                "captcha required",
+                "captcha required",
+            ]
             return {
                 "lists": [
                     {
@@ -248,8 +260,7 @@ def test_send_all_stops_at_the_activity_ceiling():
     svc = FarmListService(client)
 
     lists = [
-        FarmList.model_validate({"id": i, "name": f"l{i}", "slots": []})
-        for i in (1, 2, 3, 4, 5)
+        FarmList.model_validate({"id": i, "name": f"l{i}", "slots": []}) for i in (1, 2, 3, 4, 5)
     ]
     sent: list[int] = []
 

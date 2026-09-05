@@ -8,10 +8,9 @@ worst targets at the top of the page, which is where the wave gets sent from.
 
 from types import SimpleNamespace
 
+from tests.test_raid_unsupported_defenders import _state
 from travian_api.models.raid_analyzer import AnalysisResult, AnalyzerSettings, RaidRecommendation
 from travian_api.services.raid_analyzer_service import RaidAnalyzerService
-
-from tests.test_raid_unsupported_defenders import _state
 
 
 def _analyzer():
