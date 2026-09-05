@@ -6888,6 +6888,13 @@ async def post_execute(
                     # then shows the route landed, the destination is supplied
                     # after all and the line has to go.
                     refused_replacements: dict[int, str] = {}
+                    # What the failure branch refunded to the row budget for
+                    # each attempted create, keyed by its action. A read-back
+                    # that finds the rows re-charges exactly this and not the
+                    # observed count: the budget is spent in rows that SURVIVE
+                    # the window trim, and the fan-out a create makes before the
+                    # trim is up to three times that.
+                    refunded_rows: dict[int, int] = {}
                     # Rows the window prune removed AND confirmed gone. Only
                     # these are discounted from the footprint: a prune whose own
                     # read-back failed proves nothing, and over-reporting the
@@ -7260,6 +7267,7 @@ async def post_execute(
                         failed_action = _action(row, route, "failed", result.detail)
                         actions.append(failed_action)
                         attempted_here.append((failed_action, route))
+                        refunded_rows[id(failed_action)] = would_add
                         if destination in replaceable:
                             # The reservation bought this destination a create;
                             # it did not buy it a route. Its diverging rows were
@@ -7774,8 +7782,11 @@ async def post_execute(
                                         failure_stopped_run = False
                                 # Charged now that the rows are known to exist.
                                 # The failure branch refunded them on the
-                                # assumption nothing had reached the game.
-                                rows_written += observed
+                                # assumption nothing had reached the game, and
+                                # this puts back exactly what it refunded --
+                                # `observed` is the PRE-trim fan-out, which is
+                                # not the unit the budget is spent in.
+                                rows_written += refunded_rows[id(action)]
                                 trace.event(
                                     "unanswered_create_landed",
                                     origin=origin,

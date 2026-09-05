@@ -3265,6 +3265,45 @@ class TestTheRowFootprintCanBeCappedNotJustTheRequestCount:
 
         assert len(svc.created) == 2, "no row budget means the old behaviour exactly"
 
+    def test_a_landed_dead_answer_is_charged_the_same_rows_it_refunded(self):
+        # The create path charges and refunds the POST-PRUNE surviving count; the
+        # read-back that rehabilitates a landed create re-charged the PRE-PRUNE
+        # fan-out. One hourly night route is 24 rows fanned out and 8 after the
+        # trim, so a dropped answer spent 24 of a 16-row budget on a route
+        # occupying 8 -- and deferred a whole second origin, silently.
+        account = _account(
+            [
+                _row_with_cycle(20003, -1, 1, 23 * 60),
+                _row_with_cycle(20011, -2, 1, 23 * 60),
+            ],
+            {20003: (0, 0), 20011: (10, 0), -1: (40, 40), -2: (50, 50)},
+            {20003: "03", 20011: "11", -1: "A", -2: "B"},
+        )
+
+        class _FirstAnswerDies(_FakeLiveSvc):
+            async def create_route(self, route, *, stop_check=None):
+                result = await super().create_route(route, stop_check=stop_check)
+                if len(self.created) == 1:
+                    return SimpleNamespace(status="failed", detail="answer lost (test)")
+                return result
+
+        svc = _FirstAnswerDies()
+        res = _run_live(
+            svc,
+            account,
+            max_routes_per_run=50,
+            max_game_rows_per_run=16,
+            dispatch_window=[23 * 60, 7 * 60],
+            prune_to_window=True,
+        )
+
+        assert {r.origin_village_id for r in svc.created} == {20003, 20011}, (
+            "8 surviving rows each fit exactly in 16; the second origin was "
+            "deferred against rows the trim had already removed"
+        )
+        assert res.created == 2
+        assert res.live_game_rows == 16
+
 
 class TestTheRowFootprintIsReportedAfterTheTrim:
     """`created_game_rows` measures a state the same run destroys.
