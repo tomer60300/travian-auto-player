@@ -72,6 +72,40 @@ class TestTaxonomy:
             seen[key] = category
 
 
+class TestTheLatencyActionNamesSomethingReachable:
+    """Raising the latency target stopped being an action the operator has.
+
+    The page sends no `max_latency_hours` on any path (docs/25 4.19): the
+    backend's standing default applies, clamped by whichever profile's hours are
+    running. The group action is the ONE line a collapsed group shows, and 23 of
+    132 warnings on the account that motivated this structure were latency ones
+    -- so that line pointing at a control nobody has is the whole group saying
+    nothing.
+    """
+
+    ACTION = _SPECS[Category.LATENCY].action
+
+    def test_it_no_longer_points_at_a_control_the_page_does_not_have(self):
+        assert "raise the latency target" not in self.ACTION.lower()
+
+    def test_it_names_what_tightened_the_target_and_where_to_read_the_figure(self):
+        assert "window" in self.ACTION
+        # The exact clamped value the plan was built with, so the operator can
+        # see whether the window bound it rather than infer it from the prose.
+        assert "latency_target_hours" in self.ACTION
+
+    def test_it_names_the_one_way_the_target_can_still_be_set(self):
+        # Not on the page, but an API caller can still say so on the request.
+        assert "max_latency_hours" in self.ACTION
+
+    def test_the_standing_figure_it_names_is_the_request_default(self):
+        """Prose naming a number drifts the moment the number moves."""
+        from travian_api.web.routes.distribution import PlanRequest
+
+        default = PlanRequest.model_fields["max_latency_hours"].default
+        assert f"{default:.0f}h" in self.ACTION
+
+
 class TestAggregation:
     def test_seventeen_villages_losing_the_same_amount_are_one_finding(self):
         """The exact shape of the complaint: 17 lines, one idea.

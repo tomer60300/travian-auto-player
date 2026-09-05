@@ -429,10 +429,18 @@ _SPECS: Mapping[Category, _Spec] = {
         severity=Severity.WARNING,
         subject="route",
         headline="{count} {subject} miss the latency target",
+        # NOT "raise the latency target": the page has no such control on any
+        # path, so the one line a collapsed group shows pointed at a box that
+        # does not exist. What binds is the planner's own default, tightened by
+        # whichever profile's hours are running -- so say that, and say where
+        # the figure that actually bound this plan is reported.
         action=(
             "Geometry or the merchant budget may forbid better -- this is a soft target, "
-            "not a failure. Add merchants at the origin, raise the latency target, or "
-            "accept it."
+            "not a failure. The target is the planner's standing 2h default, tightened to "
+            "the profile's own hours whenever its window is shorter; the plan reports what "
+            "bound it as `latency_target_hours`. There is no control for it on the page, "
+            "though a caller can set `max_latency_hours` on the request. Add merchants at "
+            "the origin -- a shorter cycle is what buys the latency -- or accept it."
         ),
     ),
     Category.ARRIVAL_GAP: _Spec(
