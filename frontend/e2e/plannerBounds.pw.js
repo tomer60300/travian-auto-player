@@ -10,9 +10,10 @@
  * Browser-confirmed before any of this went in: typing 21 into a Trade Office
  * box posted `trade_office_level: 21` with `aria-invalid = null`.
  *
- * Seven boxes, each on the button it actually reaches:
+ * Eight boxes, each on the button it actually reaches:
  *
  *   * Trade Office level ......... Build plan
+ *   * Merchant base capacity ..... Build plan, and both Save writers
  *   * Crop stock alert ........... Run the full day
  *   * Foreign-target margin % .... Build plan
  *   * Emptied to % / Full to % ... Derive from stores
@@ -131,6 +132,40 @@ test.describe('a figure past the bound is marked and not sent', () => {
     await openAccount(page, WINDOWS)
 
     const cell = await type(page, 'Trade Office level for 11', 20)
+    await expect(cell).not.toHaveAttribute('aria-invalid', 'true')
+
+    await buildAndOpenPlan(page)
+    expect(calls.plan).toBe(1)
+  })
+
+  // The one the merchant row itself missed. `merchant_base_capacity` is an
+  // `int` on every request that carries it, and this predicate was the only
+  // integer lever's that did not say `Number.isInteger` -- so a fractional
+  // calibration was marked nowhere, posted verbatim, and SAVED, leaving a
+  // document `parseSetup` read back happily and every later plan refused over.
+  test('a fractional merchant base capacity', async ({ page }) => {
+    const calls = await countCalls(page)
+    await openAccount(page, WINDOWS)
+
+    const cell = await type(page, 'Merchant base capacity', 2500.5)
+    await expect(cell).toHaveAttribute('aria-invalid', 'true')
+    await expect(page.getByText('a whole number of units, more than 0')).toBeVisible()
+
+    // The two writers that would have put it on disk and in the store, held
+    // back by the same list.
+    await expect(page.getByRole('button', { name: 'Save setup to server' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Save setup to file' })).toBeDisabled()
+
+    await page.getByRole('button', { name: /^Build plan/ }).click()
+    await expect(page.getByText(/Base capacity — a whole number of units/)).toBeVisible()
+    expect(calls.plan).toBe(0)
+  })
+
+  test('a whole calibration is left alone', async ({ page }) => {
+    const calls = await countCalls(page)
+    await openAccount(page, WINDOWS)
+
+    const cell = await type(page, 'Merchant base capacity', 3200)
     await expect(cell).not.toHaveAttribute('aria-invalid', 'true')
 
     await buildAndOpenPlan(page)

@@ -483,9 +483,20 @@ export function declaresConsumption(spent) {
  * predicate rather than a second copy of it.
  */
 
-/** A merchant's cargo, in units. Positive: a capacity of 0 carries nothing. */
+/** A merchant's cargo, in units. A WHOLE number, more than 0: a capacity of 0
+ *  carries nothing, and half a unit is not a cargo the game can ship.
+ *
+ *  Backend twin: `PlanRequest.merchant_base_capacity` in
+ *  `src/travian_api/web/routes/distribution.py` (`int`, `gt=0`), and
+ *  `MerchantModelIn.base_capacity` (`int | None`) beside it. Integer, and this
+ *  predicate alone did not say so while every other integer lever's did --
+ *  `isMerchantReserve`, `isMapSpan`, `isTradeOfficeLevel`, `isMaxBusyMerchants`.
+ *  So 2500.5 left the box unmarked, posted verbatim, and came back a 422 over
+ *  the one figure that sizes every cargo the account ships; Save wrote it too,
+ *  and this parser read it back in, so every later plan and save was refused
+ *  over a number nothing on screen names. */
 export function isMerchantBaseCapacity(value) {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
 }
 
 /** Extra cargo per Trade Office level, as a fraction. 0 is a real answer -- a
@@ -543,7 +554,7 @@ export function merchantModelProblems(model) {
     if (raw == null || raw === '') return
     if (!ok(Number(raw))) out[field] = rule
   }
-  check('base_capacity', isMerchantBaseCapacity, 'more than 0')
+  check('base_capacity', isMerchantBaseCapacity, 'a whole number of units, more than 0')
   check('bonus_per_to_level', isTradeOfficeBonus, '0 or more')
   check(
     'merchant_reserve',
@@ -2215,7 +2226,9 @@ export function parseSetup(text) {
     if (m?.base_capacity != null) {
       base = Number(m.base_capacity)
       if (!isMerchantBaseCapacity(base)) {
-        throw new SetupFileError('merchant_model.base_capacity must be a positive number.')
+        throw new SetupFileError(
+          'merchant_model.base_capacity must be a whole number of units, more than 0.'
+        )
       }
     }
     if (m?.bonus_per_to_level != null) {

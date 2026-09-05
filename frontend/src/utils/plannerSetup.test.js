@@ -22,6 +22,7 @@ import {
   isConsumptionRate,
   isEmptyTemplate,
   isMaxBusyMerchants,
+  isMerchantBaseCapacity,
   isStockFloorFraction,
   materialSpendOnly,
   mergeSetup,
@@ -312,7 +313,7 @@ describe('profiles in the setup file', () => {
   it('rejects a merchant model that would divide by nothing', () => {
     const doc = buildSetup({ villages: VILLAGES, exportedAt: STAMP })
     doc.merchant_model = { base_capacity: 0, bonus_per_to_level: 0.2 }
-    expect(() => roundTrip(doc)).toThrow(/positive number/)
+    expect(() => roundTrip(doc)).toThrow(/whole number of units/)
   })
 })
 
@@ -2675,6 +2676,31 @@ describe('the merchant cap in the setup file', () => {
   })
 })
 
+// Every other integer-typed lever's predicate says `Number.isInteger` and this
+// one did not, on the single figure that sizes every cargo the account ships.
+// Backend twin: `PlanRequest.merchant_base_capacity` (`int`, `gt=0`) and
+// `MerchantModelIn.base_capacity` (`int | None`) in
+// src/travian_api/web/routes/distribution.py.
+describe('isMerchantBaseCapacity', () => {
+  it('takes a whole number of units, more than 0', () => {
+    for (const value of [1, 750, 2500, 3200]) {
+      expect(isMerchantBaseCapacity(value), String(value)).toBe(true)
+    }
+  })
+
+  it('refuses a fraction, which the request would 422 over', () => {
+    for (const value of [2500.5, 0.5, -0.5]) {
+      expect(isMerchantBaseCapacity(value), String(value)).toBe(false)
+    }
+  })
+
+  it('refuses 0, a negative, and anything that is not a number', () => {
+    for (const value of [0, -1, NaN, Infinity, '2500', null, undefined]) {
+      expect(isMerchantBaseCapacity(value), String(value)).toBe(false)
+    }
+  })
+})
+
 describe('isMaxBusyMerchants', () => {
   it('accepts every whole count a village can actually field', () => {
     for (const value of [0, 1, 8, 19, 20]) expect(isMaxBusyMerchants(value)).toBe(true)
@@ -2940,6 +2966,18 @@ describe('the account-wide merchant levers in the setup file', () => {
     // Absent is blank; 0 is a claim, and it is one the backend's `gt=0` refuses.
     const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
     doc.merchant_model = { base_capacity: 0, bonus_per_to_level: 0.2 }
+
+    expect(() => roundTrip(doc)).toThrow(/base_capacity/)
+  })
+
+  // The one the reader ACCEPTED. `merchant_base_capacity` is an `int` on the
+  // request, so a fractional capacity is a 422 -- and this parser let the file
+  // in, which is the worst place to be lenient: the document loads, no cell is
+  // marked, and every plan and every save from then on is refused over a figure
+  // nothing on screen names.
+  it('refuses a fractional base capacity, which the request is an int', () => {
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.merchant_model = { base_capacity: 2500.5, bonus_per_to_level: 0.2 }
 
     expect(() => roundTrip(doc)).toThrow(/base_capacity/)
   })

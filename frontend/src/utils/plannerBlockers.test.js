@@ -162,6 +162,29 @@ describe('planBlockers', () => {
     expect(planBlockers({ villages: VILLAGES, merchantModel: { map_span: 401 } })).toEqual([])
   })
 
+  // The lever this gate never marked: `merchant_base_capacity` is an `int` on
+  // the request, so 2500.5 posted, 422'd, and no cell said a word -- while Save
+  // and Export wrote a document `parseSetup` then loaded happily, so every later
+  // plan and save was refused over a figure nothing on screen names.
+  it('refuses a fractional base capacity, which the request is an int', () => {
+    const blockers = planBlockers({
+      villages: VILLAGES,
+      merchantModel: { base_capacity: 2500.5 },
+    })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({
+      field: 'Base capacity',
+      rule: 'a whole number of units, more than 0',
+      focusLabel: MERCHANT_MODEL_LABELS.base_capacity,
+    })
+  })
+
+  it('accepts the whole capacity a calibration actually produces', () => {
+    expect(
+      planBlockers({ villages: VILLAGES, merchantModel: { base_capacity: 3200 } })
+    ).toEqual([])
+  })
+
   it('refuses a merchant reserve the file parser would refuse, at the same bound', () => {
     const blockers = planBlockers({
       villages: VILLAGES,
