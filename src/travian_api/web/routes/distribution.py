@@ -6904,6 +6904,14 @@ async def post_execute(
     deferred: list[tuple[SheetRow, PlannedRoute]] = []
     gold_club_blocked = False  # account-level: no route can be created at all
     stopped_early = False  # captcha resolved, budget exhausted, or a read failed
+    # The label of the first village whose settlement could not decide what the
+    # marketplace holds -- two reads that disagreed, or rows that could not be
+    # attributed. NOT a refusal (the streak rightly ignores an indeterminate),
+    # but a fact about the boundary every later verdict and write goes through:
+    # once the page has stopped telling the truth about its own state, creating
+    # routes in the NEXT village is writing blind. Trips the circuit breaker at
+    # the top of the origin loop.
+    marketplace_state_uncertain: str | None = None
 
     # Register the run so the session-lifecycle guards see it: disconnect/
     # reconnect consults ActiveOpRegistry and will not close this HttpClient
@@ -6956,6 +6964,18 @@ async def post_execute(
                     budget_spent = bool(origin_cap) and visited >= origin_cap
                 else:
                     budget_spent = attempts >= cap or visited >= cap
+                if marketplace_state_uncertain is not None and not stopped_early:
+                    # The circuit breaker, tripped by the PREVIOUS village. It
+                    # is checked here rather than at the settlement that set it
+                    # because the failure-streak settlement runs in between and
+                    # can legitimately clear `stopped_early`; a breaker folded
+                    # into that flag any earlier would be lifted with it.
+                    stopped_early = True
+                    problems.append(
+                        f"marketplace reads disagreed at {marketplace_state_uncertain}; no "
+                        f"further villages were written to — re-run once the marketplace "
+                        f"is quiet"
+                    )
                 if stopped_early or gold_club_blocked or budget_spent:
                     if sweep_all:
                         # Not reconciled, so it must be named. Includes the runs
@@ -9095,6 +9115,22 @@ async def post_execute(
                                     f"{action.destination_name}: the game accepted the "
                                     f"create but no route appeared. Nothing was created "
                                     f"here; do not assume otherwise."
+                                )
+
+                            if marketplace_state_uncertain is None and any(
+                                a.status == "indeterminate"
+                                for a, _ in [*created_here, *attempted_here]
+                            ):
+                                # Settlement could not say what this marketplace
+                                # holds -- either the two reads disagreed or the
+                                # rows here could not be attributed. Both mean
+                                # the same thing for the REST of the run.
+                                marketplace_state_uncertain = village_label(origin, names)
+                                trace.event(
+                                    "marketplace_state_uncertain",
+                                    origin=origin,
+                                    stable_read_back=stable_read_back,
+                                    unattributable=sorted(str(k) for k in _ambiguous_keys),
                                 )
 
                             # ── Put back what the rebuild failed to replace ──

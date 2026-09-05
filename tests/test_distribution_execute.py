@@ -2475,6 +2475,131 @@ class TestAbsenceIsNeverFinalisedFromAnUnstablePair:
         assert any("19" in p and "could not be settled" in p for p in res.problems), res.problems
 
 
+def _four_origin_account():
+    """Four origins in insertion order [20003, 20011, 20019, 20021].
+
+    The third carries TWO routes, so one of them can land while the other's
+    answer dies -- which is what an unsettled page needs in order to produce an
+    indeterminate rather than a plain absence.
+    """
+    return _account(
+        [
+            _row_with_cycle(20003, 20051, 6, 100),
+            _row_with_cycle(20011, 20052, 6, 200),
+            _row_with_cycle(20019, 20053, 6, 300),
+            _row_with_cycle(20019, 20054, 6, 400),
+            _row_with_cycle(20021, 20055, 6, 500),
+        ],
+        {
+            20003: (0, 0),
+            20011: (10, 0),
+            20019: (20, 0),
+            20021: (30, 0),
+            20051: (0, 10),
+            20052: (10, 10),
+            20053: (20, 10),
+            20054: (20, 20),
+            20055: (30, 10),
+        },
+        {
+            20003: "03",
+            20011: "11",
+            20019: "19",
+            20021: "21",
+            20051: "51",
+            20052: "52",
+            20053: "53",
+            20054: "54",
+            20055: "55",
+        },
+    )
+
+
+class _UnsettledAtOneOrigin(_AnswerDies):
+    """Exactly ONE marketplace lags its writes; every other page is steady.
+
+    `_UnsettledPage` makes the FIRST read of the run short, whichever village it
+    belongs to. The circuit breaker is about what happens to the villages AFTER
+    the unreliable one, so the instability has to be aimed.
+    """
+
+    def __init__(self, unstable, **kw):
+        super().__init__(**kw)
+        self._unstable = unstable
+        self._reads_here = 0
+
+    async def confirm_routes(self, vid, *, map_span=None):
+        rows = await super().confirm_routes(vid, map_span=map_span)
+        if vid != self._unstable:
+            return rows
+        self._reads_here += 1
+        if self._reads_here == 1:
+            return rows[:-1]
+        return rows
+
+
+class TestAnUnreliableMarketplaceStopsTheRunWritingToOtherVillages:
+    """`indeterminate` is not a refusal, so the streak rightly ignores it -- and
+    that left the run free to carry on WRITING to every remaining village after
+    the marketplace had demonstrably stopped telling the truth about its state.
+
+    Two reads disagreeing is not a fact about one destination. It is a fact
+    about the boundary this whole run reads and writes through: every verdict
+    after it -- what exists, what landed, what may be deleted -- rests on a page
+    that would not hold still. Creating more routes on top of that is writing
+    blind, and each one is a row a later run has to reconcile.
+
+    So an indeterminate settlement is a circuit breaker: the current village is
+    finished (its own restore is guarded separately), and no further village is
+    written to. Independent of the refusal streak, which counts something else.
+    """
+
+    def _run(self, svc):
+        return _run_live(
+            svc, _four_origin_account(), max_routes_per_run=50, max_game_rows_per_run=0
+        )
+
+    def test_the_village_after_an_indeterminate_one_is_never_visited(self):
+        svc = _UnsettledAtOneOrigin(20019, dead={20054})
+        res = self._run(svc)
+
+        by_dest = {a.destination: a for a in res.actions}
+        assert by_dest[20054].status == "indeterminate", by_dest[20054].detail
+        assert 20021 not in svc.listed, (
+            "the marketplace after an unsettled one must not even be read"
+        )
+        assert 20055 not in {r.dest_village_id for r in svc.created}
+        assert by_dest[20055].status == "deferred", by_dest[20055].detail
+
+    def test_the_response_says_why_it_stopped(self):
+        svc = _UnsettledAtOneOrigin(20019, dead={20054})
+        res = self._run(svc)
+
+        assert any(
+            "marketplace reads disagreed at 19" in p and "no further villages were written to" in p
+            for p in res.problems
+        ), res.problems
+
+    def test_a_steady_account_visits_every_village(self):
+        """The control: with no indeterminate settlement nothing is stopped."""
+        svc = _FakeLiveSvc()
+        res = self._run(svc)
+
+        assert svc.listed == [20003, 20011, 20019, 20021], svc.listed
+        assert not any("marketplace reads disagreed" in p for p in res.problems), res.problems
+        assert [a.status for a in res.actions] == ["created"] * 5, [a.status for a in res.actions]
+
+    def test_a_run_of_plain_refusals_still_stops_by_the_streak(self):
+        """The breaker is independent of the refusal ledger and does not replace
+        it: refusals on a page that reads back consistently still trip the
+        consecutive-failure stop, in the streak's own words."""
+        svc = _AnswerDies(dead={20051, 20052, 20053, 20054, 20055})
+        res = self._run(svc)
+
+        assert any("in a row" in p for p in res.problems), res.problems
+        assert not any("marketplace reads disagreed" in p for p in res.problems), res.problems
+
+
 class TestThePlanCannotEmitTwoRoutesTheReadBackCannotTellApart:
     """The invariant the whole attribution rests on, stated and checked.
 
