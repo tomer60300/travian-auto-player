@@ -836,6 +836,21 @@ class PlanRequest(BaseModel):
     trade_office_bonus_per_level: float = Field(
         default=EUROPE2_TEUTON.bonus_per_trade_office_level, ge=0
     )
+    merchant_model_measured: bool = Field(
+        default=False,
+        description=(
+            "The operator has MEASURED the two figures above against the game, "
+            "not merely accepted the defaults. MERCHANT_MODEL_UNCALIBRATED fires "
+            "whenever `trade_office_bonus_per_level` still equals the shipped "
+            "0.20 and any village has a Trade Office -- which is the right "
+            "warning for an untouched account and unanswerable for one whose "
+            "operator read a Marketplace capacity at two levels and found 0.20 "
+            "to be correct: agreeing with the default is indistinguishable from "
+            "never having looked. This is the operator saying they looked. It "
+            "silences that one finding and nothing else -- every bound, every "
+            "budget and every other finding is unchanged."
+        ),
+    )
     merchant_reserve: int = Field(
         default=DEFAULT_MERCHANT_RESERVE,
         ge=0,
@@ -4816,7 +4831,14 @@ async def _plan_account(
     # Names the TO 0 villages because that is the reading that closes it:
     # capacity at level 0 is the base with no inversion, which is the sample
     # `calibrate` prefers, and any second level then pins the bonus.
-    if body.trade_office_bonus_per_level == EUROPE2_TEUTON.bonus_per_trade_office_level:
+    # ...unless the operator says they measured it and it really is 0.20. The
+    # test "still equal to the shipped default" cannot tell a measured 0.20 from
+    # an untouched one, so without an acknowledgement this finding can never be
+    # cleared by doing the very thing it asks for.
+    if (
+        not body.merchant_model_measured
+        and body.trade_office_bonus_per_level == EUROPE2_TEUTON.bonus_per_trade_office_level
+    ):
         levelled = sorted(vid for vid, level in trade_office.items() if level > 0)
         if levelled:
             # Only villages the operator actually SENT a row for. A village

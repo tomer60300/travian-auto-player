@@ -378,19 +378,48 @@ class TestABlankMerchantLeverMeansThePlannersOwn:
 
 class TestTheVersion:
     def test_a_newer_version_says_so(self, client, account):
-        # 11, not 10: v10 became readable when `prune_to_window` started
+        # 12, not 11: v11 became readable when `merchant_model_measured` started
         # travelling in the document. This case needs a version that is
         # guaranteed to be beyond this build, so it moves whenever
         # READABLE_VERSIONS grows -- and the parametrised case below is what
         # would fail if the two ever disagreed.
-        res = _put(client, account, _minimal(account, version=11))
+        res = _put(client, account, _minimal(account, version=12))
 
         assert res.status_code == 422, res.text
         assert "NEWER build" in res.text
 
-    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    @pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
     def test_every_readable_version_is_accepted(self, client, account, version):
         assert _put(client, account, _minimal(account, version=version)).status_code == 200
+
+    def test_the_measured_merchant_model_round_trips(self, client, account):
+        # It records work done IN THE GAME that the game does not record: a
+        # measured +20%/level is indistinguishable from an untouched one, so
+        # nothing here could re-derive it. Dropped, MERCHANT_MODEL_UNCALIBRATED
+        # returns on every plan and the operator is asked again for a reading
+        # they have already taken.
+        doc = _minimal(account, version=11, merchant_model_measured=True)
+        assert _put(client, account, doc).status_code == 200, doc
+
+        assert _get(client, account).json()["setup"]["merchant_model_measured"] is True
+
+    def test_the_measured_answer_is_not_coerced_from_a_string(self, client, account):
+        # `StrictBool`, like every other owned answer: pydantic's lax bool reads
+        # "yes" as True, and a value nobody typed as a boolean must not silence
+        # a finding about the figure that sizes every cargo.
+        doc = _minimal(account, version=11, merchant_model_measured="yes")
+
+        res = _put(client, account, doc)
+
+        assert res.status_code == 422, res.text
+        assert "merchant_model_measured" in res.text, res.text
+
+    def test_a_document_that_never_says_it_plans_as_unmeasured(self, client, account):
+        from travian_api.web.routes.planner_setup import SetupDocument, _as_plan_request
+
+        doc = SetupDocument.model_validate(_minimal(account))
+
+        assert _as_plan_request(doc).merchant_model_measured is False
 
     def test_the_prune_answer_round_trips(self, client, account):
         # It decides whether /execute DELETES game rows, and it was carried by
@@ -820,9 +849,9 @@ class TestWhatThePlannerWouldRefuse:
         doc = _realistic(account)
         assert _put(client, account, doc).status_code == 200
 
-        # 11 for the same reason as TestTheVersion's: v10 is readable now, so a
+        # 12 for the same reason as TestTheVersion's: v11 is readable now, so a
         # refusal has to be asked for with a version beyond this build.
-        assert _put(client, account, _minimal(account, version=11)).status_code == 422
+        assert _put(client, account, _minimal(account, version=12)).status_code == 422
 
         assert _get(client, account).json()["setup"] == doc
 

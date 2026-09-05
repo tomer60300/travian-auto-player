@@ -1535,7 +1535,7 @@ class TestTheMerchantModelSaysWhenItIsUnpinned:
     villages in the snapshot, which is the one reading that would close it.
     """
 
-    def _plan(self, *, levels, bonus=None):
+    def _plan(self, *, levels, bonus=None, measured=None):
         payload = {
             "snapshot": [
                 {
@@ -1564,6 +1564,8 @@ class TestTheMerchantModelSaysWhenItIsUnpinned:
         }
         if bonus is not None:
             payload["trade_office_bonus_per_level"] = bonus
+        if measured is not None:
+            payload["merchant_model_measured"] = measured
         return asyncio.run(post_plan(PlanRequest.model_validate(payload)))
 
     def test_a_trade_office_village_on_the_default_bonus_is_flagged(self):
@@ -1613,6 +1615,39 @@ class TestTheMerchantModelSaysWhenItIsUnpinned:
         res = self._plan(levels={20003: 13, 20026: 0}, bonus=0.175)
 
         assert not _findings(res, "merchant_model_uncalibrated")
+
+    def test_an_operator_who_measured_and_got_the_default_can_clear_it(self):
+        """The one reading the finding cannot see. The test it makes is "still
+        equal to the shipped 0.20", which a MEASURED 0.20 also satisfies -- so
+        an operator who read a Marketplace capacity at two levels, found the
+        default right, and typed it back got the same warning for ever, asking
+        them to do the thing they had just done."""
+        res = self._plan(levels={20003: 13, 20026: 0}, measured=True)
+
+        assert not _findings(res, "merchant_model_uncalibrated")
+
+    def test_saying_nothing_still_leaves_it_flagged(self):
+        # The default is False: an untouched account must keep the warning, or
+        # the acknowledgement would silence it for everyone who never looked.
+        assert PlanRequest.model_fields["merchant_model_measured"].default is False
+        res = self._plan(levels={20003: 13, 20026: 0}, measured=False)
+
+        assert _findings(res, "merchant_model_uncalibrated")
+
+    def test_it_silences_that_finding_and_no_other(self):
+        # An acknowledgement about the merchant model must not quieten anything
+        # else the plan found.
+        acknowledged = self._plan(levels={20003: 13, 20026: 0}, measured=True)
+        plain = self._plan(levels={20003: 13, 20026: 0})
+
+        def _others(res):
+            return sorted(
+                g.category
+                for g in res.diagnostics.groups
+                if g.category != "merchant_model_uncalibrated"
+            )
+
+        assert _others(acknowledged) == _others(plain)
 
 
 class TestConsumptionProfiles:
