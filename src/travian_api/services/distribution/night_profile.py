@@ -31,6 +31,7 @@ Pure: no requests, no clock, no I/O. Everything it needs is passed in.
 
 from __future__ import annotations
 
+import heapq
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -227,6 +228,93 @@ def _hours(a: NightVillage, b: NightVillage, geometry: MapGeometry) -> float:
     uses, rather than by a second implementation of the same wrap here.
     """
     return geometry.one_way_minutes((a.x, a.y), (b.x, b.y)) / 60.0
+
+
+def merchants_needed(
+    legs: Sequence[tuple[int, float]],
+    send: float,
+    *,
+    capacity: int,
+    window_hours: float,
+) -> int:
+    """Merchants a send of `send` per hour costs, under the optimizer's own
+    model: one POOL of whole merchants per destination.
+
+    `legs` is ``(complete round trips, share of the cargo)`` per destination.
+    That is what `merchants.py` charges a route -- ``ceil(batch / capacity) *
+    sets_in_flight`` per destination, summed -- so the night bound has to be
+    charged the same way, or the profile promises sends the planner will refuse
+    to build. Destination `i` receives ``send * share_i`` an hour, i.e.
+    ``send * share_i * window_hours`` over the night, and one merchant dedicated
+    to it delivers `capacity` on each of its `trips` -- so it needs the `ceil` of
+    the ratio, because a fraction of a merchant does not exist.
+    """
+    return sum(math.ceil(send * share * window_hours / (capacity * trips)) for trips, share in legs)
+
+
+def partitioned_fleet_limit(
+    legs: Sequence[tuple[int, float]],
+    *,
+    fleet: int,
+    capacity: int,
+    window_hours: float,
+) -> float:
+    """The largest per-hour send `fleet` merchants can actually make over `legs`.
+
+    The fleet is PARTITIONED: a merchant serves one destination for the night,
+    because `merchants.py` charges every route its own whole merchants and the
+    planner will not build anything else. So this is the largest `send` with
+
+        m_i = ceil(send * share_i * window_hours / (capacity * trips_i))
+        sum(m_i) <= fleet
+
+    -- exactly `merchants_needed` above, which is the predicate the answer is
+    re-checked against.
+
+    Solved exactly, not approximated. Every destination taking cargo needs at
+    least one merchant, so a fleet smaller than the destination count sheds
+    nothing at all; otherwise start at one merchant each and repeatedly give the
+    next merchant to the destination currently holding the send down. That IS
+    the optimum. Writing ``u_i = capacity * trips_i / (share_i * window_hours)``
+    for what one merchant dedicated to `i` sustains, the send an allocation
+    supports is ``min_i m_i * u_i``, and each `m_i` was last raised while `i` was
+    the binding destination, so ``(m_i - 1) * u_i`` was the send at that moment
+    and the send never falls. Any `x` above the final `min` therefore has
+    ``x > (m_i - 1) * u_i`` at every destination and ``x > m_j * u_j`` at the
+    binding one, so it needs at least ``sum(m_i) + 1`` merchants: nothing above
+    the answer fits, which is what exactness means here.
+
+    Zero-share destinations must not be passed in. They take no cargo, so they
+    need no merchant -- but they still weigh in the demand shares upstream, and
+    charging them a merchant here would be an invented cost.
+    """
+    if not legs or len(legs) > fleet:
+        # Nowhere to put the cargo, or not enough merchants to give every
+        # destination the one it must have. Either way nothing is shippable --
+        # and no `max(1, ...)` anywhere here: a destination whose round trip does
+        # not fit the window contributes `trips = 0` and is dropped upstream,
+        # because crediting it one trip promises cargo that would still be in the
+        # air at 07:00, which section 6 forbids outright.
+        return 0.0
+    units = [capacity * trips / (share * window_hours) for trips, share in legs]
+    pool = [(unit, 1, unit) for unit in units]
+    heapq.heapify(pool)
+    for _ in range(fleet - len(legs)):
+        _, merchants, unit = heapq.heappop(pool)
+        heapq.heappush(pool, ((merchants + 1) * unit, merchants + 1, unit))
+    limit = pool[0][0]
+    # `limit` and `merchants_needed` reach the same quantity by different
+    # arithmetic, so the ceiling can land one ulp high and reject the very send
+    # the allocation was built to make. Step down to the last float the predicate
+    # accepts -- a handful of ulps in practice, and it can only ever LOWER the
+    # bound, which is the safe direction (operator ruling section 1:
+    # over-estimating is the dangerous one). It terminates: at 0.0 nothing is
+    # needed and nothing is over-promised.
+    while limit > 0.0 and (
+        merchants_needed(legs, limit, capacity=capacity, window_hours=window_hours) > fleet
+    ):
+        limit = math.nextafter(limit, 0.0)
+    return limit
 
 
 def derive_night_profile(
@@ -443,56 +531,29 @@ def derive_night_profile(
         how far it goes: a village one field from its neighbour turns round dozens
         of times, one an hour away twice.
 
-        Over SEVERAL destinations the distance is the DEMAND-WEIGHTED mean of
-        the hops, and the reduction is the whole finding here. This quantity's
-        only job is to be a ceiling, and `min` -- the nearest destination -- is
-        the optimistic end of the range, so it barely ever bound: a hub shedding
-        crop to a consumer 1 field away needing 100/h and one 40 fields away
-        needing 40,000/h was credited 48 turnarounds against the neighbour and
-        booked 53,000/h as shippable, 21x the 2,500/h that actually reaches the
-        destination needing it, with the whole 40,000/h deficit reading as
-        covered. Operator ruling section 1: over-estimating is the dangerous
-        direction.
+        Over SEVERAL destinations the fleet is PARTITIONED, and that is the whole
+        finding here. A merchant serves one destination for the night: it cannot
+        spend 0.6 of itself on the near consumer and 0.4 on the far ally. So the
+        bound is `partitioned_fleet_limit` -- the largest send whose
+        per-destination merchant demand fits the fleet.
 
-        Weighted rather than WORST-CASE, which was tried and is wrong in the
-        other direction. The far hop it picks is safe in the sense that any
-        split of the cargo is deliverable at it, but one unreachable
-        destination then zeroes the limit for every reachable one: an ally 60
-        fields off -- a 10h round trip in an 8h night, unpayable at any fleet
-        size -- left the hub unable to ship to the consumer 2 fields away, so
-        its 20,000/h deficit was reported unmet and the village starves while
-        the profile says "keep everything". That is the same harm as the hub
-        distance had, and measured: it fails
-        `test_a_tribute_is_taken_out_of_the_pool_not_added_to_it` (65,000
-        claimed against 40,000 without the tribute) and
-        `test_a_coverable_one_reports_nothing_outstanding` (21,000/h unmet on a
-        1,000/h obligation).
-
-        The weighted mean is merchant-hours conservation, which is what makes
-        it a model rather than a compromise: to ship `S` an hour split by
-        demand shares `w`, destination `i` costs `2 * S * w_i * hop_i /
-        capacity` merchant-hours an hour, so `S <= fleet * capacity / (2 *
-        sum(w_i * hop_i))` -- the same formula below with the mean hop in it.
-        It is never above the `min` bound (a weighted mean is at least the
-        minimum) and never below the worst-case one, and with one destination
-        it IS the single-destination formula, so nothing with one destination
-        moved.
-
-        Conservation is NECESSARY AND NOT SUFFICIENT, which is the second
-        reduction here. It lets merchant-time split fractionally across trips of
-        different lengths, and a merchant cannot make 0.6 of a trip: two
-        consumers needing 30,000/h each, one 2 fields away and one 30, conserve
-        merchant-hours exactly at 60,750/h -- while the far one needs 26.7 round
-        trips of 5h and eighteen merchants can make eighteen. 9,750/h of a
-        hammer's deficit read as covered. So every destination also carries its
-        own integral bound, `S <= fleet * capacity * floor(H / (2 * hop_i)) /
-        (w_i * H)`, and the limit is the smallest of all of them.
+        It replaces `min(merchant-hours conservation, per-destination
+        integrality)`, which over-promised because neither factor sees the
+        partition. Conservation lets merchant-time split fractionally across
+        destinations, and the integral bound asks each destination ALONE whether
+        the whole fleet could serve it; both pass sends no allocation can
+        actually make. Measured: one merchant carrying 2,500, an 8h night, a
+        destination an hour out claiming 3 and one three hours out claiming 1 --
+        shares 0.75/0.25, mean hop 1.5h, two turnarounds -- conserved 625/h,
+        5,000 over the night. Its 3,750 to the near one is two trips (4h) and its
+        1,250 to the far one is one trip (6h): ten merchant-hours out of eight,
+        from a fleet of one. Under the partition the two destinations need a
+        merchant each, and the answer is 0.
 
         A destination NO round trip reaches is dropped from the set rather than
-        allowed to zero the bound -- that is the `max` regression from the other
-        side, and it removes only its own claim: `_anyone_reaches` keeps it out
-        of the pooled demand, so it lands in `unmet` instead of being covered by
-        a sender that cannot get there.
+        allowed to zero the bound, and it removes only its own claim:
+        `_anyone_reaches` keeps it out of the pooled demand, so it lands in
+        `unmet` instead of being covered by a sender that cannot get there.
         """
         # Off the injected model, floored exactly as the plan side floors it --
         # understating capacity over-provisions merchants, overstating it
@@ -512,24 +573,17 @@ def derive_night_profile(
         # times fleet x capacity per hour. Worse, the operator's cap is applied
         # just above and then multiplied by that count -- so the "8 busy at 02"
         # ceiling this function exists to honour was negated inside it.
-        legs = _legs(v, resource)
-        if not legs:
-            # Nowhere for this resource to go -- the hub asked about its own
-            # materials, a crop sender on an account with no crop-negative
-            # village and no tribute, or every destination further than a night.
-            # Sheds nothing, which is the honest reading either way.
-            return 0.0
-        # No `max(1, ...)` on either bound. A village whose round trip does not
-        # fit the window sheds NOTHING: crediting it one trip promises cargo that
-        # would still be in the air at 07:00, which section 6 forbids outright.
-        conserved = fleet * capacity * _trips(_mean_hop(v, resource)) / window_hours
-        # And each destination's own share has to be a whole number of trips.
-        integral = min(
-            fleet * capacity * trips / (share * window_hours)
-            for _, trips, share in legs
-            if share > 0
+        # Zero-share destinations are dropped: they take no cargo and so need no
+        # merchant. They are here to be MEASURED against -- a hub that needs
+        # nothing is still where a forced sender's surplus goes -- not served.
+        legs = [(trips, share) for _, trips, share in _legs(v, resource) if share > 0]
+        # An empty set means nowhere for this resource to go: the hub asked about
+        # its own materials, a crop sender on an account with no crop-negative
+        # village and no tribute, or every destination further than a night.
+        # Sheds nothing, which is the honest reading either way.
+        return partitioned_fleet_limit(
+            legs, fleet=fleet, capacity=capacity, window_hours=window_hours
         )
-        return min(conserved, integral)
 
     def capped(v: NightVillage, resource: Resource) -> int:
         """Its ceiling, never asking for more export than it can ship."""

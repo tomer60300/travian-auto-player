@@ -689,7 +689,7 @@ twice. The figure is in every message instead.
 *Not to be confused with the night's shed bound.* This one asks whether a
 relay's **store** can hold what passes through it. `night_profile.shed_limit`
 (§4.13) asks whether a village's **merchants** can carry what its retention
-promises to give away, and is a per-destination whole-trip bound over an
+promises to give away, and is a partitioned-fleet bound over an
 entirely different set of inputs. Neither is a refinement of the other.
 
 ## 4.3 Roles
@@ -1041,34 +1041,65 @@ morning profile — not against the closing night half itself.
 the active profile, while `NIGHT_OVERRUN` is raised by the planner on routes
 this profile has already called shippable.
 
-**What a village may shed is bounded per destination.**
-`night_profile.shed_limit` returns `min(conserved, integral)` over the legs
-`_legs` builds, and the pair is the whole model.
+**What a village may shed is a partitioned-fleet bound.**
+`night_profile.shed_limit` measures the legs `_legs` builds and hands them to
+`partitioned_fleet_limit`, which is the whole model — **one** model, where there
+used to be two that had to be intersected.
 
-`conserved` is merchant-hours conservation at the **demand-weighted mean** hop
-(`_mean_hop`): to ship `S` an hour split by demand shares `w`, destination `i`
-costs `2 × S × wᵢ × hopᵢ / capacity` merchant-hours an hour, so
-`S ≤ fleet × capacity / (2 × Σ wᵢ hopᵢ)`. Weighted rather than nearest, which
-is the optimistic end of the range and so barely ever bound — a hub shedding
-crop to a consumer 1 field away needing 100/h and one 40 fields away needing
-40,000/h was credited 48 turnarounds against the neighbour and booked 53,000/h
-as shippable, 21× what actually reaches the destination needing it. And
-weighted rather than worst-case, which fails the other way: one unreachable
-destination then zeroes the limit for every reachable one, so an ally 60 fields
-off — a 10h round trip in an 8h night — left the hub unable to ship to the
-consumer 2 fields away. With a single destination it *is* the
+A merchant serves **one** destination for the night. It cannot spend 0.6 of
+itself on the near consumer and 0.4 on the far ally, because `merchants.py`
+charges every route its own whole merchants (`ceil(batch / capacity) ×
+sets_in_flight`, summed per destination) and the planner will not build anything
+else. So the bound is the largest send whose per-destination merchant demand
+fits the fleet:
+
+```
+mᵢ = ceil(S × wᵢ × window_hours / (capacity × tripsᵢ))
+shippable  ⇔  Σ mᵢ ≤ fleet
+```
+
+`merchants_needed` is that predicate and `partitioned_fleet_limit` is the
+largest `S` it accepts, solved **exactly**: every destination taking cargo needs
+at least one merchant, so a fleet smaller than the destination count sheds
+nothing at all; otherwise start at one merchant each and give each spare
+merchant to whichever destination is currently holding the send down. Writing
+`uᵢ = capacity × tripsᵢ / (wᵢ × window_hours)` for what one merchant dedicated
+to `i` sustains, the send an allocation supports is `minᵢ mᵢ uᵢ`, and each `mᵢ`
+was last raised while `i` was binding — so `(mᵢ − 1) uᵢ` was the send at that
+moment and the send never falls. Anything above the final `min` therefore needs
+at least `Σ mᵢ + 1` merchants. The answer is re-checked against
+`merchants_needed` and stepped down while it fails, because the two reach the
+same quantity by different arithmetic and a `ceil` can land one ULP high;
+under-estimating is the safe direction.
+
+This replaced `min(conserved, integral)` — merchant-hours conservation at the
+demand-weighted mean hop, intersected with each destination's own whole-trip
+bound. **The two no longer disagree, because there are no longer two.** Neither
+factor saw the partition, so both passed sends no allocation can make:
+conservation lets merchant-time split fractionally between a near and a far
+destination, and `integral` asks each destination *alone* whether the whole
+fleet could serve it. One merchant carrying 2,500 in an 8h night, a destination
+an hour out claiming 3 and one three hours out claiming 1 — shares 0.75/0.25,
+mean hop 1.5h, two turnarounds — conserved 625/h, 5,000 over the night.
+Delivering that is 3,750 to the near one (two trips, 4h) and 1,250 to the far
+one (one trip, 6h): **ten merchant-hours out of eight**. Under the partition the
+two destinations need a merchant each and the answer is 0. Measured elsewhere in
+the same direction: a hub with 8 merchants, a consumer 1 field away needing
+100/h and one 40 fields away needing 40,000/h, shipped 2,500/h under the old
+bound and 2,192.98/h under this one — the near consumer takes a whole merchant
+for its 0.25% of the send, so seven and not eight serve the far one.
+
+The demand weighting itself is unchanged and still the reason the bound is not
+the *nearest* hop, which is the optimistic end of the range and so barely ever
+bound: the same hub was credited 48 turnarounds against its neighbour and booked
+53,000/h as shippable, 24× what actually reaches the destination needing it. Nor
+the worst-case hop, which fails the other way: one unreachable destination then
+zeroes the limit for every reachable one, so an ally 60 fields off — a 10h round
+trip in an 8h night — left the hub unable to ship to the consumer 2 fields away.
+With a single destination the whole fleet lands on one leg and the answer is the
 single-destination formula, so nothing with one destination moved.
 
-`integral` is the smallest of each destination's own whole-trip bound,
-`fleet × capacity × tripsᵢ / (wᵢ × window_hours)`. Conservation is **necessary
-and not sufficient**: it lets merchant-time split fractionally across trips of
-different lengths, and a merchant cannot make 0.6 of a trip. Two consumers
-needing 30,000/h each, one 2 fields away and one 30, conserve merchant-hours
-exactly at 60,750/h — while the far one needs 26.7 round trips of 5h and
-eighteen merchants can make eighteen, so 9,750/h of a hammer's deficit read as
-covered.
-
-`_trips` never rounds up, and there is no `max(1, …)` on either bound: a
+`_trips` never rounds up, and there is no `max(1, …)` anywhere in the bound: a
 village whose round trip does not fit the window sheds **nothing**, because
 crediting it one trip promises cargo still in the air at 07:00, which §6
 forbids outright. The fleet is `merchants_total − merchant_reserve`, tightened
@@ -1085,8 +1116,8 @@ makes, or one whose declared spend exceeds its production. Pricing every
 material sender's hop to the hub alone bound it by a village its cargo never
 visits: a supplier 199 fields from the hub and **one** field from the receiver
 it feeds was told it could ship nothing over a ten-minute haul. A zero claim is
-kept rather than dropped — `_legs` gives it no share, so it neither weighs in
-the mean nor bounds the integral, but a hub that needs nothing must still be
+kept rather than dropped — `_legs` gives it no share, so it takes no cargo and
+`shed_limit` charges it no merchant, but a hub that needs nothing must still be
 the destination a forced sender is measured against. A village is never its own
 destination: the tile is unique in Travian, so a zero hop is the village itself
 and is dropped rather than allowed to read as a free delivery. A destination
@@ -1102,9 +1133,10 @@ for 44/h was booked to ship 19,956/h over 199 fields, where no round trip fits
 the night.
 
 **The crop draw is ordered by where the crop actually goes.** The order key is
-`_mean_hop(v, CROP)` — the same quantity `shed_limit` bounds the village by —
-not the distance to the hub and not the distance to the tribute, because crop
-reaches neither. A supplier 2 fields from the hub and 18 from the hammer (a 3h
+`_mean_hop(v, CROP)` — the demand-weighted mean over the same destination set
+`shed_limit` bounds the village by, though no longer the same arithmetic since
+the bound became a merchant partition — not the distance to the hub and not the
+distance to the tribute, because crop reaches neither. A supplier 2 fields from the hub and 18 from the hammer (a 3h
 round trip, two turnarounds) was drawn ahead of one 19 fields from the hub and
 **one** from the hammer (ten minutes, forty-eight turnarounds), and the plan
 then built the long route at six merchants where the short one costs three —

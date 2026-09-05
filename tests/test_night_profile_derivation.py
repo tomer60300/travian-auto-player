@@ -11,6 +11,8 @@ demand it cannot meet is reported instead of quietly dropped.
 """
 
 import inspect
+import itertools
+import math
 
 import pytest
 
@@ -330,9 +332,9 @@ class TestNoDestinationIsPromisedAFractionOfATrip:
     26.7 trips of 5h each while eighteen merchants can make eighteen. So a
     hammer's whole 9,750/h shortfall read as covered.
 
-    The per-destination bound is `S <= fleet * capacity * floor(H / (2*hop_i)) /
-    (w_i * H)` for every destination, taken alongside the weighted mean rather
-    than instead of it -- `max` over the hops was tried and zeroes every
+    The bound is a PARTITIONED fleet: `sum_i ceil(S * w_i * H / (capacity *
+    trips_i)) <= fleet`, the same whole-merchants-per-destination charge
+    `merchants.py` makes. `max` over the hops was tried and zeroes every
     reachable destination whenever one is unreachable.
     """
 
@@ -361,22 +363,27 @@ class TestNoDestinationIsPromisedAFractionOfATrip:
         )
 
     def test_the_shortfall_the_mean_hid_is_reported(self):
-        # 18 merchants x 9,000 x 1 complete trip to the hammer = 162,000 over
-        # the night, and the hammer's half of the split is what caps the whole
-        # send: 40,500/h against 60,000/h of demand.
-        assert self._profile().unmet[Resource.CROP] == pytest.approx(19_500.0)
+        # RE-DERIVED for the partitioned fleet (was 19,500/h). The near consumer
+        # takes one whole merchant of its own -- 24 turnarounds is far more than
+        # its half of any send needs, but a merchant cannot be split -- so 17 of
+        # the 18 serve the hammer, not all 18. One trip each at 9,000 covers
+        # 153,000 over the night, and the hammer's half of the send is what caps
+        # it: 17 x 9,000 x 1 / (0.5 x 8) = 38,250/h against 60,000/h of demand.
+        # The old min(conserved, integral) bound charged the near consumer
+        # nothing and credited the hammer with all 18: 40,500/h.
+        assert self._profile().unmet[Resource.CROP] == pytest.approx(21_750.0)
 
     def test_the_hub_keeps_what_it_cannot_deliver(self):
-        assert self._profile().allocations[Resource.CROP][HUB].value == pytest.approx(59_500.0)
+        # 100,000 produced less the 38,250/h above (was 40,500/h shipped).
+        assert self._profile().allocations[Resource.CROP][HUB].value == pytest.approx(61_750.0)
 
     def test_every_destination_gets_a_whole_number_of_trips(self):
         """The property, checked directly rather than through the total.
 
-        For each destination: the trips its share needs must not exceed the
-        trips the fleet can make to it.
+        Whole merchants per destination, summed against the fleet -- the
+        partition itself, not merely "each destination alone could be served",
+        which is what this used to check and what the shipped figure moved for.
         """
-        import math
-
         profile = self._profile()
         hub = self._villages()[0]
         shipped = 100_000.0 - profile.allocations[Resource.CROP][HUB].value
@@ -384,11 +391,13 @@ class TestNoDestinationIsPromisedAFractionOfATrip:
         claims = {self.NEAR: 30_000.0, self.FARR: 30_000.0}
         hops = {self.NEAR: 2 / 12.0, self.FARR: 30 / 12.0}
         total_claim = sum(claims.values())
+        committed = 0
         for vid, claim in claims.items():
             share = claim / total_claim
-            needed = math.ceil(shipped * window * share / capacity)
-            available = fleet * int(window // (2 * hops[vid]))
-            assert needed <= available, (vid, needed, available)
+            trips = int(window // (2 * hops[vid]))
+            assert trips > 0, vid
+            committed += math.ceil(shipped * window * share / (capacity * trips))
+        assert committed <= fleet, (committed, fleet)
         assert hub.production[Resource.CROP] == 100_000.0
 
     def test_one_destination_is_unchanged_by_the_new_bound(self):
@@ -440,6 +449,133 @@ class TestNoDestinationIsPromisedAFractionOfATrip:
         assert profile.unmet[Resource.CROP] == pytest.approx(1_000.0)
 
 
+class TestTheShedLimitIsAPartitionedFleetBound:
+    """A merchant serves ONE destination for the night, so the bound is a
+    merchant ALLOCATION and not a rate.
+
+    `min(merchant-hours conservation, per-destination integrality)` over-promised
+    because neither factor sees the partition: conservation lets merchant-time
+    split fractionally between a near and a far destination, and the integral
+    bound asks each destination alone whether the WHOLE fleet could serve it.
+    The review's counterexample is the fixture below -- one merchant carrying
+    2,500 in an 8h night, a destination an hour out claiming 3 and one three
+    hours out claiming 1. Shares 0.75/0.25, mean hop 1.5h, two turnarounds, so
+    conservation said 625/h: 5,000 over the night. Delivering it is 3,750 to the
+    near one (two trips, 4h) and 1,250 to the far one (one trip, 6h) -- ten
+    merchant-hours out of eight.
+
+    `merchants.py` charges routes this way too (``ceil(batch / capacity) *
+    sets_in_flight`` per destination, summed), so a night bound charged any other
+    way promises sends the planner will refuse to build.
+    """
+
+    CAPACITY = 2_500
+    WINDOW = 8.0
+    # (complete round trips, share of the cargo). An hour out is a 2h round
+    # trip, so 4 fit in the window; three hours out is 6h, so 1 fits.
+    LEGS = ((4, 0.75), (1, 0.25))
+    # What ONE merchant dedicated to each destination sustains per hour:
+    # capacity x trips / (share x window).
+    NEAR_UNIT = 2_500 * 4 / (0.75 * 8.0)  # 1,666.67/h
+    FAR_UNIT = 2_500 * 1 / (0.25 * 8.0)  # 1,250/h
+
+    def _limit(self, fleet, legs=None):
+        return night_profile.partitioned_fleet_limit(
+            self.LEGS if legs is None else legs,
+            fleet=fleet,
+            capacity=self.CAPACITY,
+            window_hours=self.WINDOW,
+        )
+
+    def _needed(self, send, legs=None):
+        return night_profile.merchants_needed(
+            self.LEGS if legs is None else legs,
+            send,
+            capacity=self.CAPACITY,
+            window_hours=self.WINDOW,
+        )
+
+    def test_the_counterexample_sheds_nothing_on_one_merchant(self):
+        """Both destinations take cargo, so both need a merchant of their own.
+
+        The old bound answered 625/h here, which is ten merchant-hours of work
+        for a fleet with eight.
+        """
+        assert self._limit(1) == 0.0
+        assert self._needed(625.0) == 2, "the send the old bound allowed needs two merchants"
+
+    @pytest.mark.parametrize(
+        "fleet,expected",
+        [
+            (2, 1_250.0),  # one each; the far leg binds at 1 x 1,250
+            (3, 5_000 / 3),  # the spare goes far: min(1,666.67, 2,500)
+            (4, 2_500.0),  # then near: min(3,333.33, 2,500)
+            (5, 10_000 / 3),  # then far: min(3,333.33, 3,750)
+            (6, 3_750.0),  # then near: min(5,000, 3,750)
+            (7, 5_000.0),  # then far: min(5,000, 5,000)
+        ],
+    )
+    def test_each_extra_merchant_goes_to_whichever_leg_holds_the_send_down(self, fleet, expected):
+        assert self._limit(fleet) == pytest.approx(expected)
+
+    @pytest.mark.parametrize("fleet", range(1, 13))
+    def test_the_bound_is_the_last_send_the_predicate_accepts(self, fleet):
+        """Immediately below, at, and above each merchant discontinuity.
+
+        A relative step rather than one ULP on the way up: the predicate reaches
+        the same quantity by different arithmetic, so a single ULP can be
+        rounded straight back out and prove nothing. 1e-12 of the bound is still
+        a millionth of a resource an hour.
+        """
+        limit = self._limit(fleet)
+
+        assert self._needed(limit) <= fleet, "the bound itself must be shippable"
+        assert self._needed(limit * (1 - 1e-12)) <= fleet, "and so must anything under it"
+        assert self._needed(limit * (1 + 1e-12) + 1e-9) > fleet, (
+            "one resource an hour more must not fit, or the bound is not the largest"
+        )
+
+    @pytest.mark.parametrize(
+        "legs",
+        [
+            ((4, 0.75), (1, 0.25)),
+            ((24, 0.5), (1, 0.5)),
+            ((48, 0.00249), (1, 0.99751)),
+            ((8, 8 / 9), (12, 1 / 9)),
+            ((3, 0.2), (2, 0.3), (1, 0.5)),
+            ((5, 0.1), (5, 0.4), (2, 0.25), (1, 0.25)),
+        ],
+    )
+    def test_it_matches_an_exhaustive_search_over_merchant_allocations(self, legs):
+        """Exactness, measured rather than argued.
+
+        The bound hands the next merchant to whichever destination is binding,
+        which is an ALGORITHM and not a heuristic -- so it is checked against
+        every allocation of the fleet, one destination at a time.
+        """
+        for fleet in range(10):
+            best = 0.0
+            for combo in itertools.product(range(1, fleet + 1), repeat=len(legs)):
+                if sum(combo) > fleet:
+                    continue
+                best = max(
+                    best,
+                    min(
+                        merchants * self.CAPACITY * trips / (share * self.WINDOW)
+                        for merchants, (trips, share) in zip(combo, legs)
+                    ),
+                )
+            assert self._limit(fleet, legs) == pytest.approx(best), (legs, fleet)
+
+    def test_a_single_destination_is_the_whole_fleet_on_one_leg(self):
+        """The one case the old bound and this one agree on exactly, which is why
+        nothing with a single destination moved."""
+        assert self._limit(18, ((1, 1.0),)) == pytest.approx(18 * 2_500 / 8.0)
+
+    def test_nowhere_to_send_it_sheds_nothing(self):
+        assert self._limit(18, ()) == 0.0
+
+
 class TestTheDerivationsOwnBoundaryRules:
     """Three rules the module states and nothing measured.
 
@@ -477,14 +613,18 @@ class TestTheDerivationsOwnBoundaryRules:
         assert profile.allocations[Resource.CROP][ARMY].value == pytest.approx(50_000.0)
         assert profile.unmet[Resource.CROP] == pytest.approx(1_000.0)
 
-    def test_destinations_that_need_nothing_are_averaged_not_reduced_to_the_nearest(self):
+    def test_destinations_that_need_nothing_weigh_the_same_and_not_the_nearest(self):
         """The zero-claim branch, reached by a FORCED sender shedding to avoid
-        overflow. Two destinations at 1 and 40 fields weigh the same, so the hop
-        is their MEAN -- taking the nearest reverts exactly the over-estimating
-        bound this module removed on the demand-weighted path.
+        overflow. Two destinations at 1 and 40 fields weigh the same -- taking
+        the nearest reverts exactly the over-estimating bound this module
+        removed on the demand-weighted path.
 
-        18 merchants x 7,500 at a mean hop of 1.7083h is two round trips in an
-        8h night: 33,750/h. At the nearest hop it would be forty-eight.
+        RE-DERIVED for the partitioned fleet (was 26,250, off a 1.7083h mean hop
+        giving two round trips and 33,750/h). Equal shares do not become one
+        averaged hop: the near destination takes a whole merchant for its half
+        even though 48 turnarounds is far more than that half needs, so 17 of
+        the 18 serve the far one at ONE turnaround: 17 x 7,500 x 1 / (0.5 x 8) =
+        31,875/h. Renamed with it -- nothing is averaged here any more.
         """
         villages = [
             _village(HUB, "hub", 0, 0, crop=60_000.0),
@@ -494,8 +634,8 @@ class TestTheDerivationsOwnBoundaryRules:
         profile = self._derive(villages, consumer_ids=[self.NEAR, self.FARR])
 
         # Forced by its own 7,000/h ceiling, so it sheds the larger of the
-        # ceiling and what its merchants can carry: 60,000 - 33,750 = 26,250.
-        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(26_250.0)
+        # ceiling and what its merchants can carry: 60,000 - 31,875 = 28,125.
+        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(28_125.0)
 
     NEAR = 31
     FARR = 32
@@ -742,14 +882,17 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
     # would keep.
     #
     # RE-SEEDED again (shed limit measured to the HUB). FAR is 6 fields from
-    # the hub and 4 from its nearest neighbour, and its cargo goes to the hub:
-    # 6 fields at 12 f/h is a 1h round trip, so 8 turnarounds in the window,
-    # not the 12 the neighbour distance implied. At Trade Office 10 a merchant
-    # carries 7,500, so the shed limit is 135,000/h with the fleet free
-    # (18 x 7,500 x 8 / 8), 15,000/h held to two merchants, and nothing at all
-    # at zero -- three answers either side of the 34,000/h the draw wants of
-    # it. The old figures were 202,500 and 22,500 off 12 trips; the fixture did
-    # not move, the distance being measured did.
+    # the hub and 4 from the army, and its lumber goes to both of them: 6 fields
+    # at 12 f/h is a 1h round trip, so 8 turnarounds in the window, not the 12
+    # the neighbour distance implied. At Trade Office 10 a merchant carries
+    # 7,500, so the shed limit is 135,000/h with the fleet free (17 of the 18 on
+    # the hub leg, which binds: 17 x 7,500 x 8 / (8/9 x 8) is 143,437.5, above
+    # the 101,250 one merchant sustains on the army leg), 8,437.5/h held to two
+    # merchants, and nothing at all at zero -- three answers either side of the
+    # 34,000/h the draw wants of it. The old figures were 202,500 and 22,500 off
+    # 12 trips; the fixture did not move, the distance being measured did. The
+    # two-merchant figure moved again with the partitioned fleet (was 15,000/h,
+    # off a bound that let two merchants split fractionally across both legs).
     def _account(self, cap, hub_cap):
         return [
             _village(
@@ -788,14 +931,19 @@ class TestTheCapBoundsWhatADrawnInVillageMayShip:
     def test_a_material_draw_stops_at_what_the_cap_can_carry(self):
         profile = self._derive(cap=2)
 
-        # 15,000/h is all two merchants move to the HUB in the window, so the
-        # other 25,000 stays here instead of being promised.
-        assert profile.allocations[Resource.LUMBER][FAR].value == 25_000.0
+        # RE-DERIVED for the partitioned fleet (was 25,000 retained off a
+        # 15,000/h send). FAR's lumber has TWO destinations -- the hub's own
+        # 40,000/h deficit and the army's 5,000/h top-up, shares 8/9 and 1/9 --
+        # so a cap of two merchants gives each destination exactly one. The hub
+        # leg is what binds: 7,500 x 8 turnarounds / (8/9 x 8h) = 8,437.5/h,
+        # against the 101,250/h one merchant sustains on the army leg. So
+        # 40,000 - 8,437.5 = 31,562.5, rounded to 31,562.
+        assert profile.allocations[Resource.LUMBER][FAR].value == 31_562.0
         # And what the cap put out of reach is reported: the hub wants 40,000 of
         # lumber it does not make, plus the 5,000 the army needs delivered to
         # reach its 7,000 ceiling from a production of 2,000 -- 45,000 of demand
-        # against 15,000 shipped.
-        assert profile.unmet[Resource.LUMBER] == pytest.approx(30_000.0)
+        # against 8,437.5 shipped.
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(36_562.5)
 
     def test_a_cap_of_zero_draws_nothing_and_reports_the_gap(self):
         profile = self._derive(cap=0)
@@ -1308,12 +1456,16 @@ class TestEverySenderIsBoundedByWhereItsOwnCargoGoes:
         The hub makes 60,000/h with a 7,000/h granary ceiling and 8 shippable
         merchants carrying 2,500 each. A consumer 1 field away needs 100/h (a
         0h10 round trip, 48 turnarounds); one 40 fields away needs 40,000/h (a
-        6h40 round trip, ONE turnaround). Weighted by demand the mean hop is
-        (100 x 1 + 40,000 x 40) / 40,100 / 12 = 3.3252h, a 6h65 round trip --
-        so one trip fits and the limit is 8 x 2,500 x 1 / 8 = 2,500/h.
+        6h40 round trip, ONE turnaround). Demand splits the cargo 100/40,100 and
+        40,000/40,100.
+
+        RE-DERIVED for the partitioned fleet (was 2,500/h, off a demand-weighted
+        mean hop of 3.3252h and one trip for all 8 merchants). The near consumer
+        takes a whole merchant for its 0.25% of the send, so SEVEN serve the far
+        one: 7 x 2,500 x 1 / (0.9975 x 8) = 2,192.98/h.
 
         Reduced by the NEAREST it was 120,000/h, which bound nothing: the
-        ceiling decided instead, the hub was booked to ship 53,000/h -- 21x
+        ceiling decided instead, the hub was booked to ship 53,000/h -- 24x
         what reaches the destination that needs it -- and the hammer's whole
         40,000/h deficit read as covered with `unmet` at 0.
         """
@@ -1332,7 +1484,7 @@ class TestEverySenderIsBoundedByWhereItsOwnCargoGoes:
             consumer_ids=[ARMY, FAR],
         )
 
-        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(57_500.0)
-        # 40,100/h of demand against 2,500/h shippable, reported rather than
+        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(57_807.0)
+        # 40,100/h of demand against 2,192.98/h shippable, reported rather than
         # booked as covered.
-        assert profile.unmet[Resource.CROP] == pytest.approx(37_600.0)
+        assert profile.unmet[Resource.CROP] == pytest.approx(37_907.0)
