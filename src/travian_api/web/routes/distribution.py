@@ -6393,7 +6393,12 @@ async def post_execute(
         )
 
     # ── Live ───────────────────────────────────────────────────────────
-    if session is None:
+    # Checked on the SERVICE rather than the session it came from. The two are
+    # the same condition -- `svc` is None exactly when `session` is -- and
+    # `session` is never read again below, but narrowing the name the whole live
+    # path actually calls is what makes every `svc.<method>` after this point
+    # provably non-None instead of a type checker's standing complaint.
+    if svc is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
