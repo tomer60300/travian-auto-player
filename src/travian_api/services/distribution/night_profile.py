@@ -303,16 +303,58 @@ def derive_night_profile(
             _trips(geometry.one_way_minutes((v.x, v.y), point) / 60.0) > 0 for v in by_id.values()
         )
 
+    def _material_receivers(resource: Resource) -> list[tuple[int, float]]:
+        """Where a material goes tonight, with what each destination needs/hour.
+
+        The hub is always here: it is the REMAINDER village, so a forced sender
+        shedding to avoid overflow ships to it whatever anyone else needs, and
+        its own claim is whatever its production falls short by. Everything
+        else in the list is a village the draw below books senders AGAINST --
+        one the day plan wants to hold more than it makes, or one whose spend
+        exceeds its production. Both are places the cargo really goes, and
+        pricing every sender's hop to the hub bound it by a village its cargo
+        never visits: a supplier 199 fields from the hub and ONE field from the
+        receiver it feeds was told it could ship nothing over a ten-minute
+        haul. That is the same error `_destinations` documents for crop, one
+        resource across.
+
+        A zero claim is kept rather than dropped -- `_legs` gives it no share,
+        so it neither weighs in the mean nor bounds the integral, but a hub
+        that needs nothing while nobody else needs anything either must still
+        be the destination a forced sender is measured against.
+        """
+        day = day_retention.get(resource, {})
+        receivers: list[tuple[int, float]] = [
+            (hub_id, max(0.0, -by_id[hub_id].production.get(resource, 0.0)))
+        ]
+        for vid, village in by_id.items():
+            if vid == hub_id:
+                continue
+            own = village.production.get(resource, 0.0)
+            wanted = day.get(vid)
+            if wanted is not None and wanted > own:
+                claim = min(wanted, ceiling(village, resource)) - own
+            elif own < 0:
+                claim = -own
+            else:
+                continue
+            if claim > 0:
+                receivers.append((vid, claim))
+        return receivers
+
     def _destinations(v: NightVillage, resource: Resource) -> list[tuple[float, float]]:
         """Where this village's cargo of `resource` goes, in one-way hours.
 
         It is a DIFFERENT set per resource, which is why `shed_limit` cannot be
         asked without one. The hub absorbs surplus MATERIALS, so for lumber,
-        clay and iron the hub is the destination and there is exactly one. Crop
-        never reaches it: the crop pass below ships to the crop-negative
-        villages in `consumer_ids` and to `tribute_at`, and on this account the
-        hub is a crop SENDER rather than a sink -- its own granary ceiling can
-        sit under its own production and force it to give.
+        clay and iron it is always among the destinations -- but not the only
+        one: the material pass below draws villages to cover each RECEIVER's
+        `take - own`, and a village drawn to cover a receiver ships to the
+        receiver. See `_material_receivers`. Crop never reaches the hub at all:
+        the crop pass ships to the crop-negative villages in `consumer_ids` and
+        to `tribute_at`, and on this account the hub is a crop SENDER rather
+        than a sink -- its own granary ceiling can sit under its own production
+        and force it to give.
 
         Measuring every sender to the hub bound each crop sender by a village
         its cargo never visits, and it read wrong in both directions. A feeder
@@ -332,8 +374,10 @@ def derive_night_profile(
         that says how the cargo is actually split. See `shed_limit`.
         """
         if resource is not Resource.CROP:
-            # One destination, so its claim is the whole of the cargo.
-            hops = [(_hours(v, by_id[hub_id], geometry), 1.0)]
+            hops = [
+                (_hours(v, by_id[other], geometry), claim)
+                for other, claim in _material_receivers(resource)
+            ]
         else:
             hops = [
                 (
@@ -512,7 +556,13 @@ def derive_night_profile(
             wanted = day.get(vid)
             if wanted is not None and wanted > own:
                 # A receiver under the day plan: give it what it can still hold.
-                take = min(wanted, room)
+                # Bounded below by what it can actually SHIP, exactly as
+                # `capped()` bounds a forced sender: `min(wanted, room)` under
+                # its own production is a promise to move the difference, and
+                # this branch consulted no distance at all -- a village whose
+                # store leaves room for 44/h was booked to ship 19,956/h over
+                # 199 fields, where no round trip fits the night.
+                take = max(min(wanted, room), round(own - shed_limit(village, resource)))
                 entries[vid] = Allocation(mode=AllocationMode.ABSOLUTE, value=float(take))
                 demand += take - own
                 continue

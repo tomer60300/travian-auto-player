@@ -1222,6 +1222,81 @@ class TestEverySenderIsBoundedByWhereItsOwnCargoGoes:
         assert profile.drawn_in[Resource.LUMBER] == []
         assert profile.unmet[Resource.LUMBER] == pytest.approx(20_000.0)
 
+    def test_a_ten_minute_haul_to_a_material_receiver_stays_shippable(self):
+        """The material mirror of the crop case above, and the same error.
+
+        A village drawn to cover a RECEIVER ships to the receiver -- the draw
+        books it against `take - own`, which is the receiver's claim, not the
+        hub's. Pricing every material sender's hop to the hub therefore bound
+        it by a place its cargo never visits: the supplier is 199 fields from
+        the hub and ONE field from the village it actually feeds, a 10-minute
+        round trip and 48 turnarounds, and the whole deficit read as unmet.
+        """
+        villages = [
+            _village(HUB, "hub", 200, 0, wh=1_200_000, gr=800_000),
+            _village(ARMY, "supplier", 1, 0, lumber=20_000.0, wh=1_200_000, gr=800_000),
+            _village(FAR, "receiver", 0, 0, lumber=-20_000.0, gr=800_000),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={Resource.LUMBER: {ARMY: 0.0}},
+            hub_id=HUB,
+        )
+
+        assert profile.drawn_in[Resource.LUMBER] == [ARMY]
+        assert profile.allocations[Resource.LUMBER][ARMY].value == pytest.approx(0.0)
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(0.0)
+
+    def test_a_material_receiver_out_of_reach_is_still_reported_unmet(self):
+        """The control, in the direction that costs the account: the receiver
+        is 199 fields from the only village with lumber to spare, so no round
+        trip fits the night and the deficit must be reported, not covered."""
+        villages = [
+            _village(HUB, "hub", 100, 0, wh=1_200_000, gr=800_000),
+            _village(ARMY, "supplier", 1, 0, lumber=20_000.0, wh=1_200_000, gr=800_000),
+            _village(FAR, "receiver", 200, 0, lumber=-20_000.0, gr=800_000),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={Resource.LUMBER: {ARMY: 0.0}},
+            hub_id=HUB,
+        )
+
+        assert profile.drawn_in[Resource.LUMBER] == []
+        assert profile.allocations[Resource.LUMBER][ARMY].value == pytest.approx(20_000.0)
+        assert profile.unmet[Resource.LUMBER] == pytest.approx(20_000.0)
+
+    def test_a_day_plan_receiver_never_promises_more_shed_than_it_can_carry(self):
+        """`take = min(wanted, room)` books the difference as a shed and the
+        receiver branch consulted no distance at all. A village whose store
+        cannot hold what it makes has to give -- but only as much as its
+        merchants can actually move, which is what `capped()` already computes
+        for a forced sender and what this branch skipped."""
+        villages = [
+            _village(HUB, "hub", 200, 0, lumber=-5_000.0, wh=1_200_000, gr=800_000),
+            _village(ARMY, "receiver", 0, 0, lumber=20_000.0, wh=1_000, gr=800_000),
+        ]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={Resource.LUMBER: {ARMY: 25_000.0}},
+            hub_id=HUB,
+        )
+
+        # The day plan wants it to hold 25,000/h and its warehouse leaves room
+        # for 44, so `min(wanted, room)` promised to ship 19,956/h -- over 199
+        # fields, where no round trip fits the window at all. Nothing can be
+        # shed, so the retention stays at production.
+        assert profile.allocations[Resource.LUMBER][ARMY].value == pytest.approx(20_000.0)
+
     def test_several_consumers_are_reduced_by_demand_and_not_by_the_nearest(self):
         """The aggregation over a destination SET, which one consumer cannot see.
 
