@@ -545,6 +545,24 @@ describe('RevertRunPanel', () => {
     expect(out).toMatch(/4 game request\(s\) spent/)
   })
 
+  it('does not claim the rows the run put back itself', () => {
+    // The results panel prints `re_enables` -- "restored N disabled row(s)
+    // after the replacement was refused" -- and says that destination is back
+    // where it started. `restore_state` is the OTHER set: rows whose enabled
+    // flag this run changed and left changed. A restored row is not in it,
+    // because `plan_revert` compares each row against the inventory the run
+    // wrote down before it started and a restored row matches.
+    //
+    // Without this sentence the two surfaces contradict each other on the same
+    // run: one says a destination needs nothing, the other heads a list "to put
+    // back". `docs/26-first-live-run.md` §2 is explicit that the by-hand
+    // put-back is for what the run could NOT reverse itself.
+    const out = panel(answered(REVERT))
+
+    expect(out).toContain('Routes this run switched, to put back')
+    expect(out).toMatch(/switched back on itself|the run already put back/)
+  })
+
   it('says the delete disables too, rather than pretending to be narrower', () => {
     const out = panel(answered(REVERT))
 

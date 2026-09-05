@@ -137,6 +137,19 @@ export default function RevertRunPanel({
                   </li>
                 ))}
               </ul>
+              {/* The boundary between this list and the run's own
+                  `re_enables`. A destination the run emptied to rebuild and
+                  then switched back on itself is already as it was, so
+                  `plan_revert` -- which compares each row against the inventory
+                  written down before the run -- leaves it out of `to_restore`
+                  entirely. Without this sentence the results panel says that
+                  destination is back where it started while this heading reads
+                  as though it still needs doing. */}
+              <p className="text-secondary mt-1">
+                Rows the run switched back on itself are not here: it already put those back,
+                and the results panel names them under &ldquo;switched back on&rdquo;. This is
+                what it left changed.
+              </p>
             </div>
           )}
 

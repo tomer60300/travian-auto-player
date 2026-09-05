@@ -7807,6 +7807,44 @@ export default function ResourcePlanner() {
                         ))}
                       </ul>
                     )}
+                    {/* Its own heading, because `re_enables` is the opposite of
+                        `disables` and the response keeps the two apart for that
+                        reason -- folded together, a resumed route reads as a
+                        stopped one. It reached this page and was rendered
+                        NOWHERE: counted into the toast (", N re-enabled") and
+                        into the persisted run record, and not one sentence of
+                        it on screen, while `disables` and `updates` both got a
+                        list.
+
+                        The copy is about the RESTORE shape fe84298 added:
+                        "restored N disabled row(s) after the replacement was
+                        refused". Nothing was created for that destination and
+                        nothing about it is new -- it is running the schedule it
+                        was running before this run touched it. Said as
+                        "re-enabled N route(s)" under the created count, it
+                        would read as a route the operator now holds and has to
+                        remove. `RevertRunPanel` carries the other half of the
+                        same statement. */}
+                    {execResult.re_enables?.length > 0 && (
+                      <div className="text-xs mb-2">
+                        <strong>
+                          {execResult.re_enables.length} route(s) switched back on:
+                        </strong>
+                        <ul className="list-disc ml-5 mt-1">
+                          {execResult.re_enables.map((r, i) => (
+                            <li key={i}>{r}</li>
+                          ))}
+                        </ul>
+                        <p className="text-secondary mt-1">
+                          Nothing new was created for these. A route the plan still wants that
+                          was found switched off starts shipping again, and a destination whose
+                          rebuild the game refused is put back exactly as it was — the same rows
+                          on the same schedule, back where it started. Neither is a new route,
+                          neither is in the created count, and neither is among the rows the undo
+                          asks you to put back by hand.
+                        </p>
+                      </div>
+                    )}
                     {/* Grouped by sentence shape, not dumped: a whole-day
                         preview emits hundreds of per-route/per-store lines that
                         differ only in their numbers, and a wall that long stops
