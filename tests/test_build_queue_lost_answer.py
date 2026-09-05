@@ -40,10 +40,14 @@ def _no_real_pauses(monkeypatch):
 
 
 class _Game:
-    """A village whose upgrade write ALWAYS lands, whatever it answers.
+    """A village that answers each successive upgrade with a chosen verdict.
 
-    `verdicts` is the `success` flag each successive upgrade reports.
-    `queue_reads` is how many construction-queue reads show the landed build
+    Verdicts:
+      "accepted" -- reports success, and the level moves.
+      "lost"     -- reports failure, but the write LANDED anyway.
+      "refused"  -- reports failure and nothing happened.
+
+    `queue_reads` is how many construction-queue reads show a landed build
     still running before the level moves — 0 models a level that has already
     advanced when we look, 1+ models one that is still in the queue.
     """
@@ -94,13 +98,20 @@ class _Game:
     async def upgrade_building(self, slot_id, allow_gold=False, village_id=None):
         self.upgrades.append(slot_id)
         old = self.level
-        # The write lands either way — that is the whole point.
-        if self._queue_reads:
-            self._pending_target = old + 1
-            self._reads_left = self._queue_reads
-        else:
-            self.level = old + 1
-        success = self._verdicts.pop(0) if self._verdicts else True
+        verdict = self._verdicts.pop(0) if self._verdicts else "accepted"
+        assert verdict in ("accepted", "lost", "refused")
+        if verdict != "refused":
+            if self._queue_reads:
+                self._pending_target = old + 1
+                self._reads_left = self._queue_reads
+            else:
+                self.level = old + 1
+        success = verdict == "accepted"
+        raw = {
+            "accepted": "",
+            "lost": "Connection reset (non-retryable): peer closed",
+            "refused": "UPGRADE FAILED: notEnough resources",
+        }[verdict]
         return UpgradeResult(
             success=success,
             village_id=0,
@@ -110,7 +121,7 @@ class _Game:
             new_level=old + 1 if success else old,
             construction_time="0:01:00",
             reward_used=False,
-            raw_response="" if success else "Connection reset (non-retryable): peer closed",
+            raw_response=raw,
         )
 
 
@@ -168,7 +179,7 @@ def _run(game):
 
 
 def test_an_accepted_upgrade_writes_once():
-    game = _Game([True])
+    game = _Game(["accepted"])
     results = _run(game)
     assert game.upgrades == [SLOT]
     assert game.level == 5
@@ -177,7 +188,7 @@ def test_an_accepted_upgrade_writes_once():
 
 def test_a_lost_answer_does_not_overshoot_the_target():
     """The level had already advanced when we looked."""
-    game = _Game([False])
+    game = _Game(["lost"])
     results = _run(game)
 
     assert game.upgrades == [SLOT], "the upgrade must not be re-issued"
@@ -187,7 +198,7 @@ def test_a_lost_answer_does_not_overshoot_the_target():
 
 def test_a_lost_answer_with_the_build_still_queued_does_not_overshoot():
     """The landed build is in the construction queue; the level has not moved."""
-    game = _Game([False], queue_reads=1)
+    game = _Game(["lost"], queue_reads=1)
     results = _run(game)
 
     assert game.upgrades == [SLOT], "the upgrade must not be re-issued"
@@ -220,8 +231,31 @@ def test_an_unverifiable_failure_is_not_re_issued_either():
                 raise RuntimeError("building read failed")
             return await _Game.get_village_buildings(self, village_id)
 
-    game = _Blind([False])
+    game = _Blind(["lost"])
     results = _run(game)
 
     assert game.upgrades == [SLOT], "an upgrade that MAY have landed is never re-issued"
     assert [r["status"] for r in results] == ["unverified"]
+
+
+# ── F12: the machine-readable result must carry the failures too ──────────
+
+
+def test_a_refused_upgrade_appears_in_the_results():
+    """`execute_plan` appends a `failed` entry; the continuous twin did not.
+
+    The refusal existed only as a transient `_report` status string, so
+    `queue_ws`'s `ok = r.get("status") == "started"` branch was dead code and a
+    cycle that refused an upgrade and then accepted it was indistinguishable
+    from one that accepted it first time.
+    """
+    game = _Game(["refused", "accepted"])
+    results = _run(game)
+
+    assert game.upgrades == [SLOT, SLOT], "a genuine refusal IS safe to retry"
+    assert game.level == 5
+    assert [r["status"] for r in results] == ["failed", "started"]
+    failed = results[0]
+    assert failed["building"] == NAME
+    assert failed["slot_id"] == SLOT
+    assert "notEnough" in failed["error"]

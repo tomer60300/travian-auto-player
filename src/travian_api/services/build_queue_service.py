@@ -1010,6 +1010,19 @@ class BuildQueueService:
                                 )
                             built = True
                             break
+                        # The game refused it and nothing moved. Say so in the
+                        # RESULT, not only in the transient status text --
+                        # `execute_plan` has always appended this entry, and
+                        # without it `queue_ws`'s `status == "started"` check
+                        # could never see a failure.
+                        all_results.append(
+                            {
+                                "building": item.building,
+                                "slot_id": item.slot_id,
+                                "status": "failed",
+                                "error": detail,
+                            }
+                        )
                         continue
                     if result.success:
                         next_level = item.current_level + 1
