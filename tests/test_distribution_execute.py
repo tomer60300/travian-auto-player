@@ -5153,3 +5153,96 @@ class TestARefusedReplacementPutsTheOldRoutesBack:
 
         assert svc.enabled == [], svc.enabled
         assert [a.status for a in res.actions] == ["created"], [a.detail for a in res.actions]
+
+
+class TestTheDisableRecordSaysWhatHappenedToEachRow:
+    """`rows_disabled` is the write-ahead chain's closing half, and the only
+    record of what was switched off if the run dies before it can rebuild.
+
+    "Whatever the game answered" was enough to stop the record dangling and not
+    enough to recover from. The answer is one status for a whole batch, and the
+    one answer that matters most -- `unverified`, which is what a reset, a
+    session-expiry redirect or an unreadable body produce -- says nothing at all
+    about the rows. Reading it as a refusal is the same over-statement the
+    service itself stopped making. The record now carries a verdict per ROW:
+    `confirmed` (off), `failed` (not off) and `unknown` (nobody can say), taken
+    from the disable's own read-back where there is one.
+    """
+
+    def _existing(self):
+        return {20003: _fanned(20011, 10, 0, cycle_hours=3, dispatch_minute=100, start_id=710000)}
+
+    def _rows(self, res):
+        (event,) = [e for e in _trace_events(res.trace_path) if e["kind"] == "rows_disabled"]
+        return event
+
+    def _run(self, svc):
+        return _run_live(
+            svc,
+            _one_mismatched_destination(),
+            max_routes_per_run=50,
+            max_game_rows_per_run=0,
+        )
+
+    def test_a_clean_disable_confirms_every_row(self):
+        svc = _FakeLiveSvc(existing=self._existing())
+
+        event = self._rows(self._run(svc))
+
+        assert {r["verdict"] for r in event["rows"]} == {"confirmed"}, event
+        assert sorted(r["route_id"] for r in event["rows"]) == event["route_ids"], event
+
+    def test_a_refused_disable_marks_every_row_failed(self):
+        svc = _FakeLiveSvc(existing=self._existing(), disable_status="failed")
+
+        event = self._rows(self._run(svc))
+
+        assert {r["verdict"] for r in event["rows"]} == {"failed"}, event
+
+    def test_an_unreadable_answer_over_rows_that_went_off_is_not_a_refusal(self):
+        """The whole point: the PUT's body could not be read and the rows ARE
+        off. Recording that as a refusal sends the operator to switch off rows
+        already switched off, and describes an account that does not exist."""
+        svc = _FakeLiveSvc(
+            existing=self._existing(), disable_status="unverified", disable_applies=True
+        )
+
+        event = self._rows(self._run(svc))
+
+        assert {r["verdict"] for r in event["rows"]} == {"confirmed"}, event
+
+    def test_an_unreadable_answer_over_rows_still_shipping_is_a_failure(self):
+        svc = _FakeLiveSvc(
+            existing=self._existing(), disable_status="unverified", disable_applies=False
+        )
+
+        event = self._rows(self._run(svc))
+
+        assert {r["verdict"] for r in event["rows"]} == {"failed"}, event
+
+    def test_rows_the_read_back_could_not_see_are_unknown(self):
+        """An unreadable answer and an unreadable page. Two unknowns in a row
+        are not evidence of anything, and the record must not pretend."""
+        svc = _FakeLiveSvc(
+            existing=self._existing(),
+            disable_status="unverified",
+            disable_applies=True,
+            confirm_raises={20003},
+        )
+
+        event = self._rows(self._run(svc))
+
+        assert {r["verdict"] for r in event["rows"]} == {"unknown"}, event
+
+    def test_the_record_still_closes_before_the_replacement_is_written(self):
+        """The read-back the verdicts come from is a READ; it must not push the
+        closing half of the chain past the create."""
+        svc = _FakeLiveSvc(
+            existing=self._existing(), disable_status="unverified", disable_applies=True
+        )
+
+        res = self._run(svc)
+
+        kinds = [e["kind"] for e in _trace_events(res.trace_path)]
+        order = [kinds.index(k) for k in ("replacement_started", "rows_disabled", "created")]
+        assert order == sorted(order), kinds

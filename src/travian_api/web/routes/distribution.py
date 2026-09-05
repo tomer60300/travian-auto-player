@@ -5989,6 +5989,49 @@ def _settle_by_destination(
     return verdicts
 
 
+def _disable_verdicts(
+    status: str,
+    rows: Sequence[ExistingRoute],
+    checked: Sequence[ExistingRoute] | None,
+) -> list[dict]:
+    """What the disable did to each ROW: confirmed / failed / unknown.
+
+    The answer is one status for a whole batch, and the write-ahead record is
+    the only description of what was switched off if the run dies before it
+    rebuilds -- so "whatever the game answered" stops the record dangling
+    without making it recoverable.
+
+    * `disabled` -> `confirmed`. The service only returns it after reading the
+      body and finding no per-route error, which is the game's own per-row
+      answer;
+    * `unverified` -> whatever the page says, and `unknown` where it says
+      nothing. This is the case that matters: a reset, a session-expiry
+      redirect or an unreadable body all produce it, none of them is evidence
+      of a refusal, and recording one as a refusal sends the operator to switch
+      off rows that are already off;
+    * anything else -- `failed`, `stopped`, an unrecognised status -> `failed`.
+      The endpoint leaves those rows alone and creates nothing on top of them,
+      so "not switched off" is the operative fact for every row in the batch.
+    """
+    if status == "disabled":
+        return [{"route_id": e.route_id, "verdict": "confirmed"} for e in rows]
+    if status != "unverified":
+        return [{"route_id": e.route_id, "verdict": "failed"} for e in rows]
+    if checked is None:
+        return [{"route_id": e.route_id, "verdict": "unknown"} for e in rows]
+    seen = {e.route_id: e for e in checked}
+    verdicts = []
+    for e in rows:
+        row = seen.get(e.route_id)
+        verdicts.append(
+            {
+                "route_id": e.route_id,
+                "verdict": "unknown" if row is None else ("failed" if row.active else "confirmed"),
+            }
+        )
+    return verdicts
+
+
 def _row_snapshot(rows: Sequence[ExistingRoute]) -> list[dict]:
     """One read of a marketplace, as the trace records it.
 
@@ -7348,16 +7391,32 @@ async def post_execute(
                             )
                         disabled = await svc.disable_routes(origin, stale, stop_check=_stop_reason)
                         if disabled is not None:
-                            # Immediately and whatever it says: this closes the
-                            # first half of the chain, and a chain that stops
-                            # here on anything but success means the rows are
-                            # still shipping.
+                            stale_ids = {e.route_id for e in stale}
+                            # The disable's own read-back, taken BEFORE the
+                            # record closes so the record can say what happened
+                            # to each ROW rather than repeat one status for a
+                            # whole batch. Only an `unverified` answer needs it;
+                            # a read is not a write, so this does not push the
+                            # closing half of the chain past the create.
+                            checked: list[ExistingRoute] | None = None
+                            read_back_error = ""
+                            if disabled.status == "unverified":
+                                try:
+                                    checked = await svc.confirm_routes(
+                                        origin, map_span=body.map_span
+                                    )
+                                except (NetworkError, MarketplaceUnreadable) as exc:
+                                    read_back_error = str(exc)
+                            # Whatever it says: this closes the first half of
+                            # the chain, and a chain that stops here on anything
+                            # but success means the rows are still shipping.
                             trace.event(
                                 "rows_disabled",
                                 origin=origin,
-                                route_ids=sorted(e.route_id for e in stale),
+                                route_ids=sorted(stale_ids),
                                 status=disabled.status,
                                 detail=disabled.detail,
+                                rows=_disable_verdicts(disabled.status, stale, checked),
                             )
                             line = (
                                 f"{village_label(origin, names)}: "
@@ -7389,12 +7448,7 @@ async def post_execute(
                                 # empty, so the run said "disabled 0" while N
                                 # rows were off and the operator was sent to
                                 # check rows already correct.
-                                stale_ids = {e.route_id for e in stale}
-                                try:
-                                    checked = await svc.confirm_routes(
-                                        origin, map_span=body.map_span
-                                    )
-                                except (NetworkError, MarketplaceUnreadable) as exc:
+                                if checked is None:
                                     # Two unknowns in a row is not evidence of
                                     # anything, so this falls back to the
                                     # cautious half: nothing claimed, nothing
@@ -7403,8 +7457,8 @@ async def post_execute(
                                         f"{village_label(origin, names)}: the disable of "
                                         f"{sorted(stale_ids)} returned success but could "
                                         f"not be confirmed, and the marketplace read-back "
-                                        f"failed too ({exc}); skipping new routes for this "
-                                        f"origin this run"
+                                        f"failed too ({read_back_error}); skipping new "
+                                        f"routes for this origin this run"
                                     )
                                     trace.event(
                                         "unverified_disable",

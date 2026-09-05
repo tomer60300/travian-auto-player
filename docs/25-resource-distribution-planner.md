@@ -1687,6 +1687,19 @@ rebuild, an `indeterminate` create, or a destination that changed underneath is
 rows back on beside a new route that may exist would ship two schedules at once,
 which is the state disable-and-recreate exists to avoid.
 
+**The disable record says what happened to each row.** `rows_disabled` closed
+the write-ahead chain with "whatever the game answered", which stops the record
+dangling and does not make it recoverable: the answer is one status for a whole
+batch, and the one that matters most — `unverified`, which a reset, a
+session-expiry redirect or an unreadable body all produce — says nothing at all
+about the rows. Reading it as a refusal is the same over-statement
+`_toggle_routes` itself stopped making. The record now carries a verdict per
+**row**: `confirmed` (the page shows it off), `failed` (it is not off), and
+`unknown` (nobody can say). For an `unverified` answer the verdicts come from
+the disable's **own** read-back — which the run already takes, at that point,
+to decide whether it may create on top — so nothing extra is read, and a row
+that read-back could not see is `unknown` rather than assumed.
+
 **Going live for the first time is its own document.**
 [`docs/26-first-live-run.md`](26-first-live-run.md) is the step-by-step
 protocol these fixes earned — what to settle before anything touches the game,
