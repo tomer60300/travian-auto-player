@@ -1974,6 +1974,34 @@ export default function ResourcePlanner() {
     [applySetupText, toast]
   )
 
+  // The prune, as every request carries it AND as the checkbox shows it.
+  //
+  // Whole-day forces it on: the two profiles' route sets coexist in the game,
+  // disjoint departure minutes are what make a row attributable to one of them,
+  // and `ExecuteRequest._segments_are_coherent` refuses segments without it. The
+  // checkbox has always said so -- it renders ticked and disabled in that mode.
+  // What did NOT say so was the state behind the tick, which stayed `false`: so
+  // `/plan` was told to weigh all eight cycles of a route as escaping firings,
+  // `/day-check` agreed with `/plan`, and the `/execute` that actually WRITES
+  // forced the prune on and deleted the rows outside the window. Three requests,
+  // two answers, one tick box, and the plan the operator reviewed was not the
+  // plan the run wrote.
+  //
+  // Derived here and nowhere else. The STATE is deliberately left alone:
+  // `pruneToWindow` is the operator's own answer and is persisted (v10), while
+  // whole-day is a mode rather than an edit to it -- setting the state when the
+  // mode turns on would silently overwrite an answer the operator has to get
+  // back when they untick it.
+  const prunesToWindow = pruneToWindow || wholeDay
+  /** `prune_to_window` as a request carries it, given whether that request has
+   *  any hours to prune to. Omitted rather than sent false, which is what the
+   *  field has always done: the backend defaults it to false, and "does nothing
+   *  without a dispatch_window" is its own documentation. */
+  const pruneField = useCallback(
+    (hasHours) => (prunesToWindow && hasHours ? { prune_to_window: true } : {}),
+    [prunesToWindow]
+  )
+
   // Every cell this page has already outlined and named, gathered so the Build
   // plan button can refuse instead of posting a request it knows will come back
   // 422. Same rule and the same predicates as the marks themselves -- see
@@ -2120,7 +2148,7 @@ export default function ResourcePlanner() {
       // Plan-time, not run-time: with pruning the window is genuinely enforced
       // and the escaping firings are a note about a dependency; without it they
       // are a critical over-delivery. /plan must see it to weigh them.
-      ...(pruneToWindow && dispatchWindow ? { prune_to_window: true } : {}),
+      ...pruneField(dispatchWindow != null),
       // NO `max_latency_hours`. It used to be derived here from the ACTIVE
       // profile's hours, and that was wrong twice over.
       //
@@ -2271,7 +2299,9 @@ export default function ResourcePlanner() {
     profileAttendance,
     profileOvernight,
     reservedWindow,
-    pruneToWindow,
+    // `pruneField` closes over the derived answer, so the raw state is no
+    // longer read here.
+    pruneField,
   ])
 
   const buildPlan = useCallback(async () => {
@@ -2664,8 +2694,13 @@ export default function ResourcePlanner() {
       overnight: _o,
       ...rest
     } = base
-    return { ...rest, segments, prune_to_window: true }
-  }, [buildPlanPayload, buildSegments, wholeDay, attendanceIsRequired])
+    // The segments each carry their own hours, so there is always something to
+    // prune to -- `buildSegments` has already refused a profile without them.
+    // Through the same helper as `/plan` and `/day-check`, which is the whole
+    // point: this line used to be a bare `true` while the other two sent the
+    // untouched state, and the checkbox above them displayed the `true`.
+    return { ...rest, segments, ...pruneField(true) }
+  }, [buildPlanPayload, buildSegments, wholeDay, attendanceIsRequired, pruneField])
 
   // Execute the plan as trade routes. dryRun previews (zero game requests);
   // live requires an explicit confirm and only works once the backend's
@@ -3442,6 +3477,13 @@ export default function ResourcePlanner() {
       const res = await api.post('/distribution/day-check', {
         ...planInputs,
         segments,
+        // Restated rather than inherited from `planInputs`, and for the reason
+        // `buildExecutePayload` restates it: the plan payload gates the field on
+        // the ACTIVE profile's hours, and this request has none -- it has
+        // segments, every one of which carries its own. A day simulated without
+        // the prune is a day whose route sets fire round the clock, which is not
+        // the day `/execute` would write.
+        ...pruneField(true),
         crop_ceilings: ceilings,
       })
       // Drop the response if the account switched OR any day-check input changed
@@ -7231,7 +7273,7 @@ export default function ResourcePlanner() {
                         <input
                           type="checkbox"
                           className="mt-0.5"
-                          checked={pruneToWindow || wholeDay}
+                          checked={prunesToWindow}
                           disabled={wholeDay}
                           onChange={(e) => setPruneToWindow(e.target.checked)}
                         />
