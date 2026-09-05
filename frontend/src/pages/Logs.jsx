@@ -123,8 +123,9 @@ export default function Logs() {
       {/* Filters */}
       <div className="card p-3 mb-4 flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
-          <label className="text-xs text-secondary">Source:</label>
+          <label className="text-xs text-secondary" htmlFor="log-filter-source">Source:</label>
           <select
+            id="log-filter-source"
             value={filterSource}
             onChange={(e) => setFilterSource(e.target.value)}
             className="input-field text-xs py-1 px-2 w-auto"
@@ -137,8 +138,9 @@ export default function Logs() {
         </div>
 
         <div className="flex items-center gap-2">
-          <label className="text-xs text-secondary">Level:</label>
+          <label className="text-xs text-secondary" htmlFor="log-filter-level">Level:</label>
           <select
+            id="log-filter-level"
             value={filterLevel}
             onChange={(e) => setFilterLevel(e.target.value)}
             className="input-field text-xs py-1 px-2 w-auto"
@@ -152,8 +154,9 @@ export default function Logs() {
         </div>
 
         <div className="flex items-center gap-2">
-          <label className="text-xs text-secondary">Origin:</label>
+          <label className="text-xs text-secondary" htmlFor="log-filter-origin">Origin:</label>
           <select
+            id="log-filter-origin"
             value={filterOrigin}
             onChange={(e) => setFilterOrigin(e.target.value)}
             className="input-field text-xs py-1 px-2 w-auto"
@@ -165,9 +168,10 @@ export default function Logs() {
         </div>
 
         <div className="flex items-center gap-2 flex-1 min-w-[150px]">
-          <label className="text-xs text-secondary">Search:</label>
+          <label className="text-xs text-secondary" htmlFor="log-filter-search">Search:</label>
           <input
             type="text"
+            id="log-filter-search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="input-field text-xs py-1 px-2"

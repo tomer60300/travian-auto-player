@@ -121,7 +121,7 @@ function BuildingDetailPanel({
         <h3 className="heading-gold text-base">
           Slot {selectedSlot} {detail ? `- ${detail.name || 'Empty'}` : ''}
         </h3>
-        <button className="btn-close" onClick={onClose}>
+        <button className="btn-close" onClick={onClose} aria-label={`Close slot ${selectedSlot} details`}>
           {'\u2715'}
         </button>
       </div>

@@ -283,6 +283,7 @@ export default function OasisRaider() {
                 <div className="flex-1 relative">
                   <select
                     className="absolute inset-0 opacity-0 cursor-pointer"
+                    aria-label={`Troop type for row ${i + 1}`}
                     value={row.type}
                     onChange={(e) => updateTroopRow(i, 'type', e.target.value)}
                     disabled={isRunning}
@@ -310,6 +311,7 @@ export default function OasisRaider() {
                 {troopRows.length > 1 && (
                   <button
                     className="btn-danger btn-xs"
+                    aria-label={`Remove row ${i + 1} (${selectedName}) from the composition`}
                     onClick={() => removeTroopRow(i)}
                     disabled={isRunning}
                   >

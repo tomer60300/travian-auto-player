@@ -220,8 +220,8 @@ function QueueItem({ item, onRemove, onChange, onMoveUp, onMoveDown, isFirst, is
           ))}
         </select>
         <div className="flex gap-0.5 ml-auto">
-          <button className="text-xs text-secondary hover:text-primary disabled:opacity-30 px-0.5" disabled={isFirst} onClick={onMoveUp} title="Move up">&uarr;</button>
-          <button className="text-xs text-secondary hover:text-primary disabled:opacity-30 px-0.5" disabled={isLast} onClick={onMoveDown} title="Move down">&darr;</button>
+          <button className="text-xs text-secondary hover:text-primary disabled:opacity-30 px-0.5" disabled={isFirst} onClick={onMoveUp} aria-label={`Move ${item.name} (slot #${item.slotId}) earlier`} title="Move up">&uarr;</button>
+          <button className="text-xs text-secondary hover:text-primary disabled:opacity-30 px-0.5" disabled={isLast} onClick={onMoveDown} aria-label={`Move ${item.name} (slot #${item.slotId}) later`} title="Move down">&darr;</button>
         </div>
       </div>
     </div>

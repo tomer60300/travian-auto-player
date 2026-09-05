@@ -140,7 +140,11 @@ function BackgroundAccountPanel({ disabled }) {
               Test
             </button>
             {status?.source === 'stored' && (
-              <button className="btn-secondary btn-sm" onClick={clear} disabled={locked}>
+              <button
+                className="btn-secondary btn-sm"
+                onClick={clear}
+                aria-label="Clear the saved background account"
+              >
                 Clear
               </button>
             )}
@@ -849,6 +853,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
                   className="text-xs text-secondary underline hover:text-primary"
                   onClick={resetBonusFilter}
                   disabled={scanning}
+                  aria-label="Clear the bonus filter"
                 >Clear</button>
               )}
             </div>
@@ -942,7 +947,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             {excludeAlliances.map((a) => (
               <span key={a} className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-surface border-default text-secondary">
                 {a}
-                <button className="text-danger hover:text-primary ml-0.5" onClick={() => setExcludeAlliances(excludeAlliances.filter((x) => x !== a))}>x</button>
+                <button className="text-danger hover:text-primary ml-0.5" aria-label={`Stop excluding alliance ${a}`} onClick={() => setExcludeAlliances(excludeAlliances.filter((x) => x !== a))}>x</button>
               </span>
             ))}
           </div>
@@ -961,7 +966,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
             {excludePlayers.map((p) => (
               <span key={p} className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-surface border-default text-secondary">
                 {p}
-                <button className="text-danger hover:text-primary ml-0.5" onClick={() => setExcludePlayers(excludePlayers.filter((x) => x !== p))}>x</button>
+                <button className="text-danger hover:text-primary ml-0.5" aria-label={`Stop excluding player ${p}`} onClick={() => setExcludePlayers(excludePlayers.filter((x) => x !== p))}>x</button>
               </span>
             ))}
           </div>

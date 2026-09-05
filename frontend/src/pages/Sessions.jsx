@@ -478,6 +478,7 @@ function SessionCard({ session, onClick, onRerun }) {
             <button
               onClick={(e) => { e.stopPropagation(); onRerun() }}
               className="btn-secondary btn-xs"
+              aria-label={`Rerun ${session.label}`}
               title="Open the feature page to run again"
             >
               Rerun
@@ -486,6 +487,7 @@ function SessionCard({ session, onClick, onRerun }) {
           <button
             onClick={onClick}
             className="btn-secondary btn-xs"
+            aria-label={`View logs for ${session.label}`}
             title="View session logs"
           >
             Logs
