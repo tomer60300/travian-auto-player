@@ -43,6 +43,7 @@ from travian_api.services.distribution.allocation import (
     AllocationError,
     AllocationMode,
     Resource,
+    VillageAllocation,
     village_label,
 )
 from travian_api.services.distribution.execution_trace import (
@@ -112,6 +113,7 @@ from travian_api.services.distribution.run_history import (
 from travian_api.services.distribution.schedule import (
     DEFAULT_MIN_ARRIVAL_GAP_MINUTES,
     MINUTES_PER_DAY,
+    Beat,
     last_night_dispatch,
     night_overrun_minutes,
 )
@@ -1842,7 +1844,7 @@ def _night_is_not_one_run(segments: Sequence["DaySegmentInput"]) -> str | None:
 
 
 def _night_overrun_rows(
-    beat,
+    beat: Beat,
     window: tuple[int, int] | None,
     names: Mapping[int, str],
     overnight: bool | None = None,
@@ -1889,7 +1891,7 @@ def _night_overrun_rows(
     return sorted(rows, key=lambda row: (-row.overrun_minutes, row.origin, row.destination))
 
 
-def _npc_reserve_rows(plan, names: Mapping[int, str]) -> list[NpcReserveResponse]:
+def _npc_reserve_rows(plan: DistributionPlan, names: Mapping[int, str]) -> list[NpcReserveResponse]:
     """Section 7's sized reserves as a table. Empty when no floor is declared."""
     return [
         NpcReserveResponse(
@@ -2448,7 +2450,9 @@ class ExecuteResponse(BaseModel):
 
 
 @router.get("/snapshot", response_model=SnapshotResponse)
-async def get_snapshot(session: TravianSession = Depends(get_live_travian_session)):
+async def get_snapshot(
+    session: TravianSession = Depends(get_live_travian_session),
+) -> SnapshotResponse:
     """Read current account state. Costs 3-4 game requests.
 
     Uses the live session only: this endpoint prices every game request, and
@@ -2747,7 +2751,7 @@ def _resolve_roles(body: PlanRequest) -> _ResolvedRoles:
     )
 
 
-def _npc_store_deltas(plan) -> dict[int, dict[Resource, float]]:
+def _npc_store_deltas(plan: DistributionPlan) -> dict[int, dict[Resource, float]]:
     """What section 7's conversion does to a floored village's OWN stores, per hour.
 
     The NPC merchant exchanges resources INSIDE one village, so none of it is
@@ -2789,7 +2793,7 @@ def _npc_store_deltas(plan) -> dict[int, dict[Resource, float]]:
 
 
 def _npc_store_state(
-    body: PlanRequest, plan
+    body: PlanRequest, plan: DistributionPlan
 ) -> tuple[
     dict[int, dict[Resource, float]],
     dict[int, dict[Resource, float]],
@@ -2812,7 +2816,7 @@ def _npc_store_state(
         vid = village.village_id
         if plan.npc.get(vid) is None:
             continue
-        allocations: dict[Resource, object] = {}
+        allocations: dict[Resource, VillageAllocation] = {}
         for resource in Resource:
             rp = plan.resource_plans.get(resource)
             if rp is None:
@@ -2850,7 +2854,7 @@ def _npc_store_state(
 
 def _storage_findings(
     body: PlanRequest,
-    plan,
+    plan: DistributionPlan,
     dispatch_window: tuple[int, int] | None = None,
 ) -> list[Finding]:
     """Overflow and starvation checks over the finished plan. Zero requests.
@@ -2973,7 +2977,7 @@ def _storage_findings(
 
 def _budget_legs(
     village_id: int,
-    plan,
+    plan: DistributionPlan,
     geometry: MapGeometry,
     names: dict[int, str],
     coords: dict[int, tuple[int, int]],
@@ -3320,7 +3324,7 @@ class NightProfileResponse(BaseModel):
 async def post_night_profile(
     body: NightProfileRequest,
     _user: User = Depends(get_current_user),
-):
+) -> NightProfileResponse:
     """Build a night profile from stores and production. Costs **zero** requests.
 
     Pure arithmetic over the snapshot the caller already has, so it can be redone
@@ -3652,7 +3656,7 @@ async def post_night_profile(
 async def post_day_check(
     body: DayCheckRequest,
     _user: User = Depends(get_current_user),
-):
+) -> DayCheckResponse:
     """Simulate the full day across every profile. Costs zero game requests.
 
     Each profile is planned through the same planner /plan uses, told the hours
@@ -5032,7 +5036,7 @@ def _plan_response(account: _PlannedAccount) -> PlanResponse:
 async def post_plan(
     body: PlanRequest,
     _user: User = Depends(get_current_user),
-):
+) -> PlanResponse:
     """Compute a plan. Costs **zero** game requests.
 
     The caller supplies the snapshot it already fetched, so tuning allocation
@@ -5094,7 +5098,7 @@ class PlanYamlRequest(PlanRequest):
 async def post_plan_yaml(
     body: PlanYamlRequest,
     _user: User = Depends(get_current_user),
-):
+) -> PlainTextResponse:
     """Render an already-confirmed plan as YAML. Costs **zero** game requests.
 
     Profile section 10 fixes the order: readable plan first, the operator
@@ -5233,7 +5237,7 @@ async def post_revert_plan(
     body: RevertPlanRequest,
     user: User = Depends(get_current_user),
     session: TravianSession | None = Depends(get_live_travian_session),
-):
+) -> RevertPlanResponse:
     """What it would take to put things back as they were before a live run.
 
     Reverting is deliberately not a single button. Disabling and deleting are
@@ -5707,7 +5711,7 @@ async def _browse_between_villages(
 async def post_execute(
     body: ExecuteRequest,
     user: User = Depends(get_current_user),
-):
+) -> ExecuteResponse:
     """Create the plan's trade routes in-game — or preview them with dry_run.
 
     Recomputes the plan server-side from the same inputs /plan uses (it does
@@ -5725,7 +5729,9 @@ async def post_execute(
         # disagree about what a profile's routes are. The snapshot is shared,
         # so names/coords/foreign ids are identical across accounts; the first
         # stands in for all of them everywhere a single account was used.
-        planned_segments: list[tuple[DaySegmentInput, _PlannedAccount]] = []
+        # The single-profile path stores `(None, account)`: there is no
+        # segment to name, and the code below already reads it that way.
+        planned_segments: list[tuple[DaySegmentInput | None, _PlannedAccount]] = []
         # Where the night closes, resolved the same way /day-check resolves it
         # and BEFORE anything is planned: section 6's completion deadline is
         # the night's rather than each half's, and the beat both phases against
@@ -7977,7 +7983,7 @@ def _rollup_response(rollup: AccountRollup) -> AccountRollupResponse:
 async def get_run_history(
     limit: int = Query(default=20, ge=1, le=200),
     _user: User = Depends(get_current_user),
-):
+) -> RunHistoryResponse:
     """What recent live /execute runs WROTE, from their own traces. Zero game
     requests, auth-only like /plan -- reading a local trace file costs nothing
     against the game.
