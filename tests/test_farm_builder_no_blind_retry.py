@@ -233,3 +233,61 @@ def test_a_stop_during_the_assign_phase_is_reported_as_stopped():
     assert report.get("stopped") is True
     assert report["added"] == 2
     assert report["total_targets"] == 6
+
+
+# ── F11: a slot-limit refusal on the last attempt ────────────────────────
+
+
+def _slot_limit_error():
+    from travian_api.services.farm_list_service import FarmListMutationRefused
+
+    return FarmListMutationRefused(
+        "the add of slot (10,20) to list 901 was refused by the game: errorRaidListSlotLimit"
+    )
+
+
+def test_a_slot_limit_refusal_on_every_attempt_is_accounted_for():
+    """The `errorRaidListSlotLimit` branch `continue`d without consuming a
+    `fail_add` entry, so on the last attempt the loop ended with `ok = False`
+    and nothing appended: the report's own arithmetic did not add up
+    (`added+skipped+failed=0` for `total_targets=1`) and nothing in it or in
+    the log named the target. `:1004-1005` was a no-op that was meant to close
+    this (`if not ok and not fail_add or (...): pass  # already handled`).
+    """
+    farm_svc = _FarmSvc(add_raises=_slot_limit_error())
+    report = _run(farm_svc, _Military(None), _Reports())
+
+    assert report["total_targets"] == 1
+    accounted = report["added"] + report["skipped"] + report["failed"]
+    assert accounted == 1, f"accounted for {accounted}/1"
+    assert "slot_limit" in report["failed_targets"][0]["reason"]
+    assert (report["failed_targets"][0]["x"], report["failed_targets"][0]["y"]) == (10, 20)
+
+
+def test_a_target_that_can_never_be_added_probes_one_overflow_list_only():
+    """Every refusal created another overflow list to put nothing in.
+
+    Measured: 3 add POSTs, 4 lists created (`A`, `A-2`, `A-3`, `A-4`) — three
+    of them empty, persisting in the game with no undo endpoint. On a full
+    account this multiplies by the number of affected targets.
+
+    A list created seconds ago that refuses a slot means the ACCOUNT is out of
+    capacity, so exactly one such probe is made and the finding is latched for
+    the rest of the run.
+    """
+    farm_svc = _FarmSvc(add_raises=_slot_limit_error())
+    _run(farm_svc, _Military(None), _Reports())
+
+    assert farm_svc.created == ["A", "A-2"], f"orphan lists: {farm_svc.created[2:]}"
+    assert len(farm_svc.adds) == 2, "one add per list, no third"
+
+
+def test_the_slot_limit_latch_stops_more_lists_for_later_targets():
+    survivors = [
+        {"x": 10 + i, "y": 20, "assigned_bucket": "A", "population": 100} for i in range(4)
+    ]
+    farm_svc = _FarmSvc(add_raises=_slot_limit_error())
+    report = _run(farm_svc, _Military(None), _Reports(), survivors=survivors)
+
+    assert farm_svc.created == ["A", "A-2"], f"one probe for the run: {farm_svc.created}"
+    assert report["failed"] == 4, "every target is still reported"

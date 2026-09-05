@@ -895,6 +895,14 @@ class FarmBuilderService:
             return None, None
 
         assign_stopped = False
+        # Once a freshly created (empty) list ALSO refuses with the slot-limit
+        # error, it is the ACCOUNT that is out of slot capacity, not the list --
+        # and creating more lists cannot help. Every refusal used to create
+        # another overflow list to put nothing in: measured 3 add POSTs and 4
+        # lists for ONE target, three of them empty, persisting in the game with
+        # no undo endpoint, multiplied by the number of affected targets.
+        # Latched for the rest of the run, so the run makes at most one probe.
+        account_slots_exhausted = False
         for bname, recs in real_buckets.items():
             if assign_stopped:
                 break
@@ -944,7 +952,11 @@ class FarmBuilderService:
                         )
                     except Exception as exc:
                         err = str(exc)
-                        if "errorRaidListSlotLimit" in err or "Farm list is full" in err:
+                        if (
+                            "errorRaidListSlotLimit" in err
+                            or "Farm list is full" in err
+                            and not account_slots_exhausted
+                        ):
                             per_list_count[list_id] = SLOT_LIMIT
                             list_id, list_name = await _overflow_list(bname)
                             await _pace_add(list_id)
@@ -966,11 +978,15 @@ class FarmBuilderService:
                                     }
                                 )
                             except Exception as exc2:
+                                err2 = str(exc2)
+                                if "err2orRaidListSlotLimit" in err2 or "Farm list is full" in err2:
+                                    per_list_count[list_id] = SLOT_LIMIT
+                                    account_slots_exhausted = True
                                 fail_add.append(
-                                    {"x": x, "y": y, "reason": f"add_slot_failed: {exc2}"}
+                                    {"x": x, "y": y, "reason": f"add_slot_failed: {err2}"}
                                 )
                                 await send_log(
-                                    "FB-ASSIGN", "❌", f"({x},{y}) add_slot_failed: {exc2}", "error"
+                                    "FB-ASSIGN", "❌", f"({x},{y}) add_slot_failed: {err2}", "error"
                                 )
                         else:
                             fail_add.append({"x": x, "y": y, "reason": f"add_slot_failed: {err}"})
@@ -1009,9 +1025,25 @@ class FarmBuilderService:
 
                 list_id, list_name = _current_list(bname)
                 if list_id is None:
+                    if account_slots_exhausted:
+                        reason = (
+                            "slot_limit: every farm list is full and a new list was "
+                            "refused a slot earlier in this run"
+                        )
+                        fail_add.append({"x": x, "y": y, "reason": reason})
+                        await send_log("FB-ASSIGN", "❌", f"({x},{y}) {reason}", "error")
+                        continue
                     list_id, list_name = await _overflow_list(bname)
 
                 ok = False
+                # One reason per target, appended once after the loop. The
+                # slot-limit branch used to `continue` WITHOUT consuming a
+                # `fail_add` entry, so on the last attempt the loop ended with
+                # `ok = False` and nothing appended at all: the report's own
+                # arithmetic did not add up (added+skipped+failed=0 for
+                # total_targets=1) and neither it nor the log named the target.
+                fail_reason = ""
+                switched_list = False
                 for attempt in range(3):
                     # Pace before EVERY attempt (including post-overflow)
                     # so a retry after a list switch still gets a fresh
@@ -1042,6 +1074,14 @@ class FarmBuilderService:
                         err = str(exc)
                         if "errorRaidListSlotLimit" in err or "Farm list is full" in err:
                             per_list_count[list_id] = SLOT_LIMIT
+                            fail_reason = f"slot_limit: {err}"
+                            if switched_list or attempt == 2 or account_slots_exhausted:
+                                # A list we just created refused a slot too, so
+                                # the account is out of capacity. Making more
+                                # lists only leaves empties behind.
+                                account_slots_exhausted = True
+                                break
+                            switched_list = True
                             list_id, list_name = await _overflow_list(bname)
                             continue
                         # `add_slot` is non-idempotent: `farm_list_service`
@@ -1055,17 +1095,36 @@ class FarmBuilderService:
                         verdict = (
                             "add_slot_unverified" if answer_was_lost(err) else "add_slot_failed"
                         )
-                        fail_add.append({"x": x, "y": y, "reason": f"{verdict}: {err}"})
-                        await send_log("FB-ASSIGN", "❌", f"({x},{y}) {verdict}: {err}", "error")
+                        fail_reason = f"{verdict}: {err}"
                         break
-                if not ok and not fail_add or (fail_add and fail_add[-1]["x"] != x):
-                    pass  # already handled above
+                if not ok:
+                    reason = fail_reason or "add_slot_failed: no attempt succeeded"
+                    fail_add.append({"x": x, "y": y, "reason": reason})
+                    await send_log("FB-ASSIGN", "❌", f"({x},{y}) {reason}", "error")
 
         await send_log(
             "FB-ASSIGN",
             "✅",
             f"FB-ASSIGN-DONE added={len(added)} skipped={len(skipped)} failed={len(fail_add)}",
         )
+
+        # Every record the assign phase saw ends in exactly one of the three
+        # buckets. A mismatch is a target that went through unaccounted for --
+        # the F11 shape -- and is a bug here, not a game condition, so it is
+        # named rather than left for the operator to notice by subtraction. A
+        # stopped run legitimately never reaches its remaining records.
+        assign_records = sum(len(recs) for recs in real_buckets.values())
+        accounted = len(added) + len(skipped) + len(fail_add)
+        if not assign_stopped and accounted != assign_records:
+            logger.error(
+                "FB-ASSIGN accounting mismatch: %d records assigned but %d accounted for "
+                "(added=%d skipped=%d failed=%d)",
+                assign_records,
+                accounted,
+                len(added),
+                len(skipped),
+                len(fail_add),
+            )
 
         duration = round(time.monotonic() - t_start, 1)
         report = {
