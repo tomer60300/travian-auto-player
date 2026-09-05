@@ -226,8 +226,10 @@ filters leave against step 1's `actions` for the same pair. They should agree
 on destination and cargo; the repeat interval may differ, because a profile
 planned alone is planned against its own window.
 
-The page has no canary tick yet — the field rides in the `/routes/execute`
-request — so set the controls above by hand and send `canary: true` with them.
+The page has a canary tick now: **Canary: one route, create only** in the run
+panel presets four controls, locks five, takes **Max rows this run** off the
+plan's own route, names the unmet conditions on the held button, and sends
+`canary: true` on the live path only.
 The refusals are how you find out you missed one, and every one of them lands
 before the first WRITE. All but the last arrive before the first game request
 of any kind; the last needs the origin's marketplace read, which is the read the
@@ -269,7 +271,8 @@ Read the response:
   failed, or it stopped before the create — and `problems` will carry a line
   saying so and telling you to compare the marketplace against the trace's
   `origin_read` inventory. A `null` here is a stop, whatever else the response
-  says.
+  says. The result panel on this page shows the list under its own heading and
+  renders `null` as that stop, in the danger tone — never as "0 rows".
 - `trace_id` present. Write it down; it is the handle for **Undo this run**.
 - The spend, against the forecast you kept from step 1: expect the live run
   to be higher on reads, because each marketplace read is two page loads and
