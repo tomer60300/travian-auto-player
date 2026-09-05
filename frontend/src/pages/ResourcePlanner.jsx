@@ -6665,6 +6665,39 @@ export default function ResourcePlanner() {
                 )}
               </div>
 
+              {/* ── Whose sheet this is, once whole-day is on ──
+                  `wholeDay` is deliberately NOT in `planInputRev`: the checkbox
+                  that sets it, the prune box beside it and the Preview button
+                  all render inside this `{plan && ...}` block, so clearing the
+                  plan on the toggle would unmount the control on the same click
+                  that ticked it -- the mode could never be turned on, and the
+                  Preview that IS the whole-day review would go with it.
+
+                  So the sheet survives, and this says what it is. It has to,
+                  because the mode changes the request underneath it:
+                  `buildExecutePayload` strips the top-level allocations, hours,
+                  attendance and overnight declaration for one segment per
+                  profile, and `prunesToWindow` forces the trim on. Everything
+                  above describes ONE profile in its own hours; the run writes
+                  every profile's routes. Directly under the verdict rather than
+                  beside the checkbox, because the verdict is the thing that
+                  would otherwise be read as an answer about the whole day. */}
+              {wholeDay && (
+                <div className="plan-verdict plan-verdict-dirty" role="status">
+                  <p className="font-semibold text-sm">
+                    Whole day is on — this sheet is the {activeProfile} profile alone.
+                  </p>
+                  <p className="text-xs mt-1">
+                    It was planned in {activeProfile}’s hours and graded against them. A whole-day
+                    run creates <strong>every profile’s</strong> routes in one pass, each trimmed
+                    to its own window, so what it writes is a larger route set than the one below.{' '}
+                    <strong>Preview (0 requests)</strong>, under “Write it to the game”, is the
+                    review of that — it costs nothing and it is the only thing here that describes
+                    the whole day.
+                  </p>
+                </div>
+              )}
+
               {/* ── The two figures the operator acts on after the verdict ──
                   The only other large numbers on the stage, because they are
                   the only other numbers that ask for a decision: what this plan
