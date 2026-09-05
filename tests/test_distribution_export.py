@@ -47,11 +47,13 @@ def client():
 
     Both endpoints under test are auth-only and pure -- they never touch the
     database or a Travian session -- so `TestClient(app)` is used WITHOUT its
-    context manager, which is what skips startup. That is not a shortcut: the
-    suite shares one SQLite path across xdist workers, so every extra app
-    lifespan is another `create_all` racing the others, and one has already been
-    seen to lose with "table users already exists". A client that needs no
-    database should not open one.
+    context manager, which is what skips startup. That is not a shortcut: a
+    client with no use for a database should not open one. It was written when
+    every xdist worker shared ONE SQLite path, where the extra lifespan was
+    also a `create_all` racing the others and had been seen to lose with
+    "table users already exists" -- `tests/conftest.py` now gives each worker
+    its own file, so that race is gone and the fixture stands on the first
+    reason alone.
     """
     from travian_api.web.app import app
 

@@ -251,6 +251,14 @@ def _isolate_the_stealth_state() -> None:
     atexit.register(shutil.rmtree, directory, True)
 
 
+# Set alongside TRAVIAN_DB_PATH whenever the SUITE invented that path, so a
+# process can tell the controller's throwaway file -- inherited through the
+# environment by every xdist worker -- from a path a developer exported.
+# Deliberately not TRAVIAN_-prefixed: _scrub_travian_credentials runs after
+# this and would delete it before the workers are ever spawned.
+_SUITE_DB_MARKER = "PYTEST_TRAVIAN_SUITE_DB_PATH"
+
+
 def _isolate_the_database() -> None:
     """Point the suite at a throwaway SQLite file, never the live one.
 
@@ -263,11 +271,25 @@ def _isolate_the_database() -> None:
     Set before the block below imports anything, so nothing has resolved the
     path yet. An explicit TRAVIAN_DB_PATH is respected: a developer who points
     the suite somewhere deliberately keeps that choice.
+
+    Under ``-n 8`` every worker needs its OWN file. xdist spawns the workers
+    from the controller's environment, so the "already set" test above used to
+    hand all eight the controller's throwaway path: two modules that start an
+    app lifespan concurrently then both got "no" from ``create_all``'s
+    does-this-table-exist check, and the loser died with ``table users already
+    exists``. A worker therefore re-isolates when the path it inherited is one
+    the SUITE invented -- which ``_SUITE_DB_MARKER`` records, and which a path
+    the developer exported does not carry, so a deliberate choice is still
+    respected in a worker exactly as it is serially.
     """
-    if os.environ.get("TRAVIAN_DB_PATH"):
+    inherited = os.environ.get("TRAVIAN_DB_PATH")
+    if inherited and os.environ.get(_SUITE_DB_MARKER) != inherited:
         return
-    directory = tempfile.mkdtemp(prefix="travian-test-db-")
-    os.environ["TRAVIAN_DB_PATH"] = str(Path(directory) / "travian_web.db")
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    directory = tempfile.mkdtemp(prefix=f"travian-test-db-{worker}-")
+    path = str(Path(directory) / "travian_web.db")
+    os.environ["TRAVIAN_DB_PATH"] = path
+    os.environ[_SUITE_DB_MARKER] = path
     atexit.register(shutil.rmtree, directory, True)
 
 

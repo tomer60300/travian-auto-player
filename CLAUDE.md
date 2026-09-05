@@ -126,16 +126,21 @@ nothing and is pure waste.
    `-n 8` (pytest-xdist) is safe from the LIVE database, the live traces and
    live writes: `tests/conftest.py` repoints `TRAVIAN_DB_PATH`, the trace dir
    and the env before anything imports, and pins the live-writes switch off.
-   **But workers do NOT each get their own DB, despite what this file said
-   until 2026-09-04.** `_isolate_the_database()` returns early when
-   `TRAVIAN_DB_PATH` is already set — and xdist workers inherit it from the
-   controller, which set it — so all eight share one SQLite file. Two test
-   modules that start an app lifespan concurrently can then race `create_all`
-   and fail with `table users already exists`. Observed once; the workaround
-   used was a `TestClient` without its context manager, for auth-only pure
-   endpoints that need no DB. The real fix is to key the tmp path on
-   `PYTEST_XDIST_WORKER` — untaken, so treat an `already exists` failure under
-   `-n 8` as this and not as your change.
+   Each worker gets its OWN SQLite file, keyed on `PYTEST_XDIST_WORKER`
+   (`travian-test-db-gw3-…`). Until 2026-09-05 all eight shared one:
+   `_isolate_the_database()` returned early whenever `TRAVIAN_DB_PATH` was
+   already set, and xdist spawns its workers from the controller's
+   environment, so every worker inherited the controller's path — two modules
+   starting an app lifespan concurrently then raced `create_all` and the loser
+   died with `table users already exists`. Measured over ten `-n 8` runs of
+   the three lifespan modules together: 9 runs red / 140 errors before, 0 / 0
+   after. A path YOU export is still honoured, serially and under `-n 8`
+   alike: the conftest marks only the paths it invented itself
+   (`PYTEST_TRAVIAN_SUITE_DB_PATH`) and re-isolates only those. So an
+   `already exists` failure under `-n 8` is now a real finding rather than
+   this. The other side of the same coin: with the default `--dist load` two
+   tests from one module can land on different workers, so a test must never
+   lean on rows another test wrote.
    While iterating, `-m "not slow"` skips the heavy cases: the oracle
    agreement checks, the relabelling permutations, the mutation guards, and
    every 40-village planner case. Measured 2026-09-03 with `-n 8` over 2,031
