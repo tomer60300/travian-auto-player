@@ -7196,11 +7196,13 @@ async def post_execute(
                                     ]
                                     _ids = sorted(e.route_id for e in doomed)
                                     _res = None
+                                    _raised = False
                                     try:
                                         _res = await svc.delete_routes(
                                             origin, doomed, stop_check=_stop_reason
                                         )
                                     except TravianError as exc:
+                                        _raised = True
                                         problems.append(
                                             f"{village_label(origin, names)}: could not "
                                             f"prune {len(_ids)} out-of-window row(s) "
@@ -7237,6 +7239,31 @@ async def post_execute(
                                                 f"{len(_ids)} row(s) departing outside the "
                                                 f"profile hours"
                                             )
+                                    elif not _raised:
+                                        # Every other verdict -- `failed`,
+                                        # `stopped`, or no answer at all -- means
+                                        # the rows are still there. `deleted` used
+                                        # to be the only branch that reported
+                                        # anything, so a refused prune produced a
+                                        # response byte-identical to a successful
+                                        # one while the whole fan-out kept
+                                        # departing round the clock.
+                                        _said = (
+                                            "the service made no delete request"
+                                            if _res is None
+                                            else f"{_res.status} {_res.detail}".strip()
+                                        )
+                                        problems.append(
+                                            f"{village_label(origin, names)}: could not prune "
+                                            f"{len(_ids)} row(s) ({_said}); {_ids} are still "
+                                            f"departing outside the profile hours"
+                                        )
+                                        if _res is not None and _res.status == "stopped":
+                                            # Same meaning as everywhere else in
+                                            # this run: a captcha was resolved or
+                                            # the activity budget is spent, so the
+                                            # rest of the run must not carry on.
+                                            stopped_early = True
                                     trace.event(
                                         "window_pruned",
                                         origin=origin,

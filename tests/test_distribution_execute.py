@@ -272,6 +272,7 @@ class _FakeLiveSvc:
         phantom_creates=False,
         confirm_raises=None,
         rows_per_create=None,
+        delete_status="deleted",
     ):
         # phantom_creates models the failure a 200 with an empty body cannot
         # rule out: the game accepts the create and produces no route.
@@ -291,6 +292,7 @@ class _FakeLiveSvc:
         self.reconciler_verified = True
         self._existing = existing or {}
         self._create_status = create_status
+        self._delete_status = delete_status
         self._disable_status = disable_status
         self._disable_applies = (
             disable_status == "disabled" if disable_applies is None else disable_applies
@@ -359,6 +361,10 @@ class _FakeLiveSvc:
             return RouteActionResult(vid, 0, 0, "stopped", reason)
         ids = {r.route_id for r in routes}
         self.deleted.append((vid, tuple(sorted(ids))))
+        if self._delete_status != "deleted":
+            # A refused/stopped/unreadable delete leaves every row in place --
+            # which is the whole point of the case: the rows keep departing.
+            return RouteActionResult(vid, 0, 0, self._delete_status, "delete refused (test)")
         # Actually gone. The read-back is what the production code trusts, so a
         # double that recorded the call and left the rows in place would let a
         # broken delete pass.
@@ -2967,6 +2973,70 @@ class TestPruningTheFanOutToTheProfilesHours:
         )
 
         assert not getattr(svc, "deleted", []), "off by default: it deletes rows"
+
+
+class TestAFailedWindowPruneIsNotSilent:
+    """A prune that did not happen must not read as a run with nothing to say.
+
+    `delete_routes` answers `failed` on a network error and `stopped` on the
+    captcha/budget check; only `deleted` used to report anything, so a refused
+    prune produced a byte-identical response to a successful one -- the same
+    "created N route(s)" headline, an empty `problems` list, and therefore a
+    clean `needs_attention` in run history -- while every out-of-window row kept
+    departing round the clock.
+    """
+
+    def _account(self):
+        return _account(
+            [_row_with_cycle(20003, -1, 1, 23 * 60 + 30)],
+            {20003: (0, 0), -1: (40, 40)},
+            {20003: "03", -1: "A"},
+        )
+
+    def _run(self, svc):
+        return _run_live(
+            svc,
+            self._account(),
+            max_routes_per_run=50,
+            dispatch_window=[23 * 60, 7 * 60],
+            prune_to_window=True,
+        )
+
+    def test_a_refused_prune_names_the_rows_still_departing(self):
+        svc = _FakeLiveSvc(delete_status="failed")
+        res = self._run(svc)
+
+        assert svc.deleted, "the prune was attempted"
+        assert res.problems, "a prune that did not happen must be reported"
+        assert any("outside the profile" in p for p in res.problems), res.problems
+
+    def test_the_successful_prune_is_still_silent(self):
+        # The control: the two responses must not be identical, which is exactly
+        # what they were.
+        clean = self._run(_FakeLiveSvc())
+        assert clean.problems == []
+
+    def test_a_refused_prune_makes_the_run_need_attention(self, tmp_path):
+        from pathlib import Path
+        from shutil import copy
+
+        from travian_api.services.distribution.run_history import summarise_runs
+
+        res = self._run(_FakeLiveSvc(delete_status="failed"))
+        copy(Path(res.trace_path), tmp_path)
+        history = summarise_runs(tmp_path)
+
+        assert history.runs[0].problems
+        assert history.runs[0].needs_attention is True
+
+    def test_a_stopped_prune_stops_the_run(self):
+        # `stopped` is the captcha/budget answer: nothing was deleted AND the
+        # run must not carry on as though it had been.
+        svc = _FakeLiveSvc(delete_status="stopped")
+        res = self._run(svc)
+
+        assert any("outside the profile" in p for p in res.problems), res.problems
+        assert any("stopped early" in p.lower() for p in res.problems), res.problems
 
 
 class TestTheRowBudgetCountsWhatSurvives:
