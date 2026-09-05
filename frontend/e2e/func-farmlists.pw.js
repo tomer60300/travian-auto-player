@@ -21,6 +21,13 @@
  * where the fixture has to change buys the same coverage inside the suite's
  * time budget.
  *
+ * A fifth test covers Loop Send Mode, which runs over the same kind of
+ * resumable-operation socket as Oasis Raider and carried the identical dead
+ * `mountedRef` bug (`func-oasisraider.pw.js` documents the regression):
+ * `FarmLists`'s mount effect returned only a cleanup, so under StrictMode's
+ * mount-cleanup-remount the ref was stuck `false` from the first render and
+ * `handleOpMessage`'s guard dropped every frame the loop's socket sent.
+ *
  * NO BACKEND AND NO GAME REQUEST. `appHarness.isolateApp` answers the shell
  * and ABORTS every path it does not know; the fixtures below are registered
  * AFTER it and `route.fallback()` anything they do not recognise, so the
@@ -394,4 +401,45 @@ test('a failed read and an empty account do not look alike', async ({ page }) =>
   // "No targets in this list." is a claim about the account that the failed
   // read did not establish -- the overview row beside it says one slot.
   await expect(page.getByText('No targets in this list.')).toHaveCount(0)
+})
+
+test('loop mode reports every frame the operation sends', async ({ page }) => {
+  const state = model({ lists: [{ id: SOURCE_ID, name: 'Source' }], slots: [[SOURCE_ID, [501]]] })
+  const wsState = {}
+  await isolateApp(page)
+  await serveFarm(page, state)
+  // AFTER `isolateApp`, whose blanket socket close would otherwise win.
+  await page.routeWebSocket(/.*/, (ws) => {
+    const path = new URL(ws.url()).pathname
+    if (!path.endsWith('/ws/farm/run-all')) return ws.close()
+    ws.onMessage((m) => {
+      wsState.config = JSON.parse(String(m)).config
+      ws.send(JSON.stringify({ type: 'session_init', session_id: 'e2e-farm-loop' }))
+      ws.send(JSON.stringify({ type: 'cycle_start', cycle: 1 }))
+      ws.send(JSON.stringify({ type: 'error', message: 'no idle troops in this village' }))
+      ws.send(JSON.stringify({ type: 'complete', total_cycles: 1, total_success: 0, total_fail: 1 }))
+    })
+  })
+  await page.addInitScript(() => localStorage.removeItem('resumableOp:farm-all'))
+
+  await page.goto('/farm')
+  await expect(page.getByRole('cell', { name: 'Source', exact: true })).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Source' }).check()
+  await page.getByRole('button', { name: 'Start Loop' }).click()
+
+  await expect.poll(() => !!wsState.config).toBe(true)
+
+  // Fails today: `FarmLists.jsx`'s mount effect (line 159) is cleanup-only, so
+  // under StrictMode's mount-cleanup-remount `mountedRef.current` is stuck
+  // `false` from the first render and `handleOpMessage`'s guard drops every
+  // frame the loop socket sends -- this panel stays on "No messages yet..."
+  // for the whole loop.
+  await expect(
+    page.getByText('Session: e2e-farm-loop (viewable from /sessions)')
+  ).toBeVisible({ timeout: 3000 })
+  await expect(page.getByText('Cycle 1 started')).toBeVisible()
+  await expect(page.getByText('no idle troops in this village')).toBeVisible()
+  await expect(page.getByText(/Completed after 1 cycle\(s\)/)).toBeVisible()
+  await expect(toast(page)).toHaveClass(/toast-success/)
+  await expect(page.getByRole('button', { name: 'Start Loop' })).toBeVisible()
 })

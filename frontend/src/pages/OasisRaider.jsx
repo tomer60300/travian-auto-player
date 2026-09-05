@@ -88,7 +88,13 @@ export default function OasisRaider() {
   const troopNames = TRIBE_TROOPS[tribeId] || TRIBE_TROOPS[2]
   const toast = useToast()
 
+  // Set on mount as well as cleared on unmount. React re-runs an effect's
+  // cleanup and body once on mount in development (StrictMode), and a
+  // cleanup-only version left this ref stuck at `false` from the first
+  // teardown onwards -- so `handleOpMessage`'s `if (!mountedRef.current)`
+  // guard dropped EVERY frame the operation sent.
   useEffect(() => {
+    mountedRef.current = true
     return () => {
       mountedRef.current = false
     }

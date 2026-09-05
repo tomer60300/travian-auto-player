@@ -156,7 +156,15 @@ export default function FarmLists() {
   const [wsStatus, setWsStatus] = useState('disconnected')
   const [wsMessages, setWsMessages] = useState([])
   const mountedRef = useRef(true)
-  useEffect(() => { return () => { mountedRef.current = false } }, [])
+  // Set on mount as well as cleared on unmount. React re-runs an effect's
+  // cleanup and body once on mount in development (StrictMode), and a
+  // cleanup-only version left this ref stuck at `false` from the first
+  // teardown onwards -- so the loop-mode message handler's
+  // `if (!mountedRef.current)` guard dropped EVERY frame the operation sent.
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   // -----------------------------------------------------------------
   //  Fetch all lists

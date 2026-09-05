@@ -171,7 +171,7 @@ test('a live sweep the server refused is not left reading as Completed', async (
   //    frame's `addLog` and `toast.error` both sit behind the dead
   //    `mountedRef` guard, so a sweep the game refused says NOTHING at all --
   //    which is worse than saying the wrong thing.
-  await expect(page.getByText('no rally point in this village')).toBeVisible({ timeout: 3000 })
+  await expect(page.getByText('no rally point in this village').first()).toBeVisible({ timeout: 3000 })
   await expect(toast(page)).toHaveClass(/toast-error/)
   await expect(page.getByText('Completed', { exact: true })).toHaveCount(0)
   // And no summary card is invented for a sweep that produced none.

@@ -12,11 +12,19 @@
  *
  * Three tests, because a Playwright test costs ~7s before it asserts anything.
  *
+ * A fourth test does open the execution socket, to cover the Execution Log --
+ * which runs over the same kind of resumable-operation socket as Oasis Raider
+ * and carried the identical dead `mountedRef` bug (`func-oasisraider.pw.js`
+ * documents the regression): `BuildQueue`'s mount effect cleared the ref on
+ * unmount but never set it back on mount, so under StrictMode's
+ * mount-cleanup-remount the ref was stuck `false` from the first render and
+ * `handleQueueMessage`'s guard dropped every frame the execution socket sent.
+ *
  * NO BACKEND AND NO GAME REQUEST: `appHarness.isolateApp` answers the shell and
  * ABORTS every path it does not know, the two village reads are fixtures, and
- * the execution socket is never opened (the harness closes sockets and no test
- * here confirms the Execute dialog). There is a live Travian account on this
- * machine.
+ * the execution socket is never opened in the first three tests (the harness
+ * closes sockets and none of them confirms the Execute dialog). There is a
+ * live Travian account on this machine.
  */
 
 import { expect, test } from '@playwright/test'
@@ -201,4 +209,52 @@ test('a village that could not be read does not read as a village with nothing i
   await alert.getByRole('button', { name: 'Retry' }).click()
   await expect(page.getByText('No buildings available. Connect to a server first.')).toBeVisible()
   await expect(page.getByRole('alert')).toHaveCount(0)
+})
+
+test('execution reports every frame the operation sends', async ({ page }) => {
+  const wsState = {}
+  await isolateApp(page, {
+    '/buildings': { village_id: CAPITAL, buildings: BUILDINGS },
+    '/buildings/queue': { village_id: CAPITAL, queue: [] },
+  })
+  // AFTER `isolateApp`, whose blanket socket close would otherwise win.
+  await page.routeWebSocket(/.*/, (ws) => {
+    const path = new URL(ws.url()).pathname
+    if (!path.endsWith('/ws/queue/run')) return ws.close()
+    ws.onMessage((m) => {
+      wsState.config = JSON.parse(String(m)).config
+      ws.send(JSON.stringify({ type: 'session_init', session_id: 'e2e-queue-run' }))
+      ws.send(JSON.stringify({ type: 'step_complete', building: 'Woodcutter', level: 4, success: true }))
+      ws.send(JSON.stringify({ type: 'error', message: 'the game returned a login page' }))
+      ws.send(JSON.stringify({ type: 'complete' }))
+    })
+  })
+  await page.addInitScript(() => localStorage.removeItem('resumableOp:queue'))
+
+  await page.goto('/queue')
+  await page.getByRole('button', { name: 'Add Woodcutter (slot #1) to queue' }).click()
+  await page.getByRole('button', { name: 'Execute Queue' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Execute' }).click()
+
+  await expect.poll(() => !!wsState.config).toBe(true)
+  expect(wsState.config).toEqual({
+    yaml_content: `village_id: ${CAPITAL}\nplan:\n  - building: "Woodcutter"\n    target: 4\n    priority: 1\n    slot: 1\n`,
+    poll_interval: 30,
+    use_video: true,
+    verbose: false,
+  })
+
+  // Fails today: `BuildQueue.jsx`'s mount effect (lines 519-525) clears
+  // `mountedRef` on unmount but never sets it back on mount, so under
+  // StrictMode's mount-cleanup-remount the ref is stuck `false` from the
+  // first render and `handleQueueMessage`'s guard drops every frame the
+  // execution socket sends -- the Execution Log stays empty for the whole run.
+  await expect(
+    page.getByText('Session: e2e-queue-run (viewable from /sessions)')
+  ).toBeVisible({ timeout: 3000 })
+  await expect(page.getByText('Woodcutter -> Level 4: Done')).toBeVisible()
+  await expect(page.getByText('the game returned a login page')).toBeVisible()
+  await expect(page.getByText('Build queue completed!')).toBeVisible()
+  // Execution finished: the Stop button is gone again.
+  await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0)
 })

@@ -517,7 +517,13 @@ export default function BuildQueue() {
     setValidationResult(null)
   }
 
+  // Set on mount as well as cleared on unmount. React re-runs an effect's
+  // cleanup and body once on mount in development (StrictMode), and a
+  // cleanup-only version left this ref stuck at `false` from the first
+  // teardown onwards -- so the Execution Log's `if (!mountedRef.current)`
+  // guard dropped EVERY frame the operation sent.
   useEffect(() => {
+    mountedRef.current = true
     return () => {
       mountedRef.current = false
       timersRef.current.forEach(({ type, id }) => type === 'interval' ? clearInterval(id) : clearTimeout(id))
