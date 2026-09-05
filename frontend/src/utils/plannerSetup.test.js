@@ -3293,6 +3293,11 @@ describe('describeRelayPermission', () => {
 // import of the same module is the same tautology with more steps. The backend
 // agent adds the mirror pytest, so a change on either side breaks a test on
 // that side.
+//
+// Cited by SYMBOL and never by line number, which `frontend/CLAUDE.md` already
+// requires of the design-token references for the same reason: the first draft
+// of this block gave lines, and the branch's own concurrent backend edits moved
+// every one of them within the hour. A symbol is greppable and a line is not.
 describe('the backend values this build keeps a second copy of', () => {
   // THE SHARPEST OF THEM. The page seeds its four merchant boxes from this and
   // then sends all four EXPLICITLY on every request, so a change to a backend
@@ -3300,15 +3305,15 @@ describe('the backend values this build keeps a second copy of', () => {
   // copies at least fall back to the server's own value.
   it('DEFAULT_MERCHANT_MODEL matches the four levers the planner defaults to', () => {
     // base_capacity / bonus_per_to_level: `EUROPE2_TEUTON` in
-    // src/travian_api/services/distribution/merchants.py:102, which is what
+    // src/travian_api/services/distribution/merchants.py, which is what
     // `PlanRequest.merchant_base_capacity` and
-    // `PlanRequest.trade_office_bonus_per_level` default to
-    // (src/travian_api/web/routes/distribution.py:757-758).
+    // `PlanRequest.trade_office_bonus_per_level` default to.
     expect(DEFAULT_MERCHANT_MODEL.base_capacity).toBe(2500)
     expect(DEFAULT_MERCHANT_MODEL.bonus_per_to_level).toBe(0.2)
-    // src/travian_api/services/distribution/optimizer.py:96
+    // `DEFAULT_MERCHANT_RESERVE` in
+    // src/travian_api/services/distribution/optimizer.py
     expect(DEFAULT_MERCHANT_MODEL.merchant_reserve).toBe(2)
-    // src/travian_api/services/distribution/optimizer.py:119
+    // `DEFAULT_MERCHANT_HEADROOM`, same file
     expect(DEFAULT_MERCHANT_MODEL.merchant_headroom).toBe(0.1)
     // Four levers, no more: merchant SPEED is tribe-derived server-side and
     // arrives in the snapshot, so a default for it here would be a guess about
@@ -3322,7 +3327,7 @@ describe('the backend values this build keeps a second copy of', () => {
   })
 
   // Twin: `DAILY_BEAT_CYCLES` in
-  // src/travian_api/services/distribution/merchants.py:41.
+  // src/travian_api/services/distribution/merchants.py.
   //
   // A closed set, not a range: Travian's "repeat every N hours" fans out into
   // 24/N daily rows, so only the divisors of 24 are expressible at all. A cycle
@@ -3332,8 +3337,9 @@ describe('the backend values this build keeps a second copy of', () => {
     expect([...TRAVIAN_REPEAT_INTERVALS]).toEqual([1, 2, 3, 4, 6, 8, 12, 24])
   })
 
-  // Twin: the `le=0.95` on `stock_floor_fraction`
-  // (src/travian_api/web/routes/distribution.py:474 and :3231).
+  // Twin: the `le=0.95` on `stock_floor_fraction`, declared twice in
+  // src/travian_api/web/routes/distribution.py -- on `VillageConfig` and on
+  // the day check's own village model.
   //
   // Below 1 by a real margin, because a floor at the warehouse cap leaves NPC
   // nothing to convert out of and the village simply stops trading.
@@ -3342,7 +3348,7 @@ describe('the backend values this build keeps a second copy of', () => {
   })
 
   // Twin: `MAX_DAY_SEGMENTS` in
-  // src/travian_api/web/routes/distribution.py:161, the `max_length` on
+  // src/travian_api/web/routes/distribution.py, the `max_length` on
   // `DayCheckRequest.segments` and `ExecuteRequest.segments`.
   it('MAX_DAY_SEGMENTS matches the segment ceiling', () => {
     expect(MAX_DAY_SEGMENTS).toBe(12)

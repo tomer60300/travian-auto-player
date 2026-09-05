@@ -177,15 +177,18 @@ export const MAX_TRADE_OFFICE_LEVEL = 20
  * silently overridden by whatever this constant last said. The other copies at
  * least fall back.
  *
- * Their twins, one file and line each:
+ * Their twins, named by SYMBOL rather than by line -- `frontend/CLAUDE.md`
+ * already requires that of the design-token references, and for the same
+ * reason: this file's first draft gave lines, and the branch's own concurrent
+ * backend edits moved every one of them within the hour.
+ *
  *   * `base_capacity` / `bonus_per_to_level` -- `EUROPE2_TEUTON` in
- *     `src/travian_api/services/distribution/merchants.py:102`, which is what
+ *     `src/travian_api/services/distribution/merchants.py`, which is what
  *     `PlanRequest.merchant_base_capacity` and
  *     `PlanRequest.trade_office_bonus_per_level` default to.
  *   * `merchant_reserve` -- `DEFAULT_MERCHANT_RESERVE` in
- *     `src/travian_api/services/distribution/optimizer.py:96`.
- *   * `merchant_headroom` -- `DEFAULT_MERCHANT_HEADROOM` in
- *     `src/travian_api/services/distribution/optimizer.py:119`.
+ *     `src/travian_api/services/distribution/optimizer.py`.
+ *   * `merchant_headroom` -- `DEFAULT_MERCHANT_HEADROOM`, same file.
  *
  * Capacity is SERVER-CALIBRATED (Europe 2 is not a stock server), so it cannot
  * be derived from the tribe and these are the operator's calibrated Europe 2
