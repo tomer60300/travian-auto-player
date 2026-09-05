@@ -47,7 +47,7 @@ test.describe('the day holds twelve profiles', () => {
 
     await expect(addProfile(page)).toBeEnabled()
     await addProfile(page).click()
-    await page.getByRole('textbox', { name: /profile/i }).fill('P12')
+    await page.getByRole('textbox', { name: 'Profile name' }).fill('P12')
     await page.getByRole('button', { name: 'Create' }).click()
 
     await expect(page.getByLabel('Allocation profile')).toHaveValue('P12')

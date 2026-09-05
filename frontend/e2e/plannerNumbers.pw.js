@@ -394,9 +394,12 @@ test.describe('retyping a figure drops the plan the old one produced', () => {
 
     await page.getByRole('button', { name: 'Account' }).click()
     await openDisclosures(page)
+    // Named for the ROW as well as the destination now: a checkbox whose whole
+    // accessible name was "11" appeared 2x(N-1) times on one screen and said
+    // nothing about which village it belonged to.
     await page
       .getByRole('group', { name: 'Villages 02 forwards material to' })
-      .getByLabel('11', { exact: true })
+      .getByRole('checkbox', { name: '11: 02 forwards material to' })
       .check()
 
     await page.getByRole('button', { name: 'Plan', exact: true }).click()
