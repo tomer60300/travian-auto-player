@@ -99,6 +99,32 @@ class TestItInfersWhatItCan:
             "a target that cannot be routed to is not an obligation this can plan"
         )
 
+    def test_the_safety_margin_raises_the_night_obligation_too(self):
+        # The plan path and the manual-transfer path both ship
+        # `crop_per_hour * (1 + margin/100)`; the night path took the bare rate.
+        # The night then frees exactly the promise while the day books the
+        # promise plus the margin, so the remainder village drains further than
+        # the profile predicts -- or the plan reads OVER_ALLOCATED.
+        def _with(margin):
+            body = _body()
+            body.foreign_targets = [
+                ForeignTarget(
+                    name="01Arb",
+                    x=24,
+                    y=88,
+                    crop_per_hour=200_000,
+                    route_eligible=True,
+                    safety_margin_pct=margin,
+                )
+            ]
+            return asyncio.run(post_night_profile(body, USER))
+
+        assert _with(0.0).tribute_per_hour == pytest.approx(200_000.0)
+        assert _with(10.0).tribute_per_hour == pytest.approx(220_000.0)
+        assert _with(10.0).unmet[Resource.CROP] == pytest.approx(
+            _with(0.0).unmet[Resource.CROP] + 20_000.0
+        ), "the margin is crop the night has to free, like any other obligation"
+
 
 class TestEveryForeignTargetIsItsOwnDestination:
     """Two obligations are two places, and only the first one's coordinates were

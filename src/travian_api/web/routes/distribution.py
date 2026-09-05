@@ -3488,8 +3488,15 @@ async def post_night_profile(
     # at the near hop -- about forty-eight turnarounds credited to a leg that is
     # a 10h round trip in an 8h night -- and swapping the two rows of the request
     # body gave the opposite answer.
+    # `* (1 + margin/100)`, exactly as the plan path and the manual-transfer
+    # path already ship it. The night freed the bare promise while the day
+    # booked the promise plus the margin, so the remainder village drained
+    # further than the profile predicted -- or the plan read OVER_ALLOCATED.
     tributes = [
-        TributeTarget(at=(target.x, target.y), per_hour=target.crop_per_hour)
+        TributeTarget(
+            at=(target.x, target.y),
+            per_hour=target.crop_per_hour * (1.0 + target.safety_margin_pct / 100.0),
+        )
         for target in body.foreign_targets
         if target.route_eligible
     ]
