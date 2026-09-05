@@ -410,8 +410,10 @@ export default function FarmLists() {
       } else {
         toast.success(`Moved ${delOk} target(s) to "${destName}"`)
       }
+    } else if (addFail > 0) {
+      toast.warning(`Copied ${addedSlots.length} target(s) to "${destName}"; ${addFail} refused: ${addFailReason}`)
     } else {
-      toast.success(`Copied ${addedSlots.length} target(s) to "${destName}"${addFail ? ` (${addFail} failed)` : ''}`)
+      toast.success(`Copied ${addedSlots.length} target(s) to "${destName}"`)
     }
   }
 
