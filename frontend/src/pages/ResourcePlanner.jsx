@@ -110,7 +110,6 @@ import {
   withRemainder,
 } from '../utils/plannerAllocation'
 import {
-  MINUTES_IN_DAY,
   dispatchWindowFor,
   overnightField,
   overnightMapOnly,
@@ -2057,19 +2056,25 @@ export default function ResourcePlanner() {
       // and the escaping firings are a note about a dependency; without it they
       // are a critical over-delivery. /plan must see it to weigh them.
       ...(pruneToWindow && dispatchWindow ? { prune_to_window: true } : {}),
-      // A route inside a profile has that profile's hours to deliver in, not the
-      // two-hour default the backend falls back to. The default is right for a
-      // round-the-clock set, where a late arrival really is late; inside an
-      // 8-hour window it forces short cycles, and a short cycle against a long
-      // haul keeps several shipments in the air at once and spends merchants on
-      // speed nobody asked for. Measured: the same night plan came out 46
-      // routes / 120 merchants against an 8h target and 48 / 135 against 2h.
-      ...(dispatchWindow
-        ? {
-            max_latency_hours:
-              (dispatchWindow[1] - dispatchWindow[0] + MINUTES_IN_DAY) % MINUTES_IN_DAY / 60,
-          }
-        : {}),
+      // NO `max_latency_hours`. It used to be derived here from the ACTIVE
+      // profile's hours, and that was wrong twice over.
+      //
+      // It is the backend's own policy restated on the client. `_plan_account`
+      // already applies `min(body.max_latency_hours, window / 60)` -- the window
+      // may TIGHTEN the standing target and never loosen it -- so sending a
+      // window-derived figure supplied no fact the request did not already
+      // carry in `dispatch_window`; it overrode the server's default with a
+      // number this page had computed. That is the duplicated-default shape:
+      // a change to the backend's target would be silently overridden by
+      // whatever the page last derived.
+      //
+      // And on a SEGMENTED request it was the wrong window entirely. The four
+      // other active-tab fields are stripped by `runDayCheck` and
+      // `buildExecutePayload`; this one was not, so selecting the Night tab
+      // before "run the whole day" planned the 16-hour DAY segment against an
+      // 8-hour target -- shorter cycles, more routes, more merchants, more
+      // rows, on the endpoint that writes. Pinned by `segmentedLatency.pw.js`,
+      // which asserts the segmented body is byte-identical whichever tab is up.
       config: villages
         .map((v) => ({
           village_id: v.village_id,
