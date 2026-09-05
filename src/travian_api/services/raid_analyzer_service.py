@@ -37,7 +37,6 @@ UNIT_DEF_TABLE: Dict[str, Tuple[str, int, int]] = {
     # Teutons
     "u11": ("Clubswinger", 20, 1),
     "u12": ("Spearman", 35, 1),
-    "u13": ("Axeman", 10, 1),
     "u15": ("Paladin", 100, 2),
     "u16": ("Teutonic Knight", 50, 3),
     # Romans
@@ -57,18 +56,32 @@ UNIT_DEF_TABLE: Dict[str, Tuple[str, int, int]] = {
     "u83": ("Khopesh Warrior", 50, 1),
     "u84": ("Anhur Guard", 110, 2),
     "u85": ("Resheph Chariot", 120, 3),
-    # Nature (oasis defenders)
-    "u31": ("Rat", 25, 1),
-    "u32": ("Spider", 25, 1),
-    "u33": ("Snake", 25, 1),
-    "u34": ("Bat", 25, 1),
-    "u35": ("Wild Boar", 33, 2),
-    "u36": ("Wolf", 40, 1),
-    "u37": ("Bear", 50, 3),
-    "u38": ("Crocodile", 33, 3),
-    "u39": ("Tiger", 60, 3),
-    "u40": ("Elephant", 55, 5),
+    # Nature (oasis defenders) -- the whole u31-u40 block is UNVOUCHED, below.
 }
+
+# Rows whose figures contradicted the table they sat in, removed rather than
+# guessed at. None of this needed a game read to see:
+#
+#   u13 Axeman was 10, BELOW u11 Clubswinger at 20, though the Axeman is
+#       strictly the better unit -- and 10 is the value of u14, the Teuton
+#       scout, whose slot is absent from the table. A transcription one row off.
+#   u31-u34 Rat, Spider, Snake and Bat all carried the same 25.
+#   u35 Wild Boar and u38 Crocodile both carried 33.
+#   u40 Elephant was 55, below u39 Tiger at 60, while costing more upkeep.
+#
+# Four ties and an inverted ordering are internal evidence the nature block was
+# never measured, so it goes as a block. The operator's ruling for unit values
+# nobody can vouch for is "just don't support those troops": the ids route
+# through unsupported_defender_ids, which already fails closed, instead of
+# scoring a target off a number that gets clubs killed when it is too low.
+#
+# The set -- not merely the table's key list -- is what the refusal consults, so
+# re-adding a row without confirming it in game does not quietly re-enable it.
+# True figures are OPERATOR TO CONFIRM from the in-game Barracks / Rally Point
+# unit info; see .claude/agents/review-data/02-constants-register.md.
+UNVOUCHED_DEFENDER_IDS: frozenset[str] = frozenset(
+    {"u13", "u31", "u32", "u33", "u34", "u35", "u36", "u37", "u38", "u39", "u40"}
+)
 
 WALL_BASES: Dict[str, float] = {
     "teuton": 1.020,
@@ -209,14 +222,20 @@ def extract_trap_capacity(buildings: List[Dict[str, Any]]) -> int:
 
 
 def unsupported_defender_ids(defenders: dict[str, int]) -> list[str]:
-    """Defender unit ids with no UNIT_DEF_TABLE entry, sorted for a stable reason.
+    """Defender unit ids the analyzer cannot score, sorted for a stable reason.
 
-    The hero is one of them: its defence depends on attributes no report
-    carries, so it has no entry either. A defender listed here cannot be
-    scored, and treating it as zero defence would read as "undefended".
+    Two ways to land here. An id with no UNIT_DEF_TABLE entry: the hero is one
+    of them, since its defence depends on attributes no report carries. And an
+    id in UNVOUCHED_DEFENDER_IDS, whose figure contradicted the table it sat in
+    and was removed rather than guessed at.
+
+    Either way the target cannot be scored, and treating the defender as zero
+    defence would read as "undefended".
     """
     return sorted(
-        uid for uid, count in defenders.items() if count > 0 and uid not in UNIT_DEF_TABLE
+        uid
+        for uid, count in defenders.items()
+        if count > 0 and (uid not in UNIT_DEF_TABLE or uid in UNVOUCHED_DEFENDER_IDS)
     )
 
 

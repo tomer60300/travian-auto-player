@@ -111,7 +111,10 @@ def test_the_operator_is_told_which_unit_ids_were_unscorable():
 
 def test_unsupported_defender_ids_names_every_unrecognised_id():
     assert unsupported_defender_ids({"u21": 20, "u4": 5, "uhero": 1}) == ["u4", "uhero"]
-    assert unsupported_defender_ids({"u21": 20, "u31": 3}) == []
+    # u22 Swordsman, not u31 Rat: the whole nature block was withdrawn as
+    # UNVOUCHED (four rows carried the same 25) -- see
+    # tests/test_raid_unvouched_unit_values.py. A vouched-for id still passes.
+    assert unsupported_defender_ids({"u21": 20, "u22": 3}) == []
     assert unsupported_defender_ids({}) == []
     # A zero count is not a defender, so it cannot make a target unscorable.
     assert unsupported_defender_ids({"u4": 0}) == []

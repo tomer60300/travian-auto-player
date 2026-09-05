@@ -168,6 +168,40 @@ and where the operator can read it, and cap your severity accordingly.
 | **Direct scout-send mechanics** — whether one scout suffices, what a "defences" scout returns versus a "resources" scout, whether a scout that dies still produces a report | The whole defence-scan phase of the farm builder. §II.3 covers scout-only *farm-list entries* only. | Send one scout at a known target and compare the report to a resources scout of the same target |
 | **Oasis stock after clearing** — is an animal-guarded oasis's ~1,000–2,000 per resource lootable once the animals are dead, or is only the animal yield (160–800 per clear) available? | Whether skipping every animal-guarded oasis forfeits ~4,000–8,000 per tile or a few hundred. Changes the oasis raider's income model by an order of magnitude. | Clear one known animal oasis and compare the battle report's bounty against §II.8's animal-yield table |
 
+### UNIT_DEF_TABLE — eleven ids withdrawn, OPERATOR TO CONFIRM (2026-09-05)
+
+`services/raid_analyzer_service.py` used to carry a defence figure for each of
+the ids below. The table contradicted itself on all eleven, with no game read
+needed to see it, so they were **removed** (2026-09-05) rather than corrected
+from memory, and they now route through `unsupported_defender_ids` — a report
+naming one of them refuses the target instead of scoring it. The set
+`UNVOUCHED_DEFENDER_IDS` in that module, not the table's key list, is what the
+refusal consults, so re-adding a row does not quietly re-enable it.
+
+**Read each value off the in-game Barracks / Rally Point unit info and record it
+here before any of these are restored.** Do not fill them in from general
+Travian knowledge — this server is provably non-stock (§0.1).
+
+| id | Unit | Value the table used to claim | Why it was not believable |
+|---|---|---|---|
+| `u13` | Axeman | 10 | Below `u11` Clubswinger at 20, though the Axeman is strictly the better unit — and 10 is `u14`, the Teuton scout, whose slot is absent from the table. A transcription one row off. |
+| `u31` | Rat | 25 | Four nature rows carried the identical 25 |
+| `u32` | Spider | 25 | ” |
+| `u33` | Snake | 25 | ” |
+| `u34` | Bat | 25 | ” |
+| `u35` | Wild Boar | 33 | Tied with the Crocodile |
+| `u36` | Wolf | 40 | Same unmeasured block |
+| `u37` | Bear | 50 | Same unmeasured block |
+| `u38` | Crocodile | 33 | Tied with the Wild Boar |
+| `u39` | Tiger | 60 | Above the Elephant |
+| `u40` | Elephant | 55 | Below the Tiger while costing more upkeep |
+
+Measured before the withdrawal: 40 defenders on each of these rows produced a
+full recommendation — 40 Axemen scored as needing 86 clubs, 40 Tigers as 534.
+An id present with a value that is too LOW is the dangerous case, because it
+under-states the garrison and the wave dies; an id merely missing already failed
+closed.
+
 ## A possible defect in this review data itself
 
 **§II.9 says the no-loss report suppression is "an account-level preference, not
