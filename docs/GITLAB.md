@@ -11,7 +11,7 @@ Platform: WSL2 Ubuntu-22.04 (omnibus package)
 |---|---|
 | **URL** | `http://<WSL_IP>` (see "Get WSL IP" below) |
 | **Username** | `root` |
-| **Initial Password** | `OWnuPZkqXLpCf5CvAMr1o0amBNw7R4C0/XBZ+pS8bzo=` |
+| **Initial Password** | `REDACTED - rotate this credential; it was committed to a public repository and remains in git history` |
 
 > ⚠️ The WSL2 IP changes on reboot. Always check with the command below.
 
