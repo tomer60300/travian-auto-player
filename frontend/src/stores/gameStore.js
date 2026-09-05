@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import api from '../api';
+import { readErrorDetail } from '../utils/fetchError';
 
 const VILLAGE_KEY = 'activeVillageId'
 
@@ -38,14 +39,6 @@ function storeVillageId(key, id) {
 // a background sync from one tab would silently retarget another tab's
 // default. Every call that acts on a village sends its village_id explicitly;
 // the backend default only changes on an explicit user switch.
-
-// The server's own words when it sent any, and a sentence of our own when it
-// did not (a network failure has no body). Always a string: `detail` can be a
-// Pydantic validation LIST, which React would refuse to render.
-function readErrorDetail(e, fallback) {
-  const detail = e?.response?.data?.detail
-  return typeof detail === 'string' && detail ? detail : fallback
-}
 
 let _checkingStatus = false
 

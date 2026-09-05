@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { createWebSocket } from '../ws'
 import { useToast } from '../components/Toast'
 import api from '../api'
+import FetchError from '../components/FetchError'
+import { readErrorDetail } from '../utils/fetchError'
 import WebSocketPanel from '../components/WebSocketPanel'
 
 const typeIcons = {
@@ -77,6 +79,7 @@ function typeToLevel(type) {
 export default function Sessions() {
   const [sessions, setSessions] = useState([])
   const [loading, setLoading] = useState(true)
+  const [listError, setListError] = useState(null)
   const [selected, setSelected] = useState(null)
   const [messages, setMessages] = useState([])
   const [wsStatus, setWsStatus] = useState('disconnected')
@@ -88,13 +91,19 @@ export default function Sessions() {
   const navigate = useNavigate()
   const toast = useToast()
 
-  // Fetch session list
+  // Fetch session list. The catch used to be a bare `catch {}`, which left
+  // `sessions` at its previous value -- `[]` on the first poll -- so a
+  // backend that was down rendered "No active or recent sessions", the exact
+  // words for a machine with nothing running. This page is the one place an
+  // operator checks whether something IS running, so that answer being wrong
+  // silently is the worst version of the defect.
   const fetchSessions = useCallback(async () => {
     try {
       const res = await api.get('/sessions')
       setSessions(res.data)
-    } catch {
-      // ignore
+      setListError(null)
+    } catch (e) {
+      setListError(readErrorDetail(e, 'Could not reach the server'))
     } finally {
       setLoading(false)
     }
@@ -359,17 +368,30 @@ export default function Sessions() {
         Control panel for all running and recent operations. Monitor logs, stop active tasks, or rerun completed ones.
       </p>
 
+      {listError && (
+        <FetchError
+          what="Could not read the session list"
+          detail={listError}
+          onRetry={fetchSessions}
+        />
+      )}
+
       {loading ? (
         <div className="flex justify-center py-8">
           <div className="spinner spinner-md" />
         </div>
       ) : sessions.length === 0 ? (
-        <div className="text-center py-12 text-secondary">
-          <p className="text-lg mb-2">No active or recent sessions</p>
-          <p className="text-sm">
-            Start a task (Build Queue, Farm Loop, Auto Scout, Oasis Raider) on any device to see it here.
-          </p>
-        </div>
+        // Suppressed while `listError` is set: the banner above already says
+        // what happened, and "nothing is running" is a claim about the machine
+        // that the failed poll did not establish.
+        listError ? null : (
+          <div className="text-center py-12 text-secondary">
+            <p className="text-lg mb-2">No active or recent sessions</p>
+            <p className="text-sm">
+              Start a task (Build Queue, Farm Loop, Auto Scout, Oasis Raider) on any device to see it here.
+            </p>
+          </div>
+        )
       ) : (
         <>
           {running.length > 0 && (

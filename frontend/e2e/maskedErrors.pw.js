@@ -106,3 +106,69 @@ test.describe('Buildings', () => {
     await expect(page.getByRole('button', { name: /Woodcutter/ })).toBeVisible()
   })
 })
+
+test.describe('BuildQueue', () => {
+  test('an empty village says so, with no alert', async ({ page }) => {
+    await isolateApp(page, { '/buildings': NO_BUILDINGS, '/buildings/queue': EMPTY_QUEUE })
+    await page.goto('/queue')
+    await expect(page.getByText('No buildings available. Connect to a server first.')).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('a failed read is named instead of claiming the village is empty', async ({ page }) => {
+    await isolateApp(page, { '/buildings': BOOM, '/buildings/queue': BOOM })
+    await page.goto('/queue')
+
+    await expect(
+      page.getByRole('alert').filter({ hasText: "Could not read this village's buildings" })
+    ).toBeVisible()
+    await expect(page.getByText('Travian returned 503')).toBeVisible()
+    // The old text was both identical to the empty state AND wrong: we are
+    // connected, which is why the request was made at all.
+    await expect(page.getByText('No buildings available. Connect to a server first.')).toHaveCount(0)
+  })
+})
+
+test.describe('Sessions', () => {
+  test('an empty session list says nothing is running', async ({ page }) => {
+    await isolateApp(page, { '/sessions': [] })
+    await page.goto('/sessions')
+    await expect(page.getByText('No active or recent sessions')).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('a failed poll does not claim nothing is running', async ({ page }) => {
+    await isolateApp(page, { '/sessions': BOOM })
+    await page.goto('/sessions')
+
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Could not read the session list' })
+    ).toBeVisible()
+    await expect(page.getByText('Travian returned 503')).toBeVisible()
+    // This page is the one place an operator checks whether something IS
+    // running, so a wrong "no" here is the worst version of the defect.
+    await expect(page.getByText('No active or recent sessions')).toHaveCount(0)
+  })
+})
+
+test.describe("AutoScout's background account", () => {
+  test('a genuinely unconfigured account says "not configured"', async ({ page }) => {
+    await isolateApp(page, { '/recon/status': { configured: false, manageable: true } })
+    await page.goto('/scout')
+    await expect(page.getByText('not configured')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Set' })).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('a failed status read is not the same as no account', async ({ page }) => {
+    await isolateApp(page, { '/recon/status': BOOM })
+    await page.goto('/scout')
+
+    await expect(page.getByRole('alert').filter({ hasText: 'Status unknown' })).toBeVisible()
+    await expect(page.getByText('Travian returned 503')).toBeVisible()
+    // The defect: it offered to SET an account that may already exist.
+    await expect(page.getByText('not configured')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Set' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible()
+  })
+})

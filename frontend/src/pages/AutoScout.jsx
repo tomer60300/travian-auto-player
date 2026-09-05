@@ -5,6 +5,7 @@ import WebSocketPanel from '../components/WebSocketPanel'
 import AddToFarmDialog from '../components/AddToFarmDialog'
 import { MapCoord } from '../components/MapCoord'
 import useGameStore from '../stores/gameStore'
+import { readErrorDetail } from '../utils/fetchError'
 import api from '../api'
 
 // ── localStorage helpers ─────────────────────────────────────────────
@@ -30,6 +31,11 @@ function BackgroundAccountPanel({ disabled }) {
   // never used to mask reads on a different server.
   const serverUrl = useGameStore((s) => s.serverUrl)
   const [status, setStatus] = useState(null)
+  // A failed read is not "not configured". `setStatus(null)` on any error made
+  // the two indistinguishable, so a 500 from /recon/status told the operator
+  // the background account does not exist -- and offered to set one that may
+  // already be there.
+  const [statusError, setStatusError] = useState(null)
   const [editing, setEditing] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -39,8 +45,10 @@ function BackgroundAccountPanel({ disabled }) {
     try {
       const res = await api.get('/recon/status')
       setStatus(res.data)
-    } catch {
+      setStatusError(null)
+    } catch (e) {
       setStatus(null)
+      setStatusError(readErrorDetail(e, 'Could not read the background-account status'))
     }
   }, [])
 
@@ -101,10 +109,14 @@ function BackgroundAccountPanel({ disabled }) {
   const manageable = status?.manageable !== false
 
   return (
-    <div className="ml-6 mt-2 p-3 rounded border border-gray-700 bg-black/20 max-w-xl">
+    <div className="ml-6 mt-2 p-3 rounded border-default bg-surface max-w-xl">
       <div className="flex items-center gap-2 flex-wrap text-xs">
         <span className="text-secondary">Background account:</span>
-        {status?.configured ? (
+        {statusError ? (
+          <span className="text-danger" role="alert">
+            Status unknown — {statusError}
+          </span>
+        ) : status?.configured ? (
           <>
             <span className="font-mono">{status.username ?? 'configured'}</span>
             <span className="text-secondary">
@@ -112,10 +124,14 @@ function BackgroundAccountPanel({ disabled }) {
             </span>
           </>
         ) : (
-          <span className="text-amber-400">not configured</span>
+          <span className="text-warning">not configured</span>
         )}
         <span className="flex-1" />
-        {manageable ? (
+        {statusError ? (
+          <button className="btn-secondary btn-sm" onClick={refresh} disabled={locked}>
+            Retry
+          </button>
+        ) : manageable ? (
           <>
             <button className="btn-secondary btn-sm" onClick={() => setEditing(!editing)} disabled={locked}>
               {status?.configured ? 'Change' : 'Set'}

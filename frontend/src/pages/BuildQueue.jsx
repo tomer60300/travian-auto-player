@@ -5,6 +5,8 @@ import WebSocketPanel from '../components/WebSocketPanel'
 import { useToast } from '../components/Toast'
 import ConfirmDialog from '../components/ConfirmDialog'
 import useGameStore from '../stores/gameStore'
+import FetchError from '../components/FetchError'
+import { readErrorDetail } from '../utils/fetchError'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 function formatTimeRemaining(seconds) {
@@ -420,6 +422,7 @@ export default function BuildQueue() {
   // Local building/queue state (fetched per-village, not from global store)
   const [buildings, setBuildings] = useState([])
   const [buildingsLoading, setBuildingsLoading] = useState(false)
+  const [buildingsError, setBuildingsError] = useState(null)
   const [constructionQueue, setConstructionQueue] = useState([])
 
   // Queue items
@@ -463,8 +466,14 @@ export default function BuildQueue() {
       const qarr = Array.isArray(qRes.data) ? qRes.data
         : Array.isArray(qRes.data?.queue) ? qRes.data.queue : []
       setConstructionQueue(qarr)
+      setBuildingsError(null)
     } catch (e) {
       console.warn('Failed to fetch village data:', e)
+      if (fetchTokenRef.current !== token) return
+      // Not just a console.warn. Left unrendered, a failed read fell through
+      // to "No buildings available. Connect to a server first." -- which is
+      // both wrong (we ARE connected) and identical to the empty state.
+      setBuildingsError(readErrorDetail(e, 'Could not read this village from the game'))
     } finally {
       setBuildingsLoading(false)
     }
@@ -654,6 +663,12 @@ export default function BuildQueue() {
             <div className="flex items-center gap-2 py-8 justify-center">
               <div className="spinner spinner-sm" /><span className="text-secondary text-sm">Loading...</span>
             </div>
+          ) : buildingsError ? (
+            <FetchError
+              what="Could not read this village's buildings"
+              detail={buildingsError}
+              onRetry={() => fetchLocalData(villageId)}
+            />
           ) : buildingList.length === 0 ? (
             <p className="text-secondary text-sm">No buildings available. Connect to a server first.</p>
           ) : (
