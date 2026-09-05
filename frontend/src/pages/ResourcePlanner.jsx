@@ -224,6 +224,30 @@ const SWEEP_VILLAGES_PER_CHUNK = 5
  * against a marketplace the server has already refused to write to.
  */
 const MARKETPLACE_UNSETTLED = 'marketplace reads disagreed at'
+/** The canary tick's name, shared by the control, the sweep's refusal and
+ *  the held run button -- three places that must not drift apart. */
+const CANARY_LABEL = 'Canary: one route, create only'
+
+/** Rows one create request becomes in the game -- `_game_rows` on the wire.
+ *
+ * Travian implements "repeat every N hours" by generating 24/N separate daily
+ * rows, each departing at its own time. This is the same arithmetic the server
+ * checks a canary's `max_game_rows_per_run` against, so getting it wrong here
+ * would show the operator a satisfied condition the server then refuses.
+ */
+const gameRowsFor = (cycleHours) =>
+  Number(cycleHours) > 0 ? Math.max(1, Math.ceil(24 / Number(cycleHours))) : 1
+
+/** Every plan row from `origin` to `destination`, as `post_execute` filters
+ *  `items` by `only_origins`/`only_destinations` -- the same rows, so "exactly
+ *  one route" means the same thing on both sides. */
+const routesBetween = (plan, origin, destination) => {
+  const from = Number(origin)
+  const to = Number(destination)
+  if (!plan || !Number.isFinite(from) || !Number.isFinite(to)) return []
+  if (String(origin).trim() === '' || String(destination).trim() === '') return []
+  return (plan.rows || []).filter((row) => row.origin === from && row.destination === to)
+}
 // `planStatus()`'s tone, as the verdict banner's tone class. Mapped rather than
 // interpolated, because the three tones are a closed set the CSS declares and a
 // template string would silently produce a class that does not exist.
@@ -1067,6 +1091,16 @@ export default function ResourcePlanner() {
   // union, so Day and Night rows coexist in the game (disjoint by departure
   // minute) and no daily profile switching is ever needed.
   const [wholeDay, setWholeDay] = useState(false)
+  // The first live run against a real account, as `ExecuteRequest.canary`.
+  // Deliberately NOT persisted and not part of the setup document: it is a
+  // statement about ONE run, and a flag that survived a reload would go on
+  // holding the red button for reasons the operator had forgotten stating.
+  const [canary, setCanary] = useState(false)
+  // The server's refusal, kept on the page. It is the authority on the eight
+  // conditions -- the checklist below is this page's reading of them, and where
+  // the two disagree the 422 is the answer -- so its sentence, which names the
+  // condition that failed, must outlive a toast.
+  const [canaryRefusal, setCanaryRefusal] = useState(null)
   // Run history from the app's own execution traces (zero game requests).
   const [runHistory, setRunHistory] = useState(null)
   const [historyLoading, setHistoryLoading] = useState(false)
@@ -2037,7 +2071,16 @@ export default function ResourcePlanner() {
   // whole-day is a mode rather than an edit to it -- setting the state when the
   // mode turns on would silently overwrite an answer the operator has to get
   // back when they untick it.
-  const prunesToWindow = pruneToWindow || wholeDay
+  //
+  // The canary is the third input to the same derivation, and for the same
+  // reason it is not written back: `pruneToWindow` IS in `planInputRev`, so a
+  // preset that set the state would clear the plan -- and the tick that set it
+  // renders inside `{plan && ...}`, so it would unmount itself on the click
+  // that turned it on, exactly as the comment on `wholeDay` above the verdict
+  // banner describes. Derived, the box shows the run's real answer, the
+  // operator's own answer survives to be got back, and every request goes on
+  // agreeing with the box through `pruneField`.
+  const prunesToWindow = (pruneToWindow || wholeDay) && !canary
   /** `prune_to_window` as a request carries it, given whether that request has
    *  any hours to prune to. Omitted rather than sent false, which is what the
    *  field has always done: the backend defaults it to false, and "does nothing
@@ -2095,6 +2138,132 @@ export default function ResourcePlanner() {
   const runProblems = useMemo(
     () => Object.fromEntries(runIssues.map((b) => [b.field, b.rule])),
     [runIssues]
+  )
+
+  /** The one route the filters select, if they select exactly one.
+   *
+   * `post_execute` decides the eighth canary condition against the PLAN and not
+   * against the request: 24/N comes from the route's own cycle, and it refuses
+   * the run outright when the pair gives no route or more than one. Same rows,
+   * same filter, so the page can compute the answer the server will check --
+   * and name the mismatch before a request is spent rather than after.
+   */
+  const canaryRoutes = useMemo(
+    () => routesBetween(plan, onlyOrigin, onlyDestination),
+    [plan, onlyOrigin, onlyDestination]
+  )
+  const canaryRows = canaryRoutes.length === 1 ? gameRowsFor(canaryRoutes[0].cycle_hours) : null
+
+  /** `docs/26-first-live-run.md` section 2's table, in its order, as this page's
+   *  reading of the state.
+   *
+   * Read off the CONTROLS rather than off the tick, deliberately. The tick
+   * presets them, but a condition that reported what it had set would be a
+   * checklist confirming itself -- and the server checks the request, not the
+   * intent. The one condition below with no control behind it is
+   * `execution_mode`, which the red button decides by construction.
+   */
+  const canaryConditions = useMemo(
+    () => [
+      {
+        label: 'A live run (execution_mode "live")',
+        ok: true,
+        need: '',
+        note: 'The red button below. Preview never carries the flag — it writes nothing.',
+      },
+      {
+        label: 'Only origin (village id) — exactly one',
+        ok: String(onlyOrigin).trim() !== '',
+        need: 'Type one origin village id above, so the run cannot reach a village nobody chose.',
+      },
+      {
+        label: 'Only destination (village id) — exactly one',
+        ok: String(onlyDestination).trim() !== '',
+        need: 'Type one destination village id above. The run’s whole footprint is its rows.',
+      },
+      {
+        label: 'Routes this run — 1',
+        ok: routeCap(routesPerRun) === 1,
+        need: 'One route is the point: a first live run is a measurement, not a provisioning pass.',
+      },
+      {
+        label: 'Also disable routes the plan no longer wants — off',
+        ok: !disableExisting,
+        need: 'A first live run must not switch off routes it did not create.',
+      },
+      {
+        label: 'Whole day off, so the fan-out trim is off',
+        ok: !wholeDay && !prunesToWindow,
+        need: 'The trim DELETEs rows. A first live run must have no delete path at all.',
+      },
+      {
+        label: 'Correct cargo on routes that have drifted — off',
+        ok: !updateDrifted,
+        need: 'Rewriting cargo is a write against rows this run did not make.',
+      },
+      {
+        label:
+          'Max rows this run — the route’s own fan-out (24 ÷ its cycle hours)',
+        ok: canaryRows != null && Number(maxGameRows) === canaryRows,
+        need:
+          canaryRows == null
+            ? `The plan ships ${canaryRoutes.length} route(s) between this pair; pick a pair it ` +
+              'ships exactly one route between.'
+            : `Set it to ${canaryRows} — a ${canaryRoutes[0].cycle_hours}h cycle is ` +
+              `${canaryRows} daily row(s). One route was never one row.`,
+      },
+    ],
+    [
+      onlyOrigin,
+      onlyDestination,
+      routesPerRun,
+      disableExisting,
+      wholeDay,
+      prunesToWindow,
+      updateDrifted,
+      maxGameRows,
+      canaryRows,
+      canaryRoutes,
+    ]
+  )
+  const canaryUnmet = canaryConditions.filter((c) => !c.ok)
+  const canaryReady = canaryUnmet.length === 0
+
+  /** Tick it and the five controls the flag fixes are already right.
+   *
+   * A preset, not a claim: `canaryConditions` still reads the controls, so a
+   * value that drifts afterwards shows as unmet and holds the button. The row
+   * budget is set from the plan's own route when the pair already names one --
+   * the operator usually types the pair afterwards, and the two id boxes set it
+   * then.
+   */
+  const applyCanaryPreset = useCallback(
+    (on) => {
+      setCanary(on)
+      setCanaryRefusal(null)
+      if (!on) return
+      setRoutesPerRun('1')
+      setDisableExisting(false)
+      setWholeDay(false)
+      setUpdateDrifted(false)
+      if (canaryRows != null) setMaxGameRows(String(canaryRows))
+    },
+    [canaryRows]
+  )
+
+  /** The row budget follows the pair, because 24/N is a fact about the route the
+   *  pair selects and not about the box. Done on the id boxes' own change rather
+   *  than in an effect: an effect writing four controls would fire on every
+   *  unrelated render of this page. */
+  const setCanaryPair = useCallback(
+    (origin, destination) => {
+      setOnlyOrigin(origin)
+      setOnlyDestination(destination)
+      if (!canary) return
+      const routes = routesBetween(plan, origin, destination)
+      if (routes.length === 1) setMaxGameRows(String(gameRowsFor(routes[0].cycle_hours)))
+    },
+    [canary, plan]
   )
 
   // And the night-fill pair, which reaches `/night-profile` alone. The pair rule
@@ -2814,6 +2983,9 @@ export default function ResourcePlanner() {
       // only — a live run mutates the game, so its result must ALWAYS be shown
       // (dropping it would hide real in-game writes the operator must see).
       const requestedRev = planInputRev.current
+      // The previous refusal described the request that earned it. Cleared as
+      // this one leaves, so a stale sentence never sits under a run that went.
+      if (!dryRun) setCanaryRefusal(null)
       setExecuting(true)
       try {
         const res = await api.post('/distribution/execute', {
@@ -2843,6 +3015,13 @@ export default function ResourcePlanner() {
             ? { protect_destinations: splitProtected(protectDestinations) }
             : {}),
           update_drifted: updateDrifted,
+          // The first live run, stated rather than assembled by hand.
+          // `_canary_is_the_smallest_live_run` refuses the request unless every
+          // one of docs/26 section 2's conditions holds, naming the one that
+          // failed -- and refuses it before the first game request. Never on a
+          // preview: the validator requires `execution_mode: "live"`, so
+          // sending it there would 422 the one action that costs nothing.
+          ...(!dryRun && canary ? { canary: true } : {}),
         })
         if (
           dryRun &&
@@ -2948,7 +3127,12 @@ export default function ResourcePlanner() {
           }
         }
       } catch (err) {
-        toast.error(errorDetail(err, dryRun ? 'Preview failed' : 'Execution failed'))
+        const detail = errorDetail(err, dryRun ? 'Preview failed' : 'Execution failed')
+        // On the page, not only in a toast that closes itself. The server is the
+        // authority on the eight conditions and its sentence names the one that
+        // failed, which is the actionable half.
+        if (!dryRun && canary) setCanaryRefusal(detail)
+        toast.error(detail)
       } finally {
         setExecuting(false)
       }
@@ -2967,6 +3151,7 @@ export default function ResourcePlanner() {
       protectDestinations,
       disableExisting,
       updateDrifted,
+      canary,
       // Read by the marked-cell and run-control guard above.
       blockers,
       runIssues,
@@ -7316,7 +7501,7 @@ export default function ResourcePlanner() {
                         <button
                           type="button"
                           className="btn-secondary text-xs py-1.5 whitespace-nowrap"
-                          disabled={executing || !plan}
+                          disabled={executing || !plan || canary}
                           onClick={runReconcileSweep}
                         >
                           Reconcile all villages
@@ -7324,6 +7509,17 @@ export default function ResourcePlanner() {
                       )}
                     </div>
                   </div>
+                  {/* A live, disabling, account-wide run, one button above a
+                      tick that says this run creates one route and does nothing
+                      else. It sends no `canary`, so the server would not refuse
+                      it -- and the operator who ticked the box has already said
+                      what they meant. */}
+                  {canary && (
+                    <p className="text-warning text-xs mt-2">
+                      Held while <strong>{CANARY_LABEL}</strong> is ticked: a sweep is a live
+                      disabling run over every village, which is the opposite of one create.
+                    </p>
+                  )}
                   {sweepProgress ? (
                     <p className="text-xs mt-2 font-mono text-secondary">
                       chunk {sweepProgress.chunk} · {sweepProgress.swept} village(s) swept
@@ -7408,6 +7604,7 @@ export default function ResourcePlanner() {
                         min="0"
                         max={MAX_ROUTES_PER_RUN_CEILING}
                         aria-label="Routes this run"
+                        disabled={canary}
                         aria-invalid={runProblems['Routes this run'] ? true : undefined}
                         aria-describedby={
                           runProblems['Routes this run'] ? 'routes-per-run-problem' : undefined
@@ -7536,7 +7733,7 @@ export default function ResourcePlanner() {
                         className="input-sm w-32"
                         placeholder="any"
                         value={onlyOrigin}
-                        onChange={(e) => setOnlyOrigin(e.target.value)}
+                        onChange={(e) => setCanaryPair(e.target.value, onlyDestination)}
                       />
                     </label>
                     <label className="text-xs">
@@ -7546,7 +7743,7 @@ export default function ResourcePlanner() {
                         className="input-sm w-32"
                         placeholder="any"
                         value={onlyDestination}
-                        onChange={(e) => setOnlyDestination(e.target.value)}
+                        onChange={(e) => setCanaryPair(onlyOrigin, e.target.value)}
                       />
                     </label>
                   </div>
@@ -7554,12 +7751,99 @@ export default function ResourcePlanner() {
                   {/* How the run behaves. One line each, with the paragraph the
                       line used to carry kept behind its `?`. */}
                   <div className="space-y-2 border-t-default pt-2">
+                    {/* docs/26 section 2 asked the operator to get eight things
+                        right by hand and then send `canary: true` with them, on
+                        the one endpoint that writes to a real account. This is
+                        the tick. It presets the five controls the flag fixes,
+                        takes the row budget off the plan's own route for the
+                        chosen pair, and holds the red button while any condition
+                        is unmet -- with the unmet one NAMED, because a greyed
+                        button is not a reason. */}
+                    <div className="flex items-start gap-2">
+                      <label className="text-xs flex items-start gap-2 flex-1 pointer-coarse:min-h-11">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={canary}
+                          onChange={(e) => applyCanaryPreset(e.target.checked)}
+                        />
+                        <span className="text-primary">{CANARY_LABEL}</span>
+                      </label>
+                      <Why label={CANARY_LABEL}>
+                        The first live run against a real account, enforced by the server rather
+                        than by a checklist. It sends <code>canary: true</code>, and{' '}
+                        <strong>the server refuses the request</strong> unless all eight
+                        conditions below hold — naming the one that failed, before the first game
+                        request, so nothing is read and nothing is written by a refused canary.
+                        Create-only and exactly one route: no disable, no trim, no cargo rewrite,
+                        so the run has no delete path at all and everything it does is undoable by
+                        switching rows off. Ticking it sets the five controls it fixes and takes{' '}
+                        <strong>Max rows this run</strong> off the plan’s own route — “1 route”
+                        was never “1 row”, because Travian turns one create into 24/N daily rows.
+                      </Why>
+                    </div>
+
+                    {canary && (
+                      <div className="text-xs rounded border-default p-2">
+                        <p className="text-secondary">
+                          {canaryReady
+                            ? 'All eight conditions hold. The server checks them again.'
+                            : `${canaryUnmet.length} of eight not satisfied — the run button below is held until they are.`}
+                        </p>
+                        {/* Glyph and sentence, never colour alone: an unmet
+                            condition says what to do about it. */}
+                        <ul className="mt-1 space-y-1">
+                          {canaryConditions.map((condition) => (
+                            <li
+                              key={condition.label}
+                              className={condition.ok ? 'text-secondary' : 'text-warning'}
+                            >
+                              <span aria-hidden="true">{condition.ok ? '✓ ' : '⚠ '}</span>
+                              <span className="sr-only">
+                                {condition.ok ? 'satisfied: ' : 'not satisfied: '}
+                              </span>
+                              {condition.label}
+                              {condition.ok && condition.note ? (
+                                <span className="block text-secondary">{condition.note}</span>
+                              ) : null}
+                              {!condition.ok && <span className="block">{condition.need}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                        {/* The trim is a PLAN input as well as a run one, so
+                            a sheet graded with it on describes a smaller
+                            footprint than a canary leaves. Said rather than
+                            silently corrected: the alternative is clearing the
+                            plan, and that unmounts this tick on the click that
+                            set it. */}
+                        {pruneToWindow && (
+                          <p className="text-warning mt-2">
+                            This sheet was graded with the fan-out trim on, and the canary run
+                            does not trim: it leaves the route’s whole fan-out in the game, which
+                            is what <strong>Max rows this run</strong> now authorises.{' '}
+                            <strong>Build plan</strong> again to grade it the same way.
+                          </p>
+                        )}
+                        {/* The server's own words. This page's reading of the
+                            eight can be wrong -- the plan may have moved, or a
+                            condition may be checked against something the page
+                            cannot see -- and where the two disagree the 422 is
+                            the answer. */}
+                        {canaryRefusal && (
+                          <p className="text-danger mt-2" role="alert">
+                            The server refused this canary: {canaryRefusal}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
                     <div className="flex items-start gap-2">
                       <label className="text-xs flex items-start gap-2 flex-1">
                         <input
                           type="checkbox"
                           className="mt-0.5"
                           checked={wholeDay}
+                          disabled={canary}
                           onChange={(e) => setWholeDay(e.target.checked)}
                         />
                         <span className="text-primary">Whole day — execute all profiles at once</span>
@@ -7582,7 +7866,7 @@ export default function ResourcePlanner() {
                           type="checkbox"
                           className="mt-0.5"
                           checked={prunesToWindow}
-                          disabled={wholeDay}
+                          disabled={wholeDay || canary}
                           onChange={(e) => setPruneToWindow(e.target.checked)}
                         />
                         <span className="text-primary">
@@ -7605,6 +7889,7 @@ export default function ResourcePlanner() {
                           type="checkbox"
                           className="mt-0.5"
                           checked={disableExisting}
+                          disabled={canary}
                           onChange={(e) => setDisableExisting(e.target.checked)}
                         />
                         <span className="text-primary">
@@ -7624,6 +7909,7 @@ export default function ResourcePlanner() {
                           type="checkbox"
                           className="mt-0.5"
                           checked={updateDrifted}
+                          disabled={canary}
                           onChange={(e) => setUpdateDrifted(e.target.checked)}
                         />
                         <span className="text-primary">
@@ -8056,10 +8342,18 @@ export default function ResourcePlanner() {
                               writes to a real account was a small one further
                               down. The `~N requests` estimate stays: every
                               action here states its cost before spending it. */}
+                          {canary && !canaryReady && (
+                            <p className="text-warning text-xs mt-2">
+                              ⚠ Held by <strong>{CANARY_LABEL}</strong>:{' '}
+                              {canaryUnmet.map((c) => c.label).join('; ')}. The server would
+                              refuse this run anyway, naming the same condition — the checklist
+                              above says what each one needs.
+                            </p>
+                          )}
                           <button
                             type="button"
                             className="btn-danger btn-full text-xs py-1.5 mt-2"
-                            disabled={executing || !plan.feasible}
+                            disabled={executing || !plan.feasible || (canary && !canaryReady)}
                             onClick={() => setConfirmLive(true)}
                           >
                             {executing
