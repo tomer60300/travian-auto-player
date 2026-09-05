@@ -7,7 +7,7 @@ backend fixes and the four rounds of page fixes that landed after it — the
 behaviours those changed are recorded in `docs/25-resource-distribution-planner.md`
 §4.20 and §4.21, and this protocol is what first observes them against a real
 marketplace. Every control named here is quoted as the page labels it.
-Every response field is quoted as `/routes/execute` returns it. The protocol
+Every response field is quoted as `/api/distribution/execute` returns it. The protocol
 exists because the review found that the create half of the executor was
 honest and the disable half was not, and that both are now honest only along
 paths that have been driven with fakes, never against the game. The first live
@@ -482,7 +482,7 @@ before the next step is taken.
    already committed. One marketplace read (two page loads) per village
    serves both the reconcile and the create. Let it finish; a deferred create
    gets its own pass at the end. If a sweep needs undoing, narrow it: the
-   revert's `only_origins` takes village ids, and without it the Check
+   revert's `origins` field takes village ids, and without it the Check
    re-reads every origin the run touched at two page loads each — about
    fifty reads for this account before any write. Undo the villages named in
    `problems` first, one at a time, in the Check → Disable → Delete order §3
