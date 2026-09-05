@@ -13,7 +13,11 @@
  *     and no row could be attributed to either;
  *   * `buildPlanPayload` sent the untouched state, so `/plan` weighed all 24/N
  *     firings of every route as escaping the window;
- *   * `/day-check` inherits the plan payload, so it agreed with `/plan`.
+ *   * `/day-check` inherits the plan payload, so it agreed with `/plan` --
+ *     and that agreement was itself the defect, because `/day-check` is ALWAYS
+ *     segmented and the only segmented `/execute` is the whole-day run, which
+ *     forces the prune on. It sends `prune_to_window: true` unconditionally
+ *     now, for the same reason `buildExecutePayload` does.
  *
  * Which means the plan the operator reviewed and the run that WROTE described
  * different route sets, and the sheet in between was graded against the wrong
@@ -144,6 +148,36 @@ test.describe('the tick box, the plan and the run agree', () => {
     expect(pruneOf(sent.execute.at(-1))).toBe(true)
   })
 
+  // `/day-check` is the exception, and it is not an exception to the rule --
+  // it is the rule applied to the one endpoint that always carries segments.
+  // `segments` is `min_length=1` there, and the only segmented `/execute` is the
+  // whole-day run, which `_segments_are_coherent` refuses without the prune.
+  // Routing the field through the Plan stage's checkbox meant the full day was
+  // CHECKED on all 24 firings of every route and on the full cycle set, while
+  // the whole-day run that writes narrowed `allowed_cycles` to the divisors of
+  // the window and deleted the out-of-window rows. Different cycles, different
+  // merchant counts, different row counts: the plan the operator reviewed was
+  // not the plan the run wrote.
+  test('the full-day check prunes whatever the box says, because it always segments', async ({
+    page,
+  }) => {
+    const sent = await recordBodies(page)
+    await seed(page, TWO_PROFILES)
+    await openPlanStage(page)
+
+    await turnPruneOff(page)
+    await page.getByRole('button', { name: /^Build plan/ }).click()
+    await expect(page.getByText(/^Routes$/)).toBeVisible()
+    await expect(prune(page)).not.toBeChecked()
+
+    await page.getByRole('button', { name: 'Day & night' }).click()
+    await page.getByRole('button', { name: /^Run \(0 requests\)/ }).click()
+    await expect.poll(() => sent.dayCheck.length).toBe(1)
+
+    expect(sent.dayCheck.at(-1).segments.length).toBeGreaterThan(0)
+    expect(pruneOf(sent.dayCheck.at(-1))).toBe(true)
+  })
+
   test('with whole day off, the operator’s own answer is what all three carry', async ({
     page,
   }) => {
@@ -169,7 +203,9 @@ test.describe('the tick box, the plan and the run agree', () => {
     await expect.poll(() => sent.execute.length).toBe(1)
 
     expect(pruneOf(sent.plan.at(-1))).toBe(false)
-    expect(pruneOf(sent.dayCheck.at(-1))).toBe(false)
+    // Except the full-day check, which is segmented by construction and
+    // therefore prunes by construction -- see the case above.
+    expect(pruneOf(sent.dayCheck.at(-1))).toBe(true)
     expect(pruneOf(sent.execute.at(-1))).toBe(false)
   })
 

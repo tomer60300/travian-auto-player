@@ -3512,13 +3512,21 @@ export default function ResourcePlanner() {
       const res = await api.post('/distribution/day-check', {
         ...planInputs,
         segments,
-        // Restated rather than inherited from `planInputs`, and for the reason
-        // `buildExecutePayload` restates it: the plan payload gates the field on
-        // the ACTIVE profile's hours, and this request has none -- it has
-        // segments, every one of which carries its own. A day simulated without
-        // the prune is a day whose route sets fire round the clock, which is not
-        // the day `/execute` would write.
-        ...pruneField(true),
+        // TRUE unconditionally, exactly as `buildExecutePayload` forces it for
+        // the whole-day run -- and for the same reason. This request is ALWAYS
+        // segmented (`segments` is `min_length=1`), and the only segmented
+        // `/execute` is the whole-day run, which `_segments_are_coherent`
+        // refuses without the prune: both profiles' fan-outs would cover the
+        // whole day and no row could be attributed to either.
+        //
+        // Routing it through `pruneField` read the Plan stage's own checkbox, so
+        // an unticked box had the full day checked on all 24 firings of every
+        // route and on the full cycle set, while the whole-day run that WRITES
+        // narrowed `allowed_cycles` to the divisors of the window and deleted
+        // the out-of-window rows. Different cycles, different merchant counts,
+        // different row counts -- the plan the operator reviewed was not the
+        // plan the run wrote, on the one endpoint that always carries segments.
+        prune_to_window: true,
         crop_ceilings: ceilings,
       })
       // Drop the response if the account switched OR any day-check input changed
