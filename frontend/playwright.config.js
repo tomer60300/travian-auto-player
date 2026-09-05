@@ -53,6 +53,14 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'e2e/report' }]],
 
+  // Playwright's default `toHaveScreenshot` path bakes in `{-projectName}` so two projects
+  // that both screenshot the same test name do not collide. Only one project here ever does
+  // (`visual`), so that segment only renamed every committed baseline out from under itself
+  // the moment a second, named project existed (`login-tablet-768-win32.png` ->
+  // `login-tablet-768-visual-win32.png`, "snapshot doesn't exist"). Dropping `{-projectName}`
+  // restores the committed filenames regardless of which project runs the spec.
+  snapshotPathTemplate: '{snapshotDir}/{testFileDir}/{testFileName}-snapshots/{arg}{-snapshotSuffix}{ext}',
+
   projects: [
     {
       name: 'functional',
@@ -79,6 +87,13 @@ export default defineConfig({
   },
 
   expect: {
+    // The default 5000ms was tuned for one worker against an uncontended dev server. At 8
+    // workers a burst of concurrent navigations can push a single assertion past that --
+    // observed once in 530 functional tests (profileCap.pw.js, 12 seeded profiles rendering
+    // under load), reproduced 0/3 times in isolation, so it is the shared dev server under
+    // contention and not the app. Doubling absorbs that without slowing anything that already
+    // passes -- an assertion still resolves the moment it is satisfied.
+    timeout: 10_000,
     toHaveScreenshot: {
       // Sub-pixel text rendering differs between runs and machines. 1.5% of pixels absorbs that
       // without absorbing a real one-element layout shift.
