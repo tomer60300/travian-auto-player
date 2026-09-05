@@ -3990,6 +3990,11 @@ export default function ResourcePlanner() {
           <SetupStorage
             status={serverSetup}
             busy={setupBusy}
+            // The same list `Build plan` refuses on. A document written from a
+            // marked cell saves with a 200 and can never be loaded again --
+            // `parseSetup` refuses an even span or a 0 speed on the way back in,
+            // and refuses the whole file rather than half-loading it.
+            blockers={blockers}
             onSave={saveSetupToServer}
             onLoad={loadSetupFromServer}
             onForget={() => setConfirmForget(true)}

@@ -24,6 +24,7 @@
 export default function SetupStorage({
   status,
   busy,
+  blockers = [],
   onSave,
   onLoad,
   onForget,
@@ -32,6 +33,18 @@ export default function SetupStorage({
   onPaste,
   pasteOpen,
 }) {
+  // The two WRITERS are held back while a cell is marked; the three readers are
+  // not. `Build plan` has refused a marked cell since `plannerBlockers.js`, and
+  // these were gated on `busy` alone -- so an even `map_span` or a `0` speed
+  // saved with a 200 and could never be loaded again, because `parseSetup`
+  // refuses both on the way back in and refuses the whole file rather than
+  // half-loading it. That leaves the operator's only backup unreadable by their
+  // own build, which is worse than not having saved.
+  //
+  // A load is the way OUT of a bad state, so gating one would strand the
+  // operator in it.
+  const blocked = blockers.length > 0
+  const blockedId = 'setup-save-blocked'
   return (
     <div className="border-t-default pt-3 mt-3">
       <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -49,6 +62,18 @@ export default function SetupStorage({
           <p className={`text-xs mt-1 ${statusTone(status.state)}`} role="status">
             {describeStatus(status)}
           </p>
+          {/* And the reason the two writers are off, in the cell's own words.
+              A disabled button with nothing beside it is the defect this
+              replaces: the operator presses Save, nothing happens, and nothing
+              says why. Named to a screen reader through `aria-describedby` on
+              both buttons, not only shown. */}
+          {blocked && (
+            <p id={blockedId} className="text-warning text-xs mt-1" role="status">
+              Saving is held back while a figure on this page is outside what the plan
+              accepts, because this build would refuse to read the document back:{' '}
+              {blockers.map(describeBlockedField).join('; ')}.
+            </p>
+          )}
         </div>
       </div>
 
@@ -56,7 +81,8 @@ export default function SetupStorage({
         <button
           type="button"
           className="btn-primary btn-sm"
-          disabled={Boolean(busy)}
+          disabled={Boolean(busy) || blocked}
+          aria-describedby={blocked ? blockedId : undefined}
           onClick={onSave}
         >
           {busy === 'saving' ? 'Saving…' : 'Save setup to server'}
@@ -82,7 +108,13 @@ export default function SetupStorage({
           {busy === 'forgetting' ? 'Forgetting…' : 'Forget the saved setup'}
         </button>
         <span className="text-secondary text-xs">·</span>
-        <button type="button" className="btn-secondary btn-sm" onClick={onExportFile}>
+        <button
+          type="button"
+          className="btn-secondary btn-sm"
+          disabled={blocked}
+          aria-describedby={blocked ? blockedId : undefined}
+          onClick={onExportFile}
+        >
           Save setup to file
         </button>
         <button type="button" className="btn-secondary btn-sm" onClick={onImportFile}>
@@ -100,6 +132,17 @@ export default function SetupStorage({
       </div>
     </div>
   )
+}
+
+/** One blocker as the panel says it: the column heading, and where it is wrong.
+ *
+ * The same two pieces `describeBlockers` prints, without its lead sentence --
+ * that one is about a plan that was not sent, and this is about a document that
+ * would not be readable. Both are built from the blocker entries rather than a
+ * second description of the same rules. */
+function describeBlockedField(blocker) {
+  const where = blocker.villages.length ? ` (${blocker.villages.join(', ')})` : ''
+  return `${blocker.field}${where} — ${blocker.rule}`
 }
 
 function statusTone(state) {
