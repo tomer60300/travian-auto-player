@@ -7436,20 +7436,67 @@ export default function ResourcePlanner() {
                     {/* Also shown when the measured count is zero but routes were
                         written unconfirmed: the old `created_game_rows > 0` gate
                         hid this line entirely on exactly the run where the row
-                        footprint is least certain. */}
+                        footprint is least certain.
+
+                        The HEADLINE is `live_game_rows` — what the run left on
+                        the marketplace. `created_game_rows` is counted from the
+                        read-back that follows the creates, which happens BEFORE
+                        this run's window trim by design: it answers "did the
+                        game fan this request out the way 24/N says", the only
+                        question that read-back can settle. Printed as the
+                        headline it said "Put 42 route row(s) in the game" over
+                        an account holding 16 — true about the writes, false
+                        about the account, and the account is what has to be
+                        deleted by hand. It stays as the account of what was
+                        trimmed, which is the one thing it can say alone. */}
                     {(execResult.created_game_rows > 0 ||
                       execResult.created_unverified > 0) && (
                       <p className="text-xs mb-2">
                         <strong>
-                          {execResult.dry_run ? 'Would put' : 'Put'}{' '}
-                          {execResult.created_game_rows} route row(s) in the game
+                          {execResult.dry_run ? 'Would leave' : 'This run leaves'}{' '}
+                          {execResult.live_game_rows} route row(s) in the game
                         </strong>{' '}
                         — Travian turns one “repeat every N hours” request into 24/N separate
                         daily rows, so a request is not a row. Removing them later means deleting
                         every row.{' '}
+                        {execResult.created_game_rows > execResult.live_game_rows
+                          ? `The creates ${
+                              execResult.dry_run ? 'would make' : 'made'
+                            } ${execResult.created_game_rows} row(s); the window trim ${
+                              execResult.dry_run ? 'would delete' : 'deleted'
+                            } the ${
+                              execResult.created_game_rows - execResult.live_game_rows
+                            } departing outside the profile hours.`
+                          : // Not silence, and not "nothing was trimmed": a trim
+                            // that removed nothing and one that silently failed
+                            // read the same here, because only rows the trim's
+                            // own read-back confirmed gone are discounted.
+                            `The creates ${
+                              execResult.dry_run ? 'would make' : 'made'
+                            } ${execResult.created_game_rows} row(s) and the window trim ${
+                              execResult.dry_run ? 'would delete' : 'deleted'
+                            } none of them.`}{' '}
                         {execResult.dry_run
-                          ? 'This number is a forecast — 24/N per request, before anything is written.'
-                          : 'This number was measured: the marketplace was re-read and these are the rows that actually appeared.'}
+                          ? 'Both figures are forecasts — 24/N per request, before anything is written.'
+                          : 'Both figures were measured: the marketplace was re-read after the creates, and the trim’s own read-back confirmed every row it removed.'}
+                        {/* A preview is capped by `max_routes_per_run` alone —
+                            the dry-run path forecasts `items[:cap]` and never
+                            consults the row budget — while the live run charges
+                            that budget in SURVIVING rows and defers whole routes
+                            that do not fit. So a forecast above the box is the
+                            live run announcing a deferral, not a refusal. */}
+                        {execResult.dry_run &&
+                          Number(maxGameRows) > 0 &&
+                          execResult.live_game_rows > Number(maxGameRows) && (
+                            <>
+                              {' '}
+                              <span className="text-warning">
+                                That is above the {Number(maxGameRows)} of “Max rows this run”,
+                                which this preview is not bounded by: the live run creates what
+                                fits and defers the rest to a later run.
+                              </span>
+                            </>
+                          )}
                         {!execResult.dry_run && execResult.created_unverified > 0 && (
                           <>
                             {' '}

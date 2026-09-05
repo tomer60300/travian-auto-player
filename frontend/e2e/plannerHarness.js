@@ -222,6 +222,10 @@ export const PREVIEW = {
   not_created: 0,
   remaining: 0,
   created_game_rows: 6,
+  // The footprint the same forecast would LEAVE, which is what the page
+  // headlines. Equal here because this fixture's route set is not trimmed;
+  // `rowFootprint.pw.js` carries the shape where the two differ.
+  live_game_rows: 6,
   actions: [
     {
       origin: CAPITAL,

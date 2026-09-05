@@ -57,6 +57,7 @@ const EMPTY_EXECUTE = {
   not_created: 0,
   remaining: 0,
   created_game_rows: 0,
+  live_game_rows: 0,
   actions: [],
   disables: [],
   re_enables: [],
