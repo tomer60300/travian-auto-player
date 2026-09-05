@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import stat
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -37,6 +38,62 @@ _LEGACY_KEYS_FILE = Path.home() / ".travian" / ".web_keys"
 # ---------------------------------------------------------------------------
 
 
+class WebKeysCorrupt(RuntimeError):
+    """The keys file exists but cannot be read as a key pair.
+
+    Raised instead of letting a bare ``JSONDecodeError`` or ``KeyError`` out of
+    :func:`get_or_create_keys`, which runs at module import: the traceback then
+    pointed at a JSON parse rather than at the one file that holds the only
+    copy of the Fernet key for every stored credential. Regenerating past this
+    is not a recovery -- it orphans every encrypted password row -- so the
+    message says which file and says not to delete it.
+    """
+
+
+def _read_keys(path: Path) -> tuple[str, str]:
+    """Read (jwt_secret, fernet_key) from *path*, or say why it cannot be read."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data["jwt_secret"], data["fernet_key"]
+    except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        raise WebKeysCorrupt(
+            f"{path} is not a readable key file ({type(exc).__name__}: {exc}). "
+            "It holds the only copy of the Fernet key that decrypts every stored "
+            "Travian password, so DO NOT delete it and do not let the server "
+            "regenerate one -- every credential row would become permanently "
+            "undecryptable. Restore the file from a backup, or delete the "
+            "credential rows deliberately and re-enter the passwords."
+        ) from exc
+
+
+def _write_keys(path: Path, data: dict[str, str]) -> None:
+    """Write the keys file atomically, so a reader never finds a fragment.
+
+    The bare ``write_text`` this replaces could be interrupted mid-write --
+    power loss during the one-time creation -- leaving a truncated file that
+    bricks the next start. Same mkstemp/os.replace pattern as
+    ``stealth/scheduler.py``, which is where this repository already had it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            # Windows: stat/chmod do not describe the NTFS ACL. Harden with
+            # icacls instead; see _warn_if_world_readable.
+            pass
+        os.replace(tmp_path, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _warn_if_world_readable(path: Path) -> None:
     """Log a warning if the keys file is readable by others (Unix only).
 
@@ -68,36 +125,20 @@ def get_or_create_keys() -> tuple[str, str]:
     """
     if KEYS_FILE.exists():
         _warn_if_world_readable(KEYS_FILE)
-        data = json.loads(KEYS_FILE.read_text(encoding="utf-8"))
-        return data["jwt_secret"], data["fernet_key"]
+        return _read_keys(KEYS_FILE)
 
     # One-time migration: deployments that ran a custom TRAVIAN_DB_PATH before
     # keys followed the DB have their keys in ~/.travian. Regenerating instead
     # of migrating would orphan every credential row that DB already holds.
     if KEYS_FILE != _LEGACY_KEYS_FILE and _LEGACY_KEYS_FILE.exists():
-        data = json.loads(_LEGACY_KEYS_FILE.read_text(encoding="utf-8"))
-        KEYS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        try:
-            KEYS_FILE.chmod(0o600)
-        except OSError:
-            pass
+        jwt_secret, fernet_key = _read_keys(_LEGACY_KEYS_FILE)
+        _write_keys(KEYS_FILE, {"jwt_secret": jwt_secret, "fernet_key": fernet_key})
         _logger.info("Migrated web keys from %s to %s", _LEGACY_KEYS_FILE, KEYS_FILE)
-        return data["jwt_secret"], data["fernet_key"]
+        return jwt_secret, fernet_key
 
     jwt_secret = os.urandom(32).hex()
     fernet_key = Fernet.generate_key().decode()
-
-    KEYS_FILE.write_text(
-        json.dumps({"jwt_secret": jwt_secret, "fernet_key": fernet_key}, indent=2),
-        encoding="utf-8",
-    )
-
-    # Try to restrict permissions on Unix
-    try:
-        KEYS_FILE.chmod(0o600)
-    except OSError:
-        pass
-
+    _write_keys(KEYS_FILE, {"jwt_secret": jwt_secret, "fernet_key": fernet_key})
     return jwt_secret, fernet_key
 
 
