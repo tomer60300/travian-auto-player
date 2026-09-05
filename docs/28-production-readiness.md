@@ -115,6 +115,35 @@ There is a one-time migration path in `get_or_create_keys` for deployments whose
 keys were left behind in `~/.travian` when the database moved; it copies rather
 than regenerating, because regenerating would orphan every credential row.
 
+**Getting the key out of the directory it decrypts.** The two consequences above
+are one fact stated twice: the key and its ciphertext are in the same place, so
+one careless copy takes both. `get_or_create_keys` reads two environment
+variables before it looks at the file:
+
+| variable | what it is |
+|---|---|
+| `TRAVIAN_JWT_SECRET` | the token signing secret. Changing it invalidates every issued token — everyone logs in again, nothing is lost |
+| `TRAVIAN_FERNET_KEY` | the credential encryption key. **Must be the value already in `.web_keys`.** A different one leaves every stored Travian password permanently undecryptable |
+
+Set **both or neither** — half the pair raises at startup and names the missing
+one, rather than signing with an environment key and decrypting with a file key.
+When both are set the file is neither read nor written, which is what makes this
+a fix rather than a second copy. The move, in order:
+
+1. Read the current values out of `~/.travian/.web_keys` — into a shell, not
+   into a commit, an issue, or an agent session (§1.5).
+2. Put them where the process can see them and a directory copy cannot: a
+   service-manager environment file with its own permissions, or the `.env`
+   (which lives in the repo directory, not in `~/.travian`). Restrict whichever
+   you choose the way §1.3 describes.
+3. Restart, confirm you can log in *and* that a saved Travian credential still
+   connects — the second is the one that proves the Fernet key survived.
+4. Only then remove `.web_keys`, and keep the backup you made of it.
+
+Until step 4 the file is still there and still a copy of the key, so steps 1–3
+alone change nothing about the exposure. This is the operator's move to make;
+the code only stopped requiring the file.
+
 ### 1.5 Never paste a credential into an agent session
 
 The repository has a guard, and it is worth knowing exactly what it does and

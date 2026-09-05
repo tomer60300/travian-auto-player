@@ -30,8 +30,17 @@ _logger = logging.getLogger(__name__)
 # TRAVIAN_DB_PATH, keys pinned to ~/.travian mean moving or reusing that DB
 # elsewhere cannot decrypt its own credential rows. The default DB dir is
 # ~/.travian, so default deployments keep their existing key file.
+#
+# That adjacency is also the weakness (config audit P1-7): anything that reads
+# the directory -- a backup, a cloud-sync client, another local user -- gets the
+# ciphertext and its key in one copy. These two variables are the way out, and
+# `src/travian_api/CLAUDE.md` already asks for them ("Fernet encryption keys
+# from environment variables, never hardcoded"); the file remains the fallback
+# for every deployment that has one.
 KEYS_FILE = DB_DIR / ".web_keys"
 _LEGACY_KEYS_FILE = Path.home() / ".travian" / ".web_keys"
+_JWT_ENV = "TRAVIAN_JWT_SECRET"
+_FERNET_ENV = "TRAVIAN_FERNET_KEY"
 
 # ---------------------------------------------------------------------------
 # Key management
@@ -48,6 +57,50 @@ class WebKeysCorrupt(RuntimeError):
     is not a recovery -- it orphans every encrypted password row -- so the
     message says which file and says not to delete it.
     """
+
+
+class WebKeysMisconfigured(RuntimeError):
+    """The environment says something about the keys that cannot be honoured.
+
+    Half the pair, or a Fernet key the library will not accept. Both are
+    refused loudly at import rather than absorbed: a server that quietly fell
+    back to the file for the missing half would sign tokens with one key and
+    decrypt credentials with another, and the operator would learn about it
+    from a decryption failure hours later.
+    """
+
+
+def _keys_from_environment() -> tuple[str, str] | None:
+    """Return the (jwt_secret, fernet_key) pair the environment supplies.
+
+    None when it supplies neither, which is the ordinary case and sends the
+    caller to the file. Both or nothing -- see :class:`WebKeysMisconfigured`.
+    """
+    jwt_secret = os.environ.get(_JWT_ENV, "").strip()
+    fernet_key = os.environ.get(_FERNET_ENV, "").strip()
+
+    if not jwt_secret and not fernet_key:
+        return None
+    if not jwt_secret or not fernet_key:
+        missing, present = (_JWT_ENV, _FERNET_ENV) if not jwt_secret else (_FERNET_ENV, _JWT_ENV)
+        raise WebKeysMisconfigured(
+            f"{present} is set but {missing} is not. The two are read together: "
+            f"set both to move the keys out of {KEYS_FILE}, or unset both to keep "
+            "using that file."
+        )
+
+    try:
+        Fernet(fernet_key.encode())
+    except (ValueError, TypeError) as exc:
+        raise WebKeysMisconfigured(
+            f"{_FERNET_ENV} is not a valid Fernet key "
+            f"({type(exc).__name__}: {exc}). It must be the SAME key the stored "
+            f"credentials were encrypted with -- the one in {KEYS_FILE} if you "
+            "are moving it out of there -- because a new one leaves every "
+            "credential row permanently undecryptable."
+        ) from exc
+
+    return jwt_secret, fernet_key
 
 
 def _read_keys(path: Path) -> tuple[str, str]:
@@ -120,9 +173,17 @@ def _warn_if_world_readable(path: Path) -> None:
 def get_or_create_keys() -> tuple[str, str]:
     """Return (jwt_secret, fernet_key), creating the keys file if needed.
 
-    The keys file is a JSON object stored in ``~/.travian/.web_keys``:
+    ``TRAVIAN_JWT_SECRET`` + ``TRAVIAN_FERNET_KEY`` win when both are set, and
+    the file is then neither read nor written -- that is the whole point, since
+    the file's problem is the directory it is in (P1-7).
+
+    Otherwise the keys file, a JSON object stored in ``~/.travian/.web_keys``:
         {"jwt_secret": "...", "fernet_key": "..."}
     """
+    from_environment = _keys_from_environment()
+    if from_environment is not None:
+        return from_environment
+
     if KEYS_FILE.exists():
         _warn_if_world_readable(KEYS_FILE)
         return _read_keys(KEYS_FILE)
