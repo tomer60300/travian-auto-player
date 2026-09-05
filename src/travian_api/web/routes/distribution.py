@@ -6804,6 +6804,16 @@ async def post_execute(
                     pruned_ids: set[int] = set()
                     # Rows whose cargo this run rewrote, with what it asked for.
                     updated_here: list[tuple[ExistingRoute, dict]] = []
+                    # Rows whose cargo rewrite the game answered UNREADABLY: the
+                    # request returned success and nothing here proves the rows
+                    # changed. Held apart from `updated_here` because the verdict
+                    # is not "did the accepted write take effect" but "did the
+                    # write happen at all", and the read-back below settles it
+                    # from the page -- reported as corrected only when the rows
+                    # carry the plan's amounts.
+                    unverified_updates: list[
+                        tuple[RouteActionResponse, list[ExistingRoute], dict, str]
+                    ] = []
                     for i, (row, route) in enumerate(desired):
                         destination = _desired_key(route)
                         # A mismatched destination in create-only mode is a dead
@@ -6963,6 +6973,40 @@ async def post_execute(
                                     problems.append(updated.detail)
                                     deferred.extend(desired[i:])
                                     break
+                                if updated is not None and updated.status == "unverified":
+                                    # Not a refusal: the PUT returned success and
+                                    # its body could not be read. Claim nothing
+                                    # yet -- the end-of-origin read-back decides,
+                                    # exactly as it does for an unverified
+                                    # disable.
+                                    _pending = _action(
+                                        row,
+                                        route,
+                                        "updated",
+                                        f"cargo rewritten on {len(drifted)} row(s); the "
+                                        f"game's answer was unreadable, awaiting the "
+                                        f"marketplace",
+                                    )
+                                    actions.append(_pending)
+                                    unverified_updates.append(
+                                        (
+                                            _pending,
+                                            list(drifted),
+                                            dict(route.cargo),
+                                            village_label(row.destination, names),
+                                        )
+                                    )
+                                    trace.decision(
+                                        origin=origin,
+                                        destination=destination,
+                                        decision="updated",
+                                        reason=(
+                                            f"cargo drifted on {len(drifted)} row(s); the "
+                                            f"rewrite's answer was unreadable ({detail})"
+                                        ),
+                                        route_ids=[e.route_id for e in drifted],
+                                    )
+                                    continue
                                 problems.append(
                                     f"{village_label(origin, names)} -> "
                                     f"{village_label(row.destination, names)}: cargo has "
@@ -7164,6 +7208,7 @@ async def post_execute(
                         or disabled_here
                         or reenabled_here
                         or updated_here
+                        or unverified_updates
                     ):
                         try:
                             after = await svc.confirm_routes(origin, map_span=body.map_span)
@@ -7513,6 +7558,38 @@ async def post_execute(
                                     origin=origin,
                                     claimed=sorted(r.route_id for r, _ in updated_here),
                                     still_stale=stale_after,
+                                )
+
+                            # And the unreadable ones, whose whole verdict this
+                            # read-back is: a row carrying the plan's amounts was
+                            # rewritten, one still carrying the old ones was not.
+                            for _act_u, _rows_u, _wanted_u, _label_u in unverified_updates:
+                                _unchanged = sorted(
+                                    r.route_id
+                                    for r in _rows_u
+                                    if r.route_id not in by_id
+                                    or cargo_has_drifted(by_id[r.route_id].cargo, _wanted_u)
+                                )
+                                trace.event(
+                                    "settled_unverified_update",
+                                    origin=origin,
+                                    claimed=sorted(r.route_id for r in _rows_u),
+                                    still_stale=_unchanged,
+                                )
+                                if _unchanged:
+                                    _act_u.status = "skipped"
+                                    _act_u.detail = "route active, cargo stale"
+                                    problems.append(
+                                        f"{village_label(origin, names)} -> {_label_u}: the "
+                                        f"cargo rewrite could not be confirmed and the page "
+                                        f"still shows the old amounts on {_unchanged}. They "
+                                        f"are shipping something the plan did not ask for."
+                                    )
+                                    continue
+                                _act_u.detail = f"cargo reset on {len(_rows_u)} row(s)"
+                                updates.append(
+                                    f"{village_label(origin, names)} -> {_label_u}: "
+                                    f"cargo reset on {len(_rows_u)} row(s)"
                                 )
 
                             still_active = [

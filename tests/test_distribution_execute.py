@@ -2425,6 +2425,65 @@ class TestCargoDriftIsCorrected:
         assert events[-1]["cargo_updated"] == 1
 
 
+class TestAnUnverifiableCargoUpdateIsSettledByLookingAtTheMarketplace:
+    """The bulk PUT answers with an empty body on this account, so `unverified`
+    is the NORMAL outcome of a cargo correction, not an exception.
+
+    Settled the way an unverified disable is: the origin is re-read and the
+    verdict comes from what the page carries, not from a response shape nobody
+    has observed. Reported as corrected only when the rows show the plan's
+    amounts.
+    """
+
+    def _existing(self, crop):
+        from travian_api.services.distribution.allocation import Resource
+
+        return {20003: _fanned(20011, start_id=800, cargo={Resource.CROP: crop})}
+
+    def _svc(self, *, applies):
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        class _Unreadable(_FakeLiveSvc):
+            async def update_cargo(
+                self, vid, routes, cargo, *, dest_x=None, dest_y=None, stop_check=None
+            ):
+                if not routes:
+                    return None
+                self.updated.append((vid, tuple(sorted(r.route_id for r in routes)), dict(cargo)))
+                if applies:
+                    targets = {r.route_id for r in routes}
+                    for row in self._existing.get(vid, []):
+                        if row.route_id in targets:
+                            row.cargo = dict(cargo)
+                return RouteActionResult(vid, 0, 0, "unverified", "cannot be confirmed (test)")
+
+        return _Unreadable(existing=self._existing(9000))
+
+    def test_rows_the_game_really_rewrote_are_counted_as_corrected(self):
+        svc = self._svc(applies=True)
+        res = _run_live(svc, _own_village_account(), max_routes_per_run=50, update_drifted=True)
+
+        assert len(res.updates) == 1, res.problems
+        assert "cargo reset on 4 row(s)" in res.updates[0]
+        assert [a.status for a in res.actions] == ["updated"]
+        assert res.problems == []
+
+    def test_rows_still_carrying_the_old_amounts_are_reported(self):
+        svc = self._svc(applies=False)
+        res = _run_live(svc, _own_village_account(), max_routes_per_run=50, update_drifted=True)
+
+        assert res.updates == []
+        assert [a.status for a in res.actions] == ["skipped"]
+        joined = " ".join(res.problems)
+        assert "still shows the old amounts" in joined, res.problems
+
+    def test_an_update_only_run_still_reads_back(self):
+        svc = self._svc(applies=True)
+        _run_live(svc, _own_village_account(), max_routes_per_run=50, update_drifted=True)
+
+        assert svc.confirmed == [20003], "the page is what settles an unreadable answer"
+
+
 class TestEveryKindOfWriteIsVerified:
     """Creates and disables were read back; re-enables and cargo updates were not.
 

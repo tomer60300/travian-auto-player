@@ -943,13 +943,24 @@ class TradeRouteService:
             # A cargo correction that did not happen, reported as applied, is
             # the same defect wearing different clothes: the rows keep carrying
             # the figures the plan was supposed to replace.
+            #
+            # But `failed` was the OTHER over-statement, and the one that bites:
+            # this is the same endpoint, the same request shape and the same
+            # missing evidence `_toggle_routes` calls `unverified`, and `docs/15`
+            # records the empty 200 as the normal body here -- so `failed` was
+            # the expected outcome of every cargo correction this app makes. The
+            # run reported "0 corrected" and "the live route is still shipping
+            # the old amounts" over rows it had just rewritten, and the operator
+            # could not tell that from the game genuinely saying no. The caller
+            # settles it by reading the marketplace back, as it does for a
+            # disable.
             detail = (
                 f"cargo update of {len(routes)} route(s) cannot be confirmed: {exc}. The "
-                f"request returned success, so some or all may still carry the OLD cargo "
-                f"and have to be checked in-game."
+                f"request returned success, so some or all may already carry the NEW "
+                f"cargo -- the page has to say which."
             )
             self._trace_write("update", origin_village_id, "unreadable", started, payload, detail)
-            return RouteActionResult(origin_village_id, 0, 0, "failed", detail)
+            return RouteActionResult(origin_village_id, 0, 0, "unverified", detail)
         if rejected:
             detail = f"{len(rejected)} of {len(routes)} route(s) rejected: {rejected}"
             self._trace_write("update", origin_village_id, "partial", started, payload, detail)

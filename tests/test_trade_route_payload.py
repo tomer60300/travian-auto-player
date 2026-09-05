@@ -692,3 +692,27 @@ class TestTheUpdateBodyMatchesTheClient:
         )
         assert result.status == "failed"
         assert "[2]" in result.detail
+
+    def test_an_unreadable_body_is_unverified_not_failed(self):
+        # The same evidence `_toggle_routes` calls `unverified`, on the same
+        # endpoint, in the same request shape -- and `docs/15` records the empty
+        # 200 as the NORMAL body here, so `failed` was the expected outcome of
+        # every cargo correction this app makes. It made `update_drifted` report
+        # "0 corrected" and "still shipping the old amounts" over rows it had
+        # just rewritten.
+        for body in ({}, None, {"other": 1}, "not json at all"):
+            client = _RecordingClient()
+
+            async def _put(url, payload, _body=body, _client=client, **kw):
+                _client.sent.append(("PUT", url, payload))
+                return _body
+
+            client.put_json = _put
+            service = TradeRouteService(client, live_enabled=True, reconciler_verified=True)
+            routes = [ExistingRoute(route_id=1, dest_village_id=20044, dest_x=0, dest_y=0)]
+
+            result = asyncio.run(
+                service.update_cargo(20031, routes, {Resource.CROP: 1}, dest_x=23, dest_y=88)
+            )
+            assert result.status == "unverified", f"body {body!r}"
+            assert "cannot be confirmed" in result.detail
