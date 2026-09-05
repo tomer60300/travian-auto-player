@@ -75,10 +75,6 @@ async function record(page) {
   return sent
 }
 
-function toast(page) {
-  return page.locator('.toast').first()
-}
-
 /** The queue panel, so its rows can be read in ORDER -- which is the whole
  *  point of the reorder buttons and the one thing a per-row lookup loses. */
 function queueNames(page) {
@@ -170,8 +166,15 @@ test('a refused validation says why and leaves no verdict table behind', async (
   await page.getByRole('button', { name: 'Validate' }).click()
 
   // 3. THE FAILURE BRANCH: the server's own sentence, in the error tone.
-  await expect(toast(page)).toHaveClass(/toast-error/)
-  await expect(toast(page)).toContainText(REASON)
+  // Not `toast(page)` (`.toast` `.first()`): the ADD click above already
+  // raised its own success toast, still on screen alongside the validation
+  // one and older, so it -- not the validation failure -- is first in DOM
+  // order until its own 4s lifetime (Toast.jsx) elapses. Scoping directly to
+  // `.toast-error` asserts the failure toast exists, whichever position it
+  // is in the stack.
+  const errorToast = page.locator('.toast.toast-error')
+  await expect(errorToast).toBeVisible()
+  await expect(errorToast).toContainText(REASON)
   // And no table: a stale verdict under a refusal would read as an approval.
   await expect(page.getByRole('heading', { name: 'Validation Results' })).toHaveCount(0)
   // The queue itself is untouched -- a refused check is not a reason to lose
