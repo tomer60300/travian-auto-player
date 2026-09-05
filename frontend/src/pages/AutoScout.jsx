@@ -2,7 +2,6 @@ import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import { useResumableOperation } from '../hooks/useResumableOperation'
 import { useToast } from '../components/Toast'
 import WebSocketPanel from '../components/WebSocketPanel'
-import VillageSelector from '../components/VillageSelector'
 import AddToFarmDialog from '../components/AddToFarmDialog'
 import { MapCoord } from '../components/MapCoord'
 import useGameStore from '../stores/gameStore'
@@ -640,24 +639,24 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
 
       {/* Radius slider */}
       <div className="mb-4">
-        <label className="field-label-lg">Radius: {radius}</label>
-        <input type="range" min={5} max={100} value={radius} onChange={(e) => setRadius(Number(e.target.value))} className="w-full checkbox-gold" />
+        <label className="field-label-lg" htmlFor="scan-radius">Radius: {radius}</label>
+        <input id="scan-radius" type="range" min={5} max={100} value={radius} onChange={(e) => setRadius(Number(e.target.value))} className="w-full checkbox-gold" />
         <div className="flex justify-between text-xs text-secondary"><span>5</span><span>100</span></div>
       </div>
 
       {/* Population range — village */}
       <div className="flex gap-4 mb-4">
         <div className="flex-1">
-          <label className="field-label-lg">Min Village Pop</label>
-          <input type="number" className="input-field" value={minPop} min={0} onChange={(e) => setMinPop(Number(e.target.value))} />
+          <label className="field-label-lg" htmlFor="scan-min-pop">Min Village Pop</label>
+          <input id="scan-min-pop" type="number" className="input-field" value={minPop} min={0} onChange={(e) => setMinPop(Number(e.target.value))} />
         </div>
         <div className="flex-1">
-          <label className="field-label-lg">Max Village Pop</label>
-          <input type="number" className="input-field" value={maxPop} min={0} onChange={(e) => setMaxPop(Number(e.target.value))} />
+          <label className="field-label-lg" htmlFor="scan-max-pop">Max Village Pop</label>
+          <input id="scan-max-pop" type="number" className="input-field" value={maxPop} min={0} onChange={(e) => setMaxPop(Number(e.target.value))} />
         </div>
         <div className="flex-1">
-          <label className="field-label-lg">Max Player Pop (all villages)</label>
-          <input type="number" className="input-field" value={maxPlayerPop} placeholder="no limit" onChange={(e) => setMaxPlayerPop(e.target.value)} />
+          <label className="field-label-lg" htmlFor="scan-max-player-pop">Max Player Pop (all villages)</label>
+          <input id="scan-max-player-pop" type="number" className="input-field" value={maxPlayerPop} placeholder="no limit" onChange={(e) => setMaxPlayerPop(e.target.value)} />
         </div>
       </div>
 
@@ -892,6 +891,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
                       }
                       onClick={() => toggleLevel(lv)}
                       disabled={scanning}
+                      aria-label={`${villageMode ? 'Minimum total bonus' : 'Total bonus level'} ${lv}%`}
                     >{lv}%</button>
                   )
                 })}
@@ -919,7 +919,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         <label className="field-label-lg mb-1">Exclude Alliances (name or ID — persisted)</label>
         <div className="flex gap-2 items-center mb-2">
           <input className="input-field flex-1" placeholder="Alliance name or ID" value={newAlliance} onChange={(e) => setNewAlliance(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addAlliance()} />
-          <button className="btn-secondary btn-xs" onClick={addAlliance}>Add</button>
+          <button className="btn-secondary btn-xs" onClick={addAlliance} aria-label="Add alliance">Add</button>
         </div>
         {excludeAlliances.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
@@ -938,7 +938,7 @@ function ScanConfigPanel({ onScanComplete, scanning, setScanning, onConfigChange
         <label className="field-label-lg mb-1">Exclude Players (persisted)</label>
         <div className="flex gap-2 items-center mb-2">
           <input className="input-field flex-1" placeholder="Player name" value={newPlayer} onChange={(e) => setNewPlayer(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addPlayer()} />
-          <button className="btn-secondary btn-xs" onClick={addPlayer}>Add</button>
+          <button className="btn-secondary btn-xs" onClick={addPlayer} aria-label="Add player">Add</button>
         </div>
         {excludePlayers.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
@@ -1130,7 +1130,7 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
           <thead className="sticky top-0 bg-card z-[1]">
             <tr>
               <th className="w-10">
-                <input type="checkbox" checked={allSelected} onChange={toggleAll} className="checkbox-gold" />
+                <input type="checkbox" checked={allSelected} onChange={toggleAll} className="checkbox-gold" aria-label="Select all scan results" />
               </th>
               <th>Coords</th>
               <SortableHeader label="Village" field="village_name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
@@ -1151,7 +1151,7 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
               const isSelected = selected.has(origIdx)
               return (
                 <tr key={origIdx} onClick={() => toggleRow(origIdx)} className={`row-clickable ${isSelected ? 'row-selected' : ''}`}>
-                  <td><input type="checkbox" checked={isSelected} onChange={() => toggleRow(origIdx)} onClick={(e) => e.stopPropagation()} className="checkbox-gold" /></td>
+                  <td><input type="checkbox" checked={isSelected} onChange={() => toggleRow(origIdx)} onClick={(e) => e.stopPropagation()} className="checkbox-gold" aria-label={`Select ${row.village_name || row.name || 'target'} (${row.x}, ${row.y})`} /></td>
                   <td className="font-mono text-gold"><MapCoord x={row.x} y={row.y} /></td>
                   <td>{row.village_name || row.name || '---'}</td>
                   <td
@@ -1192,7 +1192,12 @@ function ScanResultsTable({ results, selected, setSelected, farmLists, coordMap,
                     ))}
                   </td>
                   <td onClick={(e) => e.stopPropagation()}>
-                    <button className="btn-secondary btn-xs" title="Add to farm list" onClick={() => setAddFarmTarget(row)}>+Farm</button>
+                    <button
+                      className="btn-secondary btn-xs"
+                      title="Add to farm list"
+                      onClick={() => setAddFarmTarget(row)}
+                      aria-label={`Add ${row.village_name || row.name || 'target'} (${row.x}, ${row.y}) to farm list`}
+                    >+Farm</button>
                   </td>
                 </tr>
               )
@@ -1585,8 +1590,8 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
       {/* Scouts per target + idle scout check */}
       <div className="flex gap-4 mb-4 flex-wrap">
         <div className="flex-1 min-w-[120px]">
-          <label className="field-label-lg">Scouts per target</label>
-          <input type="number" className="input-field" value={amount} min={1} max={20} onChange={(e) => setAmount(Number(e.target.value))} disabled={running} />
+          <label className="field-label-lg" htmlFor="scouts-per-target">Scouts per target</label>
+          <input id="scouts-per-target" type="number" className="input-field" value={amount} min={1} max={20} onChange={(e) => setAmount(Number(e.target.value))} disabled={running} />
           <div className="flex items-center gap-2 mt-1">
             <button className="btn-secondary btn-xs" onClick={checkIdleScouts} disabled={checkingScouts || running}>
               {checkingScouts ? '...' : 'Check'}
@@ -1748,13 +1753,17 @@ export default function AutoScout() {
       <div className="flex justify-between items-center mb-5">
         <h2 className="heading-gold text-2xl">Auto Scout</h2>
         <div className="flex items-center gap-3">
+          {/* The page used to embed its own <VillageSelector/> here too, which
+              duplicated the layout's -- same store, same "Active village" name,
+              so getByLabel('Active village') resolved 2 on this page. Removed;
+              the sidebar/mobile-top-bar selector already covers every
+              breakpoint (see components/Layout.jsx). */}
           <span
             className="text-[10px] text-secondary opacity-50 font-mono"
             title="Bundle build marker. wd12 = wd11 + Scan Results pagination (10 rows/page) — removes the fixed-height scroll container so the table doesn't push the rest of the page below the fold."
           >
             build: wd12
           </span>
-          <VillageSelector />
         </div>
       </div>
       <div className="flex flex-col gap-4">
