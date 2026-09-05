@@ -3020,6 +3020,18 @@ export default function ResourcePlanner() {
   // The gap between chunks is the session break a long operation needs, and the
   // server picks its length so the client is not returning on a metronome.
   const runReconcileSweep = useCallback(async () => {
+    // The same gate `executePlan` opens with, and this was the one write path
+    // without it: the sweep checked only that a plan existed and then posted
+    // `dry_run: false`. So every marked cell Preview refuses -- an unparseable
+    // "Never disable" entry, an even `map_span` that decides what a marketplace
+    // row's map id turns back into, an unresolved "Not from" exclusion -- went
+    // straight to a live, disabling run. It is also the one write button that
+    // carries no live-run confirmation.
+    const gate = [...blockers, ...runIssues]
+    if (gate.length) {
+      refuseBlockers(gate)
+      return
+    }
     if (!plan) {
       toast.error('Build a plan first — the sweep needs to know what the plan wants')
       return
@@ -3134,7 +3146,18 @@ export default function ResourcePlanner() {
     } finally {
       setSweeping(false)
     }
-  }, [plan, buildExecutePayload, wholeDay, routesPerRun, maxGameRows, protectDestinations, toast])
+  }, [
+    plan,
+    buildExecutePayload,
+    wholeDay,
+    routesPerRun,
+    maxGameRows,
+    protectDestinations,
+    blockers,
+    runIssues,
+    refuseBlockers,
+    toast,
+  ])
 
   // Live unallocated counter, so slack is visible while typing rather than
   // discovered later (profile known issue #9).

@@ -19,7 +19,7 @@
  *   * Emptied to % / Full to % ... Derive from stores
  *   * Routes this run ............ Preview / live run
  *   * Max rows this run .......... Preview / live run
- *   * Never disable .............. Preview / live run
+ *   * Never disable .............. Preview / live run / the sweep
  *
  * The pattern copied throughout is the merchant-model row's: one predicate,
  * shared by the cell's message and by the gate, so a mark and a refusal cannot
@@ -304,6 +304,45 @@ test.describe('a figure past the bound is marked and not sent', () => {
     await expect(entry).not.toHaveAttribute('aria-invalid', 'true')
     await page.getByRole('button', { name: /^Preview/ }).click()
     await expect.poll(() => calls.execute).toBe(1)
+  })
+
+  // The RECONCILIATION SWEEP, which was the only write path with no client gate
+  // at all: `executePlan` opens with `[...blockers, ...runIssues]` -- for the
+  // preview as well as the live run -- and this one checked only that a plan
+  // existed and then posted `dry_run: false`. So every marked cell Preview
+  // refuses went straight to a live, disabling run, on the one write button that
+  // carries no live-run confirmation either.
+  test('the sweep refuses a malformed "Never disable" the same way Preview does', async ({
+    page,
+  }) => {
+    const calls = await countCalls(page)
+    await openAccount(page, WINDOWS)
+    await buildAndOpenPlan(page)
+
+    // Not a plan input, so the plan -- and the sweep button with it -- stays on
+    // screen while the cell is marked. This is the state that was measured.
+    await type(page, 'Never disable', '53629, ally hub', 'textbox')
+
+    await page.getByRole('button', { name: 'Reconcile all villages' }).click()
+    await expect(page.getByText(/Never disable \(ally hub\)/)).toBeVisible()
+    expect(calls.execute).toBe(0)
+  })
+
+  // And the other list. The crop alert is the one `planBlockers` entry that is
+  // not a plan input, so it can be wrong while a built plan is still on screen
+  // -- which is exactly how a marked cell reached a live sweep.
+  test('the sweep refuses a marked plan cell too', async ({ page }) => {
+    const calls = await countCalls(page)
+    await openAccount(page, WINDOWS)
+    await buildAndOpenPlan(page)
+
+    await goToStage(page, 'Day & night')
+    await type(page, 'Crop stock alert level for 11', -5)
+    await goToStage(page, 'Plan')
+
+    await page.getByRole('button', { name: 'Reconcile all villages' }).click()
+    await expect(page.getByText(/Crop stock alert \(11\)/)).toBeVisible()
+    expect(calls.execute).toBe(0)
   })
 
   // The refusal is not only a sentence: it switches to the stage that mounts
