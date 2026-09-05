@@ -354,12 +354,13 @@ const LS_RESERVED_WINDOW = 'planner_reserved_window'
 // and the next run left every out-of-window firing live in the game. The
 // criterion that earned `reserved_window` its v9 bump, met harder.
 const LS_PRUNE_TO_WINDOW = 'planner_prune_to_window'
-// Whether the operator has MEASURED the merchant model against the game rather
-// than accepted the shipped figures. Owned in the strictest sense: it records
-// work done IN THE GAME that the game does not record, and no amount of
-// re-reading the account could recover it -- a measured +20%/level looks
-// exactly like an untouched one, which is the whole reason the finding it
-// silences cannot be cleared by doing what it asks.
+// Whether the operator has MEASURED the two CAPACITY figures against the game
+// rather than accepted the shipped ones -- capacity and not the whole model,
+// because merchant SPEED is still assumed here and must not ride along on this
+// tick. Owned in the strictest sense: it records work done IN THE GAME that the
+// game does not record, and no amount of re-reading the account could recover
+// it -- a measured +20%/level looks exactly like an untouched one, which is the
+// whole reason the finding it silences cannot be cleared by doing what it asks.
 const LS_MERCHANT_MEASURED = 'planner_merchant_measured'
 
 // Only complete rows go to the backend: a half-typed target would 422 the
