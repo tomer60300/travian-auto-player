@@ -583,13 +583,15 @@ class FarmListService:
             finally:
                 self._cursors[list_id] = (cursor + advanced) % total if total else 0
         finally:
-            # Stealth: feed real elapsed time into the activity scheduler so
-            # session/rolling caps accrue for EVERY exit path — single-target,
-            # explicit-slot, troop-exhaustion mid-loop, or full success.
-            try:
-                self.http_client.activity_scheduler.log_activity(time.monotonic() - send_start)
-            except Exception:
-                pass
+            # Billing moved to the transport (`HttpClient._billed`): one bill
+            # per request it issues, on every exit path, for every writer
+            # instead of the four callers that remembered. Billing here as well
+            # would charge each send's seconds twice.
+            logger.debug(
+                "Farm list %d: send took %.1fs (billed per request by the transport)",
+                list_id,
+                time.monotonic() - send_start,
+            )
 
     async def send_all_farm_lists(
         self, list_ids: Optional[List[int]] = None

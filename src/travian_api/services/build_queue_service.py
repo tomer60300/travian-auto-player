@@ -1150,12 +1150,6 @@ class BuildQueueService:
 
                         break
 
-            # Log activity for scheduler tracking
-            try:
-                self.http_client.activity_scheduler.log_activity(poll_interval_s)
-            except Exception:
-                pass
-
             if not built:
                 # Distinguish "no money" from "no upgrade URL on build page" —
                 # the second is a transient Travian-state issue, the first is

@@ -729,7 +729,9 @@ def _build_auto_scout_coro(config: dict):
             t_elapsed = time.monotonic() - t_start
             times_per_target.append(t_elapsed)
 
-            session.http_client.activity_scheduler.log_activity(t_elapsed)
+            # Billing is the transport's (`HttpClient._billed`), which charges
+            # each of this target's form POSTs once. Billing the whole
+            # per-target span here as well would count them twice.
             if (i + 1) % 5 == 0:
                 try:
                     session.http_client.check_activity_budget()

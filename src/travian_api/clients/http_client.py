@@ -7,13 +7,16 @@ falling back to httpx if curl_cffi is not installed.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
 import random
 import re
+import time
+from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, TypeVar
 from urllib.parse import urlencode, urljoin
 
 if TYPE_CHECKING:
@@ -96,6 +99,64 @@ _transient_retry = retry(
 # "application/json; charset=UTF-8"; bare "application/json" differs from it
 # in a byte-exact, trivially indexable way on every JSON write.
 JSON_CONTENT_TYPE = "application/json; charset=UTF-8"
+
+
+# Set for the duration of one billed request so a request method that
+# re-enters ITSELF (post_json's connection-reset re-send) does not charge the
+# same seconds twice -- the outer frame's span already covers the inner one. A
+# ContextVar rather than an instance flag because one HttpClient serves many
+# concurrent coroutines, and an instance flag would let a request that happens
+# to overlap another go unbilled.
+_billing_in_progress: ContextVar[bool] = ContextVar("_http_billing_in_progress", default=False)
+
+_R = TypeVar("_R")
+
+
+def _billed(
+    method: Callable[..., Awaitable[_R]],
+) -> Callable[..., Awaitable[_R]]:
+    """Charge one issued request to the rolling activity ceiling.
+
+    Wraps the request-issuing methods so that EVERY game request is billed,
+    exactly once, from a ``finally`` -- the ``except`` paths included, because
+    a request that failed still went out and still consumed a throttler gap.
+
+    This used to be each caller's job, and eight of the ten writers forgot:
+    ``log_activity`` had four call sites in the whole tree, so
+    ``daily_hours_used`` accrued from the distribution planner, farm-list sends
+    and the scout WS and from nothing else. A day of farm-builder runs,
+    build-queue upgrades, oasis sweeps and video claims moved the ceiling by
+    zero, and the next farm send was then told it could continue -- the stealth
+    model's central budget measuring a minority of the traffic. It also
+    replaces the build queue's constant ``poll_interval_s`` per loop iteration,
+    which was billed whatever happened in the iteration and from outside any
+    ``finally``.
+
+    The span starts before the pre-request hook, so the throttler gap and any
+    outstanding rate-limit penalty are billed with the request. That is the
+    session wall-clock the ceiling is a proxy for, and it is what the three
+    non-constant callers already did.
+
+    Applied OUTSIDE ``_transient_retry``, so one call is one bill however many
+    transport attempts it took: the outer span already covers every attempt
+    and the backoff between them. Over-billing a ceiling stops the account
+    early, which is the safe direction; under-billing is the defect this
+    exists to fix.
+    """
+
+    @functools.wraps(method)
+    async def wrapper(self: HttpClient, *args: Any, **kwargs: Any) -> _R:
+        if _billing_in_progress.get():
+            return await method(self, *args, **kwargs)
+        token = _billing_in_progress.set(True)
+        started = time.monotonic()
+        try:
+            return await method(self, *args, **kwargs)
+        finally:
+            _billing_in_progress.reset(token)
+            self._bill_activity(time.monotonic() - started)
+
+    return wrapper
 
 
 def _jitter_penalty(base_seconds: float) -> float:
@@ -438,6 +499,18 @@ class HttpClient:
     @property
     def captcha_guard(self) -> CaptchaGuard:
         return self._captcha_guard
+
+    def _bill_activity(self, seconds: float) -> None:
+        """Record one issued request against the rolling 24h ceiling.
+
+        Accounting must never break a request that already went out -- the
+        contract ``trade_route_service._log_activity`` carried before billing
+        moved here -- so a scheduler failure is logged and swallowed.
+        """
+        try:
+            self._activity_scheduler.log_activity(max(0.0, seconds))
+        except Exception:
+            logger.debug("Activity billing failed (non-critical)", exc_info=True)
 
     def check_activity_budget(self) -> bool:
         """Check whether the activity budget allows continued operation.
@@ -1030,6 +1103,7 @@ class HttpClient:
         self._sync_cookies_from_curl(response)
         return response
 
+    @_billed
     @_transient_retry
     async def post_json(
         self,
@@ -1181,6 +1255,7 @@ class HttpClient:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
+    @_billed
     @_transient_retry
     async def delete_json(
         self,
@@ -1293,6 +1368,7 @@ class HttpClient:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
+    @_billed
     async def put_json(
         self,
         url: str,
@@ -1414,6 +1490,7 @@ class HttpClient:
                 raise NetworkError(f"Request failed (curl): {e}")
             raise
 
+    @_billed
     @_transient_retry
     async def post_form(self, url: str, data: Dict[str, str], *, safe_to_retry: bool = True) -> str:
         """Make a POST request with form data."""
@@ -1533,6 +1610,7 @@ class HttpClient:
                 raise NetworkError(f"Request failed (non-retryable): {e}")
             raise
 
+    @_billed
     @_transient_retry
     async def get_html(
         self,

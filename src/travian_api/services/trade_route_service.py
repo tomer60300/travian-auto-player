@@ -621,6 +621,20 @@ class TradeRouteService:
         Accounting must never break a write that already went out, hence the
         broad catch -- the ceiling exists to keep the account looking human, not
         to become a new way for a committed request to fail.
+
+        KNOWN OVERLAP with ``HttpClient._billed``, which now bills every
+        request the transport issues (the fix for eight writers that billed
+        NOTHING). This service was one of the four that did remember, so its
+        writes are charged twice: once for the whole write's wall clock here,
+        once per request underneath. Over-billing a ceiling stops the account
+        early, so the direction is safe, but it is not right. Removing this
+        needs the ~17 tests that pin billing at THIS layer
+        (``tests/test_trade_route_payload.py::TestWritesConsumeActivityBudget``,
+        ``tests/test_trade_route_footprint.py::TestAFailedReadIsBilledToo``,
+        ``tests/test_distribution_execute.py::TestMarketplaceReadsBillTheActivityCeiling``)
+        re-pointed at the transport first -- they drive fake clients that
+        replace the request methods on the instance, so they cannot observe the
+        transport's bill at all.
         """
         try:
             self.http_client.activity_scheduler.log_activity(time.monotonic() - started)
