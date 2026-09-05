@@ -2488,9 +2488,13 @@ class ExecuteRequest(PlanRequest):
             "`disable_existing` false, `prune_to_window` false with no "
             "`segments` (so the run has no delete path at all), "
             "`update_drifted` false, and `max_game_rows_per_run` equal to that "
-            "one route's own fan-out (24/N). Anything else is a 422 naming the "
-            "condition that failed. Off for every ordinary run, which none of "
-            "these conditions touches."
+            "one route's own fan-out (24/N). Two more are settled server-side: "
+            "the filters must select exactly one planned route, and the origin "
+            "must hold NO marketplace row for that destination already — "
+            "otherwise the read-back cannot say which rows this run made and "
+            "the undo cannot say which it may switch off. Anything else is a "
+            "422 naming the condition that failed. Off for every ordinary run, "
+            "which none of these conditions touches."
         ),
     )
 
@@ -2703,6 +2707,21 @@ class ExecuteResponse(BaseModel):
     # cannot say WHY each route was skipped or disabled -- the trace can.
     trace_id: str | None = None
     trace_path: str | None = None
+    canary_rows_created: list[int] | None = Field(
+        default=None,
+        description=(
+            "The route rows a `canary: true` run put in the game, by route id — "
+            "its undo list, and the whole claim such a run makes: one new write, "
+            "reversible by switching exactly these rows off. Attributed by the "
+            "read-back and diffed against the pre-write inventory, because the "
+            "game returns no id on a create. `[]` is a MEASUREMENT (the create "
+            "produced nothing, so there is nothing to undo); `null` is the "
+            "absence of one and never means zero — a run whose read-back failed, "
+            "or which stopped before its create, does not know what is in the "
+            "game and says so in `problems` as well. Always `null` on an "
+            "ordinary run, which makes no such claim."
+        ),
+    )
 
 
 @router.get("/snapshot", response_model=SnapshotResponse)
@@ -6582,6 +6601,14 @@ async def post_execute(
                 ),
             )
 
+    # How the ONE destination a canary writes to is recognised on the page:
+    # village id for an own village, coordinates for a foreign target, exactly
+    # as the reconciler matches routes. Bound here because the pre-write
+    # inventory check inside the origin loop needs it, and deriving it there
+    # from the request would key on the plan row's id where the page keys on
+    # coordinates. `None` on every ordinary run.
+    canary_key: int | tuple[int, int] | None = None
+
     if body.canary:
         # The last canary condition, and the only one the request alone cannot
         # decide: `max_routes_per_run: 1` is not "one row". Travian turns one
@@ -6613,6 +6640,7 @@ async def post_execute(
                     f"max_game_rows_per_run: {canary_rows}."
                 ),
             )
+        canary_key = _desired_key(items[0][1])
 
     def _action(
         row: SheetRow, route: PlannedRoute, status_: str, detail: str = ""
@@ -7033,6 +7061,18 @@ async def post_execute(
     # routes in the NEXT village is writing blind. Trips the circuit breaker at
     # the top of the origin loop.
     marketplace_state_uncertain: str | None = None
+    # The route ids a CANARY's single create put on the page, as the read-back
+    # attributed them and less everything the pre-write inventory already held.
+    # This is the undo list, and the whole claim a canary makes: one new write,
+    # reversible by switching exactly these rows off.
+    #
+    # `[]` is a measurement -- the create produced nothing, so there is nothing
+    # to reverse. `None` is the ABSENCE of one, and the two must never be
+    # reported alike: a run whose read-back failed, or which never got as far as
+    # its create, has no idea what is now in the game and must not be read as a
+    # clean empty canary.
+    canary_rows_created: list[int] | None = None
+    canary_settled = False  # the read-back reached a verdict about that create
 
     # Register the run so the session-lifecycle guards see it: disconnect/
     # reconnect consults ActiveOpRegistry and will not close this HttpClient
@@ -7457,6 +7497,57 @@ async def post_execute(
                                 destination=_k,
                                 decision="blocked",
                                 reason="schedule mismatch left in place: " + _remedy,
+                            )
+
+                    if canary_key is not None:
+                        # ── The canary condition the request cannot state ──
+                        #
+                        # "One new write, reversible by one disable" is a claim
+                        # about ROWS, and it only holds on a destination that
+                        # had none. The read-back separates this run's rows from
+                        # the old ones by route id, so the attribution is only
+                        # as good as the inventory it diffs against; and the
+                        # undo in docs/26 §3 switches a destination off, so an
+                        # older route beside the new one is a row the undo would
+                        # hit. Either way the first write this account has ever
+                        # seen would not be the isolated measurement it is for.
+                        #
+                        # This also settles the create COUNT, which is the other
+                        # half of the same condition: an empty destination has
+                        # nothing satisfied, nothing completable and nothing
+                        # mismatched, so the one route the plan check already
+                        # pinned is the one create the reconciler derives. A
+                        # destination that already holds rows is exactly the
+                        # case where it would derive none and the canary would
+                        # write nothing at all.
+                        #
+                        # Read from the inventory this origin already fetched --
+                        # no extra request -- and raised before the disable pass,
+                        # the re-enable and the create alike.
+                        _canary_here = sorted(
+                            e.route_id for e in existing if canary_key in _existing_keys(e)
+                        )
+                        if _canary_here:
+                            trace.event(
+                                "canary_refused",
+                                origin=origin,
+                                destination=str(canary_key),
+                                route_ids=_canary_here,
+                                reason="the destination already holds rows from this origin",
+                            )
+                            raise HTTPException(
+                                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                                detail=(
+                                    f"canary requires a destination this origin does not "
+                                    f"already ship to: {village_label(origin, names)} already "
+                                    f"holds route row(s) {_canary_here} for "
+                                    f"{village_label(canary_key, names) if isinstance(canary_key, int) else canary_key}. "
+                                    f"Nothing was written. A canary's one create has to be "
+                                    f"the only thing on that destination, or the read-back "
+                                    f"cannot say which rows it made and the undo cannot say "
+                                    f"which rows it may switch off. Pick a destination this "
+                                    f"origin has no routes to, or clear those rows first."
+                                ),
                             )
 
                     # Honeypots (hidden) would be ignored entirely — neither
@@ -9302,6 +9393,68 @@ async def post_execute(
                                     unattributable=sorted(str(k) for k in _ambiguous_keys),
                                 )
 
+                            if canary_key is not None:
+                                # ── What this canary is answerable for ──────
+                                #
+                                # The game returns no id on a create, so the
+                                # only way to name what it added is this
+                                # settlement: the rows the read-back attributed
+                                # to the one create, which `_attribute` already
+                                # limits to ids the pre-write inventory did not
+                                # hold. Written down here rather than derived by
+                                # a reader, because the page will not show the
+                                # same answer again.
+                                #
+                                # Claimed only where the settlement was
+                                # unambiguous. `created` with attributed rows is
+                                # the undo list; a create the page refuses
+                                # outright leaves nothing to undo and is the
+                                # empty list. `indeterminate` and
+                                # `created_unverified` are neither, and a canary
+                                # that reaches one of them must say it cannot
+                                # promise reversibility rather than let a clean
+                                # summary imply it.
+                                canary_settled = True
+                                _c_acts = [a for a, _ in [*created_here, *attempted_here]]
+                                _c_why = ""
+                                if len(_c_acts) != 1:
+                                    # A canary is one POST by construction --
+                                    # one route, one create, cap 1. If that ever
+                                    # stops being true the claim goes with it.
+                                    _c_why = (
+                                        f"this run made {len(_c_acts)} create attempts, not one"
+                                    )
+                                elif _c_acts[0].status == "created":
+                                    canary_rows_created = sorted(
+                                        observed_by_action.get(id(_c_acts[0]), [])
+                                    )
+                                    if not canary_rows_created:
+                                        canary_rows_created = None
+                                        _c_why = (
+                                            "the create was confirmed and no row on the page "
+                                            "could be attributed to it"
+                                        )
+                                elif _c_acts[0].status in ("failed", "not_created"):
+                                    canary_rows_created = []
+                                else:
+                                    _c_why = _c_acts[0].detail or _c_acts[0].status
+                                trace.event(
+                                    "canary_settled",
+                                    origin=origin,
+                                    destination=str(canary_key),
+                                    canary_rows_created=canary_rows_created,
+                                    unattributable=_c_why,
+                                )
+                                if _c_why:
+                                    problems.append(
+                                        f"canary: this run could not name the row(s) it put "
+                                        f"in the game ({_c_why}), so it must not be treated "
+                                        f"as reversible by one disable. Open "
+                                        f"{village_label(origin, names)}'s marketplace and "
+                                        f"compare it against the `origin_read` inventory in "
+                                        f"trace {trace.run_id} before running anything else."
+                                    )
+
                             # ── Put back what the rebuild failed to replace ──
                             #
                             # Disable was chosen over delete on this path
@@ -9551,6 +9704,27 @@ async def post_execute(
                 # farm lists, scouting and the build queue all do.
                 await _browse_between_villages(svc, origin, trace, sweep_all)
 
+            if canary_key is not None and not canary_settled:
+                # The read-back never reached a verdict about the one create:
+                # its own read failed, or the run stopped before the create went
+                # out at all. Either way nothing here measured the account, and
+                # "created 0" would read as the reversible empty set. Said in
+                # the run's own words instead, because a canary that cannot name
+                # what it wrote is the one outcome the flag exists to surface.
+                trace.event(
+                    "canary_settled",
+                    destination=str(canary_key),
+                    canary_rows_created=None,
+                    unattributable="the read-back never settled this run's create",
+                )
+                problems.append(
+                    f"canary: this run could not name the row(s) it put in the game "
+                    f"(the read-back never settled its create), so it must not be "
+                    f"treated as reversible by one disable. Open the origin's "
+                    f"marketplace and compare it against the `origin_read` inventory "
+                    f"in trace {trace.run_id} before running anything else."
+                )
+
         # Inside the try, so it beats the fallback close in `finally`. The
         # counts below are the run's actual outcome; the fallback can only say
         # that the run ended.
@@ -9675,6 +9849,10 @@ async def post_execute(
         ),
         warnings=warnings,
         problems=problems,
+        # The same list the trace's `canary_settled` event holds, so the
+        # operator reading the response and the one reading the trace undo the
+        # same rows. `None` on every run that was not a canary.
+        canary_rows_created=canary_rows_created,
     )
 
 

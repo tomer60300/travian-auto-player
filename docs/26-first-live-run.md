@@ -193,14 +193,31 @@ that failed:
 | **Whole day** off, so **Trim the fan-out to the profile hours** is off | unticked | the trim DELETEs; a first live run must have no delete path at all |
 | **Correct cargo on routes that have drifted** | unticked | it writes to rows this run did not make |
 | **Max rows this run** | the route's own fan-out: 24 ÷ its cycle hours | "1 route" is not "1 row" |
+| the routes the filters select, in the plan | exactly one | zero would write nothing and two is not a canary |
+| the rows that origin already holds for that destination | none | otherwise the read-back cannot say which rows this run made, and the undo cannot say which it may switch off |
 
-The last one is checked against the plan rather than against the request: the
-server computes 24/N for the single route the filters selected, refuses any
-other figure, and refuses the run outright if the filters select no route or
-more than one. `max_routes_per_run: 1` never meant one row — Travian turns one
-create into 24/N daily rows — and that arithmetic is the footprint you would
-have to delete by hand if this goes wrong. A 1 h cycle is 24 rows from one
-request.
+The last three are checked against the plan and against the marketplace rather
+than against the request.
+
+**Max rows this run** is an EQUALITY, in both directions: the server computes
+24/N for the single route the filters selected and refuses any other figure,
+above it or below it. Above authorises a footprint this run cannot produce,
+which is the mistyped figure the flag exists to catch; below defers the only
+create and leaves nothing to measure. `max_routes_per_run: 1` never meant one
+row — Travian turns one create into 24/N daily rows — and that arithmetic is
+the footprint you would have to delete by hand if this goes wrong. A 1 h cycle
+is 24 rows from one request. A canary whose filters select no route, or two, is
+refused outright, before any game request at all.
+
+The last condition is the only one that needs the game: it is read from the
+origin's pre-write inventory — the read every run makes anyway, so it costs no
+extra request — and the refusal is a 422 naming the route ids, raised before
+the disable pass, the re-enable and the create alike. It also settles the create
+COUNT, which is the other half of the same condition: a destination with no rows
+has nothing satisfied, nothing completable and nothing diverging, so the one
+route the filters selected is exactly one missing create and exactly one POST. A
+destination that already ships is precisely the case where the reconciler would
+derive none and the canary would write nothing at all.
 
 Note what the flag costs: **Whole day** must be off, so the route this writes
 is planned for one profile's hours rather than the union step 1 confirmed.
@@ -211,13 +228,17 @@ planned alone is planned against its own window.
 
 The page has no canary tick yet — the field rides in the `/routes/execute`
 request — so set the controls above by hand and send `canary: true` with them.
-The refusals are how you find out you missed one, and they arrive before the
-first game request: nothing is read and nothing is written by a refused canary.
+The refusals are how you find out you missed one, and every one of them lands
+before the first WRITE. All but the last arrive before the first game request
+of any kind; the last needs the origin's marketplace read, which is the read the
+run would take anyway, and refuses on what it finds there.
 
 Pick the origin as a village whose marketplace you will open in the game
 immediately after the run, and prefer one with **no existing trade routes** —
 not because the run would touch them (it cannot; the disable box is unticked
-and the flag enforces it) but because it makes the after-check unambiguous.
+and the flag enforces it) but because it makes the after-check unambiguous. The
+DESTINATION is no longer a preference: a destination that origin already ships
+to is refused outright, by the condition above.
 
 Set `TRAVIAN_TRADE_ROUTE_LIVE=true` in `.env` (or unset it; true is the
 default), stop any running loops, and reconnect the session. Press
@@ -238,6 +259,17 @@ Read the response:
 - `problems` empty, and `disables` empty — not "as predicted": a canary
   disables nothing, so a single line here means the flag did not do its job
   and is itself a stop.
+- `canary_rows_created` — the route ids this run put in the game, attributed
+  by the read-back and diffed against the pre-write inventory. This is the undo
+  list and the whole claim a canary makes: one new write, reversible by
+  switching exactly these rows off. It must be a list of 24 ÷ the cycle hours
+  ids. `[]` is a measurement (the create produced nothing, so there is nothing
+  to undo, and `not_created` or a refusal will say which). **`null` is not
+  zero**: it means the run could not settle what it wrote — its read-back
+  failed, or it stopped before the create — and `problems` will carry a line
+  saying so and telling you to compare the marketplace against the trace's
+  `origin_read` inventory. A `null` here is a stop, whatever else the response
+  says.
 - `trace_id` present. Write it down; it is the handle for **Undo this run**.
 - The spend, against the forecast you kept from step 1: expect the live run
   to be higher on reads, because each marketplace read is two page loads and
@@ -263,7 +295,9 @@ Read the response:
    promised is in its own per-village merchant table, committed against the
    fleet minus the reserve. The game-side check belongs in step 5.
 
-Then open the trace by `trace_id`. `run_start` records `canary: true` beside
+Then open the trace by `trace_id`. `canary_settled` carries the same
+`canary_rows_created` list the response does, so the record and the response
+undo the same rows. `run_start` records `canary: true` beside
 `execution_mode_requested`, `execution_mode_resolved` and `env_brake_open`, so
 the record answers "was this run asked for, and was the server allowed to
 honour it" without reference to anything outside the file. `origin_read`

@@ -3425,6 +3425,215 @@ class TestTheCanaryRunIsFullyRecoverableFromItsTrace:
         assert {"route_id", "dispatch_minute", "cargo", "active"} <= set(verified["rows"][0])
 
 
+class TestACanaryOnlyRunsAgainstADestinationThatIsEmpty:
+    """The canary's whole claim is "one new write, reversible by one disable".
+
+    A destination that already carries rows from this origin breaks both halves.
+    The read-back separates new rows from old by route id, so the attribution is
+    only as good as the inventory that read them -- and the undo path in docs/26
+    §3 switches rows off by destination, so an old route sitting beside the new
+    one is a row the undo can hit. Neither is a risk worth taking on the first
+    write this account has ever seen.
+
+    Refused from the PRE-WRITE inventory, which is the read every origin makes
+    anyway: no extra request, and the refusal lands before the disable pass, the
+    re-enable and the create alike.
+    """
+
+    def _run(self, svc, **kw):
+        kw.setdefault("canary", True)
+        kw.setdefault("only_origins", [20003])
+        kw.setdefault("only_destinations", [20011])
+        kw.setdefault("max_routes_per_run", 1)
+        kw.setdefault("disable_existing", False)
+        kw.setdefault("max_game_rows_per_run", 4)
+        return _run_live(
+            svc,
+            _account(
+                [_row_with_cycle(20003, 20011, 6, 100)],
+                {20003: (0, 0), 20011: (10, 0)},
+                {20003: "03", 20011: "11"},
+            ),
+            **kw,
+        )
+
+    def test_rows_that_already_satisfy_the_plan_are_refused(self):
+        """The zero-create case the brief names: the route already exists, so
+        the canary would write nothing at all and measure nothing."""
+        svc = _FakeLiveSvc(existing={20003: _fanned(20011, 10, 0, start_id=710000)})
+
+        with pytest.raises(HTTPException) as exc:
+            self._run(svc)
+
+        assert exc.value.status_code == 422
+        assert "710000" in exc.value.detail, exc.value.detail
+        assert svc.created == [], "the refusal lands before the create"
+
+    def test_rows_that_diverge_from_the_plan_are_refused_too(self):
+        """Not "the plan is already satisfied" -- ANY row. A diverging set is
+        the worse case: the canary would leave the destination holding two
+        schedules, and the undo cannot tell which rows it may switch off."""
+        svc = _FakeLiveSvc(existing=_mismatched_rows())
+
+        with pytest.raises(HTTPException) as exc:
+            self._run(svc)
+
+        assert exc.value.status_code == 422
+        assert "already" in exc.value.detail, exc.value.detail
+
+    def test_no_write_of_any_kind_went_out(self):
+        svc = _FakeLiveSvc(existing=_mismatched_rows())
+
+        with pytest.raises(HTTPException):
+            self._run(svc, disable_existing=False)
+
+        assert svc.created == []
+        assert svc.disabled == []
+        assert svc.enabled == []
+        assert svc.deleted == []
+        assert svc.listed == [20003], "the pre-write inventory is the read it decides from"
+
+    def test_rows_to_another_destination_do_not_refuse_it(self):
+        """The control. The condition is about the destination this run writes
+        to, not about a tidy village: an origin that ships elsewhere is normal."""
+        svc = _FakeLiveSvc(existing={20003: _fanned(20019, 20, 0, start_id=720000)})
+
+        res = self._run(svc)
+
+        assert [a.status for a in res.actions] == ["created"], [a.detail for a in res.actions]
+
+    def test_an_empty_destination_runs(self):
+        svc = _FakeLiveSvc()
+
+        res = self._run(svc)
+
+        assert [a.status for a in res.actions] == ["created"], [a.detail for a in res.actions]
+        assert len(svc.created) == 1, svc.created
+
+
+class TestACanaryClaimsReversibilityOnlyWhenItCanNameTheRows:
+    """ "Reversible by one disable" is a claim about specific rows.
+
+    The game returns no id on create, so the only way this run can name what it
+    added is the destination-level settlement: rows the read-back attributed to
+    the one create, minus everything the pre-write inventory already held. When
+    that settles, the ids are the undo list and they are written into the trace
+    and the response. When it does not -- the read-back failed, the create was
+    never made, the page would not hold still -- the run must say so instead of
+    letting an operator infer reversibility from a clean-looking summary.
+    """
+
+    def _account(self):
+        return _account(
+            [_row_with_cycle(20003, 20011, 6, 100)],
+            {20003: (0, 0), 20011: (10, 0)},
+            {20003: "03", 20011: "11"},
+        )
+
+    def _run(self, svc, **kw):
+        kw.setdefault("canary", True)
+        kw.setdefault("only_origins", [20003])
+        kw.setdefault("only_destinations", [20011])
+        kw.setdefault("max_routes_per_run", 1)
+        kw.setdefault("disable_existing", False)
+        kw.setdefault("max_game_rows_per_run", 4)
+        return _run_live(svc, self._account(), **kw)
+
+    def test_the_response_names_every_row_the_create_made(self):
+        svc = _FakeLiveSvc()
+
+        res = self._run(svc)
+
+        assert res.canary_rows_created == sorted(e.route_id for e in svc._existing[20003]), (
+            res.canary_rows_created
+        )
+        assert len(res.canary_rows_created) == 4, "a 6h cycle is four daily rows"
+
+    def test_the_trace_carries_the_same_id_set(self):
+        svc = _FakeLiveSvc()
+
+        res = self._run(svc)
+
+        (settled,) = [e for e in _trace_events(res.trace_path) if e["kind"] == "canary_settled"]
+        assert settled["canary_rows_created"] == res.canary_rows_created, settled
+
+    def test_an_ordinary_run_claims_nothing(self):
+        """The control: the field belongs to the canary and to nothing else."""
+        res = _run_live(_FakeLiveSvc(), _two_origin_account(), max_routes_per_run=50)
+
+        assert res.canary_rows_created is None
+
+    def test_a_refused_create_records_an_empty_set_not_an_absent_one(self):
+        """Zero rows is a MEASUREMENT: the game said no and the page agrees, so
+        there is nothing to reverse. That is not the same as "unknown"."""
+        svc = _FakeLiveSvc(create_status="failed", phantom_creates=True)
+
+        res = self._run(svc)
+
+        assert res.canary_rows_created == []
+        assert not any("could not name" in p for p in res.problems), res.problems
+
+    def test_a_failed_read_back_claims_no_reversibility(self):
+        svc = _FakeLiveSvc(confirm_raises={20003})
+
+        res = self._run(svc)
+
+        assert res.canary_rows_created is None
+        assert any("could not name" in p and "marketplace" in p for p in res.problems), res.problems
+
+    def test_a_canary_that_never_posted_claims_no_reversibility_either(self):
+        """A run stopped before its one create wrote nothing -- but it also
+        MEASURED nothing, and a canary that measured nothing is not a canary.
+        "No rows created" would read here as the reversible empty set."""
+        svc = _FakeLiveSvc(budget_ok=False)
+
+        res = self._run(svc)
+
+        assert svc.created == []
+        assert res.canary_rows_created is None
+        assert any("could not name" in p for p in res.problems), res.problems
+
+
+class TestTheCanaryRowBudgetIsAnEqualityInBothDirections:
+    """`max_game_rows_per_run` must EQUAL the route's fan-out, not merely bound
+    it. A budget above the fan-out authorises a footprint the canary cannot
+    produce -- which is exactly the mistyped figure the flag exists to catch --
+    and one below it defers the only create and leaves nothing to measure."""
+
+    def _run(self, **kw):
+        kw.setdefault("canary", True)
+        kw.setdefault("only_origins", [20003])
+        kw.setdefault("only_destinations", [20011])
+        kw.setdefault("max_routes_per_run", 1)
+        kw.setdefault("disable_existing", False)
+        return _run_live(
+            _FakeLiveSvc(),
+            _account(
+                [_row_with_cycle(20003, 20011, 6, 100)],
+                {20003: (0, 0), 20011: (10, 0)},
+                {20003: "03", 20011: "11"},
+            ),
+            **kw,
+        )
+
+    def test_a_budget_above_the_fan_out_is_refused(self):
+        with pytest.raises(HTTPException) as exc:
+            self._run(max_game_rows_per_run=24)
+
+        assert exc.value.status_code == 422
+
+    def test_a_budget_below_the_fan_out_is_refused(self):
+        with pytest.raises(HTTPException) as exc:
+            self._run(max_game_rows_per_run=2)
+
+        assert exc.value.status_code == 422
+
+    def test_the_exact_fan_out_runs(self):
+        res = self._run(max_game_rows_per_run=4)
+
+        assert [a.status for a in res.actions] == ["created"], [a.detail for a in res.actions]
+
+
 class TestCreatedMeansVerifiedNotAccepted:
     """`POST /trade-routes` answers 200 with an EMPTY body.
 
