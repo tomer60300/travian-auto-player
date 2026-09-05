@@ -306,6 +306,26 @@ departure minute, enabled and visible flags — and the `verified` event carries
 the page as it stood after the write in the same shape. Those two are the
 before and after; keep the trace.
 
+**What the canary must show before the write path is trusted.** The
+adversarial review that shaped this path declared the code exhausted and
+named the evidence it wants from this one run; every line is checkable from
+the response, the trace and the marketplace page, and any miss is a stop:
+
+1. `run_start`: `canary: true`, requested and resolved mode `live`, the env
+   brake open.
+2. `origin_read`: no pre-existing row from this origin to the chosen
+   destination.
+3. Exactly one create attempt and exactly one marketplace POST in the trace.
+4. No disable, delete, restore or cargo-update request anywhere in the run.
+5. Two consistent post-write snapshots (`verified`, and no
+   `read_back_disagreed`) holding the expected `(minute, cargo)` multiset.
+6. `canary_rows_created` holds precisely the new row ids — not `null`, not
+   unexpectedly empty.
+7. The visible marketplace matches those ids: destination, cargo, dispatch
+   minutes, cycle and fan-out, enabled state.
+8. No uncertainty, attribution, refusal, early-stop or other `problems` line,
+   and the recorded row charge equals the observed fan-out.
+
 This first route is also the **canary for the game's read-after-write
 consistency**: every run now reads a marketplace a second time before it
 deletes anything, and `read_back_disagreed` events in the trace are the
