@@ -7289,6 +7289,20 @@ export default function ResourcePlanner() {
                         : ''}
                     </p>
                   ) : null}
+                  {/* The sentences, not just the count. Every problem the
+                      server reports is composed prose -- "two reads of this
+                      marketplace did not agree, so nothing was deleted here" is
+                      one of them -- and this panel showed a tally while the
+                      only copy of the text was the first one, in a toast that
+                      closes itself. A sweep that disabled nothing at a village
+                      and said so nowhere reads as a sweep that found nothing. */}
+                  {sweepProgress?.problems?.length ? (
+                    <ul className="text-xs text-danger list-disc list-inside mt-1">
+                      {sweepProgress.problems.map((p, i) => (
+                        <li key={i}>{p}</li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </div>
 
                 {/* Controlled run. A first live run against a real account should
