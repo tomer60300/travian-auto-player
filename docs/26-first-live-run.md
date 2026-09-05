@@ -25,11 +25,25 @@ are measurements the plan's own numbers rest on.
    planned 46 routes / 120 merchants; a 2 h target planned 48 / 135. Decide
    2 h, window length, or an exposed control **before** step 1, because the
    plan you confirm in step 1 is the plan step 2 writes.
-2. **Live writes are refused, not faked, until the switch is on.** With
-   `TRAVIAN_TRADE_ROUTE_LIVE` unset, a live execute is refused with a 409 that
-   names the flag. Dry runs need no flag. There is no silent no-op path: if a
-   live execute returns a response at all, writes were enabled. Set the flag
-   only at step 2.
+2. **Live writes are already on. Turn them OFF for steps 0 and 1.**
+   `TRAVIAN_TRADE_ROUTE_LIVE` defaults to **true** (`config.py`, changed
+   2026-08-27 at the operator's instruction because the opt-in kept reverting
+   to preview-only on every server restart). Unset, the switch is *on*:
+   pressing **Execute** at any point writes to the real account, with
+   **Routes this run** at 3 and **Also disable routes the plan no longer
+   wants** ticked. The page asks for confirmation before a live execute, but
+   a dialog is not a safety. Set `TRAVIAN_TRADE_ROUTE_LIVE=false` and
+   reconnect the session before step 0, so steps 0 and 1 cannot write even
+   by mis-click; set it back to true at step 2. Settings are rebuilt per
+   session, so a reconnect is enough. No server restart, and never restart
+   :80 without asking.
+
+   The response tells you which state you are in: every response carries
+   `live_enabled`, and a dry run reports it truthfully. Read it before you
+   trust anything else. Dry runs never depend on it — `dry_run: true`
+   returns before the session is touched — and a live execute with the flag
+   false is refused with a 409 naming it. Two comments in the code still say
+   the flag defaults off; they are stale, and queued for correction.
 3. **A run cannot be undone without its trace.** A live run whose trace file
    cannot be opened is refused before the first game request (`4b5203b`),
    because the game returns no id on create and the undo reconstructs from
@@ -99,7 +113,11 @@ unexpected:
   `marketplace_reads` is one per origin that creates; on a sweep it is one per
   village; either way a marketplace read is two page loads. Expect roughly
   one create per route and a handful of batched writes on top. If the
-  forecast is far above that, something is planning more than you asked.
+  forecast is far above that, something is planning more than you asked. One
+  exception: a sweep preview forecasts every village in the snapshot, and
+  the page then runs the sweep five villages at a time, so expect the
+  preview's read count to be about five times any one pass. Compare per
+  pass, not against the preview total.
   Keep this response: the live run returns `requests_forecast: {}`, so this
   is the only forecast you will have to compare against.
 - `actions` — every planned row: origin, destination, cargo, repeat interval.
@@ -140,8 +158,10 @@ Set:
 | **Also disable routes the plan no longer wants** | unticked, unless the village has no routes | nothing is switched off that you have not seen |
 | **Whole day** | on | the same plan you confirmed in step 1 |
 
-Set `TRAVIAN_TRADE_ROUTE_LIVE`. Press **Preview** once more and confirm the
-response shows `live_enabled: true` with `dry_run: true`. Then execute.
+Set `TRAVIAN_TRADE_ROUTE_LIVE=true` (or unset it; true is the default) and
+reconnect the session. Press **Preview** once more and confirm the response
+shows `live_enabled: true` with `dry_run: true`. That pair is the only proof
+you have of which mode you are in. Then execute, and confirm the dialog.
 
 Read the response:
 
@@ -217,7 +237,12 @@ As written, step 2 unticks the disable option and prefers a village with no
 routes, so this list will come back empty and the one part of the undo that
 has no code path is the one part never rehearsed. Before undoing, disable one
 disposable row on the origin by hand, so the list has one line and the
-put-back is exercised once with nothing at stake.
+put-back is exercised once with nothing at stake. Note what the rehearsal
+also demonstrates: the panel attributes your manual disable to the run — the
+line reads "the run changed it", and it did not. The diff compares the
+pre-run inventory against now and cannot tell your edit from the app's. On
+an account with a dual, read that list as "rows whose state differs from
+the pre-run inventory", not as a record of what the run did.
 
 Budget roughly ten game requests for the three calls: each re-reads the origin
 it touches, and each write is confirmed by its own read-back. It is the only
@@ -261,7 +286,12 @@ before the next step is taken.
    unbounded, and fifty paced reads run past a client timeout with writes
    already committed. One marketplace read (two page loads) per village
    serves both the reconcile and the create. Let it finish; a deferred create
-   gets its own pass at the end.
+   gets its own pass at the end. If a sweep needs undoing, narrow it: the
+   revert's `only_origins` takes village ids, and without it the Check
+   re-reads every origin the run touched at two page loads each — about
+   fifty reads for this account before any write. Undo the villages named in
+   `problems` first, one at a time, in the Check → Disable → Delete order §3
+   rehearsed.
 
 After the sweep, the run-history panel's `needs_attention` must be false for
 every run, and a second sweep must report zero creates and zero disables: the
@@ -278,7 +308,10 @@ every rate the tool reports and has never been observed: what a route does
 when its origin holds less than the batch. The tool assumes a short sender
 sends a partial load rather than nothing. Pick one low-value route and, in
 the twenty minutes before its scheduled departure, spend the origin's stock
-by hand down below the batch the plan sized. Then watch: at the send minute
+by hand down below the batch the plan sized — into a building or a troop
+queue, not into a merchant send, because a send ties up merchants and would
+confound "short of resources" with "short of merchants", the two halves of
+the same unanswered question. Then watch: at the send minute
 the marketplace's merchants-in-transit list shows what actually left, and the
 destination's stock at the arrival minute shows what landed. This is the only
 window — a transfer between your own villages generates no report and nothing
@@ -318,7 +351,7 @@ The next morning, read:
 | `not_created` > 0 | the game accepted the create and made no route; the plan believes cargo is moving that is not | stop; read the marketplace before any re-create |
 | `created_unverified` > 0 | a create's answer was unreadable and the read-back did not settle it | read the marketplace before any other write |
 | `stopped_early` | a captcha, the activity budget, a failed read, or a prune that stopped | stop; for a captcha, solve it in a browser first, then retry; for the others, read the trace |
-| rows in the game > `live_game_rows` | the trim did not hold | stop; the response names the rows still departing |
+| rows in the game > `live_game_rows` | the trim did not hold; checkable as a total only while the run is one origin and one destination — from step 4.2 on, compare per action at a village you have opened, not the run total | stop; the response names the rows still departing |
 | a `disables` entry you did not predict | the plan moved or dropped a destination | undo, protect or re-plan |
 | the game shows a row the response does not | reconciliation is wrong about the account | stop; this is a review finding, not an operator error |
 | an incoming attack on any origin or destination in the plan | the executor does not consult this and will act identically under threat | stop the protocol; a run that commits merchants and cargo into a village under attack is a decision no player would make |
