@@ -27,10 +27,15 @@ class TargetVillageState(BaseModel):
     defender_source: str = "none"
     defender_timestamp: Optional[datetime] = None
 
-    # Infrastructure
+    # Infrastructure. `defence_buildings_seen` is the provenance of the two
+    # numbers above it: False means no report ever carried a building list, so
+    # the zeros are an absence of information rather than a reading, and the
+    # target cannot be scored -- `trapped = min(n, traps)` would predict that
+    # nobody is swallowed by a trapper nobody looked for.
     trap_capacity: int = 0
     wall_level: int = 0
     wall_tribe: str = ""
+    defence_buildings_seen: bool = False
 
     # Timing
     last_scout_time: Optional[datetime] = None

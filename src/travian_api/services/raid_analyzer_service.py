@@ -509,15 +509,15 @@ def reconstruct_state(
             state.defender_source = "scout"
             state.defender_timestamp = best_scout["timestamp"]
 
-        # Wall / trap info from scout
+        # Wall / trap info from scout. An EMPTY building list is not "no wall
+        # and no trapper" -- it is a report that never carried the row, which is
+        # what a resources-only scout comes back with. Record which it was; the
+        # zeros mean nothing without it.
         buildings = d.get("buildings", [])
-        wl, wt = extract_wall_info(buildings)
-        if wl > 0:
-            state.wall_level = wl
-            state.wall_tribe = wt
-        tc = extract_trap_capacity(buildings)
-        if tc > 0:
-            state.trap_capacity = tc
+        if buildings:
+            state.defence_buildings_seen = True
+            state.wall_level, state.wall_tribe = extract_wall_info(buildings)
+            state.trap_capacity = extract_trap_capacity(buildings)
 
         # ── Sum post-scout raid bounties ──────────────────────
         scout_time = best_scout["timestamp"] or datetime.min
@@ -1297,6 +1297,17 @@ class RaidAnalyzerService:
                     f"({state.x}|{state.y}) {state.village_name or '?'} skipped: "
                     f"no defence stats for unit ids {', '.join(unsupported)} "
                     "— losses cannot be predicted."
+                )
+                continue
+
+            # Unseen defences → refuse. Scoring asserts who dies, and with no
+            # building list there is no trapper reading to assert it against.
+            if not state.defence_buildings_seen:
+                warnings.append(
+                    f"({state.x}|{state.y}) {state.village_name or '?'} skipped: "
+                    "the scout report carried no defensive buildings, so the wall "
+                    "and any trapper are unknown — scout defences before "
+                    "committing troops."
                 )
                 continue
 
