@@ -242,7 +242,7 @@ describe('profiles in the setup file', () => {
       merchantModel: { base_capacity: 2500, bonus_per_to_level: 0.2 },
       exportedAt: STAMP,
     })
-    // 11 since the measured merchant model landed (10 was the window prune, 9
+    // 11 since the measured merchant capacity landed (10 was the window prune, 9
     // the reserved NPC-burst window, 8 the overnight declaration, 7 the
     // per-profile NPC attendance, 6 profile section 5's declared relay tier, 5
     // the per-village merchant cap, 4 `may_relay`, 3 the role templates).
@@ -774,7 +774,7 @@ describe('the window prune travels in the setup (v10)', () => {
   })
 })
 
-// The acknowledgement that the merchant model was read off the game, and the
+// The acknowledgement that the two CAPACITY figures were read off the game, and the
 // one thing in this document that records work done IN THE GAME that the game
 // does not record. MERCHANT_MODEL_UNCALIBRATED fires whenever
 // `trade_office_bonus_per_level` still equals the shipped 0.20 and any village
@@ -782,17 +782,23 @@ describe('the window prune travels in the setup (v10)', () => {
 // who read a Marketplace capacity at two levels, found the default right and
 // typed it back got the same warning for ever. Nothing here could re-derive it,
 // and dropped it brings the finding back on every plan.
-describe('the measured merchant model travels in the setup (v11)', () => {
+describe('the measured merchant capacity travels in the setup (v11)', () => {
   it('carries the acknowledgement', () => {
     const setup = buildSetup({
       villages: VILLAGES,
       tradeOffice: { 20030: 19 },
-      merchantModelMeasured: true,
+      merchantCapacityMeasured: true,
       exportedAt: STAMP,
     })
 
-    expect(setup.merchant_model_measured).toBe(true)
-    expect(roundTrip(setup).merchantModelMeasured).toBe(true)
+    // The literal, pinned against `SetupDocument.merchant_capacity_measured`
+    // in `planner_setup.py` and `PlanRequest.merchant_capacity_measured` in
+    // `distribution.py` -- both were `merchant_model_measured` until b89e0f4.
+    // The server IGNORES an unknown key on the document and lifts the absent
+    // field with `bool(None)`, so the old name would have gone on saving,
+    // loading and planning while the acknowledgement silently did nothing.
+    expect(setup.merchant_capacity_measured).toBe(true)
+    expect(roundTrip(setup).merchantCapacityMeasured).toBe(true)
   })
 
   it('leaves it out when nobody has said so, because absent IS unmeasured', () => {
@@ -804,12 +810,12 @@ describe('the measured merchant model travels in the setup (v11)', () => {
     const setup = buildSetup({
       villages: VILLAGES,
       tradeOffice: { 20030: 19 },
-      merchantModelMeasured: false,
+      merchantCapacityMeasured: false,
       exportedAt: STAMP,
     })
 
-    expect('merchant_model_measured' in setup).toBe(false)
-    expect(roundTrip(setup).merchantModelMeasured).toBeNull()
+    expect('merchant_capacity_measured' in setup).toBe(false)
+    expect(roundTrip(setup).merchantCapacityMeasured).toBeNull()
   })
 
   it('reads a v10 document as saying nothing about it', () => {
@@ -818,7 +824,7 @@ describe('the measured merchant model travels in the setup (v11)', () => {
     // to be UNTICKED rather than absent-and-forgotten when one loads.
     const doc = { format: SETUP_FORMAT, version: 10, villages: [] }
 
-    expect(roundTrip(doc).merchantModelMeasured).toBeNull()
+    expect(roundTrip(doc).merchantCapacityMeasured).toBeNull()
   })
 
   it('refuses anything that is not a boolean, rather than coercing it', () => {
@@ -827,10 +833,10 @@ describe('the measured merchant model travels in the setup (v11)', () => {
     // value nobody typed as a boolean must not silence a finding about the
     // figure that sizes every cargo.
     const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
-    doc.merchant_model_measured = 'yes'
+    doc.merchant_capacity_measured = 'yes'
 
     expect(() => roundTrip(doc)).toThrow(SetupFileError)
-    expect(() => roundTrip(doc)).toThrow(/merchant_model_measured/)
+    expect(() => roundTrip(doc)).toThrow(/merchant_capacity_measured/)
   })
 
   it('lets the document win where it has one, and says nothing where it does not', () => {
@@ -838,25 +844,25 @@ describe('the measured merchant model travels in the setup (v11)', () => {
       buildSetup({
         villages: VILLAGES,
         tradeOffice: { 20030: 1 },
-        merchantModelMeasured: true,
+        merchantCapacityMeasured: true,
         exportedAt: STAMP,
       })
     )
     expect(
-      mergeSetup({ setup: carried, villages: VILLAGES, merchantModelMeasured: false })
-        .merchantModelMeasured
+      mergeSetup({ setup: carried, villages: VILLAGES, merchantCapacityMeasured: false })
+        .merchantCapacityMeasured
     ).toBe(true)
 
     // A v10 document knows nothing about it, so loading one must not clear an
     // acknowledgement the operator has on screen.
     const silentDoc = roundTrip({ format: SETUP_FORMAT, version: 10, villages: [] })
     expect(
-      mergeSetup({ setup: silentDoc, villages: VILLAGES, merchantModelMeasured: true })
-        .merchantModelMeasured
+      mergeSetup({ setup: silentDoc, villages: VILLAGES, merchantCapacityMeasured: true })
+        .merchantCapacityMeasured
     ).toBe(true)
     // And with nothing on either side it is unmeasured, never null: the page
     // renders a checkbox, and a checkbox has two states.
-    expect(mergeSetup({ setup: silentDoc, villages: VILLAGES }).merchantModelMeasured).toBe(false)
+    expect(mergeSetup({ setup: silentDoc, villages: VILLAGES }).merchantCapacityMeasured).toBe(false)
   })
 })
 
@@ -3256,7 +3262,7 @@ describe('the reserved NPC-burst window in the setup file', () => {
       exportedAt: STAMP,
     })
 
-    // 11 since the measured merchant model landed (10 was the window prune, 9
+    // 11 since the measured merchant capacity landed (10 was the window prune, 9
     // the reserved window this block is about, 8 the overnight declaration, 7
     // the per-profile NPC attendance, 6 the relay tier). Pinned to a literal on
     // purpose: the version has to rise

@@ -1,5 +1,10 @@
 /**
- * The acknowledgement that the merchant model was read off the game.
+ * The acknowledgement that the two CAPACITY figures were read off the game.
+ *
+ * Capacity and not "model": the merchant model is capacity AND speed, and
+ * speed has never been measured on this server -- `MapGeometry`'s 12
+ * fields/hour is still an assumption. The field was renamed on both sides in
+ * b89e0f4 so the unmeasured half could not ride along on the operator's tick.
  *
  * MERCHANT_MODEL_UNCALIBRATED fires whenever `trade_office_bonus_per_level`
  * still equals the shipped 0.20 and any village has a Trade Office. It is an
@@ -12,8 +17,8 @@
  * changes no number, which is why the `Why` says so out loud: a checkbox beside
  * six figures that quietly moved one of them would be the worse defect.
  *
- * Backend twins: `PlanRequest.merchant_model_measured` and
- * `SetupDocument.merchant_model_measured` in
+ * Backend twins: `PlanRequest.merchant_capacity_measured` and
+ * `SetupDocument.merchant_capacity_measured` in
  * `src/travian_api/web/routes/distribution.py` and
  * `src/travian_api/web/routes/planner_setup.py`.
  *
@@ -134,7 +139,7 @@ test.describe('the measured-merchant-model acknowledgement', () => {
     await page.getByRole('button', { name: 'Save setup to server' }).click()
     await expect(page.getByText(/A setup is saved on the server/)).toBeVisible()
 
-    expect(store.puts[0].merchant_model_measured).toBe(true)
+    expect(store.puts[0].merchant_capacity_measured).toBe(true)
     // Both halves of the bump, or a fresh export answers 422 "NEWER build".
     expect(store.puts[0].version).toBe(11)
   })
@@ -205,7 +210,7 @@ test.describe('the measured-merchant-model acknowledgement', () => {
     await page.getByRole('button', { name: 'Save setup to server' }).click()
     await expect(page.getByText(/A setup is saved on the server/)).toBeVisible()
     expect(store.puts).toHaveLength(1)
-    expect(store.puts[0].merchant_model_measured).toBe(true)
+    expect(store.puts[0].merchant_capacity_measured).toBe(true)
   })
 })
 
@@ -319,7 +324,7 @@ async function openPlanStage(page) {
 test.describe('one page state reaches every request that carries the field', () => {
   test.use({ viewport: { width: 1440, height: 1400 } })
 
-  // `PlanRequest.merchant_model_measured`, and every sibling that INHERITS it:
+  // `PlanRequest.merchant_capacity_measured`, and every sibling that INHERITS it:
   // `ExecuteRequest`, `DayCheckRequest`, `NightProfileRequest` and
   // `PlanYamlRequest` are all `class X(PlanRequest)`. So the field rides in
   // `buildPlanPayload` once rather than being spelled at five call sites --
@@ -367,7 +372,7 @@ test.describe('one page state reaches every request that carries the field', () 
         ['whole-day', sent.execute[2]],
       ]
       for (const [name, body] of bodies) {
-        expect(body.merchant_model_measured, `${name} carries the acknowledgement`).toBe(measured)
+        expect(body.merchant_capacity_measured, `${name} carries the acknowledgement`).toBe(measured)
       }
       // The whole-day body is the one that survives a destructuring, so it is
       // worth saying out loud that the field was not stripped along with the
@@ -393,7 +398,7 @@ test.describe('one page state reaches every request that carries the field', () 
     await page.getByRole('button', { name: /^Check what undoing this would take/ }).click()
     await expect.poll(() => sent.revert.length).toBe(1)
 
-    expect('merchant_model_measured' in sent.revert[0]).toBe(false)
+    expect('merchant_capacity_measured' in sent.revert[0]).toBe(false)
   })
 })
 
@@ -428,7 +433,7 @@ test.describe('editing a measured figure withdraws the acknowledgement', () => {
 
     await openPlanStage(page)
     await expect.poll(() => sent.plan.length).toBeGreaterThan(0)
-    expect(sent.plan.at(-1).merchant_model_measured).toBe(false)
+    expect(sent.plan.at(-1).merchant_capacity_measured).toBe(false)
     // And the figure the operator typed did go, so this is a withdrawal rather
     // than a rejected edit.
     expect(sent.plan.at(-1).merchant_base_capacity).toBe(3200)
@@ -478,7 +483,7 @@ test.describe('editing a measured figure withdraws the acknowledgement', () => {
       exported_at: '2026-09-05T09:00:00Z',
       account: KEY,
       villages: [{ village_id: CAPITAL, name: '02', trade_office_level: 13 }],
-      merchant_model_measured: true,
+      merchant_capacity_measured: true,
       merchant_model: { base_capacity: 3200, bonus_per_to_level: 0.25 },
     }
     await isolate(page, (path, route) => {

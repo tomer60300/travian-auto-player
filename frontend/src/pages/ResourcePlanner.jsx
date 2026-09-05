@@ -980,7 +980,7 @@ export default function ResourcePlanner() {
   // without this the finding could never be cleared by taking the very reading
   // it asks for. OFF by default: the finding is right about an untouched
   // account, and a box that arrived ticked would silence it for everyone.
-  const [merchantModelMeasured, setMerchantModelMeasured] = useState(false)
+  const [merchantCapacityMeasured, setMerchantCapacityMeasured] = useState(false)
   // Villages outside the account that are owed crop. Hand-entered, because
   // nothing in the game tells us about them, and cached per account like the
   // Trade Office levels are.
@@ -1147,7 +1147,7 @@ export default function ResourcePlanner() {
       // A reading taken against one account says nothing about another's, and
       // this one is about the WORLD's Trade Office scaling -- which a second
       // account may not even share.
-      setMerchantModelMeasured(false)
+      setMerchantCapacityMeasured(false)
       setSelected({})
       setPlan(null)
       // The load report names villages from the snapshot it was matched
@@ -1186,7 +1186,7 @@ export default function ResourcePlanner() {
     // `=== true`, not truthy: a stored "yes" from a hand-edited origin would
     // otherwise silence a finding about the figure that sizes every cargo, and
     // the server's own field is `StrictBool` for the same reason.
-    setMerchantModelMeasured(loadJson(`${LS_MERCHANT_MEASURED}::${accountKey}`, false) === true)
+    setMerchantCapacityMeasured(loadJson(`${LS_MERCHANT_MEASURED}::${accountKey}`, false) === true)
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
     setRelayFor(loadJson(`${LS_RELAY_FOR}::${accountKey}`, {}))
@@ -1303,8 +1303,8 @@ export default function ResourcePlanner() {
   }, [pruneToWindow, hydratedKey, accountKey, storageKey])
   useEffect(() => {
     if (hydratedKey && hydratedKey === accountKey)
-      saveJson(storageKey(LS_MERCHANT_MEASURED), merchantModelMeasured)
-  }, [merchantModelMeasured, hydratedKey, accountKey, storageKey])
+      saveJson(storageKey(LS_MERCHANT_MEASURED), merchantCapacityMeasured)
+  }, [merchantCapacityMeasured, hydratedKey, accountKey, storageKey])
   // A day-check result is a pure function of these inputs; the moment any of
   // them changes it describes a day that will never happen. Without this, the
   // green all-clear banner could sit on screen after the operator changed
@@ -1353,7 +1353,7 @@ export default function ResourcePlanner() {
     mayRelay,
     roleTemplates,
     merchantModel,
-    merchantModelMeasured,
+    merchantCapacityMeasured,
     // Section 7's attendance decides whether a segment's NPC allowance exists
     // at all, so a day computed with the night marked awake is a different day.
     // The reserved window moves arrival times, and the day check reads them.
@@ -1430,7 +1430,7 @@ export default function ResourcePlanner() {
     relayFor,
     roleTemplates,
     merchantModel,
-    merchantModelMeasured,
+    merchantCapacityMeasured,
     foreignTargets,
     snapshot,
     profileWindows,
@@ -1692,7 +1692,7 @@ export default function ResourcePlanner() {
       // untouched one, which is exactly why MERCHANT_MODEL_UNCALIBRATED cannot
       // tell them apart -- so dropped, the operator is asked again on every
       // plan for a reading they have already taken.
-      merchantModelMeasured,
+      merchantCapacityMeasured,
       merchantModel,
       foreignTargets,
       exportedAt: new Date().toISOString(),
@@ -1738,7 +1738,7 @@ export default function ResourcePlanner() {
     // field ONLY when it is true, and true is a reading somebody took in the
     // game. It is also the one answer here that nothing could re-derive, so a
     // page holding nothing else still has something worth saving.
-    if (document.merchant_model_measured) parts.push('the merchant model reading')
+    if (document.merchant_capacity_measured) parts.push('the measured merchant capacity')
     if (!parts.length) {
       toast.error(
         'Nothing typed yet — fill in a Trade Office level, crop alert or allocation first'
@@ -1765,7 +1765,7 @@ export default function ResourcePlanner() {
     profileOvernight,
     reservedWindow,
     pruneToWindow,
-    merchantModelMeasured,
+    merchantCapacityMeasured,
     merchantModel,
     foreignTargets,
     accountKey,
@@ -1814,7 +1814,7 @@ export default function ResourcePlanner() {
         overnight: profileOvernight,
         reservedWindow,
         pruneToWindow,
-        merchantModelMeasured,
+        merchantCapacityMeasured,
         foreignTargets,
       })
       setTradeOffice(merged.tradeOffice)
@@ -1848,7 +1848,7 @@ export default function ResourcePlanner() {
       // withdraws this over: the withdrawal lives in those boxes' own
       // `onChange`, which a direct `setMerchantModel` never runs. A document
       // restoring a calibration is not an operator typing over one.
-      setMerchantModelMeasured(merged.merchantModelMeasured)
+      setMerchantCapacityMeasured(merged.merchantCapacityMeasured)
       // Capacity is server-calibrated, so a file that carries a calibration is
       // more trustworthy than this build's default. Absent, the default stands.
       if (merged.merchantModel) {
@@ -1895,7 +1895,7 @@ export default function ResourcePlanner() {
       profileWindows,
       reservedWindow,
       pruneToWindow,
-      merchantModelMeasured,
+      merchantCapacityMeasured,
       foreignTargets,
       toast,
     ]
@@ -2353,7 +2353,7 @@ export default function ResourcePlanner() {
       // `DayCheckRequest`, `NightProfileRequest` and `PlanYamlRequest` are all
       // `class X(PlanRequest)`. `RevertPlanRequest` is not, and does not go
       // through here.
-      merchant_model_measured: merchantModelMeasured,
+      merchant_capacity_measured: merchantCapacityMeasured,
     }
   }, [
     villages,
@@ -2372,7 +2372,7 @@ export default function ResourcePlanner() {
     merchantModel,
     // The acknowledgement rides in the body beside the two figures it is
     // about, so it belongs here for the same reason they do.
-    merchantModelMeasured,
+    merchantCapacityMeasured,
     snapshot,
     profileWindows,
     activeProfile,
@@ -5338,7 +5338,7 @@ export default function ResourcePlanner() {
                   // MERCHANT_MODEL_UNCALIBRATED over a model nobody measured.
                   // Withdrawn here rather than inside the updater below, which
                   // is a pure function React may call twice.
-                  setMerchantModelMeasured(false)
+                  setMerchantCapacityMeasured(false)
                   setMerchantModel((m) => ({
                     ...m,
                     // `Number('')` is 0, and a 0 here is not what an emptied box
@@ -5509,7 +5509,7 @@ export default function ResourcePlanner() {
                       // The figure MERCHANT_MODEL_UNCALIBRATED actually tests,
                       // so an acknowledgement surviving an edit to this one
                       // would silence the finding about a slope nobody read.
-                      setMerchantModelMeasured(false)
+                      setMerchantCapacityMeasured(false)
                       setMerchantModel((m) => ({
                         ...m,
                         bonus_per_to_level:
@@ -5569,8 +5569,8 @@ export default function ResourcePlanner() {
                 <input
                   type="checkbox"
                   className="mt-0.5"
-                  checked={merchantModelMeasured}
-                  onChange={(e) => setMerchantModelMeasured(e.target.checked)}
+                  checked={merchantCapacityMeasured}
+                  onChange={(e) => setMerchantCapacityMeasured(e.target.checked)}
                 />
                 <span className="text-primary">
                   I read the base capacity and the bonus off the Marketplace send form

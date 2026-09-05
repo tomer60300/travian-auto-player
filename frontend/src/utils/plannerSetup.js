@@ -129,8 +129,13 @@
  * the backend's `bool` is lax enough to read `"no"` as TRUE, which would switch
  * the prune back on and delete rows over a string nobody can see.
  *
- * Version 11 adds `merchant_model_measured`, and it is the one field here that
- * records work done IN THE GAME which the game does not record.
+ * Version 11 adds `merchant_capacity_measured`, and it is the one field here that
+ * records work done IN THE GAME which the game does not record. CAPACITY and
+ * not "model": the merchant model is capacity and speed, and speed is still
+ * assumed here -- naming it for the whole model would have let the unmeasured
+ * half ride along on the operator's tick, which is why b89e0f4 renamed it on
+ * both sides. The version does NOT move: the same v11 documents this build
+ * wrote carried the old key, and no build ever shipped both.
  * MERCHANT_MODEL_UNCALIBRATED fires whenever `trade_office_bonus_per_level`
  * still equals the shipped 0.20 and any village has a Trade Office. That is the
  * right warning for an untouched account and unanswerable for one whose
@@ -1419,7 +1424,7 @@ export function buildSetup({
   overnight,
   reservedWindow,
   pruneToWindow,
-  merchantModelMeasured,
+  merchantCapacityMeasured,
   merchantModel,
   foreignTargets,
   exportedAt,
@@ -1594,7 +1599,7 @@ export function buildSetup({
   // worth carrying. This one rests OFF -- the finding's own default, and what
   // the server lifts from an absent field with `bool(None)` -- so a written
   // `false` would say nothing an absent field does not.
-  if (merchantModelMeasured === true) doc.merchant_model_measured = true
+  if (merchantCapacityMeasured === true) doc.merchant_capacity_measured = true
   // The levers the operator actually TYPED. A blank box means "use the
   // planner's own", which the plan path has always read correctly -- the field
   // is omitted from the request and the backend's default stands -- while this
@@ -2266,16 +2271,16 @@ export function parseSetup(text) {
   // field is `StrictBool`, so a hand-edited "yes" would be a 422 on save, and
   // coercing it here would silence a finding about the figure that sizes every
   // cargo on the strength of a value nobody typed as a boolean.
-  let merchantModelMeasured = null
-  if (raw.merchant_model_measured != null) {
-    if (typeof raw.merchant_model_measured !== 'boolean') {
+  let merchantCapacityMeasured = null
+  if (raw.merchant_capacity_measured != null) {
+    if (typeof raw.merchant_capacity_measured !== 'boolean') {
       throw new SetupFileError(
-        `merchant_model_measured is ${JSON.stringify(raw.merchant_model_measured)}, which is ` +
+        `merchant_capacity_measured is ${JSON.stringify(raw.merchant_capacity_measured)}, which is ` +
           `not an answer. It must be true (the base capacity and the Trade Office bonus were ` +
           `read off the game's Marketplace send form), or absent to say nothing about it.`
       )
     }
-    merchantModelMeasured = raw.merchant_model_measured
+    merchantCapacityMeasured = raw.merchant_capacity_measured
   }
 
   let merchantModel = null
@@ -2403,7 +2408,7 @@ export function parseSetup(text) {
     overnight,
     reservedWindow,
     pruneToWindow,
-    merchantModelMeasured,
+    merchantCapacityMeasured,
     merchantModel,
     foreignTargets,
   }
@@ -2437,7 +2442,7 @@ export function mergeSetup({
   overnight,
   reservedWindow,
   pruneToWindow,
-  merchantModelMeasured,
+  merchantCapacityMeasured,
   foreignTargets,
 }) {
   const known = new Map((villages ?? []).map((v) => [v.village_id, v]))
@@ -2588,7 +2593,7 @@ export function mergeSetup({
     // the acknowledgement, so loading one must not clear one the operator has
     // on screen. `false` and not `null` at the end of the chain, because the
     // page renders a checkbox and a checkbox has two states.
-    merchantModelMeasured: setup.merchantModelMeasured ?? merchantModelMeasured ?? false,
+    merchantCapacityMeasured: setup.merchantCapacityMeasured ?? merchantCapacityMeasured ?? false,
     // Replaced wholesale, not merged. Merging two tribute lists would either
     // double an obligation or leave a target the operator deleted still being
     // shipped to. A file with no targets leaves what is on screen alone.
