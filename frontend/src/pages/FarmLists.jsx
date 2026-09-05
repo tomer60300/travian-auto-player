@@ -336,8 +336,9 @@ export default function FarmLists() {
     if (slotsToTransfer.length === 0) return
 
     setTransferring(true)
-    let addOk = 0
+    const addedSlots = []
     let addFail = 0
+    let addFailReason = ''
 
     // 1. Add each selected target to destination list
     for (const slot of slotsToTransfer) {
@@ -347,16 +348,20 @@ export default function FarmLists() {
           y: slot.y,
           force: true,
         })
-        addOk++
-      } catch {
+        addedSlots.push(slot)
+      } catch (err) {
         addFail++
+        addFailReason = err.response?.data?.detail || addFailReason || 'unknown error'
       }
     }
 
-    // 2. If "move", delete from source
+    // 2. If "move", delete from source only the slots whose add the
+    // destination confirmed. A slot whose add failed (e.g. the destination
+    // is at its slot cap) must stay in the source -- deleting it here would
+    // destroy the target with no copy left anywhere.
     let delOk = 0
-    if (transferMode === 'move' && addOk > 0) {
-      for (const slot of slotsToTransfer) {
+    if (transferMode === 'move' && addedSlots.length > 0) {
+      for (const slot of addedSlots) {
         try {
           await api.delete(`/farm/lists/${selectedListId}/targets/${slot.id}`)
           delOk++
@@ -376,9 +381,14 @@ export default function FarmLists() {
 
     const destName = lists.find((l) => l.id === destListId)?.name || `#${destListId}`
     if (transferMode === 'move') {
-      toast.success(`Moved ${delOk} target(s) to "${destName}" (${addOk} added, ${addFail} failed)`)
+      if (addFail > 0) {
+        const sourceName = lists.find((l) => l.id === selectedListId)?.name || `#${selectedListId}`
+        toast.warning(`${delOk} moved; ${addFail} left in "${sourceName}" because "${destName}" refused them: ${addFailReason}`)
+      } else {
+        toast.success(`Moved ${delOk} target(s) to "${destName}"`)
+      }
     } else {
-      toast.success(`Copied ${addOk} target(s) to "${destName}"${addFail ? ` (${addFail} failed)` : ''}`)
+      toast.success(`Copied ${addedSlots.length} target(s) to "${destName}"${addFail ? ` (${addFail} failed)` : ''}`)
     }
   }
 

@@ -43,9 +43,23 @@ import yaml
 
 from ..clients.http_client import HttpClient
 from ..constants import BUILDING_GID_BY_NAME_LOWER, BUILDING_NAMES
+from ..exceptions import TravianError
 from ..logging_config import get_logger
 from ..stealth.timing import HumanTiming
 from .building_service import BuildingService
+
+
+class BuildActionUnverifiable(TravianError):
+    """A build action failed and the game could not be re-read afterwards.
+
+    The build write is a ``safe_to_retry=False`` GET, so a failure does not
+    prove the action was refused -- only that its answer did not arrive
+    recognisably. When the level and the construction queue are BOTH
+    unreadable, re-issuing it risks a second upgrade on a building that is
+    already going up, which costs an extra level's resources and an extra build
+    slot. Raised so the item is reported and left alone instead.
+    """
+
 
 # ── Per-account build-action coordination (stealth) ────────────────────
 #
@@ -438,6 +452,58 @@ class BuildQueueService:
             "costs": costs,
             "current": current,
         }
+
+    async def _level_after_failed_action(
+        self, item: BuildPlanItem, village_id: Optional[int]
+    ) -> Optional[int]:
+        """The level the game holds for ``item`` after a build action failed.
+
+        Returns that level when it is AHEAD of the tracker -- proof the action
+        took effect even though its own answer said otherwise -- and ``None``
+        when the game agrees the level did not move, which is the only case
+        where re-issuing the action is safe.
+
+        Both the live construction queue (the build is still running, so the
+        level has not moved yet) and the village building list (the build has
+        finished) are consulted, because a landed action shows up in exactly one
+        of them depending on timing.
+
+        Raises :class:`BuildActionUnverifiable` when NEITHER read could be made.
+        "I could not check" must not become "it did not land": that assumption
+        is what re-issued the upgrade and overshot the plan target by a level.
+        """
+        observed: list[int] = []
+        queue_read = False
+        level_read = False
+        try:
+            for q in await self.building_service.get_construction_queue(village_id=village_id):
+                queue_read = True
+                if (
+                    q.building_name
+                    and item.building
+                    and q.building_name.lower() == item.building.lower()
+                ):
+                    observed.append(q.target_level)
+            queue_read = True
+        except Exception as exc:
+            self._report(f"  WARNING: could not re-read the construction queue: {exc}")
+        try:
+            for b in await self.building_service.get_village_buildings(village_id=village_id):
+                if b.slot_id == item.slot_id:
+                    observed.append(b.level)
+                    break
+            level_read = True
+        except Exception as exc:
+            self._report(f"  WARNING: could not re-read the building level: {exc}")
+        if not queue_read and not level_read:
+            raise BuildActionUnverifiable(
+                "the action failed and neither the construction queue nor the building "
+                "level could be re-read, so whether it landed is unknown"
+            )
+        if not observed:
+            return None
+        landed = max(observed)
+        return landed if landed > item.current_level else None
 
     async def is_queue_empty(self, village_id: Optional[int] = None) -> bool:
         """Check if construction queue is empty."""
@@ -887,9 +953,63 @@ class BuildQueueService:
                             )
                     if not result.success:
                         action = "CONSTRUCT" if item.is_construction else "UPGRADE"
-                        self._report(
-                            f"  {action} FAILED: {item.building} (slot {item.slot_id}) - {result.raw_response[:200] if result.raw_response else 'unknown error'}"
+                        detail = (
+                            result.raw_response[:200] if result.raw_response else "unknown error"
                         )
+                        self._report(
+                            f"  {action} FAILED: {item.building} (slot {item.slot_id}) - {detail}"
+                        )
+                        # The build action is a `safe_to_retry=False` GET whose
+                        # exceptions `building_service` turns into
+                        # `success=False`, so a failure can mean "the answer was
+                        # lost", not "the write was refused". Every guard in this
+                        # loop keys off `is_queue_empty()` or the success branch,
+                        # so the item used to stay `pending` at its OLD level and
+                        # the next pass issued the action again — measured as a
+                        # final level of 6 against a plan target of 5, reported as
+                        # one clean 4->5. Re-read before deciding.
+                        try:
+                            landed = await self._level_after_failed_action(item, vid)
+                        except BuildActionUnverifiable as exc:
+                            self._report(
+                                f"  UNVERIFIED: {item.building} (slot {item.slot_id}) — {exc}. "
+                                "Not re-issuing it; check the village and restart the plan."
+                            )
+                            all_results.append(
+                                {
+                                    "building": item.building,
+                                    "level": f"{item.current_level}->{item.current_level + 1}",
+                                    "status": "unverified",
+                                    "error": f"{detail} / {exc}"[:200],
+                                }
+                            )
+                            item.status = "skipped"
+                            continue
+                        if landed is not None:
+                            self._report(
+                                f"  LANDED: {item.building} is at Lv{landed} despite the failure — "
+                                "the action took effect and will NOT be re-issued"
+                            )
+                            all_results.append(
+                                {
+                                    "building": item.building,
+                                    "level": f"{item.current_level}->{landed}",
+                                    "status": "started",
+                                    "time": result.construction_time,
+                                }
+                            )
+                            if item.is_construction:
+                                item.is_construction = False
+                                item.construct_gid = 0
+                            item.current_level = landed
+                            if item.current_level >= item.target:
+                                item.status = "done"
+                                self._report(
+                                    f"  DONE: {item.building} reached Lv{item.current_level} "
+                                    f"(target was {item.target})"
+                                )
+                            built = True
+                            break
                         continue
                     if result.success:
                         next_level = item.current_level + 1
