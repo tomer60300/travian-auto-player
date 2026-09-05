@@ -100,6 +100,43 @@ class TestItInfersWhatItCan:
         )
 
 
+class TestEveryForeignTargetIsItsOwnDestination:
+    """Two obligations are two places, and only the first one's coordinates were
+    ever used.
+
+    `tribute` summed every route-eligible target's rate while `tribute_at` took
+    the FIRST one in request order, so a 500/h ally 2 fields away and a 20,000/h
+    artifact 60 fields away became 20,500/h priced at the 2-field hop: about
+    forty-eight turnarounds credited to a leg that is a 10h round trip in an 8h
+    night, and the whole obligation read as covered. Swapping the two entries in
+    the request body gave the opposite answer.
+    """
+
+    def _targets(self, order):
+        near = ForeignTarget(name="WW", x=24, y=88, crop_per_hour=500, route_eligible=True)
+        far = ForeignTarget(name="artifact", x=82, y=88, crop_per_hour=20_000, route_eligible=True)
+        return [near, far] if order == "near-first" else [far, near]
+
+    def _derive(self, order):
+        body = _body()
+        body.foreign_targets = self._targets(order)
+        return asyncio.run(post_night_profile(body, USER))
+
+    def test_the_answer_does_not_depend_on_the_order_they_were_typed_in(self):
+        near_first = self._derive("near-first")
+        far_first = self._derive("far-first")
+
+        assert near_first.allocations == far_first.allocations
+        assert near_first.unmet == far_first.unmet
+
+    def test_the_far_obligation_is_not_priced_at_the_near_hop(self):
+        # 60 fields at 12 f/h is a 10h round trip: nothing reaches it tonight,
+        # so its 20,000/h is outstanding however close the other target is.
+        result = self._derive("near-first")
+
+        assert result.unmet[Resource.CROP] >= 20_000.0
+
+
 class TestTheOperatorSuppliesOnlyWhatTheAccountCannot:
     def test_the_baseline_changes_the_answer(self):
         empty = _derive(baseline_fill=0.10)

@@ -45,6 +45,10 @@ def _village(
     )
 
 
+def _tribute(per_hour, at):
+    return night_profile.TributeTarget(at=at, per_hour=per_hour)
+
+
 def _account():
     return [
         _village(HUB, "hub", 0, 0, crop=60_000.0, lumber=13_000.0, wh=1_200_000, gr=800_000, to=19),
@@ -107,7 +111,7 @@ class TestItNeverOverClaimsTheAccount:
     def test_a_tribute_is_taken_out_of_the_pool_not_added_to_it(self):
         # 4 fields out, so the obligation is actually payable: at (60|0) it is a
         # 10h round trip in an 8h night and the account rightly keeps the crop.
-        with_tribute = _derive(tribute_per_hour=10_000.0, tribute_at=(4, 0))
+        with_tribute = _derive(tributes=[_tribute(10_000.0, (4, 0))])
         without = _derive()
         claimed_with = sum(a.value for a in with_tribute.allocations[Resource.CROP].values())
         claimed_without = sum(a.value for a in without.allocations[Resource.CROP].values())
@@ -151,7 +155,7 @@ class TestUnmeetableDemandIsReported:
     def test_a_tribute_nobody_can_cover_is_stated(self):
         # Silence here would read as a covered obligation, and the operator would
         # find out from an ally rather than from the plan.
-        profile = _derive(tribute_per_hour=500_000.0, tribute_at=(60, 0))
+        profile = _derive(tributes=[_tribute(500_000.0, (60, 0))])
         assert profile.unmet[Resource.CROP] > 0
 
     def test_a_coverable_one_reports_nothing_outstanding(self):
@@ -161,7 +165,7 @@ class TestUnmeetableDemandIsReported:
         # demand-weighted mean hop booked ten trips' worth of a journey nobody
         # can complete. The premise contradicted the module's own
         # no-partial-trip rule; see the case below for what (60|0) means.
-        profile = _derive(tribute_per_hour=1_000.0, tribute_at=(4, 0))
+        profile = _derive(tributes=[_tribute(1_000.0, (4, 0))])
         assert profile.unmet[Resource.CROP] == pytest.approx(0.0)
 
     def test_a_tribute_no_round_trip_reaches_is_outstanding_however_small(self):
@@ -169,17 +173,66 @@ class TestUnmeetableDemandIsReported:
         # window means zero crop delivered, whatever the fleet -- so the whole
         # obligation is outstanding, and a small one is exactly the case a
         # weighted mean over a NEAR consumer used to swallow.
-        profile = _derive(tribute_per_hour=1_000.0, tribute_at=(60, 0))
+        profile = _derive(tributes=[_tribute(1_000.0, (60, 0))])
         assert profile.unmet[Resource.CROP] == pytest.approx(1_000.0)
 
     def test_the_hub_still_keeps_what_it_cannot_deliver(self):
         # And it is not quietly shed: crop shipped nowhere is crop lost.
-        with_far = _derive(tribute_per_hour=1_000.0, tribute_at=(60, 0))
+        with_far = _derive(tributes=[_tribute(1_000.0, (60, 0))])
         without = _derive()
         assert (
             with_far.allocations[Resource.CROP][HUB].value
             == without.allocations[Resource.CROP][HUB].value
         )
+
+
+class TestTributesAreDestinationsNotOneSummedNumber:
+    """`tribute_per_hour` + `tribute_at` could only describe ONE place.
+
+    N obligations were summed into one rate and pinned to the first one's
+    coordinates, so the set of destinations `shed_limit` and the draw both read
+    was wrong by construction whenever the account owed more than one ally.
+    """
+
+    def test_each_target_carries_its_own_hop(self):
+        # 500/h two fields out and 20,000/h sixty fields out. The near one is a
+        # 20-minute round trip and the far one does not fit the night at all, so
+        # the honest answer is the small obligation paid and the large one
+        # outstanding -- not 20,500/h credited at the near hop.
+        villages = [_village(HUB, "hub", 0, 0, crop=100_000.0, gr=4_000_000, to=13)]
+        profile = derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            tributes=[
+                night_profile.TributeTarget(at=(2, 0), per_hour=500.0),
+                night_profile.TributeTarget(at=(60, 0), per_hour=20_000.0),
+            ],
+        )
+
+        assert profile.unmet[Resource.CROP] == pytest.approx(20_000.0)
+        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(99_500.0)
+
+    def test_the_order_they_are_given_in_does_not_matter(self):
+        def _run(targets):
+            return derive_night_profile(
+                [_village(HUB, "hub", 0, 0, crop=100_000.0, gr=4_000_000, to=13)],
+                window_hours=8.0,
+                geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+                merchant_model=EUROPE2_TEUTON,
+                day_retention={},
+                hub_id=HUB,
+                tributes=targets,
+            )
+
+        near = night_profile.TributeTarget(at=(2, 0), per_hour=500.0)
+        far = night_profile.TributeTarget(at=(60, 0), per_hour=20_000.0)
+
+        assert _run([near, far]).allocations == _run([far, near]).allocations
+        assert _run([near, far]).unmet == _run([far, near]).unmet
 
 
 class TestTheCropDrawIsOrderedByWhereTheCropGoes:
@@ -257,8 +310,7 @@ class TestTheCropDrawIsOrderedByWhereTheCropGoes:
         profile = self._derive(
             villages,
             consumer_ids=[ARMY],
-            tribute_per_hour=1_000.0,
-            tribute_at=(20, 0),
+            tributes=[_tribute(1_000.0, (20, 0))],
         )
 
         assert profile.drawn_in[Resource.CROP][0] == self.NEAR_ARMY
@@ -377,8 +429,7 @@ class TestNoDestinationIsPromisedAFractionOfATrip:
             day_retention={},
             hub_id=HUB,
             consumer_ids=[self.NEAR],
-            tribute_per_hour=1_000.0,
-            tribute_at=(60, 0),
+            tributes=[_tribute(1_000.0, (60, 0))],
         )
 
         assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(80_000.0)
@@ -980,8 +1031,7 @@ class TestTheHubIsBoundedByWhereItsCropActuallyGoes:
             merchant_model=EUROPE2_TEUTON,
             day_retention={},
             hub_id=HUB,
-            tribute_per_hour=80_000.0,
-            tribute_at=(40, 0),
+            tributes=[_tribute(80_000.0, (40, 0))],
         )
 
         # One trip at 16,875/h, exactly as above: 60,000 - 16,875 = 43,125,

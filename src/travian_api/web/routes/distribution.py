@@ -66,6 +66,7 @@ from travian_api.services.distribution.night_profile import (
     DEFAULT_TARGET_FILL,
     MATERIALS,
     NightVillage,
+    TributeTarget,
     derive_night_profile,
     is_night_window,
 )
@@ -3445,13 +3446,18 @@ async def post_night_profile(
 
     consumers = [v.village_id for v in villages if v.production[Resource.CROP] < 0]
 
-    tribute = 0.0
-    tribute_at: tuple[int, int] | None = None
-    for target in body.foreign_targets:
-        if target.route_eligible:
-            tribute += target.crop_per_hour
-            if tribute_at is None:
-                tribute_at = (target.x, target.y)
+    # One destination per target. Summing the rates and keeping only the FIRST
+    # target's coordinates priced every obligation at one hop, so a 500/h ally
+    # two fields out beside a 20,000/h artifact sixty fields out read as 20,500/h
+    # at the near hop -- about forty-eight turnarounds credited to a leg that is
+    # a 10h round trip in an 8h night -- and swapping the two rows of the request
+    # body gave the opposite answer.
+    tributes = [
+        TributeTarget(at=(target.x, target.y), per_hour=target.crop_per_hour)
+        for target in body.foreign_targets
+        if target.route_eligible
+    ]
+    tribute = sum(target.per_hour for target in tributes)
 
     if body.dispatch_window is None:
         raise HTTPException(
@@ -3527,8 +3533,7 @@ async def post_night_profile(
         day_retention=day_retention,
         hub_id=hub,
         consumer_ids=consumers,
-        tribute_per_hour=tribute,
-        tribute_at=tribute_at,
+        tributes=tributes,
         baseline_fill=body.baseline_fill,
         target_fill=body.target_fill,
         merchant_reserve=body.merchant_reserve,

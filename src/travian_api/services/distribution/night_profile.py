@@ -180,6 +180,22 @@ class NightVillage:
         return self.granary_capacity if resource is Resource.CROP else self.warehouse_capacity
 
 
+@dataclass(frozen=True)
+class TributeTarget:
+    """One foreign obligation the night must ship crop to.
+
+    A place and a rate, kept together. They used to be a single
+    ``tribute_per_hour`` beside a single ``tribute_at``, which cannot describe
+    two allies: N obligations were summed into one rate and pinned to the FIRST
+    one's coordinates, so a 500/h ally two fields out beside a 20,000/h artifact
+    sixty fields out became 20,500/h priced at the two-field hop. Reordering the
+    request body gave the opposite answer.
+    """
+
+    at: tuple[int, int]
+    per_hour: float
+
+
 @dataclass
 class NightProfile:
     """The derived allocations, and what deriving them decided."""
@@ -222,8 +238,7 @@ def derive_night_profile(
     day_retention: Mapping[Resource, Mapping[int, float]],
     hub_id: int,
     consumer_ids: Sequence[int] = (),
-    tribute_per_hour: float = 0.0,
-    tribute_at: tuple[int, int] | None = None,
+    tributes: Sequence[TributeTarget] = (),
     baseline_fill: float = DEFAULT_BASELINE_FILL,
     target_fill: float = DEFAULT_TARGET_FILL,
     merchant_reserve: int = DEFAULT_MERCHANT_RESERVE,
@@ -249,11 +264,15 @@ def derive_night_profile(
         consumer_ids: villages that consume crop. They break even -- ending the
             night at the fill they started -- which is what makes the profile
             hold rather than drift.
-        tribute_per_hour / tribute_at: a foreign obligation and where it is. Paid
-            by the villages nearest to it, since distance is what makes a tribute
-            expensive in merchants.
+        tributes: the foreign obligations, each with its OWN coordinates. One
+            per target rather than a summed rate at one place: the rate decides
+            how much of a sender's cargo goes there and the coordinates decide
+            what that leg costs, so two allies at different distances are two
+            destinations and cannot be averaged into one before the derivation
+            sees them.
     """
     by_id = {v.village_id: v for v in villages}
+    tribute_per_hour = sum(target.per_hour for target in tributes)
     if hub_id not in by_id:
         raise ValueError(f"hub {hub_id} is not among the villages given")
     consumers = [vid for vid in consumer_ids if vid in by_id]
@@ -323,13 +342,13 @@ def derive_night_profile(
                 )
                 for c in consumers
             ]
-            if tribute_at is not None:
-                hops.append(
-                    (
-                        geometry.one_way_minutes((v.x, v.y), tribute_at) / 60.0,
-                        tribute_per_hour,
-                    )
+            hops.extend(
+                (
+                    geometry.one_way_minutes((v.x, v.y), target.at) / 60.0,
+                    target.per_hour,
                 )
+                for target in tributes
+            )
         return [(hop, claim) for hop, claim in hops if hop > 0]
 
     def _legs(v: NightVillage, resource: Resource) -> list[tuple[float, int, float]]:
@@ -570,13 +589,11 @@ def derive_night_profile(
     # be booked to cover a place it cannot get to and back from, and the
     # obligation read as paid. Reported as outstanding instead.
     unservable = 0.0
-    if tribute_per_hour > 0:
-        # No coordinates means nothing to judge: the tribute is not a
-        # destination for `_destinations` either, so it bounds nobody.
-        if tribute_at is not None and not _anyone_reaches(tribute_at):
-            unservable += tribute_per_hour
+    for target in tributes:
+        if target.per_hour > 0 and not _anyone_reaches(target.at):
+            unservable += target.per_hour
         else:
-            demand += tribute_per_hour
+            demand += target.per_hour
     for vid in consumers:
         # Break even: end the night at the fill it started, which is what stops
         # the profile drifting from night to night.
