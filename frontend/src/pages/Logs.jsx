@@ -28,12 +28,17 @@ const SOURCE_LABELS = {
   server: 'Server',
 }
 
+// The status layer, which is what it is for: `--status-*` coloured text on a
+// 10% wash of itself, and it flips with the theme. The fifteen Tailwind palette
+// utilities this replaces did not -- `text-gray-400` and `bg-blue-500/20` are
+// fixed values with no relationship to any token, so every badge on this page
+// was a dark-theme colour rendered on a light surface.
 const LEVEL_BADGE = {
-  debug: 'bg-gray-500/20 text-gray-400 border-gray-500/30',
-  info: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  success: 'bg-green-500/20 text-green-400 border-green-500/30',
-  warning: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
-  error: 'bg-red-500/20 text-red-400 border-red-500/30',
+  debug: 'status-idle',
+  info: 'status-running',
+  success: 'status-success',
+  warning: 'status-waiting',
+  error: 'status-error',
 }
 
 const ALL_SOURCES = Object.keys(SOURCE_LABELS)
@@ -223,11 +228,11 @@ export default function Logs() {
               key={entry.id}
               className={`cursor-pointer ${LEVEL_CLASS[entry.level] || 'text-primary'}`}
               onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
-              style={{ padding: '3px 0', borderBottom: '1px solid rgba(58,48,40,0.3)' }}
+              style={{ padding: '3px 0', borderBottom: '1px solid var(--md-outline-variant)' }}
             >
               <div className="flex gap-2 items-start text-xs">
                 <span className="ws-panel-time shrink-0">[{formatTime(entry.timestamp)}]</span>
-                <span className={`shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium border ${LEVEL_BADGE[entry.level] || LEVEL_BADGE.info}`}>
+                <span className={`shrink-0 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium ${LEVEL_BADGE[entry.level] || LEVEL_BADGE.info}`}>
                   {entry.level}
                 </span>
                 <span className="text-gold shrink-0 w-[55px] text-right">{SOURCE_LABELS[entry.source] || entry.source}</span>

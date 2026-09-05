@@ -260,8 +260,15 @@ export default function Layout() {
                     {item.icon}
                   </span>
                   {!sidebarCollapsed && <span>{item.label}</span>}
+                  {/* `bg-danger` was declared NOWHERE -- not in index.css, and
+                      not by Tailwind, which has no shadeless palette class. This
+                      badge was white text on no background at all: invisible
+                      against the sidebar. */}
                   {!sidebarCollapsed && item.to === '/logs' && serverLogCount > 0 && (
-                    <span className="ml-auto bg-danger text-white text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
+                    <span
+                      className="ml-auto text-[10px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1"
+                      style={{ background: 'var(--md-error)', color: 'var(--md-on-error)' }}
+                    >
                       {serverLogCount > 99 ? '99+' : serverLogCount}
                     </span>
                   )}
@@ -271,8 +278,8 @@ export default function Layout() {
                         position: 'absolute',
                         top: 4,
                         right: 4,
-                        background: 'var(--danger)',
-                        color: '#fff',
+                        background: 'var(--md-error)',
+                        color: 'var(--md-on-error)',
                         fontSize: 10,
                         fontWeight: 700,
                         borderRadius: 9999,

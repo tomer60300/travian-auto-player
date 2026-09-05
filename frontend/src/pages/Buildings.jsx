@@ -455,7 +455,7 @@ export default function Buildings() {
         <h2 className="heading-gold text-2xl">Buildings</h2>
         <div className="flex items-center gap-3">
           <label
-            className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer"
+            className="flex items-center gap-1.5 text-xs text-secondary cursor-pointer"
             title="Building levels need two extra requests per village and take minutes on a large account"
           >
             <input

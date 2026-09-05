@@ -441,7 +441,10 @@ function SessionCard({ session, onClick, onRerun }) {
   return (
     <div
       className="w-full text-left bg-surface border-default rounded-lg p-3 hover:border-[var(--primary)] transition-colors"
-      style={{ border: '1px solid var(--color-border, #333)' }}
+      // `--color-border` does not exist and never has, so the `#333` fallback
+      // always fired: a near-black hairline in both themes, unrelated to every
+      // other border on the page. The real token is `--border`.
+      style={{ border: '1px solid var(--border)' }}
     >
       <div className="flex items-center gap-3">
         <span className="text-lg font-mono text-secondary" style={{ minWidth: 36, textAlign: 'center' }}>

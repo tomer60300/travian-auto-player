@@ -77,7 +77,9 @@ export default function MobileNav() {
                   width: 40,
                   height: 4,
                   borderRadius: 2,
-                  background: 'var(--color-border, #555)',
+                  // `--color-border` is not a token in this app; the `#555`
+                  // fallback always fired. The real one is `--border`.
+                  background: 'var(--border)',
                   margin: '0 auto 1rem',
                 }}
               />
@@ -120,8 +122,15 @@ export default function MobileNav() {
                           position: 'absolute',
                           top: 4,
                           right: 4,
-                          background: 'var(--color-danger, #e53e3e)',
-                          color: '#fff',
+                          // `--color-danger` is not a token either, so this
+                          // badge always drew `#e53e3e` -- a visibly different
+                          // red from every other danger surface in the app, in
+                          // both themes, because the intended reference was
+                          // dead. `--md-error` with its own `--md-on-error`
+                          // keeps the label readable when the theme flips the
+                          // fill to a pale salmon.
+                          background: 'var(--md-error)',
+                          color: 'var(--md-on-error)',
                           fontSize: 10,
                           fontWeight: 700,
                           borderRadius: 9999,

@@ -67,7 +67,12 @@
   --status-success: #386A20;
   --status-error: #BA1A1A;
   --status-waiting: #7D5700;
-  --status-idle: #79747E;
+  /* Darkened from #79747E, which was MD3's OUTLINE colour used as text: as
+     `.status-idle` -- coloured text on a 10% wash of itself -- it measured
+     3.55:1 on a card and 3.96:1 on the base, under the 4.5 AA needs. #635E6B
+     measures 4.80 / 5.32 / 4.97 on card / base / surface. The dark value was
+     the same defect (3.93:1 on a card). */
+  --status-idle: #635E6B;
 
   /* Raid-optimizer functional colours. The five Teuton unit hues and the four
      strategy hues are INDICATORS, not decoration -- the operator reads a
@@ -155,7 +160,7 @@
   --status-success: #A8D88E;
   --status-error: #FFB4AB;
   --status-waiting: #FFDDB3;
-  --status-idle: #938F99;
+  --status-idle: #B0ACB6;
 
   --raid-club: #8A9A4B;
   --raid-spear: #8A9AAE;
@@ -1020,7 +1025,12 @@ h1, h2, h3 {
 
 .status-running { color: var(--status-running); background-color: rgba(0,97,164,0.1); }
 .status-success { color: var(--status-success); background-color: rgba(56,106,32,0.1); }
-.status-error { color: var(--status-error); background-color: rgba(186,26,26,0.1); }
+/* 7%, not the 10% the other four take. `--status-error` is the darkest token
+   of the five, so its own wash costs it more contrast than theirs cost them:
+   measured on the Logs level badges, 10% left it at 4.49:1 against a 4.5
+   requirement -- the only one of the five that missed, and by a hundredth. At
+   7% it measures 4.72:1. */
+.status-error { color: var(--status-error); background-color: rgba(186,26,26,0.07); }
 .status-waiting { color: var(--status-waiting); background-color: rgba(125,87,0,0.1); }
 .status-idle { color: var(--status-idle); background-color: rgba(121,116,126,0.1); }
 

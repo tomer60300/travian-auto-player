@@ -12,15 +12,25 @@ const LEVEL_COLORS = {
   warning: 'text-warning',
 }
 
+// Nine of these were Tailwind palette utilities -- `text-blue-400`,
+// `text-purple-400`, `text-cyan-400`, `text-yellow-400` -- which are fixed
+// values that do not flip with `[data-theme]`, so they were dark-theme colours
+// drawn on a light log surface. The other eleven were already tokens.
+//
+// Blue and cyan both become `.text-info` and both yellows become
+// `.text-warning`: the token set has seven semantic colours and this map wanted
+// nine, so two pairs merge. The cost is small because every one of these lines
+// also PRINTS its category in text -- the colour groups them, it does not
+// identify them.
 const CATEGORY_COLORS = {
-  TROOPS: 'text-blue-400',
-  SCAN: 'text-purple-400',
+  TROOPS: 'text-info',
+  SCAN: 'text-gold',
   FILTER: 'text-secondary',
-  ENRICH: 'text-cyan-400',
+  ENRICH: 'text-info',
   CLASSIFY: 'text-secondary',
   RAID: 'text-primary',
-  'DRY RUN': 'text-cyan-400',
-  SLEEP: 'text-yellow-400',
+  'DRY RUN': 'text-info',
+  SLEEP: 'text-warning',
   DONE: 'text-success',
   SUMMARY: 'text-gold',
   SORT: 'text-secondary',
@@ -28,10 +38,10 @@ const CATEGORY_COLORS = {
   STOP: 'text-warning',
   SYSTEM: 'text-secondary',
   ERROR: 'text-danger',
-  HUMANIZE: 'text-purple-400',
-  BROWSE: 'text-cyan-400',
-  THINK: 'text-blue-400',
-  BREAK: 'text-yellow-400',
+  HUMANIZE: 'text-gold',
+  BROWSE: 'text-info',
+  THINK: 'text-info',
+  BREAK: 'text-warning',
   SKIP: 'text-warning',
 }
 
