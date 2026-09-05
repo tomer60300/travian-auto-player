@@ -20,9 +20,12 @@ from travian_api.services.distribution.optimizer import Route
 from travian_api.services.distribution.schedule import build_beat
 from travian_api.services.distribution.storage import (
     DEFAULT_WARN_HOURS,
+    MAX_SETTLING_DAYS,
     OverflowEvent,
     ProfileSegment,
     Trend,
+    _accrue,
+    _npc_top_up,
     simulate_day,
     simulate_profile_cycle,
     storage_findings,
@@ -69,6 +72,16 @@ class TestBothDirections:
         assert status.trend is Trend.STEADY
         assert status.hours_remaining is None
 
+    def test_a_rate_that_empties_a_granary_in_a_day_is_not_level(self):
+        """The other side of the negligible-rate threshold, which nothing else
+        pins: 0.2/h is rounding error, 400/h is a granary gone by tomorrow. Read
+        as STEADY it would carry no hours of cover and could never be urgent."""
+        status = store_status(1, Resource.CROP, stock=4_000, capacity=None, net_per_hour=-400.0)
+
+        assert status.trend is Trend.DRAINING
+        assert status.hours_remaining == pytest.approx(10.0)
+        assert status.is_urgent
+
     def test_an_already_full_store_reports_zero_not_a_negative(self):
         status = store_status(1, Resource.CLAY, stock=90_000, capacity=80_000, net_per_hour=1_000)
 
@@ -93,6 +106,17 @@ class TestWarnings:
 
         assert storage_warnings([calm], []) == ()
         assert (calm.hours_remaining or 0) > DEFAULT_WARN_HOURS
+
+    def test_exactly_the_warn_horizon_of_cover_is_not_yet_urgent(self):
+        """The boundary the threshold names. Eighteen hours is the warning's
+        span, not a point inside it, so a store with exactly that much cover has
+        not yet crossed anything."""
+        on_the_hour = store_status(1, Resource.CROP, 18_000, None, -1_000)
+        one_short = store_status(1, Resource.CROP, 17_999, None, -1_000)
+
+        assert on_the_hour.hours_remaining == pytest.approx(DEFAULT_WARN_HOURS)
+        assert not on_the_hour.is_urgent
+        assert one_short.is_urgent
 
 
 class TestDiscreteArrivals:
@@ -644,6 +668,102 @@ class TestNpcReserves:
         overflows = self._replay(npc={2: self._reserve(2, allowance_per_day=96_000)})
 
         assert not [e for e in overflows if e.village_id == 2]
+
+
+class TestTheBudgetIsCappedAtOneDaysAllowance:
+    """The infinite reservoir, one level up from where it was fixed.
+
+    ``_npc_top_up``'s budget bound is what makes the reservoir finite *within* a
+    day; ``_accrue``'s cap is what makes the budget mean "one day's allowance"
+    rather than "everything since the replay started". Both replays run to a
+    steady state over as many as ``MAX_SETTLING_DAYS`` days, so an uncapped
+    accrual is fourteen days of conversion available to fund a single departure.
+
+    Pinned on the accrual itself rather than through a replay, deliberately: at
+    a steady state the daily accrual and the daily draw balance, so the *stock*
+    of budget cancels out of every periodic fixture. The cap is a property of
+    the accrual, and this is where it is observable.
+    """
+
+    def _reserve(self, allowance_per_day: float) -> NpcReserve:
+        return NpcReserve(
+            village_id=1,
+            floor_level=40_000,
+            allowance_per_day=allowance_per_day,
+            sources=(Resource.CROP,),
+            shares=(1.0,),
+            drawn=frozenset({Resource.LUMBER}),
+        )
+
+    def test_a_budget_nobody_spends_stops_at_one_days_allowance(self):
+        budget: dict[int, float] = {}
+
+        for _ in range(MAX_SETTLING_DAYS):
+            _accrue({1: self._reserve(96_000)}, budget, 24.0)
+
+        assert budget[1] == pytest.approx(96_000), (
+            "fourteen settling days must not leave fourteen days of conversion in hand"
+        )
+
+    def test_a_part_day_accrues_at_the_rate(self):
+        """The control: the cap is a ceiling on an accrual, not the accrual."""
+        budget: dict[int, float] = {}
+
+        _accrue({1: self._reserve(96_000)}, budget, 6.0)
+
+        assert budget[1] == pytest.approx(24_000)
+
+
+class TestTheFloorOnAFeedstockStoreIsKept:
+    """Section 7's buffer level, seen from the paying side.
+
+    Every reserve elsewhere in this file converts out of CROP, where the floor
+    is deliberately ``0`` -- a granary has no NPC-fed buffer. The branch that
+    differs is a MATERIAL feedstock: the operator's declared floor on lumber is
+    the thing the whole mechanism exists to protect, and a conversion that spent
+    it would empty the store by the machinery meant to defend it.
+    """
+
+    def _reserve(self) -> NpcReserve:
+        return NpcReserve(
+            village_id=1,
+            floor_level=40_000,
+            allowance_per_day=96_000,
+            sources=(Resource.IRON,),
+            shares=(1.0,),
+            drawn=frozenset({Resource.LUMBER}),
+        )
+
+    def test_a_store_sitting_exactly_on_its_floor_funds_nothing(self):
+        budget = {1: 96_000.0}
+
+        funded, paid = _npc_top_up(
+            self._reserve(),
+            Resource.LUMBER,
+            {(1, Resource.IRON): 40_000.0},
+            budget,
+            shortfall=50_000.0,
+        )
+
+        assert funded == 0.0
+        assert paid == {}
+        assert budget[1] == 96_000.0, "an unfunded top-up spends none of the budget either"
+
+    def test_only_what_stands_above_the_floor_is_spendable(self):
+        budget = {1: 96_000.0}
+
+        funded, paid = _npc_top_up(
+            self._reserve(),
+            Resource.LUMBER,
+            {(1, Resource.IRON): 45_000.0},
+            budget,
+            shortfall=50_000.0,
+        )
+
+        assert funded == pytest.approx(5_000.0)
+        assert paid == {Resource.IRON: pytest.approx(5_000.0)}, (
+            "the iron store pays 5,000 and closes on its 40,000 floor, never below"
+        )
 
 
 class TestConsumptionIsNotAccumulation:
