@@ -396,3 +396,104 @@ test.describe('one page state reaches every request that carries the field', () 
     expect('merchant_model_measured' in sent.revert[0]).toBe(false)
   })
 })
+
+/** The Trade Office bonus lives behind the "Non-Europe-2 world" disclosure,
+ *  which is closed unless one of its two figures is refused. Opened directly,
+ *  the way `focusRing.pw.js` and `cellPickers.pw.js` open theirs -- clicking
+ *  the summary would move focus and is not what this is testing. */
+async function openWorldDisclosure(page) {
+  await page.evaluate(() => {
+    for (const d of document.querySelectorAll('details')) {
+      if (d.querySelector('summary')?.textContent?.includes('Non-Europe-2 world')) d.open = true
+    }
+  })
+}
+
+test.describe('editing a measured figure withdraws the acknowledgement', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  // A reading that is then typed over is not a reading. The box says the two
+  // figures WERE READ OFF THE GAME; the moment one of them is a different
+  // number, that sentence is false about what is on screen -- and it would go
+  // on silencing MERCHANT_MODEL_UNCALIBRATED about a slope nobody measured.
+  test('changing the base capacity unticks it, and the next plan says so', async ({ page }) => {
+    const sent = await recordBodies(page)
+    await seed(page, { planner_trade_office: { [CAPITAL]: 13 } })
+    await openAccount(page)
+    await measured(page).check()
+    await expect(measured(page)).toBeChecked()
+
+    await page.getByLabel('Merchant base capacity').fill('3200')
+    await expect(measured(page)).not.toBeChecked()
+
+    await openPlanStage(page)
+    await expect.poll(() => sent.plan.length).toBeGreaterThan(0)
+    expect(sent.plan.at(-1).merchant_model_measured).toBe(false)
+    // And the figure the operator typed did go, so this is a withdrawal rather
+    // than a rejected edit.
+    expect(sent.plan.at(-1).merchant_base_capacity).toBe(3200)
+  })
+
+  test('changing the Trade Office bonus unticks it too', async ({ page }) => {
+    // The bonus is the figure the finding actually tests -- "still equal to the
+    // shipped 0.20" -- so an acknowledgement surviving an edit to THIS one
+    // would silence the finding about a number nobody read.
+    await isolate(page)
+    await seed(page, { planner_trade_office: { [CAPITAL]: 13 } })
+    await openAccount(page)
+    await measured(page).check()
+    await openWorldDisclosure(page)
+
+    await page.getByLabel('Trade Office bonus per level').fill('0.25')
+    await expect(measured(page)).not.toBeChecked()
+  })
+
+  test('the four levers it does not describe leave it alone', async ({ page }) => {
+    // The reserve and the headroom are the operator's own POLICY, not readings;
+    // the map span and the merchant speed are properties of the world and have
+    // nothing to do with what one merchant carries. Unticking on those would
+    // train the operator to re-tick a box that means nothing.
+    await isolate(page)
+    await seed(page, { planner_trade_office: { [CAPITAL]: 13 } })
+    await openAccount(page)
+    await measured(page).check()
+    await openWorldDisclosure(page)
+
+    await page.getByLabel('Merchants held in reserve at every village').fill('2')
+    await page.getByLabel("Merchant headroom, percent of each village's budget").fill('15')
+    await page.getByLabel('Merchant speed fields per hour override').fill('20')
+    await page.getByLabel('Map span override').fill('801')
+
+    await expect(measured(page)).toBeChecked()
+  })
+
+  test('a loaded document is not an operator typing, so it does not untick', async ({ page }) => {
+    // `mergeParsedSetup` writes the merchant model with `setMerchantModel`
+    // directly rather than through the boxes' own handlers, which is what keeps
+    // a saved acknowledgement from being withdrawn by the very load that
+    // restored it. A document carrying both must come back with both.
+    const DOC = {
+      format: 'travian-planner-owned-state',
+      version: 11,
+      exported_at: '2026-09-05T09:00:00Z',
+      account: KEY,
+      villages: [{ village_id: CAPITAL, name: '02', trade_office_level: 13 }],
+      merchant_model_measured: true,
+      merchant_model: { base_capacity: 3200, bonus_per_to_level: 0.25 },
+    }
+    await isolate(page, (path, route) => {
+      if (path.endsWith('/distribution/setup') && route.request().method() === 'GET') {
+        return { account_key: KEY, setup: DOC, saved_at: DOC.exported_at }
+      }
+      return undefined
+    })
+    await seed(page)
+    await page.goto('/resource-planner')
+
+    await page.getByRole('button', { name: 'Load setup from server' }).click()
+    await expect(page.getByText(/from the saved setup/).first()).toBeVisible()
+
+    await expect(page.getByLabel('Merchant base capacity')).toHaveValue('3200')
+    await expect(measured(page)).toBeChecked()
+  })
+})

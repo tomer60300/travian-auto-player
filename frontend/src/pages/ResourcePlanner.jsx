@@ -5315,7 +5315,15 @@ export default function ResourcePlanner() {
                 }
                 className="input-field w-24 text-right py-1"
                 value={merchantModel.base_capacity ?? ''}
-                onChange={(e) =>
+                onChange={(e) => {
+                  // A reading that is then typed over is not a reading. The box
+                  // below says these two figures WERE READ OFF THE GAME, so the
+                  // moment one is a different number that sentence is false
+                  // about what is on screen -- and it would go on silencing
+                  // MERCHANT_MODEL_UNCALIBRATED over a model nobody measured.
+                  // Withdrawn here rather than inside the updater below, which
+                  // is a pure function React may call twice.
+                  setMerchantModelMeasured(false)
                   setMerchantModel((m) => ({
                     ...m,
                     // `Number('')` is 0, and a 0 here is not what an emptied box
@@ -5328,7 +5336,7 @@ export default function ResourcePlanner() {
                     // Office level adding capacity.
                     base_capacity: e.target.value === '' ? undefined : Number(e.target.value),
                   }))
-                }
+                }}
               />
               <MerchantRule
                 id="merchant-problem-base_capacity"
@@ -5482,13 +5490,17 @@ export default function ResourcePlanner() {
                     }
                     className="input-field w-20 text-right py-1"
                     value={merchantModel.bonus_per_to_level ?? ''}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      // The figure MERCHANT_MODEL_UNCALIBRATED actually tests,
+                      // so an acknowledgement surviving an edit to this one
+                      // would silence the finding about a slope nobody read.
+                      setMerchantModelMeasured(false)
                       setMerchantModel((m) => ({
                         ...m,
                         bonus_per_to_level:
                           e.target.value === '' ? undefined : Number(e.target.value),
                       }))
-                    }
+                    }}
                   />
                   <MerchantRule
                     id="merchant-problem-bonus_per_to_level"
