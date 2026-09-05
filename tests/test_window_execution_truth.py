@@ -187,3 +187,37 @@ class TestDeclaringThePruneMakesThePlanHonestAgain:
         # The control: the severity must follow the intent, not drift.
         plan = _plan(NIGHT, cycles=(1,))
         assert _window_findings(plan), "not declaring the prune leaves it critical"
+
+    def test_the_note_describes_the_prune_rather_than_the_breach(self):
+        """The two findings shared one sentence and differed only by Category,
+        so the note told the operator that "the other 16 ship the same cargo
+        outside it" and that his destination "receives about 3.0x what was
+        modelled". With the prune on, those rows are deleted: nothing ships
+        outside the hours and the destination gets what was sized for it. The
+        sentence was the critical case's, and it was false here."""
+        (note,) = [f for f in self._plan_pruned().findings if f.category is Category.WINDOW_PRUNED]
+
+        assert "ship the same cargo outside it" not in note.message, note.message
+        assert "what was modelled" not in note.message, note.message
+        assert "the 16 that depart outside this profile's 480 min are deleted" in note.message
+        assert "leaving the 8 the plan sized the cargo for" in note.message
+
+    def test_the_breach_keeps_its_own_words(self):
+        """The control: correcting the note must not soften the critical one,
+        which describes a real over-delivery and is what the operator reads
+        when nothing is pruning anything."""
+        (breach,) = _window_findings(_plan(NIGHT, cycles=(1,)))
+
+        assert "the other 16 ship the same cargo outside it" in breach.message
+        assert "receives about 3.0x what was modelled" in breach.message
+
+    def test_both_findings_quote_the_windows_real_length(self):
+        """23:00-07:00 is eight hours. Measured as ``abs(end - start)`` it reads
+        as 960 minutes -- the sixteen hours the profile is NOT running -- and
+        the finding renders that figure straight to the operator."""
+        (note,) = [f for f in self._plan_pruned().findings if f.category is Category.WINDOW_PRUNED]
+        (breach,) = _window_findings(_plan(NIGHT, cycles=(1,)))
+
+        for finding in (note, breach):
+            assert "480 min" in finding.message, finding.message
+            assert "960" not in finding.message, finding.message

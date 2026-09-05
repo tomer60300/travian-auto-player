@@ -598,21 +598,37 @@ def build_beat(
                 [m for m in placement.dispatch_minutes if _in_window(m, dispatch_window)]
             )
             if escaping > 0 and cycle_minutes < MINUTES_PER_DAY:
+                kept = firings_per_day - escaping
+                # Two different facts, and they had one sentence between them.
+                # Where the rows are pruned nothing ships outside the hours and
+                # the destination receives exactly what was sized for it, so
+                # "the other N ship the same cargo outside it ... receives about
+                # 3.0x what was modelled" describes the failure the prune
+                # exists to prevent. The note says what is deleted and what is
+                # left; only the critical one reports an over-delivery.
                 findings.append(
                     Finding(
-                        category=(
-                            Category.WINDOW_PRUNED
-                            if prune_to_window
-                            else Category.WINDOW_NOT_ENFORCEABLE
+                        category=Category.WINDOW_PRUNED,
+                        message=(
+                            f"route {leg} repeats every {route.cycle_hours}h, so the game "
+                            f"fires it {firings_per_day} times a day; the {escaping} that "
+                            f"depart outside this profile's {window_minutes} min are deleted "
+                            f"after the route is created, leaving the {kept} the plan sized "
+                            f"the cargo for"
                         ),
+                        detail=f"{leg} — {escaping} of {firings_per_day} rows pruned",
+                    )
+                    if prune_to_window
+                    else Finding(
+                        category=Category.WINDOW_NOT_ENFORCEABLE,
                         message=(
                             f"route {leg} repeats every {route.cycle_hours}h, so the game "
                             f"fires it {firings_per_day} times a day; only "
-                            f"{firings_per_day - escaping} land in this profile's "
+                            f"{kept} land in this profile's "
                             f"{window_minutes} min, and the other {escaping} ship the same "
                             f"cargo outside it. The plan sized the cargo for the firings "
                             f"inside, so the destination receives about "
-                            f"{firings_per_day / max(1, firings_per_day - escaping):.1f}x "
+                            f"{firings_per_day / max(1, kept):.1f}x "
                             f"what was modelled"
                         ),
                         detail=f"{leg} — {escaping} of {firings_per_day} firings escape",
