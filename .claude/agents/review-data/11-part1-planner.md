@@ -117,9 +117,9 @@ Trade Office is **additive on the base**. Stock values, VERIFIED (Travian Fandom
 | Gaul | 750 | +10% | 24 |
 | Teuton | 1,000 | +10% | 12 |
 
-**This account is modified** — see §0.1. Measured `2200 / +20%`.
+**This account is modified** — see §0.1. Measured `2500 / +20%` (base re-read 2026-09-02; 2,200 was the superseded reading — see 01-operator-rulings §1).
 
-**Current code:** `EUROPE2_TEUTON = MerchantModel(base_capacity=2200, bonus_per_trade_office_level=0.20)`, held in one injectable model with `calibrate()` to derive base and slope from two observations, and `STOCK_TEUTON` retained for contrast. Nothing else in the planner hardcodes a capacity. Correct, and the seam is the right one.
+**Current code:** `EUROPE2_TEUTON = MerchantModel(base_capacity=2500, bonus_per_trade_office_level=0.20)`, held in one injectable model with `calibrate()` to derive base and slope from two observations, and `STOCK_TEUTON` retained for contrast. Nothing else in the planner hardcodes a capacity. Correct, and the seam is the right one.
 
 **Still pinned by a single data point.** Any `base × (1 + 13k) = 7,920` fits the observation — `2200/0.20` is the natural reading but not the only one. A second village at a *different* Trade Office level nails it at zero request cost, since the levels are already held. A Trade artifact can also change capacity mid-server, which is another reason the constant must stay derivable rather than fixed.
 
