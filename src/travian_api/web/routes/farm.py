@@ -54,6 +54,11 @@ class SendResultResponse(BaseModel):
     success_count: int
     fail_count: int
     targets: list[TargetResultResponse]
+    # "sent" | "dry_run" | "not_attempted". A send-all that the activity
+    # ceiling stopped part-way used to return a SHORTER array, with no field
+    # that could say the remaining lists never ran -- a 5-list cycle that sent
+    # 2 was indistinguishable from a 2-list account.
+    status: str = "sent"
 
 
 class LastRaidResponse(BaseModel):
@@ -690,6 +695,7 @@ async def send_all_farm_lists(
                     success_count=len(targets),
                     fail_count=0,
                     targets=targets,
+                    status="dry_run",
                 )
             )
         return results
@@ -703,4 +709,18 @@ async def send_all_farm_lists(
             detail=exc.message,
         ) from exc
 
-    return [_send_result_response(lid, result) for lid, result in result_map.items()]
+    # `send_all_farm_lists` returns early when the activity ceiling goes false,
+    # so the map can be shorter than what was asked for. Report the lists that
+    # never ran rather than omitting them: they are not lists that sent nothing.
+    return [
+        _send_result_response(lid, result_map[lid])
+        if lid in result_map
+        else SendResultResponse(
+            list_id=lid,
+            success_count=0,
+            fail_count=0,
+            targets=[],
+            status="not_attempted",
+        )
+        for lid in send_ids
+    ]

@@ -392,6 +392,26 @@ def _build_farm_run_all_coro(
                     )
                     break
 
+                # `send_all_farm_lists` returns early when the activity ceiling
+                # goes false, so the map can be shorter than what was asked
+                # for. Folding it into cycle_end totals alone made a 5-list
+                # cycle that sent 2 look like a 2-list account.
+                not_attempted = [lid for lid in send_ids if lid not in results]
+                if not_attempted:
+                    ctx.push(
+                        {
+                            "type": "budget_stop",
+                            "cycle": cycle,
+                            "not_attempted": not_attempted,
+                            "message": (
+                                f"The activity ceiling stopped this cycle after "
+                                f"{len(results)} of {len(send_ids)} lists; "
+                                f"{len(not_attempted)} were not attempted."
+                            ),
+                            "timestamp": _now_iso(),
+                        }
+                    )
+
                 total_success += cycle_success
                 total_fail += cycle_fail
 
