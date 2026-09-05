@@ -118,4 +118,24 @@ test.describe('a relay tier the backend refuses is refused here first', () => {
     await page.getByRole('button', { name: /^Build plan/ }).click()
     await expect.poll(() => calls.plan).toBe(1)
   })
+
+  // The summary already links its refusal via `aria-describedby` (asserted
+  // above by way of the visible text), but unlike all eight `<input>`-based
+  // bounded boxes it never set `aria-invalid` -- so a screen reader announces
+  // the problem on focus but never reports the control itself as invalid.
+  test('the summary marks itself invalid while the relay tier is refused', async ({ page }) => {
+    await countWrites(page)
+    await openAccount(page, DEF_RELAY)
+
+    const summary = page.locator('summary').filter({ hasText: 'Relays for, for 11:' })
+    await expect(summary).toHaveAttribute('aria-invalid', 'true')
+  })
+
+  test('a legal tier leaves the summary unmarked', async ({ page }) => {
+    await countWrites(page)
+    await openAccount(page, { planner_relay_for: { [CAPITAL]: [DEF_A] } })
+
+    const summary = page.locator('summary').filter({ hasText: 'Relays for, for 02:' })
+    await expect(summary).not.toHaveAttribute('aria-invalid', 'true')
+  })
 })

@@ -4791,6 +4791,7 @@ export default function ResourcePlanner() {
                                     ? 'text-primary'
                                     : 'text-secondary'
                               }`}
+                              aria-invalid={problems.length > 0 || undefined}
                               aria-describedby={problems.length ? problemId : undefined}
                             >
                               <span className="sr-only">Relays for, for {v.name}: </span>
