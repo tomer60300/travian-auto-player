@@ -44,12 +44,31 @@ export default defineConfig({
   testDir: './e2e',
   testMatch: '**/*.pw.js',
 
-  // Visual regression is worthless when it is flaky. One worker, no retries: a diff is either
-  // real or the baseline is stale, and both deserve a human.
-  workers: 1,
+  // Only login.visual.pw.js does image comparison (`grep -l "toHaveScreenshot" e2e/*.pw.js`
+  // -- one file out of 72). Visual regression is worthless when it is flaky, so THAT project
+  // keeps one worker and no retries: a diff is either real or the baseline is stale, and both
+  // deserve a human. Every other spec mocks its own network and asserts on the DOM, not
+  // pixels, so it has no such flakiness to protect against and can run fully in parallel.
   retries: 0,
   forbidOnly: !!process.env.CI,
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'e2e/report' }]],
+
+  projects: [
+    {
+      name: 'functional',
+      testIgnore: '**/login.visual.pw.js',
+      fullyParallel: true,
+      // This machine runs other agents' work concurrently (see CLAUDE.md's pytest -n 8
+      // precedent) -- 8 of its 12 logical cores, not all of them.
+      workers: 8,
+    },
+    {
+      name: 'visual',
+      testMatch: '**/login.visual.pw.js',
+      fullyParallel: false,
+      workers: 1,
+    },
+  ],
 
   use: {
     baseURL: `http://localhost:${PORT}`,
