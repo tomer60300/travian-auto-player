@@ -497,3 +497,80 @@ test.describe('editing a measured figure withdraws the acknowledgement', () => {
     await expect(measured(page)).toBeChecked()
   })
 })
+
+test.describe('the acknowledgement against the UI Definition of Done', () => {
+  test('one accessible name, keyboard-operable, with a visible focus ring', async ({ page }) => {
+    // Items 2 and 4 of `frontend/CLAUDE.md`'s list, plus the name itself. The
+    // name matters more here than on an ordinary control: this box's whole
+    // purpose is to state a specific claim, so a name that does not carry the
+    // claim ("Measured", "Calibrated") is an operator asserting they know not
+    // what.
+    await isolate(page)
+    await seed(page, { planner_trade_office: { [CAPITAL]: 13 } })
+    await openAccount(page)
+
+    // Exactly one, and reached BY THAT NAME -- the sentence the label renders.
+    await expect(measured(page)).toHaveCount(1)
+    await expect(page.getByLabel(`Why: ${MEASURED}`)).toHaveCount(1)
+
+    // `.focus()` with no click before it anywhere in this test, so Chromium's
+    // focus modality stays keyboard-ish and `:focus-visible` reports true --
+    // the same approach `focusRing.pw.js` takes for the three controls it
+    // measures.
+    await measured(page).focus()
+    await expect(measured(page)).toBeFocused()
+    const ring = await measured(page).evaluate((el) => {
+      const cs = getComputedStyle(el)
+      return { style: cs.outlineStyle, width: cs.outlineWidth }
+    })
+    // A ring of some kind, and not the `outline: none` item 2 forbids without a
+    // replacement indicator.
+    expect(ring.style).not.toBe('none')
+    expect(parseFloat(ring.width)).toBeGreaterThan(0)
+
+    // Operable from the keyboard, which for a checkbox is Space.
+    await page.keyboard.press('Space')
+    await expect(measured(page)).toBeChecked()
+    await page.keyboard.press('Space')
+    await expect(measured(page)).not.toBeChecked()
+  })
+
+  test.describe('at 375px on a coarse pointer', () => {
+    test.use({ viewport: { width: 375, height: 900 }, hasTouch: true, isMobile: true })
+
+    test('the label is a 44px target and the row does not scroll sideways', async ({ page }) => {
+      // Item 4. A native checkbox is ~13px and inflating it would eat a tenth
+      // of this viewport, so the TAP TARGET is the label -- clicking anywhere
+      // on it toggles the box, which is what `pointer-coarse:min-h-11` sizes.
+      // The exemption for 24px checkboxes is documented for TABLE rows only,
+      // and this is not one.
+      await isolate(page)
+      await seed(page, { planner_trade_office: { [CAPITAL]: 13 } })
+      await openAccount(page)
+
+      const label = page.locator('label').filter({ hasText: MEASURED })
+      const box = await label.boundingBox()
+      if (globalThis.process?.env?.MEASURE) console.log('\nlabel:', JSON.stringify(box))
+      expect(Math.round(box.height)).toBeGreaterThanOrEqual(44)
+
+      // And the target is real: tapping the label, not the tick, toggles it.
+      await label.click()
+      await expect(measured(page)).toBeChecked()
+
+      // Its `Why` is the same size as the other nine on this page.
+      const why = page.getByLabel(`Why: ${MEASURED}`)
+      const whyBox = await why.boundingBox()
+      expect(Math.round(whyBox.width)).toBeGreaterThanOrEqual(44)
+      expect(Math.round(whyBox.height)).toBeGreaterThanOrEqual(44)
+
+      // Item 1, asked with the Why OPEN, because a closed disclosure hiding a
+      // paragraph is not a reason to pass. A sentence's max-content width is
+      // what `basis-full` exists to keep off this row.
+      await why.click()
+      const scrollX = await page.evaluate(
+        () => document.scrollingElement.scrollWidth - document.scrollingElement.clientWidth
+      )
+      expect(scrollX, 'no horizontal page scroll').toBe(0)
+    })
+  })
+})
