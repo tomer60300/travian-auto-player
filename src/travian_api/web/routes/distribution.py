@@ -937,6 +937,24 @@ class PlanRequest(BaseModel):
                 f"foreign target(s) {', '.join(off_map)} are off a {self.map_span}-wide "
                 f"map: coordinates run -{limit}..+{limit}"
             )
+        # A Travian tile holds ONE village, so a foreign obligation sitting on
+        # one of the operator's own is a typo. It surfaced as unmet crop: the
+        # village on that tile has a zero hop to the target, which
+        # `_destinations` drops as "the village itself" rather than letting it
+        # read as a free delivery, so the rate came back outstanding with
+        # nothing connecting it to the coordinates that caused it.
+        names = {v.village_id: v.name for v in self.snapshot}
+        own_tiles = {(v.x, v.y): v.village_id for v in self.snapshot}
+        clashes = [
+            f"{t.name} ({t.x}|{t.y}) is {village_label(own_tiles[(t.x, t.y)], names)}"
+            for t in self.foreign_targets
+            if (t.x, t.y) in own_tiles
+        ]
+        if clashes:
+            raise ValueError(
+                "foreign target(s) sit on your own villages, which cannot be foreign "
+                "obligations: " + "; ".join(clashes)
+            )
         return self
 
     @model_validator(mode="after")

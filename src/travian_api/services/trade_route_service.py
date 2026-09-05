@@ -1004,6 +1004,15 @@ class TradeRouteService:
 
         One request for all of them, matching the UI: it deletes the whole
         selection at once.
+
+        RESPONSE SHAPE, UNVERIFIED. `_rejected_routes` reads
+        ``{"routes": [{"id": .., "error": ..}]}``, which is the shape the game's
+        own bulk-TOGGLE handler uses in `main.js` (`docs/15`). Nobody has
+        observed a DELETE reply on this account at all, so applying that shape
+        here is an assumption, not a reading. It is a safe one -- anything this
+        parser cannot read becomes `unverified` and is settled by re-reading the
+        marketplace -- but it is an assumption, and the first live prune settles
+        it: check the `window_pruned` trace event's `status`.
         """
         if not routes:
             return None

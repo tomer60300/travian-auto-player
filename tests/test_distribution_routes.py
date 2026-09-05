@@ -362,6 +362,19 @@ class TestForeignTribute:
         with pytest.raises(ValidationError, match="off a 401-wide map"):
             PlanRequest.model_validate(payload)
 
+    def test_a_target_on_one_of_your_own_tiles_is_an_input_error(self):
+        """A Travian tile holds one village, so a foreign obligation at a
+        village's own coordinates is a typo -- and it surfaced as unmet crop:
+        the sender at that tile has a zero hop to it, which `_destinations`
+        drops as "the village itself", so the rate came back outstanding with
+        nothing saying why. Name the village instead."""
+        payload = self._body().model_dump()
+        payload["foreign_targets"] = [
+            {"name": "Ally-Keep", "x": 10, "y": 0, "crop_per_hour": 1_000.0}
+        ]
+        with pytest.raises(ValidationError, match="11"):
+            PlanRequest.model_validate(payload)
+
     def test_the_widest_legal_coordinate_is_still_accepted(self):
         """The boundary: -200..+200 is the whole of a 401-wide world."""
         payload = self._body().model_dump()
