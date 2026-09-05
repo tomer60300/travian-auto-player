@@ -1501,6 +1501,10 @@ h1, h2, h3 {
   background-color: rgba(0,97,164,0.1);
   color: var(--info);
 }
+.result-box-warning {
+  background-color: rgba(125,87,0,0.12);
+  color: var(--warning);
+}
 
 /* ── Report Rows ── */
 

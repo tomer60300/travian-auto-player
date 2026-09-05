@@ -144,21 +144,28 @@ export default function VideoRewards() {
           }
         }
 
+        // Danger at zero successes, warning on a partial, success only when
+        // nothing failed -- "Completed" means the request returned, not that
+        // what it did succeeded.
+        const tone = successCount === 0 ? 'danger' : failCount > 0 ? 'warning' : 'success'
         setClaimAllResult({
-          success: true,
+          tone,
           message: `Completed: ${successCount} succeeded, ${failCount} failed`,
         })
+        if (tone === 'success') toast.success('Claim all completed!')
+        else if (tone === 'warning') toast.warning('Claim all: some rewards could not be claimed')
+        else toast.error('Claim all: no rewards could be claimed')
       } else {
         // Simple response
         const message = data?.message || 'All production boosts claimed!'
-        setClaimAllResult({ success: true, message })
+        setClaimAllResult({ tone: 'success', message })
+        toast.success('Claim all completed!')
       }
 
-      toast.success('Claim all completed!')
       useGameStore.getState().fetchResources()
     } catch (err) {
       const message = err.response?.data?.detail || err.response?.data?.message || 'Failed to claim all rewards'
-      setClaimAllResult({ success: false, message })
+      setClaimAllResult({ tone: 'danger', message })
       toast.error(message)
     } finally {
       setClaimingAll(false)
@@ -214,9 +221,7 @@ export default function VideoRewards() {
         {/* Result */}
         {claimAllResult && (
           <div
-            className={`text-sm mt-3 px-3 py-2 rounded result-box ${
-              claimAllResult.success ? 'result-box-success' : 'result-box-danger'
-            }`}
+            className={`text-sm mt-3 px-3 py-2 rounded result-box result-box-${claimAllResult.tone}`}
           >
             {claimAllResult.message}
           </div>
