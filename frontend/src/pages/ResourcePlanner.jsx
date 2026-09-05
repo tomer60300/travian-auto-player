@@ -354,6 +354,13 @@ const LS_RESERVED_WINDOW = 'planner_reserved_window'
 // and the next run left every out-of-window firing live in the game. The
 // criterion that earned `reserved_window` its v9 bump, met harder.
 const LS_PRUNE_TO_WINDOW = 'planner_prune_to_window'
+// Whether the operator has MEASURED the merchant model against the game rather
+// than accepted the shipped figures. Owned in the strictest sense: it records
+// work done IN THE GAME that the game does not record, and no amount of
+// re-reading the account could recover it -- a measured +20%/level looks
+// exactly like an untouched one, which is the whole reason the finding it
+// silences cannot be cleared by doing what it asks.
+const LS_MERCHANT_MEASURED = 'planner_merchant_measured'
 
 // Only complete rows go to the backend: a half-typed target would 422 the
 // whole request, and the operator is mid-edit, not in error. Shared by the
@@ -967,6 +974,13 @@ export default function ResourcePlanner() {
   const [profiles, setProfiles] = useState({ [DEFAULT_PROFILE]: {} })
   const [activeProfile, setActiveProfile] = useState(DEFAULT_PROFILE)
   const [merchantModel, setMerchantModel] = useState(DEFAULT_MERCHANT_MODEL)
+  // The operator saying they read the base capacity and the Trade Office bonus
+  // off the game's Marketplace send form. MERCHANT_MODEL_UNCALIBRATED tests
+  // "still equal to the shipped 0.20", which a MEASURED 0.20 also satisfies, so
+  // without this the finding could never be cleared by taking the very reading
+  // it asks for. OFF by default: the finding is right about an untouched
+  // account, and a box that arrived ticked would silence it for everyone.
+  const [merchantModelMeasured, setMerchantModelMeasured] = useState(false)
   // Villages outside the account that are owed crop. Hand-entered, because
   // nothing in the game tells us about them, and cached per account like the
   // Trade Office levels are.
@@ -1130,6 +1144,10 @@ export default function ResourcePlanner() {
       setMaxBusy({})
       setActiveProfile(DEFAULT_PROFILE)
       setMerchantModel(DEFAULT_MERCHANT_MODEL)
+      // A reading taken against one account says nothing about another's, and
+      // this one is about the WORLD's Trade Office scaling -- which a second
+      // account may not even share.
+      setMerchantModelMeasured(false)
       setSelected({})
       setPlan(null)
       // The load report names villages from the snapshot it was matched
@@ -1165,6 +1183,10 @@ export default function ResourcePlanner() {
     // non-boolean is read as the default rather than coerced -- `Boolean('no')`
     // is true, and this switch deletes game rows.
     setPruneToWindow(loadJson(`${LS_PRUNE_TO_WINDOW}::${accountKey}`, true) !== false)
+    // `=== true`, not truthy: a stored "yes" from a hand-edited origin would
+    // otherwise silence a finding about the figure that sizes every cargo, and
+    // the server's own field is `StrictBool` for the same reason.
+    setMerchantModelMeasured(loadJson(`${LS_MERCHANT_MEASURED}::${accountKey}`, false) === true)
     setCropCeilings(loadJson(`${LS_CROP_CEILING}::${accountKey}`, {}))
     setShipOnlyTo(loadJson(`${LS_SHIP_ONLY_TO}::${accountKey}`, {}))
     setRelayFor(loadJson(`${LS_RELAY_FOR}::${accountKey}`, {}))
@@ -1279,6 +1301,10 @@ export default function ResourcePlanner() {
     if (hydratedKey && hydratedKey === accountKey)
       saveJson(storageKey(LS_PRUNE_TO_WINDOW), pruneToWindow)
   }, [pruneToWindow, hydratedKey, accountKey, storageKey])
+  useEffect(() => {
+    if (hydratedKey && hydratedKey === accountKey)
+      saveJson(storageKey(LS_MERCHANT_MEASURED), merchantModelMeasured)
+  }, [merchantModelMeasured, hydratedKey, accountKey, storageKey])
   // A day-check result is a pure function of these inputs; the moment any of
   // them changes it describes a day that will never happen. Without this, the
   // green all-clear banner could sit on screen after the operator changed
@@ -1654,6 +1680,12 @@ export default function ResourcePlanner() {
       // localStorage -- so an operator who turned it off got it back ON after
       // a reload and the next run left every out-of-window firing in place.
       pruneToWindow,
+      // The reading taken in the game, and v11. The one field here nothing
+      // could re-derive: a measured +20%/level is indistinguishable from an
+      // untouched one, which is exactly why MERCHANT_MODEL_UNCALIBRATED cannot
+      // tell them apart -- so dropped, the operator is asked again on every
+      // plan for a reading they have already taken.
+      merchantModelMeasured,
       merchantModel,
       foreignTargets,
       exportedAt: new Date().toISOString(),
@@ -1695,6 +1727,11 @@ export default function ResourcePlanner() {
     // counts. Counting either unconditionally would make this guard unreachable.
     if (document.prune_to_window === false) parts.push('the window prune')
     if (merchantModelIsCalibrated(document.merchant_model)) parts.push('the merchant model')
+    // Content on its own, unlike the two above it: the document carries this
+    // field ONLY when it is true, and true is a reading somebody took in the
+    // game. It is also the one answer here that nothing could re-derive, so a
+    // page holding nothing else still has something worth saving.
+    if (document.merchant_model_measured) parts.push('the merchant model reading')
     if (!parts.length) {
       toast.error(
         'Nothing typed yet — fill in a Trade Office level, crop alert or allocation first'
@@ -1721,6 +1758,7 @@ export default function ResourcePlanner() {
     profileOvernight,
     reservedWindow,
     pruneToWindow,
+    merchantModelMeasured,
     merchantModel,
     foreignTargets,
     accountKey,
@@ -1769,6 +1807,7 @@ export default function ResourcePlanner() {
         overnight: profileOvernight,
         reservedWindow,
         pruneToWindow,
+        merchantModelMeasured,
         foreignTargets,
       })
       setTradeOffice(merged.tradeOffice)
@@ -1794,6 +1833,12 @@ export default function ResourcePlanner() {
       // Same rule: a v9 document says nothing about the prune, so loading one
       // must not switch it. `mergeSetup` has already decided that.
       setPruneToWindow(merged.pruneToWindow)
+      // And the same rule again: a v10 document says nothing about the reading,
+      // so loading one must not clear an acknowledgement on screen. Set BEFORE
+      // the merchant model below it, because writing those boxes through the
+      // page's own handlers is what unticks this -- and a document is not an
+      // operator editing a figure.
+      setMerchantModelMeasured(merged.merchantModelMeasured)
       // Capacity is server-calibrated, so a file that carries a calibration is
       // more trustworthy than this build's default. Absent, the default stands.
       if (merged.merchantModel) {
@@ -1840,6 +1885,7 @@ export default function ResourcePlanner() {
       profileWindows,
       reservedWindow,
       pruneToWindow,
+      merchantModelMeasured,
       foreignTargets,
       toast,
     ]
@@ -5454,6 +5500,43 @@ export default function ResourcePlanner() {
                 </label>
               </div>
             </details>
+            {/* The acknowledgement, and the only control on this row that is not
+                a figure. MERCHANT_MODEL_UNCALIBRATED is an EQUALITY TEST against
+                the shipped 0.20, so it cannot tell a measured 0.20 from an
+                untouched one -- and an operator who read a Marketplace capacity
+                at two Trade Office levels, found the default right and typed it
+                back got the same warning for ever, asking them to do the thing
+                they had just done.
+
+                `basis-full` so it owns its own line in this wrapping row: the
+                label is a sentence and a sentence's max-content width would push
+                the row past 375px. It is also what makes the LABEL the tap
+                target -- clicking anywhere on it toggles the box -- which is how
+                a native checkbox reaches 44px without a 44px checkbox. */}
+            <div className="flex items-start gap-2 basis-full">
+              <label className="flex items-start gap-2 pointer-coarse:min-h-11">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={merchantModelMeasured}
+                  onChange={(e) => setMerchantModelMeasured(e.target.checked)}
+                />
+                <span className="text-primary">
+                  I read the base capacity and the bonus off the Marketplace send form
+                </span>
+              </label>
+              <Why label="I read the base capacity and the bonus off the Marketplace send form">
+                Open the Marketplace in a village with no Trade Office and read the cargo one
+                merchant carries; that is the base capacity. Read it again in a village that has
+                one and the difference over its level is the bonus. Without this the plan warns
+                that the Trade Office slope was <strong>never measured</strong> — and it cannot
+                tell a measured +20%/level from the shipped one, so agreeing with the default
+                would leave the warning up for ever. Ticking it{' '}
+                <strong>changes no number</strong>: it silences that one finding and nothing
+                else. Editing either figure afterwards unticks it, because the reading no longer
+                describes what is in the box.
+              </Why>
+            </div>
           </div>
 
           {/* Villages outside the account that are owed crop. Kept in their own
