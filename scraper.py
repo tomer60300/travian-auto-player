@@ -14,7 +14,7 @@ import os
 from datetime import datetime
 
 BASE = "https://ts1.x1.europe.travian.com"
-JWT = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI2WFMyTDJncVg3bFdUWTFvbGllZGc0dm5xcG5hQjFZViIsImF1ZCI6IjdkOTQ1ODAwLTExOTEtMTFmMS02NTAxLTAxMDAwMDAwNWU0YyIsImV4cCI6MTc3Mzk0MDAzNCwicHJvcGVydGllcyI6eyJoYXNoIjoiYzRlNWM0ZTVjNGU1YzRlNTJrb2VBQldyd25iV0pySmIiLCJtb2JpbGVPcHRpbWl6YXRpb25zIjp0cnVlLCJsb2JieSI6dHJ1ZSwiZGlkIjo2OTEzMCwibGFuZ3VhZ2UiOiJlbi1VUyIsInZpbGxhZ2VQZXJzcGVjdGl2ZSI6InBlcnNwZWN0aXZlQnVpbGRpbmdzIn19.FF2M-ILhaDObJoC2N_UW8-9UozI-9DVjeoOTzNQiyxFKGRKeddDQo1sNODyyTawUPd-Op-viDM3bJgPfVFFvRFmqlzsbhh7kSqICFP2koGZkvMO2Ulvoiz4AtN2fgWqMgW3my3Yvj8dCg5OiqoBG7YB-Ok6tUYGjZZZHBwTXph9nEPiNOQf7ypsFsHa4F0b3JuSw9O9tE0qSZnBtEr013kjDrMdOalYjaK6VHG0twuqzkzkWgd0fSUmjf0YdcPNt_9keK0__1UreGEsEG9KX-1LGEPxFiN9LUKqFpmMXDcg5BLEoyk7VEifSwo25sVoOc9iRP8ulpoMKCSnX8Dftog"
+JWT = "REDACTED - this token was committed to a public repository and must be rotated; supply it from the environment instead"
 
 COOKIES = {"JWT": JWT}
 HEADERS = {"Content-Type": "application/json", "X-Version": "389"}
