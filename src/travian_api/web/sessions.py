@@ -8,7 +8,6 @@ so that cookie jars, JWT tokens, and stealth state never leak between users.
 import asyncio
 import hashlib
 import logging
-import os
 import tempfile
 import time
 from datetime import UTC
@@ -32,6 +31,7 @@ from travian_api.services.reports_service import ReportsService
 from travian_api.services.target_resolver import TargetResolver
 from travian_api.services.trade_route_service import TradeRouteService
 from travian_api.services.video_reward_service import VideoRewardService
+from travian_api.session_dirs import harden_session_dir
 from travian_api.web.auth import get_current_user
 from travian_api.web.models.db import User, get_db
 from travian_api.web.url_guard import ensure_safe_server_url
@@ -58,10 +58,7 @@ class TravianSession:
         identity = hashlib.sha256(f"{server_url.rstrip('/')}|{username}".encode()).hexdigest()[:16]
         self._data_dir = _SESSION_DATA_DIR / str(user_id) / identity
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self._data_dir, 0o700)
-        except OSError:
-            pass  # Windows ACL may not support chmod
+        harden_session_dir(self._data_dir)
 
         # ── Isolated Settings ─────────────────────────────────────────
         # Start from a default Settings (reads .env for stealth config) then

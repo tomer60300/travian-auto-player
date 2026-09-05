@@ -60,6 +60,7 @@ from urllib.parse import urlparse
 from ..clients.http_client import HttpClient
 from ..config import Settings
 from ..services.auth_service import AuthService
+from ..session_dirs import harden_session_dir
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,8 @@ class ReconAccount:
         # multiple Travian worlds in a single deployment.
         data_dir = _RECON_DATA_DIR / _server_slug(self.server_url)
         data_dir.mkdir(parents=True, exist_ok=True)
+        # Same tree, same exposure, and this one hardened nothing at all.
+        harden_session_dir(data_dir)
 
         settings = Settings().model_copy(
             update={
