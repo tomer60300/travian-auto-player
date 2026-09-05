@@ -1628,6 +1628,23 @@ never been measured on this server, which is why the field is not called
 `merchant_model_measured`: a name that claimed the whole model would have let
 the unmeasured half ride along on the operator's tick.
 
+**Absence is never finalised from an unstable pair.** The stabilising read
+already stopped an unsettled marketplace from being *deleted* from; it did not
+stop the same page producing a *verdict*. With the two reads disagreeing, "the
+later read classifies" still let a create the game was a moment slow to show be
+recorded as **refused** — and a refusal releases its rows back to the budget,
+drops the destination into the consecutive-failure streak and can stop the whole
+run, all over a route that then appears. A create whose answer died and whose
+rows are absent on a page that would not hold still is now
+**`indeterminate`**: a fourth action status, distinct from `failed` (the game
+refused it) and from `created_unverified` (the write was *accepted*). Its row
+charge stands, the streak ignores it — neither counted nor breaking a genuine
+streak — the destination is named in `problems`, and the next run settles it
+against a freshly read marketplace, where an existing row already satisfies the
+plan. `read_back_disagreed` now carries **both snapshots**, not just a reason
+string: when nothing on a page is final, the recovery question is which rows
+moved between the two reads, and only the rows answer it.
+
 **Going live for the first time is its own document.**
 [`docs/26-first-live-run.md`](26-first-live-run.md) is the step-by-step
 protocol these fixes earned — what to settle before anything touches the game,

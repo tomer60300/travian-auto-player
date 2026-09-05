@@ -2295,6 +2295,182 @@ class TestTheMarketplaceIsSteadyBeforeAnythingIsDeleted:
         assert summary.needs_attention is True
 
 
+def _three_destination_account():
+    """One origin, three OWN destinations, so all three match by village id."""
+    return _account(
+        [
+            _row_with_cycle(20003, 20011, 6, 100),
+            _row_with_cycle(20003, 20019, 6, 700),
+            _row_with_cycle(20003, 20021, 6, 400),
+        ],
+        {20003: (0, 0), 20011: (10, 0), 20019: (20, 0), 20021: (30, 0)},
+        {20003: "03", 20011: "11", 20019: "19", 20021: "21"},
+    )
+
+
+class _AnswerDies(_FakeLiveSvc):
+    """The game's ANSWER to a create dies for chosen destinations.
+
+    `create_route` maps a reset connection, a session-expiry redirect and a curl
+    failure all to `failed`, and none of them is evidence that nothing was
+    created -- which is exactly why the read-back is what settles them.
+    """
+
+    def __init__(self, dead=(), **kw):
+        super().__init__(**kw)
+        self._dead = set(dead)
+
+    async def create_route(self, route, *, stop_check=None):
+        from travian_api.services.trade_route_service import RouteActionResult
+
+        if route.dest_village_id in self._dead:
+            return RouteActionResult(
+                route.origin_village_id,
+                route.dest_x,
+                route.dest_y,
+                "failed",
+                "connection reset (test)",
+            )
+        return await super().create_route(route, stop_check=stop_check)
+
+
+class _UnsettledPage(_AnswerDies):
+    """A marketplace whose first read lags the writes and whose second does not.
+
+    The first read is short one row, so the run's own expectation check fails and
+    the stabilising read is taken; the second read shows the row, so the two
+    snapshots disagree and nothing on this page can be finalised.
+    """
+
+    def __init__(self, dead=(), **kw):
+        super().__init__(dead=dead, **kw)
+        self._reads = 0
+
+    async def confirm_routes(self, vid, *, map_span=None):
+        rows = await super().confirm_routes(vid, map_span=map_span)
+        self._reads += 1
+        if self._reads == 1:
+            return rows[:-1]
+        return rows
+
+
+class TestAbsenceIsNeverFinalisedFromAnUnstablePair:
+    """A create is only refused when the page that says so held still.
+
+    The stabilising read already stops an unsettled page from being DELETED
+    from. It did not stop the same page from producing a VERDICT: with the two
+    reads disagreeing, "the later read classifies" still let a create the game
+    was slow to show be recorded as refused an instant before it appeared -- and
+    a refusal releases its rows back to the budget, drops the destination into
+    the failure streak and can stop the whole run.
+
+    Absence measured on a page that would not hold still is not evidence. The
+    action becomes `indeterminate`: the row charge stands, the streak ignores it,
+    and the NEXT run's inventory settles it -- a run that reads a real
+    marketplace and treats an existing row as satisfied. Presence is still
+    accepted, because a row that is demonstrably there is not ambiguous.
+    """
+
+    def test_an_absent_create_on_an_unstable_page_is_indeterminate(self):
+        svc = _UnsettledPage(dead={20019, 20021})
+        res = _run_live(
+            svc, _three_destination_account(), max_routes_per_run=50, max_game_rows_per_run=0
+        )
+
+        by_dest = {a.destination: a for a in res.actions}
+        assert by_dest[20011].status == "created", by_dest[20011].detail
+        assert by_dest[20019].status == "indeterminate", by_dest[20019].detail
+        assert by_dest[20021].status == "indeterminate", by_dest[20021].detail
+        assert res.not_created == 0, "an unsettled page never proves a create was refused"
+
+    def test_presence_is_still_accepted_on_an_unstable_page(self):
+        """Attribution of a row that is DEMONSTRABLY there is not ambiguous, so
+        the create that made it is still promoted."""
+
+        class _LandsAnyway(_UnsettledPage):
+            async def create_route(self, route, *, stop_check=None):
+                from travian_api.services.trade_route_service import RouteActionResult
+
+                if route.dest_village_id in self._dead:
+                    # The rows appear; only the ANSWER died.
+                    await _FakeLiveSvc.create_route(self, route)
+                    return RouteActionResult(
+                        route.origin_village_id,
+                        route.dest_x,
+                        route.dest_y,
+                        "failed",
+                        "connection reset (test)",
+                    )
+                return await _FakeLiveSvc.create_route(self, route, stop_check=stop_check)
+
+        svc = _LandsAnyway(dead={20019})
+        res = _run_live(
+            svc, _three_destination_account(), max_routes_per_run=50, max_game_rows_per_run=0
+        )
+
+        by_dest = {a.destination: a for a in res.actions}
+        assert by_dest[20019].status == "created", by_dest[20019].detail
+
+    def test_the_row_charge_of_an_indeterminate_create_is_retained(self):
+        """A refusal releases the rows it was charged for; an indeterminate one
+        must not, or the next origin spends a budget that may already be in the
+        game."""
+        account = _account(
+            [
+                _row_with_cycle(20003, 20011, 6, 100),
+                _row_with_cycle(20003, 20019, 6, 700),
+                _row_with_cycle(20033, 20021, 6, 400),
+            ],
+            {20003: (0, 0), 20011: (10, 0), 20019: (20, 0), 20033: (30, 0), 20021: (40, 0)},
+            {20003: "03", 20011: "11", 20019: "19", 20033: "33", 20021: "21"},
+        )
+        svc = _UnsettledPage(dead={20019})
+        # Exactly two 6h routes' worth of rows: the create that landed spends
+        # four, the indeterminate one holds four, and nothing is left for the
+        # second origin.
+        res = _run_live(svc, account, max_routes_per_run=50, max_game_rows_per_run=8)
+
+        by_dest = {a.destination: a for a in res.actions}
+        assert by_dest[20019].status == "indeterminate", by_dest[20019].detail
+        assert by_dest[20021].status == "deferred", (
+            "the indeterminate create's rows are still charged against the budget"
+        )
+        assert {r.dest_village_id for r in svc.created} == {20011}
+
+    def test_an_indeterminate_create_is_not_a_refusal_in_the_streak(self):
+        """Two dead answers trip the consecutive-failure stop at create time.
+        Settlement cannot confirm either refusal, so the stop it caused is
+        lifted -- an indeterminate is not a refusal in the ledger."""
+        svc = _UnsettledPage(dead={20019, 20021})
+        res = _run_live(
+            svc, _three_destination_account(), max_routes_per_run=50, max_game_rows_per_run=0
+        )
+
+        assert not any("in a row" in p for p in res.problems), res.problems
+        assert not any("stopped early" in p for p in res.problems), res.problems
+
+    def test_both_snapshots_are_in_the_trace(self):
+        svc = _UnsettledPage(dead={20019})
+        res = _run_live(
+            svc, _three_destination_account(), max_routes_per_run=50, max_game_rows_per_run=0
+        )
+
+        disagreed = [e for e in _trace_events(res.trace_path) if e["kind"] == "read_back_disagreed"]
+        assert disagreed, [e["kind"] for e in _trace_events(res.trace_path)]
+        # Two 6h creates land eight rows; the first read is short exactly one.
+        assert len(disagreed[0]["first_rows"]) == 7, disagreed[0]
+        assert len(disagreed[0]["second_rows"]) == 8, disagreed[0]
+        assert "route_id" in disagreed[0]["first_rows"][0], disagreed[0]
+
+    def test_the_indeterminate_destination_is_named_in_problems(self):
+        svc = _UnsettledPage(dead={20019})
+        res = _run_live(
+            svc, _three_destination_account(), max_routes_per_run=50, max_game_rows_per_run=0
+        )
+
+        assert any("19" in p and "could not be settled" in p for p in res.problems), res.problems
+
+
 class TestThePlanCannotEmitTwoRoutesTheReadBackCannotTellApart:
     """The invariant the whole attribution rests on, stated and checked.
 

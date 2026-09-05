@@ -2503,13 +2503,22 @@ class RouteActionResponse(BaseModel):
     # fan-out rather than as the number the trim was supposed to produce.
     live_game_rows: int | None = None
     # would_create | deferred | created | created_unverified | not_created |
-    # re_enabled | updated | skipped | blocked | failed
+    # indeterminate | re_enabled | updated | skipped | blocked | failed
     #
     # `created` means VERIFIED: the marketplace was read back and the route is
     # there. `created_unverified` means the write was accepted but the read-back
     # failed -- probably fine, not confirmed. `not_created` means the game
     # accepted the write and produced no route, which a 200 with an empty body
     # cannot distinguish from success on its own.
+    #
+    # `indeterminate` is the fourth outcome, and it is the honest one: the
+    # create's answer died AND the marketplace could not be read twice the same
+    # way, so absence proves nothing. Distinct from `failed` (the game refused
+    # it, and its rows were released back to the budget) and from
+    # `created_unverified` (the write was ACCEPTED and only the confirmation is
+    # missing). An indeterminate action keeps its row charge, is not counted as
+    # a refusal in the consecutive-failure streak, and is left for the next run
+    # to settle against a freshly read marketplace.
     status: str
     detail: str = ""
 
@@ -5873,6 +5882,30 @@ def _stable_rows(rows: Sequence[ExistingRoute]) -> Counter:
     )
 
 
+def _row_snapshot(rows: Sequence[ExistingRoute]) -> list[dict]:
+    """One read of a marketplace, as the trace records it.
+
+    Exactly the fields `_stable_rows` compares, plus the route id: when two reads
+    disagree the question afterwards is WHICH rows moved, and a reason string
+    cannot answer it. `departure_at` is left out for the same reason it is left
+    out of the comparison -- it advances every time a row fires, so recording it
+    would make every snapshot look different from every other.
+    """
+    return [
+        {
+            "route_id": e.route_id,
+            "dest_village_id": e.dest_village_id,
+            "dest_x": e.dest_x,
+            "dest_y": e.dest_y,
+            "cargo": e.cargo,
+            "dispatch_minute": _row_minute(e),
+            "active": e.active,
+            "visible": e.visible,
+        }
+        for e in rows
+    ]
+
+
 def _as_planned(
     created: list[tuple[RouteActionResponse, PlannedRoute]],
     attempted: list[tuple[RouteActionResponse, PlannedRoute]],
@@ -6627,11 +6660,19 @@ async def post_execute(
 
         `pending` counts as a refusal: at create time that is all the run knows,
         and the read-back promotes it later if it was wrong.
+
+        `indeterminate` counts as neither. The read-back ran and the page would
+        not hold still, so the run has no evidence the game refused anything --
+        and "the game refused N in a row" is a claim about the game. It does not
+        break a genuine streak either: two real refusals with an unsettled
+        attempt between them are still two refusals in a row.
         """
         streak = 0
         for state in reversed(attempt_ledger[: upto + 1]):
             if state == "succeeded":
                 break
+            if state == "indeterminate":
+                continue
             streak += 1
         return streak
 
@@ -8175,6 +8216,8 @@ async def post_execute(
                             # retried.
                             stable_read_back = True
                             _instability = ""
+                            _first = after
+                            _again_rows: list[ExistingRoute] = []
                             if not _as_planned(
                                 created_here, attempted_here, fresh, observed_by_action
                             ) or (body.prune_to_window and (created_here or landed_here)):
@@ -8186,6 +8229,7 @@ async def post_execute(
                                     stable_read_back = False
                                     _instability = f"the second read failed: {exc}"
                                 else:
+                                    _again_rows = _again
                                     if _stable_rows(_again) != _stable_rows(after):
                                         stable_read_back = False
                                         _instability = (
@@ -8204,6 +8248,17 @@ async def post_execute(
                                         "read_back_disagreed",
                                         origin=origin,
                                         reason=_instability,
+                                        # BOTH snapshots, not just the reason.
+                                        # Nothing on this page is finalised, so
+                                        # the recovery question afterwards is
+                                        # which rows moved between the two
+                                        # reads -- and only the rows themselves
+                                        # answer it. `_first` is what the run
+                                        # would have classified from before the
+                                        # stabilising read; `_again` is empty
+                                        # when that read failed outright.
+                                        first_rows=_row_snapshot(_first),
+                                        second_rows=_row_snapshot(_again_rows),
                                     )
                             if (
                                 stable_read_back
@@ -8573,6 +8628,45 @@ async def post_execute(
                             _landed_ids = {id(_a) for _a, _ in landed_here}
                             for action, _route in attempted_here:
                                 if id(action) in _landed_ids:
+                                    continue
+                                if not stable_read_back:
+                                    # ABSENCE measured on a page that would not
+                                    # hold still is not evidence of a refusal.
+                                    # The later read was still allowed to
+                                    # classify here, so a create the game was a
+                                    # moment slow to show was recorded as
+                                    # refused -- which releases its rows back to
+                                    # the budget, drops the destination into the
+                                    # failure streak and can stop the run, all
+                                    # over a route that then appears.
+                                    #
+                                    # So it is settled by nobody this run. The
+                                    # charge STANDS (the rows may be in the
+                                    # game), the streak ignores it, and the next
+                                    # run's inventory decides: it reads the
+                                    # marketplace fresh and treats a row that is
+                                    # there as satisfying the plan.
+                                    action.status = "indeterminate"
+                                    action.detail = (
+                                        "the create's answer died and two reads of the "
+                                        "marketplace did not agree, so whether it landed "
+                                        "is unknown; the next run settles it"
+                                    )
+                                    attempt_ledger[ledger_index[id(action)]] = "indeterminate"
+                                    problems.append(
+                                        f"{village_label(origin, names)} -> "
+                                        f"{action.destination_name}: the create's answer died "
+                                        f"and this marketplace could not be read twice the "
+                                        f"same way, so whether the route exists could not be "
+                                        f"settled. Nothing was assumed either way — check "
+                                        f"this destination, or let the next run reconcile it."
+                                    )
+                                    trace.event(
+                                        "create_indeterminate",
+                                        origin=origin,
+                                        destination=str(_desired_key(_route)),
+                                        rows_still_charged=charged_rows[id(action)],
+                                    )
                                     continue
                                 # The page shows nothing for it, so the game
                                 # really did refuse it and the rows it was
