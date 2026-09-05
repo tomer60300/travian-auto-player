@@ -56,6 +56,7 @@ def _run_end(**overrides) -> dict:
         "created_unverified": 0,
         "not_created": 0,
         "created_game_rows": 0,
+        "live_game_rows": 0,
         "disabled": 0,
         "re_enabled": 0,
         "cargo_updated": 0,
@@ -101,6 +102,27 @@ class TestNormalCompletedRun:
         assert run.created_game_rows == 1
         assert run.problems == 0
         assert run.needs_attention is False
+
+    def test_the_rows_the_run_left_live_are_reported_too(self, tmp_path):
+        # `created_game_rows` counts the fan-out the creates made; the window
+        # trim then removes most of it. What the account is LEFT holding is the
+        # number the row budget is charged in and the one an operator has to
+        # reconcile against -- `trace.close` has recorded it since 456bf02 and
+        # the summary dropped it on the floor, so the history table could only
+        # show the transient figure.
+        _write_trace(
+            tmp_path,
+            "cccccccccccc",
+            [
+                _run_start(),
+                _run_end(created=1, created_game_rows=42, live_game_rows=16),
+            ],
+        )
+
+        run = summarise_runs(tmp_path).runs[0]
+
+        assert run.created_game_rows == 42
+        assert run.live_game_rows == 16
 
 
 class TestUnverifiedCreates:

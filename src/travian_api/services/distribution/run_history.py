@@ -63,6 +63,10 @@ class RunSummary:
     created_unverified: int | None
     not_created: int | None
     created_game_rows: int | None
+    # Rows still on the marketplace when the run ended: the fan-out above
+    # MINUS what the window trim removed. This is the unit the row budget is
+    # charged in and the footprint a later run has to reconcile against.
+    live_game_rows: int | None
     disabled: int | None
     re_enabled: int | None
     cargo_updated: int | None
@@ -183,6 +187,7 @@ def _summarise_one(path: Path) -> RunSummary:
         created_unverified=totals("created_unverified"),
         not_created=totals("not_created"),
         created_game_rows=totals("created_game_rows"),
+        live_game_rows=totals("live_game_rows"),
         disabled=totals("disabled"),
         re_enabled=totals("re_enabled"),
         cargo_updated=totals("cargo_updated"),

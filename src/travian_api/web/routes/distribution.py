@@ -7996,6 +7996,13 @@ class RunSummaryResponse(BaseModel):
     created_unverified: int | None = None
     not_created: int | None = None
     created_game_rows: int | None = None
+    live_game_rows: int | None = Field(
+        default=None,
+        description="Rows this run LEFT on the marketplace -- the fan-out its "
+        "creates made minus the rows the window trim removed. `created_game_rows` "
+        "counts a state the same run destroys; this one is the footprint the "
+        "account is holding.",
+    )
     disabled: int | None = None
     re_enabled: int | None = None
     cargo_updated: int | None = None
@@ -8053,6 +8060,7 @@ def _run_summary_response(run: RunSummary) -> RunSummaryResponse:
         created_unverified=run.created_unverified,
         not_created=run.not_created,
         created_game_rows=run.created_game_rows,
+        live_game_rows=run.live_game_rows,
         disabled=run.disabled,
         re_enabled=run.re_enabled,
         cargo_updated=run.cargo_updated,
