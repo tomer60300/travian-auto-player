@@ -68,7 +68,9 @@ import api from '../api'
 import {
   CONSUMABLE_RESOURCES,
   DEFAULT_BASELINE_FILL,
+  DEFAULT_MERCHANT_MODEL,
   DEFAULT_TARGET_FILL,
+  MAX_DAY_SEGMENTS,
   MAX_MERCHANTS_PER_VILLAGE,
   SetupFileError,
   VILLAGE_ROLES,
@@ -294,20 +296,6 @@ function loadProfiles(accountKey) {
   if (stored && typeof stored === 'object' && Object.keys(stored).length) return stored
   const legacy = loadJson(`${LS_ALLOCATIONS}::${accountKey}`, null)
   return { [DEFAULT_PROFILE]: legacy && typeof legacy === 'object' ? legacy : {} }
-}
-
-// Merchant capacity is server-calibrated (Europe 2 is not a stock server — see
-// docs/25), so it cannot be derived from tribe and defaults to the operator's
-// calibrated Europe 2 Teuton values. Travel SPEED, by contrast, is tribe-derived
-// server-side and travels in the snapshot.
-// The two merchant levers default to the planner's own values, so an account
-// nobody has touched sends what the backend would have used anyway -- exposing
-// them must not change a single plan by itself.
-const DEFAULT_MERCHANT_MODEL = {
-  base_capacity: 2500,
-  bonus_per_to_level: 0.2,
-  merchant_reserve: 2,
-  merchant_headroom: 0.1,
 }
 
 const LS_WINDOWS = 'planner_profile_windows'
@@ -3293,6 +3281,12 @@ export default function ResourcePlanner() {
   // A built plan belongs to the profile it was built from, so switching or
   // editing the set clears it.
   const profileNames = Object.keys(profiles)
+  const profilesAreFull = profileNames.length >= MAX_DAY_SEGMENTS
+  // One sentence for the toast and for the line beside the disabled buttons, so
+  // the refusal and the warning cannot come to say different things.
+  const profileCapReason =
+    `A day holds ${MAX_DAY_SEGMENTS} profiles: a whole-day run plans each one ` +
+    `separately, and the server refuses more. Delete one to make room.`
 
   const windowFor = (name) => profileWindows[name] ?? DEFAULT_WINDOWS[name] ?? null
 
@@ -3394,6 +3388,17 @@ export default function ResourcePlanner() {
       toast.error(`Profile "${name}" already exists`)
       return
     }
+    // The backend bounds a whole-day request at MAX_DAY_SEGMENTS segments, and
+    // a segment is a profile. Refused here so the operator is not told about it
+    // by a pydantic list-length 422 on `body.segments` -- a message that names
+    // no profile and points at no control -- after typing a whole allocation
+    // set into the profile that will not fit. The controls are disabled too;
+    // this is the authoritative half, because the dialog can be confirmed with
+    // Enter from a state the render did not catch up with.
+    if (profileNames.length >= MAX_DAY_SEGMENTS) {
+      toast.error(profileCapReason)
+      return
+    }
     setProfiles((prev) => ({ ...prev, [name]: {} }))
     setActiveProfile(name)
     setPlan(null)
@@ -3403,6 +3408,12 @@ export default function ResourcePlanner() {
     if (!name) return
     if (profiles[name]) {
       toast.error(`Profile "${name}" already exists`)
+      return
+    }
+    // Duplicating makes a profile too, so it takes the same ceiling. Renaming
+    // does not, and deleting is the way back under it.
+    if (profileNames.length >= MAX_DAY_SEGMENTS) {
+      toast.error(profileCapReason)
       return
     }
     setProfiles((prev) => ({
@@ -3779,10 +3790,20 @@ export default function ResourcePlanner() {
             </option>
           ))}
         </select>
-        <button className="btn-secondary btn-xs" onClick={() => askForProfileName('add')}>
+        <button
+          className="btn-secondary btn-xs"
+          disabled={profilesAreFull}
+          aria-describedby={profilesAreFull ? 'profile-cap' : undefined}
+          onClick={() => askForProfileName('add')}
+        >
           + New
         </button>
-        <button className="btn-secondary btn-xs" onClick={() => askForProfileName('duplicate')}>
+        <button
+          className="btn-secondary btn-xs"
+          disabled={profilesAreFull}
+          aria-describedby={profilesAreFull ? 'profile-cap' : undefined}
+          onClick={() => askForProfileName('duplicate')}
+        >
           Duplicate
         </button>
         <button className="btn-secondary btn-xs" onClick={() => askForProfileName('rename')}>
@@ -3795,6 +3816,14 @@ export default function ResourcePlanner() {
         >
           Delete
         </button>
+        {/* Why the two makers are off, at the control and before it is pressed.
+            The alternative was a 422 on `body.segments` that names no profile
+            and arrives after the work has been done. */}
+        {profilesAreFull && (
+          <span id="profile-cap" className="text-warning" role="status">
+            {profileCapReason}
+          </span>
+        )}
         {/* The hours this profile actually runs. Profiles are separate plans,
             but the account lives through all of them every day; without hours
             the full-day check cannot line them up.

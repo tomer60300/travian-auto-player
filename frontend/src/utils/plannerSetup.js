@@ -169,6 +169,59 @@ export const READABLE_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 /** Matches the Trade Office input's own bounds, and the backend's `le=20`. */
 export const MAX_TRADE_OFFICE_LEVEL = 20
 
+/** The four account-wide merchant levers, as the planner itself defaults them.
+ *
+ * A second copy of four backend values, and the sharpest of the duplicated
+ * defaults in this app: the page seeds its boxes from here and then sends all
+ * four EXPLICITLY on every request, so a change to a backend default would be
+ * silently overridden by whatever this constant last said. The other copies at
+ * least fall back.
+ *
+ * Their twins, one file and line each:
+ *   * `base_capacity` / `bonus_per_to_level` -- `EUROPE2_TEUTON` in
+ *     `src/travian_api/services/distribution/merchants.py:102`, which is what
+ *     `PlanRequest.merchant_base_capacity` and
+ *     `PlanRequest.trade_office_bonus_per_level` default to.
+ *   * `merchant_reserve` -- `DEFAULT_MERCHANT_RESERVE` in
+ *     `src/travian_api/services/distribution/optimizer.py:96`.
+ *   * `merchant_headroom` -- `DEFAULT_MERCHANT_HEADROOM` in
+ *     `src/travian_api/services/distribution/optimizer.py:119`.
+ *
+ * Capacity is SERVER-CALIBRATED (Europe 2 is not a stock server), so it cannot
+ * be derived from the tribe and these are the operator's calibrated Europe 2
+ * Teuton values -- 2,500 only recently stopped being 2,200. Travel speed, by
+ * contrast, is tribe-derived server-side and travels in the snapshot, which is
+ * why it is not here.
+ *
+ * Moved out of the page so a literal test can hold it: a duplicated default
+ * that nothing asserts is a default that has already drifted. */
+export const DEFAULT_MERCHANT_MODEL = Object.freeze({
+  base_capacity: 2500,
+  bonus_per_to_level: 0.2,
+  merchant_reserve: 2,
+  merchant_headroom: 0.1,
+})
+
+/** How many allocation profiles one day can hold.
+ *
+ * The backend's twin is `MAX_DAY_SEGMENTS` in
+ * `src/travian_api/web/routes/distribution.py`, where it bounds
+ * `DayCheckRequest.segments` and `ExecuteRequest.segments` with
+ * `max_length=MAX_DAY_SEGMENTS`. Its own note gives the reason, and it is cost
+ * rather than arithmetic: each segment is its own optimizer run.
+ *
+ * A whole-day request carries one segment per profile, so this is the profile
+ * ceiling too -- and nothing on the page knew it. A thirteenth profile was
+ * created happily and the next full-day check came back as a pydantic
+ * list-length 422 about `body.segments`: a message that names no profile,
+ * points at no control, and arrives after a whole allocation set has been typed
+ * into the profile that will not fit.
+ *
+ * Pinned by a literal on both sides, like `MAX_TRADE_OFFICE_LEVEL` and
+ * `MAX_MERCHANTS_PER_VILLAGE`: a bound copied across a wire with nothing
+ * asserting the copy is a bound that has already drifted. */
+export const MAX_DAY_SEGMENTS = 12
+
 /** Travian's hard ceiling on merchants in one village (profile section 8).
  *
  * The only bound on a merchant cap a FILE can check. The real bound is that

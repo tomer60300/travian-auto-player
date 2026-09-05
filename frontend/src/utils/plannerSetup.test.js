@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import {
   DEFAULT_BASELINE_FILL,
+  DEFAULT_MERCHANT_MODEL,
   DEFAULT_TARGET_FILL,
+  MAX_DAY_SEGMENTS,
+  MAX_MERCHANTS_PER_VILLAGE,
+  MAX_STOCK_FLOOR_FRACTION,
+  MAX_TRADE_OFFICE_LEVEL,
+  TRAVIAN_REPEAT_INTERVALS,
   SETUP_FORMAT,
   SETUP_VERSION,
   SetupFileError,
@@ -3270,5 +3276,93 @@ describe('describeRelayPermission', () => {
   it('does not guess a direction from a crop rate it could not read', () => {
     expect(describeRelayPermission({ role: null, cropPerHour: null })).toBe('From the crop sign')
     expect(describeRelayPermission({})).toBe('From the crop sign')
+  })
+})
+
+
+// ─── Values this file keeps a second copy of ────────────────────────────────
+//
+// Each one is a Python constant restated in JavaScript because the wire cannot
+// carry it: the page has to seed a box, bound an input or cap a control before
+// any request is made. That is legitimate, and it is also how 25/60 came to sit
+// on screen while the server measured against 30/80 -- a copy nobody asserted.
+//
+// So every copy is pinned to a LITERAL here, with its twin named by file and
+// line. A literal is the only assertion that fails when the number moves;
+// comparing the constant to itself is a tautology, and comparing it to an
+// import of the same module is the same tautology with more steps. The backend
+// agent adds the mirror pytest, so a change on either side breaks a test on
+// that side.
+describe('the backend values this build keeps a second copy of', () => {
+  // THE SHARPEST OF THEM. The page seeds its four merchant boxes from this and
+  // then sends all four EXPLICITLY on every request, so a change to a backend
+  // default is silently overridden by whatever this last said -- the other
+  // copies at least fall back to the server's own value.
+  it('DEFAULT_MERCHANT_MODEL matches the four levers the planner defaults to', () => {
+    // base_capacity / bonus_per_to_level: `EUROPE2_TEUTON` in
+    // src/travian_api/services/distribution/merchants.py:102, which is what
+    // `PlanRequest.merchant_base_capacity` and
+    // `PlanRequest.trade_office_bonus_per_level` default to
+    // (src/travian_api/web/routes/distribution.py:757-758).
+    expect(DEFAULT_MERCHANT_MODEL.base_capacity).toBe(2500)
+    expect(DEFAULT_MERCHANT_MODEL.bonus_per_to_level).toBe(0.2)
+    // src/travian_api/services/distribution/optimizer.py:96
+    expect(DEFAULT_MERCHANT_MODEL.merchant_reserve).toBe(2)
+    // src/travian_api/services/distribution/optimizer.py:119
+    expect(DEFAULT_MERCHANT_MODEL.merchant_headroom).toBe(0.1)
+    // Four levers, no more: merchant SPEED is tribe-derived server-side and
+    // arrives in the snapshot, so a default for it here would be a guess about
+    // a fact the account already states.
+    expect(Object.keys(DEFAULT_MERCHANT_MODEL).sort()).toEqual([
+      'base_capacity',
+      'bonus_per_to_level',
+      'merchant_headroom',
+      'merchant_reserve',
+    ])
+  })
+
+  // Twin: `DAILY_BEAT_CYCLES` in
+  // src/travian_api/services/distribution/merchants.py:41.
+  //
+  // A closed set, not a range: Travian's "repeat every N hours" fans out into
+  // 24/N daily rows, so only the divisors of 24 are expressible at all. A cycle
+  // the create payload cannot express comes back from the game on some other
+  // interval entirely.
+  it('TRAVIAN_REPEAT_INTERVALS matches DAILY_BEAT_CYCLES', () => {
+    expect([...TRAVIAN_REPEAT_INTERVALS]).toEqual([1, 2, 3, 4, 6, 8, 12, 24])
+  })
+
+  // Twin: the `le=0.95` on `stock_floor_fraction`
+  // (src/travian_api/web/routes/distribution.py:474 and :3231).
+  //
+  // Below 1 by a real margin, because a floor at the warehouse cap leaves NPC
+  // nothing to convert out of and the village simply stops trading.
+  it('MAX_STOCK_FLOOR_FRACTION matches the request bound', () => {
+    expect(MAX_STOCK_FLOOR_FRACTION).toBe(0.95)
+  })
+
+  // Twin: `MAX_DAY_SEGMENTS` in
+  // src/travian_api/web/routes/distribution.py:161, the `max_length` on
+  // `DayCheckRequest.segments` and `ExecuteRequest.segments`.
+  it('MAX_DAY_SEGMENTS matches the segment ceiling', () => {
+    expect(MAX_DAY_SEGMENTS).toBe(12)
+  })
+
+  // The two already pinned when this block was written, kept here so the whole
+  // set reads in one place.
+  it('MAX_TRADE_OFFICE_LEVEL and MAX_MERCHANTS_PER_VILLAGE match their bounds', () => {
+    // `le=20` on `trade_office_level`, and Travian's own ceiling on merchants
+    // in one village.
+    expect(MAX_TRADE_OFFICE_LEVEL).toBe(20)
+    expect(MAX_MERCHANTS_PER_VILLAGE).toBe(20)
+  })
+
+  // The fourth copy, which had neither a note nor a test until the night
+  // profile landed: the boxes defaulted to 30/80 while the server measured
+  // against 25/60, so the derivation aimed at one night and the report
+  // described another.
+  it('the fill pair matches night_profile.py', () => {
+    expect(DEFAULT_BASELINE_FILL).toBe(0.25)
+    expect(DEFAULT_TARGET_FILL).toBe(0.6)
   })
 })
