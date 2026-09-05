@@ -55,6 +55,7 @@ export default function DayNightPanel({
   profileNames,
   activeProfile,
   profileWindows,
+  defaultWindows,
   profileAttendance,
   profileOvernight,
   attendanceRequired,
@@ -201,7 +202,17 @@ export default function DayNightPanel({
           </thead>
           <tbody>
             {profileNames.map((name) => {
-              const hours = profileWindows[name] ?? null
+              // `profileWindows[name] ?? defaultWindows[name]`, which is what
+              // `buildSegments` resolves and what the profile bar's own editor
+              // shows. Reading only the stored map made this table the one
+              // place on the page that disagreed with the plan: a fresh
+              // account's Day profile rendered two blank boxes and "skipped by
+              // the day check" while the request planned it at 07:00-23:00.
+              //
+              // Only an ABSENT key falls back. A pair the operator cleared is
+              // `['', '']`, which is not nullish, so clearing the hours still
+              // means what it says -- and the profile really is skipped.
+              const hours = profileWindows[name] ?? defaultWindows?.[name] ?? null
               const pair = dispatchWindowFor(hours)
               const share = windowDayShare(hours)
               const answer = attendanceFor(profileAttendance, name)
@@ -253,7 +264,7 @@ export default function DayNightPanel({
                     <span className="inline-flex items-center gap-1">
                       <input
                         type="time"
-                        aria-label={`${name} window start`}
+                        aria-label={`${name} window start, day and night table`}
                         className="input-field text-xs py-0.5 px-1 w-auto"
                         value={(hours ?? ['', ''])[0]}
                         onChange={(e) => onWindow(name, [e.target.value, (hours ?? ['', ''])[1]])}
@@ -261,7 +272,7 @@ export default function DayNightPanel({
                       <span className="text-secondary">–</span>
                       <input
                         type="time"
-                        aria-label={`${name} window end`}
+                        aria-label={`${name} window end, day and night table`}
                         className="input-field text-xs py-0.5 px-1 w-auto"
                         value={(hours ?? ['', ''])[1]}
                         onChange={(e) => onWindow(name, [(hours ?? ['', ''])[0], e.target.value])}

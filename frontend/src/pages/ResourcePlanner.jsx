@@ -3839,7 +3839,7 @@ export default function ResourcePlanner() {
           runs
           <input
             type="time"
-            aria-label={`${activeProfile} window start`}
+            aria-label={`${activeProfile} window start, profile bar`}
             className="input-field text-xs py-0.5 px-1 w-auto"
             value={(windowFor(activeProfile) ?? ['', ''])[0]}
             onChange={(e) =>
@@ -3852,7 +3852,7 @@ export default function ResourcePlanner() {
           –
           <input
             type="time"
-            aria-label={`${activeProfile} window end`}
+            aria-label={`${activeProfile} window end, profile bar`}
             className="input-field text-xs py-0.5 px-1 w-auto"
             value={(windowFor(activeProfile) ?? ['', ''])[1]}
             onChange={(e) =>
@@ -4505,6 +4505,18 @@ export default function ResourcePlanner() {
                                   >
                                     <input
                                       type="checkbox"
+                                      // The row it belongs to, in the name.
+                                      // The enclosing `role="group"` carries
+                                      // the same context, but a group label is
+                                      // not part of a checkbox's accessible
+                                      // name -- it is announced on ENTERING
+                                      // the group, which is exactly what is
+                                      // missing when the user tabs into the
+                                      // middle of one or navigates by control.
+                                      // On this account the visible label is
+                                      // "11" on four separate checkboxes, and
+                                      // 2x(N-1) of them on a real one.
+                                      aria-label={`${o.name}: ${v.name} may ship to`}
                                       checked={allowed?.includes(o.village_id) ?? false}
                                       onChange={(e) =>
                                         setShipOnlyTo((prev) => {
@@ -4586,6 +4598,10 @@ export default function ResourcePlanner() {
                                   >
                                     <input
                                       type="checkbox"
+                                      // Same rule as Ships only to beside it,
+                                      // and the group's own wording so the two
+                                      // read alike.
+                                      aria-label={`${o.name}: ${v.name} forwards material to`}
                                       checked={forwards?.includes(o.village_id) ?? false}
                                       onChange={(e) =>
                                         setRelayFor((prev) => {
@@ -4954,7 +4970,7 @@ export default function ResourcePlanner() {
                                     })
                                   }
                                 >
-                                  Clear this village&apos;s own figures
+                                  Clear {v.name}&apos;s own spend figures
                                 </button>
                               )}
                             </div>
@@ -6085,6 +6101,12 @@ export default function ResourcePlanner() {
             profileNames={profileNames}
             activeProfile={activeProfile}
             profileWindows={profileWindows}
+            // The same fallback `buildSegments` and the profile bar's own
+            // editor apply. Without it this table was the one reading on the
+            // page that disagreed with the plan: a fresh account's Day profile
+            // showed two blank boxes and "skipped by the day check" while the
+            // request planned it at 07:00-23:00.
+            defaultWindows={DEFAULT_WINDOWS}
             profileAttendance={profileAttendance}
             profileOvernight={profileOvernight}
             attendanceRequired={attendanceIsRequired}
