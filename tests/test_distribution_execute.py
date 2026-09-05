@@ -656,6 +656,21 @@ class TestLiveExecution:
         )
         assert all("disable" not in w.lower() for w in res.warnings)
 
+    def test_an_unrecognised_disable_status_is_not_read_as_success(self):
+        # `else: disables.append(line)` was the DEFAULT branch, so any status
+        # `_toggle_routes` does not produce today reads as "switched off" and
+        # lets the creates stack on top -- both schedules shipping at once,
+        # which is exactly the issue-#61 guard bypassed. The same
+        # else-is-success shape f47083f had to remove from `delete_routes`.
+        desired = _desired_routes()
+        existing = {desired[0].origin: [ExistingRoute(1, _UNWANTED_DEST, 99, 98)]}
+        svc = _FakeLiveSvc(existing=existing, disable_status="partial")
+        res = self._run(svc, disable_existing=True, max_routes_per_run=50)
+
+        assert svc.created == [], "creates must not stack on rows that may still be live"
+        assert any("disable" in p.lower() for p in res.problems), res.problems
+        assert res.disables == [], res.disables
+
 
 class TestServiceGuards:
     def _svc(self, live_enabled=False):

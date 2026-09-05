@@ -6802,31 +6802,34 @@ async def post_execute(
                                     deferred.extend(desired)
                                     continue
                                 disabled_here.extend(sorted(stale_ids))
-                                disabled_keys.update(
-                                    k for e in stale for k in _existing_keys(e)
-                                )
+                                disabled_keys.update(k for e in stale for k in _existing_keys(e))
                                 disables.append(
                                     f"{village_label(origin, names)}: disabled "
                                     f"{len(stale_ids)} route(s) - the toggle's answer was "
                                     f"unreadable, confirmed off by the marketplace"
                                 )
-                            elif disabled.status == "failed":
-                                # A failed/ambiguous disable leaves stale routes
-                                # live; do NOT add new routes on top for this
-                                # origin — defer them and reconcile on a later run
-                                # after re-reading state (issue #61).
+                            elif disabled.status == "disabled":
+                                disabled_here.extend(e.route_id for e in stale)
+                                disabled_keys.update(k for e in stale for k in _existing_keys(e))
+                                disables.append(line)
+                            else:
+                                # `failed`, or anything this endpoint does not
+                                # recognise. Success is the NAMED branch, not
+                                # the default one: an unknown status read as
+                                # "switched off" let the creates stack on rows
+                                # that may still be live, shipping both
+                                # schedules at once and bypassing the issue-#61
+                                # guard entirely. Same else-is-success shape
+                                # f47083f had to remove from `delete_routes`.
+                                # So: leave the stale routes alone, do NOT add
+                                # new ones on top, and reconcile on a later run
+                                # after re-reading state.
                                 problems.append(
                                     f"Could not disable stale routes — {line}; "
                                     "skipping new routes for this origin this run"
                                 )
                                 deferred.extend(desired)
                                 continue
-                            else:
-                                disabled_here.extend(e.route_id for e in stale)
-                                disabled_keys.update(
-                                    k for e in stale for k in _existing_keys(e)
-                                )
-                                disables.append(line)
 
                     # Only a destination whose ENABLED rows match the planned
                     # fan-out is satisfied. "Some active row exists" let a 3h
