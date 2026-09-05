@@ -20,12 +20,22 @@
  * the Account table's cells, which is precisely the reported failure. What it
  * shares with the cells instead is the PREDICATE: `isMaxBusyMerchants`,
  * `unreachableCaps`, `isStockFloorFraction`, `isConsumptionRate`,
- * `isEmptyTemplate`, `isAssumedCropRate`, `merchantModelProblems` and
- * `resolveVillageNames` are the same functions the cells call, so a mark and a
- * blocker cannot come from two different rules.
+ * `isEmptyTemplate`, `isAssumedCropRate`, `isTradeOfficeLevel`,
+ * `isCropCeiling`, `isSafetyMarginPct`, `nightFillProblems`,
+ * `merchantModelProblems` and `resolveVillageNames` are the same functions the
+ * cells call, so a mark and a blocker cannot come from two different rules.
  *
  * Pure, so the whole gate is testable without a browser -- which is the other
  * half of why it does not read the DOM.
+ *
+ * Three lists, not one, because the AUDIENCES differ. `planBlockers` is the
+ * document and the plan, so it refuses Build plan, Save, Export, the full-day
+ * check, the night derivation and the run. `runBlockers` is the three
+ * controlled-run boxes, which are neither plan inputs nor document fields, so
+ * they refuse Preview and the live run alone. `nightBlockers` is the fill pair,
+ * which reaches `/night-profile` and nothing else. Refusing a request a figure
+ * has no bearing on would be the same class of mistake as not refusing one it
+ * does.
  */
 
 import { RESOURCE_LABEL, ROLE_LABEL } from '../constants/planner'
