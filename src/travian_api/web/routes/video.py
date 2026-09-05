@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from travian_api.exceptions import TravianError
+from travian_api.exceptions import ActivityBudgetExhausted, TravianError
 from travian_api.web.sessions import TravianSession, get_travian_session, require_village_id
 
 logger = logging.getLogger(__name__)
@@ -87,9 +87,33 @@ async def claim_all_production_boosts(
 ):
     """Claim all production boost video rewards."""
     village_id = require_village_id(body.village_id if body else None)
-    results = []
+    results: list[dict] = []
+    stopped_reason: str | None = None
 
     for reward_type in _PRODUCTION_BOOST_TYPES:
+        # Each claim is ~8 requests plus 30s of real 3-second ticks plus a
+        # wait_before_claim_s. Nothing used to check the ceiling between them,
+        # so a run that started just under it spent five full video sessions
+        # past it.
+        if stopped_reason is None:
+            try:
+                session.http_client.check_activity_budget()
+            except ActivityBudgetExhausted as exc:
+                stopped_reason = str(exc)
+
+        if stopped_reason is not None:
+            # Reported, not omitted: a shorter array would be indistinguishable
+            # from an account with fewer boost types.
+            results.append(
+                {
+                    "success": False,
+                    "reward_type": reward_type,
+                    "status": "not_attempted",
+                    "message": f"Not attempted: {stopped_reason}",
+                }
+            )
+            continue
+
         extra_params: dict = {}
         if village_id is not None:
             extra_params["villageId"] = village_id
@@ -103,6 +127,7 @@ async def claim_all_production_boosts(
                 {
                     "success": result.success,
                     "reward_type": result.reward_type,
+                    "status": "claimed" if result.success else "failed",
                     "message": result.message,
                 }
             )
@@ -111,6 +136,7 @@ async def claim_all_production_boosts(
                 {
                     "success": False,
                     "reward_type": reward_type,
+                    "status": "failed",
                     "message": exc.message,
                 }
             )
@@ -119,4 +145,5 @@ async def claim_all_production_boosts(
         "results": results,
         "total": len(results),
         "succeeded": sum(1 for r in results if r["success"]),
+        "stopped_reason": stopped_reason,
     }
