@@ -148,6 +148,10 @@ def _summarise_one(path: Path) -> RunSummary:
     run_failed = next((e for e in events if e.get("kind") == "run_failed"), None)
 
     verify_failures = sum(1 for e in events if e.get("kind") == "verify_failed")
+    # An origin whose marketplace did not read the same twice: the run
+    # deliberately deleted nothing there, so it is unfinished work whatever
+    # else it reported.
+    unsettled_read_backs = sum(1 for e in events if e.get("kind") == "read_back_disagreed")
     schedule_mismatch_origins = tuple(
         sorted(
             {
@@ -173,6 +177,7 @@ def _summarise_one(path: Path) -> RunSummary:
         or totals("gold_club_blocked")
         or totals("stopped_early")
         or verify_failures
+        or unsettled_read_backs
         or schedule_mismatch_origins
         or run_failed is not None
         or not complete

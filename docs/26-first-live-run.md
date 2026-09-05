@@ -240,6 +240,12 @@ were actually due for removal: a route whose whole fan-out already falls
 inside its window produces none, and that absence means nothing needed
 trimming, not that the trim failed.
 
+This first route is also the **canary for the game's read-after-write
+consistency**: every run now reads a marketplace a second time before it
+deletes anything, and `read_back_disagreed` events in the trace are the
+measurement — none across the widening steps means the page settles before the
+read-back, and even one means it does not and the trim is deferring itself.
+
 If any game check is false, stop. Undo as §3 describes — Check, then Disable,
 then Delete — confirm in the game that the route is gone, put back by hand
 every row the panel lists under **Routes this run switched, to put back** to

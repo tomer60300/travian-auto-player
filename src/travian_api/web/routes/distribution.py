@@ -5762,6 +5762,74 @@ def _row_minute(e: ExistingRoute) -> int:
     return int(e.departure_at % 86400) // 60
 
 
+def _stable_rows(rows: Sequence[ExistingRoute]) -> Counter:
+    """What a marketplace row says about ITSELF, excluding anything that moves
+    on its own -- as a multiset, so two reads can be compared for stability.
+
+    `departure_at` is a timestamp of the next firing and advances every time the
+    row fires, so comparing it would report an unchanged page as changed. The
+    minute of the DAY it departs is the schedule and does not move (Travian
+    turns "repeat every N hours" into 24/N rows, each firing once a day), so
+    that is what is compared, alongside the destination, the cargo and the
+    enabled flag. Route ids are left out too: the question is whether the page
+    describes the same routes, not whether it renumbered them.
+    """
+    return Counter(
+        (
+            e.dest_village_id,
+            e.dest_x,
+            e.dest_y,
+            tuple(sorted((str(r), a) for r, a in (e.cargo or {}).items())),
+            _row_minute(e),
+            e.active,
+            e.visible,
+        )
+        for e in rows
+    )
+
+
+def _as_planned(
+    created: list[tuple[RouteActionResponse, PlannedRoute]],
+    attempted: list[tuple[RouteActionResponse, PlannedRoute]],
+    fresh: list[ExistingRoute],
+    observed_by_action: dict[int, list[int]],
+) -> bool:
+    """Whether the read-back shows exactly what this origin's creates planned.
+
+    Not merely HOW MANY rows: the count is the easiest thing to get right by
+    accident. Per create, the rows attributed to it must occupy exactly the
+    departure minutes its cycle implies and carry exactly its cargo -- a page
+    caught mid-write shows part of a fan-out, or shows it before the cargo is
+    filled in, and both can pass a count.
+
+    A create whose ANSWER died is allowed to show nothing at all: that is the
+    honest "the game refused it" reading and not a sign of an unsettled page.
+    Anything in between -- some of its rows, or its rows at the wrong minutes --
+    is not.
+    """
+    by_id = {e.route_id: e for e in fresh}
+
+    def _rows(action: RouteActionResponse) -> list[ExistingRoute]:
+        return [by_id[i] for i in observed_by_action.get(id(action), []) if i in by_id]
+
+    def _matches(route: PlannedRoute, rows: list[ExistingRoute]) -> bool:
+        want = Counter(
+            (route.dispatch_minute + i * route.cycle_hours * 60) % MINUTES_PER_DAY
+            for i in range(_game_rows(route.cycle_hours))
+        )
+        if Counter(_row_minute(e) for e in rows) != want:
+            return False
+        cargo = {r: a for r, a in route.cargo.items() if a}
+        return all(
+            e.cargo is not None and {r: a for r, a in e.cargo.items() if a} == cargo for e in rows
+        )
+
+    return all(_matches(route, _rows(action)) for action, route in created) and all(
+        not observed_by_action.get(id(action)) or _matches(route, _rows(action))
+        for action, route in attempted
+    )
+
+
 def _planned_minutes(route: PlannedRoute) -> list[int]:
     """The minutes of the day this route's rows will depart, after the trim.
 
@@ -6179,15 +6247,22 @@ async def post_execute(
             and _rows_that_survive(route.cycle_hours, route.dispatch_minute, route.window)
             < _game_rows(route.cycle_hours)
         }
-        _known = len(items[:cap]) + _reads + len(_create_origins) + 2 * len(_trim_origins)
+        # A delete needs TWO agreeing snapshots, so every origin that trims pays
+        # one stabilising read before it. An origin whose read-back does not
+        # match what its creates planned pays one too, which no forecast can
+        # know in advance -- that is in the max, not the estimate.
+        _known = len(items[:cap]) + _reads + len(_create_origins) + 3 * len(_trim_origins)
         requests_forecast = {
             "marketplace_reads": _reads,
             "creates": len(items[:cap]),
             "verify_reads": len(_create_origins),
+            "stabilise_reads": len(_trim_origins),
             "trim_deletes": len(_trim_origins),
             "trim_verify_reads": len(_trim_origins),
             "estimated_total": _known,
-            "estimated_total_max": _known + _reads,  # + up to one disable PUT per origin
+            # + up to one disable PUT per origin, and one stabilising read per
+            # origin whose read-back disagrees with its own creates.
+            "estimated_total_max": _known + _reads + len(_create_origins) - len(_trim_origins),
         }
         disables = (
             ["Existing routes not in this plan would be disabled first (read at execution)."]
@@ -7833,117 +7908,211 @@ async def post_execute(
                             )
                         else:
                             before_ids = {e.route_id for e in existing}
-                            fresh = [e for e in after if e.route_id not in before_ids]
-                            # New rows counted PER DESTINATION, not as one flat
-                            # total. `fresh` is everything new at this origin,
-                            # while an action is one destination -- an origin
-                            # that created two routes would otherwise hand each
-                            # action the other's rows as well. Keyed exactly as
-                            # the reconciler matches routes (village id for own
-                            # villages, coordinates for foreign targets), so
-                            # attribution and recognition cannot drift apart.
-                            # ...and split per CREATE within the destination: a
-                            # whole-day visit can create Day's and Night's route
-                            # to the same key back to back, and a key-level
-                            # count handed each action the other's rows as well
-                            # -- two actions each claiming all twelve. Rows are
-                            # assigned EXCLUSIVELY, most-specific route first
-                            # (fewest fan-out rows), exact cargo as the
-                            # tie-break at shared minutes; an hourly route's
-                            # minute set contains every other cycle's, so
-                            # minute membership alone over-counts on exactly
-                            # the accounts this exists for.
-                            fresh_by_key: dict[int | tuple[int, int], list[ExistingRoute]] = {}
-                            for e in fresh:
-                                for key in _existing_keys(e):
-                                    fresh_by_key.setdefault(key, []).append(e)
-                            # Route ids, not a bare count: the trim runs after
-                            # this and the footprint is what SURVIVES it.
-                            observed_by_action: dict[int, list[int]] = {}
-                            _claim_groups: dict[int | tuple[int, int], list] = {}
-                            _claimed_ids = {id(a) for a, _ in created_here}
-                            # Failed creates join the attribution, but claim
-                            # LAST: a create the game confirmed must never be
-                            # handed rows that belong to it by one whose answer
-                            # merely went missing.
-                            for action, route in [*created_here, *attempted_here]:
-                                _claim_groups.setdefault(_desired_key(route), []).append(
-                                    (action, route)
-                                )
-                            for key, group in _claim_groups.items():
-                                unclaimed = list(fresh_by_key.get(key, []))
-                                _ordered = sorted(
-                                    group,
-                                    key=lambda ar: (
-                                        id(ar[0]) not in _claimed_ids,
-                                        _game_rows(ar[1].cycle_hours),
-                                    ),
-                                )
-                                for action, route in _ordered:
-                                    own = {
-                                        (route.dispatch_minute + _i * route.cycle_hours * 60)
-                                        % MINUTES_PER_DAY
-                                        for _i in range(_game_rows(route.cycle_hours))
-                                    }
-                                    want = _game_rows(route.cycle_hours)
-                                    cargo = {r: a for r, a in route.cargo.items() if a}
-                                    taken: list[ExistingRoute] = []
-                                    for exact in (True, False):
-                                        for e in unclaimed:
-                                            if len(taken) >= want or e in taken:
-                                                continue
-                                            if _row_minute(e) not in own:
-                                                continue
-                                            if exact and not (
-                                                e.cargo is not None
-                                                and {r: a for r, a in e.cargo.items() if a} == cargo
-                                            ):
-                                                continue
-                                            taken.append(e)
-                                    unclaimed = [e for e in unclaimed if e not in taken]
-                                    observed_by_action[id(action)] = [e.route_id for e in taken]
-                                # `want` bounds the FIRST pass so two routes to
-                                # one destination cannot swallow each other's
-                                # rows -- an hourly minute set contains every
-                                # 4-hourly one. But it also clamped the total to
-                                # the forecast, so a game that fanned out MORE
-                                # than 24/N was reported as agreeing with the
-                                # model and the extra rows were counted in
-                                # neither `created_game_rows` nor
-                                # `live_game_rows`. Whatever is left over after
-                                # every claim has had its fill is this run's
-                                # work -- `fresh` is rows that were not there
-                                # before -- so it is attributed, unbounded, and
-                                # the overshoot is reported like a shortfall.
-                                for action, route in _ordered:
-                                    if not unclaimed:
-                                        break
-                                    own = {
-                                        (route.dispatch_minute + _i * route.cycle_hours * 60)
-                                        % MINUTES_PER_DAY
-                                        for _i in range(_game_rows(route.cycle_hours))
-                                    }
-                                    extra = [e for e in unclaimed if _row_minute(e) in own]
-                                    if not extra:
-                                        continue
-                                    unclaimed = [e for e in unclaimed if e not in extra]
-                                    observed_by_action[id(action)] += [e.route_id for e in extra]
 
-                            # Confine the fan-out to the profile hours, by
-                            # subtraction. Done here because `fresh` is already the
-                            # set of rows these creates are CONFIRMED to have made:
-                            # pruning against an unverified read would be deleting
-                            # rows on a guess. One delete for the whole origin
-                            # rather than one per route.
-                            # Creates whose answer failed but whose rows are on
-                            # the page: they landed, so they are trimmed,
-                            # counted and reported exactly like a confirmed one.
-                            landed_here = [
-                                (action, route)
-                                for action, route in attempted_here
-                                if observed_by_action.get(id(action))
-                            ]
-                            if body.prune_to_window and (created_here or landed_here):
+                            def _attribute(
+                                rows: list[ExistingRoute],
+                                # Bound as defaults, not captured: this is
+                                # defined inside the per-origin loop and must
+                                # never read a later origin's state.
+                                *,
+                                before_ids: set[int] = before_ids,
+                                created_here: list[
+                                    tuple[RouteActionResponse, PlannedRoute]
+                                ] = created_here,
+                                attempted_here: list[
+                                    tuple[RouteActionResponse, PlannedRoute]
+                                ] = attempted_here,
+                            ) -> tuple[list[ExistingRoute], dict[int, list[int]]]:
+                                """Which of these rows each create of this origin made.
+
+                                A pure function of one snapshot, so a second,
+                                stabilising read can be classified by exactly the
+                                same rules as the first.
+
+                                New rows counted PER DESTINATION, not as one flat
+                                total. `fresh` is everything new at this origin,
+                                while an action is one destination -- an origin
+                                that created two routes would otherwise hand each
+                                action the other's rows as well. Keyed exactly as
+                                the reconciler matches routes (village id for own
+                                villages, coordinates for foreign targets), so
+                                attribution and recognition cannot drift apart.
+                                ...and split per CREATE within the destination: a
+                                whole-day visit can create Day's and Night's route
+                                to the same key back to back, and a key-level
+                                count handed each action the other's rows as well
+                                -- two actions each claiming all twelve. Rows are
+                                assigned EXCLUSIVELY, most-specific route first
+                                (fewest fan-out rows), exact cargo as the
+                                tie-break at shared minutes; an hourly route's
+                                minute set contains every other cycle's, so
+                                minute membership alone over-counts on exactly
+                                the accounts this exists for.
+                                """
+                                fresh = [e for e in rows if e.route_id not in before_ids]
+                                fresh_by_key: dict[int | tuple[int, int], list[ExistingRoute]] = {}
+                                for e in fresh:
+                                    for key in _existing_keys(e):
+                                        fresh_by_key.setdefault(key, []).append(e)
+                                # Route ids, not a bare count: the trim runs after
+                                # this and the footprint is what SURVIVES it.
+                                observed_by_action: dict[int, list[int]] = {}
+                                _claim_groups: dict[int | tuple[int, int], list] = {}
+                                _claimed_ids = {id(a) for a, _ in created_here}
+                                # Failed creates join the attribution, but claim
+                                # LAST: a create the game confirmed must never be
+                                # handed rows that belong to it by one whose answer
+                                # merely went missing.
+                                for action, route in [*created_here, *attempted_here]:
+                                    _claim_groups.setdefault(_desired_key(route), []).append(
+                                        (action, route)
+                                    )
+                                for key, group in _claim_groups.items():
+                                    unclaimed = list(fresh_by_key.get(key, []))
+                                    _ordered = sorted(
+                                        group,
+                                        key=lambda ar: (
+                                            id(ar[0]) not in _claimed_ids,
+                                            _game_rows(ar[1].cycle_hours),
+                                        ),
+                                    )
+                                    for action, route in _ordered:
+                                        own = {
+                                            (route.dispatch_minute + _i * route.cycle_hours * 60)
+                                            % MINUTES_PER_DAY
+                                            for _i in range(_game_rows(route.cycle_hours))
+                                        }
+                                        want = _game_rows(route.cycle_hours)
+                                        cargo = {r: a for r, a in route.cargo.items() if a}
+                                        taken: list[ExistingRoute] = []
+                                        for exact in (True, False):
+                                            for e in unclaimed:
+                                                if len(taken) >= want or e in taken:
+                                                    continue
+                                                if _row_minute(e) not in own:
+                                                    continue
+                                                if exact and not (
+                                                    e.cargo is not None
+                                                    and {r: a for r, a in e.cargo.items() if a}
+                                                    == cargo
+                                                ):
+                                                    continue
+                                                taken.append(e)
+                                        unclaimed = [e for e in unclaimed if e not in taken]
+                                        observed_by_action[id(action)] = [e.route_id for e in taken]
+                                    # `want` bounds the FIRST pass so two routes to
+                                    # one destination cannot swallow each other's
+                                    # rows -- an hourly minute set contains every
+                                    # 4-hourly one. But it also clamped the total to
+                                    # the forecast, so a game that fanned out MORE
+                                    # than 24/N was reported as agreeing with the
+                                    # model and the extra rows were counted in
+                                    # neither `created_game_rows` nor
+                                    # `live_game_rows`. Whatever is left over after
+                                    # every claim has had its fill is this run's
+                                    # work -- `fresh` is rows that were not there
+                                    # before -- so it is attributed, unbounded, and
+                                    # the overshoot is reported like a shortfall.
+                                    for action, route in _ordered:
+                                        if not unclaimed:
+                                            break
+                                        own = {
+                                            (route.dispatch_minute + _i * route.cycle_hours * 60)
+                                            % MINUTES_PER_DAY
+                                            for _i in range(_game_rows(route.cycle_hours))
+                                        }
+                                        extra = [e for e in unclaimed if _row_minute(e) in own]
+                                        if not extra:
+                                            continue
+                                        unclaimed = [e for e in unclaimed if e not in extra]
+                                        observed_by_action[id(action)] += [
+                                            e.route_id for e in extra
+                                        ]
+                                return fresh, observed_by_action
+
+                            fresh, observed_by_action = _attribute(after)
+
+                            def _landed(
+                                claims: dict[int, list[int]],
+                                *,
+                                attempted_here: list[
+                                    tuple[RouteActionResponse, PlannedRoute]
+                                ] = attempted_here,
+                            ) -> list[tuple[RouteActionResponse, PlannedRoute]]:
+                                """Creates whose answer failed but whose rows are on
+                                the page: they landed, so they are trimmed, counted
+                                and reported exactly like a confirmed one."""
+                                return [
+                                    (action, route)
+                                    for action, route in attempted_here
+                                    if claims.get(id(action))
+                                ]
+
+                            landed_here = _landed(observed_by_action)
+
+                            # ── Is the page steady enough to act on? ────────
+                            #
+                            # A marketplace read a moment after a write can lag
+                            # it, and this block turns the page into verdicts
+                            # ("the game accepted the create but no route
+                            # appeared") and, below, into DELETEs. A page caught
+                            # mid-write makes the first false and the second
+                            # destructive: the trim would remove rows this run
+                            # had just made.
+                            #
+                            # So it is read once more before anything
+                            # destructive, and only when there is a reason:
+                            # either the rows do not match what the creates
+                            # planned, or a trim is about to run. A delete needs
+                            # two agreeing snapshots; a run that met its
+                            # expectations and deletes nothing needs none.
+                            #
+                            # Exactly ONE extra read, never a retry-until-equal.
+                            # Two identical snapshots prove STABILITY, not
+                            # freshness -- a page that is consistently behind
+                            # agrees with itself perfectly -- so reading until
+                            # two agree buys no correctness and has no bound on
+                            # requests. One read separates the case a re-read
+                            # fixes (a page caught mid-write) from the one it
+                            # cannot, and the second is reported rather than
+                            # retried.
+                            stable_read_back = True
+                            _instability = ""
+                            if not _as_planned(
+                                created_here, attempted_here, fresh, observed_by_action
+                            ) or (body.prune_to_window and (created_here or landed_here)):
+                                try:
+                                    _again = await svc.confirm_routes(
+                                        origin, map_span=body.map_span
+                                    )
+                                except (NetworkError, MarketplaceUnreadable) as exc:
+                                    stable_read_back = False
+                                    _instability = f"the second read failed: {exc}"
+                                else:
+                                    if _stable_rows(_again) != _stable_rows(after):
+                                        stable_read_back = False
+                                        _instability = (
+                                            "the destinations, cargo, departure minutes or "
+                                            "enabled flags differed between two reads"
+                                        )
+                                        # The later read is the better guess at
+                                        # the truth, so it is what everything
+                                        # below is classified from -- it is just
+                                        # not good enough to delete on.
+                                        after = _again
+                                        fresh, observed_by_action = _attribute(after)
+                                        landed_here = _landed(observed_by_action)
+                                if not stable_read_back:
+                                    trace.event(
+                                        "read_back_disagreed",
+                                        origin=origin,
+                                        reason=_instability,
+                                    )
+                            if (
+                                stable_read_back
+                                and body.prune_to_window
+                                and (created_here or landed_here)
+                            ):
                                 # Pooled per destination, because per-route
                                 # attribution has a hole: an hourly fan-out
                                 # contains EVERY minute a 4h one has, so routes
@@ -8114,6 +8283,35 @@ async def post_execute(
                                         route_ids=_ids,
                                         status=getattr(_res, "status", None),
                                     )
+                            if not stable_read_back:
+                                # The trim was skipped, so say what is still
+                                # departing round the clock rather than leaving
+                                # a run that looks trimmed. Named from the LATER
+                                # read, which is what everything else here was
+                                # classified from. The next run trims them: it
+                                # reads the marketplace fresh and will find the
+                                # same strays if they are real.
+                                _kept = {e.route_id: e for e in fresh}
+                                _strays = sorted(
+                                    _id
+                                    for action, route in [*created_here, *landed_here]
+                                    if route.window is not None
+                                    for _id in observed_by_action.get(id(action), [])
+                                    if _id in _kept
+                                    and _row_minute(_kept[_id]) not in set(_planned_minutes(route))
+                                )
+                                _line = (
+                                    f"{village_label(origin, names)}: two reads of this "
+                                    f"marketplace did not agree ({_instability}), so nothing "
+                                    f"was deleted here — a delete on an unsettled page can "
+                                    f"remove a row this run had just made."
+                                )
+                                if _strays:
+                                    _line += (
+                                        f" Row(s) {_strays} depart outside the profile hours "
+                                        f"and were left in place."
+                                    )
+                                problems.append(_line)
                             trace.event(
                                 "verified",
                                 origin=origin,
@@ -8303,7 +8501,6 @@ async def post_execute(
                                     stopped_early = False
                                     failure_stopped_run = False
                             for action, route in created_here:
-                                key = _desired_key(route)
                                 _rows = observed_by_action.get(id(action), [])
                                 observed = len(_rows)
                                 # Recorded whether it is what was predicted or

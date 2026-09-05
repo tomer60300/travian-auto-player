@@ -2152,6 +2152,149 @@ class TestAReplacedDestinationLeavesARecoveryRecordBeforeItIsEmptied:
         assert kinds.count("replacement_abandoned") == 2, kinds
 
 
+class TestTheMarketplaceIsSteadyBeforeAnythingIsDeleted:
+    """A read taken a moment after a write can lag it, and this run turns a page
+    into verdicts -- and into DELETEs.
+
+    Two things rest on the read-back: the classification ("the game accepted the
+    create but no route appeared") and the window trim, which removes rows. A
+    page caught mid-write produces a false verdict on the first and destroys the
+    run's own work on the second. So before anything destructive the page is read
+    once more -- ONCE. Two identical snapshots prove stability, not freshness: a
+    page consistently behind agrees with itself, so retrying until two agree buys
+    nothing and has no bound. One read separates the case a re-read fixes from
+    the one it does not, and the second is reported rather than retried.
+    """
+
+    def _windowed_account(self):
+        # An hourly route inside a 23:00-07:00 window: 24 rows created, 8 kept,
+        # so a trim is what normally follows.
+        return _account(
+            [_row_with_cycle(20003, -1, 1, 23 * 60 + 30)],
+            {20003: (0, 0), -1: (40, 40)},
+            {20003: "03", -1: "A"},
+        )
+
+    def _windowed(self, svc):
+        return _run_live(
+            svc,
+            self._windowed_account(),
+            max_routes_per_run=50,
+            max_game_rows_per_run=0,
+            dispatch_window=[23 * 60, 7 * 60],
+            prune_to_window=True,
+        )
+
+    def test_a_page_that_lagged_the_create_is_settled_by_one_more_read(self):
+        class _LaggingPage(_FakeLiveSvc):
+            """The first read-back is still the page as it was before the write."""
+
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._lagged = False
+
+            async def confirm_routes(self, vid, *, map_span=None):
+                rows = await super().confirm_routes(vid, map_span=map_span)
+                if not self._lagged:
+                    self._lagged = True
+                    return [e for e in rows if e.route_id <= 900000]
+                return rows
+
+        svc = _LaggingPage()
+        res = _run_live(svc, _own_village_account(), max_routes_per_run=50)
+
+        assert [a.status for a in res.actions] == ["created"], [a.detail for a in res.actions]
+        assert res.actions[0].observed_game_rows == 4, "classified from the LATER read"
+        assert len(svc.confirmed) == 2, f"exactly one extra read, not a retry loop: {svc.confirmed}"
+
+    def test_expectations_met_and_no_trim_costs_no_extra_read(self):
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, _own_village_account(), max_routes_per_run=50)
+
+        assert [a.status for a in res.actions] == ["created"]
+        assert svc.confirmed == [20003], f"a settled page is read once: {svc.confirmed}"
+
+    def test_a_trim_always_costs_the_stabilising_read_first(self):
+        svc = _FakeLiveSvc()
+        res = self._windowed(svc)
+
+        assert svc.deleted, "the out-of-window rows are still trimmed"
+        # Read-back, stabilising read, then the delete's own confirming read.
+        assert svc.confirmed == [20003, 20003, 20003], svc.confirmed
+        assert res.problems == [], res.problems
+
+    def test_a_page_that_never_settles_is_never_deleted_from(self):
+        import dataclasses
+
+        class _NeverSettles(_FakeLiveSvc):
+            """Every read of this marketplace differs from the last."""
+
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._reads = 0
+
+            async def confirm_routes(self, vid, *, map_span=None):
+                rows = await super().confirm_routes(vid, map_span=map_span)
+                self._reads += 1
+                if self._reads % 2 == 0 and rows:
+                    rows = [dataclasses.replace(rows[0], active=not rows[0].active)] + rows[1:]
+                return rows
+
+        svc = _NeverSettles()
+        res = self._windowed(svc)
+
+        assert svc.deleted == [], "a delete on an unstable page can remove this run's own rows"
+        assert any("did not agree" in p for p in res.problems), res.problems
+        assert any("depart outside the profile hours" in p for p in res.problems), res.problems
+
+    def test_the_disagreement_is_in_the_trace(self):
+        import dataclasses
+
+        class _NeverSettles(_FakeLiveSvc):
+            def __init__(self, **kw):
+                super().__init__(**kw)
+                self._reads = 0
+
+            async def confirm_routes(self, vid, *, map_span=None):
+                rows = await super().confirm_routes(vid, map_span=map_span)
+                self._reads += 1
+                if self._reads % 2 == 0 and rows:
+                    rows = [dataclasses.replace(rows[0], active=not rows[0].active)] + rows[1:]
+                return rows
+
+        svc = _NeverSettles()
+        res = self._windowed(svc)
+
+        events = _trace_events(res.trace_path)
+        assert [e for e in events if e["kind"] == "read_back_disagreed"], [
+            e["kind"] for e in events
+        ]
+
+    def test_an_unstable_read_back_makes_the_run_need_attention(self, tmp_path):
+        """`read_back_disagreed` is folded into the run summary directly, not
+        left to the problems count: an origin the run refused to trim is
+        unfinished work whatever else the run reported."""
+        from travian_api.services.distribution import run_history
+
+        path = tmp_path / "exec-abc.jsonl"
+        path.write_text(
+            "\n".join(
+                json.dumps(e)
+                for e in (
+                    {"kind": "run_start", "live_enabled": True},
+                    {"kind": "read_back_disagreed", "origin": 20003, "reason": "test"},
+                    {"kind": "run_end", "problems": 0, "created": 1},
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        summary = run_history._summarise_one(path)
+
+        assert summary.needs_attention is True
+
+
 class TestAControlledRunCanTargetOnePair:
     """The first live run against a real account must be exactly one chosen route.
 
