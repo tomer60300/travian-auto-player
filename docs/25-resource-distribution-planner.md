@@ -686,6 +686,12 @@ the same event to the account and `Diagnostics.total_loss_per_day` is a plain
 sum, so carrying it twice put 113,856/day of lumber into one account's total
 twice. The figure is in every message instead.
 
+*Not to be confused with the night's shed bound.* This one asks whether a
+relay's **store** can hold what passes through it. `night_profile.shed_limit`
+(§4.13) asks whether a village's **merchants** can carry what its retention
+promises to give away, and is a per-destination whole-trip bound over an
+entirely different set of inputs. Neither is a refinement of the other.
+
 ## 4.3 Roles
 
 `VillageConfig.role` says **what a village is FOR**, which nothing in the game
@@ -971,7 +977,8 @@ index by half a field silently.
 
 ## 4.13 The night rules (profile §6)
 
-Four rules, all of which used to be prose.
+Four rules, all of which used to be prose — and, under them, what the
+derivation is allowed to promise.
 
 **Everything home before the switch.** `schedule.night_overrun_minutes(scheduled,
 window, night_end)` prices a route's last *in-window* dispatch plus its full
@@ -1034,6 +1041,108 @@ morning profile — not against the closing night half itself.
 the active profile, while `NIGHT_OVERRUN` is raised by the planner on routes
 this profile has already called shippable.
 
+**What a village may shed is bounded per destination.**
+`night_profile.shed_limit` returns `min(conserved, integral)` over the legs
+`_legs` builds, and the pair is the whole model.
+
+`conserved` is merchant-hours conservation at the **demand-weighted mean** hop
+(`_mean_hop`): to ship `S` an hour split by demand shares `w`, destination `i`
+costs `2 × S × wᵢ × hopᵢ / capacity` merchant-hours an hour, so
+`S ≤ fleet × capacity / (2 × Σ wᵢ hopᵢ)`. Weighted rather than nearest, which
+is the optimistic end of the range and so barely ever bound — a hub shedding
+crop to a consumer 1 field away needing 100/h and one 40 fields away needing
+40,000/h was credited 48 turnarounds against the neighbour and booked 53,000/h
+as shippable, 21× what actually reaches the destination needing it. And
+weighted rather than worst-case, which fails the other way: one unreachable
+destination then zeroes the limit for every reachable one, so an ally 60 fields
+off — a 10h round trip in an 8h night — left the hub unable to ship to the
+consumer 2 fields away. With a single destination it *is* the
+single-destination formula, so nothing with one destination moved.
+
+`integral` is the smallest of each destination's own whole-trip bound,
+`fleet × capacity × tripsᵢ / (wᵢ × window_hours)`. Conservation is **necessary
+and not sufficient**: it lets merchant-time split fractionally across trips of
+different lengths, and a merchant cannot make 0.6 of a trip. Two consumers
+needing 30,000/h each, one 2 fields away and one 30, conserve merchant-hours
+exactly at 60,750/h — while the far one needs 26.7 round trips of 5h and
+eighteen merchants can make eighteen, so 9,750/h of a hammer's deficit read as
+covered.
+
+`_trips` never rounds up, and there is no `max(1, …)` on either bound: a
+village whose round trip does not fit the window sheds **nothing**, because
+crediting it one trip promises cargo still in the air at 07:00, which §6
+forbids outright. The fleet is `merchants_total − merchant_reserve`, tightened
+by `max_busy_merchants` where the operator declared one — the same rule
+`VillageState.merchant_budget` applies on the plan side.
+
+**Where the cargo goes is a different set per resource**, which is why
+`shed_limit` cannot be asked without one. `_destinations` answers it. For crop
+the set is the crop-negative villages in `consumer_ids` plus each tribute's own
+tile; the hub is not in it, and on this account the hub is a crop *sender*
+rather than a sink. For lumber, clay and iron it is `_material_receivers`: the
+hub **and** every receiver — a village the day plan wants to hold more than it
+makes, or one whose declared spend exceeds its production. Pricing every
+material sender's hop to the hub alone bound it by a village its cargo never
+visits: a supplier 199 fields from the hub and **one** field from the receiver
+it feeds was told it could ship nothing over a ten-minute haul. A zero claim is
+kept rather than dropped — `_legs` gives it no share, so it neither weighs in
+the mean nor bounds the integral, but a hub that needs nothing must still be
+the destination a forced sender is measured against. A village is never its own
+destination: the tile is unique in Travian, so a zero hop is the village itself
+and is dropped rather than allowed to read as a free delivery. A destination
+**no** round trip reaches is dropped rather than allowed to zero the bound, and
+`_anyone_reaches` keeps its claim out of the pooled demand so it lands in
+`unmet` instead of reading as covered by a sender that cannot get there.
+
+The receiver branch of the material pass is **floored by what the receiver can
+ship**, exactly as `capped()` floors a forced sender:
+`take = max(min(wanted, room), round(own − shed_limit(…)))`. Before that floor
+the branch consulted no distance at all, and a village whose store left room
+for 44/h was booked to ship 19,956/h over 199 fields, where no round trip fits
+the night.
+
+**The crop draw is ordered by where the crop actually goes.** The order key is
+`_mean_hop(v, CROP)` — the same quantity `shed_limit` bounds the village by —
+not the distance to the hub and not the distance to the tribute, because crop
+reaches neither. A supplier 2 fields from the hub and 18 from the hammer (a 3h
+round trip, two turnarounds) was drawn ahead of one 19 fields from the hub and
+**one** from the hammer (ten minutes, forty-eight turnarounds), and the plan
+then built the long route at six merchants where the short one costs three —
+with the early firing still in the air at 09:00, which is a `NIGHT_OVERRUN`
+besides. Coverage does not move either way: `give = min(own, demand,
+shed_limit)` and `shed_limit` reads nothing the loop mutates, so greedy fill
+yields `min(demand, Σ caps)` under every permutation. Only the merchant bill
+does. The **material** draw deliberately keeps its hub ordering: there the hub
+genuinely is the destination the draw ships to.
+
+**One `TributeTarget` per foreign obligation.** A place and a rate kept
+together, one built per `route_eligible` `ForeignTarget` on the
+`/night-profile` path. They used to be a single `tribute_per_hour` beside a
+single `tribute_at`, which cannot describe two allies: N obligations were
+summed into one rate and pinned to the *first* one's coordinates, so a 500/h
+ally two fields out beside a 20,000/h artifact sixty fields out became 20,500/h
+priced at the two-field hop — about forty-eight turnarounds credited to a leg
+that is a 10h round trip in an 8h night — and reordering the request body gave
+the opposite answer.
+
+The night path applies the **safety margin** the day path already applied:
+`per_hour = crop_per_hour × (1 + safety_margin_pct / 100)`. The night freed the
+bare promise while the day booked the promise plus the margin, so the remainder
+village drained further than the profile predicted — or the plan read
+`OVER_ALLOCATED`.
+
+**A tribute on one of your own tiles is an input error.** `PlanRequest` refuses
+it and names the village it collides with: a Travian tile holds one village, so
+a foreign obligation sitting on one of the operator's own is a typo. It used to
+surface as unmet crop with nothing connecting it to the coordinates that caused
+it, because `_destinations` drops the zero hop as "the village itself". The
+same validator bounds `ForeignTarget.x`/`y` against the request's own
+`map_span`: a typed 450 on a 401-wide map is not a far target, it is a place
+that is not there, and the geometry used to **fold** it — `span − raw` goes
+negative and `hypot` takes the absolute value, so (450|0) read as 49 fields
+from the centre, a five-minute haul. Each offending target is named, because
+"x out of range" over a table of allies is one cell nobody can find.
+
 ## 4.14 NPC balancing (profile §7)
 
 `services/distribution/npc.py`. Two mechanisms kept apart, because conflating
@@ -1074,6 +1183,31 @@ whenever a floor meets a `dispatch_window`. A round-the-clock set (no window) is
 the eight nobody is at the Marketplace, and Travian offers nothing to confine a
 repeat interval to part of the day. It is not a 422 there only because a setup
 *document* is validated through the same model and carries no window.
+
+**One reserve, apportioned across the materials it funds.** A village has a
+single conversion budget, so `npc.draw_allowance` splits it over lumber, clay
+and iron **proportional to need** — `_need(retention)`, the amount a village
+must ship beyond its production — which is the only split no resource ordering
+biases. Every floored village appears under every material *even at zero*,
+because the allocation layer needs the **declaration** and not just the number:
+that is what tells a village that relied on the exchange and came up short from
+one that never asked. Crop is never in the map — a granary is not NPC-fed.
+
+**The feedstock floor is kept inside the conversion, not outside it.**
+`storage._npc_top_up` bounds each departure's funding three ways, and each is
+load-bearing: by what is asked for, by the budget accrued so far (so the
+reservoir can run out), and by what the feedstock stores actually **hold**, so
+nothing is converted out of crop that has already been shipped away. A material
+source keeps `reserve.floor_level`; crop keeps nothing, because a granary has
+no floor. The debit is proportional to `NpcReserve.share_of` — the store that
+funded most of the allowance is debited most — then spilled onto whatever else
+has room where one store cannot cover its share, because the operator converts
+from what is in the village and not from a ratio.
+
+**The budget is capped at one day's allowance.** `storage._accrue` adds
+`allowance_per_hour × hours` and takes `min(allowance_per_day, …)`. Without
+the cap a budget accumulating over the settling days the replay runs to reach
+steady state would be the infinite reservoir again, wearing a rate.
 
 *Direction of danger: quiet and over-committing.* Nothing downstream catches an
 optimistic reading — `simulate_day` tops the store up at every departure minute
@@ -1141,14 +1275,28 @@ snapshot and is deliberately left to the next `/plan`.
 Why it exists: `localStorage` is scoped to an **origin**, so the same app on
 `:80`, `:8001`, the LAN address and over Tailscale kept four independent copies.
 
-**Format versions.** v7 carries per-profile `npc_attended`, v8 per-profile
-`overnight`, v9 the account-wide `reserved_window`. Each earned a version rather
-than riding along as an unknown key — which all three mechanically could, since
-the body is stored verbatim and `SetupDocument` ignores extras — because the
-harmful path is identical: a build that cannot read one drops it silently, the
-operator saves from that build, and the answer is gone from the shared copy.
-Older documents load with the field absent; newer ones are **refused, never
-upgraded**, and the version is stored as given.
+**Format versions.** `READABLE_VERSIONS` is `1–11`, pinned as a literal on
+both sides (`planner_setup.READABLE_VERSIONS` ↔ `plannerSetup.SETUP_VERSION`).
+v7 carries per-profile `npc_attended`, v8 per-profile `overnight`, v9 the
+account-wide `reserved_window`, v10 `prune_to_window` and v11
+`merchant_model_measured`. Each earned a version rather than riding along as an
+unknown key — which all five mechanically could, since the body is stored
+verbatim and `SetupDocument` ignores extras — because the harmful path is
+identical: a build that cannot read one drops it silently, the operator saves
+from that build, and the answer is gone from the shared copy. Older documents
+load with the field absent; newer ones are **refused, never upgraded**, with a
+message that says the server is the older half, and the version is stored as
+given.
+
+The last two earned it on exactly the criterion `reserved_window` did — neither
+persistence path carried them — and each is worse than the general case in its
+own way. `prune_to_window` decides whether `/execute` **deletes** rows from the
+game, the only destructive answer the document holds; its resting state is
+*on*, so only *off* is an answer somebody gave. `merchant_model_measured`
+records work done **in** the game that the game does not record and nothing
+here can re-derive: a measured +20%/level is indistinguishable from an
+untouched one, which is the whole reason the acknowledgement exists (§4.20).
+Both are `StrictBool | None`, and absent is "not answered" rather than "no".
 
 **Every boolean answer is typed at the door.** `npc_attended` and `overnight`
 are declared `dict[str, StrictBool]` on `SetupDocument`, and `may_relay` is
@@ -1166,6 +1314,45 @@ document still loads. (Not a perfect agreement — pydantic reads `"off"` as
 false where JS `Boolean` reads it as true — but that is a value divergence, not
 a document that cannot be opened.) The numeric fields are safe the same way:
 `Number(...)` on each.
+
+**Every merchant lever is optional, and every one of them is declared.**
+`MerchantModelIn` carries `base_capacity`, `bonus_per_to_level`,
+`merchant_reserve`, `merchant_headroom`, `map_span` and
+`speed_fields_per_hour`, all `| None`. Absent means "use the planner's own",
+which is how the *plan* path already reads a cleared box — `buildPlanPayload`
+omits the field and `PlanRequest`'s default decides. `base_capacity` and
+`bonus_per_to_level` were required **here alone**, so clearing either made the
+whole setup unsaveable: a 422 "Field required" over a figure the operator had
+deliberately not supplied, with no cell marked to say which.
+
+The last two were the sharper omission. `buildSetup` writes the whole merchant
+model, `map_span` and `speed_fields_per_hour` included, and nothing on this
+model declared them — so `_as_plan_request` never lifted them into the request
+and `PlanRequest._span_is_odd` never saw them. An even span saved with a 200,
+came back out of `GET` unchanged, and the page's own parser then refused the
+document **forever**: "merchant_model.map_span is 400". A document the planner
+would refuse is refused here. No bound is restated: `_as_plan_request` maps each
+lever onto its `PlanRequest` field and lets that model's validators speak, so
+there is one copy of each rule — including the `ForeignTarget` coordinate bound
+and the own-tile clash of §4.13, both of which are cross-checks the *request*
+makes against `map_span` and the snapshot rather than field bounds
+`ForeignTarget` could carry alone.
+
+**"Nothing typed yet" is counted off the document, not off the page.**
+`buildSetup` writes twelve things and the guard counted three — village
+columns, named profiles, role templates — so a page whose only content was a
+tribute, a profile's hours, the reserved NPC-burst window, an attendance
+answer, an overnight declaration or a deliberately unticked window prune was
+told to "fill in a Trade Office level, crop alert or allocation first", and the
+one owned answer it held went unsaved on an origin that will drop it. Four of
+those earned a version bump precisely because losing them is expensive.
+Counting the built document instead means the two cannot drift apart again: a
+thirteenth field is counted on the day it is written. Two fields ride on every
+document whatever the operator does and so are not content on their own —
+`prune_to_window`, whose resting state is on, counts only when **false**; the
+merchant model counts only when a lever differs from the planner's own seed
+(`merchantModelIsCalibrated`). `merchant_model_measured` is content on its own,
+because the document carries it only when it is true.
 
 ## 4.18 The reserved marketplace window
 
@@ -1202,6 +1389,33 @@ objective outright, since no route can miss 16h; ignoring the window leaves a
 60-minute profile aiming at a lag it has no hours to absorb. `None` still means
 "no target", so a declared night is unaffected.
 
+**There is now exactly one place the target comes from.** The page sends no
+`max_latency_hours` on **any** path — `/plan`, `/day-check`, `/night-profile`,
+preview, the sweep, the whole-day run — so the standing target is
+`PlanRequest.max_latency_hours`, whose default is **2.0 h**. What the page used
+to send was the backend's own policy restated on the client: it derived the
+figure from the active profile's hours, which supplied no fact the request did
+not already carry in `dispatch_window`, and it overrode the server's default
+with a number the page had computed. That is the duplicated-default shape — a
+change to the backend's target silently overridden by whatever the page last
+derived.
+
+On a **segmented** request it was worse than redundant, because it was the
+wrong window entirely. The four other active-tab fields are stripped when the
+whole-day body is built; this one was not, so selecting the Night tab before
+"run the whole day" planned the 16-hour **day** segment against an 8-hour
+target — shorter cycles, more routes, more merchants, more rows, on the
+endpoint that writes.
+
+**The standing target is an open operator decision**, and it is not free.
+Measured on this repository against one night plan: an 8 h target planned **46
+routes / 120 merchants**; a 2 h target planned **48 routes / 135 merchants** —
+the same account, +12% merchants for a tighter delivery lag. Three options, all
+one line: keep 2.0; send 24 on a segmented request so each segment's own window
+is the only thing that binds; or expose a latency-target control. Decide it
+before the first live run — `docs/26-first-live-run.md` §0.1 — because the plan
+confirmed in its step 1 is the plan step 2 writes.
+
 ## 4.20 Writes and reads that were not what they claimed *(fixed defects)*
 
 **An unreadable bulk toggle was reported as total success.**
@@ -1237,11 +1451,264 @@ saying "slow down" is not a stealth preference. The penalty is now served
 whichever way the flag is set; the inter-request gap and burst rules stay off,
 which is the deliberate half.
 
+**A window prune that did not happen is reported.** The trim runs after the
+creates land, and its own failure used to be silent: the run reported the rows
+it meant to leave while the whole fan-out kept departing round the clock. Now a
+failed or unmade delete raises a `problems` line naming the origin, the row
+ids and what the service actually said, and a `stopped` delete stops the run
+like any other stop. Either way a `window_pruned` trace event records the
+origin, the ids and the status.
+
+**An off-schedule destination is switched off only when its rebuild is funded.**
+`disable_existing` used to disable a diverging destination and then discover
+that the per-run create cap or the row budget had nothing left for the
+replacement, leaving the village receiving **nothing** — reachable on the first
+run at a cap of 1 against any village holding a previous plan's routes. The
+replacement is now **reserved** out of both budgets before the disable, and a
+destination whose rebuild cannot be reserved keeps its rows and is reported
+diverging. The refusal names the operator's own control and the real cause,
+because "raise the budget or re-run" was wrong in three of the four cases: a
+destination this run's filters excluded is not a budget question at all, and a
+destination needing more routes — or more rows — than the whole per-run limit
+can never be reconciled by re-running however many times.
+
+**A rebuild the game refuses names the destination.** One refusal is below the
+consecutive-failure limit, so without this the run reported an empty `problems`
+list over a village whose diverging rows had just been switched off and whose
+replacement the game said no to. The same holds for a stop landing *between*
+the disable and the rebuild: only destinations whose rows this run really
+switched off are named, since a disable that failed left them shipping and has
+its own report.
+
+**A create whose answer died is settled by the marketplace, not by a verdict.**
+An unanswered create is charged and reported `failed`; the read-back that
+follows every create then looks for it. Where it finds it, the action is
+promoted to `created` with the rows the read-back attributed to it, the
+"switched off and could not replace" line is **withdrawn**, the create is taken
+back out of the consecutive-failure streak, and — if that streak was what
+stopped the run — the stop is lifted too. Left standing, a run that created
+everything it attempted still reported the game as refusing the writes and kept
+the stop that verdict caused, which skips every remaining origin: a flaky
+connection capped every run at two creates.
+
+**The DELETE's own body is read.** `delete_routes` used to discard the return,
+so every 2xx was `deleted` — a body naming per-route errors, an HTML soft-block
+or a non-object included — and the execute path only re-read the marketplace on
+`deleted`, which it always was. One call site from being the only guard on the
+one irreversible operation here. It now goes through `_rejected_routes` like
+the toggles, and **the shape it applies is marked UNVERIFIED for DELETE**:
+`{"routes": [{"id": .., "error": ..}]}` is the game's bulk-*toggle* shape from
+its own bundle (`docs/15`), and nobody has observed a DELETE reply on this
+account at all. It is a safe assumption — anything the parser cannot read
+becomes `unverified` and is settled by re-reading the marketplace — but it is
+an assumption, and the first live prune settles it.
+
+**An unreadable cargo update is `unverified`, and protected rows are left
+alone.** The same missing evidence `_toggle_routes` calls `unverified`, on the
+same endpoint with the same request shape, was reported as `failed` — and
+`docs/15` records the empty 200 as the *normal* body here, so `failed` was the
+expected outcome of every cargo correction this app makes: the run said "0
+corrected" and "the live route is still shipping the old amounts" over rows it
+had just rewritten. Separately, a **protected** destination's rows are now
+excluded from the drift comparison entirely. A protected route is a hand-made
+one, so its amounts always look drifted — and every rewrite also stamps
+`deliveries: 1`, so an ally route built at deliveries 3 silently dropped to a
+third of its volume with nothing downstream detecting it. Where a protected row
+does carry cargo the plan did not set, that is a **warning** saying it was left
+as it is.
+
+**The row budget has a default, and the footprint is reported after the trim.**
+`max_game_rows_per_run` defaults to **24** — one day of hourly rows, a single
+route at the shortest cycle. An unbounded default on the one endpoint that
+writes was the opposite of what every other control here does, and the run
+already reported the number that nothing bounded, so what was agreed to and
+what was written were different units. `0` is still unbounded, and the page
+always sends a figure (a blank box is sent as `0`), so the default governs a
+caller that omits the field rather than one that clears the box. Two counts,
+not one: `observed_game_rows` is what the read-back attributed to a create,
+measured **before** the trim because that is when the read-back happens and it
+is the question the 24/N fan-out model is checked against; `live_game_rows` is
+what the run **left** in the game, and it is the unit the budget is charged in.
+A prune that did not happen discounts nothing, so a silently failed trim shows
+as the full fan-out rather than as the number the trim was supposed to produce.
+`live_game_rows` is carried through `RunSummaryResponse` and the run history,
+so the footprint of a past run survives the response that reported it.
+
+**A live run with no trace is refused before the first game request.**
+`ExecutionTrace.__init__` catches `OSError`, warns and carries on with tracing
+off — right for observability, wrong here. The trace is the only record of what
+a run put in a real account: the game returns no id on create, so
+`/routes/revert-plan` reconstructs what to undo by diffing against the
+pre-write inventory the trace holds. Without it the run is unrevertible and the
+500 handler would hand the operator a `trace_id` that 404s. Dry runs never
+reach it.
+
+**The irreversible endpoint takes the lock the reversible one takes.**
+`/routes/revert-plan` disables, and with `apply_delete` removes rows for good,
+and it took none of the guards `/execute` takes. `plan_revert` attributes
+everything new since the trace's inventory to the run being undone, so a
+concurrent execution puts its own fresh creates into `plan.created` and
+`apply_delete` deletes them irreversibly. A second run is now rejected with a
+409, exactly as `/execute` rejects one, and the lock is held **across the reads
+too** — the comparison is what the deletion is decided from.
+
+**The sweep's "come back for another pass" condition is a fixed point.** It was
+gated on unvisited villages alone, so a sweep that had visited everything while
+still holding deferred creates reported itself finished: "swept" quietly meant
+"swept but only partly provisioned". It is now also unfinished while the
+per-chunk budget holds creates — and gated on **progress**, not merely on
+`deferred`, because a route whose surviving fan-out exceeds
+`max_game_rows_per_run` is deferred by every run alike, so `deferred` is never
+empty and the contract had no termination guarantee at all. A pass that
+attempted no create is a pass the next one would repeat exactly.
+
+**`/day-check` refuses segments without `prune_to_window`**, the same rule
+`ExecuteRequest._segments_are_coherent` makes. `segments` is `min_length=1`
+there, so the endpoint is always segmented, and the only segmented `/execute`
+is the whole-day run, which forces the prune on. The flag is not cosmetic on
+the plan path: it narrows the allowed cycles to the divisors of the window
+length and the replay simulates only the in-window firings. Without it the
+full-day check the operator reviews is planned on the full cycle set with every
+firing simulated, while the run that writes is planned on divisor cycles with
+the out-of-window rows deleted — different cycles, different merchant counts,
+different row counts.
+
+**`WINDOW_PRUNED` says what is deleted; `WINDOW_NOT_ENFORCEABLE` says what
+escapes.** The two are one branch on `prune_to_window` and the pruned half used
+to reuse the other's message verbatim — which reads "the destination receives
+about 3.0× what was modelled", the exact failure the prune exists to prevent.
+Only the critical one reports an over-delivery; the note says how many rows are
+removed after the route is created and how many the plan sized the cargo for.
+
+**A measured merchant model can clear its own warning.**
+`MERCHANT_MODEL_UNCALIBRATED` fires whenever `trade_office_bonus_per_level`
+still equals the shipped 0.20 and any village has a Trade Office — the right
+warning for an untouched account, and unanswerable for one whose operator read
+a Marketplace capacity at two levels and found 0.20 to be correct, because
+agreeing with the default is indistinguishable from never having looked.
+`PlanRequest.merchant_model_measured` is the operator saying they looked. It
+**silences that one finding and nothing else**: no bound, no budget and no
+other finding moves, and every figure in the plan is what it was.
+
+**Going live for the first time is its own document.**
+[`docs/26-first-live-run.md`](26-first-live-run.md) is the step-by-step
+protocol these fixes earned — what to settle before anything touches the game,
+what to read in the dry run, one route on a village you can watch, a rehearsed
+undo, and the stop rules. It is written against this section: several of its
+steps exist to make the first *observation* of a behaviour recorded here.
+
+## 4.21 One predicate, three readers — the page's own refusal
+
+`min` and `max` on a number input bound the **spinner** and nothing else. A
+typed or pasted figure sails straight past both: `aria-invalid` stays null, the
+cell says nothing, and the button beside it posts the figure to be refused as a
+server 422 — a response that names a pydantic field path, arrives after a round
+trip, and leads nobody back to the cell that caused it. Browser-confirmed
+before any of this went in: typing 21 into a Trade Office box posted
+`trade_office_level: 21` with `aria-invalid = null`.
+
+`frontend/src/utils/plannerBlockers.js` is the gate, and it is **three lists,
+not one, because the audiences differ**:
+
+| list | what it holds | what it refuses |
+|---|---|---|
+| `planBlockers` | the document and the plan | Build plan, Save, Export, the full-day check, the night derivation, the run |
+| `runBlockers` | the three controlled-run boxes | Preview and the live run alone |
+| `nightBlockers` | the night fill pair | `/night-profile` alone |
+
+The controlled-run boxes are neither plan inputs nor setup-document fields, and
+the fill pair reaches one endpoint, so refusing `Build plan` or `Save setup`
+over either would refuse a request the figure has no bearing on — the same
+class of mistake as not refusing one it does. `describeBlockers` therefore says
+"what **its field** accepts", not "what the plan accepts": an operator who
+pasted 51 into "Routes this run" was told their figure was outside what the
+plan accepts, about a box `Build plan` deliberately never reads.
+
+**Computed from state, never swept out of the DOM.** A
+`document.querySelectorAll('[aria-invalid]')` scan is tempting — it is by
+construction whatever the cells say — but each stage mounts only its own
+tables, so a scan run from the Targets stage cannot see the Account table's
+cells, which is precisely the reported failure. What the gate shares with the
+cells instead is the **predicate**: `isMaxBusyMerchants`, `unreachableCaps`,
+`isStockFloorFraction`, `isConsumptionRate`, `isEmptyTemplate`,
+`isAssumedCropRate`, `isTradeOfficeLevel`, `isCropCeiling`, `isSafetyMarginPct`,
+`nightFillProblems`, `merchantModelProblems`, `relayTierProblemsByVillage` and
+`resolveVillageNames` are the same functions in `plannerSetup.js` that the
+cells call, so a mark and a blocker cannot come from two different rules. The
+module is pure, which is the other half of why it does not read the DOM: the
+whole gate is testable without a browser.
+
+**Nine boxes, each on the button it actually reaches** — the list
+`e2e/plannerBounds.pw.js` keeps in its own header:
+
+* Trade Office level → Build plan
+* Merchant base capacity → Build plan, and both Save writers
+* Crop stock alert → Run the full day
+* Foreign-target margin % → Build plan
+* Emptied to % / Full to % → Derive from stores
+* Routes this run → Preview / live run
+* Max rows this run → Preview / live run
+* Never disable → Preview / live run / the sweep
+
+A refusal is not just a toast. `refuseBlockers` switches to the stage that
+mounts the offending cell and drops the caret into it, so the fix is one
+keystroke from the refusal — the pattern the page already had at
+`activeAttendanceOwed` and nowhere else.
+
+**The declared relay tier is in the gate, not only on the cell.**
+`relayTierProblemsByVillage` feeds a `Relays for` entry into `planBlockers`, so
+a tier the setup store would refuse on `PUT` — a relay feeding a relay, a role
+village relaying, a downstream the snapshot does not contain — is refused
+before the document is written rather than after.
+
+**The reconciliation sweep is gated like every other write path.**
+`runReconcileSweep` checked only that a plan existed and then posted
+`dry_run: false`, so every marked cell Preview refuses — an unparseable "Never
+disable" entry, an even `map_span` that decides what a marketplace row's map id
+turns back into, an unresolved "Not from" exclusion — went straight to a live,
+disabling run. It is also the one write button that carries no live-run
+confirmation dialog, which is why the gate mattered most there.
+
+**`/day-check` is gated on the same list**, and for a sharper reason than
+`Build plan`: the request carries `buildPlanPayload()` verbatim **and** the
+crop alert levels typed in the table below it, so a figure the plan would not
+send was posted from here without the button ever hesitating.
+
+**The constants both sides copy are pinned as literals on both sides.**
+`tests/test_frontend_mirror_constants.py` ↔
+`frontend/src/utils/plannerSetup.test.js`: `DEFAULT_MERCHANT_MODEL`'s four
+levers, `TRAVIAN_REPEAT_INTERVALS` against `DAILY_BEAT_CYCLES`,
+`MAX_DAY_SEGMENTS`, `MAX_STOCK_FLOOR_FRACTION`, `MAX_TRADE_OFFICE_LEVEL`,
+`MAX_MERCHANTS_PER_VILLAGE`, the run-control ceilings (50 routes, 2,000 rows)
+and the row budget's default of 24. A literal on each side deliberately:
+asserting one side against the *other's* value would pass however far both had
+drifted from what the game does. The Python half also proves the bounds
+**bite** rather than merely being declared, since a bound asserted through
+`model_fields` alone would survive the field being replaced by one that
+validates nothing.
+
+**The live-writes flag defaults ON, and the library's default is deliberately
+the opposite.** `Settings.trade_route_live` defaults **True**, since
+2026-08-27, at the operator's explicit instruction — the opt-in kept reverting
+to preview-only on every server restart. `TradeRouteService.__init__` keeps
+`live_enabled: bool = False`: that is the library's own safe default, which
+every test and every direct construction relies on, and only
+`web/sessions.py` overrides it with the settings value. The two disagreeing is
+the design, not drift — do not "fix" the constructor. What this means in
+practice is that **unset means live**: see `docs/26-first-live-run.md` §0.2 for
+turning it off for the steps that must not write, and note that settings are
+rebuilt per session, so a reconnect suffices and no server restart is needed.
+
 ## Immediate next actions
 
 | # | Action | Cost | Unblocks | Status |
 |---|---|---|---|---|
-| 1 | Read merchant capacity at a *second* TO level — a **TO 0** village for preference, because its capacity *is* the base (`merchants.py` records 03 and 26 as TO 0) | 0 requests | pins base and slope together; today only the base is read | open — base 2,500 (2026-09-02), slope unmeasured, 7,920 @ TO 13 superseded |
+| 1 | Read merchant capacity at a *second* TO level — a **TO 0** village for preference, because its capacity *is* the base (`merchants.py` records 03 and 26 as TO 0) | 0 requests | pins base and slope together; today only the base is read | open — base 2,500 (2026-09-02), slope unmeasured, 7,920 @ TO 13 superseded. The reading now has somewhere to live: tick the merchant-model acknowledgement so `MERCHANT_MODEL_UNCALIBRATED` stops asking (§4.20), and follow `docs/26` §0.6 for the procedure |
 | 2 | Capture Resources + Capacity + one *filling* village `dorf1` together | 0 requests | R2 filling branch | open |
 | 3 | One-off `dorf2` sweep for TO + Marketplace | N requests | §1 OWNED state, and refreshes the per-village TO levels R1 found drifted | open |
-| 4 | Create one trade route and observe its phase and any per-village cap | in-game | R6, open question #1 | open |
+| 4 | Create one trade route and observe its phase and any per-village cap | in-game | R6, open question #1 | open — `docs/26-first-live-run.md` §2 is the protocol for exactly this, and §5 carries the starved-route experiment that settles the partial-load assumption above |
+
+Two decisions belong to the operator before any of the above, and neither has a
+default the code can supply: the **standing latency target** (§4.19) and
+whether live writes stay on for the first run (§4.21). Both are named in
+`docs/26-first-live-run.md` §0.
