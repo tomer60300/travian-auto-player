@@ -306,6 +306,28 @@ test.describe('a figure past the bound is marked and not sent', () => {
     await expect.poll(() => calls.execute).toBe(1)
   })
 
+  // A SHAPE-valid entry ("4688" is a plausible village id) that names nothing
+  // on this account: the server can only check the shape, so this miss is
+  // knowable only here (`unresolvedProtectedEntries` in `villageRefs.js`). It
+  // used to render visibly (a `<span>` under the box) with no `id` at all, so
+  // a screen-reader user focused on the box heard nothing about it and
+  // `aria-invalid` stayed absent -- the entry protects nothing, and the box
+  // gave no indication.
+  test('a "Never disable" entry that is shape-valid but names no village', async ({ page }) => {
+    await countCalls(page)
+    await openAccount(page, WINDOWS)
+    await buildAndOpenPlan(page)
+
+    const entry = await type(page, 'Never disable', '53629, 4688', 'textbox')
+    await expect(entry).toHaveAttribute('aria-invalid', 'true')
+
+    const described = await entry.getAttribute('aria-describedby')
+    const text = (
+      await Promise.all(described.split(' ').map((id) => page.locator(`#${id}`).innerText()))
+    ).join(' ')
+    expect(text).toContain('4688')
+  })
+
   // The RECONCILIATION SWEEP, which was the only write path with no client gate
   // at all: `executePlan` opens with `[...blockers, ...runIssues]` -- for the
   // preview as well as the live run -- and this one checked only that a plan

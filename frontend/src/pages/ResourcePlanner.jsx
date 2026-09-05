@@ -7271,9 +7271,18 @@ export default function ResourcePlanner() {
                       <input
                         type="text"
                         aria-label="Never disable"
-                        aria-invalid={runProblems['Never disable'] ? true : undefined}
+                        aria-invalid={
+                          runProblems['Never disable'] || protectionMisses.length > 0
+                            ? true
+                            : undefined
+                        }
                         aria-describedby={
-                          runProblems['Never disable'] ? 'protect-shape-problem' : undefined
+                          [
+                            runProblems['Never disable'] ? 'protect-shape-problem' : null,
+                            protectionMisses.length > 0 ? 'protect-miss-problem' : null,
+                          ]
+                            .filter(Boolean)
+                            .join(' ') || undefined
                         }
                         className="input-sm w-56"
                         placeholder="none"
@@ -7300,7 +7309,10 @@ export default function ResourcePlanner() {
                           nothing, and the next run switches off the route the
                           operator was protecting. This page has the list. */}
                       {protectionMisses.length > 0 && (
-                        <span className="block text-warning text-xs mt-0.5">
+                        <span
+                          id="protect-miss-problem"
+                          className="block text-warning text-xs mt-0.5"
+                        >
                           {protectionMisses.map((miss) => (
                             <span key={miss.entry} className="block">
                               no village named {miss.entry}
