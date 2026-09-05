@@ -535,6 +535,21 @@ h1, h2, h3 {
   min-height: 44px;
 }
 
+/* The theme control, beside it in the top bar and to the same rule: item 4 of
+   the UI Definition of Done applies to every viewport for a button, not only
+   to coarse pointers, and this one is a glyph with no text to grow it. */
+.theme-toggle {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  border-radius: 9999px;
+  transition: background-color 200ms var(--md-easing);
+}
+.theme-toggle:hover { background-color: var(--md-surface-container-high); }
+
 /* ── Layout ── */
 
 .top-bar {

@@ -6,6 +6,7 @@ import useLogStore from '../stores/logStore'
 import { connectLogStream, disconnectLogStream } from '../logStream'
 import { useToast } from './Toast'
 import MobileNav from './MobileNav'
+import ThemeToggle from './ThemeToggle'
 import VillageSelector from './VillageSelector'
 // ToastContainer is mounted in App.jsx (global, works for all routes)
 
@@ -146,6 +147,12 @@ export default function Layout() {
           <span className="logo-text">
             Travian Auto Player
           </span>
+          {/* ONCE, in the left group, which is the only part of this bar that
+              is not breakpoint-switched. The right-hand groups are rendered
+              twice (desktop-only / mobile-only) and a control placed there
+              would be two nodes with one accessible name -- the same defect
+              five pages carried with their own <VillageSelector/>. */}
+          <ThemeToggle />
         </div>
 
         {/* Center: Village selector on mobile */}
