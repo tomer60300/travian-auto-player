@@ -1223,7 +1223,23 @@ export function buildSetup({
   if (Array.isArray(reservedWindow) && reservedWindow.length === 2) {
     doc.reserved_window = [String(reservedWindow[0]), String(reservedWindow[1])]
   }
-  if (merchantModel) doc.merchant_model = merchantModel
+  // The levers the operator actually TYPED. A blank box means "use the
+  // planner's own", which the plan path has always read correctly -- the field
+  // is omitted from the request and the backend's default stands -- while this
+  // writer stored the model wholesale, so an emptied box travelled as an
+  // `undefined` key the server answered with 422 "Field required" and this
+  // file's own reader refused. Nothing is filled in: writing 2,500 into an
+  // emptied box would make it look like a calibration the operator asserted,
+  // and that figure sizes every cargo the account ships.
+  //
+  // Omitted entirely when nothing is typed, on the rule the rest of this
+  // document follows: `{}` would import as a model asserting nothing, which
+  // reads identically to having none.
+  const levers = {}
+  for (const [field, value] of Object.entries(merchantModel ?? {})) {
+    if (value != null && value !== '') levers[field] = value
+  }
+  if (Object.keys(levers).length) doc.merchant_model = levers
   // A tribute is entirely operator-supplied -- the game will not say that an ally
   // needs 25,700 crop an hour -- and it drives real routes. Losing it to a cleared
   // origin means the obligation silently stops being planned for.
@@ -1853,17 +1869,35 @@ export function parseSetup(text) {
   let merchantModel = null
   if (raw.merchant_model != null) {
     const m = raw.merchant_model
-    const base = Number(m?.base_capacity)
-    const bonus = Number(m?.bonus_per_to_level)
+    // ABSENT is blank, not a refusal, and blank is not 0. Both boxes may be
+    // emptied on the page, where it means "use the planner's own" -- the plan
+    // request omits the field and the backend's default stands -- and this
+    // reader demanded both, so an operator who cleared either could not load
+    // their own document back. A key that IS there is still held to the same
+    // bound: 0 is a claim, and it is one the backend's `gt=0` refuses.
+    //
     // The predicates rather than the conditions they replaced, so the box on
     // the page and this parser cannot disagree about one number -- the defect
     // this shares with `merchant_reserve` below: 25 was refused from a file and
     // accepted from a keystroke.
-    if (!isMerchantBaseCapacity(base)) {
-      throw new SetupFileError('merchant_model.base_capacity must be a positive number.')
+    //
+    // The keys are set to `undefined` rather than left off, so a document that
+    // omits one loads as an EMPTY box: the page merges what it reads over its
+    // own defaults, and a missing key would take the default back while an
+    // explicit `undefined` carries the blank through.
+    let base
+    let bonus
+    if (m?.base_capacity != null) {
+      base = Number(m.base_capacity)
+      if (!isMerchantBaseCapacity(base)) {
+        throw new SetupFileError('merchant_model.base_capacity must be a positive number.')
+      }
     }
-    if (!isTradeOfficeBonus(bonus)) {
-      throw new SetupFileError('merchant_model.bonus_per_to_level must be zero or more.')
+    if (m?.bonus_per_to_level != null) {
+      bonus = Number(m.bonus_per_to_level)
+      if (!isTradeOfficeBonus(bonus)) {
+        throw new SetupFileError('merchant_model.bonus_per_to_level must be zero or more.')
+      }
     }
     merchantModel = { base_capacity: base, bonus_per_to_level: bonus }
     // The two account-wide merchant levers, carried only when the file has

@@ -2671,6 +2671,83 @@ describe('the account-wide merchant levers in the setup file', () => {
 
     expect(() => roundTrip(doc)).toThrow(/merchant_headroom/)
   })
+
+  // Blank is a state these two boxes can be in, and it means "use the planner's
+  // own". The PLAN path has always read it that way -- the field is omitted from
+  // the request and the backend's default stands -- while this writer stored the
+  // model wholesale and the reader demanded both, so an operator who cleared
+  // either could not save at all: the PUT came back 422 "Field required" and the
+  // export wrote a file this parser refused, with no cell marked on the way.
+  //
+  // Blank is NOT 0 and is not filled in with a number here. Writing 2,500 in
+  // would make an emptied box look like a calibration the operator asserted --
+  // and that figure sizes every cargo the account ever ships.
+  it('leaves a blank base capacity out of the document rather than inventing one', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      merchantModel: {
+        base_capacity: undefined,
+        bonus_per_to_level: 0.2,
+        merchant_reserve: 2,
+        merchant_headroom: 0.1,
+      },
+      exportedAt: STAMP,
+    })
+
+    expect('base_capacity' in doc.merchant_model).toBe(false)
+    expect(doc.merchant_model.bonus_per_to_level).toBe(0.2)
+  })
+
+  it('reads an absent base capacity back as blank, not as a refusal', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      merchantModel: { base_capacity: undefined, bonus_per_to_level: 0.2 },
+      exportedAt: STAMP,
+    })
+
+    const setup = roundTrip(doc)
+    expect(setup.merchantModel.base_capacity).toBeUndefined()
+    expect(setup.merchantModel.bonus_per_to_level).toBe(0.2)
+  })
+
+  it('does the same for a blank Trade Office bonus', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      merchantModel: { base_capacity: 2500, bonus_per_to_level: undefined },
+      exportedAt: STAMP,
+    })
+
+    expect('bonus_per_to_level' in doc.merchant_model).toBe(false)
+    const setup = roundTrip(doc)
+    expect(setup.merchantModel.base_capacity).toBe(2500)
+    expect(setup.merchantModel.bonus_per_to_level).toBeUndefined()
+  })
+
+  it('omits the model entirely when every lever is blank', () => {
+    const doc = buildSetup({
+      villages: VILLAGES,
+      tradeOffice: { 20030: 19 },
+      merchantModel: { base_capacity: undefined, bonus_per_to_level: undefined },
+      exportedAt: STAMP,
+    })
+
+    // Omitted rather than written empty, the rule every other optional field in
+    // this document follows: `{}` would import as a model that asserts nothing,
+    // which reads identically to having none.
+    expect('merchant_model' in doc).toBe(false)
+    expect(roundTrip(doc).merchantModel).toBeNull()
+  })
+
+  it('still refuses a base capacity that is present and wrong', () => {
+    // Absent is blank; 0 is a claim, and it is one the backend's `gt=0` refuses.
+    const doc = buildSetup({ villages: VILLAGES, tradeOffice: { 20030: 1 }, exportedAt: STAMP })
+    doc.merchant_model = { base_capacity: 0, bonus_per_to_level: 0.2 }
+
+    expect(() => roundTrip(doc)).toThrow(/base_capacity/)
+  })
 })
 
 // ─── Section 7's feedstock override, and section 9's crop assumption ────────
