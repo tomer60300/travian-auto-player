@@ -218,7 +218,7 @@ export default function Layout() {
               )}
               <button
                 onClick={() => setSidebarCollapsed((c) => !c)}
-                className="bg-transparent border-none text-secondary cursor-pointer hover:text-primary"
+                className="link-action bg-transparent border-none text-secondary cursor-pointer hover:text-primary"
                 style={{
                   fontSize: '0.85rem',
                   width: 28,
@@ -330,13 +330,6 @@ export default function Layout() {
         </>
       )}
 
-      {/* Mobile bottom tab bar — hidden on desktop via .mobile-only */}
-      {connected && (
-        <div className="mobile-only">
-          <MobileNav />
-        </div>
-      )}
-
       {/* Main content */}
       <main
         className={`main-content min-h-[calc(100vh-64px)] mt-[64px] transition-[margin-left] duration-200 ${connected ? '' : 'ml-0'}`}
@@ -344,6 +337,19 @@ export default function Layout() {
       >
         <Outlet />
       </main>
+
+      {/* Mobile bottom tab bar — hidden on desktop via .mobile-only.
+          AFTER <main> on purpose. `.bottom-tab-bar` is `position: fixed` at the
+          BOTTOM of the viewport, so DOM order here decides tab order and
+          nothing else: rendered before <main>, Tab left the top bar for the
+          bottom bar and then jumped back up to the page's first control — one
+          backward jump on every one of the 13 pages this layout wraps, at
+          every width ≤767px. */}
+      {connected && (
+        <div className="mobile-only">
+          <MobileNav />
+        </div>
+      )}
 
       {/* Inline styles for responsive helpers — no external CSS changes needed */}
       <style>{`

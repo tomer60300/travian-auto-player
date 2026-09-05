@@ -457,10 +457,42 @@ h1, h2, h3 {
 
 /* The same ring for the plain-text controls above that carry none of the
    five classes it is otherwise wired to: "Lift restriction", "Stop
-   relaying" and the Relays-for `<summary>` in ResourcePlanner.jsx. */
+   relaying" and the Relays-for `<summary>` in ResourcePlanner.jsx, plus the
+   sidebar-collapse toggle in Layout.jsx. */
 .link-action:focus-visible {
   outline: 2px solid var(--md-primary);
   outline-offset: 2px;
+}
+
+/* And the same ring again for the app's PRIMARY NAVIGATION, which carried none
+   of the classes above: the 14 sidebar links, the mobile hamburger, and the
+   five bottom-tab controls. Measured on every one of the 13 Layout-wrapped
+   pages before this rule, by real Tab traversal: `outline-style: auto`,
+   `rgb(19,18,23)`, 1px -- Chromium's own default, not the app's ring. Item 2 of
+   the UI Definition of Done, over the whole of the navigation chrome.
+
+   `outline-offset` stays POSITIVE, unlike `.tab-btn`'s inset ring: the nav's
+   two clipping ancestors both leave room for it (`nav` has `overflow: hidden`
+   with 4px of `py-1` above a link's 1px margin, and the 64px bottom bar centres
+   a 44px control), so a ring outside the pill reads as one ring rather than as
+   a second border. */
+.nav-link:focus-visible,
+.sidebar-toggle:focus-visible,
+.bottom-tab-bar a:focus-visible,
+.bottom-tab-bar button:focus-visible {
+  outline: 2px solid var(--md-primary);
+  outline-offset: 2px;
+}
+
+/* The hamburger measured 18x44 under touch emulation at 375. It picked up the
+   generic `@media (max-width: 767px) { button { min-height: 44px } }` rule far
+   below for its height and had nothing at all for its width. Declared
+   unconditionally rather than inside that query because the button is
+   `md:hidden` -- it does not exist above 767px to be sized. Item 4 of the UI
+   Definition of Done. */
+.sidebar-toggle {
+  min-width: 44px;
+  min-height: 44px;
 }
 
 /* ── Layout ── */

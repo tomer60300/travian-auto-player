@@ -18,44 +18,18 @@
  * store, so "Clear All" renders with no fetch at all. The fix is a CSS rule,
  * not a page, so one page proves it for all of them.
  *
- * NO BACKEND AND NO GAME REQUEST: `/users/me` and `/travian/status` are
- * fulfilled from literals and every other `/api/**` call is aborted. There is
- * a live Travian account on this machine.
+ * NO BACKEND AND NO GAME REQUEST: `appHarness.js` fulfils `/users/me` and
+ * `/travian/status` from literals and aborts every other `/api/**` call. There
+ * is a live Travian account on this machine.
  */
 
 import { expect, test } from '@playwright/test'
 
+import { isolateApp } from './appHarness'
 import { forceTheme, measureContrast } from './contrast'
 
-const PLAYER = 'e2e-operator'
-const CAPITAL = 20002
-
-async function isolateApi(page) {
-  await page.route('**/api/**', (route) => {
-    const path = new URL(route.request().url()).pathname
-    if (path.endsWith('/users/me')) {
-      return route.fulfill({ json: { id: 1, username: PLAYER, is_active: true } })
-    }
-    if (path.endsWith('/travian/status')) {
-      return route.fulfill({
-        json: {
-          connected: true,
-          server_url: 'https://ts2.x1.europe.travian.com',
-          player_name: PLAYER,
-          tribe_id: 1,
-          active_village_id: CAPITAL,
-          villages: [{ id: CAPITAL, name: '02', x: 0, y: 0 }],
-        },
-      })
-    }
-    return route.abort('blockedbyclient')
-  })
-}
-
 async function openLogs(page) {
-  await isolateApi(page)
-  await page.routeWebSocket(/.*/, (ws) => ws.close())
-  await page.addInitScript(() => localStorage.setItem('token', 'e2e-not-a-real-token'))
+  await isolateApp(page)
   await page.goto('/logs')
   const clearAll = page.getByRole('button', { name: 'Clear All' })
   await expect(clearAll).toBeVisible()
