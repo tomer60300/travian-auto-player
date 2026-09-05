@@ -1092,7 +1092,7 @@ export const TRAVIAN_REPEAT_INTERVALS = Object.freeze([1, 2, 3, 4, 6, 8, 12, 24]
  * is nothing on screen to reconcile: the request has been dropping this figure
  * all along, so the document catching up changes no plan.
  */
-export function storedRoleTemplates(templates) {
+function storedRoleTemplates(templates) {
   const out = {}
   for (const [role, template] of Object.entries(templates ?? {})) {
     if (!template || typeof template !== 'object' || template.consumption == null) {
@@ -1123,7 +1123,7 @@ const isClockTime = (value) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(value))
  * typed, both boxes are filled, and the parser and the server both take it --
  * dropping it would lose typed state over a rule that belongs to the request.
  */
-export function storedProfileWindows(windows) {
+function storedProfileWindows(windows) {
   const out = {}
   for (const [name, pair] of Object.entries(windows ?? {})) {
     if (!Array.isArray(pair) || pair.length !== 2) continue
@@ -1181,7 +1181,7 @@ export function foreignTargetIsDraft(target) {
  * file follows: the parser reads absent as "no exclusion", so writing an empty
  * list would only make the document look like it had an answer.
  */
-export function storedForeignTargets(targets, villages) {
+function storedForeignTargets(targets, villages) {
   return (targets ?? [])
     // A draft is the operator mid-edit, not in error, so it is left out rather
     // than refused -- the same rule and the same predicate the plan request
