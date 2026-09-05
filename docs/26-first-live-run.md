@@ -1,8 +1,12 @@
 # 26 — The first live run of the distribution planner
 
 Written 2026-09-05, against the execute path as it stands after the wave-1
-review (`4b5203b` and later), and corrected after the game-mechanics review of
-its first draft. Every control named here is quoted as the page labels it.
+review (`4b5203b` and later), corrected after the game-mechanics review of its
+first draft, and re-checked the same day against the two further rounds of
+backend fixes and the four rounds of page fixes that landed after it — the
+behaviours those changed are recorded in `docs/25-resource-distribution-planner.md`
+§4.20 and §4.21, and this protocol is what first observes them against a real
+marketplace. Every control named here is quoted as the page labels it.
 Every response field is quoted as `/routes/execute` returns it. The protocol
 exists because the review found that the create half of the executor was
 honest and the disable half was not, and that both are now honest only along
@@ -29,8 +33,11 @@ are measurements the plan's own numbers rest on.
    `TRAVIAN_TRADE_ROUTE_LIVE` defaults to **true** (`config.py`, changed
    2026-08-27 at the operator's instruction because the opt-in kept reverting
    to preview-only on every server restart). Unset, the switch is *on*:
-   pressing **Execute** at any point writes to the real account, with
-   **Routes this run** at 3 and **Also disable routes the plan no longer
+   the red button at the foot of "Write it to the game" — labelled
+   **Disable old routes & create N (~M requests)**, or **Create N route(s),
+   disable nothing (~M requests)** with the disable box unticked — writes to
+   the real account at any point, and the page seeds **Routes this run** to 3,
+   **Max rows this run** to 24 and **Also disable routes the plan no longer
    wants** ticked. The page asks for confirmation before a live execute, but
    a dialog is not a safety. Set `TRAVIAN_TRADE_ROUTE_LIVE=false` in `.env` —
    not in the shell, because a running process's environment cannot be
@@ -45,20 +52,24 @@ are measurements the plan's own numbers rest on.
    `live_enabled`, and a dry run reports it truthfully. Read it before you
    trust anything else. Dry runs never depend on it — `dry_run: true`
    returns before the session is touched — and a live execute with the flag
-   false is refused with a 409 naming it. Three comments in the code still
-   say the flag defaults off — two in `trade_route_service.py`, one in
-   `sessions.py` — and are queued for correction. The constructor default
-   `live_enabled: bool = False` in `trade_route_service.py` is **not** one of
-   them: that is the library's own safe default, which every test and every
-   direct construction depends on. Only `sessions.py` overrides it, with the
-   settings value.
+   false is refused with a 409 naming it. The three comments that used to say
+   the flag defaults off — the module docstring and the constructor comment in
+   `trade_route_service.py`, and the construction site in `web/sessions.py` —
+   now say it defaults **on** and give the date; only the words were wrong, and
+   only the words changed. The constructor default `live_enabled: bool = False`
+   in `TradeRouteService.__init__` is **not** one of them and is **not** stale:
+   it is the library's own safe default, which every test and every direct
+   construction depends on, and `web/sessions.py` is the only caller that
+   overrides it, with the settings value. Do not "correct" it to match
+   `config.py`.
 3. **A run cannot be undone without its trace.** A live run whose trace file
    cannot be opened is refused before the first game request (`4b5203b`),
    because the game returns no id on create and the undo reconstructs from
    the trace's pre-write inventory. If the refusal fires, fix the trace
    directory; do not work around it. Dry runs are unaffected.
-4. **Save the setup to the server** (v10) and **export it** to a file, then
-   load the file back once to prove it parses. The review found three ways a
+4. **Save the setup to the server** (v11 — v10 added the window prune, v11
+   the merchant-model acknowledgement of step 0.6) and **export it** to a
+   file, then load the file back once to prove it parses. The review found three ways a
    saved document could never be loaded again; all are closed, and this is
    the check that they stay closed for your account's actual figures.
 5. **Read the plan's blockers to zero.** The plan verdict's `executable` must
@@ -78,6 +89,18 @@ are measurements the plan's own numbers rest on.
    pair then overstates capacity.) Slope = (second reading ÷ base − 1) ÷ that
    village's Trade Office level. Type base and slope into the merchant-model
    fields, not the two readings. Do not build the plan against the defaults.
+
+   Then **record that you did it**: tick **I read the base capacity and the
+   bonus off the Marketplace send form**, the one control in the World &
+   merchants row that is not a figure. It rides in the plan request as
+   `merchant_model_measured` and in the saved document as the field v11 added,
+   and it exists because `MERCHANT_MODEL_UNCALIBRATED` is an equality test
+   against the shipped 0.20 — so an operator who measured the slope, found the
+   default right and typed it back got the same warning for ever, asking them
+   to do the thing they had just done. Ticking it **changes no number**: it
+   silences that one finding and nothing else. Editing either figure afterwards
+   unticks it, because the reading no longer describes what is in the box — so
+   tick it last, after both figures are typed.
 7. **Time one leg.** Merchant speed has never been measured on this server;
    it drives sets in flight, the merchant budget and the night profile's
    turnaround counts, and a wrong speed invalidates step 1's merchant column.
@@ -97,7 +120,7 @@ are measurements the plan's own numbers rest on.
 
 Turn on **Whole day — execute all profiles at once**. **Trim the fan-out to
 the profile hours** is forced on and shown disabled; the page and the request
-agree. Press **Preview**. Nothing reaches the game.
+agree. Press **Preview (0 requests)**. Nothing reaches the game.
 
 A dry run carries no `problems` — that field is populated only on live runs.
 Its refusal signal is the plan verdict from step 0.5 (`executable` true,
@@ -110,12 +133,15 @@ unexpected:
 - `warnings` — read each. `MERCHANT_MODEL_UNCALIBRATED` does **not** mean a
   Trade Office level is missing; it fires *because* levels were typed, on any
   plan still carrying the default +20 % slope. The fix is step 0.6 and only
-  step 0.6. The check compares against the default value, so if your reading
-  confirms +20 % the warning keeps firing after the work is done: record the
-  two readings in your run notes and treat it from then on as a standing
-  reminder, not a blocker. A merchant-boundary warning means the two profiles
-  together commit more merchants than the fleet around the window edge;
-  acceptable, but know which village.
+  step 0.6. The check compares against the default value, so a reading that
+  *confirms* +20 % is indistinguishable from never having looked — which is
+  what the acknowledgement in step 0.6 is for: with it ticked the request
+  carries `merchant_model_measured: true` and this one finding is suppressed,
+  and nothing else about the plan moves. If the warning is still here, either
+  the box is unticked or an edit to base or bonus unticked it. Record the two
+  readings in your run notes either way. A merchant-boundary warning means the
+  two profiles together commit more merchants than the fleet around the window
+  edge; acceptable, but know which village.
 - `requests_forecast` — the reads, disables, creates, verifies and trims the
   live run would spend. This is the price. On an ordinary run
   `marketplace_reads` is one per origin that creates; on a sweep it is one per
@@ -168,9 +194,12 @@ Set:
 
 Set `TRAVIAN_TRADE_ROUTE_LIVE=true` in `.env` (or unset it; true is the
 default), stop any running loops, and reconnect the session. Press
-**Preview** once more and confirm the response
+**Preview (0 requests)** once more and confirm the response
 shows `live_enabled: true` with `dry_run: true`. That pair is the only proof
-you have of which mode you are in. Then execute, and confirm the dialog.
+you have of which mode you are in. Then press the red run button beneath it —
+**Create 1 route, disable nothing (~N requests)** with the disable box
+unticked, **Disable old routes & create 1 (~N requests)** with it ticked — and
+confirm the dialog, whose own button reads **Go live (~N requests)**.
 
 Read the response:
 
