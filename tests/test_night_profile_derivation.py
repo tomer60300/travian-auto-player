@@ -79,10 +79,14 @@ class TestItDependsOnCapacityNotOnCurrentStock:
     def test_the_baseline_moves_every_ceiling(self):
         tight = _derive(baseline_fill=0.30)
         loose = _derive(baseline_fill=0.10)
-        # A lower baseline leaves more room, so more may accumulate.
+        # Asserted on the RECEIVER and strictly. FAR has room to spare, so it
+        # keeps exactly what it makes at either baseline and the `>=` this used
+        # to make was satisfied by the baseline having no effect at all. ARMY is
+        # the village being FILLED -- 7,700/h of lumber against a ceiling of
+        # 7,000/h at 30% and 11,000/h at 10% -- which is where the room decides.
         assert (
-            loose.allocations[Resource.LUMBER][FAR].value
-            >= tight.allocations[Resource.LUMBER][FAR].value
+            loose.allocations[Resource.LUMBER][ARMY].value
+            > tight.allocations[Resource.LUMBER][ARMY].value
         )
 
 
@@ -434,6 +438,87 @@ class TestNoDestinationIsPromisedAFractionOfATrip:
 
         assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(80_000.0)
         assert profile.unmet[Resource.CROP] == pytest.approx(1_000.0)
+
+
+class TestTheDerivationsOwnBoundaryRules:
+    """Three rules the module states and nothing measured.
+
+    A village is never its own destination; a set of destinations that need
+    nothing is averaged rather than reduced to the nearest; and the rounding
+    trim lands the residual at or below zero rather than one unit above it.
+    """
+
+    def _derive(self, villages, **kw):
+        return derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            **kw,
+        )
+
+    def test_a_village_standing_on_the_destination_cannot_deliver_to_it(self):
+        """The tile is unique in Travian, so a zero hop is the village itself and
+        never a free delivery. The supplier sitting on the tribute's own
+        coordinates therefore cannot pay it -- and nobody else is near enough --
+        so it keeps its crop and the obligation is reported outstanding."""
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=0.0),
+            _village(ARMY, "supplier", 60, 0, crop=50_000.0, gr=1_600_000),
+        ]
+        profile = self._derive(
+            villages,
+            consumer_ids=[],
+            tributes=[night_profile.TributeTarget(at=(60, 0), per_hour=1_000.0)],
+        )
+
+        assert profile.allocations[Resource.CROP][ARMY].value == pytest.approx(50_000.0)
+        assert profile.unmet[Resource.CROP] == pytest.approx(1_000.0)
+
+    def test_destinations_that_need_nothing_are_averaged_not_reduced_to_the_nearest(self):
+        """The zero-claim branch, reached by a FORCED sender shedding to avoid
+        overflow. Two destinations at 1 and 40 fields weigh the same, so the hop
+        is their MEAN -- taking the nearest reverts exactly the over-estimating
+        bound this module removed on the demand-weighted path.
+
+        18 merchants x 7,500 at a mean hop of 1.7083h is two round trips in an
+        8h night: 33,750/h. At the nearest hop it would be forty-eight.
+        """
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=60_000.0),
+            _village(self.NEAR, "near", 1, 0, crop=0.0),
+            _village(self.FARR, "far", 40, 0, crop=0.0),
+        ]
+        profile = self._derive(villages, consumer_ids=[self.NEAR, self.FARR])
+
+        # Forced by its own 7,000/h ceiling, so it sheds the larger of the
+        # ceiling and what its merchants can carry: 60,000 - 33,750 = 26,250.
+        assert profile.allocations[Resource.CROP][HUB].value == pytest.approx(26_250.0)
+
+    NEAR = 31
+    FARR = 32
+
+    def test_the_rounding_trim_lands_the_residual_below_one_and_not_below_zero(self):
+        """Integer retentions cannot sum to a fractional production total, so
+        the trim takes the slack off the largest entry. `int(-residual) + 1` is
+        what carries it PAST zero: without the `+ 1` a residual of -0.8 has 0
+        taken off it and the profile over-claims the account by a unit every
+        night, which the planner reads as not executable.
+
+        Two villages at 10.6/h each: 21.2 produced, 22 claimed once rounded.
+        """
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=10.6),
+            _village(ARMY, "other", 2, 0, crop=10.6),
+        ]
+        profile = self._derive(villages, consumer_ids=[])
+
+        produced = 21.2
+        claimed = sum(a.value for a in profile.allocations[Resource.CROP].values())
+        assert 0 <= produced - claimed < 1, (produced, claimed)
+        assert profile.residual_trimmed == pytest.approx(1.0)
 
 
 class TestTheLibraryContractSurvivesANegativeProducer:

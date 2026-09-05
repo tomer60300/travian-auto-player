@@ -28,6 +28,7 @@ from travian_api.services.distribution.merchants import (
     route_cost,
 )
 from travian_api.services.distribution.optimizer import (
+    MAX_IMPROVE_PASSES,
     MIN_SEND_FILL,
     VillageState,
     _flows_for_resource,
@@ -804,18 +805,36 @@ class TestSearchTerminationIsHonest:
     """
 
     def test_a_converged_search_is_a_fixed_point(self):
-        """Re-running the search on its own output must change nothing. This is
-        the detector for truncation: it fails exactly when the cap cut in."""
+        """One more pass than the cap allows must change nothing.
+
+        RE-SEEDED. It called `build_plan` TWICE WITH IDENTICAL ARGUMENTS and
+        asserted the two agreed -- a determinism test wearing a convergence
+        test's name, and this class is the only guard on `MAX_IMPROVE_PASSES`.
+        Comparing the cap against the cap PLUS ONE is the detector it claimed to
+        be: if the search is still finding improvements when the cap stops it,
+        the extra pass moves the plan.
+        """
         villages = make_account(22, seed=113)
         plans, _ = make_plans(villages, seed=113)
 
-        once = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
-        # Feed the finished plan's own flows back in; a converged local optimum
-        # has no improving swap left, so the second run must be identical.
-        twice = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+        def _plan(passes):
+            return build_plan(
+                villages,
+                plans,
+                GEOMETRY,
+                MODEL,
+                max_latency_hours=None,
+                max_improve_passes=passes,
+            )
 
-        assert once.routes == twice.routes
-        assert not [w for w in once.warnings if "improvement passes" in w]
+        at_cap = _plan(MAX_IMPROVE_PASSES)
+        one_more = _plan(MAX_IMPROVE_PASSES + 1)
+
+        assert at_cap.routes == one_more.routes
+        assert not [w for w in at_cap.warnings if "improvement passes" in w]
+        # And the comparison has teeth on this fixture: at a single pass the
+        # search is genuinely unfinished, so an extra pass DOES move the plan.
+        assert _plan(1).routes != at_cap.routes
 
     def test_truncating_the_search_is_reported_not_hidden(self):
         """With the cap set to 1 the search cannot finish, and the plan must say

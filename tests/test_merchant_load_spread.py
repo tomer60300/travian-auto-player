@@ -207,7 +207,11 @@ class TestTheSoftCapSpreadsLoad:
             optimizer.SOFT_BUDGET_PRICE = original
 
     def test_headroom_lowers_peak_utilisation(self) -> None:
-        villages, plans = _fan_in(villages_count=9, spread=10, budget=18, surplus=5000)
+        # RE-SEEDED: at budget 18 the two peaks are both 56%, so `<=` was
+        # satisfied by headroom doing nothing -- the only outcome this test
+        # exists to rule out. At budget 10 the tight plan runs a village at its
+        # redline and headroom takes it to 80%.
+        villages, plans = _fan_in(villages_count=9, spread=10, budget=10, surplus=5000)
 
         tight = build_plan(
             villages, plans, GEOMETRY, MODEL, max_latency_hours=None, merchant_headroom=0.0
@@ -222,8 +226,10 @@ class TestTheSoftCapSpreadsLoad:
             f"fixture does not concentrate load ({tight_peak:.0%} peak), so it cannot "
             f"show that headroom spreads it"
         )
-        assert spread_peak <= tight_peak, (
-            f"headroom raised peak utilisation from {tight_peak:.0%} to {spread_peak:.0%}"
+        # STRICTLY lower: `<=` was satisfied by headroom doing nothing, which
+        # is the only outcome this test exists to rule out.
+        assert spread_peak < tight_peak, (
+            f"headroom did not lower peak utilisation: {tight_peak:.0%} -> {spread_peak:.0%}"
         )
 
     @pytest.mark.parametrize("target_hours", [1.0, 2.0, 4.0])

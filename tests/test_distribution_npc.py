@@ -19,10 +19,25 @@ import dataclasses
 import pytest
 from fastapi import HTTPException
 
-from travian_api.services.distribution.allocation import Allocation, AllocationMode, Resource
+from travian_api.services.distribution.allocation import (
+    MATERIALS,
+    Allocation,
+    AllocationError,
+    AllocationMode,
+    Resource,
+)
 from travian_api.services.distribution.geometry import MapGeometry
 from travian_api.services.distribution.merchants import EUROPE2_TEUTON
-from travian_api.services.distribution.npc import NpcPolicy
+from travian_api.services.distribution.npc import (
+    MIN_FUNDED_ALLOWANCE_PER_DAY,
+    NpcPolicy,
+    NpcReserve,
+    TriggerKind,
+    _projected,
+    derive_reserves,
+    draw_allowance,
+    evaluate_triggers,
+)
 from travian_api.services.distribution.optimizer import VillageState
 from travian_api.services.distribution.planner import PlannerConfig, craft_plan
 from travian_api.web.routes import distribution as dist
@@ -303,6 +318,184 @@ class TestTheFeedstockOverride:
         assert exc.value.status_code == 400
         assert "lumber" in exc.value.detail
         assert "cannot convert a resource into itself" in exc.value.detail
+
+
+def _reserve(**kw):
+    """A funded reserve: 24,000/day, so 1,000/h, paid for out of crop."""
+    base = dict(
+        village_id=HUB,
+        floor_level=360_000.0,
+        allowance_per_day=24_000.0,
+        sources=(Resource.CROP,),
+        shares=(1.0,),
+    )
+    base.update(kw)
+    return NpcReserve(**base)
+
+
+class TestOneBudgetIsSplitAcrossTheMaterialsThatNeedIt:
+    """`draw_allowance` apportions ONE reserve across every material.
+
+    Every existing case is short on exactly one material, so the divisor never
+    divides and dropping `* needs[resource] / total` changed nothing anywhere in
+    the suite. As the real code that hands the whole budget to lumber AND the
+    whole budget to clay AND the whole budget to iron -- up to three times the
+    conversion the feedstock can pay for -- and the plan reports routes as
+    funded that arrive short.
+    """
+
+    def _draw(self, **needs):
+        retention = {resource: {HUB: -amount} for resource, amount in needs.items()}
+        return draw_allowance({HUB: _reserve()}, retention)
+
+    def test_the_parts_sum_to_the_whole_budget(self):
+        draw = self._draw(**{Resource.LUMBER: 3_000.0, Resource.CLAY: 1_000.0})
+
+        assert draw[Resource.LUMBER][HUB] + draw[Resource.CLAY][HUB] == pytest.approx(1_000.0)
+
+    def test_the_split_is_proportional_to_need(self):
+        # 3:1 of need is 3:1 of the budget.
+        draw = self._draw(**{Resource.LUMBER: 3_000.0, Resource.CLAY: 1_000.0})
+
+        assert draw[Resource.LUMBER][HUB] == pytest.approx(750.0)
+        assert draw[Resource.CLAY][HUB] == pytest.approx(250.0)
+
+    def test_a_material_that_needs_nothing_gets_nothing(self):
+        draw = self._draw(**{Resource.LUMBER: 3_000.0, Resource.CLAY: 1_000.0})
+
+        assert draw[Resource.IRON][HUB] == 0.0
+
+    def test_one_short_material_still_gets_the_whole_budget(self):
+        # The control, and the shape every previous case had.
+        draw = self._draw(**{Resource.LUMBER: 3_000.0})
+
+        assert draw[Resource.LUMBER][HUB] == pytest.approx(1_000.0)
+
+
+class TestAFloorOnAQuietVillageCostsNothing:
+    """`_need` reads a NEGATIVE retention as demand and nothing else.
+
+    "This one line is why a floor on a quiet village costs nothing", says the
+    module. Read as `abs(retention)`, a village KEEPING 5,000/h of every
+    material claims 5,000/h of conversion it does not need -- and
+    `derive_reserves` then marks it as DRAWING on that material, which removes
+    the material from its own feedstock set.
+    """
+
+    def _retention(self, amount):
+        return {resource: {HUB: amount} for resource in MATERIALS}
+
+    def test_a_village_keeping_what_it_makes_draws_nothing(self):
+        draw = draw_allowance({HUB: _reserve()}, self._retention(5_000.0))
+
+        assert [draw[resource][HUB] for resource in MATERIALS] == [0.0, 0.0, 0.0]
+
+    def test_and_is_not_recorded_as_drawing_on_anything(self):
+        reserves, findings = derive_reserves(
+            NpcPolicy(floor_level={HUB: 360_000.0}, attended=True),
+            self._retention(5_000.0),
+        )
+
+        assert reserves[HUB].drawn == frozenset()
+        assert findings == ()
+
+    def test_a_village_shipping_beyond_production_still_draws(self):
+        # The control: a negative retention IS demand.
+        draw = draw_allowance({HUB: _reserve()}, self._retention(-5_000.0))
+
+        assert all(draw[resource][HUB] > 0 for resource in MATERIALS)
+
+
+class TestTheReserveRefusesWhatNpcCannotDo:
+    """Two rules stated in four docstrings across two modules and asserted
+    nowhere: both guards could be deleted with the whole suite still green."""
+
+    def test_crop_can_never_be_drawn(self):
+        # A granary is not NPC-fed. Drawn crop would take the account's largest
+        # feedstock out of its own sources and fund the conversion from itself.
+        with pytest.raises(AllocationError) as caught:
+            NpcReserve(
+                village_id=HUB,
+                floor_level=360_000.0,
+                allowance_per_day=0.0,
+                drawn=frozenset({Resource.CROP}),
+            )
+
+        assert "granary" in str(caught.value)
+
+    def test_an_allowance_with_no_feedstock_is_refused(self):
+        # NPC is an exchange: it cannot create resources.
+        with pytest.raises(AllocationError) as caught:
+            NpcReserve(
+                village_id=HUB,
+                floor_level=360_000.0,
+                allowance_per_day=50_000.0,
+                sources=(),
+                shares=(),
+            )
+
+        assert "cannot create resources" in str(caught.value)
+
+    def test_float_residue_below_the_funded_minimum_is_still_allowed(self):
+        # The paired case that keeps the guard from being "no sources, ever":
+        # below one resource a DAY the allowance is rounding, not a budget.
+        reserve = NpcReserve(
+            village_id=HUB,
+            floor_level=360_000.0,
+            allowance_per_day=MIN_FUNDED_ALLOWANCE_PER_DAY / 2,
+            sources=(),
+            shares=(),
+        )
+
+        assert reserve.sources == ()
+
+
+class TestAProjectedStoreNeverGoesBelowEmpty:
+    """`_projected` clamps at zero the way the game does.
+
+    The figure it returns is what the wood-low trigger and the day-check status
+    both PRINT, so a store the plan drains past empty was reported at a negative
+    level.
+    """
+
+    def test_a_store_the_plan_empties_reads_as_empty(self):
+        assert _projected(10_000.0, -10_000.0, None) == 0.0
+
+    def test_a_store_the_plan_drains_far_past_empty_still_reads_as_empty(self):
+        assert _projected(10_000.0, -100_000.0, None) == 0.0
+
+    def test_the_capacity_clamp_still_applies_at_the_top(self):
+        assert _projected(10_000.0, 10_000.0, 50_000.0) == 50_000.0
+
+
+class TestWoodLowReadsTheLowerOfNowAndProjected:
+    """The trigger exists for the store the plan is about to empty.
+
+    Its crop mirror IS covered (`crop_banked` reads the HIGHER of the two and a
+    test proves it); wood was not, so reading `max` instead of `min` silenced
+    exactly the case section 7's first trigger is for -- a warehouse above its
+    floor now and below it by 07:00.
+    """
+
+    def _triggers(self, *, now, net):
+        return evaluate_triggers(
+            reserves={HUB: _reserve(allowance_per_day=0.0, sources=(), shares=())},
+            stocks={HUB: {Resource.LUMBER: now}},
+            capacities={HUB: {Resource.LUMBER: 1_200_000.0}},
+            net_per_hour={HUB: {Resource.LUMBER: net}},
+        )
+
+    def test_a_store_above_its_floor_now_and_below_it_by_morning_fires(self):
+        # 400,000 now, draining 5,000/h: 280,000 after a day, under the 360,000
+        # floor. "Now" alone says nothing is wrong.
+        fired = self._triggers(now=400_000.0, net=-5_000.0)
+
+        assert [t.kind for t in fired] == [TriggerKind.WOOD_LOW]
+        assert fired[0].projected is True
+        assert fired[0].level == pytest.approx(280_000.0)
+
+    def test_a_store_that_stays_above_its_floor_says_nothing(self):
+        assert self._triggers(now=400_000.0, net=0.0) == ()
 
 
 class TestTheTwoTriggers:

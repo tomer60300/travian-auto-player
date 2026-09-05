@@ -2862,6 +2862,17 @@ class TestABoundedSweepSaysWhatItDidNotReach:
 
         assert res.swept_origins == [], "this run did not sweep the account"
         assert res.unswept_origins == []
+        # The same account WITH the sweep, so the empty lists above are a
+        # decision and not a field that is always empty. Two assertions that can
+        # only ever read `[]` prove nothing about the one that matters.
+        swept = _run_live(
+            _FakeLiveSvc(existing={20011: [ExistingRoute(7, _ORPHAN_DEST, 60, 60, active=True)]}),
+            _one_origin_account(),
+            disable_existing=True,
+            max_routes_per_run=50,
+            reconcile_all_origins=True,
+        )
+        assert swept.swept_origins == [20003, 20011]
 
 
 class TestASweepDoesNotReadAsASweep:

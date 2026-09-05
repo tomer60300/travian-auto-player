@@ -12,6 +12,7 @@ from travian_api.services.distribution.merchants import (
     ALL_CYCLES,
     DAILY_BEAT_CYCLES,
     EUROPE2_TEUTON,
+    MIN_CALIBRATION_SEPARATION,
     STOCK_TEUTON,
     CalibrationError,
     CapacityObservation,
@@ -110,6 +111,38 @@ class TestCalibration:
                 ],
             )
 
+    def test_an_observation_off_by_a_real_margin_raises_too(self):
+        """The case between "identical" and "doubled", and the one the residual
+        check exists for.
+
+        Base 1,000 at +10% predicts 1,500 at TO 5; a village reading 1,700 is
+        200 out -- not rounding, and not a factor of two either. Widening the
+        tolerance five hundredfold left the doubled case above still raising, so
+        the check could be all but disabled with the suite green.
+        """
+        with pytest.raises(CalibrationError) as caught:
+            calibrate(
+                [
+                    CapacityObservation(0, 1000),
+                    CapacityObservation(10, 2000),
+                    CapacityObservation(5, 1700),
+                ],
+            )
+
+        assert "TO=5" in str(caught.value), str(caught.value)
+
+    def test_the_minimum_separation_is_a_named_constant(self):
+        # Pinned the way CROP_DRIFT_THRESHOLD is. The constant guards against an
+        # ill-conditioned solve that OVERSTATES capacity -- the direction that
+        # breaches merchant budgets -- and nothing named it.
+        assert MIN_CALIBRATION_SEPARATION == 3
+
+    def test_levels_two_apart_are_too_close_to_solve(self):
+        # Solvable arithmetic (base 1,000 at +10%), refused on conditioning
+        # alone: without the constant biting, this returns a model.
+        with pytest.raises(CalibrationError, match="apart"):
+            calibrate([CapacityObservation(5, 1500), CapacityObservation(7, 1700)])
+
     def test_adjacent_trade_office_levels_are_refused(self):
         """Found by simulation, not by these tests originally.
 
@@ -200,11 +233,21 @@ class TestCycleSelection:
         assert all(24 % cycle == 0 for cycle in DAILY_BEAT_CYCLES)
 
     def test_the_wider_sweep_is_available_to_price_the_restriction(self):
-        """The daily-beat restriction must be measurable, not hidden."""
-        restricted = cheapest_cycle(V10_CARGO, V10_ROUND_TRIP, V10_CAPACITY)
-        unrestricted = cheapest_cycle(V10_CARGO, V10_ROUND_TRIP, V10_CAPACITY, ALL_CYCLES)
+        """The daily-beat restriction must be measurable, not hidden.
 
-        assert unrestricted.merchants_committed <= restricted.merchants_committed
+        RE-SEEDED. It used the V10 route, where the best over DAILY_BEAT_CYCLES
+        and the best over ALL_CYCLES are both 15 merchants (cycle 3) -- so the
+        `<=` was satisfied by equality and priced nothing: it would have passed
+        with `ALL_CYCLES == DAILY_BEAT_CYCLES`. 1,000/h over a 9h round trip at
+        2,500 per merchant is a route where the restriction genuinely costs, so
+        the comparison is strict and both cycles are named.
+        """
+        restricted = cheapest_cycle(1000, 540.0, 2500)
+        unrestricted = cheapest_cycle(1000, 540.0, 2500, ALL_CYCLES)
+
+        assert (restricted.cycle_hours, restricted.merchants_committed) == (2, 5)
+        assert (unrestricted.cycle_hours, unrestricted.merchants_committed) == (5, 4)
+        assert unrestricted.merchants_committed < restricted.merchants_committed
 
     def test_ties_resolve_to_the_shorter_cycle(self):
         """Equal merchants, sooner delivery -- objective 2."""

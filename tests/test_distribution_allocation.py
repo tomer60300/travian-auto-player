@@ -153,6 +153,20 @@ class TestSustainMode:
         assert plan.villages[0].ship_per_hour == 0
         assert any("nothing to sustain" in w for w in plan.warnings)
 
+    def test_a_village_producing_exactly_nothing_is_still_a_no_op(self):
+        """The boundary the healthy case above stops short of. Sustain covers a
+        DEFICIT, and zero production is not one -- so the finding has to fire at
+        `own >= 0`, not `own > 0`, or a village set to sustain against a flat
+        rate silently reads as sustained."""
+        plan = resolve_resource(
+            Resource.CROP,
+            productions={1: 0},
+            allocations={1: Allocation(AllocationMode.SUSTAIN, 13)},
+        )
+
+        assert plan.villages[0].ship_per_hour == 0
+        assert any("nothing to sustain" in w for w in plan.warnings), plan.warnings
+
     def test_negative_headroom_is_rejected(self):
         with pytest.raises(AllocationError):
             Allocation(AllocationMode.SUSTAIN, -5)

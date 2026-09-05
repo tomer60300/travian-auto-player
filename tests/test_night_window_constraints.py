@@ -141,6 +141,16 @@ class TestWhichProfileIsTheNight:
         assert not is_night_window(DAY_WINDOW)
         assert not is_night_window(None)
 
+    def test_a_window_that_covers_the_whole_day_is_not_the_night_either(self):
+        # `(420, 420)` is 24 hours from 07:00 and has no switch in it at all.
+        # The rule is `start > end`, and the class stopped one minute short of
+        # the boundary: `(420, 419)` wraps, `(420, 420)` does not. Read as
+        # overnight it suspends the latency objective for the whole day and
+        # applies section 6's completion deadline to a window with no end to
+        # measure against.
+        assert not is_night_window((7 * 60, 7 * 60))
+        assert not is_night_window((0, 0))
+
 
 # ── The wrap is a default; the profile's own declaration wins ────────────────
 
@@ -666,6 +676,12 @@ class TestTheDayCheckReportsTheNightState:
 
         assert not [r for r in res.morning_shortfalls if r.village_id == HUB], (
             "the capital is the storage hub and is excluded by name"
+        )
+        # And the same stores DO produce a shortfall for a role village, so the
+        # absence above is the exclusion working rather than the check being
+        # silent on this fixture altogether.
+        assert [r for r in res.morning_shortfalls if r.village_id == ARMY], (
+            "nothing was reported for any village, so the exclusion is untested"
         )
 
     def test_a_role_village_over_the_baseline_at_the_switch_is_a_finding_not_a_refusal(self):

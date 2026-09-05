@@ -147,6 +147,24 @@ def test_the_midpoint_is_genuinely_the_hub_relay_wants() -> None:
     )
 
 
+def test_a_sustaining_midpoint_is_genuinely_the_hub_too() -> None:
+    """The control for the cases below, which is not the control above.
+
+    That one uses `ABSOLUTE 0.0` while every crop-negative case uses `_SUSTAIN`,
+    so the fixture actually under test had no control at all: if the SUSTAIN
+    variant produced no relay whatsoever, `MIDPOINT not in _relay_hubs(plan)`
+    would pass for the wrong reason on all three rates.
+    """
+    villages, plans = _account(1200.0, _SUSTAIN)
+
+    plan = build_plan(villages, plans, GEOMETRY, MODEL, max_latency_hours=None)
+
+    assert MIDPOINT in _relay_hubs(plan), (
+        "a solvent SUSTAIN midpoint was not chosen as a relay hub, so the "
+        "refusals below cannot show anything about refusing it when it is a sink"
+    )
+
+
 @pytest.mark.parametrize(
     "sink_rate",
     [-3037.0, -874.0, -1.0],

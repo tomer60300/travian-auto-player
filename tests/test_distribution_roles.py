@@ -36,6 +36,8 @@ from travian_api.services.distribution.roles import (
     CROP_DRIFT_THRESHOLD,
     Role,
     crop_drift_findings,
+    default_may_relay,
+    keeps_a_morning_floor,
 )
 from travian_api.web.routes.distribution import (
     DayCheckRequest,
@@ -631,6 +633,45 @@ class TestADesignedDeficitIsANoteNotACritical:
         assert [r.model_dump() for r in loud.rows] == [r.model_dump() for r in quiet.rows]
         assert loud.total_merchants == quiet.total_merchants
         assert quiet.verdict.critical_findings == loud.verdict.critical_findings - 1
+
+
+class TestTheTwoRoleDefaultsAreDifferentSets:
+    """`default_may_relay` and `keeps_a_morning_floor` disagree on the capital,
+    and that is the point rather than an inconsistency to tidy away.
+
+    Neither had a case in this file, which is the module's own test file: the
+    relay default was reached only through a plan and the morning floor only
+    through the day-check endpoint, so the two sets could be quietly aligned
+    with the suite green.
+    """
+
+    def test_only_a_feeder_relays_by_default(self):
+        # The capital would win every relay search it entered -- it is the most
+        # central village on the account by construction -- and the tier section
+        # 5 asks for would never be built.
+        assert default_may_relay(Role.FEEDER) is True
+        assert [
+            role
+            for role in (Role.CAPITAL, Role.DEF, Role.TROOPS_OFF, Role.FULL_OFF)
+            if default_may_relay(role)
+        ] == []
+
+    def test_the_morning_floor_is_the_narrower_set(self):
+        # Section 6: DEF + OFF, capital excluded. A feeder holds nothing by
+        # design, so 60% of its warehouse is cargo sitting where it is not
+        # wanted.
+        assert {role for role in Role if keeps_a_morning_floor(role)} == {
+            Role.DEF,
+            Role.TROOPS_OFF,
+            Role.FULL_OFF,
+        }
+
+    def test_the_capital_is_where_the_two_defaults_part(self):
+        assert default_may_relay(Role.CAPITAL) is False
+        assert keeps_a_morning_floor(Role.CAPITAL) is False
+        # ...and the feeder is where they part the other way.
+        assert default_may_relay(Role.FEEDER) is True
+        assert keeps_a_morning_floor(Role.FEEDER) is False
 
 
 class TestAVillageMayOverrideItsRolesRelayPermission:
