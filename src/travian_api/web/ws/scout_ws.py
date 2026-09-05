@@ -30,6 +30,7 @@ from travian_api.models.farm_list import MapTileInfo
 from travian_api.operation_manager import OperationContext, operation_manager
 from travian_api.parsers.html_parser import parse_troop_confirm_page
 from travian_api.services.auto_scout_service import _format_bonus_breakdown
+from travian_api.services.military_service import MilitaryService
 from travian_api.stealth.human_delay import ActionType
 from travian_api.stealth.timing import HumanTiming
 from travian_api.web.operation_gate import active_ops
@@ -165,10 +166,7 @@ async def _send_scout_fast(
     result_html = await http.post_form(rally_url, final_data, safe_to_retry=False)
 
     action_token = final_data.get("action", "")
-    form_reappeared = action_token and f'value="{action_token}"' in result_html
-    has_error = bool(re.search(r'class="error[^"]*"', result_html))
-    has_movement = "troopMovement" in result_html
-    success = (not form_reappeared and not has_error) or has_movement
+    success = MilitaryService._send_succeeded(result_html, action_token)
 
     travel_time = None
     time_match = re.search(r'class="in"[^>]*>.*?(\d+:\d+:\d+)', confirm_html, re.DOTALL)
