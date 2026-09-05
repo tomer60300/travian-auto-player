@@ -227,6 +227,27 @@ export const MAX_ROUTES_PER_RUN_CEILING = 50
  * request into 24/N separate daily rows. */
 export const MAX_GAME_ROWS_PER_RUN_CEILING = 2000
 
+/** Route ROWS one run may put in the game, by default.
+ *
+ * Backend twin: the `default=24` on `ExecuteRequest.max_game_rows_per_run` in
+ * `src/travian_api/web/routes/distribution.py`, pinned by a literal on this
+ * side like the two ceilings above it.
+ *
+ * The unit the operator actually authorises, in the backend's own words. A
+ * ROUTE is one request; Travian turns each "repeat every N hours" into 24/N
+ * separate daily rows and fires every one of them, so three routes on one-hour
+ * cycles is seventy-two rows -- and removing them later means deleting each row
+ * by hand. 24 is one route at the shortest cycle the game offers: the cautious
+ * reading of "a few at a time", which is what the whole controlled run is for.
+ *
+ * Blank in the box still means NO LIMIT, and the box still says so -- but the
+ * request has to CARRY the 0 that says it. Omitting the field meant no limit
+ * only while the server's own default was 0; since `456bf02` that default is
+ * this same 24, so an omission asked for the very cap the operator had just
+ * cleared and the whole-day provisioning pass the copy describes was
+ * unaskable. */
+export const MAX_GAME_ROWS_PER_RUN = 24
+
 /** What the two night-fill boxes are allowed to hold, in the words the cells
  *  print, keyed by the request field so one call answers the pair.
  *

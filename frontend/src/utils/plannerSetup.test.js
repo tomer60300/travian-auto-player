@@ -4,6 +4,7 @@ import {
   DEFAULT_MERCHANT_MODEL,
   DEFAULT_TARGET_FILL,
   MAX_DAY_SEGMENTS,
+  MAX_GAME_ROWS_PER_RUN,
   MAX_MERCHANTS_PER_VILLAGE,
   MAX_STOCK_FLOOR_FRACTION,
   MAX_TRADE_OFFICE_LEVEL,
@@ -3423,6 +3424,19 @@ describe('the backend values this build keeps a second copy of', () => {
   // `DayCheckRequest.segments` and `ExecuteRequest.segments`.
   it('MAX_DAY_SEGMENTS matches the segment ceiling', () => {
     expect(MAX_DAY_SEGMENTS).toBe(12)
+  })
+
+  // Twin: the `default=24` on `ExecuteRequest.max_game_rows_per_run` in
+  // src/travian_api/web/routes/distribution.py.
+  //
+  // A DEFAULT rather than a ceiling, and the sharpest kind: the box seeds
+  // itself from this copy and the request sends the box, so the two halves
+  // agreeing is the only thing that makes a blank box mean what it says. When
+  // that default moved from 0 to 24 and this copy did not, the page went on
+  // omitting the field for a blank box -- which used to mean "no limit" and now
+  // means "24, the cap you just cleared".
+  it('MAX_GAME_ROWS_PER_RUN matches the row budget the server defaults to', () => {
+    expect(MAX_GAME_ROWS_PER_RUN).toBe(24)
   })
 
   // The two already pinned when this block was written, kept here so the whole

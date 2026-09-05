@@ -71,6 +71,7 @@ import {
   DEFAULT_MERCHANT_MODEL,
   DEFAULT_TARGET_FILL,
   MAX_DAY_SEGMENTS,
+  MAX_GAME_ROWS_PER_RUN,
   MAX_GAME_ROWS_PER_RUN_CEILING,
   MAX_MERCHANTS_PER_VILLAGE,
   MAX_ROUTES_PER_RUN_CEILING,
@@ -203,26 +204,6 @@ const routeCap = (typed) =>
   String(typed).trim() === '' || !Number.isFinite(Number(typed))
     ? MAX_ROUTES_PER_RUN
     : Number(typed)
-/** Route ROWS one run may put in the game, by default.
- *
- * The unit the operator actually authorises, in the backend's own words. A
- * ROUTE is one request; Travian turns each "repeat every N hours" into 24/N
- * separate daily rows and fires every one of them, so `MAX_ROUTES_PER_RUN` of 3
- * on one-hour cycles is 72 rows -- and removing them later means deleting each
- * row by hand.
- *
- * The row cap defaulted to blank, which the payload omits and the server reads
- * as 0 = unbounded. So a default live run bounded routes at 3 and rows at
- * infinity: "nothing bounded it, so what was agreed to and what was written
- * were different units", as the backend field says.
- *
- * 24 is one route at the shortest cycle the game offers -- the cautious reading
- * of "a few at a time", which is what the whole controlled run is for. Blank
- * still means no limit, and says so in the box, because a whole-day
- * provisioning pass is a legitimate thing to ask for and emptying the box is
- * how it is asked.
- */
-const MAX_GAME_ROWS_PER_RUN = 24
 // Villages a single reconciliation chunk visits. Two paced reads each, plus a
 // disable and its verifying re-read where there is something stale, lands a
 // chunk of five at roughly 40-70 seconds — comfortably inside one request, which
@@ -1030,10 +1011,11 @@ export default function ResourcePlanner() {
   // Rows, not routes: the unit that actually lands in the game. A route is a
   // request; Travian turns it into 24/cycle daily rows, so three routes on
   // one-hour cycles is seventy-two rows. Defaulted rather than blank -- see
-  // MAX_GAME_ROWS_PER_RUN -- because blank omits the field and the server then
-  // reads 0, which is unbounded: the run capped the unit nobody authorises and
-  // left the one they do uncapped. Blank still means no limit, and the box says
-  // so.
+  // MAX_GAME_ROWS_PER_RUN -- because an uncapped default bounds the unit nobody
+  // authorises and leaves the one they do uncapped. Blank still means no limit,
+  // the box says so, and the request CARRIES that 0 rather than omitting the
+  // field: the server's own default is this same 24, so an omission asks for
+  // the cap the operator has just cleared.
   const [maxGameRows, setMaxGameRows] = useState(String(MAX_GAME_ROWS_PER_RUN))
   // Travian cannot confine a route to part of the day, but its fan-out can be
   // trimmed: repeat-every-N-hours is 24/N individually deletable rows, so the
@@ -2786,7 +2768,11 @@ export default function ResourcePlanner() {
           // ordinary run is byte-identical to what it was before.
           ...(onlyOrigin ? { only_origins: [Number(onlyOrigin)] } : {}),
           ...(onlyDestination ? { only_destinations: [Number(onlyDestination)] } : {}),
-          ...(Number(maxGameRows) > 0 ? { max_game_rows_per_run: Number(maxGameRows) } : {}),
+          // Always sent, never omitted. Blank and 0 both mean "no limit", which
+          // is what the box says and what a whole-day provisioning pass needs --
+          // and an omitted field is the server's own default of 24, i.e. the cap
+          // the operator has just cleared.
+          max_game_rows_per_run: Number(maxGameRows) || 0,
           ...(protectDestinations.trim()
             ? { protect_destinations: splitProtected(protectDestinations) }
             : {}),
@@ -3057,9 +3043,10 @@ export default function ResourcePlanner() {
             // serves reconcile AND create, which is the entire point of the
             // single pass. Otherwise the sweep only takes routes away.
             max_routes_per_run: wholeDay ? routeCap(routesPerRun) : 0,
-            ...(wholeDay && Number(maxGameRows) > 0
-              ? { max_game_rows_per_run: Number(maxGameRows) }
-              : {}),
+            // Explicit here too, and unconditionally: this path provisions in
+            // whole-day mode, so an omitted field silently capped it at the
+            // server's 24 however empty the box was.
+            max_game_rows_per_run: Number(maxGameRows) || 0,
             reconcile_all_origins: true,
             max_origins_per_run: SWEEP_VILLAGES_PER_CHUNK,
             // The sweep honours the exemption too, or it would switch off by

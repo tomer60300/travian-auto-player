@@ -86,6 +86,12 @@ test.describe('the row cap the page explains is on by default', () => {
     // Blank has to stay unbounded. The cap is a default, not a new floor: an
     // operator who deliberately wants a whole-day provisioning pass must be
     // able to say so, and the way they say it is by emptying the box.
+    //
+    // Said on the wire as an explicit 0, not as an omission. Omitting it meant
+    // unbounded only while `ExecuteRequest.max_game_rows_per_run` defaulted to
+    // 0; `456bf02` moved that default to 24, so from then on an emptied box
+    // asked the server for the very cap it had just cleared and this sentence
+    // was true of the page and false of the run.
     let body = null
     await isolate(page, (path, route) => {
       if (path.endsWith('/distribution/execute')) {
@@ -101,7 +107,7 @@ test.describe('the row cap the page explains is on by default', () => {
     await expect(page.getByText(/route\(s\) would be created/)).toBeVisible()
 
     expect(body).not.toBeNull()
-    expect('max_game_rows_per_run' in body).toBe(false)
+    expect(body.max_game_rows_per_run).toBe(0)
   })
 })
 
