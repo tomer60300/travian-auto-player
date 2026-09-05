@@ -152,6 +152,33 @@ class TestItSaysWhenTheAssumptionContradictsTheSnapshot:
         assert caught.value.status_code == 422
         assert "02" in caught.value.detail, caught.value.detail
 
+    def test_an_unreadable_warehouse_capacity_is_refused_too(self):
+        """The other half of the same guard, and the one a type check reported as
+        a live 500: `VillageSnapshot.warehouse_capacity` is `int | None`
+        ("None when the capacity page was not needed by the crop read"),
+        `NightVillage` is an unvalidated dataclass declaring `int`, and the
+        ceiling arithmetic multiplies it. The granary case was pinned; this one
+        rode on the same `or`, so deleting half the condition broke nothing."""
+        body = NightProfileRequest.model_validate(
+            {
+                "snapshot": [
+                    {**_village(1, "02", 0, crop_stock=95_000), "warehouse_capacity": None},
+                    _village(2, "farm", 10, crop_stock=30_000, crop=8000),
+                ],
+                "config": [{"village_id": v, "trade_office_level": 10} for v in (1, 2)],
+                "allocations": {"crop": {"1": {"mode": "remainder", "value": 0}}},
+                "dispatch_window": NIGHT,
+                "baseline_fill": 0.30,
+                "target_fill": 0.8,
+            }
+        )
+
+        with pytest.raises(HTTPException) as caught:
+            asyncio.run(dist.post_night_profile(body, USER))
+
+        assert caught.value.status_code == 422
+        assert "02" in caught.value.detail, caught.value.detail
+
     @pytest.mark.parametrize("stock", [59_000, 61_000])
     def test_the_threshold_is_not_hair_trigger(self, stock):
         """Stores drift constantly; a check that fires at every few percent is
