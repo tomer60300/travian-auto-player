@@ -36,6 +36,7 @@ def _trace_with(origin: int, inventory: list[dict]) -> str:
 
 class _Svc:
     def __init__(self, now, *, disable=None, raises=None, confirm_after=None):
+        self.execute_lock = asyncio.Lock()
         self._now = now
         self._disable = disable
         self._raises = raises
@@ -199,6 +200,65 @@ class TestAnUnverifiedDisableStillGetsItsReadBack:
         assert svc.calls == ["read", "disable"], "a refusal costs no extra request"
         assert res.disabled_now == {}
         assert any("STILL RUNNING" in p for p in res.problems)
+
+
+class TestAConcurrentExecutionBlocksTheUndo:
+    """The one irreversible endpoint took none of the guards `/execute` takes.
+
+    `plan_revert` attributes everything new since the trace's inventory to the
+    run being undone, so a concurrent `/execute` puts its own fresh creates into
+    `plan.created` -- and `apply_delete` then removes them for good. The
+    reversible endpoint held an account-wide lock and rejected an overlap with a
+    409; the non-reversible one did neither.
+    """
+
+    def test_a_run_in_flight_is_a_409(self):
+        trace = _trace_with(20003, [{"route_id": 555, "dest": 30540, "active": True}])
+        svc = _Svc([ExistingRoute(555, 30540, active=True)])
+
+        async def _run():
+            async with svc.execute_lock:  # an execution already holds it
+                body = dist.RevertPlanRequest(trace_id=trace, origins=[20003])
+                session = SimpleNamespace(trade_route_service=svc)
+                with pytest.raises(HTTPException) as caught:
+                    await dist.post_revert_plan(body, _USER, session)
+                return caught.value
+
+        error = asyncio.run(_run())
+        assert error.status_code == 409
+        assert "execution is already in progress" in error.detail
+
+    def test_nothing_is_read_or_written_while_it_is_refused(self):
+        trace = _trace_with(20003, [{"route_id": 555, "dest": 30540, "active": True}])
+        svc = _Svc([ExistingRoute(555, 30540, active=True)])
+
+        async def _run():
+            async with svc.execute_lock:
+                body = dist.RevertPlanRequest(trace_id=trace, origins=[20003], apply_disable=True)
+                session = SimpleNamespace(trade_route_service=svc)
+                with contextlib.suppress(HTTPException):
+                    await dist.post_revert_plan(body, _USER, session)
+
+        asyncio.run(_run())
+        assert svc.calls == [], "a refused revert must not touch the game"
+
+    def test_the_lock_is_held_for_the_whole_revert(self):
+        # Held across the READS as well: the comparison against the trace's
+        # inventory is what the deletion is decided from.
+        trace = _trace_with(20003, [{"route_id": 555, "dest": 30540, "active": True}])
+        svc = _Svc([ExistingRoute(555, 30540, active=True)])
+        seen: list[bool] = []
+        real = svc.list_existing_routes
+
+        async def _watching(vid, *, map_span=None):
+            seen.append(svc.execute_lock.locked())
+            return await real(vid, map_span=map_span)
+
+        svc.list_existing_routes = _watching
+        _call(trace, svc)
+
+        assert seen == [True]
+        assert not svc.execute_lock.locked(), "and released afterwards"
 
 
 class TestItRefusesRatherThanGuesses:

@@ -5263,169 +5263,191 @@ async def post_revert_plan(
             detail=f"None of those origins appear in run {body.trace_id}.",
         )
 
-    steps: list[str] = []
-    problems: list[str] = []
-    created: dict[int, list[int]] = {}
-    disabled_now: dict[int, list[int]] = {}
-    deleted_now: dict[int, list[int]] = {}
-    must_delete: dict[int, list[int]] = {}
-    restore: dict[int, list[str]] = {}
-    requests_used = 0
-    clean = True
+    # This endpoint WRITES -- it disables, and with `apply_delete` removes rows
+    # for good -- and took none of the guards `/execute` takes. `plan_revert`
+    # attributes everything new since the trace's inventory to the run being
+    # undone, so a concurrent execution puts its own fresh creates into
+    # `plan.created` and `apply_delete` deletes them IRREVERSIBLY: the one
+    # non-reversible action in this module had strictly less protection than the
+    # reversible one. Rejected rather than queued, exactly as `/execute` rejects
+    # a second run, and the lock is held across the READS too -- the comparison
+    # is what the deletion is decided from.
+    if svc.execute_lock.locked():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "A trade-route execution is already in progress for this account. "
+                "Reverting now would read its new routes as ones the run being "
+                "undone created, and delete them."
+            ),
+        )
+    async with svc.execute_lock:
+        steps: list[str] = []
+        problems: list[str] = []
+        created: dict[int, list[int]] = {}
+        disabled_now: dict[int, list[int]] = {}
+        deleted_now: dict[int, list[int]] = {}
+        must_delete: dict[int, list[int]] = {}
+        restore: dict[int, list[str]] = {}
+        requests_used = 0
+        clean = True
 
-    for origin in origins:
-        try:
-            now = await svc.list_existing_routes(origin, map_span=body.map_span)
-            requests_used += 2  # dorf2 + the marketplace tab
-        except (NetworkError, MarketplaceUnreadable) as exc:
-            # Conclude nothing about a village we could not read: an unreadable
-            # page would otherwise look like "every route vanished".
-            problems.append(
-                f"village {origin}: could not re-read the marketplace ({exc}); "
-                f"nothing concluded or changed for this village"
-            )
-            clean = False
-            continue
-
-        after = [
-            {"route_id": e.route_id, "dest": e.dest_village_id, "active": e.active} for e in now
-        ]
-        plan = plan_revert(origin, before[origin], after)
-        steps.extend(describe(plan))
-        if plan.is_clean:
-            continue
-        clean = False
-        created[origin] = plan.manual_delete_ids
-        must_delete[origin] = plan.manual_delete_ids
-        if plan.to_restore:
-            restore[origin] = [
-                f"route {rid} -> {'enabled' if was else 'disabled'}" for rid, was in plan.to_restore
-            ]
-
-        if body.apply_disable and plan.disable_ids:
-            live = [e for e in now if e.route_id in set(plan.disable_ids)]
+        for origin in origins:
             try:
-                result = await svc.disable_routes(origin, live)
-                requests_used += 1
-            except TravianError as exc:
-                # Most likely the live opt-in is off. Previously this propagated
-                # as a bare 500 and discarded the whole response -- including
-                # `must_delete_by_hand`, the half only a human can do. Losing the
-                # undo instructions because the automated half was unavailable is
-                # the worst possible trade in this endpoint.
+                now = await svc.list_existing_routes(origin, map_span=body.map_span)
+                requests_used += 2  # dorf2 + the marketplace tab
+            except (NetworkError, MarketplaceUnreadable) as exc:
+                # Conclude nothing about a village we could not read: an unreadable
+                # page would otherwise look like "every route vanished".
                 problems.append(
-                    f"village {origin}: could not disable the created route(s) "
-                    f"{plan.disable_ids} ({exc}). They are STILL RUNNING; the "
-                    f"manual steps below still apply."
+                    f"village {origin}: could not re-read the marketplace ({exc}); "
+                    f"nothing concluded or changed for this village"
                 )
+                clean = False
                 continue
-            if result is not None and result.status in ("disabled", "unverified"):
-                # Read back, for the same reason every other write is: the PUT
-                # says it was accepted, not that the rows are off. This endpoint
-                # exists to make an undo trustworthy, so claiming an unverified
-                # disable here would defeat its whole purpose.
-                #
-                # `unverified` -- a 200 whose body could not be read -- belongs
-                # on this path and not in the else below. It used to skip the
-                # read entirely and fall through to "they are STILL RUNNING",
-                # which is the OPPOSITE of the truth whenever the game had in
-                # fact switched them off, from the one endpoint whose whole job
-                # is to be trustworthy about that. It is precisely the case a
-                # read-back answers, so the page decides. `failed` -- the game
-                # naming a rejection -- stays in the else: there is nothing to
-                # look at, and looking would cost a request for no information.
+
+            after = [
+                {"route_id": e.route_id, "dest": e.dest_village_id, "active": e.active} for e in now
+            ]
+            plan = plan_revert(origin, before[origin], after)
+            steps.extend(describe(plan))
+            if plan.is_clean:
+                continue
+            clean = False
+            created[origin] = plan.manual_delete_ids
+            must_delete[origin] = plan.manual_delete_ids
+            if plan.to_restore:
+                restore[origin] = [
+                    f"route {rid} -> {'enabled' if was else 'disabled'}"
+                    for rid, was in plan.to_restore
+                ]
+
+            if body.apply_disable and plan.disable_ids:
+                live = [e for e in now if e.route_id in set(plan.disable_ids)]
                 try:
-                    after = await svc.confirm_routes(origin, map_span=body.map_span)
+                    result = await svc.disable_routes(origin, live)
+                    requests_used += 1
+                except TravianError as exc:
+                    # Most likely the live opt-in is off. Previously this propagated
+                    # as a bare 500 and discarded the whole response -- including
+                    # `must_delete_by_hand`, the half only a human can do. Losing the
+                    # undo instructions because the automated half was unavailable is
+                    # the worst possible trade in this endpoint.
+                    problems.append(
+                        f"village {origin}: could not disable the created route(s) "
+                        f"{plan.disable_ids} ({exc}). They are STILL RUNNING; the "
+                        f"manual steps below still apply."
+                    )
+                    continue
+                if result is not None and result.status in ("disabled", "unverified"):
+                    # Read back, for the same reason every other write is: the PUT
+                    # says it was accepted, not that the rows are off. This endpoint
+                    # exists to make an undo trustworthy, so claiming an unverified
+                    # disable here would defeat its whole purpose.
+                    #
+                    # `unverified` -- a 200 whose body could not be read -- belongs
+                    # on this path and not in the else below. It used to skip the
+                    # read entirely and fall through to "they are STILL RUNNING",
+                    # which is the OPPOSITE of the truth whenever the game had in
+                    # fact switched them off, from the one endpoint whose whole job
+                    # is to be trustworthy about that. It is precisely the case a
+                    # read-back answers, so the page decides. `failed` -- the game
+                    # naming a rejection -- stays in the else: there is nothing to
+                    # look at, and looking would cost a request for no information.
+                    try:
+                        after = await svc.confirm_routes(origin, map_span=body.map_span)
+                        requests_used += 1
+                    except (NetworkError, MarketplaceUnreadable) as exc:
+                        problems.append(
+                            f"village {origin}: disabled {len(plan.disable_ids)} route(s) "
+                            f"but could not re-read the page to confirm ({exc}); treat "
+                            f"them as still running until you have looked"
+                        )
+                        continue
+                    still_on = [
+                        e.route_id
+                        for e in after
+                        if e.route_id in set(plan.disable_ids) and e.active
+                    ]
+                    if still_on:
+                        problems.append(
+                            f"village {origin}: asked the game to disable {plan.disable_ids} "
+                            f"and {still_on} are STILL RUNNING"
+                        )
+                        continue
+                    disabled_now[origin] = plan.disable_ids
+                    steps.append(
+                        f"village {origin}: disabled {len(plan.disable_ids)} created "
+                        f"route(s) - confirmed inert, but they still need deleting"
+                    )
+                else:
+                    detail = result.detail if result is not None else "no request was made"
+                    problems.append(
+                        f"village {origin}: could not disable created routes "
+                        f"{plan.disable_ids} ({detail}); they are STILL RUNNING"
+                    )
+
+            if body.apply_delete and plan.manual_delete_ids:
+                # Deliberately after the disable. Disabling stops the resources
+                # moving and is reversible; deleting is neither. If the delete fails
+                # the routes are at least already inert.
+                targets = [e for e in now if e.route_id in set(plan.manual_delete_ids)]
+                try:
+                    removed = await svc.delete_routes(origin, targets)
+                    requests_used += 1
+                except TravianError as exc:
+                    problems.append(
+                        f"village {origin}: could not delete the created route(s) "
+                        f"{plan.manual_delete_ids} ({exc}); they must be removed by hand"
+                    )
+                    continue
+                if removed is None or removed.status not in ("deleted", "unverified"):
+                    detail = removed.detail if removed is not None else "no request was made"
+                    problems.append(
+                        f"village {origin}: delete failed ({detail}); the route(s) "
+                        f"{plan.manual_delete_ids} must be removed by hand"
+                    )
+                    continue
+                # Read back. A delete that reports success and leaves the rows there
+                # is the same class of false outcome as an unverified create, and
+                # this endpoint exists to make an undo trustworthy.
+                try:
+                    left = await svc.confirm_routes(origin, map_span=body.map_span)
                     requests_used += 1
                 except (NetworkError, MarketplaceUnreadable) as exc:
                     problems.append(
-                        f"village {origin}: disabled {len(plan.disable_ids)} route(s) "
-                        f"but could not re-read the page to confirm ({exc}); treat "
-                        f"them as still running until you have looked"
+                        f"village {origin}: deleted the route(s) but could not re-read "
+                        f"the page to confirm ({exc}); check before assuming they are gone"
                     )
                     continue
-                still_on = [
-                    e.route_id for e in after if e.route_id in set(plan.disable_ids) and e.active
-                ]
-                if still_on:
+                survivors = sorted(
+                    e.route_id for e in left if e.route_id in set(plan.manual_delete_ids)
+                )
+                if survivors:
                     problems.append(
-                        f"village {origin}: asked the game to disable {plan.disable_ids} "
-                        f"and {still_on} are STILL RUNNING"
+                        f"village {origin}: asked the game to delete "
+                        f"{plan.manual_delete_ids} and {survivors} are STILL THERE"
                     )
                     continue
-                disabled_now[origin] = plan.disable_ids
+                deleted_now[origin] = plan.manual_delete_ids
+                must_delete.pop(origin, None)
                 steps.append(
-                    f"village {origin}: disabled {len(plan.disable_ids)} created "
-                    f"route(s) - confirmed inert, but they still need deleting"
-                )
-            else:
-                detail = result.detail if result is not None else "no request was made"
-                problems.append(
-                    f"village {origin}: could not disable created routes "
-                    f"{plan.disable_ids} ({detail}); they are STILL RUNNING"
+                    f"village {origin}: deleted {len(plan.manual_delete_ids)} created "
+                    f"route(s) - confirmed gone, nothing left to do by hand"
                 )
 
-        if body.apply_delete and plan.manual_delete_ids:
-            # Deliberately after the disable. Disabling stops the resources
-            # moving and is reversible; deleting is neither. If the delete fails
-            # the routes are at least already inert.
-            targets = [e for e in now if e.route_id in set(plan.manual_delete_ids)]
-            try:
-                removed = await svc.delete_routes(origin, targets)
-                requests_used += 1
-            except TravianError as exc:
-                problems.append(
-                    f"village {origin}: could not delete the created route(s) "
-                    f"{plan.manual_delete_ids} ({exc}); they must be removed by hand"
-                )
-                continue
-            if removed is None or removed.status not in ("deleted", "unverified"):
-                detail = removed.detail if removed is not None else "no request was made"
-                problems.append(
-                    f"village {origin}: delete failed ({detail}); the route(s) "
-                    f"{plan.manual_delete_ids} must be removed by hand"
-                )
-                continue
-            # Read back. A delete that reports success and leaves the rows there
-            # is the same class of false outcome as an unverified create, and
-            # this endpoint exists to make an undo trustworthy.
-            try:
-                left = await svc.confirm_routes(origin, map_span=body.map_span)
-                requests_used += 1
-            except (NetworkError, MarketplaceUnreadable) as exc:
-                problems.append(
-                    f"village {origin}: deleted the route(s) but could not re-read "
-                    f"the page to confirm ({exc}); check before assuming they are gone"
-                )
-                continue
-            survivors = sorted(
-                e.route_id for e in left if e.route_id in set(plan.manual_delete_ids)
-            )
-            if survivors:
-                problems.append(
-                    f"village {origin}: asked the game to delete "
-                    f"{plan.manual_delete_ids} and {survivors} are STILL THERE"
-                )
-                continue
-            deleted_now[origin] = plan.manual_delete_ids
-            must_delete.pop(origin, None)
-            steps.append(
-                f"village {origin}: deleted {len(plan.manual_delete_ids)} created "
-                f"route(s) - confirmed gone, nothing left to do by hand"
-            )
-
-    return RevertPlanResponse(
-        trace_id=body.trace_id,
-        steps=steps or [f"run {body.trace_id}: nothing to revert"],
-        created=created,
-        disabled_now=disabled_now,
-        deleted_now=deleted_now,
-        must_delete_by_hand=must_delete,
-        restore_state=restore,
-        clean=clean,
-        requests_used=requests_used,
-        problems=problems,
-    )
+        return RevertPlanResponse(
+            trace_id=body.trace_id,
+            steps=steps or [f"run {body.trace_id}: nothing to revert"],
+            created=created,
+            disabled_now=disabled_now,
+            deleted_now=deleted_now,
+            must_delete_by_hand=must_delete,
+            restore_state=restore,
+            clean=clean,
+            requests_used=requests_used,
+            problems=problems,
+        )
 
 
 def _game_rows(cycle_hours: int) -> int:
