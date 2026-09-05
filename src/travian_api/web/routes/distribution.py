@@ -2239,11 +2239,16 @@ class ExecuteRequest(PlanRequest):
         return value
 
     max_game_rows_per_run: int = Field(
-        default=0,
+        default=24,
         ge=0,
         le=2000,
         description=(
-            "Route ROWS this run may put in the game. 0 is unbounded. This is the "
+            "Route ROWS this run may put in the game. 0 is unbounded, and is no "
+            "longer the default: an unbounded default on the one endpoint that "
+            "writes is the opposite of what every other control here does, and "
+            "the UI omits this field whenever its box is blank, so the server's "
+            "own default is what a run actually gets. 24 is one day of hourly "
+            "rows -- a single route at the shortest cycle. This is the "
             "unit the operator actually authorises: Travian turns one 'repeat "
             "every N hours' request into 24/N separate daily rows, so three "
             "routes on a one-hour cycle is seventy-two rows, and removing them "
@@ -2294,7 +2299,21 @@ class RouteActionResponse(BaseModel):
     # means no measurement exists and none is invented: a dry run observes
     # nothing, and a create whose read-back failed is unconfirmed rather than
     # counted. A `not_created` action carries 0, which IS a measurement.
+    #
+    # Measured BEFORE this run's window prune, because that is when the
+    # read-back happens: it answers "what did the create make", which is the
+    # question the 24/N fan-out model is checked against. What the run LEFT in
+    # the game is `live_game_rows`, and the two differ by exactly the rows the
+    # trim removed.
     observed_game_rows: int | None = None
+    # Rows of this action still on the marketplace when the run finished with
+    # this origin -- `observed_game_rows` less the ones the window prune
+    # actually removed, confirmed gone by its own read-back. This is the
+    # FOOTPRINT: what the operator now holds and would have to delete, and the
+    # unit `max_game_rows_per_run` is charged in. A prune that did not happen
+    # discounts nothing, so a silently failed trim shows here as the full
+    # fan-out rather than as the number the trim was supposed to produce.
+    live_game_rows: int | None = None
     # would_create | deferred | created | created_unverified | not_created |
     # re_enabled | updated | skipped | blocked | failed
     #
@@ -2377,6 +2396,16 @@ class ExecuteResponse(BaseModel):
     # Unconfirmed creates contribute nothing here; they are reported as
     # created_unverified instead of having a row count guessed for them.
     created_game_rows: int = 0
+    # The same count AFTER this run's window prune: the rows it left live.
+    #
+    # `created_game_rows` is measured from the read-back that follows the
+    # creates, and the trim runs after that -- so on a whole-day run it reported
+    # 42 rows while the marketplace was left holding 16, and it could not be
+    # compared with `max_game_rows_per_run`, which is charged in surviving rows.
+    # Both are reported and both are labelled: what the writes made, and what
+    # the account is now carrying. On a DRY RUN this is the forecast footprint,
+    # as created_game_rows is the forecast write count.
+    live_game_rows: int = 0
     # Where this run's full decision-and-request trace was written. A live run is
     # the one operation here that changes a real account, and the response alone
     # cannot say WHY each route was skipped or disabled -- the trace can.
@@ -5838,6 +5867,15 @@ async def post_execute(
         """
         return sum(a.observed_game_rows for a in reported if a.observed_game_rows is not None)
 
+    def _live_rows(reported: list[RouteActionResponse]) -> int:
+        """Rows this run left in the game, summed. Never a forecast.
+
+        Same rule as `_observed_rows`: only a measurement counts. The difference
+        is the window prune, whose deletions are subtracted only where its own
+        read-back confirmed the rows had gone.
+        """
+        return sum(a.live_game_rows for a in reported if a.live_game_rows is not None)
+
     def _filter_description() -> str | None:
         if body.only_origins is None and body.only_destinations is None:
             return None
@@ -5921,6 +5959,12 @@ async def post_execute(
             # game requests, so there is nothing to have measured. The live path
             # reports what the marketplace actually showed instead.
             created_game_rows=sum(a.game_rows for a in actions if a.status == "would_create"),
+            # The footprint the same forecast would leave: the fan-out less the
+            # departures the trim would remove.
+            live_game_rows=sum(
+                _rows_that_survive(_row.cycle_hours, _row.dispatch_minute, _route.window)
+                for _row, _route in items[:cap]
+            ),
             requests_forecast=requests_forecast,
             filtered_to=filtered_to,
             remaining=max(0, len(items) - cap),
@@ -6753,6 +6797,11 @@ async def post_execute(
                     # refused, and are settled by the same read-back every other
                     # write here is settled by.
                     attempted_here: list[tuple[RouteActionResponse, PlannedRoute]] = []
+                    # Rows the window prune removed AND confirmed gone. Only
+                    # these are discounted from the footprint: a prune whose own
+                    # read-back failed proves nothing, and over-reporting the
+                    # rows still in the game is the safe direction.
+                    pruned_ids: set[int] = set()
                     # Rows whose cargo this run rewrote, with what it asked for.
                     updated_here: list[tuple[ExistingRoute, dict]] = []
                     for i, (row, route) in enumerate(desired):
@@ -7170,7 +7219,9 @@ async def post_execute(
                             for e in fresh:
                                 for key in _existing_keys(e):
                                     fresh_by_key.setdefault(key, []).append(e)
-                            observed_by_action: dict[int, int] = {}
+                            # Route ids, not a bare count: the trim runs after
+                            # this and the footprint is what SURVIVES it.
+                            observed_by_action: dict[int, list[int]] = {}
                             _claim_groups: dict[int | tuple[int, int], list] = {}
                             _claimed_ids = {id(a) for a, _ in created_here}
                             # Failed creates join the attribution, but claim
@@ -7211,7 +7262,7 @@ async def post_execute(
                                                 continue
                                             taken.append(e)
                                     unclaimed = [e for e in unclaimed if e not in taken]
-                                    observed_by_action[id(action)] = len(taken)
+                                    observed_by_action[id(action)] = [e.route_id for e in taken]
 
                             # Confine the fan-out to the profile hours, by
                             # subtraction. Done here because `fresh` is already the
@@ -7225,7 +7276,7 @@ async def post_execute(
                             landed_here = [
                                 (action, route)
                                 for action, route in attempted_here
-                                if observed_by_action.get(id(action), 0)
+                                if observed_by_action.get(id(action))
                             ]
                             if body.prune_to_window and (created_here or landed_here):
                                 # Pooled per destination, because per-route
@@ -7348,6 +7399,7 @@ async def post_execute(
                                             _survivors = sorted(
                                                 e.route_id for e in _left if e.route_id in set(_ids)
                                             )
+                                            pruned_ids.update(set(_ids) - set(_survivors))
                                         except (NetworkError, MarketplaceUnreadable) as exc:
                                             problems.append(
                                                 f"{village_label(origin, names)}: pruned "
@@ -7488,8 +7540,12 @@ async def post_execute(
                                 # the opposite direction: reporting a refusal
                                 # over rows that are demonstrably shipping is the
                                 # same false result, pointing the other way.
-                                observed = observed_by_action.get(id(action), 0)
+                                _rows = observed_by_action.get(id(action), [])
+                                observed = len(_rows)
                                 action.observed_game_rows = observed
+                                action.live_game_rows = len(
+                                    [r for r in _rows if r not in pruned_ids]
+                                )
                                 action.status = "created"
                                 action.detail = (
                                     "the game's answer to the create failed to arrive, but the "
@@ -7508,11 +7564,15 @@ async def post_execute(
                                 )
                             for action, route in created_here:
                                 key = _desired_key(route)
-                                observed = observed_by_action.get(id(action), 0)
+                                _rows = observed_by_action.get(id(action), [])
+                                observed = len(_rows)
                                 # Recorded whether it is what was predicted or
                                 # not, and recorded even when it is zero: zero
                                 # measured is a result, unlike "not measured".
                                 action.observed_game_rows = observed
+                                action.live_game_rows = len(
+                                    [r for r in _rows if r not in pruned_ids]
+                                )
                                 if observed:
                                     if observed != action.game_rows:
                                         # The fan-out model is what every other
@@ -7569,6 +7629,9 @@ async def post_execute(
             # the outcome would make the record agree with itself by
             # construction and prove nothing about the account.
             created_game_rows=_observed_rows(actions),
+            # What the run LEFT, which is the number the row budget is charged
+            # in and the one a later run has to reconcile against.
+            live_game_rows=_live_rows(actions),
             disabled=len(disables),
             re_enabled=len(re_enables),
             cargo_updated=len(updates),
@@ -7651,6 +7714,7 @@ async def post_execute(
         not_created=sum(1 for a in actions if a.status == "not_created"),
         # What the marketplace showed, not what the cycle length implies.
         created_game_rows=_observed_rows(actions),
+        live_game_rows=_live_rows(actions),
         filtered_to=filtered_to,
         remaining=len(deferred) + outstanding,
         # Empty unless this run was a reconcile sweep, so an ordinary run can

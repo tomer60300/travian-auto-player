@@ -487,6 +487,12 @@ class _FakeLiveSvc:
 
 class TestLiveExecution:
     def _run(self, svc, **kw):
+        # Unbounded footprint unless a case asks otherwise. These exercise
+        # creation, reconciliation and the request caps; the plan they drive is
+        # hourly, so the server's own 24-row default would stop them at one
+        # route and hide the behaviour under test. The row budget has its own
+        # class.
+        kw.setdefault("max_game_rows_per_run", 0)
         return _execute(_exec_body(dry_run=False, **kw), svc=svc)
 
     def test_missing_routes_are_created(self):
@@ -2004,11 +2010,15 @@ class TestCreatedMeansVerifiedNotAccepted:
     def test_a_run_that_creates_nothing_does_not_read_back(self):
         # No write, no verification: it would be a request for nothing.
         svc = _FakeLiveSvc()
-        _execute(_exec_body(dry_run=False, disable_existing=False, max_routes_per_run=50), svc=svc)
-        svc.created.clear()
-        res = _execute(
-            _exec_body(dry_run=False, disable_existing=False, max_routes_per_run=50), svc=svc
+        _body = dict(
+            dry_run=False,
+            disable_existing=False,
+            max_routes_per_run=50,
+            max_game_rows_per_run=0,
         )
+        _execute(_exec_body(**_body), svc=svc)
+        svc.created.clear()
+        res = _execute(_exec_body(**_body), svc=svc)
 
         assert svc.created == []
         import json
@@ -2961,6 +2971,128 @@ class TestTheRowFootprintCanBeCappedNotJustTheRequestCount:
         _run_live(svc, account, max_routes_per_run=50, max_game_rows_per_run=0)
 
         assert len(svc.created) == 2, "no row budget means the old behaviour exactly"
+
+
+class TestTheRowFootprintIsReportedAfterTheTrim:
+    """`created_game_rows` measures a state the same run destroys.
+
+    The rows are counted from the read-back that follows the creates, and the
+    window prune runs AFTER that -- so the run reported the transient fan-out
+    (42 rows on the measured whole-day case) while the marketplace was left
+    holding 16. The number is not comparable to `max_game_rows_per_run`, which
+    is charged in surviving rows, so the budget did not look like a bound.
+
+    Both are now reported and both are labelled: what the creates made, and what
+    this run left live.
+    """
+
+    def _account(self):
+        return _account(
+            [_row_with_cycle(20003, -1, 1, 23 * 60 + 30)],
+            {20003: (0, 0), -1: (40, 40)},
+            {20003: "03", -1: "A"},
+        )
+
+    def _run(self, svc, **kw):
+        return _run_live(
+            svc,
+            self._account(),
+            max_routes_per_run=50,
+            max_game_rows_per_run=0,
+            dispatch_window=[23 * 60, 7 * 60],
+            **kw,
+        )
+
+    def test_the_created_count_is_still_what_the_creates_made(self):
+        res = self._run(_FakeLiveSvc(), prune_to_window=True)
+        assert res.created_game_rows == 24
+
+    def test_the_live_count_is_what_survived_the_trim(self):
+        res = self._run(_FakeLiveSvc(), prune_to_window=True)
+        assert res.live_game_rows == 8, "eight of the 24 departures fall inside 23:00-07:00"
+
+    def test_a_prune_that_did_not_happen_reports_the_whole_footprint(self):
+        # The cell that mattered: a failed prune left 24 rows shipping and the
+        # run reported the same 24 it reports when the prune worked.
+        res = self._run(_FakeLiveSvc(delete_status="failed"), prune_to_window=True)
+
+        assert res.created_game_rows == 24
+        assert res.live_game_rows == 24, "nothing was removed, so nothing is discounted"
+        assert res.problems
+
+    def test_without_a_prune_the_two_counts_agree(self):
+        res = self._run(_FakeLiveSvc())
+        assert (res.created_game_rows, res.live_game_rows) == (24, 24)
+
+    def test_a_dry_run_forecasts_the_surviving_footprint(self):
+        async def _plan(_body):
+            return self._account()
+
+        with _patch(dist_module, "_plan_account", _plan):
+            res = _execute(
+                _exec_body(
+                    dry_run=True,
+                    max_routes_per_run=50,
+                    max_game_rows_per_run=0,
+                    dispatch_window=[23 * 60, 7 * 60],
+                    prune_to_window=True,
+                ),
+                svc=_dry_svc(live_enabled=True),
+            )
+
+        assert res.created_game_rows == 24, "the writes it would make"
+        assert res.live_game_rows == 8, "the footprint it would leave"
+
+    def test_the_run_end_records_both(self):
+        import json
+        from pathlib import Path
+
+        res = self._run(_FakeLiveSvc(), prune_to_window=True)
+        events = [
+            json.loads(line)
+            for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
+        ]
+
+        assert events[-1]["created_game_rows"] == 24
+        assert events[-1]["live_game_rows"] == 8
+
+
+class TestTheRowBudgetHasADefault:
+    """0 meant unbounded, and unbounded was the default.
+
+    The UI defaults the box to 24 and omits the field when it is blank, so the
+    server's own default is what a run actually gets -- and an unbounded default
+    on the endpoint that writes is the opposite of what every other control here
+    does. 24 is a day of hourly rows: one route at the shortest cycle.
+    """
+
+    def test_the_server_default_is_twenty_four_rows(self):
+        assert ExecuteRequest.model_fields["max_game_rows_per_run"].default == 24
+
+    def test_a_run_that_sends_nothing_is_bounded(self):
+        # Two 1h routes are 48 rows. Without a default only the request count
+        # bounded them.
+        account = _account(
+            [_row_with_cycle(20003, -1, 1, 100), _row_with_cycle(20011, -2, 1, 700)],
+            {20003: (0, 0), 20011: (10, 0), -1: (40, 40), -2: (50, 50)},
+            {20003: "03", 20011: "11", -1: "A", -2: "B"},
+        )
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, account, max_routes_per_run=50)
+
+        assert len(svc.created) == 1, "24 rows is one hourly route"
+        assert res.remaining == 1
+
+    def test_zero_still_means_unbounded_when_asked_for(self):
+        account = _account(
+            [_row_with_cycle(20003, -1, 1, 100), _row_with_cycle(20011, -2, 1, 700)],
+            {20003: (0, 0), 20011: (10, 0), -1: (40, 40), -2: (50, 50)},
+            {20003: "03", 20011: "11", -1: "A", -2: "B"},
+        )
+        svc = _FakeLiveSvc()
+        _run_live(svc, account, max_routes_per_run=50, max_game_rows_per_run=0)
+
+        assert len(svc.created) == 2
 
 
 class TestRoutesTheOperatorWantsLeftAlone:
