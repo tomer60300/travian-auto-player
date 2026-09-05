@@ -9,16 +9,45 @@ from .config import settings
 
 
 class SensitiveDataFilter(logging.Filter):
-    """Redact actual credential values while preserving operational messages."""
+    """Redact actual credential values while preserving operational messages.
 
-    # Only redact log records whose message contains actual credential patterns
-    _REDACT_PATTERNS = ("password=", "jwt=", "token=", "secret=", "Authorization:")
+    Scrubs ``record.msg`` AND every string in ``record.args``, because the args
+    are where credentials actually arrive: a call like
+    ``logger.warning("Auto-reconnect failed for user %s: %s", user.id, exc)``
+    has a format string that matches no pattern at all, while the exception's
+    ``__str__`` in the args carries whatever it carried. Inspecting only the
+    format string caught nothing but a credential a developer had typed into a
+    literal.
+
+    Redaction is surgical -- the value goes, the message stays -- so a redacted
+    record still says what failed. Attached UNCONDITIONALLY by
+    :func:`setup_logging`, like its sibling below: it used to be installed only
+    under ``settings.debug``, which defaults False, so the default configuration
+    (the one both servers run) had no credential redaction at all.
+    """
+
+    # `secret=`/`token=`/... take the rest of the word; `Authorization:` takes
+    # the rest of the line, because the value there is `<scheme> <credential>`
+    # and stopping at the first space would leave the credential behind.
+    _KEYED_VALUE = re.compile(r"(?i)\b(password|jwt|token|secret)=\S+")
+    _AUTH_HEADER = re.compile(r"(?i)(Authorization:)\s*.*")
+
+    def _scrub(self, value: str) -> str:
+        value = self._KEYED_VALUE.sub(r"\1=[REDACTED]", value)
+        return self._AUTH_HEADER.sub(r"\1 [REDACTED]", value)
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if hasattr(record, "msg"):
-            msg = str(record.msg)
-            if any(p in msg for p in self._REDACT_PATTERNS):
-                record.msg = "[REDACTED - Sensitive data filtered]"
+        if isinstance(record.msg, str):
+            record.msg = self._scrub(record.msg)
+        if record.args:
+            if isinstance(record.args, tuple):
+                record.args = tuple(
+                    self._scrub(a) if isinstance(a, str) else a for a in record.args
+                )
+            elif isinstance(record.args, dict):
+                record.args = {
+                    k: (self._scrub(v) if isinstance(v, str) else v) for k, v in record.args.items()
+                }
         return True
 
 
@@ -105,13 +134,17 @@ def setup_logging(level: Optional[str] = None, *, attach_broadcast: bool = False
         handler.addFilter(query_filter)
     logging.getLogger("uvicorn.access").addFilter(query_filter)
 
+    # Credential values, redacted everywhere, always. This used to sit inside
+    # `if settings.debug:` -- and debug defaults False -- so the configuration
+    # both servers actually run had no credential redaction at all, while the
+    # query-string filter one line up was correctly unconditional.
+    sensitive_filter = SensitiveDataFilter()
+    for handler in root_logger.handlers:
+        handler.addFilter(sensitive_filter)
+    logging.getLogger("uvicorn.access").addFilter(sensitive_filter)
+
     if settings.debug:
         logging.getLogger("travian_api").setLevel(logging.DEBUG)
-
-        # Apply sensitive data filter — only redacts actual credential values
-        sensitive_filter = SensitiveDataFilter()
-        for handler in root_logger.handlers:
-            handler.addFilter(sensitive_filter)
 
 
 def get_logger(name: str) -> logging.Logger:
