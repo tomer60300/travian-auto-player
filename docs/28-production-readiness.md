@@ -151,10 +151,31 @@ a real fan or regional TLD, and never to a bare wildcard.
 - `DATABASE_URL = f"sqlite+aiosqlite:///{_DB_PATH}"`
 
 So the default production database is `~/.travian/travian_web.db`, and — from
-§1.4 — its keys are `~/.travian/.web_keys`. Two more directories under
+§1.4 — its keys are `~/.travian/.web_keys`. Three more directories under
 `~/.travian` matter operationally: `traces/` (`TRACE_DIR` in
-`services/distribution/execution_trace.py`) and the per-user session data
-directories the session manager creates with mode `0o700` where it can.
+`services/distribution/execution_trace.py`), `debug/` (`DEFAULT_ROOT` in
+`debug_dump.py`), and the per-user session data directories the session manager
+creates with mode `0o700` where it can.
+
+`debug/` is the one to know about, because **it holds authenticated game
+pages** — the raw HTML of a `/build.php` whose checksum would not parse, a
+login redirect, a captcha or soft-block response, and the warehouse statistics
+page under `TRAVIAN_DIST_DIAG`. Those carry the account name and the per-page
+action checksum. Three properties, all of them recent (config audit P1-6, which
+found none of them true):
+
+- **It is `~/.travian/debug/`, not `%TEMP%/travian_debug/`.** The old root was a
+  fixed path under a directory every local user can read.
+- **Bodies are redacted on the way in**, through the same
+  `redact_sensitive` the log records go through (`logging_config.py`).
+- **Everything expires after 24 h**, `_latest` included. It used to be exempt,
+  which left one permanent copy per category and key.
+
+Root and category directories are created `0o700` and a directory that cannot be
+made private is not written to — on POSIX. On Windows that `chmod` does not
+describe the NTFS ACL (§1.3), so there, as with `.env` and the key file, restrict
+it with `icacls` and verify by hand. Back it up nowhere: unlike `traces/`, it is
+diagnostic scratch, and copying it copies game pages.
 
 ### 2.2 What "no migrations" actually means
 

@@ -7,6 +7,25 @@ from typing import Optional
 
 from .config import settings
 
+# `secret=`/`token=`/... take the rest of the word; `Authorization:` takes the
+# rest of the line, because the value there is `<scheme> <credential>` and
+# stopping at the first space would leave the credential behind.
+_KEYED_VALUE = re.compile(r"(?i)\b(password|jwt|token|secret)=\S+")
+_AUTH_HEADER = re.compile(r"(?i)(Authorization:)\s*.*")
+
+
+def redact_sensitive(text: str) -> str:
+    """Replace credential values in *text*, surgically -- the value goes, the
+    message stays.
+
+    Module-level because a log record is not the only thing this app writes
+    down: ``debug_dump`` puts whole authenticated game pages on disk and runs
+    them through this same function, so there is one definition of "what counts
+    as a credential" rather than one per sink.
+    """
+    text = _KEYED_VALUE.sub(r"\1=[REDACTED]", text)
+    return _AUTH_HEADER.sub(r"\1 [REDACTED]", text)
+
 
 class SensitiveDataFilter(logging.Filter):
     """Redact actual credential values while preserving operational messages.
@@ -26,15 +45,8 @@ class SensitiveDataFilter(logging.Filter):
     (the one both servers run) had no credential redaction at all.
     """
 
-    # `secret=`/`token=`/... take the rest of the word; `Authorization:` takes
-    # the rest of the line, because the value there is `<scheme> <credential>`
-    # and stopping at the first space would leave the credential behind.
-    _KEYED_VALUE = re.compile(r"(?i)\b(password|jwt|token|secret)=\S+")
-    _AUTH_HEADER = re.compile(r"(?i)(Authorization:)\s*.*")
-
     def _scrub(self, value: str) -> str:
-        value = self._KEYED_VALUE.sub(r"\1=[REDACTED]", value)
-        return self._AUTH_HEADER.sub(r"\1 [REDACTED]", value)
+        return redact_sensitive(value)
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):

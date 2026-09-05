@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..clients.http_client import HttpClient
@@ -34,12 +32,6 @@ from ..parsers.html_parser import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _crop_diag_dir() -> Path:
-    """Where TRAVIAN_DIST_DIAG writes the raw statistics HTML for debugging the
-    net-crop derivation. Off unless that env var is set."""
-    return Path(tempfile.gettempdir()) / "travian_crop_diag"
 
 
 def derive_net_crop_per_hour(
@@ -222,12 +214,11 @@ class BuildingService:
             timers = parse_village_stats_warehouse(warehouse_html)
             requests_spent += 1
             if _diag:
-                try:
-                    out = _crop_diag_dir()
-                    out.mkdir(parents=True, exist_ok=True)
-                    (out / "warehouse.html").write_text(warehouse_html, encoding="utf-8")
-                except Exception as exc:  # diagnostics must never break the read
-                    logger.warning("CROPDIAG dump failed: %s", exc)
+                # Through the shared dumper rather than a second, weaker copy
+                # of it: this is a fully authenticated statistics page, and it
+                # used to go to a fixed %TEMP%/travian_crop_diag/warehouse.html
+                # with no hardening, no redaction and no expiry (P1-6).
+                debug_dumper.dump("crop_diag", warehouse_html, key="warehouse")
 
             capacities = dict(granary_capacity or {})
             # Fetch the capacity page whenever the account has any village, not

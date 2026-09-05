@@ -5,10 +5,25 @@ error, captcha trigger, parser-found-nothing, session redirect to login)
 should call ``debug_dumper.dump(...)`` so the raw response lands on disk
 for post-mortem inspection.
 
-Files live under ``%TEMP%/travian_debug/<category>/`` with filenames
-``<key>_<unix_ts>.<ext>`` plus a stable ``<key>_latest.<ext>`` for easy
-tailing. A JSON sidecar with the same stem records context (url, status,
-slot_id, user_id, etc.).
+Files live under ``~/.travian/debug/<category>/`` with filenames
+``<key>_<unix_ts>.<ext>`` plus a ``<key>_latest.<ext>`` for easy tailing.
+A JSON sidecar with the same stem records context (url, status, slot_id,
+user_id, etc.).
+
+What lands here is a **fully authenticated game page** -- the account name and
+the per-page action checksum the app parses out of it -- so three things are
+not optional and are exercised by ``tests/test_debug_dump_is_private.py``:
+
+* the root is the application's own directory, alongside the database and the
+  traces, and made private to this user. It used to be
+  ``tempfile.gettempdir()/travian_debug``: a fixed path under a world-readable
+  ``/tmp`` on any multi-user host, with no ``chmod`` anywhere in the module;
+* every body is run through :func:`~travian_api.logging_config.redact_sensitive`
+  before it is written, the same redaction the log records get;
+* everything expires. ``_latest`` used to be exempt from the TTL, which left
+  one permanent unredacted copy per (category, key) on disk forever. Nothing in
+  this codebase reads ``_latest`` -- it is a convenience for a human tailing the
+  most recent miss -- and a convenience does not need to outlive the evidence.
 
 A background task prunes anything older than ``DEFAULT_TTL_S`` (24 h) so
 disk usage stays bounded on long-running servers.
@@ -20,14 +35,17 @@ import asyncio
 import json
 import logging
 import re
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
+from .logging_config import redact_sensitive
+from .session_dirs import SessionDirectoryUnsafe, harden_session_dir
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_ROOT = Path(tempfile.gettempdir()) / "travian_debug"
+# Alongside the database, the traces and the cookie jar, not in shared temp.
+DEFAULT_ROOT = Path.home() / ".travian" / "debug"
 DEFAULT_TTL_S = 24 * 60 * 60  # 24 hours
 DEFAULT_CLEANUP_INTERVAL_S = 60 * 60  # hourly
 
@@ -71,14 +89,18 @@ class DebugDumper:
         A JSON sidecar with the same stem holds *context* (url, status,
         slot_id, etc.) and a ``<key>_latest.<ext>`` copy is always
         overwritten so you can tail the most recent miss without
-        hunting timestamps.
+        hunting timestamps. Text content is redacted first; ``bytes``
+        content is written as given, because the only callers that pass
+        bytes pass something that is not text to begin with.
 
-        Returns the path written, or None if the write failed. Swallows
-        OSError so the hot path never dies because debug disk is full.
+        Returns the path written, or None if the write failed or the
+        directory could not be made private. Swallows OSError so the hot
+        path never dies because debug disk is full.
         """
         try:
             category_dir = self.root / _slug(category)
-            category_dir.mkdir(parents=True, exist_ok=True)
+            self._private_dir(self.root)
+            self._private_dir(category_dir)
 
             ts = int(time.time())
             stem_base = _slug(key) if key else "dump"
@@ -86,7 +108,9 @@ class DebugDumper:
             stem_latest = f"{stem_base}_latest"
 
             data: bytes = (
-                content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
+                content
+                if isinstance(content, bytes)
+                else redact_sensitive(content).encode("utf-8", errors="replace")
             )
 
             path = category_dir / f"{stem_timestamped}.{file_ext}"
@@ -118,9 +142,28 @@ class DebugDumper:
                 len(data),
             )
             return path
+        except SessionDirectoryUnsafe as exc:
+            logger.warning("Debug dump skipped, directory is not private: %s", exc)
+            return None
         except OSError:
             logger.exception("Debug dump failed for category=%s key=%s", category, key)
             return None
+
+    @staticmethod
+    def _private_dir(directory: Path) -> None:
+        """Create *directory* and make it readable only by this user.
+
+        Both levels, not just the leaf: ``mkdir(parents=True)`` creates the
+        parents with the umask default and takes ``mode`` into account for the
+        leaf alone, which is the same "only the leaf is hardened" hole the
+        session store had. The hardening rule itself is
+        :func:`~travian_api.session_dirs.harden_session_dir` -- best-effort on
+        Windows, where chmod does not describe the NTFS ACL, and fatal on
+        POSIX, where a directory we cannot make private is not a directory to
+        put an authenticated game page in.
+        """
+        directory.mkdir(parents=True, exist_ok=True)
+        harden_session_dir(directory)
 
     def start_cleanup(self) -> None:
         """Spawn the periodic pruning task. Idempotent."""
@@ -150,10 +193,10 @@ class DebugDumper:
         for path in self.root.rglob("*"):
             if not path.is_file():
                 continue
-            # Never prune `_latest` files — they're meant to always reflect
-            # the most recent hit of each (category, key) even if old.
-            if path.stem.endswith("_latest"):
-                continue
+            # `_latest` used to be exempt here, which turned a 24 h retention
+            # policy into one permanent copy of an authenticated page per
+            # (category, key). It is a tailing convenience nothing reads back;
+            # it expires with everything else.
             try:
                 if path.stat().st_mtime < cutoff:
                     path.unlink()

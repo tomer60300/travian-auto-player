@@ -53,7 +53,13 @@ def test_dump_accepts_bytes(tmp_path):
     assert path.read_bytes() == b"\x00\x01\x02"
 
 
-def test_prune_removes_old_files_but_keeps_latest(tmp_path):
+def test_prune_removes_every_file_older_than_the_ttl(tmp_path):
+    # This test used to assert the opposite of its last two lines: `_latest`
+    # was exempt from the TTL. That exemption kept one permanent, unredacted
+    # copy of an authenticated game page per (category, key) on disk forever,
+    # which is the retention half of the config audit's P1-6. `_latest` is a
+    # tailing convenience nothing in this codebase reads back, so it now
+    # expires with everything else.
     d = DebugDumper(root=tmp_path, ttl_s=3600)
     # Write a fresh dump.
     d.dump("no_checksum", "fresh", key="slot1")
@@ -68,16 +74,16 @@ def test_prune_removes_old_files_but_keeps_latest(tmp_path):
     os.utime(old_file, (old_ts, old_ts))
     os.utime(old_sidecar, (old_ts, old_ts))
 
-    # And backdate _latest — prune must still keep it.
+    # And backdate _latest — it is stale too, so it goes.
     latest = tmp_path / "no_checksum" / "slot1_latest.html"
     os.utime(latest, (old_ts, old_ts))
 
     removed = d.prune_once()
 
-    assert removed == 2  # old_file + old_sidecar
+    assert removed == 3  # old_file + old_sidecar + the stale _latest
     assert not old_file.exists()
     assert not old_sidecar.exists()
-    assert latest.exists()  # never pruned even when stale
+    assert not latest.exists()
 
 
 def test_dump_never_raises_on_write_failure(tmp_path, monkeypatch):

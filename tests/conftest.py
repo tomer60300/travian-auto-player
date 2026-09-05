@@ -288,9 +288,26 @@ def _isolate_the_execution_traces() -> None:
     atexit.register(shutil.rmtree, directory, True)
 
 
+def _isolate_the_debug_dumps() -> None:
+    """Send debug dumps to a throwaway directory, never ~/.travian/debug.
+
+    Same reasoning as the traces, and newly necessary: the dump root moved out
+    of shared temp and into the application's own directory, so an unstubbed
+    error path in a test would now scatter fake dumps through the operator's
+    real one -- next to the real ones, which are the post-mortem evidence after
+    a crash.
+    """
+    from travian_api import debug_dump
+
+    directory = tempfile.mkdtemp(prefix="travian-test-dumps-")
+    debug_dump.debug_dumper.root = Path(directory)
+    atexit.register(shutil.rmtree, directory, True)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     _isolate_the_database()
     _isolate_the_execution_traces()
+    _isolate_the_debug_dumps()
     _isolate_the_stealth_state()
     _scrub_travian_credentials()
     _install_network_block()
