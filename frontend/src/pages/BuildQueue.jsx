@@ -132,6 +132,7 @@ function BuildingList({ buildings, onAdd, queueItems }) {
                         className="text-gold hover:text-primary text-lg leading-none px-1"
                         onClick={(e) => { e.stopPropagation(); onAdd(b) }}
                         title="Add to queue"
+                        aria-label={`Add ${b.name} (slot #${b.slotId}) to queue`}
                       >+</button>
                     )}
                   </div>
@@ -153,7 +154,13 @@ function QueueItem({ item, onRemove, onChange, onMoveUp, onMoveDown, isFirst, is
       <div className="flex items-center justify-between gap-1 mb-1">
         <span className="text-sm text-primary font-medium flex items-center gap-1.5">
           {onToggleSelect && (
-            <input type="checkbox" checked={selected} onChange={onToggleSelect} className="checkbox-gold" />
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={onToggleSelect}
+              className="checkbox-gold"
+              aria-label={`Select ${item.name} (slot #${item.slotId})`}
+            />
           )}
           <span className="text-gold font-mono">#{item.slotId}</span>
           {item.name || '???'}
@@ -162,6 +169,7 @@ function QueueItem({ item, onRemove, onChange, onMoveUp, onMoveDown, isFirst, is
           className="text-secondary hover:text-danger text-base leading-none px-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
           onClick={onRemove}
           title="Remove"
+          aria-label={`Remove ${item.name} (slot #${item.slotId}) from queue`}
         >&times;</button>
       </div>
       {/* Row 2: level, target, priority, reorder */}
@@ -282,6 +290,7 @@ function QueuePanel({ items, setItems }) {
         <div className="flex flex-wrap items-center gap-2 p-2 bg-surface rounded-lg border-default sticky top-0 z-10">
           <span className="text-xs text-secondary font-medium">{selectedIds.size} selected</span>
           <select
+            aria-label="Bulk priority"
             value={bulkPriority}
             onChange={(e) => setBulkPriority(Number(e.target.value))}
             className="input-field text-xs w-auto py-0.5 px-1"
