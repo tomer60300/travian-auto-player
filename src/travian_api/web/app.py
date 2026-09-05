@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 # Import DB models so init_db() creates their tables
+from travian_api.operation_manager import operation_manager
 from travian_api.web.models import farm_builder as _fb_models  # noqa: F401
 from travian_api.web.models.db import init_db
 from travian_api.web.routes.buildings import router as buildings_router
@@ -141,6 +142,20 @@ async def lifespan(app: FastAPI):
 
     debug_dumper.stop_cleanup()
     exec_session_manager.stop_cleanup()
+
+    # Stop the operations BEFORE closing the clients they hold. disconnect_all()
+    # closes every HttpClient and saves its cookie jar; an op mid-request when
+    # uvicorn took SIGINT used to outlive its client and fire the next game
+    # request into a closed one. session_manager.disconnect() already refuses a
+    # user-initiated disconnect while ops are running -- on shutdown, refusing
+    # is not available, so stop and wait instead.
+    stragglers = await operation_manager.stop_all()
+    if stragglers:
+        logger.warning(
+            "Shutdown: %d operation(s) did not stop in time: %s",
+            len(stragglers),
+            ", ".join(stragglers),
+        )
     await session_manager.disconnect_all()
     # Close any recon-proxy HttpClients (curl_cffi / httpx connection
     # pools leak across hot-reloads without this).

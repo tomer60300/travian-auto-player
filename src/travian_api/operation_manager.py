@@ -334,6 +334,36 @@ class OperationManager:
         logger.info("Operation %s: stop requested", session_id)
         return True
 
+    async def stop_all(self, grace_seconds: float = 10.0) -> list[str]:
+        """Signal every running operation and wait for its task. Shutdown only.
+
+        Returns ``"<label>:<session_id>"`` for each op still running when the
+        grace period expired, so the caller can name the stragglers rather than
+        guess. It does NOT cancel them: a shutdown that hangs is its own
+        failure, but a task killed mid-request is exactly the state this
+        exists to avoid, so past the grace period the choice is to proceed and say
+        so.
+
+        Called from the app lifespan before ``session_manager.disconnect_all()``,
+        which closes the very ``HttpClient`` instances these tasks are using
+        (and saves their cookie jars). Without this, an op mid-request when
+        uvicorn took SIGINT fired its next game request into a closed client.
+        """
+        ops = list(self._ops.values())
+        if not ops:
+            return []
+        for op in ops:
+            op.stop_event.set()
+        pending = [op.task for op in ops if not op.task.done()]
+        if pending:
+            logger.info(
+                "Shutdown: waiting up to %.1fs for %d operation(s)",
+                grace_seconds,
+                len(pending),
+            )
+            await asyncio.wait(pending, timeout=grace_seconds)
+        return [f"{op.label}:{op.session_id}" for op in ops if not op.task.done()]
+
 
 def _last_message_was_fatal_error(exec_session: ExecutionSession) -> bool:
     """Look at the tail of the ring buffer for a recent fatal error.
