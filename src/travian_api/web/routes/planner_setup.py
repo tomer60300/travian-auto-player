@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, StrictBool, ValidationError, field_validator
@@ -87,7 +87,11 @@ router = APIRouter(prefix="/api/distribution", tags=["distribution"])
 # and a version added on one side must be added on the other or a fresh export
 # is refused on save.
 
-SETUP_FORMAT = "travian-planner-owned-state"
+# `Final`, because `SetupDocument.format` is `Literal[SETUP_FORMAT]`: without
+# it the name is statically `str`, so the literal type is not a literal type
+# at all and the one field identifying the document as ours goes unchecked
+# by any checker reading this module.
+SETUP_FORMAT: Final = "travian-planner-owned-state"
 
 READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
 """Versions this build can read. A v1 document simply carries no profiles, a v2
@@ -483,7 +487,7 @@ async def get_setup(
     account_key: AccountKey,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-):
+) -> StoredSetupOut:
     """The caller's saved setup for one account.
 
     404 when nothing is saved, deliberately: an empty setup and no setup are
@@ -506,7 +510,7 @@ async def put_setup(
     account_key: AccountKey,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-):
+) -> StoredSetupOut:
     """Validate and store, replacing whatever was there.
 
     Idempotent: one row per user per account, so the same document sent twice
@@ -535,7 +539,7 @@ async def delete_setup(
     account_key: AccountKey,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-):
+) -> None:
     """Forget the saved setup for one account.
 
     404 when there is nothing to forget, as `DELETE /presets/{id}` answers:

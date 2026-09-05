@@ -13,12 +13,12 @@ import os
 import random
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from urllib.parse import urlencode, urljoin
 
 if TYPE_CHECKING:
-    from ..stealth.browser_headers import BrowserHeaders
     from ..stealth.captcha_guard import CaptchaGuard
+    from ..stealth.headers import BrowserHeaders
     from ..stealth.human_delay import HumanDelay
     from ..stealth.navigator import PageNavigator
     from ..stealth.noise import NoiseInjector
@@ -124,7 +124,7 @@ class HttpClient:
         self.settings = settings
         self.base_url = settings.base_url.rstrip("/")
         self._resolved_x_version: str | None = None
-        self._auth_callback: Optional[callable] = None
+        self._auth_callback: Optional[Callable[..., Any]] = None
         # The cookie file's PARENT also becomes the home of the persona and
         # activity-scheduler state, so this path decides where stealth
         # accounting lives. A bare relative default meant "wherever the process
@@ -493,7 +493,7 @@ class HttpClient:
         # oversleep hours past morning.
         return self._activity_scheduler.seconds_until_rest_ends()
 
-    def set_auth_callback(self, callback: callable) -> None:
+    def set_auth_callback(self, callback: Callable[..., Any]) -> None:
         """Set callback function to call when re-authentication is needed."""
         self._auth_callback = callback
 
@@ -553,7 +553,17 @@ class HttpClient:
             referer: pin the Referer instead of using the client-wide last page
 
         Returns:
-            Headers dict to use for the request
+            Headers dict to use for the request.
+
+            Declared ``str`` and NOT ``str | None``, though under curl_cffi the
+            mapping really can carry ``None``: that is the suppression sentinel
+            (it emits ``name:`` on the wire, deleting a header
+            curl-impersonate would otherwise inject from its Chrome navigation
+            defaults). The sentinels are stripped just below for httpx, which
+            rejects them -- and no annotation can express "optional on one
+            transport and not the other", so widening this signature only moves
+            eleven errors onto the httpx call sites. It needs the two transports
+            separated, not a wider type.
         """
         x_version = await self._fetch_x_version()
 

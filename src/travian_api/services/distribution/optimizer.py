@@ -1018,6 +1018,27 @@ def _relay_tier_flows(
 
 # A directed flow: (origin, destination) -> rate, one map per resource.
 FlowKey = tuple[int, int]
+
+# What `_score_changes` hands `_commit_changes`: the pairs it touched and the
+# cargo, merchant count, per-origin delta and tonnage each would have. Named
+# because the two closures are one operation split in half -- score, then apply
+# the very same numbers -- and an untyped 5-tuple passed between them is exactly
+# how the halves come to disagree.
+_SwapState = tuple[
+    set[FlowKey],
+    dict[FlowKey, dict["Resource", float]],
+    dict[FlowKey, int],
+    dict[int, int],
+    dict[FlowKey, float],
+]
+# One improving swap: its objective delta, the cargo deltas, the state to commit,
+# and the coordinate pair that breaks ties on GEOGRAPHY rather than on village id.
+_SwapMove = tuple[
+    tuple[int, float, int, float],
+    list[tuple[FlowKey, "Resource", float]],
+    _SwapState,
+    tuple[tuple[tuple[int, int], tuple[int, int]], ...],
+]
 Assignment = dict[Resource, dict[FlowKey, float]]
 
 # Ceiling on improvement passes. Termination does not depend on it -- each
@@ -1227,24 +1248,6 @@ def _merge_pair_cargo(assignment: Assignment) -> dict[FlowKey, dict[Resource, fl
     return pair
 
 
-def _pair_merchants(
-    origin: int,
-    destination: int,
-    cargo: Mapping[Resource, float],
-    villages: Mapping[int, VillageState],
-    geometry: MapGeometry,
-    merchant_model: MerchantModel,
-    cycles: Sequence[int],
-) -> int:
-    """Merchants one pair commits at its cheapest cycle. Zero for empty cargo."""
-    hourly_total = sum(cargo.values())
-    if hourly_total <= EPSILON:
-        return 0
-    one_way = geometry.one_way_minutes(villages[origin].coords, villages[destination].coords)
-    capacity = merchant_model.capacity(villages[origin].trade_office_level)
-    return cheapest_cycle(hourly_total, 2.0 * one_way, capacity, cycles).merchants_committed
-
-
 def _route_for_pair(
     origin: int,
     destination: int,
@@ -1311,7 +1314,18 @@ def _spend_idle_merchants_on_latency(
         indices = by_origin[origin]
         spare = budgets.get(origin, 0) - sum(result[i].merchants_committed for i in indices)
         while spare > 0:
-            best: tuple[tuple[int, int, float, int, int], int, int, int, int] | None = None
+            # SEVEN elements in the key, not five: two geometry tie-breakers
+            # were added to it and this was never widened.
+            best: (
+                tuple[
+                    tuple[int, int, float, int, int, tuple[int, int], tuple[int, int]],
+                    int,
+                    int,
+                    int,
+                    int,
+                ]
+                | None
+            ) = None
             for i in indices:
                 route = result[i]
                 # Every route is a candidate, not only the ones over target.
@@ -1512,7 +1526,9 @@ def _improve_flows(
     # villages and 93.8% at 40, and cheapest_cycle is still the largest leaf in
     # the profile at ~43% of build_plan. The memo lives and dies inside this one
     # build_plan call, so nothing leaks between requests or between accounts.
-    cost_memo: dict[tuple[int, float, float], int] = {}
+    # The cadence CAP is the fourth element -- see `_pair_cost` below, which
+    # added it and left this declaring three.
+    cost_memo: dict[tuple[int, float, float, int | None], int] = {}
 
     # Cadence caps, and the candidate cycles they leave, resolved once per
     # destination instead of on every one of the ~4M costing calls.
@@ -1669,7 +1685,9 @@ def _improve_flows(
     def _crop_edges() -> set[FlowKey]:
         return {key for key, amount in flows.get(Resource.CROP, {}).items() if amount > EPSILON}
 
-    def _score_changes(changes: Sequence[tuple[FlowKey, Resource, float]]):
+    def _score_changes(
+        changes: Sequence[tuple[FlowKey, Resource, float]],
+    ) -> tuple[tuple[int, float, int, float], _SwapState]:
         """Cost a set of pair-cargo deltas WITHOUT applying them.
 
         Split out from applying so a mover can compare candidates before
@@ -1768,7 +1786,9 @@ def _improve_flows(
             new_total,
         )
 
-    def _commit_changes(changes, state) -> None:
+    def _commit_changes(
+        changes: Sequence[tuple[FlowKey, Resource, float]], state: _SwapState
+    ) -> None:
         touched_keys, new_cargo, new_merch, per_origin, new_total = state
         for key in touched_keys:
             if new_cargo[key]:
@@ -1940,7 +1960,9 @@ def _improve_flows(
             return True
         return False
 
-    def _swap_changes(resource, o1, d1, o2, d2, t):
+    def _swap_changes(
+        resource: Resource, o1: int, d1: int, o2: int, d2: int, t: float
+    ) -> list[tuple[FlowKey, Resource, float]]:
         return [
             ((o1, d1), resource, -t),
             ((o2, d2), resource, -t),
@@ -1948,7 +1970,15 @@ def _improve_flows(
             ((o2, d1), resource, t),
         ]
 
-    def _swap_shape_ok(resource, legs, o1, d1, o2, d2, t) -> bool:
+    def _swap_shape_ok(
+        resource: Resource,
+        legs: Mapping[FlowKey, float],
+        o1: int,
+        d1: int,
+        o2: int,
+        d2: int,
+        t: float,
+    ) -> bool:
         # Swaps are blind to relay: rewiring a hub's legs can lengthen the chain
         # or close a loop, either of which the beat cannot then schedule.
         # Checked on the prospective edge set, never applied-then-undone.
@@ -1960,12 +1990,14 @@ def _improve_flows(
                 prospective.discard(key)
         return _crop_shape_ok(prospective)
 
-    def _breakpoint_ts(resource, o1, d1, o2, d2, t_full):
+    def _breakpoint_ts(
+        resource: Resource, o1: int, d1: int, o2: int, d2: int, t_full: float
+    ) -> list[float]:
         grows = [(pair_total.get(key, 0.0), capacities[key[0]]) for key in ((o1, d2), (o2, d1))]
         shrinks = [(pair_total.get(key, 0.0), capacities[key[0]]) for key in ((o1, d1), (o2, d2))]
         return breakpoint_candidates(grows, shrinks, t_full, cycles)
 
-    def _best_swap(refinement: bool):
+    def _best_swap(refinement: bool) -> _SwapMove | None:
         """One full sweep; return the single best improving swap, or None.
 
         Best-improvement, not first-improvement. An order-perturbation audit
