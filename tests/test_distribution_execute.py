@@ -304,6 +304,7 @@ class _FakeLiveSvc:
         self.deleted = []  # (origin, sorted tuple of route ids removed for good)
         self.enabled = []  # (origin, sorted tuple of re-enabled dest coords)
         self.listed = []  # origin ids whose marketplace was READ
+        self.confirmed = []  # origin ids RE-read to settle what a write did
         self.execute_lock = asyncio.Lock()
         self.on_create = None  # optional hook fired after a create is recorded
         self.on_pacing = None  # optional hook fired inside create_route BEFORE its
@@ -372,6 +373,7 @@ class _FakeLiveSvc:
         return RouteActionResult(vid, 0, 0, "deleted")
 
     async def confirm_routes(self, vid, *, map_span=None):
+        self.confirmed.append(vid)
         if vid in self._confirm_raises:
             from travian_api.exceptions import NetworkError
 
@@ -2011,6 +2013,77 @@ class TestCreatedMeansVerifiedNotAccepted:
             for line in Path(res.trace_path).read_text(encoding="utf-8").splitlines()
         ]
         assert [e for e in events if e["kind"] == "verified"] == []
+
+
+class TestACreateWhoseAnswerDiedIsSettledByTheMarketplace:
+    """`failed` from a create is not evidence that nothing was created.
+
+    `create_route` maps `NetworkError` to `failed`, and that is what a
+    session-expiry redirect on a non-retryable write, a connection reset or a
+    curl failure produce -- cases whose own comment says "the original may
+    already have taken effect". The read-back gate required `created_here`,
+    which a failed create never joins, so a run that had put thirty rows in the
+    game reported `created=0` and told the operator the game had refused the
+    write. Every other write in this path is settled by looking at the page;
+    this one asserted a refusal instead.
+    """
+
+    def _run(self, svc, **kw):
+        return _run_live(
+            svc, _own_village_account(), disable_existing=False, max_routes_per_run=50, **kw
+        )
+
+    def test_a_landed_create_is_reported_as_created(self):
+        # The double fans the rows out and THEN answers `failed`: the write
+        # landed, the answer did not survive.
+        svc = _FakeLiveSvc(create_status="failed")
+        res = self._run(svc)
+
+        assert [a.status for a in res.actions] == ["created"], [a.detail for a in res.actions]
+        assert res.created == 1
+        assert res.remaining == 0
+
+    def test_the_rows_it_made_are_counted(self):
+        svc = _FakeLiveSvc(create_status="failed")
+        res = self._run(svc)
+
+        # A 6h cycle is four daily rows, and they are on the page.
+        assert res.created_game_rows == 4
+
+    def test_a_create_that_really_was_refused_stays_failed(self):
+        # The control. Nothing appeared on the marketplace, so `failed` is the
+        # truth and must survive the read-back.
+        svc = _FakeLiveSvc(create_status="failed", phantom_creates=True)
+        res = self._run(svc)
+
+        assert [a.status for a in res.actions] == ["failed"]
+        assert res.created == 0
+        assert res.remaining == 1
+
+    def test_the_marketplace_is_actually_re_read(self):
+        svc = _FakeLiveSvc(create_status="failed")
+        self._run(svc)
+
+        assert svc.confirmed == [20003], "the create's fate is settled by re-reading the page"
+
+    def test_a_landed_creates_fan_out_is_still_pruned_to_the_window(self):
+        # The rows exist, so they depart round the clock unless the trim runs --
+        # the trim keyed off `created_here` alone, so an unanswered create left
+        # its whole fan-out shipping outside the profile.
+        svc = _FakeLiveSvc(create_status="failed")
+        _run_live(
+            svc,
+            _account(
+                [_row_with_cycle(20003, -1, 1, 23 * 60 + 30)],
+                {20003: (0, 0), -1: (40, 40)},
+                {20003: "03", -1: "A"},
+            ),
+            max_routes_per_run=50,
+            dispatch_window=[23 * 60, 7 * 60],
+            prune_to_window=True,
+        )
+
+        assert svc.deleted, "the out-of-window rows of a landed create must be pruned too"
 
 
 class TestASessionThatDiesMidRun:

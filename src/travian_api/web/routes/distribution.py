@@ -6745,6 +6745,14 @@ async def post_execute(
                     # Routes this origin claims to have created, paired with
                     # their action so the verdict can be corrected below.
                     created_here: list[tuple[RouteActionResponse, PlannedRoute]] = []
+                    # Creates the game ANSWERED with a failure. `create_route`
+                    # maps NetworkError to `failed`, and that is what a
+                    # session-expiry redirect on a non-retryable write, a reset
+                    # connection or a curl failure produce -- "the original may
+                    # already have taken effect". So these are unknown, not
+                    # refused, and are settled by the same read-back every other
+                    # write here is settled by.
+                    attempted_here: list[tuple[RouteActionResponse, PlannedRoute]] = []
                     # Rows whose cargo this run rewrote, with what it asked for.
                     updated_here: list[tuple[ExistingRoute, dict]] = []
                     for i, (row, route) in enumerate(desired):
@@ -7065,7 +7073,9 @@ async def post_execute(
                         # counts attempts -- but rows only exist if the game made
                         # them.
                         rows_written -= would_add
-                        actions.append(_action(row, route, "failed", result.detail))
+                        failed_action = _action(row, route, "failed", result.detail)
+                        actions.append(failed_action)
+                        attempted_here.append((failed_action, route))
                         consecutive_failures += 1
                         if consecutive_failures >= _CONSECUTIVE_FAILURE_LIMIT:
                             # Whatever is refusing these is not going to stop
@@ -7099,7 +7109,13 @@ async def post_execute(
                     #
                     # One request settles it, and it is the request the game's
                     # own UI makes after a create: refresh the list and look.
-                    if created_here or disabled_here or reenabled_here or updated_here:
+                    if (
+                        created_here
+                        or attempted_here
+                        or disabled_here
+                        or reenabled_here
+                        or updated_here
+                    ):
                         try:
                             after = await svc.confirm_routes(origin, map_span=body.map_span)
                         except (NetworkError, MarketplaceUnreadable) as exc:
@@ -7156,14 +7172,23 @@ async def post_execute(
                                     fresh_by_key.setdefault(key, []).append(e)
                             observed_by_action: dict[int, int] = {}
                             _claim_groups: dict[int | tuple[int, int], list] = {}
-                            for action, route in created_here:
+                            _claimed_ids = {id(a) for a, _ in created_here}
+                            # Failed creates join the attribution, but claim
+                            # LAST: a create the game confirmed must never be
+                            # handed rows that belong to it by one whose answer
+                            # merely went missing.
+                            for action, route in [*created_here, *attempted_here]:
                                 _claim_groups.setdefault(_desired_key(route), []).append(
                                     (action, route)
                                 )
                             for key, group in _claim_groups.items():
                                 unclaimed = list(fresh_by_key.get(key, []))
                                 for action, route in sorted(
-                                    group, key=lambda ar: _game_rows(ar[1].cycle_hours)
+                                    group,
+                                    key=lambda ar: (
+                                        id(ar[0]) not in _claimed_ids,
+                                        _game_rows(ar[1].cycle_hours),
+                                    ),
                                 ):
                                     own = {
                                         (route.dispatch_minute + _i * route.cycle_hours * 60)
@@ -7194,7 +7219,15 @@ async def post_execute(
                             # pruning against an unverified read would be deleting
                             # rows on a guess. One delete for the whole origin
                             # rather than one per route.
-                            if body.prune_to_window and created_here:
+                            # Creates whose answer failed but whose rows are on
+                            # the page: they landed, so they are trimmed,
+                            # counted and reported exactly like a confirmed one.
+                            landed_here = [
+                                (action, route)
+                                for action, route in attempted_here
+                                if observed_by_action.get(id(action), 0)
+                            ]
+                            if body.prune_to_window and (created_here or landed_here):
                                 # Pooled per destination, because per-route
                                 # attribution has a hole: an hourly fan-out
                                 # contains EVERY minute a 4h one has, so routes
@@ -7222,7 +7255,7 @@ async def post_execute(
                                 # routes already written to the game. It needed a
                                 # trim AND deferred routes in the same run to
                                 # fire, which is exactly a capped whole-day pass.
-                                for _created_action, _route in created_here:
+                                for _created_action, _route in [*created_here, *landed_here]:
                                     del _created_action  # only _route is used here
                                     if _route.window is not None:
                                         _created_keys.setdefault(_desired_key(_route), []).append(
@@ -7441,6 +7474,30 @@ async def post_execute(
                                     origin=origin,
                                     claimed=sorted(set(disabled_here)),
                                     still_active=still_active,
+                                )
+                            for action, route in landed_here:
+                                # The POST said no and the page says yes. Trust
+                                # the page, as the create path already does in
+                                # the opposite direction: reporting a refusal
+                                # over rows that are demonstrably shipping is the
+                                # same false result, pointing the other way.
+                                observed = observed_by_action.get(id(action), 0)
+                                action.observed_game_rows = observed
+                                action.status = "created"
+                                action.detail = (
+                                    "the game's answer to the create failed to arrive, but the "
+                                    "marketplace read-back shows the route: it landed"
+                                )
+                                outstanding -= 1
+                                # Charged now that the rows are known to exist.
+                                # The failure branch refunded them on the
+                                # assumption nothing had reached the game.
+                                rows_written += observed
+                                trace.event(
+                                    "unanswered_create_landed",
+                                    origin=origin,
+                                    destination=str(_desired_key(route)),
+                                    rows=observed,
                                 )
                             for action, route in created_here:
                                 key = _desired_key(route)
