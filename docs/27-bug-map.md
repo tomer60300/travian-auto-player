@@ -443,11 +443,13 @@ future contributor comes to believe a gate exists.
 - One comment-only commit on this branch lacks the `Co-Authored-By` and
   `Claude-Session` trailers. It is not HEAD; rewriting it means a rebase after
   every writer has stopped.
-- The xdist shared-database race: `tests/conftest.py` repoints
-  `TRAVIAN_DB_PATH` before anything imports, and its isolation helper returns
-  early when the variable is **already** set — which it is, in every xdist
-  worker, inherited from the controller. So all eight workers share one SQLite
-  file, and two modules starting an app lifespan concurrently can race
-  `create_all` and fail with `table users already exists`. Observed once. The
-  fix — keying the temporary path on `PYTEST_XDIST_WORKER` — is untaken, so
-  treat an `already exists` failure under `-n 8` as this and not as your change.
+- The xdist shared-database race. `tests/conftest.py` repoints
+  `TRAVIAN_DB_PATH` before anything imports, and `_isolate_the_database()`
+  begins `if os.environ.get("TRAVIAN_DB_PATH"): return` — deliberately, so a
+  developer who points the suite somewhere is respected. But an xdist worker
+  inherits the variable from the controller, which set it, so **all eight
+  workers share one SQLite file**; `PYTEST_XDIST_WORKER` appears nowhere in
+  `conftest.py`. Two test modules starting an app lifespan concurrently can then
+  race `create_all` and fail with `table users already exists`. Observed once.
+  The fix — keying the temporary path on the worker id — is untaken, so treat an
+  `already exists` failure under `-n 8` as this and not as your change.
