@@ -59,6 +59,40 @@ describe('planBlockers', () => {
     expect(planBlockers({ villages: VILLAGES, maxBusy: { [DEF_A]: 19 } })).toEqual([])
   })
 
+  // The column the page outlined in `text-danger` and this list never carried,
+  // so it was the one marked cell the gate agreed to send. Backend rule 3,
+  // profile section 5.9: a role village may not relay.
+  it('refuses a declared relay whose role may not relay, naming its own cell', () => {
+    const blockers = planBlockers({
+      villages: VILLAGES,
+      villageRoles: { [DEF_A]: 'def' },
+      roleTemplates: { def: { consumption: { lumber: 0 } } },
+      relayFor: { [DEF_A]: [CAPITAL] },
+    })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({
+      field: 'Relays for',
+      stage: 'snapshot',
+      villages: ['11'],
+      focusLabel: 'Villages 11 forwards material to',
+    })
+    expect(blockers[0].rule).toContain('Profile section 5.9')
+  })
+
+  it('refuses a relay that names a village this account does not have', () => {
+    const blockers = planBlockers({ villages: VILLAGES, relayFor: { [CAPITAL]: [99999] } })
+    expect(blockers).toHaveLength(1)
+    expect(blockers[0]).toMatchObject({ field: 'Relays for', villages: ['02'] })
+    expect(blockers[0].rule).toContain('does not have')
+  })
+
+  it('says nothing about a relay tier the backend would accept', () => {
+    expect(planBlockers({ villages: VILLAGES, relayFor: { [CAPITAL]: [DEF_A] } })).toEqual([])
+    // An empty list is the picker mid-edit, not a tier, and the request drops
+    // it -- so it is not a refusal either.
+    expect(planBlockers({ villages: VILLAGES, relayFor: { [CAPITAL]: [] } })).toEqual([])
+  })
+
   it('refuses a stock floor past the 95% ceiling', () => {
     const blockers = planBlockers({ villages: VILLAGES, stockFloors: { [CAPITAL]: 0.99 } })
     expect(blockers).toHaveLength(1)
@@ -234,6 +268,21 @@ describe('planBlockers', () => {
       'Stock floor %',
       'Map span',
       'DEF assumed net crop',
+    ])
+  })
+
+  // Column order on screen: Max busy, Ships only to, Relays for, Stock floor %.
+  it('puts the relay column where the table puts it', () => {
+    const blockers = planBlockers({
+      villages: VILLAGES,
+      maxBusy: { [DEF_A]: 99 },
+      relayFor: { [CAPITAL]: [99999] },
+      stockFloors: { [CAPITAL]: 0.99 },
+    })
+    expect(blockers.map((b) => b.field)).toEqual([
+      'Most merchants busy at once',
+      'Relays for',
+      'Stock floor %',
     ])
   })
 })

@@ -22,8 +22,9 @@
  * `unreachableCaps`, `isStockFloorFraction`, `isConsumptionRate`,
  * `isEmptyTemplate`, `isAssumedCropRate`, `isTradeOfficeLevel`,
  * `isCropCeiling`, `isSafetyMarginPct`, `nightFillProblems`,
- * `merchantModelProblems` and `resolveVillageNames` are the same functions the
- * cells call, so a mark and a blocker cannot come from two different rules.
+ * `merchantModelProblems`, `relayTierProblemsByVillage` and
+ * `resolveVillageNames` are the same functions the cells call, so a mark and a
+ * blocker cannot come from two different rules.
  *
  * Pure, so the whole gate is testable without a browser -- which is the other
  * half of why it does not read the DOM.
@@ -56,6 +57,7 @@ import {
   isTradeOfficeLevel,
   merchantModelProblems,
   nightFillProblems,
+  relayTierProblemsByVillage,
   resolvedSpend,
   unreachableCaps,
 } from './plannerSetup'
@@ -112,12 +114,17 @@ export function planBlockers({
   roleTemplates = {},
   foreignTargets = [],
   merchantModel = {},
+  relayFor = {},
 } = {}) {
   const out = []
   const add = (entry) => {
     if (entry.villages.length || entry.focusLabel) out.push(entry)
   }
   const named = (v) => v.name || String(v.village_id)
+  const namedId = (id) => {
+    const found = villages.find((v) => v.village_id === id)
+    return found ? named(found) : String(id)
+  }
 
   // ── Account ───────────────────────────────────────────────────────────
   // Column order, so the refusal reads left to right across the table the
@@ -163,6 +170,33 @@ export function planBlockers({
     focusLabel: badCaps.length
       ? `Most merchants busy at once for ${named(badCaps[0])}`
       : null,
+  })
+
+  // The declared relay tier, which the cell has outlined in `text-danger` and
+  // named with `aria-describedby` since it was built -- and which this list did
+  // not carry at all, so it was the one figure the page marked and then agreed
+  // to send. A `def` village declared as the relay for 02 is backend rule 3
+  // (profile section 5.9): `/plan` 422s it, `Save setup` PUTs a document that
+  // 422s, and `Save setup to file` writes one `parseSetup` refuses on the way
+  // back in -- the exact "saves with a 200 and can never be loaded again" shape
+  // the save gate exists to stop, reached through a column the gate never read.
+  //
+  // Same helper the cell calls, so a mark and a refusal cannot come from two
+  // rules. Keyed to the RELAY's own cell, because that is the list that has to
+  // change: the downstream village named in the message is not where the edit
+  // happens.
+  const relayProblems = relayTierProblemsByVillage(relayFor, villages, villageRoles)
+  const badRelays = Object.keys(relayProblems)
+    .map(Number)
+    .sort((a, b) => a - b)
+  add({
+    field: 'Relays for',
+    // The cell's own sentences, not a bound: a relay tier has no range to
+    // state, only rules it breaks, and each one already names its villages.
+    rule: badRelays.flatMap((id) => relayProblems[id]).join(' '),
+    stage: 'snapshot',
+    villages: badRelays.map(namedId),
+    focusLabel: badRelays.length ? `Villages ${namedId(badRelays[0])} forwards material to` : null,
   })
 
   const badFloors = villages.filter((v) => {

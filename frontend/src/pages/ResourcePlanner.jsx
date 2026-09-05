@@ -2025,6 +2025,7 @@ export default function ResourcePlanner() {
         roleTemplates,
         foreignTargets,
         merchantModel,
+        relayFor,
       }),
     [
       villages,
@@ -2037,6 +2038,7 @@ export default function ResourcePlanner() {
       roleTemplates,
       foreignTargets,
       merchantModel,
+      relayFor,
     ]
   )
 
