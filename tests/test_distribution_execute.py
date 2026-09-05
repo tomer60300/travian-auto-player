@@ -1678,6 +1678,119 @@ class TestTheFanOutDoesNotCauseAReRun:
         assert len(enabled_coords) == 2, "exactly the two that were off"
 
 
+def _two_destination_account():
+    """One origin, two OWN destinations -- so both are matched by village id."""
+    return _account(
+        [
+            SheetRow(
+                origin=20003,
+                destination=20011,
+                cargo={Resource.CROP: 100},
+                cycle_hours=6,
+                dispatch_minute=100,
+                arrival_minute=0,
+                merchants=2,
+            ),
+            SheetRow(
+                origin=20003,
+                destination=20019,
+                cargo={Resource.CROP: 100},
+                cycle_hours=6,
+                dispatch_minute=700,
+                arrival_minute=0,
+                merchants=2,
+            ),
+        ],
+        {20003: (0, 0), 20011: (10, 0), 20019: (20, 0)},
+        {20003: "03", 20011: "11", 20019: "19"},
+    )
+
+
+class TestAnOffScheduleDestinationIsOnlyDisabledIfItCanBeRebuilt:
+    """ "We NEVER disable a destination we are about to create" -- and a
+    mismatched one is exactly the case that broke it.
+
+    A destination whose live rows run a schedule the plan does not want is
+    reconciled by disable-and-recreate. The disable is unbounded; the create is
+    bounded by `max_routes_per_run` and by the row budget. So a run capped at one
+    create against two mismatched destinations switched BOTH off and rebuilt one:
+    the second destination stopped receiving anything at all, under a green
+    "created 1 route(s)" with an empty `problems` list.
+    """
+
+    def _existing(self):
+        # Eight 3h rows to each destination where the plan wants four 6h ones.
+        return {
+            20003: _fanned(20011, 10, 0, cycle_hours=3, dispatch_minute=100, start_id=710000)
+            + _fanned(20019, 20, 0, cycle_hours=3, dispatch_minute=700, start_id=720000)
+        }
+
+    def _still_active(self, svc, dest):
+        return [e for e in svc._existing[20003] if e.active and e.dest_village_id == dest]
+
+    def test_the_unfundable_destination_keeps_its_rows(self):
+        svc = _FakeLiveSvc(existing=self._existing())
+        _run_live(svc, _two_destination_account(), disable_existing=True, max_routes_per_run=1)
+
+        assert len(svc.created) == 1, "the cap still bounds creates"
+        rebuilt = svc.created[0].dest_village_id
+        starved = 20019 if rebuilt == 20011 else 20011
+        assert self._still_active(svc, starved), (
+            "the destination this run could not rebuild must keep shipping"
+        )
+
+    def test_it_says_which_destination_was_left_diverging(self):
+        svc = _FakeLiveSvc(existing=self._existing())
+        res = _run_live(
+            svc, _two_destination_account(), disable_existing=True, max_routes_per_run=1
+        )
+
+        rebuilt = svc.created[0].dest_village_id
+        starved_name = "19" if rebuilt == 20011 else "11"
+        assert any(starved_name in p and "diverging" in p for p in res.problems), res.problems
+
+    def test_the_route_it_could_not_rebuild_is_blocked_not_created(self):
+        # Creating on top of the live rows would ship both schedules at once --
+        # the same conclusion create-only mode reaches.
+        svc = _FakeLiveSvc(existing=self._existing())
+        res = _run_live(
+            svc, _two_destination_account(), disable_existing=True, max_routes_per_run=1
+        )
+
+        blocked = [a for a in res.actions if a.status == "blocked"]
+        assert len(blocked) == 1, [a.status for a in res.actions]
+        assert "different schedule" in blocked[0].detail
+
+    def test_a_cap_that_covers_both_replaces_both(self):
+        # The control: with the budget to rebuild them, nothing is left running.
+        svc = _FakeLiveSvc(existing=self._existing())
+        res = _run_live(
+            svc, _two_destination_account(), disable_existing=True, max_routes_per_run=50
+        )
+
+        assert len(svc.created) == 2
+        assert res.problems == []
+        assert not self._still_active(svc, 20011)[8:], "the 3h rows are gone"
+
+    def test_a_row_budget_too_small_to_rebuild_also_holds_the_rows(self):
+        # The other half of the budget: a 6h route is four rows, so a four-row
+        # budget funds exactly one replacement.
+        svc = _FakeLiveSvc(existing=self._existing())
+        res = _run_live(
+            svc,
+            _two_destination_account(),
+            disable_existing=True,
+            max_routes_per_run=50,
+            max_game_rows_per_run=4,
+        )
+
+        assert len(svc.created) == 1
+        rebuilt = svc.created[0].dest_village_id
+        starved = 20019 if rebuilt == 20011 else 20011
+        assert self._still_active(svc, starved)
+        assert res.problems, "a destination left diverging is never silent"
+
+
 class TestAControlledRunCanTargetOnePair:
     """The first live run against a real account must be exactly one chosen route.
 

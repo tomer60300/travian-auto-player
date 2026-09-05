@@ -6417,6 +6417,64 @@ async def post_execute(
                             destinations={str(k): why for k, why in mismatched.items()},
                         )
 
+                    # A mismatched destination is reconciled by disable-and-
+                    # recreate, and only the disable half is unbounded: the
+                    # create is capped by `max_routes_per_run` and by the row
+                    # budget. Switching off rows this run cannot rebuild leaves
+                    # the destination receiving NOTHING -- precisely what the
+                    # invariant above ("we NEVER disable a destination we are
+                    # about to create") exists to prevent, and reachable on the
+                    # first run at cap=1 against any village holding a previous
+                    # plan's routes. So the replacement is RESERVED out of the
+                    # budget before the disable, and a destination whose rebuild
+                    # cannot be funded keeps its rows and is reported diverging,
+                    # exactly as create-only mode reports it.
+                    replaceable: dict[int | tuple[int, int], str] = {}
+                    reserved_attempts = 0  # creates owed to `replaceable`, unspent
+                    reserved_rows = 0  # and the rows those creates will add
+                    if body.disable_existing and mismatched:
+                        _wanted_pairs: dict[
+                            int | tuple[int, int], list[tuple[SheetRow, PlannedRoute]]
+                        ] = {}
+                        for _pair in desired:
+                            _wanted_pairs.setdefault(_desired_key(_pair[1]), []).append(_pair)
+                        for _k, _why in mismatched.items():
+                            # From `desired`, not `wanted_here`: a filtered run
+                            # cannot recreate what it excluded, so it must not
+                            # disable it either.
+                            _pairs = _wanted_pairs.get(_k, [])
+                            _needs_rows = sum(
+                                _rows_that_survive(_r.cycle_hours, _r.dispatch_minute, _p.window)
+                                for _r, _p in _pairs
+                            )
+                            if (
+                                _pairs
+                                and attempts + reserved_attempts + len(_pairs) <= cap
+                                and (
+                                    not row_cap
+                                    or rows_written + reserved_rows + _needs_rows <= row_cap
+                                )
+                            ):
+                                reserved_attempts += len(_pairs)
+                                reserved_rows += _needs_rows
+                                replaceable[_k] = _why
+                                continue
+                            problems.append(
+                                f"{village_label(origin, names)}: left the diverging route(s) "
+                                f"to {village_label(_k, names) if isinstance(_k, int) else _k} "
+                                f"running ({_why}); this run cannot fund their replacement, and "
+                                f"switching them off without rebuilding them would stop the "
+                                f"shipments altogether"
+                            )
+                            trace.decision(
+                                origin=origin,
+                                destination=_k,
+                                decision="blocked",
+                                reason=(
+                                    "schedule mismatch this run's create budget cannot replace"
+                                ),
+                            )
+
                     # Honeypots (hidden) would be ignored entirely — neither
                     # acted on nor treated as occupying a destination. A no-op
                     # as things stand: nothing produces visible=False, because
@@ -6438,7 +6496,7 @@ async def post_execute(
                             and _identifiable(e, desired_ids, desired_foreign)
                             and (
                                 not _is_wanted(e, desired_ids, desired_foreign)
-                                or _off_schedule(e, mismatched)
+                                or _off_schedule(e, replaceable)
                             )
                             and not _is_protected(e, protected_ids, protected_coords)
                         ]
@@ -6699,15 +6757,27 @@ async def post_execute(
                         # eight 3h rows, a 6h plan, disable_existing=False --
                         # where this loop happily built the duplicate: created 1,
                         # disabled 0.
-                        if destination in mismatched and not body.disable_existing:
+                        if destination in mismatched and destination not in replaceable:
+                            # Two ways to get here, one conclusion: the live rows
+                            # are still running, so creating would ship both
+                            # schedules at once. Create-only mode withheld the
+                            # disable; a spent budget could not fund the rebuild.
+                            _remedy = (
+                                "run with 'also disable' to replace them"
+                                if not body.disable_existing
+                                else "the rows were left running because this run could not "
+                                "fund the replacement; raise the per-run budget or re-run"
+                            )
                             trace.decision(
                                 origin=origin,
                                 destination=destination,
                                 decision="blocked",
                                 reason=(
                                     "schedule mismatch in create-only mode: "
-                                    + mismatched[destination]
-                                ),
+                                    if not body.disable_existing
+                                    else "schedule mismatch left in place, unfunded rebuild: "
+                                )
+                                + mismatched[destination],
                             )
                             actions.append(
                                 _action(
@@ -6717,7 +6787,7 @@ async def post_execute(
                                     (
                                         f"live rows run a different schedule than the plan "
                                         f"({mismatched[destination]}); creating would ship both "
-                                        f"at once — run with 'also disable' to replace them"
+                                        f"at once — {_remedy}"
                                     ),
                                 )
                             )
@@ -6897,12 +6967,23 @@ async def post_execute(
                             )
                             outstanding += 1
                             continue
-                        if attempts >= cap:
+                        # A route to a `replaceable` destination is spending
+                        # budget already set aside for it; every other route must
+                        # leave that reservation intact, or the rebuild this run
+                        # switched rows off for would never happen.
+                        _held_creates = 0 if destination in replaceable else reserved_attempts
+                        _held_rows = 0 if destination in replaceable else reserved_rows
+                        if attempts + _held_creates >= cap:
                             trace.decision(
                                 origin=origin,
                                 destination=destination,
                                 decision="deferred",
-                                reason=f"per-run cap of {cap} create(s) already spent",
+                                reason=(
+                                    f"per-run cap of {cap} create(s) already spent"
+                                    if not _held_creates
+                                    else f"per-run cap of {cap} create(s): {attempts} spent and "
+                                    f"{_held_creates} reserved to rebuild a disabled destination"
+                                ),
                             )
                             deferred.append((row, route))
                             continue
@@ -6916,14 +6997,15 @@ async def post_execute(
                             row.dispatch_minute,
                             route.window,
                         )
-                        if row_cap and rows_written + would_add > row_cap:
+                        if row_cap and rows_written + _held_rows + would_add > row_cap:
                             trace.decision(
                                 origin=origin,
                                 destination=destination,
                                 decision="deferred",
                                 reason=(
-                                    f"row budget: {rows_written}/{row_cap} rows used, "
-                                    f"this {row.cycle_hours}h route needs {would_add} more"
+                                    f"row budget: {rows_written}/{row_cap} rows used"
+                                    + (f" and {_held_rows} reserved" if _held_rows else "")
+                                    + f", this {row.cycle_hours}h route needs {would_add} more"
                                 ),
                             )
                             deferred.append((row, route))
@@ -6941,6 +7023,11 @@ async def post_execute(
                             break
                         attempts += 1
                         rows_written += would_add
+                        if destination in replaceable:
+                            # Reservation spent, whatever the game answers: this
+                            # run will not try this destination again.
+                            reserved_attempts -= 1
+                            reserved_rows -= would_add
                         result = await svc.create_route(route, stop_check=_stop_reason)
                         if result.status == "stopped":
                             # Stopped after the pacing wait, before the POST —
