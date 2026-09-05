@@ -73,7 +73,13 @@ describe('every page renders', () => {
     expect(NAMES).toContain('ResourcePlanner')
   })
 
-  it.each(NAMES)('%s', async (name) => {
+  // 20s, not vitest's 5s default: each case dynamically imports a whole page
+  // module and renders it to a string, and the biggest of them (AutoScout,
+  // ResourcePlanner) measure ~2.4s idle but have been seen at 5.1-5.3s while
+  // the machine is running the browser suite. A timeout is not the property
+  // under test here -- 'the page renders at all' is -- so the budget only has
+  // to be loose enough that load cannot turn a passing page into a red one.
+  it.each(NAMES)('%s', { timeout: 20_000 }, async (name) => {
     const mod = await PAGES[`./${name}.jsx`]()
     const Page = mod.default
 
