@@ -61,6 +61,7 @@ import RoleTemplates from '../components/RoleTemplates'
 import SetupStorage from '../components/SetupStorage'
 import ScrollableTable from '../components/ScrollableTable'
 import UnallocatedPanel from '../components/UnallocatedPanel'
+import Why from '../components/Why'
 import { useToast } from '../components/Toast'
 import useGameStore from '../stores/gameStore'
 import useLogStore from '../stores/logStore'
@@ -512,38 +513,6 @@ const signed = (n) => (n == null ? '—' : `${n > 0 ? '+' : ''}${Math.round(n).t
  *  the third press: the account's own order is the default and has to stay
  *  reachable without a page reload.
  */
-/** A field's reasoning, one click away.
- *
- * The controlled-run box's four checkbox labels measured 489, 408, 215 and 300
- * characters, and the two number inputs sat BETWEEN two of those paragraphs.
- * The bolded lead clause of each was already the label; the rest is prose that
- * carries real warnings, so it is disclosed rather than deleted -- the same
- * mechanism this page uses in nine other places.
- *
- * A `<button>` inside `<summary>` would be a control inside a control, so this
- * is the native disclosure and the SUMMARY carries the accessible name. It
- * still exposes `role="button"` to the accessibility tree, which is how a test
- * and a screen reader both reach it by name.
- *
- * `pointer-coarse:min-h-11`/`min-w-11` because a "?" glyph is about seven
- * pixels wide, and item 4 of the UI Definition of Done wants 44px on a coarse
- * pointer. The desktop layout is untouched: the constraint only applies there.
- */
-function Why({ label, children }) {
-  return (
-    <details className="text-xs inline-block align-top">
-      <summary
-        className="why-toggle cursor-pointer list-none inline-flex items-center justify-center rounded-full border-default text-secondary hover:text-primary w-4 h-4 leading-none pointer-coarse:min-h-11 pointer-coarse:min-w-11"
-        aria-label={`Why: ${label}`}
-        title={`Why: ${label}`}
-      >
-        ?
-      </summary>
-      <div className="text-secondary mt-1 max-w-md">{children}</div>
-    </details>
-  )
-}
-
 function SortHeader({ label, col, sortKey, sortDir, onSort }) {
   const active = sortKey === col
   return (
@@ -6920,6 +6889,48 @@ export default function ResourcePlanner() {
                 <div>
                   <div className="text-secondary text-xs uppercase">Merchants</div>
                   <div className="text-xl font-mono">{plan.total_merchants}</div>
+                </div>
+                {/* What BOUND these routes, which nothing on the page carried.
+                    The page stopped sending `max_latency_hours` on every path,
+                    so the figure is entirely the server's -- the standing 2h
+                    default clamped by whatever window this request carried, a
+                    window being allowed to tighten it and never to loosen it.
+                    Before `PlanResponse.latency_target_hours` the only trace was
+                    the number rounded to whole hours inside whichever finding
+                    messages happened to fire, which is prose and must not be
+                    parsed. */}
+                <div>
+                  <div className="text-secondary text-xs uppercase flex items-center gap-1">
+                    <span>Latency target used</span>
+                    <Why label="Latency target used">
+                      The planner&rsquo;s standing target, clamped to this profile&rsquo;s hours:
+                      a window may <strong>tighten</strong> it and never loosen it. This page
+                      sends no target of its own, so this is what actually bound the cycles
+                      rather than what was asked for — a shorter cycle bought by the target and
+                      one forced by the window are not the same decision.{' '}
+                      <strong>Not an operator control</strong> yet; it is reported so the plan
+                      can be read, not typed.{' '}
+                      <em>None</em> means the target was suspended: the overnight rules drop it
+                      for the hours nobody is waiting through, so the latency pass never ran and
+                      no cycle here was shortened to meet one.
+                    </Why>
+                  </div>
+                  {plan.latency_target_hours == null ? (
+                    <>
+                      <div className="text-xl font-mono text-secondary">none</div>
+                      <p className="text-secondary text-xs mt-0.5 max-w-xs">
+                        suspended overnight by the night rules — cycles here are decided by
+                        getting home and not overflowing
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <div className="text-xl font-mono">{plan.latency_target_hours} h</div>
+                      <p className="text-secondary text-xs mt-0.5 max-w-xs">
+                        the standing target, clamped to this profile&rsquo;s hours
+                      </p>
+                    </>
+                  )}
                 </div>
                 {/* The Status column is gone: the banner above says it at 2rem,
                     and saying it twice at two sizes is what made eleven cards

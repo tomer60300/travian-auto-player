@@ -1,5 +1,6 @@
 import NightOverrunTable from './NightOverrunTable'
 import ScrollableTable from './ScrollableTable'
+import Why from './Why'
 import { isCropCeiling } from '../utils/plannerSetup'
 
 const RESOURCE_LABEL = { lumber: 'Lumber', clay: 'Clay', iron: 'Iron', crop: 'Crop' }
@@ -84,6 +85,46 @@ export default function FullDayCheck({
           Skipped {dayCheck.skipped.join(', ')} — no hours set. Give each profile its window
           in the table above.
         </p>
+      )}
+
+      {/* One row per profile, in the order they were sent. One number cannot
+          say it for the whole day: a 16h day and an 8h night planned from the
+          same body are clamped separately, so a shorter cycle in the night may
+          be the window's doing rather than the plan's — which is exactly the
+          comparison this panel exists to make, and the figure it was missing.
+          `DayCheckResponse.segments` only arrives on a segmented request, so a
+          single-profile check renders nothing here rather than an empty
+          heading. */}
+      {dayCheck?.segments?.length > 0 && (
+        <div className="text-xs mb-3">
+          <p className="text-secondary font-semibold flex items-center gap-1">
+            <span>Latency target used</span>
+            <Why label="Latency target used">
+              Each profile&rsquo;s own: the planner&rsquo;s standing target clamped to that
+              profile&rsquo;s hours, since a window may <strong>tighten</strong> it and never
+              loosen it. This page sends no target of its own, so these are what actually bound
+              each profile&rsquo;s cycles rather than what was asked for.{' '}
+              <strong>Not an operator control</strong> yet.{' '}
+              <em>None</em> means the target was suspended: the overnight rules drop it for the
+              hours nobody is waiting through, so a night profile is always none whatever the
+              day is.
+            </Why>
+          </p>
+          <ul className="list-disc list-inside mt-1">
+            {dayCheck.segments.map((segment) => (
+              <li key={segment.name}>
+                {segment.name}:{' '}
+                {segment.latency_target_hours == null ? (
+                  <span className="text-secondary">
+                    none — suspended overnight by the night rules
+                  </span>
+                ) : (
+                  <span className="font-mono">{segment.latency_target_hours} h</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {dayCheck?.warnings?.length > 0 && (

@@ -82,6 +82,11 @@ export const PLAN = {
   shortfalls: [],
   unallocated: [],
   total_merchants: 3,
+  // `PlanResponse.latency_target_hours` has no default on the wire, so every
+  // real plan carries it: what BOUND these routes, which is the standing 2h
+  // target unless the window clamped it shorter. `null` on an overnight
+  // profile -- see `latencyTarget.pw.js`.
+  latency_target_hours: 2.0,
   feasible: true,
   verdict: {
     executable: true,

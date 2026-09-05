@@ -161,6 +161,55 @@ describe('FullDayCheck', () => {
     expect(out).toContain('72,000 short of the floor')
   })
 
+  it('names the latency target each profile was planned against', () => {
+    // `DayCheckResponse.segments` -- one `SegmentPlanResponse` per profile, in
+    // the order they were sent. One number cannot say it for the whole day: a
+    // 16h day and an 8h night planned from one body are clamped separately, so
+    // a shorter cycle in the night may be the window's doing rather than the
+    // plan's, and that is the comparison this panel exists to make.
+    const out = text(
+      <FullDayCheck
+        dayCheck={{
+          ...dayCheck,
+          segments: [
+            { name: 'Day', latency_target_hours: 2.0 },
+            { name: 'Evening', latency_target_hours: 1.0 },
+            { name: 'Night', latency_target_hours: null },
+          ],
+        }}
+        dayChecking={false}
+        onRun={() => {}}
+        cropCeilings={{}}
+        villages={[]}
+      />
+    )
+
+    expect(out).toContain('Latency target used')
+    expect(out).toMatch(/Day: 2 h/)
+    // A window may only TIGHTEN the standing target, never loosen it.
+    expect(out).toMatch(/Evening: 1 h/)
+    // Not "0 h", which reads as the tightest target there is, and not the 2.0
+    // default the night never used. Section 6 suspends it outright.
+    expect(out).not.toMatch(/Night: 0 h/)
+    expect(out).not.toMatch(/Night: 2 h/)
+    expect(out).toMatch(/Night: .*suspended overnight by the night rules/i)
+  })
+
+  it('says nothing about a target when no profile reported one', () => {
+    // `segments` is only sent by a segmented request. A single-profile check
+    // must not grow an empty heading.
+    const out = text(
+      <FullDayCheck
+        dayCheck={dayCheck}
+        dayChecking={false}
+        onRun={() => {}}
+        cropCeilings={{}}
+        villages={[]}
+      />
+    )
+    expect(out).not.toContain('Latency target used')
+  })
+
   it('says a threshold was met rather than showing an empty section', () => {
     const out = text(
       <FullDayCheck
