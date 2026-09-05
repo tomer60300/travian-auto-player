@@ -8109,10 +8109,10 @@ class RunSummaryResponse(BaseModel):
     verify_failures: int
     schedule_mismatch_origins: list[int] = []
     needs_attention: bool = Field(
-        description="Something here is worth an operator's look: an unverified "
-        "or missing create, a verify failure, a reported problem, a Gold Club "
-        "block, an early stop, a schedule mismatch, an outright failure, or a "
-        "run that never reached its own ending."
+        description="Something here is worth an operator's look: an unverified, "
+        "missing or refused create, a verify failure, a reported problem, a Gold "
+        "Club block, an early stop, a schedule mismatch, an outright failure, or "
+        "a run that never reached its own ending."
     )
 
 

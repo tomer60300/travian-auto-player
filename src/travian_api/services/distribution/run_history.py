@@ -80,9 +80,9 @@ class RunSummary:
     verify_failures: int
     schedule_mismatch_origins: tuple[int, ...]
     # True when there is something here an operator should look at: an
-    # unverified or missing create, a verify failure, a reported problem, a
-    # Gold Club block, an early stop, a schedule mismatch, an outright failure,
-    # or a run that never reached its own ending at all.
+    # unverified, missing or refused create, a verify failure, a reported
+    # problem, a Gold Club block, an early stop, a schedule mismatch, an
+    # outright failure, or a run that never reached its own ending at all.
     needs_attention: bool
 
 
@@ -165,6 +165,10 @@ def _summarise_one(path: Path) -> RunSummary:
     needs_attention = bool(
         (totals("created_unverified") or 0)
         or (totals("not_created") or 0)
+        # A create the game refused: below _CONSECUTIVE_FAILURE_LIMIT it
+        # produces no `problems` entry at all, so without this an otherwise
+        # clean account reads as clean over a route that was never made.
+        or (totals("outstanding") or 0)
         or (totals("problems") or 0)
         or totals("gold_club_blocked")
         or totals("stopped_early")

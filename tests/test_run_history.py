@@ -152,6 +152,24 @@ class TestUnverifiedCreates:
         assert run.verify_failures == 1
         assert run.needs_attention is True
 
+    def test_a_single_refused_create_is_not_reported_as_a_clean_run(self, tmp_path):
+        # One refusal is below _CONSECUTIVE_FAILURE_LIMIT, so it produces no
+        # `problems` entry at all -- it is carried only by `outstanding`, which
+        # `needs_attention` did not read. An otherwise clean account therefore
+        # showed created=2, problems=0, needs_attention=False over a route the
+        # game refused to make.
+        _write_trace(
+            tmp_path,
+            "dddddddddddd",
+            [_run_start(), _run_end(created=2, outstanding=1)],
+        )
+
+        run = summarise_runs(tmp_path).runs[0]
+
+        assert run.outstanding == 1
+        assert run.problems == 0
+        assert run.needs_attention is True
+
 
 class TestTruncatedTrace:
     def test_a_torn_final_line_parses_without_raising_and_is_reported_incomplete(self, tmp_path):
