@@ -17,6 +17,7 @@ import {
   declaresConsumption,
   describeConsumption,
   describeRelayPermission,
+  merchantModelIsCalibrated,
   describeSpendSource,
   isConsumptionRate,
   isEmptyTemplate,
@@ -3402,5 +3403,44 @@ describe('the backend values this build keeps a second copy of', () => {
   it('the fill pair matches night_profile.py', () => {
     expect(DEFAULT_BASELINE_FILL).toBe(0.25)
     expect(DEFAULT_TARGET_FILL).toBe(0.6)
+  })
+})
+
+
+// The four merchant boxes are FILLED IN on a page nobody has touched -- the
+// planner seeds them from its own defaults -- so `buildSetup` writes a
+// `merchant_model` into every document and "the document carries one" cannot be
+// read as "the operator typed one". The empty-document guard needs the
+// difference, or it becomes unreachable.
+describe('merchantModelIsCalibrated', () => {
+  it('says no to the planner’s own figures', () => {
+    expect(merchantModelIsCalibrated(DEFAULT_MERCHANT_MODEL)).toBe(false)
+    expect(merchantModelIsCalibrated({ ...DEFAULT_MERCHANT_MODEL })).toBe(false)
+    expect(merchantModelIsCalibrated({})).toBe(false)
+    expect(merchantModelIsCalibrated(null)).toBe(false)
+  })
+
+  it('says no to a box the operator emptied', () => {
+    expect(merchantModelIsCalibrated({ ...DEFAULT_MERCHANT_MODEL, base_capacity: '' })).toBe(false)
+    expect(merchantModelIsCalibrated({ base_capacity: null })).toBe(false)
+  })
+
+  it('says yes to a lever that differs from the planner’s', () => {
+    expect(merchantModelIsCalibrated({ ...DEFAULT_MERCHANT_MODEL, base_capacity: 2200 })).toBe(true)
+    expect(merchantModelIsCalibrated({ merchant_reserve: 0 })).toBe(true)
+  })
+
+  // Neither exists in `DEFAULT_MERCHANT_MODEL`: travel speed is tribe-derived
+  // and rides in the snapshot, and the span comes from the world. They are
+  // overrides for a world that is not Europe 2, so any value is an assertion.
+  it('says yes to a geometry override, which has no planner default at all', () => {
+    expect(merchantModelIsCalibrated({ map_span: 801 })).toBe(true)
+    expect(merchantModelIsCalibrated({ speed_fields_per_hour: 24 })).toBe(true)
+  })
+
+  // The string the page actually holds: every box is a text input.
+  it('compares by value, not by type', () => {
+    expect(merchantModelIsCalibrated({ base_capacity: '2500' })).toBe(false)
+    expect(merchantModelIsCalibrated({ base_capacity: '2501' })).toBe(true)
   })
 })

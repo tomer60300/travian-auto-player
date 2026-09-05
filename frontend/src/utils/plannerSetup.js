@@ -301,6 +301,29 @@ export const DEFAULT_MERCHANT_MODEL = Object.freeze({
   merchant_headroom: 0.1,
 })
 
+/** Has anyone actually calibrated this merchant model, or is it the page's
+ *  own seed?
+ *
+ * The four boxes are FILLED IN on a page nobody has touched -- the planner
+ * seeds them from `DEFAULT_MERCHANT_MODEL` -- so `buildSetup` writes a
+ * `merchant_model` into every document, and "the document carries one" cannot
+ * be read as "the operator typed one". This is the difference: a lever that
+ * differs from the planner's own figure, or one the planner has no figure for
+ * at all (`map_span`, `speed_fields_per_hour`, which exist only as overrides
+ * for a world that is not Europe 2).
+ *
+ * Used by the empty-document guard, which has to tell "you have saved nothing"
+ * apart from "you saved a blank sheet": the server distinguishes them and
+ * writing the second by accident destroys the first.
+ */
+export function merchantModelIsCalibrated(model) {
+  return Object.entries(model ?? {}).some(([field, value]) => {
+    if (value == null || value === '') return false
+    const planners = DEFAULT_MERCHANT_MODEL[field]
+    return planners == null || Number(value) !== planners
+  })
+}
+
 /** How many allocation profiles one day can hold.
  *
  * The backend's twin is `MAX_DAY_SEGMENTS` in

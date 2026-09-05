@@ -93,6 +93,7 @@ import {
   isSafetyMarginPct,
   isStockFloorFraction,
   isTradeOfficeLevel,
+  merchantModelIsCalibrated,
   merchantModelProblems,
   mergeSetup,
   parseSetup,
@@ -253,6 +254,10 @@ const PROFILE_NAMING_ACTION = {
   duplicate: 'Duplicate it',
   rename: 'Rename it',
 }
+/** "a", "a and b", "a, b and c" — the save summary can now name up to ten
+ *  things, and `join(' and ')` read as one run-on sentence past two. */
+const listed = (parts) =>
+  parts.length < 3 ? parts.join(' and ') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`
 const splitProtected = (text) =>
   text
     .split(',')
@@ -1626,77 +1631,95 @@ export default function ResourcePlanner() {
       toast.error('Fetch account state first, so the setup records village names too')
       return null
     }
-    const typed = villages.filter(
-      (v) =>
-        tradeOffice[v.village_id] != null ||
-        cropCeilings[v.village_id] != null ||
-        shipOnlyTo[v.village_id] != null ||
-        relayFor[v.village_id]?.length > 0 ||
-        stockFloors[v.village_id] != null ||
-        isFeedstockList(npcFeedstock[v.village_id]) ||
-        maxBusy[v.village_id] != null ||
-        villageRoles[v.village_id] != null ||
-        mayRelay[v.village_id] != null ||
-        declaresConsumption(consumption[v.village_id])
-    ).length
-    const named = Object.entries(profiles).filter(([, a]) => Object.keys(a ?? {}).length)
-    const templated = Object.keys(roleTemplates).length
-    if (!typed && !named.length && !templated) {
-      toast.error('Nothing typed yet — fill in a Trade Office level, crop alert or allocation first')
+    const document = buildSetup({
+      account: accountKey,
+      villages,
+      tradeOffice,
+      maxBusy,
+      cropCeilings,
+      shipOnlyTo,
+      relayFor,
+      stockFloors,
+      npcFeedstock,
+      consumption,
+      villageRoles,
+      mayRelay,
+      roles: roleTemplates,
+      profiles,
+      profileWindows,
+      // The answer that decides whether a night route set is funded at all.
+      // It used to live only in localStorage -- which is per ORIGIN -- so it
+      // did not follow the operator between :80, :8001, the LAN address and
+      // Tailscale the way the hours beside it did, and a save-then-reload
+      // lost it silently. Carrying it is what the v7 bump is for.
+      npcAttended: profileAttendance,
+      // Section 6's declaration, carried for the same reason and with the
+      // same consequence for losing it: a split night whose post-midnight
+      // half arrives undeclared has its 60% morning floor measured at 00:00
+      // and its overruns unreported. That is what v8 is for.
+      overnight: profileOvernight,
+      // Section 7's reserved burst window, and v9. The last owned answer that
+      // neither persistence path carried: it lived only in localStorage,
+      // which is per browser origin, so it did not follow the operator
+      // between :80, :8001, the LAN address and Tailscale -- exactly what the
+      // storage panel two cards up warns about. Confirmed against a real
+      // saved document, whose top level held every other owned field and not
+      // this one.
+      reservedWindow,
+      // The window prune, and v10. The field with the sharpest consequence
+      // of any in the document: it decides whether `/execute` DELETES game
+      // rows. It was carried by neither persistence path -- not even
+      // localStorage -- so an operator who turned it off got it back ON after
+      // a reload and the next run left every out-of-window firing in place.
+      pruneToWindow,
+      merchantModel,
+      foreignTargets,
+      exportedAt: new Date().toISOString(),
+    })
+    // Counted off the DOCUMENT rather than off the page's own state, which is
+    // the whole correction here. `buildSetup` writes eleven things and this
+    // counted three -- village columns, named profiles, role templates -- so a
+    // page whose only content was a tribute, a profile's hours, the reserved
+    // NPC-burst window, an attendance answer, an overnight declaration or a
+    // deliberately unticked window prune was told to "fill in a Trade Office
+    // level, crop alert or allocation first", and the one owned answer it held
+    // went unsaved on an origin that will drop it. Four of those earned a
+    // version bump precisely because losing them is expensive.
+    //
+    // Reading the document back means the two cannot drift apart again: a
+    // twelfth field is counted on the day it is written.
+    const parts = []
+    const count = (n, unit) => (n ? parts.push(`${n} ${unit}`) : undefined)
+    count(document.villages.length, 'village(s)')
+    // Profiles that actually hold an allocation. The page always has one named
+    // profile -- "Day" -- and `buildSetup` writes the map whether or not
+    // anything has been typed into it, so counting keys would make an untouched
+    // page look like content and this guard unreachable.
+    count(
+      Object.values(document.profiles ?? {}).filter((a) => Object.keys(a ?? {}).length).length,
+      'profile(s)'
+    )
+    count(Object.keys(document.roles ?? {}).length, 'role template(s)')
+    count(Object.keys(document.profile_windows ?? {}).length, 'window(s)')
+    count(Object.keys(document.npc_attended ?? {}).length, 'attendance answer(s)')
+    count(Object.keys(document.overnight ?? {}).length, 'overnight answer(s)')
+    count(document.foreign_targets?.length ?? 0, 'tribute(s)')
+    if (document.reserved_window) parts.push('the reserved window')
+    // Two fields ride on every document whatever the operator does, so neither
+    // is content on its own. `prune_to_window` writes both polarities and its
+    // RESTING state is ON, so only OFF is an answer somebody gave; the merchant
+    // model's boxes are seeded from the planner's own figures and are filled in
+    // on a page nobody has touched, so only a lever that differs from them
+    // counts. Counting either unconditionally would make this guard unreachable.
+    if (document.prune_to_window === false) parts.push('the window prune')
+    if (merchantModelIsCalibrated(document.merchant_model)) parts.push('the merchant model')
+    if (!parts.length) {
+      toast.error(
+        'Nothing typed yet — fill in a Trade Office level, crop alert or allocation first'
+      )
       return null
     }
-    const parts = []
-    if (typed) parts.push(`${typed} village(s)`)
-    if (named.length) parts.push(`${named.length} profile(s)`)
-    if (templated) parts.push(`${templated} role template(s)`)
-    return {
-      document: buildSetup({
-        account: accountKey,
-        villages,
-        tradeOffice,
-        maxBusy,
-        cropCeilings,
-        shipOnlyTo,
-        relayFor,
-        stockFloors,
-        npcFeedstock,
-        consumption,
-        villageRoles,
-        mayRelay,
-        roles: roleTemplates,
-        profiles,
-        profileWindows,
-        // The answer that decides whether a night route set is funded at all.
-        // It used to live only in localStorage -- which is per ORIGIN -- so it
-        // did not follow the operator between :80, :8001, the LAN address and
-        // Tailscale the way the hours beside it did, and a save-then-reload
-        // lost it silently. Carrying it is what the v7 bump is for.
-        npcAttended: profileAttendance,
-        // Section 6's declaration, carried for the same reason and with the
-        // same consequence for losing it: a split night whose post-midnight
-        // half arrives undeclared has its 60% morning floor measured at 00:00
-        // and its overruns unreported. That is what v8 is for.
-        overnight: profileOvernight,
-        // Section 7's reserved burst window, and v9. The last owned answer that
-        // neither persistence path carried: it lived only in localStorage,
-        // which is per browser origin, so it did not follow the operator
-        // between :80, :8001, the LAN address and Tailscale -- exactly what the
-        // storage panel two cards up warns about. Confirmed against a real
-        // saved document, whose top level held every other owned field and not
-        // this one.
-        reservedWindow,
-        // The window prune, and v10. The field with the sharpest consequence
-        // of any in the document: it decides whether `/execute` DELETES game
-        // rows. It was carried by neither persistence path -- not even
-        // localStorage -- so an operator who turned it off got it back ON after
-        // a reload and the next run left every out-of-window firing in place.
-        pruneToWindow,
-        merchantModel,
-        foreignTargets,
-        exportedAt: new Date().toISOString(),
-      }),
-      summary: parts.join(' and '),
-    }
+    return { document, summary: listed(parts) }
   }, [
     villages,
     tradeOffice,
