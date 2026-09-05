@@ -250,6 +250,10 @@ def calculate_score(
         return None
     if state.raidable_confidence == "depleted":
         return None
+    if state.raidable_confidence == "unreadable":
+        # The scout carried neither a raidable figure nor a cranny, so how much
+        # can be taken is unknown. Refuse rather than invent it.
+        return None
 
     R = state.estimated_raidable
     if R < 1:
@@ -389,9 +393,6 @@ def calculate_score(
 # State reconstruction
 # ---------------------------------------------------------------------------
 
-WAREHOUSE_RATIO = 0.67  # fallback stealable fraction when carry icon not parsed
-
-
 def reconstruct_state(
     coord_key: Tuple[int, int],
     reports: List[Dict[str, Any]],
@@ -476,15 +477,29 @@ def reconstruct_state(
         steal = d.get("stealable_resources", {})
         total_res = sum(res.get(k, 0) for k in ("lumber", "clay", "iron", "crop"))
 
-        # Carry icon value IS the stealable amount directly
-        stealable = steal.get("raidable", 0)
-        if stealable <= 0:
-            # Fallback: use total * WAREHOUSE_RATIO
-            stealable = round(total_res * WAREHOUSE_RATIO)
+        # What can actually be taken, from what the report actually carried.
+        # `cranny` is the amount the crannies hide, so the mechanic is
+        # total - cranny; the carry icon is the same figure the game worked out
+        # for itself. Either answers the question. NEITHER means the question is
+        # unanswered -- a fully-crannied village and a report with no such row
+        # both arrive here, and inventing a fraction of the stock for them is
+        # what sent waves to an empty village on every scan.
+        cranny = steal.get("cranny")
+        raidable = steal.get("raidable")
+        if cranny is not None:
+            stealable = max(0, total_res - cranny)
+        elif raidable is not None:
+            stealable = raidable
+        else:
+            stealable = None
 
-        state.estimated_raidable = stealable
-        state.raidable_confidence = "scouted"
         state.last_scout_time = best_scout["timestamp"]
+        if stealable is None:
+            state.estimated_raidable = 0
+            state.raidable_confidence = "unreadable"
+        else:
+            state.estimated_raidable = stealable
+            state.raidable_confidence = "scouted"
 
         # Defenders from scout
         troops = d.get("troops", {})
@@ -527,7 +542,12 @@ def reconstruct_state(
             state.last_raid_time = raid_time
             state.last_raid_bounty = bounty_total
 
-        if depleted_by_raid:
+        if stealable is None:
+            # Nothing to subtract from: the target stays unreadable, and a raid
+            # that emptied it says nothing about what a readable scout would
+            # have found. Leave the refusal standing.
+            pass
+        elif depleted_by_raid:
             state.estimated_raidable = 0
             state.raidable_confidence = "depleted"
         else:
@@ -699,7 +719,7 @@ def calculate_score_v2(
     dist = state.distance
     if dist == 0:
         return None
-    if state.raidable_confidence in ("none", "depleted"):
+    if state.raidable_confidence in ("none", "depleted", "unreadable"):
         return None
     R = state.estimated_raidable
     if R < 1:
@@ -1259,6 +1279,15 @@ class RaidAnalyzerService:
                     )
                 )
                 # Still score it (stale data is better than none) but flag it
+
+            # Unreadable loot → refuse, and say what the report was missing
+            if state.raidable_confidence == "unreadable":
+                warnings.append(
+                    f"({state.x}|{state.y}) {state.village_name or '?'} skipped: "
+                    "the scout report carried neither a raidable figure nor a "
+                    "cranny, so how much can be taken is unknown."
+                )
+                continue
 
             # Unscorable garrison → refuse by name, and say which unit did it
             unsupported = unsupported_defender_ids(state.defenders)

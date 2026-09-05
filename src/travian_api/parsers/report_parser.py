@@ -364,8 +364,11 @@ def parse_scout_report(html: str) -> ScoutReportData:
 
     # Resources: first resourceWrapper inside additionalInformation
     resources: Dict[str, int] = {"lumber": 0, "clay": 0, "iron": 0, "crop": 0}
-    cranny: int = 0
-    raidable: int = 0
+    # A figure this parser did not read is left OUT, not written as zero. Absent
+    # and zero are different claims: "the report carried no cranny row" and "the
+    # crannies hide nothing" lead to opposite decisions, and a zero standing in
+    # for both is what let a 0.67 ratio be invented for a fully-crannied village.
+    stealable: Dict[str, int] = {}
 
     ai_table = soup.find("table", class_="additionalInformation")
     if ai_table:
@@ -384,9 +387,9 @@ def parse_scout_report(html: str) -> ScoutReportData:
                 if raw.isdigit():
                     val = int(raw)
                     if "cranny" in title:
-                        cranny = val
+                        stealable["cranny"] = val
                     elif "raidable" in title or "carry" in title:
-                        raidable = val
+                        stealable["raidable"] = val
 
     # Defender troops (if visible)
     troops: Dict[str, int] = {}
@@ -412,7 +415,7 @@ def parse_scout_report(html: str) -> ScoutReportData:
     return ScoutReportData(
         target=target_info,
         resources=resources,
-        stealable_resources={"raidable": raidable, "cranny": cranny},
+        stealable_resources=stealable,
         troops=troops,
         buildings=buildings,
     )
