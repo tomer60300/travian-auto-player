@@ -374,3 +374,48 @@ def test_oasis_burst_size_is_right_skewed_and_bounded():
     assert 0.12 < (c[5] + c[6] + c[7]) / n < 0.28
     # Mean sits below the midpoint of the [2,7] support (right-skewed).
     assert 2.0 < sum(samples) / n < 4.2
+
+
+class TestTheCanonicalFilterBoundaries:
+    """`filter_canonical` is "the ONE filter function both the dry-run
+    preview and the live execution path must call" per its own docstring --
+    and nothing in the suite called it. Its bounds are inclusive."""
+
+    @staticmethod
+    def _tile(**kw):
+        return MapTileInfo(
+            **{"x": 0, "y": 0, "village_id": 1, "player_id": 7, "population": 100, **kw}
+        )
+
+    def test_a_village_exactly_at_the_population_cap_is_kept(self):
+        kept, drops = AutoScoutService.filter_canonical(
+            [self._tile(population=120)], max_target_village_pop=120
+        )
+        assert [t.village_id for t in kept] == [1]
+        assert drops == {}
+
+    def test_a_village_one_over_the_cap_is_dropped(self):
+        kept, drops = AutoScoutService.filter_canonical(
+            [self._tile(population=121)], max_target_village_pop=120
+        )
+        assert kept == []
+        assert drops == {"target_pop_too_high": 1}
+
+    def test_a_tile_exactly_on_the_radius_is_inside_it(self):
+        kept, drops = AutoScoutService.filter_canonical(
+            [self._tile(x=30, y=0)], within_chebyshev_of=[(0, 0, 30)]
+        )
+        assert len(kept) == 1
+        assert drops == {}
+
+    def test_a_tile_one_step_outside_the_radius_is_dropped(self):
+        kept, drops = AutoScoutService.filter_canonical(
+            [self._tile(x=31, y=0)], within_chebyshev_of=[(0, 0, 30)]
+        )
+        assert kept == []
+        assert drops == {"outside_chebyshev_radius": 1}
+
+    def test_a_zero_population_tile_is_not_a_farm(self):
+        kept, drops = AutoScoutService.filter_canonical([self._tile(population=0)])
+        assert kept == []
+        assert drops == {"zero_population": 1}

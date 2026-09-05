@@ -132,3 +132,14 @@ def test_source_uses_new_algorithm() -> None:
             f"Expected new HALF/STRIDE pattern in {path}; old code may still be in place."
         )
         assert "STRIDE = 30" in src
+        # S1: `_build_scan_centers` above is a COPY of this arithmetic, so its
+        # eight behavioural tests cannot see a mutation to the real source --
+        # this text guard is a deliberate stopgap for that missing seam, not
+        # a substitute for real coverage (see auto_scout_service.py's own
+        # `filter_canonical`/`send_scouts_to_targets` tests for the shape a
+        # real seam takes).
+        assert "extras = max(0, (radius - HALF + STRIDE - 1) // STRIDE)" in src, (
+            f"{path} must round the ring count UP: without the `+ STRIDE - 1` a "
+            "radius that is not a multiple of STRIDE loses its outermost band, "
+            "and tiles inside the radius the operator asked for are never fetched."
+        )
