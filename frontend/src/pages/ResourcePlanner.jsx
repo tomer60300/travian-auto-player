@@ -210,6 +210,20 @@ const routeCap = (typed) =>
 // chunk of five at roughly 40-70 seconds — comfortably inside one request, which
 // is the whole reason the sweep is chunked at all.
 const SWEEP_VILLAGES_PER_CHUNK = 5
+/** The one `problems` line that means the RUN is over, not that one village
+ *  went wrong.
+ *
+ * 241d664 added a circuit breaker to `execute_routes`: once a marketplace has
+ * stopped agreeing with itself, every later verdict the run would reach rests
+ * on a page that would not hold still, so it stops before the next village and
+ * says so. Nothing on the wire flags it -- `ExecuteResponse` has no
+ * `stopped_early` -- so this is the marker, kept to the stable clause the
+ * server composes and never used to reformat the sentence: the line is printed
+ * verbatim like every other, and this only decides whether the sweep asks for
+ * another chunk. Without it the loop pauses and re-sends the same village set
+ * against a marketplace the server has already refused to write to.
+ */
+const MARKETPLACE_UNSETTLED = 'marketplace reads disagreed at'
 // `planStatus()`'s tone, as the verdict banner's tone class. Mapped rather than
 // interpolated, because the three tones are a closed set the CSS declares and a
 // template string would silently produce a class that does not exist.
@@ -3107,6 +3121,7 @@ export default function ResourcePlanner() {
     let outstanding = null // null = first chunk, visit everything
     let chunk = 0
     let lastCreatesLeft = -1
+    let unsettled = false
     try {
       for (;;) {
         chunk += 1
@@ -3152,6 +3167,15 @@ export default function ResourcePlanner() {
         sweptAll.push(...(res.data.swept_origins || []))
         problems.push(...(res.data.problems || []))
         outstanding = res.data.unswept_origins || []
+        // The run is over. The server deferred every remaining origin WITHOUT
+        // reading it, so `unswept_origins` is full and the loop would pause and
+        // ask for exactly the same set again -- for ever, against a village it
+        // has already declined to write to. Re-running is right; re-running NOW
+        // is not, which is what the line itself says.
+        if ((res.data.problems || []).some((p) => p.includes(MARKETPLACE_UNSETTLED))) {
+          unsettled = true
+          break
+        }
         const wait = res.data.next_chunk_wait_seconds
         const createsLeft = wholeDay ? Number(res.data.remaining) || 0 : 0
         // Stall guard: a blocked account (Gold Club refused, repeated failures)
@@ -3190,6 +3214,7 @@ export default function ResourcePlanner() {
         waiting: 0,
         problems,
         done,
+        unsettled,
       })
       useLogStore
         .getState()
@@ -7309,6 +7334,12 @@ export default function ResourcePlanner() {
                         ? ` · pausing ${sweepProgress.waiting}s before the next chunk`
                         : ''}
                       {sweepProgress.done ? ' · COMPLETE — nothing stale left' : ''}
+                      {/* Not "outstanding": the villages left are ones the
+                          server declined to read at all, and the operator's
+                          next action is to wait rather than to press again. */}
+                      {sweepProgress.unsettled
+                        ? ' · STOPPED — the marketplace stopped agreeing with itself'
+                        : ''}
                       {sweepProgress.failed ? ' · FAILED — routes may still be live' : ''}
                       {sweepProgress.problems?.length
                         ? ` · ${sweepProgress.problems.length} problem(s)`

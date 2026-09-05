@@ -25,7 +25,7 @@
 
 import { expect, test } from '@playwright/test'
 
-import { CAPITAL, PREVIEW, isolate, openPlan, seed } from './plannerHarness'
+import { CAPITAL, DEF_A, PREVIEW, isolate, openPlan, seed } from './plannerHarness'
 
 /** The line as the server composes it, verbatim -- prefix, parenthetical,
  *  em dash and the trailing sentence about the strays. */
@@ -92,5 +92,97 @@ test.describe('every problem the run reports is legible on the page', () => {
     // and said so only in a toast is a sweep the operator reads as clean.
     await expect(page.getByRole('listitem').filter({ hasText: UNSETTLED })).toBeVisible()
     await expect(page.getByRole('listitem').filter({ hasText: REFUSED })).toBeVisible()
+  })
+})
+
+/** 241664's circuit breaker, verbatim: once one marketplace has stopped
+ *  agreeing with itself, every later verdict this run would reach rests on a
+ *  page that would not hold still, so the run stops before the next village. */
+const BREAKER =
+  'marketplace reads disagreed at 02; no further villages were written to — re-run once ' +
+  'the marketplace is quiet'
+
+test.describe('the sweep stops when the run has stopped', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  /** One chunk that trips the breaker, with villages still outstanding and a
+   *  pause the loop would otherwise sit through before asking again. */
+  const TRIPPED = {
+    ...LIVE,
+    swept_origins: [CAPITAL],
+    unswept_origins: [DEF_A],
+    next_chunk_wait_seconds: 1,
+    remaining: 0,
+    problems: [BREAKER],
+  }
+
+  async function sweep(page) {
+    const calls = { n: 0 }
+    await isolate(page, async (path, route) => {
+      if (!path.endsWith('/distribution/execute')) return undefined
+      const body = route.request().postDataJSON()
+      if (body.execution_mode !== 'live') {
+        await route.fulfill({ json: PREVIEW })
+        return 'handled'
+      }
+      calls.n += 1
+      await route.fulfill({ json: TRIPPED })
+      return 'handled'
+    })
+    await seed(page)
+    await openPlan(page)
+    await page.getByRole('button', { name: 'Reconcile all villages' }).click()
+    return calls
+  }
+
+  test('the breaker line is printed whole', async ({ page }) => {
+    await sweep(page)
+
+    await expect(page.getByRole('listitem').filter({ hasText: BREAKER })).toBeVisible()
+  })
+
+  test('and no further chunk is requested', async ({ page }) => {
+    const calls = await sweep(page)
+
+    // The button coming back IS the loop having ended: while it is sweeping it
+    // reads "Stop after this chunk". Without the break the loop pauses one
+    // second and asks the same village set again -- for ever, against a
+    // marketplace the server has already said it will not write to.
+    await expect(page.getByRole('button', { name: 'Reconcile all villages' })).toBeVisible({
+      timeout: 15_000,
+    })
+    expect(calls.n).toBe(1)
+
+    // And the progress line says why it stopped, rather than reading as a
+    // sweep that merely ran out of villages per chunk.
+    await expect(page.getByText(/STOPPED — the marketplace stopped agreeing with itself/)).toBeVisible()
+  })
+
+  test('an ordinary problem does not stop the sweep', async ({ page }) => {
+    // The breaker is the one problem that means the run is over. A Gold Club
+    // refusal at one village is not, and chunking must survive it.
+    const calls = { n: 0 }
+    await isolate(page, async (path, route) => {
+      if (!path.endsWith('/distribution/execute')) return undefined
+      const body = route.request().postDataJSON()
+      if (body.execution_mode !== 'live') {
+        await route.fulfill({ json: PREVIEW })
+        return 'handled'
+      }
+      calls.n += 1
+      await route.fulfill({
+        json:
+          calls.n === 1
+            ? { ...TRIPPED, problems: [REFUSED] }
+            : { ...TRIPPED, problems: [], unswept_origins: [], next_chunk_wait_seconds: 0 },
+      })
+      return 'handled'
+    })
+    await seed(page)
+    await openPlan(page)
+    await page.getByRole('button', { name: 'Reconcile all villages' }).click()
+
+    await expect(page.getByText(/COMPLETE — nothing stale left/)).toBeVisible({ timeout: 15_000 })
+    expect(calls.n).toBe(2)
   })
 })
