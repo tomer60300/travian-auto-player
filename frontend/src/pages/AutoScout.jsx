@@ -1477,7 +1477,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
       case 'operation_complete': {
         const resolver = passResolverRef.current
         passResolverRef.current = null
-        resolver?.()
+        resolver?.(data.status)
         break
       }
       default: if (data.message) addMessage('info', data.message); break
@@ -1491,7 +1491,7 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
       setWsStatus('disconnected')
       const resolver = passResolverRef.current
       passResolverRef.current = null
-      resolver?.()
+      resolver?.(next)
     }
   }, [])
 
@@ -1514,11 +1514,14 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
   // Core: run one scout pass via the resumable hook, returns a promise that
   // resolves on the terminal `complete`/`operation_complete` frame OR a 5-min
   // safety timeout.
+  // Resolves with the terminal frame's status ('completed'/'failed'/'stopped',
+  // or 'timeout' for the safety watchdog below) so callers can tell a refused
+  // pass from a real one instead of treating "the promise settled" as success.
   const runOnePass = useCallback((cycleNum) => {
     return new Promise((resolve) => {
       if (!mountedRef.current || loopStoppedRef.current) { resolve(); return }
       let resolved = false
-      const safeResolve = () => { if (!resolved) { resolved = true; resolve() } }
+      const safeResolve = (status) => { if (!resolved) { resolved = true; resolve(status) } }
       // Pass safety timeout: 5 minutes was too aggressive — a real auto-
       // scout pass with stealth delays + 50+ targets routinely takes
       // 10-30 minutes. The op runs detached server-side anyway; this is
@@ -1529,9 +1532,9 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
       const safetyTimer = setTimeout(() => {
         addMessage('warning', 'Pass timed out after 60 minutes (server may still be running — check /sessions)')
         setWsStatus('disconnected')
-        safeResolve()
+        safeResolve('timeout')
       }, 60 * 60 * 1000)
-      passResolverRef.current = () => { clearTimeout(safetyTimer); safeResolve() }
+      passResolverRef.current = (status) => { clearTimeout(safetyTimer); safeResolve(status) }
 
       const curResults = scanResultsRef.current
       const curSelected = selectedRef.current
@@ -1569,8 +1572,12 @@ function AutoScoutPanel({ scanResults, selected, scanConfig }) {
       // Single pass — reset resume index for fresh run
       setResumeIndex(0)
       resumeIndexRef.current = 0
-      await runOnePass(0)
-      if (mountedRef.current) { setRunning(false); toast.success('Scouting complete') }
+      const passStatus = await runOnePass(0)
+      if (mountedRef.current) {
+        setRunning(false)
+        if (passStatus === 'failed') toast.error('Scouting failed — see log for details')
+        else toast.success('Scouting complete')
+      }
     } else {
       // Loop mode
       loopStartRef.current = Date.now()

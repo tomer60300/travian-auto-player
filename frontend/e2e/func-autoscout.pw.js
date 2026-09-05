@@ -96,8 +96,13 @@ async function arrive(page, opts = {}) {
   return frames
 }
 
+// `.last()`, not `.first()`: the scan a moment earlier already left its own
+// "Scan complete" success toast up (toasts self-dismiss after 4s, and this
+// whole flow runs in well under that against a mocked socket), so the oldest
+// toast on screen is not the sweep's. The newest one is the operator's last
+// word on it.
 function toast(page) {
-  return page.locator('.toast').first()
+  return page.locator('.toast').last()
 }
 
 test('the scan frame and the sweep frame carry what was configured, and nothing else', async ({
