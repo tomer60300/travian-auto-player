@@ -292,6 +292,26 @@ class MilitaryService:
                 rally_url, final_data, safe_to_retry=False
             )
 
+            if not result_html.strip():
+                # `_send_succeeded` reads a reappeared form or an error div as
+                # a refusal and everything else as dispatched -- with nothing
+                # else to go on, an EMPTY answer defaulted to "dispatched".
+                # This POST already went out and is non-idempotent, so the
+                # honest verdict for "the game answered with nothing" is the
+                # same one a lost NetworkError answer gets below: unverified,
+                # never a silent success.
+                return TroopSendResult(
+                    success=False,
+                    target_x=x,
+                    target_y=y,
+                    troops_sent=troops,
+                    raw_response=(
+                        "Step 2 error: confirmation page came back empty, so whether "
+                        "the troops were dispatched cannot be read; it may already "
+                        "have taken effect"
+                    ),
+                )
+
             success = self._send_succeeded(result_html, final_data.get("action", ""))
 
             # Try to extract travel time from the confirmation we parsed
