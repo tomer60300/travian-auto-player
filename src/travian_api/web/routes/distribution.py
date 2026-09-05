@@ -7495,13 +7495,14 @@ async def post_execute(
                                 )
                             for key, group in _claim_groups.items():
                                 unclaimed = list(fresh_by_key.get(key, []))
-                                for action, route in sorted(
+                                _ordered = sorted(
                                     group,
                                     key=lambda ar: (
                                         id(ar[0]) not in _claimed_ids,
                                         _game_rows(ar[1].cycle_hours),
                                     ),
-                                ):
+                                )
+                                for action, route in _ordered:
                                     own = {
                                         (route.dispatch_minute + _i * route.cycle_hours * 60)
                                         % MINUTES_PER_DAY
@@ -7524,6 +7525,32 @@ async def post_execute(
                                             taken.append(e)
                                     unclaimed = [e for e in unclaimed if e not in taken]
                                     observed_by_action[id(action)] = [e.route_id for e in taken]
+                                # `want` bounds the FIRST pass so two routes to
+                                # one destination cannot swallow each other's
+                                # rows -- an hourly minute set contains every
+                                # 4-hourly one. But it also clamped the total to
+                                # the forecast, so a game that fanned out MORE
+                                # than 24/N was reported as agreeing with the
+                                # model and the extra rows were counted in
+                                # neither `created_game_rows` nor
+                                # `live_game_rows`. Whatever is left over after
+                                # every claim has had its fill is this run's
+                                # work -- `fresh` is rows that were not there
+                                # before -- so it is attributed, unbounded, and
+                                # the overshoot is reported like a shortfall.
+                                for action, route in _ordered:
+                                    if not unclaimed:
+                                        break
+                                    own = {
+                                        (route.dispatch_minute + _i * route.cycle_hours * 60)
+                                        % MINUTES_PER_DAY
+                                        for _i in range(_game_rows(route.cycle_hours))
+                                    }
+                                    extra = [e for e in unclaimed if _row_minute(e) in own]
+                                    if not extra:
+                                        continue
+                                    unclaimed = [e for e in unclaimed if e not in extra]
+                                    observed_by_action[id(action)] += [e.route_id for e in extra]
 
                             # Confine the fan-out to the profile hours, by
                             # subtraction. Done here because `fresh` is already the

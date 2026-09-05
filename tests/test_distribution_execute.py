@@ -1443,6 +1443,23 @@ class TestTheRowCountIsMeasuredNotPredicted:
         assert [a.status for a in res.actions] == ["created", "created"]
         assert res.problems == []
 
+    def test_an_overshoot_against_the_forecast_is_reported_too(self):
+        # The attribution stopped at `want = _game_rows(cycle)`, so a game that
+        # fanned out MORE than 24/N was reported as agreeing with the model and
+        # the extra rows were counted in neither `created_game_rows` nor
+        # `live_game_rows`. The direction that costs merchants and shipments is
+        # exactly this one, and it read as clean.
+        svc = _FakeLiveSvc(rows_per_create=6)
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+
+        created = [a for a in res.actions if a.status == "created"]
+        assert all(a.game_rows == 4 for a in created), "the forecast is still 4"
+        assert all(a.observed_game_rows == 6 for a in created), [
+            a.observed_game_rows for a in created
+        ]
+        assert res.created_game_rows == 12
+        assert "the game made 6 route row(s), not the 4" in " ".join(res.problems), res.problems
+
     def test_rows_are_attributed_to_the_destination_that_made_them(self):
         # Both creates leave the SAME origin, so the origin's fresh rows are a
         # pooled six. Each action must get its own share, matched by the same
