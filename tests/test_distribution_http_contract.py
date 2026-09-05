@@ -347,6 +347,89 @@ class TestTheExecuteContract:
         assert "detail" in res.json(), "a refusal with no detail tells the operator nothing"
 
 
+class TestConsentToWriteIsNamedNotInferred:
+    """`dry_run: false` is the ABSENCE of a preview, not the presence of consent.
+
+    A field whose default makes a preview and whose falsity makes a live write
+    puts the whole safety of this endpoint on one boolean that a client can flip
+    by accident -- a stale form, a JSON serialiser that emits every default, a
+    hand-typed curl. `execution_mode` is the canonical control and it is
+    positive: nothing writes unless the request SAYS "live". `dry_run` survives
+    for older callers, but it never decides, and the two disagreeing is a 422
+    rather than a guess about which one the operator meant.
+
+    The env brake (TRAVIAN_TRADE_ROUTE_LIVE) is unchanged and still answers 409:
+    it says whether this server may write at all, which is a different question
+    from what this request asked for. The suite pins it false, so a request that
+    gets past the matrix below stops there.
+    """
+
+    def test_a_body_with_neither_field_previews(self, client):
+        res = client.post("/api/distribution/execute", json=_plan_body(max_routes_per_run=5))
+
+        assert res.status_code == 200, res.text
+        assert res.json()["dry_run"] is True
+
+    def test_preview_with_dry_run_true_previews(self, client):
+        res = client.post(
+            "/api/distribution/execute",
+            json=_plan_body(execution_mode="preview", dry_run=True, max_routes_per_run=5),
+        )
+
+        assert res.status_code == 200, res.text
+        assert res.json()["dry_run"] is True
+
+    def test_dry_run_false_alone_is_refused_and_names_the_field(self, client):
+        """The whole point: an old client that only knows `dry_run` cannot start
+        a live run by omission of a preview."""
+        res = client.post(
+            "/api/distribution/execute",
+            json=_plan_body(dry_run=False, max_routes_per_run=5),
+        )
+
+        assert res.status_code == 422, res.text
+        detail = str(res.json()["detail"])
+        assert "execution_mode" in detail, detail
+        assert "dry_run alone is not consent" in detail, detail
+
+    def test_live_with_dry_run_true_is_refused_as_contradictory(self, client):
+        res = client.post(
+            "/api/distribution/execute",
+            json=_plan_body(execution_mode="live", dry_run=True, max_routes_per_run=5),
+        )
+
+        assert res.status_code == 422, res.text
+        detail = str(res.json()["detail"])
+        assert "execution_mode" in detail and "dry_run" in detail, detail
+
+    @pytest.mark.parametrize("extra", [{}, {"dry_run": False}])
+    def test_live_takes_the_live_branch_and_never_previews(self, client, extra):
+        """`execution_mode: live` resolves to a live run -- with or without an
+        explicit `dry_run: false` -- so the request leaves the preview path.
+
+        There is no connected session on this ASGI fixture, so the first gate it
+        meets is the session one and the answer is 403. That is the assertion
+        worth making here: a 200 would mean it previewed. The env brake (409 on
+        TRAVIAN_TRADE_ROUTE_LIVE) is the NEXT gate and is pinned in
+        `test_distribution_execute`, where a session exists to reach it.
+        """
+        res = client.post(
+            "/api/distribution/execute",
+            json=_plan_body(execution_mode="live", max_routes_per_run=5, **extra),
+        )
+
+        assert res.status_code == 403, res.text
+        assert "Not connected" in str(res.json()["detail"])
+
+    def test_an_unknown_mode_is_refused(self, client):
+        res = client.post(
+            "/api/distribution/execute",
+            json=_plan_body(execution_mode="LIVE", max_routes_per_run=5),
+        )
+
+        assert res.status_code == 422, res.text
+
+
 class TestTheRunHistoryContract:
     def test_run_history_serialises(self, client):
         res = client.get("/api/distribution/run-history", params={"limit": 5})

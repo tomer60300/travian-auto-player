@@ -146,6 +146,11 @@ def _segments_body(**extra):
         "config": [{"village_id": 20003, "trade_office_level": 10}],
         "allocations": {},
         "prune_to_window": True,
+        # `execution_mode` is what authorises a write; `dry_run: false` alone is
+        # a 422 and `dry_run: true` alongside "live" is a 422, so the two are set
+        # together. A caller asking for a preview through `dry_run` gets the mode
+        # that agrees with it.
+        "execution_mode": "preview" if extra.get("dry_run") else "live",
         "dry_run": False,
         "disable_existing": True,
         "max_routes_per_run": 50,

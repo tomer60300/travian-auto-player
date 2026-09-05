@@ -70,6 +70,10 @@ def _exec_body(dry_run=True, disable_existing=True, max_routes_per_run=3, margin
             "allocations": {
                 "crop": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}
             },
+            # `execution_mode` is what authorises a write. `dry_run` is kept for
+            # older callers and never decides, so the two must agree or the
+            # request is a 422 -- which is exactly why the helper sets both.
+            "execution_mode": "preview" if dry_run else "live",
             "dry_run": dry_run,
             "disable_existing": disable_existing,
             "max_routes_per_run": max_routes_per_run,
@@ -1361,6 +1365,22 @@ class TestTheGameRowFanOutIsReported:
             "BEFORE anything is written"
         )
         assert events[-1]["created_game_rows"] == 8
+
+    def test_run_start_records_what_was_asked_for_and_what_it_resolved_to(self):
+        """Three separate facts, because a trace that records only the outcome
+        cannot answer "was this run asked for?" afterwards -- which is the
+        question a surprise write raises. The requested mode, the mode it
+        resolved to, and whether the server's own switch was even open."""
+        import json
+        from pathlib import Path
+
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, _two_origin_account(), max_routes_per_run=50)
+        start = json.loads(Path(res.trace_path).read_text(encoding="utf-8").splitlines()[0])
+
+        assert start["execution_mode_requested"] == "live"
+        assert start["execution_mode_resolved"] == "live"
+        assert start["env_brake_open"] is True
 
 
 class _UnevenFanOut(_FakeLiveSvc):

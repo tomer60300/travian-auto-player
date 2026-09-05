@@ -19,7 +19,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import PlainTextResponse
@@ -2304,10 +2304,52 @@ class ExecuteRequest(PlanRequest):
     """Same inputs as /plan (the server recomputes the exact plan rather than
     trust client-sent rows) plus execution controls."""
 
+    # The canonical control, and the only one that decides. Consent to write is
+    # POSITIVE here: nothing touches the game unless the request says "live".
+    # `dry_run` put the whole safety of this endpoint on one boolean whose
+    # FALSITY authorised a write, so a stale form, a serialiser that emits every
+    # default, or a hand-typed curl could start a live run by omitting a
+    # preview. It is kept for older callers and never overrides this field --
+    # the two disagreeing is a 422, not a guess at what was meant.
+    execution_mode: Literal["preview", "live"] = Field(
+        default="preview",
+        description=(
+            'Whether this run may write to the game. "preview" (the default) '
+            'issues zero game requests; "live" reconciles the plan against '
+            "each marketplace and creates, disables and deletes rows. A live "
+            "run is still subject to the server's own TRAVIAN_TRADE_ROUTE_LIVE "
+            "switch, which answers 409 when it is off."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _execution_mode_is_unambiguous(self) -> "ExecuteRequest":
+        # `model_fields_set` and not the value: `dry_run` defaults to True, so
+        # "live with dry_run omitted" and "live with dry_run: true" are the same
+        # value and opposite intentions. Only an EXPLICIT dry_run can contradict.
+        stated = "dry_run" in self.model_fields_set
+        if self.execution_mode == "preview" and stated and not self.dry_run:
+            raise ValueError(
+                "dry_run: false does not start a live run: a live run must say "
+                'execution_mode: "live"; dry_run alone is not consent. Send '
+                'execution_mode: "live" to write to the game, or drop dry_run '
+                "to preview."
+            )
+        if self.execution_mode == "live" and stated and self.dry_run:
+            raise ValueError(
+                'execution_mode: "live" and dry_run: true contradict each other. '
+                "execution_mode decides and dry_run never overrides it, so this "
+                "is refused rather than resolved: drop dry_run for a live run, "
+                'or send execution_mode: "preview".'
+            )
+        return self
+
     dry_run: bool = Field(
         default=True,
-        description="Preview only, zero game requests. Must be explicitly set "
-        "False to touch the game.",
+        description="Superseded by `execution_mode`, kept for older callers. "
+        "It never authorises a write on its own: `dry_run: false` without "
+        '`execution_mode: "live"` is a 422, and `dry_run: true` alongside '
+        '`execution_mode: "live"` is a 422.',
     )
     disable_existing: bool = Field(
         default=True,
@@ -5852,7 +5894,7 @@ async def post_execute(
     body: ExecuteRequest,
     user: User = Depends(get_current_user),
 ) -> ExecuteResponse:
-    """Create the plan's trade routes in-game — or preview them with dry_run.
+    """Create the plan's trade routes in-game — or preview them.
 
     Recomputes the plan server-side from the same inputs /plan uses (it does
     NOT trust client-sent rows), then, per origin village, disables the routes
@@ -5860,8 +5902,9 @@ async def post_execute(
     rate-capped to a few routes per run: a human sets routes up over days, not
     in one machine sweep, so the run stops once the cap is reached (leaving the
     rest as ``remaining`` for a later run) and origins are visited in randomized
-    order. ``dry_run`` (default) previews with ZERO game requests and, like
-    /plan, is auth-only — it never resolves a live session so it works offline.
+    order. ``execution_mode`` decides: "preview" (the default) issues ZERO game
+    requests and, like /plan, is auth-only — it never resolves a live session, so
+    it works offline. Only ``execution_mode: "live"`` writes.
     """
     if body.segments:
         # One optimizer pass per profile, each in its own hours -- identical to
@@ -6105,7 +6148,10 @@ async def post_execute(
         else:
             protected_ids.add(int(_text))
 
-    if body.dry_run:
+    # `execution_mode` alone. `dry_run` is validated against it on the way in
+    # and is never read here: a second field that could still decide is a second
+    # way to get this wrong.
+    if body.execution_mode == "preview":
         # Zero game requests: the exact routes already on each marketplace are
         # unknown here, so this previews the DESIRED plan against a worst-case
         # empty marketplace (first `cap` created, the rest deferred). The live
@@ -6177,7 +6223,8 @@ async def post_execute(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
                 "Not connected. Reconnect first — live trade-route execution "
-                "never spends login traffic implicitly. Use dry_run to preview."
+                "never spends login traffic implicitly. Use the default "
+                'execution_mode: "preview" to see what would be created.'
             ),
         )
     if not live_enabled:
@@ -6187,8 +6234,8 @@ async def post_execute(
                 "Live trade-route execution is disabled. The request payload is "
                 "verified against a captured client request, so this is an explicit "
                 "opt-in and not a missing capability: set TRAVIAN_TRADE_ROUTE_LIVE="
-                "true on the server to allow it. Use dry_run to preview what would "
-                "be created."
+                "true on the server to allow it. Use the default "
+                'execution_mode: "preview" to see what would be created.'
             ),
         )
     # Feasibility is enforced server-side, not just by the disabled UI button: a
@@ -6249,7 +6296,7 @@ async def post_execute(
                 "run and accumulate duplicate routes in-game. Capture "
                 "/build.php?gid=17&t=3 with at least one route present, confirm "
                 "read_trade_routes finds the page's route model, then set "
-                "ROUTE_LIST_MARKUP_VERIFIED. dry_run previews are unaffected."
+                'ROUTE_LIST_MARKUP_VERIFIED. execution_mode: "preview" is unaffected.'
             ),
         )
 
@@ -6353,6 +6400,13 @@ async def post_execute(
         "run_start",
         user=user.id,
         dry_run=False,
+        # What the request asked for, what that resolved to, and whether the
+        # server was even allowed to honour it. Three separate facts: a trace
+        # that records only the outcome cannot answer "was this run asked for?"
+        # afterwards, which is the question a surprise write raises.
+        execution_mode_requested=body.execution_mode,
+        execution_mode_resolved="live",
+        env_brake_open=live_enabled,
         live_enabled=live_enabled,
         reconciler_verified=svc.reconciler_verified,
         disable_existing=body.disable_existing,
