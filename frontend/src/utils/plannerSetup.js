@@ -503,17 +503,31 @@ export const ROLES_THAT_MAY_NOT_RELAY = Object.freeze(
 /** What a village's `may_relay` resolves to when the village says nothing.
  *
  * The resting state of this field is not a blank, it is an ANSWER, and which
- * answer depends on three things the operator cannot see from the cell: the
- * village's role, whether that role's template states a permission, and -- for
- * a village with no role at all -- the sign of its own crop rate. The
- * backend's order, mirrored: the village's own answer, then its role
- * template's, then `default_may_relay(role)`, then `crop_per_hour >= 0`.
+ * answer depends on four things the operator cannot see from the cell: whether
+ * the village's crop rate was readable at all, its role, whether that role's
+ * template states a permission, and -- for a village with no role -- the sign
+ * of that rate. The backend's order, mirrored: `crop_per_hour is None`, then
+ * the village's own answer, then its role template's, then
+ * `default_may_relay(role)`, then `crop_per_hour >= 0`.
+ *
+ * The unreadable rate comes FIRST, and that order is the whole correction here.
+ * `_may_relay_through` refuses a null rate before it consults anything else, so
+ * a village whose rate could not be parsed was being told "Role default (may)"
+ * or "DEF template (may)" while the planner would never relay through it. A
+ * declaration says what a village is FOR; it cannot answer a question about a
+ * granary balance nobody could read.
  *
  * So the "unset" option names the answer rather than saying "default", which
  * is the same rule the feedstock picker follows for "derived": an option that
- * hides which of three things it means is a control the operator cannot use.
+ * hides which of four things it means is a control the operator cannot use.
  */
 export function describeRelayPermission({ role, template, cropPerHour }) {
+  // Backend twin: `_may_relay_through` in
+  // `src/travian_api/services/distribution/optimizer.py`, whose first statement
+  // is `if village.crop_per_hour is None: return False`.
+  if (typeof cropPerHour !== 'number' || !Number.isFinite(cropPerHour)) {
+    return 'No crop rate read (may not)'
+  }
   if (role != null) {
     if (template?.may_relay != null) {
       return `${ROLE_LABEL[role] ?? role} template (${template.may_relay ? 'may' : 'may not'})`
@@ -521,10 +535,8 @@ export function describeRelayPermission({ role, template, cropPerHour }) {
     return `Role default (${ROLES_THAT_MAY_NOT_RELAY.includes(role) ? 'may not' : 'may'})`
   }
   // A village with no role falls to the crop sign, which the snapshot states --
-  // so it can be named here rather than left as "derived from something".
-  if (typeof cropPerHour !== 'number' || !Number.isFinite(cropPerHour)) {
-    return 'From the crop sign'
-  }
+  // so it can be named here rather than left as "derived from something". The
+  // rate is known to be readable by now: the guard above returned for the rest.
   return `From the crop sign (${cropPerHour >= 0 ? 'may' : 'may not'})`
 }
 

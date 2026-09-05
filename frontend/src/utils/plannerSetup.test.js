@@ -3238,26 +3238,34 @@ describe('roleInherits', () => {
 // backend's order, mirrored: the village's own answer, then the template's,
 // then `default_may_relay(role)`, then `crop_per_hour >= 0`.
 describe('describeRelayPermission', () => {
+  // Every case below carries a crop rate, because the cell does: it is fed
+  // `cropPerHour: v.crop_per_hour` straight off the snapshot row. A rate that
+  // could not be read is its own answer and has its own case at the foot of
+  // this block.
   it('names the role default where the template is silent', () => {
-    expect(describeRelayPermission({ role: 'def', template: undefined })).toBe(
+    expect(describeRelayPermission({ role: 'def', template: undefined, cropPerHour: 2200 })).toBe(
       'Role default (may not)'
     )
-    expect(describeRelayPermission({ role: 'feeder', template: {} })).toBe('Role default (may)')
+    expect(describeRelayPermission({ role: 'feeder', template: {}, cropPerHour: 2200 })).toBe(
+      'Role default (may)'
+    )
   })
 
   // The capital is `may not` on purpose -- it is the hub every feeder ships to
   // and hands off from -- and it is the one everybody gets wrong.
   it('says the capital may not, which is the answer that surprises people', () => {
-    expect(describeRelayPermission({ role: 'capital' })).toBe('Role default (may not)')
+    expect(describeRelayPermission({ role: 'capital', cropPerHour: 2200 })).toBe(
+      'Role default (may not)'
+    )
   })
 
   it('names the TEMPLATE where the template has an opinion', () => {
-    expect(describeRelayPermission({ role: 'def', template: { may_relay: true } })).toBe(
-      'DEF template (may)'
-    )
-    expect(describeRelayPermission({ role: 'feeder', template: { may_relay: false } })).toBe(
-      'Feeder template (may not)'
-    )
+    expect(
+      describeRelayPermission({ role: 'def', template: { may_relay: true }, cropPerHour: 2200 })
+    ).toBe('DEF template (may)')
+    expect(
+      describeRelayPermission({ role: 'feeder', template: { may_relay: false }, cropPerHour: 2200 })
+    ).toBe('Feeder template (may not)')
   })
 
   it('falls to the crop sign for a village with no role, and says which way', () => {
@@ -3274,8 +3282,32 @@ describe('describeRelayPermission', () => {
   })
 
   it('does not guess a direction from a crop rate it could not read', () => {
-    expect(describeRelayPermission({ role: null, cropPerHour: null })).toBe('From the crop sign')
-    expect(describeRelayPermission({})).toBe('From the crop sign')
+    expect(describeRelayPermission({ role: null, cropPerHour: null })).toBe(
+      'No crop rate read (may not)'
+    )
+    expect(describeRelayPermission({})).toBe('No crop rate read (may not)')
+  })
+
+  // The backend's FIRST rule, and the one this cell used to omit entirely:
+  // `_may_relay_through` returns False on `crop_per_hour is None` BEFORE it
+  // consults the village's own answer, its template or its role. So a village
+  // whose rate could not be read was told "Role default (may)" while the
+  // planner would never relay through it -- the optimistic reading of an
+  // unparsed rate, in the one place this codebase has never taken it.
+  it('refuses an unreadable rate before the role, the template or anything else', () => {
+    expect(describeRelayPermission({ role: 'feeder', cropPerHour: null })).toBe(
+      'No crop rate read (may not)'
+    )
+    expect(
+      describeRelayPermission({ role: 'def', template: { may_relay: true }, cropPerHour: null })
+    ).toBe('No crop rate read (may not)')
+    expect(describeRelayPermission({ role: null, cropPerHour: undefined })).toBe(
+      'No crop rate read (may not)'
+    )
+    // NaN is what `Number(unreadable)` produces, and it is not a rate either.
+    expect(describeRelayPermission({ role: 'feeder', cropPerHour: NaN })).toBe(
+      'No crop rate read (may not)'
+    )
   })
 })
 
