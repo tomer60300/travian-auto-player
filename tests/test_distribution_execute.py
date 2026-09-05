@@ -2295,6 +2295,161 @@ class TestTheMarketplaceIsSteadyBeforeAnythingIsDeleted:
         assert summary.needs_attention is True
 
 
+class TestThePlanCannotEmitTwoRoutesTheReadBackCannotTellApart:
+    """The invariant the whole attribution rests on, stated and checked.
+
+    The matcher claims each new live row for the create that made it using three
+    discriminators: the destination key, the departure minute, and -- at a shared
+    minute -- the exact cargo. Two routes to ONE destination with identical cargo
+    on overlapping minutes defeat all three, and the arbitrary split that follows
+    decides which action is reported created, which rows the trim keeps and which
+    it DELETES.
+
+    Nothing the planner emits today is such a pair. That is an assumption until
+    something checks it, and the failure mode of the assumption going stale is
+    rows vanishing from a real account, discovered afterwards.
+
+    Measured on the minutes that SURVIVE each route's window, and with exact
+    duplicates excluded -- both forced by plans this app already ships, and both
+    pinned below so the exclusions cannot be widened by accident.
+    """
+
+    def _pair(self, first_minute, second_minute, *, second_cargo=None, dest=20011):
+        return _account(
+            [
+                SheetRow(
+                    origin=20003,
+                    destination=20011,
+                    cargo={Resource.CROP: 100},
+                    cycle_hours=6,
+                    dispatch_minute=first_minute,
+                    arrival_minute=0,
+                    merchants=2,
+                ),
+                SheetRow(
+                    origin=20003,
+                    destination=dest,
+                    cargo=second_cargo or {Resource.CROP: 100},
+                    cycle_hours=6,
+                    dispatch_minute=second_minute,
+                    arrival_minute=0,
+                    merchants=2,
+                ),
+            ],
+            {20003: (0, 0), 20011: (10, 0), 20019: (20, 0)},
+            {20003: "03", 20011: "11", 20019: "19"},
+        )
+
+    def test_an_ambiguous_pair_is_refused_and_both_routes_are_named(self):
+        # A 6h cycle from minute 100 fans out to {100, 460, 820, 1180}; one from
+        # 460 fans out to the very same four. Same destination, same cargo: the
+        # matcher has nothing left to tell them apart.
+        svc = _FakeLiveSvc()
+        with pytest.raises(HTTPException) as caught:
+            _run_live(svc, self._pair(100, 460), max_routes_per_run=50)
+
+        detail = str(caught.value.detail)
+        assert caught.value.status_code == 500
+        assert "100" in detail and "460" in detail, detail
+        assert "identical cargo" in detail, detail
+        assert svc.created == [], "nothing may be attempted against a plan like this"
+
+    def test_the_same_pair_on_disjoint_minutes_is_fine(self):
+        # {100, 460, 820, 1180} against {130, 490, 850, 1210}: no shared minute,
+        # so every row belongs to exactly one route.
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, self._pair(100, 130), max_routes_per_run=50)
+
+        assert [a.status for a in res.actions] == ["created", "created"]
+
+    def test_overlapping_minutes_with_different_cargo_are_not_ambiguous(self):
+        # The cargo is the tie-break the matcher uses at a shared minute, so a
+        # pair that differs in it is not ambiguous and must not be refused.
+        # What happens to the second route is a different mechanism: the
+        # reconciler's own within-visit minute claim skips it, because the first
+        # create already put a row at every minute it wanted. This asserts only
+        # that the invariant did not fire.
+        svc = _FakeLiveSvc()
+        res = _run_live(
+            svc,
+            self._pair(100, 460, second_cargo={Resource.CROP: 250}),
+            max_routes_per_run=50,
+        )
+
+        assert [a.status for a in res.actions] == ["created", "skipped"]
+
+    def test_the_same_schedule_to_a_different_destination_is_fine(self):
+        svc = _FakeLiveSvc()
+        res = _run_live(svc, self._pair(100, 100, dest=20019), max_routes_per_run=50)
+
+        assert [a.status for a in res.actions] == ["created", "created"]
+
+    def test_a_dry_run_refuses_it_too(self):
+        """The preview is where an operator would see this, and a preview that
+        passes over a plan the live run refuses is worse than either answer."""
+
+        async def _plan(_body):
+            return self._pair(100, 460)
+
+        with (
+            _patch(dist_module, "_plan_account", _plan),
+            pytest.raises(HTTPException) as caught,
+        ):
+            _execute(_exec_body(dry_run=True, max_routes_per_run=50), connected=False)
+
+        assert caught.value.status_code == 500
+
+    def test_the_invariant_reads_the_same_minutes_the_matcher_claims_by(self):
+        """Both go through `_fanout_minutes`, so they cannot drift apart."""
+        route = SimpleNamespace(dispatch_minute=100, cycle_hours=6)
+
+        assert dist_module._fanout_minutes(route) == {100, 460, 820, 1180}
+
+    def _route(self, *, cycle=6, minute=100, cargo=None, window=None, dest=20011):
+        return SimpleNamespace(
+            origin_village_id=20003,
+            dest_village_id=dest,
+            dest_x=10,
+            dest_y=0,
+            dest_name=str(dest),
+            cargo=cargo or {Resource.CROP: 100},
+            cycle_hours=cycle,
+            dispatch_minute=minute,
+            window=window,
+            segment="",
+        )
+
+    def test_two_cycles_sharing_one_surviving_minute_are_ambiguous(self):
+        # 6h from 100 is {100, 460, 820, 1180}; 3h from 100 contains 100 too.
+        pair = [self._route(cycle=6, minute=100), self._route(cycle=3, minute=100)]
+
+        assert dist_module._matcher_ambiguity(pair) is not None
+
+    def test_two_identical_rows_are_the_same_route_not_an_ambiguous_pair(self):
+        """Two foreign targets on one tile produce two identical plan rows. They
+        are not two routes the matcher must separate -- the reconciler creates
+        the route once, and splitting a claim between two identical routes
+        misattributes nothing. Excluded deliberately, and pinned so the
+        exclusion is not quietly widened."""
+        pair = [self._route(), self._route()]
+
+        assert dist_module._matcher_ambiguity(pair) is None
+
+    def test_a_whole_day_pair_trimmed_to_its_own_hours_is_not_ambiguous(self):
+        """The other forced exclusion. A whole-day plan sends one destination
+        once per profile, and two hourly routes both fan out across every minute
+        of the day BEFORE the trim -- so measured on the raw fan-out, every
+        shared destination of every whole-day plan would be refused. What LANDS
+        is disjoint, because each route is trimmed to its own profile's hours,
+        and the pooled trim works on exactly these surviving minutes."""
+        pair = [
+            self._route(cycle=1, minute=420, window=(420, 1380)),
+            self._route(cycle=1, minute=480, window=(1380, 420)),
+        ]
+
+        assert dist_module._matcher_ambiguity(pair) is None
+
+
 class TestAControlledRunCanTargetOnePair:
     """The first live run against a real account must be exactly one chosen route.
 

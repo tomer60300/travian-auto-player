@@ -5691,6 +5691,83 @@ def _desired_key(route: PlannedRoute) -> int | tuple[int, int]:
     return (route.dest_x, route.dest_y)
 
 
+def _fanout_minutes(route: PlannedRoute) -> set[int]:
+    """Every minute of the day this route's rows depart, BEFORE any window trim.
+
+    Travian turns one "repeat every N hours" request into 24/N separate daily
+    rows, and this is where they land. The read-back matcher claims live rows by
+    membership of exactly this set, so the invariant below and the matcher must
+    read it from one place or they can disagree about what a route owns.
+    """
+    return {
+        (route.dispatch_minute + i * route.cycle_hours * 60) % MINUTES_PER_DAY
+        for i in range(_game_rows(route.cycle_hours))
+    }
+
+
+def _matcher_ambiguity(routes: Sequence[PlannedRoute]) -> str | None:
+    """Two planned routes the read-back matcher could not tell apart, or None.
+
+    The matcher attributes each new live row to the create that made it using
+    three discriminators: the destination key, the departure minute, and -- at a
+    minute two routes share -- the exact cargo. Two routes to ONE destination
+    carrying identical cargo on overlapping minutes defeat all three, so their
+    rows are split arbitrarily. That is not a cosmetic misattribution: the split
+    decides which action is reported created, which rows the window trim keeps,
+    and which it DELETES.
+
+    Measured on the minutes that SURVIVE each route's own window, not on the raw
+    24/N fan-out, and with exact duplicates excluded. Both exclusions are forced
+    by plans this app already ships and must keep working:
+
+    * a whole-day run plans one destination once per profile, and two hourly
+      routes fan out across every minute of the day BEFORE the trim -- so on the
+      raw fan-out every shared destination of a whole-day plan looks ambiguous.
+      What lands is disjoint, because each route is trimmed to its own profile's
+      hours, and the trim is pooled per destination against exactly these
+      surviving minutes;
+    * two plan rows that are identical in every field (two foreign targets at
+      one tile) are not two routes the matcher must tell apart: they are the
+      same route, the reconciler creates it once, and an arbitrary split between
+      two identical claims misattributes nothing.
+
+    What is left is the real hazard: one destination, one cargo, two DIFFERENT
+    schedules whose surviving rows collide. Nothing the planner emits today does
+    that. This states it as a checked invariant rather than an assumption, so a
+    future planner change cannot silently invalidate the matcher and be
+    discovered as rows disappearing from a real account.
+    """
+    by_key: dict[int | tuple[int, int], list[PlannedRoute]] = {}
+    for route in routes:
+        by_key.setdefault(_desired_key(route), []).append(route)
+    for group in by_key.values():
+        for index, first in enumerate(group):
+            for second in group[index + 1 :]:
+                if {r: a for r, a in first.cargo.items() if a} != {
+                    r: a for r, a in second.cargo.items() if a
+                }:
+                    continue
+                if (first.cycle_hours, first.dispatch_minute, first.window) == (
+                    second.cycle_hours,
+                    second.dispatch_minute,
+                    second.window,
+                ):
+                    continue  # the same route twice, not two the matcher must separate
+                shared = sorted(set(_planned_minutes(first)) & set(_planned_minutes(second)))
+                if not shared:
+                    continue
+                return (
+                    f"village {first.origin_village_id} -> {first.dest_name}: "
+                    f"the plan wants two routes with identical cargo whose rows share "
+                    f"departure minute(s) {shared} — "
+                    f"{first.cycle_hours}h from minute {first.dispatch_minute}"
+                    + (f" ({first.segment})" if first.segment else "")
+                    + f" and {second.cycle_hours}h from minute {second.dispatch_minute}"
+                    + (f" ({second.segment})" if second.segment else "")
+                )
+    return None
+
+
 def _existing_keys(e: ExistingRoute) -> set[int | tuple[int, int]]:
     """Every key this live route could be recognised by.
 
@@ -5813,10 +5890,7 @@ def _as_planned(
         return [by_id[i] for i in observed_by_action.get(id(action), []) if i in by_id]
 
     def _matches(route: PlannedRoute, rows: list[ExistingRoute]) -> bool:
-        want = Counter(
-            (route.dispatch_minute + i * route.cycle_hours * 60) % MINUTES_PER_DAY
-            for i in range(_game_rows(route.cycle_hours))
-        )
+        want = Counter(_fanout_minutes(route))
         if Counter(_row_minute(e) for e in rows) != want:
             return False
         cargo = {r: a for r, a in route.cargo.items() if a}
@@ -6147,6 +6221,24 @@ async def post_execute(
             filtered_out += 1
             continue
         items.append((row, planned))
+
+    # Checked on the FULL plan, not the filtered slice: the invariant is a
+    # property of what the planner emits, and a filter that happens to drop one
+    # of an ambiguous pair would hide it until the run that does not filter.
+    for _origin_routes in wanted_by_origin.values():
+        _ambiguous = _matcher_ambiguity(_origin_routes)
+        if _ambiguous is not None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    f"This plan breaks an invariant live execution depends on: "
+                    f"{_ambiguous}. The read-back cannot tell two such routes apart, so "
+                    f"the rows they create would be attributed arbitrarily and the window "
+                    f"trim could DELETE rows this run had just made. Nothing was "
+                    f"attempted. This is a planner defect, not a setting: report it with "
+                    f"the plan that produced it."
+                ),
+            )
 
     def _action(
         row: SheetRow, route: PlannedRoute, status_: str, detail: str = ""
@@ -7977,11 +8069,7 @@ async def post_execute(
                                         ),
                                     )
                                     for action, route in _ordered:
-                                        own = {
-                                            (route.dispatch_minute + _i * route.cycle_hours * 60)
-                                            % MINUTES_PER_DAY
-                                            for _i in range(_game_rows(route.cycle_hours))
-                                        }
+                                        own = _fanout_minutes(route)
                                         want = _game_rows(route.cycle_hours)
                                         cargo = {r: a for r, a in route.cargo.items() if a}
                                         taken: list[ExistingRoute] = []
@@ -8016,11 +8104,7 @@ async def post_execute(
                                     for action, route in _ordered:
                                         if not unclaimed:
                                             break
-                                        own = {
-                                            (route.dispatch_minute + _i * route.cycle_hours * 60)
-                                            % MINUTES_PER_DAY
-                                            for _i in range(_game_rows(route.cycle_hours))
-                                        }
+                                        own = _fanout_minutes(route)
                                         extra = [e for e in unclaimed if _row_minute(e) in own]
                                         if not extra:
                                             continue
