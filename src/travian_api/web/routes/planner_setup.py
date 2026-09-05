@@ -124,13 +124,17 @@ earned v9 for: it was carried by neither persistence path either, and it
 decides whether `/execute` DELETES rows from the game -- the only destructive
 answer in the whole document.
 
-v11 carries `merchant_model_measured`, on the same criterion. It is the
-operator's statement that they read a Marketplace capacity at two Trade Office
+v11 carries `merchant_capacity_measured`, on the same criterion. It is the
+operator's statement that they read a Marketplace CAPACITY at two Trade Office
 levels and found the shipped +20%/level to be right -- a fact about work done
 in the game that nothing in the game records and nothing here can re-derive,
 since a measured 0.20 is indistinguishable from an untouched one. Dropped, the
 MERCHANT_MODEL_UNCALIBRATED finding returns on every plan and the operator is
-asked again for a reading they have already taken."""
+asked again for a reading they have already taken.
+
+Named `merchant_capacity_measured` and not `merchant_model_measured`: the
+merchant model is capacity AND speed, and speed has never been measured on this
+server. The tick covers the half that was read."""
 
 MAX_MERCHANTS_PER_VILLAGE = 20
 """Travian's hard ceiling on merchants in one village. The only bound on a
@@ -309,13 +313,15 @@ class SetupDocument(BaseModel):
     # False, and a value nobody typed as a boolean must not decide whether rows
     # are removed. Absent is "not answered", not "do not prune".
     prune_to_window: StrictBool | None = None
-    # Whether the operator has MEASURED the merchant model's Trade Office slope
-    # rather than accepting the shipped one. Owned state in the strictest sense:
+    # Whether the operator has MEASURED merchant CAPACITY -- the base and the
+    # Trade Office slope -- rather than accepting the shipped figures. Not the
+    # whole merchant model: speed is assumed and this says nothing about it.
+    # Owned state in the strictest sense:
     # it records work done in the game that the game does not record, and no
     # amount of re-reading the account could recover it -- a measured 0.20 looks
     # exactly like an untouched 0.20. `StrictBool` like the answers above it,
     # and absent is "not answered", not "measured".
-    merchant_model_measured: StrictBool | None = None
+    merchant_capacity_measured: StrictBool | None = None
     merchant_model: MerchantModelIn | None = None
     foreign_targets: list[ForeignTarget] = []
 
@@ -405,7 +411,7 @@ def _as_plan_request(doc: SetupDocument) -> PlanRequest:
         foreign_targets=doc.foreign_targets,
         # Absent is "not answered", which for this one is the same as "not
         # measured" -- the finding's default state.
-        merchant_model_measured=bool(doc.merchant_model_measured),
+        merchant_capacity_measured=bool(doc.merchant_capacity_measured),
         **levers,
     )
 

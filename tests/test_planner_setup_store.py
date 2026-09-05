@@ -378,7 +378,7 @@ class TestABlankMerchantLeverMeansThePlannersOwn:
 
 class TestTheVersion:
     def test_a_newer_version_says_so(self, client, account):
-        # 12, not 11: v11 became readable when `merchant_model_measured` started
+        # 12, not 11: v11 became readable when `merchant_capacity_measured` started
         # travelling in the document. This case needs a version that is
         # guaranteed to be beyond this build, so it moves whenever
         # READABLE_VERSIONS grows -- and the parametrised case below is what
@@ -392,34 +392,50 @@ class TestTheVersion:
     def test_every_readable_version_is_accepted(self, client, account, version):
         assert _put(client, account, _minimal(account, version=version)).status_code == 200
 
-    def test_the_measured_merchant_model_round_trips(self, client, account):
+    def test_the_old_field_name_is_gone_and_not_kept_as_an_alias(self, client, account):
+        """`merchant_model_measured` said "model", which is capacity AND speed.
+        Speed has never been measured on this server, so the tick would have
+        covered a reading nobody took. v11 had not shipped, so nothing has to
+        accept both -- and a document carrying the old key is stored verbatim
+        and READ as unmeasured, which is the safe direction (the finding
+        returns) rather than a silent silencing."""
+        from travian_api.web.routes.planner_setup import SetupDocument, _as_plan_request
+
+        assert "merchant_model_measured" not in SetupDocument.model_fields
+        doc = SetupDocument.model_validate(
+            _minimal(account, version=11, merchant_model_measured=True)
+        )
+
+        assert _as_plan_request(doc).merchant_capacity_measured is False
+
+    def test_the_measured_merchant_capacity_round_trips(self, client, account):
         # It records work done IN THE GAME that the game does not record: a
         # measured +20%/level is indistinguishable from an untouched one, so
         # nothing here could re-derive it. Dropped, MERCHANT_MODEL_UNCALIBRATED
         # returns on every plan and the operator is asked again for a reading
         # they have already taken.
-        doc = _minimal(account, version=11, merchant_model_measured=True)
+        doc = _minimal(account, version=11, merchant_capacity_measured=True)
         assert _put(client, account, doc).status_code == 200, doc
 
-        assert _get(client, account).json()["setup"]["merchant_model_measured"] is True
+        assert _get(client, account).json()["setup"]["merchant_capacity_measured"] is True
 
     def test_the_measured_answer_is_not_coerced_from_a_string(self, client, account):
         # `StrictBool`, like every other owned answer: pydantic's lax bool reads
         # "yes" as True, and a value nobody typed as a boolean must not silence
         # a finding about the figure that sizes every cargo.
-        doc = _minimal(account, version=11, merchant_model_measured="yes")
+        doc = _minimal(account, version=11, merchant_capacity_measured="yes")
 
         res = _put(client, account, doc)
 
         assert res.status_code == 422, res.text
-        assert "merchant_model_measured" in res.text, res.text
+        assert "merchant_capacity_measured" in res.text, res.text
 
     def test_a_document_that_never_says_it_plans_as_unmeasured(self, client, account):
         from travian_api.web.routes.planner_setup import SetupDocument, _as_plan_request
 
         doc = SetupDocument.model_validate(_minimal(account))
 
-        assert _as_plan_request(doc).merchant_model_measured is False
+        assert _as_plan_request(doc).merchant_capacity_measured is False
 
     def test_the_prune_answer_round_trips(self, client, account):
         # It decides whether /execute DELETES game rows, and it was carried by

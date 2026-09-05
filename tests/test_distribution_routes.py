@@ -1565,7 +1565,7 @@ class TestTheMerchantModelSaysWhenItIsUnpinned:
         if bonus is not None:
             payload["trade_office_bonus_per_level"] = bonus
         if measured is not None:
-            payload["merchant_model_measured"] = measured
+            payload["merchant_capacity_measured"] = measured
         return asyncio.run(post_plan(PlanRequest.model_validate(payload)))
 
     def test_a_trade_office_village_on_the_default_bonus_is_flagged(self):
@@ -1629,7 +1629,12 @@ class TestTheMerchantModelSaysWhenItIsUnpinned:
     def test_saying_nothing_still_leaves_it_flagged(self):
         # The default is False: an untouched account must keep the warning, or
         # the acknowledgement would silence it for everyone who never looked.
-        assert PlanRequest.model_fields["merchant_model_measured"].default is False
+        assert PlanRequest.model_fields["merchant_capacity_measured"].default is False
+        # And the old name is gone rather than kept as an alias. It said "model",
+        # which is capacity AND speed; speed has never been measured on this
+        # server, so the tick would have covered a reading nobody took. v11 had
+        # not shipped, so nothing has to accept both.
+        assert "merchant_model_measured" not in PlanRequest.model_fields
         res = self._plan(levels={20003: 13, 20026: 0}, measured=False)
 
         assert _findings(res, "merchant_model_uncalibrated")

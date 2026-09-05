@@ -836,11 +836,19 @@ class PlanRequest(BaseModel):
     trade_office_bonus_per_level: float = Field(
         default=EUROPE2_TEUTON.bonus_per_trade_office_level, ge=0
     )
-    merchant_model_measured: bool = Field(
+    # Named for what it actually covers. It was `merchant_model_measured`, which
+    # overstated it: the merchant MODEL is capacity and speed, and speed has
+    # never been measured on this server -- `MapGeometry`'s 12 fields/hour is
+    # still an assumption. This acknowledgement is about the two capacity
+    # figures above and nothing else, and a name that claimed the whole model
+    # would have let the unmeasured half ride along on the operator's tick.
+    merchant_capacity_measured: bool = Field(
         default=False,
         description=(
-            "The operator has MEASURED the two figures above against the game, "
-            "not merely accepted the defaults. MERCHANT_MODEL_UNCALIBRATED fires "
+            "The operator has MEASURED the two CAPACITY figures above against "
+            "the game -- the base and the Trade Office slope -- not merely "
+            "accepted the defaults. It says nothing about merchant SPEED, which "
+            "is assumed, not measured. MERCHANT_MODEL_UNCALIBRATED fires "
             "whenever `trade_office_bonus_per_level` still equals the shipped "
             "0.20 and any village has a Trade Office -- which is the right "
             "warning for an untouched account and unanswerable for one whose "
@@ -4880,7 +4888,7 @@ async def _plan_account(
     # an untouched one, so without an acknowledgement this finding can never be
     # cleared by doing the very thing it asks for.
     if (
-        not body.merchant_model_measured
+        not body.merchant_capacity_measured
         and body.trade_office_bonus_per_level == EUROPE2_TEUTON.bonus_per_trade_office_level
     ):
         levelled = sorted(vid for vid, level in trade_office.items() if level > 0)

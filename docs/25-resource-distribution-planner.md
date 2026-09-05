@@ -1311,7 +1311,9 @@ Why it exists: `localStorage` is scoped to an **origin**, so the same app on
 both sides (`planner_setup.READABLE_VERSIONS` ↔ `plannerSetup.SETUP_VERSION`).
 v7 carries per-profile `npc_attended`, v8 per-profile `overnight`, v9 the
 account-wide `reserved_window`, v10 `prune_to_window` and v11
-`merchant_model_measured`. Each earned a version rather than riding along as an
+`merchant_capacity_measured` (named `merchant_model_measured` until v11 shipped:
+the model is capacity *and* speed, speed is still assumed, and the old name
+claimed both). Each earned a version rather than riding along as an
 unknown key — which all five mechanically could, since the body is stored
 verbatim and `SetupDocument` ignores extras — because the harmful path is
 identical: a build that cannot read one drops it silently, the operator saves
@@ -1324,7 +1326,7 @@ The last two earned it on exactly the criterion `reserved_window` did — neithe
 persistence path carried them — and each is worse than the general case in its
 own way. `prune_to_window` decides whether `/execute` **deletes** rows from the
 game, the only destructive answer the document holds; its resting state is
-*on*, so only *off* is an answer somebody gave. `merchant_model_measured`
+*on*, so only *off* is an answer somebody gave. `merchant_capacity_measured`
 records work done **in** the game that the game does not record and nothing
 here can re-derive: a measured +20%/level is indistinguishable from an
 untouched one, which is the whole reason the acknowledgement exists (§4.20).
@@ -1383,7 +1385,7 @@ thirteenth field is counted on the day it is written. Two fields ride on every
 document whatever the operator does and so are not content on their own —
 `prune_to_window`, whose resting state is on, counts only when **false**; the
 merchant model counts only when a lever differs from the planner's own seed
-(`merchantModelIsCalibrated`). `merchant_model_measured` is content on its own,
+(`merchantModelIsCalibrated`). `merchant_capacity_measured` is content on its own,
 because the document carries it only when it is true.
 
 ## 4.18 The reserved marketplace window
@@ -1618,9 +1620,13 @@ still equals the shipped 0.20 and any village has a Trade Office — the right
 warning for an untouched account, and unanswerable for one whose operator read
 a Marketplace capacity at two levels and found 0.20 to be correct, because
 agreeing with the default is indistinguishable from never having looked.
-`PlanRequest.merchant_model_measured` is the operator saying they looked. It
+`PlanRequest.merchant_capacity_measured` is the operator saying they looked. It
 **silences that one finding and nothing else**: no bound, no budget and no
-other finding moves, and every figure in the plan is what it was.
+other finding moves, and every figure in the plan is what it was. It covers
+CAPACITY only — the base and the Trade Office slope. Merchant **speed** has
+never been measured on this server, which is why the field is not called
+`merchant_model_measured`: a name that claimed the whole model would have let
+the unmeasured half ride along on the operator's tick.
 
 **Going live for the first time is its own document.**
 [`docs/26-first-live-run.md`](26-first-live-run.md) is the step-by-step

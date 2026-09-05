@@ -93,7 +93,7 @@ are measurements the plan's own numbers rest on.
    Then **record that you did it**: tick **I read the base capacity and the
    bonus off the Marketplace send form**, the one control in the World &
    merchants row that is not a figure. It rides in the plan request as
-   `merchant_model_measured` and in the saved document as the field v11 added,
+   `merchant_capacity_measured` and in the saved document as the field v11 added,
    and it exists because `MERCHANT_MODEL_UNCALIBRATED` is an equality test
    against the shipped 0.20 — so an operator who measured the slope, found the
    default right and typed it back got the same warning for ever, asking them
@@ -136,7 +136,7 @@ unexpected:
   step 0.6. The check compares against the default value, so a reading that
   *confirms* +20 % is indistinguishable from never having looked — which is
   what the acknowledgement in step 0.6 is for: with it ticked the request
-  carries `merchant_model_measured: true` and this one finding is suppressed,
+  carries `merchant_capacity_measured: true` and this one finding is suppressed,
   and nothing else about the plan moves. If the warning is still here, either
   the box is unticked or an edit to base or bonus unticked it. Record the two
   readings in your run notes either way. A merchant-boundary warning means the
