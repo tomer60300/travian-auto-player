@@ -48,17 +48,24 @@ are measurements the plan's own numbers rest on.
    over-estimating plans cargo the merchants cannot carry. Open the
    Marketplace send form in a village at **Trade Office 0** (03 and 26 are)
    and read the resources-per-merchant figure it states; that number *is* the
-   base capacity. Read it again in a village at least three levels higher;
-   the pair fixes the slope, and closer levels are refused by the calibration
-   because the game floors the figure and the fit then overstates capacity.
-   Type both into the merchant-model fields. Do not build the plan against
-   the defaults.
-7. **Time one leg on the same form.** With the send form open on the
-   destination step 2 will use, note the travel time the game states and
-   compare it with `distance ÷ 12 × 60` minutes. Merchant speed has never
-   been measured on this server; it drives sets in flight, the merchant
-   budget and the night profile's turnaround counts. A disagreement here
-   invalidates step 1's merchant column, so it is settled before step 1.
+   base capacity. Read it again in any village with a Trade Office; with a
+   level-0 sample in hand there is no minimum separation, because the base is
+   read directly and nothing has to be inverted. (The three-level minimum
+   exists only when no level-0 reading is available and the slope has to be
+   solved from two levelled villages; the game floors the figure and a close
+   pair then overstates capacity.) Slope = (second reading ÷ base − 1) ÷ that
+   village's Trade Office level. Type base and slope into the merchant-model
+   fields, not the two readings. Do not build the plan against the defaults.
+7. **Time one leg.** Merchant speed has never been measured on this server;
+   it drives sets in flight, the merchant budget and the night profile's
+   turnaround counts, and a wrong speed invalidates step 1's merchant column.
+   If the send form states a duration for the destination step 2 will use,
+   compare it with `distance ÷ 12 × 60` minutes and you are done. If it does
+   not, do not block step 1 on this: time the first real firing in step 5
+   instead, departure minute from the route row, arrival from the
+   destination's incoming transports. Either way, record the answer. This
+   check cannot validate the map wrap: every village on this account sits
+   well inside the half-span, so the wrap never engages on a real pair.
 8. **Confirm the snapshot carries capacities.** The fetch reads warehouse and
    granary capacity for every village; a village whose capacity was not read
    is refused by the night derivation, by name. If 01 or 03 is named, fetch
@@ -71,15 +78,22 @@ the profile hours** is forced on and shown disabled; the page and the request
 agree. Press **Preview**. Nothing reaches the game.
 
 A dry run carries no `problems` — that field is populated only on live runs.
-Its refusal signal is the plan verdict from step 0.5, and the live call's own
-422. Read, in this order, and stop on anything unexpected:
+Its refusal signal is the plan verdict from step 0.5 (`executable` true,
+`blockers` empty) and that same verdict's `unweighed`, where overflow,
+starvation and `NIGHT_OVERRUN` appear: all three are critical and all three
+deliberately do **not** block execution. The live call's own 422 is the last
+gate. Then read the execute response, in this order, and stop on anything
+unexpected:
 
-- `warnings` — read each. `MERCHANT_MODEL_UNCALIBRATED` on a village with a
-  real Trade Office means the level was not typed; fix it. A merchant-boundary
-  warning means the two profiles together commit more merchants than the
-  fleet around the window edge; acceptable, but know which village. Read
-  `unweighed` too: overflow, starvation and `NIGHT_OVERRUN` are critical and
-  deliberately do **not** block execution.
+- `warnings` — read each. `MERCHANT_MODEL_UNCALIBRATED` does **not** mean a
+  Trade Office level is missing; it fires *because* levels were typed, on any
+  plan still carrying the default +20 % slope. The fix is step 0.6 and only
+  step 0.6. The check compares against the default value, so if your reading
+  confirms +20 % the warning keeps firing after the work is done: record the
+  two readings in your run notes and treat it from then on as a standing
+  reminder, not a blocker. A merchant-boundary warning means the two profiles
+  together commit more merchants than the fleet around the window edge;
+  acceptable, but know which village.
 - `requests_forecast` — the reads, disables, creates, verifies and trims the
   live run would spend. This is the price. On an ordinary run
   `marketplace_reads` is one per origin that creates; on a sweep it is one per
@@ -97,9 +111,12 @@ Its refusal signal is the plan verdict from step 0.5, and the live call's own
   is off-schedule for the profile (the plan moved it) or it is not in the plan
   at all. Protect it with **Never disable** (`x|y`) or fix the plan. Do not
   proceed with a disable you do not understand.
-- `created_game_rows` vs `live_game_rows` and **Max rows this run** — the
-  reported count is measured after the trim; the budget is an upper bound on
-  live rows. Confirm the numbers are consistent with each other.
+- `created_game_rows` and `live_game_rows` — the first is the rows the
+  creates would make, counted before the trim; the second is what would
+  survive it. On a dry run both are forecasts over the first **Routes this
+  run** routes and **neither is capped by Max rows this run**, so a forecast
+  above the budget is expected and means the live run will defer, not that
+  anything is wrong. The budget binds only live.
 
 Paste the whole response somewhere you can compare against later.
 
@@ -160,12 +177,16 @@ Then open the trace by `trace_id` and find the `window_pruned` event. Its
 with: the delete's response shape was taken from the game's bulk-toggle
 handler and has never been seen on this account. `deleted` means the shape
 applies; `unverified` means it does not and the code settled the delete purely
-by read-back. Either is safe. Record which.
+by read-back. Either is safe. Record which. The event exists only if rows
+were actually due for removal: a route whose whole fan-out already falls
+inside its window produces none, and that absence means nothing needed
+trimming, not that the trim failed.
 
 If any game check is false, stop. Undo as §3 describes — Check, then Disable,
-then Delete — confirm in the game that the route is gone, re-enable by hand
-every row the panel lists under **Routes this run switched, to put back**, and
-bring the response and a screenshot to the review.
+then Delete — confirm in the game that the route is gone, put back by hand
+every row the panel lists under **Routes this run switched, to put back** to
+the state its arrow names, and bring the response and a screenshot to the
+review.
 
 ## 3. Prove the undo once, on purpose
 
@@ -182,12 +203,21 @@ actions, not one**, and only the first is free of consequence.
    the game that the rows are gone; the panel names anything the app could not
    remove and you delete that by hand.
 
-**The undo does not re-enable anything.** Rows this run switched off are listed
-by the panel under **Routes this run switched, to put back**, and you switch
-them back on by hand in the marketplace: select them, edit selected, enable.
-The undo is complete only when that list is empty or every row on it is back
-on. An empty `disables` in step 2 is what makes the list empty, which is why
-step 2 prefers a village with no existing routes.
+**The undo does not change any enabled flag on a pre-existing row.** Every row
+whose flag this run moved is listed by the panel under **Routes this run
+switched, to put back**, and each line names the state to put it *back to*:
+`route 627318 -> enabled` means switch it on, `route 627319 -> disabled` means
+switch it off. Both happen — the run disables stale rows, and it re-enables
+dormant rows the plan still wants instead of creating them — so read the
+arrow, do not assume the direction. Do it by hand in the marketplace: select
+the rows, edit selected, set enabled or not. The undo is complete only when a
+fresh **Check** returns that list empty.
+
+As written, step 2 unticks the disable option and prefers a village with no
+routes, so this list will come back empty and the one part of the undo that
+has no code path is the one part never rehearsed. Before undoing, disable one
+disposable row on the origin by hand, so the list has one line and the
+put-back is exercised once with nothing at stake.
 
 Budget roughly ten game requests for the three calls: each re-reads the origin
 it touches, and each write is confirmed by its own read-back. It is the only
@@ -229,8 +259,9 @@ before the next step is taken.
    and `next_chunk_wait_seconds` tell you where it is. Never drive the sweep
    from the API without `max_origins_per_run`: the server's own default is
    unbounded, and fifty paced reads run past a client timeout with writes
-   already committed. One read per village serves both the reconcile and the
-   create. Let it finish; a deferred create gets its own pass at the end.
+   already committed. One marketplace read (two page loads) per village
+   serves both the reconcile and the create. Let it finish; a deferred create
+   gets its own pass at the end.
 
 After the sweep, the run-history panel's `needs_attention` must be false for
 every run, and a second sweep must report zero creates and zero disables: the
@@ -243,12 +274,17 @@ created in step 4 alongside the Day profile's, so the night runs itself with
 no request from us.
 
 Before sleeping, one deliberate experiment, because it is load-bearing on
-every rate the tool reports and has never been observed: pick one low-value
-route and size its cargo above what the origin will hold at its send time. The
-tool assumes a short sender sends a partial load rather than nothing. In the
-morning, read the origin's own movement history: did it send a short load, or
-skip? Record the answer; if it skipped, the assumption is wrong at both points
-the code states it.
+every rate the tool reports and has never been observed: what a route does
+when its origin holds less than the batch. The tool assumes a short sender
+sends a partial load rather than nothing. Pick one low-value route and, in
+the twenty minutes before its scheduled departure, spend the origin's stock
+by hand down below the batch the plan sized. Then watch: at the send minute
+the marketplace's merchants-in-transit list shows what actually left, and the
+destination's stock at the arrival minute shows what landed. This is the only
+window — a transfer between your own villages generates no report and nothing
+records it afterwards. A short load confirms the assumption; nothing leaving
+refutes it, and the code states it at two points that would both need
+changing.
 
 The next morning, read:
 
@@ -260,10 +296,13 @@ The next morning, read:
   the switch means the pre-night spend-down did not happen.
 - **The crop-negative villages**: is anyone's granary below where the plan
   promised at 07:00?
-- **Merchants**, now readable: at a minute when no route of an origin is
-  scheduled to depart, its free count should be at least the reserve you set
-  (default 2). Fewer means the plan's merchant arithmetic is wrong for that
-  village, and step 0.6 or 0.7 is where to look.
+- **Merchants**, now meaningful. A merchant is busy for the whole round trip,
+  so a village with short cycles has no quiet minute; do not wait for one.
+  Sample the free/total cell three or four times across the morning: `free`
+  should never fall below the total minus the plan's committed count for that
+  village, and never below the reserve you set (default 2). One reading below
+  the reserve is the signal: the plan's peak commitment is understated, and
+  step 0.6 or 0.7 is where the ruler is wrong.
 - **NPC**: if the plan relied on the exchange (attended or unattended, the
   wood-low or crop > 700,000 trigger), the plan modelled it; **no run
   performs it**. The NPC merchant exchanges inside one village and the
