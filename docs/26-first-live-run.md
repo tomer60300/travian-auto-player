@@ -32,18 +32,26 @@ are measurements the plan's own numbers rest on.
    pressing **Execute** at any point writes to the real account, with
    **Routes this run** at 3 and **Also disable routes the plan no longer
    wants** ticked. The page asks for confirmation before a live execute, but
-   a dialog is not a safety. Set `TRAVIAN_TRADE_ROUTE_LIVE=false` and
-   reconnect the session before step 0, so steps 0 and 1 cannot write even
-   by mis-click; set it back to true at step 2. Settings are rebuilt per
-   session, so a reconnect is enough. No server restart, and never restart
-   :80 without asking.
+   a dialog is not a safety. Set `TRAVIAN_TRADE_ROUTE_LIVE=false` in `.env` —
+   not in the shell, because a running process's environment cannot be
+   changed from outside — and reconnect the session before step 0, so steps
+   0 and 1 cannot write even by mis-click; set it back to true at step 2.
+   Settings are rebuilt per session, so a reconnect is enough: no server
+   restart, and never restart :80 without asking. Reconnect is refused with a
+   409 while any operation is running, so stop the farm and queue loops
+   first; the refusal names them.
 
    The response tells you which state you are in: every response carries
    `live_enabled`, and a dry run reports it truthfully. Read it before you
    trust anything else. Dry runs never depend on it — `dry_run: true`
    returns before the session is touched — and a live execute with the flag
-   false is refused with a 409 naming it. Two comments in the code still say
-   the flag defaults off; they are stale, and queued for correction.
+   false is refused with a 409 naming it. Three comments in the code still
+   say the flag defaults off — two in `trade_route_service.py`, one in
+   `sessions.py` — and are queued for correction. The constructor default
+   `live_enabled: bool = False` in `trade_route_service.py` is **not** one of
+   them: that is the library's own safe default, which every test and every
+   direct construction depends on. Only `sessions.py` overrides it, with the
+   settings value.
 3. **A run cannot be undone without its trace.** A live run whose trace file
    cannot be opened is refused before the first game request (`4b5203b`),
    because the game returns no id on create and the undo reconstructs from
@@ -158,8 +166,9 @@ Set:
 | **Also disable routes the plan no longer wants** | unticked, unless the village has no routes | nothing is switched off that you have not seen |
 | **Whole day** | on | the same plan you confirmed in step 1 |
 
-Set `TRAVIAN_TRADE_ROUTE_LIVE=true` (or unset it; true is the default) and
-reconnect the session. Press **Preview** once more and confirm the response
+Set `TRAVIAN_TRADE_ROUTE_LIVE=true` in `.env` (or unset it; true is the
+default), stop any running loops, and reconnect the session. Press
+**Preview** once more and confirm the response
 shows `live_enabled: true` with `dry_run: true`. That pair is the only proof
 you have of which mode you are in. Then execute, and confirm the dialog.
 
