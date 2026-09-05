@@ -78,6 +78,41 @@ def _derive(**extra):
     return asyncio.run(post_night_profile(_body(**extra), USER))
 
 
+class TestTheLatencyTargetNeverReachesTheDerivation:
+    """`shed_limit` is what bounds every night decision -- what a village may
+    give away, what a hub may draw in, what goes unmet -- and it is a function
+    of stores and production alone. Nothing here is scheduling.
+
+    Pinned because the night's `latency_target_hours` is reported as `null`, and
+    that claim covers the derivation as well as the routing: an operator reading
+    it takes it to mean no delivery-lag target shaped anything about the night.
+    Sweeping the request's target across three values a night window would clamp
+    differently has to leave the derived profile identical to the byte.
+    """
+
+    def _derive(self, target):
+        body = _body()
+        body.max_latency_hours = target
+        return asyncio.run(post_night_profile(body, USER))
+
+    def test_the_derived_profile_is_identical_across_three_targets(self):
+        standing, whole_day, half_hour = (
+            self._derive(target).model_dump(mode="json") for target in (2.0, 24.0, 0.5)
+        )
+
+        assert standing == whole_day
+        assert standing == half_hour
+
+    def test_the_shed_bounded_answers_are_named_explicitly(self):
+        """Every figure `shed_limit` decides, asserted apart from the whole
+        document so a failure says which one moved."""
+        derived = [self._derive(target) for target in (2.0, 24.0, 0.5)]
+
+        for field in ("allocations", "forced_senders", "drawn_in", "unmet"):
+            values = [getattr(d, field) for d in derived]
+            assert all(v == values[0] for v in values), (field, values)
+
+
 class TestItInfersWhatItCan:
     def test_the_hub_is_the_day_profiles_remainder_village(self):
         assert _derive().hub == HUB

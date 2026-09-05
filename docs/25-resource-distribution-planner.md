@@ -1431,6 +1431,17 @@ hours nobody is waiting through, the latency pass never runs and the LATENCY
 findings never fire, and naming the clamped figure there would read as a target
 the night's longer cycles had *missed* rather than one it never had.
 
+`null` there is a claim about the OUTPUT, and it is measured as one. Sweeping
+the request's `max_latency_hours` across 2 h, 24 h and 0.5 h on an overnight
+window leaves the plan byte-identical — the routes, the merchant assignments,
+every derived figure — and leaves the derived night profile byte-identical too,
+because `shed_limit` and everything it bounds (what a village may give away,
+what a hub draws in, what goes unmet) is a function of stores and production and
+never of scheduling. The same sweep on a 16 h day window moves the plan: the
+reported target follows the clamp (2.0 / 16.0 / 0.5) and the LATENCY finding
+fires at 0.5 h. That contrast is the evidence the suspension does not leak, and
+it is what makes `null` an honest report rather than a label.
+
 **There is now exactly one place the target comes from.** The page sends no
 `max_latency_hours` on **any** path — `/plan`, `/day-check`, `/night-profile`,
 preview, the sweep, the whole-day run — so the standing target is

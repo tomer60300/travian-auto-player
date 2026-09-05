@@ -783,6 +783,70 @@ class TestTheLatencyTargetIsInTheResponse:
         assert self._plan(dispatch_window=(1380, 420)).latency_target_hours is None
 
 
+class TestTheLatencyTargetCannotTouchTheNight:
+    """`latency_target_hours: null` overnight is a claim, not a label.
+
+    It says nothing about this route set was decided by a delivery-lag target --
+    section 6 suspends the rule for the hours nobody is waiting through, so the
+    pass that enforces it never runs and the LATENCY findings never fire. The
+    field is only honest if that is true of the OUTPUT and not merely of the
+    code path: a night plan that moved when the target moved would mean the
+    suspension leaks, and `null` would then be hiding a rule the routes had
+    obeyed after all.
+
+    So the target is swept across three values a night window would clamp
+    differently -- the standing 2 h, a whole day, and half an hour -- and every
+    byte of the plan has to be the same. Nothing weaker will do: the routes,
+    the merchant assignments and every derived figure are what a caller compares
+    between profiles.
+    """
+
+    NIGHT = (23 * 60, 7 * 60)
+    DAY = (7 * 60, 23 * 60)
+    TARGETS = (2.0, 24.0, 0.5)
+
+    def _plan(self, window, target):
+        body = _plan_request(
+            {"lumber": {"20003": {"mode": "absolute", "value": 0}, "20011": {"mode": "remainder"}}}
+        ).model_copy(update={"dispatch_window": window, "max_latency_hours": target})
+        return asyncio.run(post_plan(body))
+
+    def test_the_whole_night_plan_is_byte_identical_across_three_targets(self):
+        standing, whole_day, half_hour = (
+            self._plan(self.NIGHT, target).model_dump(mode="json") for target in self.TARGETS
+        )
+
+        assert standing["latency_target_hours"] is None, standing["latency_target_hours"]
+        assert standing == whole_day, "a 24h target moved a plan no target was applied to"
+        assert standing == half_hour, "a 0.5h target moved a plan no target was applied to"
+
+    def test_the_routes_and_the_merchants_are_named_explicitly(self):
+        """The two the field exists to be read against: a caller comparing the
+        day's and the night's cycles has to know the night's were not chosen by
+        a target. Asserted apart from the whole-document check so a failure says
+        WHICH of them moved."""
+        plans = [self._plan(self.NIGHT, target) for target in self.TARGETS]
+
+        assert (
+            len({tuple((r.cycle_hours, r.dispatch, r.merchants) for r in p.rows) for p in plans})
+            == 1
+        ), [[(r.cycle_hours, r.dispatch, r.merchants) for r in p.rows] for p in plans]
+        assert len({p.total_merchants for p in plans}) == 1, [p.total_merchants for p in plans]
+
+    def test_the_same_sweep_does_move_a_day_plan(self):
+        """The control, and the whole reason the test above proves anything: the
+        request's field is live. A 0.5h target on the same account fires the
+        LATENCY finding the night never sees, and the day reports the figure it
+        was clamped to rather than null."""
+        days = [self._plan(self.DAY, target) for target in self.TARGETS]
+
+        assert [d.latency_target_hours for d in days] == [2.0, 16.0, 0.5], [
+            d.latency_target_hours for d in days
+        ]
+        assert not any("latency against" in w for w in days[0].warnings), days[0].warnings
+        assert any("latency against" in w for w in days[2].warnings), days[2].warnings
+
+
 class TestPlanDiagnostics:
     """/plan must answer "should I care?" before it answers "about what?".
 
