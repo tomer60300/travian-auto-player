@@ -4765,6 +4765,71 @@ class TestPruningTheFanOutToTheProfilesHours:
         assert not getattr(svc, "deleted", []), "off by default: it deletes rows"
 
 
+class TestTheTrimKeepsRowsByMultiplicityNotByMembership:
+    """How many rows may survive a minute, not whether the minute is allowed.
+
+    The trim's question at minute m is "how many of the planned routes' windows
+    contain m?" -- a COUNT. The tempting reading is a boolean: m belongs to some
+    window, so every row sitting on m is in-window and stays. The two agree
+    whenever the game fans a route out exactly as 24/N predicts, and part
+    company the moment it does not: a duplicated row is then a row at a
+    permitted minute, and the boolean reading keeps it for ever. It ships a
+    second load the plan never budgeted merchants or resources for, and every
+    later run sees a marketplace that already satisfies the plan.
+    """
+
+    def _account(self, minute=600):
+        # A 24h cycle: 24/N predicts exactly ONE row, so a second row at the
+        # same minute is unambiguously a duplicate rather than part of a
+        # fan-out.
+        return _account(
+            [_row_with_cycle(20003, -1, 24, minute)],
+            {20003: (0, 0), -1: (40, 40)},
+            {20003: "03", -1: "A"},
+        )
+
+    def _run(self, svc, minute=600):
+        return _run_live(
+            svc,
+            self._account(minute),
+            max_routes_per_run=50,
+            max_game_rows_per_run=0,
+            dispatch_window=[420, 1380],
+            prune_to_window=True,
+        )
+
+    def test_a_second_row_at_a_wanted_minute_is_still_deleted(self):
+        # 10:00 is inside the 07:00-23:00 window, and the game made two rows
+        # there instead of one.
+        svc = _FakeLiveSvc(rows_per_create=2)
+        res = self._run(svc)
+
+        assert res.created_game_rows == 2, "the game really made two rows"
+        assert svc.deleted, "the surplus row must be pruned"
+        assert [len(ids) for _vid, ids in svc.deleted] == [1], svc.deleted
+        assert res.live_game_rows == 1, "exactly one row may survive that minute"
+
+    def test_the_row_the_plan_wants_is_not_deleted_with_it(self):
+        """The other half: keeping by multiplicity must not become deleting by
+        multiplicity. One planned row at the minute means one survivor, not
+        zero."""
+        svc = _FakeLiveSvc(rows_per_create=2)
+        res = self._run(svc)
+
+        assert not any("refusing to prune every new row" in p for p in res.problems), res.problems
+        assert res.live_game_rows == 1
+
+    def test_a_single_row_at_a_wanted_minute_is_left_alone(self):
+        """The control: without a duplicate there is nothing to trim, so a run
+        that deletes here is deleting the route it just made."""
+        svc = _FakeLiveSvc()
+        res = self._run(svc)
+
+        assert svc.deleted == [], svc.deleted
+        assert res.created_game_rows == 1
+        assert res.live_game_rows == 1
+
+
 class TestAFailedWindowPruneIsNotSilent:
     """A prune that did not happen must not read as a run with nothing to say.
 

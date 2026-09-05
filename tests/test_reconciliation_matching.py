@@ -141,6 +141,52 @@ class TestWhichMinutesARouteWillDepartAt:
     def test_the_fan_out_is_24_over_n(self, cycle, expected):
         assert len(_planned_minutes(_planned(20011, cycle=cycle))) == expected
 
+    # A 6h cycle spaces its four departures 360 minutes apart, so BOTH windows
+    # below always catch at least one of them whatever the send minute -- which
+    # keeps the "a route with no in-window departure keeps them all" fallback out
+    # of these cases. Without that the answers would be indistinguishable from a
+    # window that matched nothing.
+    @pytest.mark.parametrize(
+        "minute,in_day",
+        [
+            (420, True),  # 07:00 -- Day opens here and Night has just closed
+            (419, False),  # one minute earlier still belongs to Night
+            (1380, False),  # 23:00 -- Night opens here and Day has just closed
+            (1379, True),
+        ],
+    )
+    def test_a_window_owns_its_start_minute_and_not_its_end_minute(self, minute, in_day):
+        """Half-open, [start, end), on the wrapped window as well as the plain
+        one -- so the two profiles of a whole-day run partition the clock
+        instead of overlapping at the hour they meet.
+
+        An inclusive end would put 07:00 in Night AND Day. Nothing raises: the
+        minute simply becomes wanted twice, the trim keeps two rows there, and
+        the destination quietly ships a double load at the changeover for as
+        long as the routes live."""
+        day = _planned_minutes(_planned(20011, cycle=6, minute=minute, window=(420, 1380)))
+        night = _planned_minutes(_planned(20011, cycle=6, minute=minute, window=(1380, 420)))
+
+        assert (minute in day) is in_day, (minute, day)
+        assert (minute in night) is not in_day, (minute, night)
+
+    def test_the_two_profiles_partition_the_fan_out(self):
+        """The consequence, stated directly: every departure belongs to exactly
+        one of the pair. Any minute in both is a row the trim wants twice; any
+        minute in neither is a row both profiles delete."""
+        whole = _planned_minutes(_planned(20011, cycle=6, minute=420))
+        day = _planned_minutes(_planned(20011, cycle=6, minute=420, window=(420, 1380)))
+        night = _planned_minutes(_planned(20011, cycle=6, minute=420, window=(1380, 420)))
+
+        assert set(day) & set(night) == set()
+        assert sorted(set(day) | set(night)) == whole
+
+    def test_the_night_window_wraps_past_midnight(self):
+        """23:00-07:00 is one window, not two: it holds 1380 and 0 alike."""
+        minutes = _planned_minutes(_planned(20011, cycle=1, minute=0, window=(1380, 420)))
+
+        assert minutes == [0, 60, 120, 180, 240, 300, 360, 1380]
+
 
 class TestReadingALiveRowsDepartureTime:
     def test_a_departure_becomes_its_minute_of_the_day(self):
