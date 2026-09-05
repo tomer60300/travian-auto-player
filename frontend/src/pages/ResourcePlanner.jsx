@@ -2938,14 +2938,28 @@ export default function ResourcePlanner() {
             (res.data.actions.some((a) => a.status === 'failed')
               ? 'a create failed — see the result panel'
               : null)
+          // Neither a failure nor a success, and it had been neither on screen:
+          // an `indeterminate` create means the game's answer died and the
+          // marketplace would not read the same way twice, so whether a route
+          // was written is UNKNOWN. With no `problems` line (a one-origin run
+          // produces none) and nothing `failed`, the toast was the green "No
+          // new routes needed".
+          const unsettled =
+            !problem && res.data.actions.some((a) => a.status === 'indeterminate')
+              ? 'a create could not be settled — see the result panel'
+              : null
           if (res.data.created > 0 && problem) {
             // Some routes went through, but a real failure occurred too — don't
             // let the green count hide it.
             toast.error(`Created ${res.data.created} route(s), but ${problem}`)
+          } else if (res.data.created > 0 && unsettled) {
+            toast.warning(`Created ${res.data.created} route(s), but ${unsettled}`)
           } else if (res.data.created > 0) {
             toast.success(`Created ${res.data.created} route(s)${left}`)
           } else if (problem) {
             toast.error(problem)
+          } else if (unsettled) {
+            toast.warning(unsettled)
           } else {
             toast.success(`No new routes needed${left}`)
           }
@@ -7771,7 +7785,9 @@ export default function ResourcePlanner() {
                     {!execResult.dry_run &&
                       execResult.remaining > 0 &&
                       (!execResult.problems || execResult.problems.length === 0) &&
-                      !execResult.actions.some((a) => a.status === 'failed') && (
+                      !execResult.actions.some(
+                        (a) => a.status === 'failed' || a.status === 'indeterminate'
+                      ) && (
                         <p className="text-xs text-secondary mb-2">
                           Deferred routes were not checked this run (a few villages are handled per
                           run). Run again to continue — already-active routes are skipped.
@@ -7853,9 +7869,20 @@ export default function ResourcePlanner() {
                                   ? 'text-success'
                                   : a.status === 'failed' || a.status === 'blocked'
                                     ? 'text-danger'
-                                    : a.status === 'deferred' || a.status === 'skipped'
-                                      ? 'text-secondary'
-                                      : 'text-info'
+                                    : // `indeterminate` is its own outcome and
+                                      // not a shade of either: the create's
+                                      // answer died and the marketplace could
+                                      // not be read twice the same way, so
+                                      // absence proves nothing. Painted as the
+                                      // generic `text-info` it sat beside
+                                      // `would_create` and `created_unverified`
+                                      // -- two states that are not a question
+                                      // about the account.
+                                      a.status === 'indeterminate'
+                                      ? 'text-warning'
+                                      : a.status === 'deferred' || a.status === 'skipped'
+                                        ? 'text-secondary'
+                                        : 'text-info'
                               }`}
                             >
                               {/* Glyph + word, so outcome is never colour-only. */}
@@ -7863,7 +7890,9 @@ export default function ResourcePlanner() {
                                 ? '✓ '
                                 : a.status === 'failed' || a.status === 'blocked'
                                   ? '✕ '
-                                  : ''}
+                                  : a.status === 'indeterminate'
+                                    ? '⚠ '
+                                    : ''}
                               {a.status.replace('_', ' ')}
                             </td>
                             <td className="px-2 text-secondary">{a.detail || '—'}</td>
