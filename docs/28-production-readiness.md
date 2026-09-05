@@ -335,6 +335,14 @@ directory somewhere before building; nothing else will preserve it.
 `Depends(get_current_user)` and speak about the *game* session rather than the
 process.
 
+**One thing to expect on the first restart after the token-versioning change.**
+JWTs now carry a `tv` claim compared against `users.token_version`, and a token
+minted before that claim existed is refused rather than read as version 0. So
+every open tab signs in again, once, on both ports. After that, `POST
+/api/users/logout` bumps the row's version and ends every token that user holds
+— the lever for a token you think has leaked. It is not wired to any button; the
+UI's sign-out still just drops its own copy.
+
 What you can use today, in ascending cost:
 
 | check | what a success proves | what it does not prove |

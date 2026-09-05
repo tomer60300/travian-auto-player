@@ -806,15 +806,20 @@ class TestWebSocketReconnect:
         import travian_api.web.ws.manager as ws_module
 
         manager = ws_module.ConnectionManager()
-        monkeypatch.setattr(ws_module, "decode_access_token", lambda token: {"user_id": 7})
+        monkeypatch.setattr(
+            ws_module,
+            "decode_access_token",
+            lambda token: {"user_id": 7, "token_version": 0},
+        )
         monkeypatch.setattr(ws_module.session_manager, "get", lambda user_id: None)
 
-        # The user row is looked up now (a token for a deleted account must not
-        # authenticate a socket); this file is about session RESTORE, so stub it.
-        async def user_exists(user_id):
+        # The user row is looked up now (a token for a deleted or revoked
+        # account must not authenticate a socket); this file is about session
+        # RESTORE, so stub it.
+        async def token_is_current(user_id, token_version):
             return True
 
-        monkeypatch.setattr(ws_module, "_user_still_exists", user_exists)
+        monkeypatch.setattr(ws_module, "_token_is_current", token_is_current)
 
         async def restored(user_id):
             return SimpleNamespace(user_id=user_id)
@@ -829,15 +834,20 @@ class TestWebSocketReconnect:
         import travian_api.web.ws.manager as ws_module
 
         manager = ws_module.ConnectionManager()
-        monkeypatch.setattr(ws_module, "decode_access_token", lambda token: {"user_id": 7})
+        monkeypatch.setattr(
+            ws_module,
+            "decode_access_token",
+            lambda token: {"user_id": 7, "token_version": 0},
+        )
         monkeypatch.setattr(ws_module.session_manager, "get", lambda user_id: None)
 
-        # The user row is looked up now (a token for a deleted account must not
-        # authenticate a socket); this file is about session RESTORE, so stub it.
-        async def user_exists(user_id):
+        # The user row is looked up now (a token for a deleted or revoked
+        # account must not authenticate a socket); this file is about session
+        # RESTORE, so stub it.
+        async def token_is_current(user_id, token_version):
             return True
 
-        monkeypatch.setattr(ws_module, "_user_still_exists", user_exists)
+        monkeypatch.setattr(ws_module, "_token_is_current", token_is_current)
 
         async def not_restored(user_id):
             return None

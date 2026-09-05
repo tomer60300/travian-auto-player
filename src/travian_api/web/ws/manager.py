@@ -34,12 +34,14 @@ def _token_from_subprotocol(websocket: WebSocket) -> Optional[str]:
     return None
 
 
-async def _user_still_exists(user_id: int) -> bool:
-    """Is there still a ``User`` row for this id?
+async def _token_is_current(user_id: int, token_version: int) -> bool:
+    """Is there still a ``User`` row for this id, at this token version?
 
-    Opens its own db session for the same reason :func:`try_restore_session`
-    does: a socket has no request-scoped dependency to borrow one from. Kept
-    out of ``ConnectionManager`` so a test can point it at a db of its own.
+    Both halves of what ``get_current_user`` checks after decoding, so a socket
+    accepts exactly what an HTTP route would. Opens its own db session for the
+    same reason :func:`try_restore_session` does: a socket has no
+    request-scoped dependency to borrow one from. Kept out of
+    ``ConnectionManager`` so a test can point it at a db of its own.
     """
     from sqlalchemy import select
 
@@ -47,7 +49,8 @@ async def _user_still_exists(user_id: int) -> bool:
 
     async with db_module.async_session_factory() as db:
         result = await db.execute(select(db_module.User).where(db_module.User.id == user_id))
-        return result.scalar_one_or_none() is not None
+        user = result.scalar_one_or_none()
+        return user is not None and user.token_version == token_version
 
 
 class ConnectionManager:
@@ -103,15 +106,15 @@ class ConnectionManager:
 
         user_id = payload["user_id"]
 
-        # The user must still exist. ``get_current_user`` looks the row up and
-        # 401s when it is gone; skipping the lookup here meant a token for a
-        # deleted account was refused on every HTTP route and accepted on all
-        # ten sockets for the rest of its 24 hours -- and with no revocation
-        # anywhere in this app, deleting the row is the only way to end a
-        # session at all.
-        if not await _user_still_exists(user_id):
+        # The user must still exist, and the token must not have been revoked.
+        # ``get_current_user`` checks both and 401s; skipping the lookup here
+        # meant a token for a deleted account was refused on every HTTP route
+        # and accepted on all ten sockets for the rest of its 24 hours.
+        if not await _token_is_current(user_id, payload["token_version"]):
             await websocket.accept()
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Unknown user")
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION, reason="Unknown user or revoked token"
+            )
             return None
 
         # Verify user has active Travian session (when required). HTTP routes

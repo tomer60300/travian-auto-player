@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, func, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -53,6 +53,13 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    # Bumped to revoke. The JWT carries the value it was minted with and every
+    # authenticated entry point compares the two, so one increment ends every
+    # token this user holds -- which is otherwise impossible: the tokens are
+    # stateless, valid for 24 h, and there is no refresh or blocklist.
+    token_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
     )
 
     credentials: Mapped[list["TravianCredential"]] = relationship(
@@ -125,6 +132,11 @@ class ReconCredential(Base):
 # but never ALTERs existing ones, so upgrading a live travian_web.db needs
 # these backfilled or every query naming them fails with 'no such column'.
 _COLUMN_BACKFILLS: dict[str, dict[str, str]] = {
+    "users": {
+        # SQLite accepts NOT NULL in ADD COLUMN only with a non-null default,
+        # which this has; existing rows read 0 and their tokens keep working.
+        "token_version": "INTEGER NOT NULL DEFAULT 0",
+    },
     "travian_credentials": {
         "label": "VARCHAR(128)",
         "last_connected": "DATETIME",

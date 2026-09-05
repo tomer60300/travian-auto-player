@@ -237,23 +237,45 @@ def verify_password(password: str, hashed: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def create_access_token(user_id: int, username: str) -> str:
-    """Create a signed JWT containing the user's id and username."""
+def create_access_token(user_id: int, username: str, token_version: int) -> str:
+    """Create a signed JWT containing the user's id, username and token version.
+
+    *token_version* is required rather than defaulted: a token minted without
+    the caller's current ``User.token_version`` is a token revocation cannot
+    reach, and a default would make that the easy mistake to make.
+    """
     payload = {
         "user_id": user_id,
         "username": username,
+        "tv": token_version,
         "exp": datetime.now(UTC) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def decode_access_token(token: str) -> dict:
-    """Decode and verify a JWT.  Returns ``{"user_id": int, "username": str}``.
+    """Decode and verify a JWT.
+
+    Returns ``{"user_id": int, "username": str, "token_version": int}``.
+
+    A payload with no ``tv`` claim predates revocation and is refused rather
+    than read as version 0 -- a bump could never end it, which is the one thing
+    the version exists to do. The cost is that everyone signed in across this
+    deploy signs in again, once.
 
     Raises ``jwt.ExpiredSignatureError`` or ``jwt.InvalidTokenError`` on failure.
     """
     payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    return {"user_id": payload["user_id"], "username": payload["username"]}
+    if "tv" not in payload:
+        raise jwt.InvalidTokenError(
+            "token carries no version claim, so it cannot be revoked; it was "
+            "issued before token versioning existed. Sign in again."
+        )
+    return {
+        "user_id": payload["user_id"],
+        "username": payload["username"],
+        "token_version": payload["tv"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +310,8 @@ async def get_current_user(
     Also sets ``request.state.user_id`` so that downstream dependencies
     (e.g. the rate limiter) can key on the authenticated user rather than IP.
 
-    Raises HTTP 401 if the token is invalid/expired or the user no longer exists.
+    Raises HTTP 401 if the token is invalid/expired, the user no longer exists,
+    or the token was revoked (its ``tv`` claim no longer matches the row).
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -307,6 +330,12 @@ async def get_current_user(
     user = result.scalar_one_or_none()
 
     if user is None:
+        raise credentials_exception
+
+    # Revoked: POST /api/users/logout bumps the row's version, which ends every
+    # token minted before it in one write. Without this the only lever an
+    # operator had over a leaked token was deleting the account.
+    if user.token_version != payload["token_version"]:
         raise credentials_exception
 
     # Expose user_id on request state for rate limiting and other middleware

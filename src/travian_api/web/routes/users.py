@@ -114,7 +114,7 @@ async def register(
         )
     await db.refresh(user)
 
-    token = create_access_token(user.id, user.username)
+    token = create_access_token(user.id, user.username, user.token_version)
     return TokenResponse(access_token=token)
 
 
@@ -140,7 +140,7 @@ async def login(
             detail="Invalid username or password",
         )
 
-    token = create_access_token(user.id, user.username)
+    token = create_access_token(user.id, user.username, user.token_version)
     return TokenResponse(access_token=token)
 
 
@@ -152,3 +152,21 @@ async def me(user: User = Depends(get_current_user)):
         username=user.username,
         created_at=user.created_at.isoformat(),
     )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Revoke every token this user holds, including the one making the call.
+
+    The tokens are stateless HS256 with a 24-hour life and no blocklist, so
+    until now "logging out" was the browser dropping its copy
+    (``localStorage.removeItem('token')``) while the token itself stayed valid
+    for the rest of the day wherever else it had reached. Bumping the row's
+    version invalidates all of them in one write, which is the point: this is
+    the lever for a token that leaked, not a per-device sign-out.
+    """
+    user.token_version += 1
+    await db.commit()

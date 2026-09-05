@@ -88,7 +88,9 @@ def _authenticate(token: str):
 
 def test_a_token_for_a_deleted_user_is_refused(patched_db):
     patched_db(None)
-    user_id, socket = _authenticate(create_access_token(user_id=42, username="ghost"))
+    user_id, socket = _authenticate(
+        create_access_token(user_id=42, username="ghost", token_version=0)
+    )
 
     assert user_id is None
     assert socket.accepted, "ASGI requires accept() before close()"
@@ -97,8 +99,8 @@ def test_a_token_for_a_deleted_user_is_refused(patched_db):
 
 
 def test_a_token_for_a_live_user_is_accepted(patched_db):
-    holder = patched_db(SimpleNamespace(id=42, username="me"))
-    user_id, socket = _authenticate(create_access_token(user_id=42, username="me"))
+    holder = patched_db(SimpleNamespace(id=42, username="me", token_version=0))
+    user_id, socket = _authenticate(create_access_token(user_id=42, username="me", token_version=0))
 
     assert user_id == 42
     assert socket.closed is None
@@ -106,7 +108,7 @@ def test_a_token_for_a_live_user_is_accepted(patched_db):
 
 
 def test_an_undecodable_token_never_reaches_the_database(patched_db):
-    holder = patched_db(SimpleNamespace(id=42, username="me"))
+    holder = patched_db(SimpleNamespace(id=42, username="me", token_version=0))
     user_id, socket = _authenticate("not-a-jwt")
 
     assert user_id is None
