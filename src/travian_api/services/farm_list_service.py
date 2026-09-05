@@ -493,6 +493,16 @@ class FarmListService:
             all_results: List[FarmListSendTargetResult] = []
             troops_exhausted = False
 
+            # How far the cursor has earned the right to move, committed to
+            # `self._cursors` in the `finally` below so EVERY exit path writes
+            # it. It used to be written only on the two clean exits, so a
+            # TravianError/NetworkError mid-loop left it untouched and the next
+            # run re-raided the batches that had already gone out: measured 12
+            # of 12 slots duplicated across two runs, 8 of them definitely
+            # dispatched, troops leaving twice. There is no fixed point on the
+            # failing shape, so it repeats for as long as the failure lasts.
+            advanced = 0
+
             # Stealth: pick a per-cycle batch size from a small range so the
             # payload-shape signature isn't an invariant 5,5,5,... across runs.
             # Stays close to BATCH_SIZE so cursor math remains stable.
@@ -503,68 +513,75 @@ class FarmListService:
             # Stealth: small custom pause between successive batches so the
             # network signature isn't "5 targets, 5 targets, 5 targets" at
             # raw-throttler cadence. Cheap (~0.25-0.9s typical).
-            for batch_idx, batch_start in enumerate(range(0, total, batch_size)):
-                if batch_idx > 0:
+            try:
+                for batch_idx, batch_start in enumerate(range(0, total, batch_size)):
+                    if batch_idx > 0:
+                        try:
+                            await self.http_client.human_delay.wait_range(
+                                0.25, 0.9, f"pause between farm-list batches ({batch_idx + 1})"
+                            )
+                        except Exception:
+                            pass
+                    batch = rotated[batch_start : batch_start + batch_size]
+
                     try:
-                        await self.http_client.human_delay.wait_range(
-                            0.25, 0.9, f"pause between farm-list batches ({batch_idx + 1})"
-                        )
-                    except Exception:
-                        pass
-                batch = rotated[batch_start : batch_start + batch_size]
+                        batch_results = await self._send_batch(list_id, batch)
+                    except Exception as e:
+                        if "goldclub" in str(e).lower():
+                            all_results.extend(
+                                [
+                                    FarmListSendTargetResult(
+                                        id=s, status="error", error="plus.error_goldclub"
+                                    )
+                                    for s in batch
+                                ]
+                            )
+                            troops_exhausted = True
+                            break
+                        raise
 
-                try:
-                    batch_results = await self._send_batch(list_id, batch)
-                except Exception as e:
-                    if "goldclub" in str(e).lower():
-                        all_results.extend(
-                            [
-                                FarmListSendTargetResult(
-                                    id=s, status="error", error="plus.error_goldclub"
-                                )
-                                for s in batch
-                            ]
-                        )
-                        troops_exhausted = True
-                        break
-                    raise
+                    all_results.extend(batch_results)
 
-                all_results.extend(batch_results)
-
-                # Check if this entire batch failed with troop errors → stop
-                batch_sent = sum(1 for t in batch_results if not t.error)
-                batch_troop_errors = sum(
-                    1 for t in batch_results if t.error and "troops" in t.error.lower()
-                )
-                if batch_results and batch_sent == 0 and batch_troop_errors == len(batch_results):
-                    troops_exhausted = True
-                    # Advance cursor PAST the depleted batch — without this,
-                    # the next cycle retries the exact same empty slots first
-                    # (a bot-like instant-retry signature).
-                    cursor_advance = batch_start + len(batch)
-                    logger.info(
-                        "Farm list %d: troops exhausted at batch offset %d (advancing past batch)",
-                        list_id,
-                        batch_start,
+                    # Check if this entire batch failed with troop errors → stop
+                    batch_sent = sum(1 for t in batch_results if not t.error)
+                    batch_troop_errors = sum(
+                        1 for t in batch_results if t.error and "troops" in t.error.lower()
                     )
-                    self._cursors[list_id] = (cursor + cursor_advance) % total if total else 0
-                    return FarmListSendResult(targets=all_results)
+                    advanced += batch_sent
+                    if (
+                        batch_results
+                        and batch_sent == 0
+                        and batch_troop_errors == len(batch_results)
+                    ):
+                        troops_exhausted = True
+                        # Advance cursor PAST the depleted batch — without this,
+                        # the next cycle retries the exact same empty slots first
+                        # (a bot-like instant-retry signature). The one place
+                        # the cursor moves past slots that were NOT sent.
+                        advanced = batch_start + len(batch)
+                        logger.info(
+                            "Farm list %d: troops exhausted at batch offset %d (advancing past batch)",
+                            list_id,
+                            batch_start,
+                        )
+                        return FarmListSendResult(targets=all_results)
 
-            # ── Advance cursor ──────────────────────────────────────────
-            sent_ok = sum(1 for t in all_results if not t.error)
-            new_cursor = (cursor + sent_ok) % total
-            self._cursors[list_id] = new_cursor
-            logger.info(
-                "Farm list %d: %d/%d sent, cursor %d → %d%s",
-                list_id,
-                sent_ok,
-                len(all_results),
-                cursor,
-                new_cursor,
-                " (troops exhausted)" if troops_exhausted else "",
-            )
+                # ── Advance cursor ──────────────────────────────────────────
+                sent_ok = sum(1 for t in all_results if not t.error)
+                new_cursor = (cursor + advanced) % total
+                logger.info(
+                    "Farm list %d: %d/%d sent, cursor %d → %d%s",
+                    list_id,
+                    sent_ok,
+                    len(all_results),
+                    cursor,
+                    new_cursor,
+                    " (troops exhausted)" if troops_exhausted else "",
+                )
 
-            return FarmListSendResult(targets=all_results)
+                return FarmListSendResult(targets=all_results)
+            finally:
+                self._cursors[list_id] = (cursor + advanced) % total if total else 0
         finally:
             # Stealth: feed real elapsed time into the activity scheduler so
             # session/rolling caps accrue for EVERY exit path — single-target,
