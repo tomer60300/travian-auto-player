@@ -1,6 +1,210 @@
 # Changelog
 
-## [Unreleased] — 2026-09-04
+## [Unreleased] — 2026-09-05
+
+A review day rather than a feature day: six independent audits — contract and
+reachability, failure paths, accessibility, game mechanics, type checking and
+mutation testing — were run against the distribution planner, and every finding
+they raised was either fixed with a failing test first or argued equivalent in
+writing. Sixty-odd commits, almost all of them corrections.
+
+### Fixed — the night profile
+
+- **No destination is promised a fraction of a trip.** `shed_limit` conserved
+  merchant-hours at the demand-weighted mean hop, which lets merchant-time split
+  fractionally across trips of different lengths — and a merchant cannot make
+  0.6 of a trip. Two consumers needing 30,000/h each, one 2 fields away and one
+  30, conserved exactly at 60,750/h while the far one needed 26.7 round trips of
+  5h and eighteen merchants can make eighteen: 9,750/h of a hammer's deficit
+  read as covered. Every destination now carries its own whole-trip bound and
+  the limit is the smallest of them.
+- **A material draw is priced at the receiver's hop, not the hub's.** Pricing
+  every material sender against the hub bound it by a village its cargo never
+  visits: a supplier 199 fields from the hub and **one** field from the receiver
+  it feeds was told it could ship nothing over a ten-minute haul. The
+  destination set for lumber, clay and iron is now the hub *and* every receiver,
+  and the receiver branch is floored by what the receiver can actually ship —
+  before which a village whose store left room for 44/h was booked to move
+  19,956/h over 199 fields.
+- **The crop draw is ordered by where the crop actually goes.** It ordered by
+  the hub, or with a tribute by the tribute, and crop reaches neither: a
+  supplier 2 fields from the hub and 18 from the hammer was drawn ahead of one
+  19 from the hub and one from the hammer, so the plan built the long route at
+  six merchants where the short one costs three, with the early firing still in
+  the air at 09:00. Coverage is unchanged under every permutation; only the
+  merchant bill moved.
+- **Every foreign target is its own destination.** N obligations were summed
+  into one rate pinned to the *first* target's coordinates, so a 500/h ally two
+  fields out beside a 20,000/h artifact sixty out became 20,500/h at the
+  two-field hop — and reordering the request body gave the opposite answer.
+- **The night applies the tribute safety margin the day already applied.** The
+  night freed the bare promise while the day booked promise-plus-margin, so the
+  remainder village drained further than the profile predicted.
+- **A tribute on one of your own villages is refused**, naming the village it
+  collides with. A Travian tile holds one village, so it is a typo — and it
+  surfaced as unmet crop with nothing connecting it to the coordinates that
+  caused it. **An off-map coordinate is refused rather than folded**: the
+  geometry took `span − raw` and then an absolute value, so (450|0) on a
+  401-wide map read as 49 fields from the centre, a five-minute haul.
+
+### Fixed — storage, schedule and the optimizer
+
+- **The NPC conversion budget is capped at one day's allowance.** Accumulating
+  without bound over the settling days the replay runs to reach steady state was
+  the infinite reservoir again, wearing a rate.
+- **Conversion no longer eats the feedstock floor**, and the debit is
+  proportional to each store's share of the retention that sized the allowance,
+  spilled onto whatever else has room where one store cannot cover its share.
+- **`exact_arrival_minutes` no longer rounds**, a same-instant send is handled,
+  a wrapping window's length is computed from both ends, and the arrival-gap
+  default is pinned.
+- **`WINDOW_PRUNED` has its own sentence.** It reused
+  `WINDOW_NOT_ENFORCEABLE`'s message verbatim — which says "the destination
+  receives about 3.0× what was modelled", the exact failure the prune exists to
+  prevent. The note now says what is deleted and what is left; only the critical
+  one reports an over-delivery.
+- **The cadence cap is inclusive**, its empty-set fallback is pinned, and the
+  sink-route weight is pinned against a merchant-neutral split.
+
+### Fixed — the executor
+
+- **A window prune that did not happen is reported.** The trim runs after the
+  creates land and its failure was silent: the run reported the rows it meant to
+  leave while the whole fan-out kept departing round the clock.
+- **An off-schedule destination is switched off only when its rebuild is
+  funded.** The disable happened first and the create cap or row budget then had
+  nothing left, leaving a village receiving **nothing** — reachable on the first
+  run at a cap of 1 against any village holding a previous plan's routes. The
+  replacement is reserved out of both budgets before the disable, and where it
+  cannot be, the refusal names the operator's own control and the real cause.
+- **A rebuild the game refuses names the destination**, and so does a stop
+  landing between the disable and the rebuild. One refusal is below the
+  consecutive-failure limit, so the run reported an empty `problems` list over a
+  village that had stopped being supplied.
+- **A create whose answer died is settled by the marketplace read-back.** Where
+  the read-back finds the route, the action is promoted, the "could not replace"
+  line is withdrawn, the create leaves the consecutive-failure streak, and the
+  stop that streak caused is lifted. Left standing, a flaky connection capped
+  every run at two creates.
+- **An unrecognised disable status is a failure, not a success.** Success is now
+  the named branch: an unknown status read as "switched off" let creates stack
+  on rows that may still be live, shipping both schedules at once.
+- **The DELETE's own body is read**, through the same parser the toggles use —
+  one call site from being the only guard on the one irreversible operation
+  here. Its response shape is marked **UNVERIFIED for DELETE**: it is the game's
+  bulk-*toggle* shape, and no DELETE reply has ever been observed on this
+  account.
+- **An unreadable cargo update is `unverified`, not `failed`**, which was the
+  expected outcome of every cargo correction this app makes; and **protected
+  rows are left out of the drift comparison entirely**, because a hand-made
+  route always looks drifted and every rewrite also stamps `deliveries: 1`.
+- **A live run with no trace is refused** before the first game request: the
+  game returns no id on create, so the undo reconstructs from the trace's
+  pre-write inventory, and without it the run is unrevertible.
+- **`/routes/revert-plan` takes the lock `/execute` takes.** The one
+  non-reversible action in the module had strictly less protection than the
+  reversible one: a concurrent execution's fresh creates were attributed to the
+  run being undone and deleted.
+- **The sweep's re-pass condition is a fixed point.** It was gated on unvisited
+  villages alone, so "swept" quietly meant "swept but only partly provisioned";
+  gating on `deferred` alone would never terminate, because a route whose
+  fan-out exceeds the row budget is deferred by every run alike.
+- **A refused create makes a run need attention**, and observed rows are no
+  longer clamped to the forecast.
+
+### Fixed — the planner page
+
+- **The page sends no `max_latency_hours` on any path.** It restated the
+  backend's own policy on the client, and on a segmented request it was the
+  wrong window entirely: selecting the Night tab before "run the whole day"
+  planned the 16-hour day segment against an 8-hour target — shorter cycles,
+  more routes, more merchants, more rows, on the endpoint that writes.
+- **Nine boxes gained a bound the request will honour.** `min` and `max` on a
+  number input bound the spinner and nothing else: typing 21 into a Trade Office
+  box posted `trade_office_level: 21` with `aria-invalid` null. The gate is one
+  predicate shared with the cell, in three lists for three audiences, and it
+  reaches the full-day check, Preview, the live run and the night derivation —
+  not only Build plan.
+- **The reconciliation sweep is gated like every other write path.** It checked
+  only that a plan existed and posted `dry_run: false`, so every marked cell
+  Preview refuses went straight to a live, disabling run — and it is the one
+  write button with no confirmation dialog.
+- **`/day-check` is gated**, on the same list, and it carries the plan payload
+  verbatim plus the crop alert levels typed below it.
+- **The declared relay tier is in the gate, not only on the cell**, so a tier
+  the store would refuse on `PUT` is refused before the document is written.
+- **A blank merchant lever round-trips as blank**, a **fractional base capacity
+  is refused** (it is a whole number of units on the cell and in the file), and
+  the **row budget is sent as a figure** so a cleared box can still mean "no
+  limit".
+- **"Nothing typed yet" counts the whole document.** `buildSetup` writes twelve
+  things and the guard counted three, so a page whose only content was a
+  tribute, a window, the reserved NPC-burst window, an attendance answer, an
+  overnight declaration or a deliberately unticked prune was told to fill
+  something in — and the one owned answer it held went unsaved.
+- **A typed foreign-target exclusion resolves into the document**, a role
+  template's stored crop spend is stripped from it, half-typed state no longer
+  blocks the whole setup, and profiles are capped at the segment ceiling.
+- **The plan sheet says it is one profile once whole day is on**, and the
+  result copy headlines the rows the run **leaves** rather than the rows it
+  wrote.
+- **Accessibility.** Twenty unlabelled controls across Auto-Scout, farm lists
+  and the build queue were named and a duplicate embedded village selector
+  removed; the nine bounded boxes set `aria-invalid` and `aria-describedby` from
+  the same boolean; the unresolved-village warning is wired into
+  `aria-describedby`; the Relays-for summary sets `aria-invalid` when refused;
+  "Lift restriction", "Stop relaying" and the Relays-for summary carry the app
+  focus ring; and a profile's Delete button names the profile it deletes.
+
+### Added
+
+- **A measured merchant model can clear its own warning.**
+  `MERCHANT_MODEL_UNCALIBRATED` is an equality test against the shipped 0.20, so
+  it cannot tell a measured 0.20 from an untouched one: an operator who read a
+  Marketplace capacity at two Trade Office levels, found the default right and
+  typed it back got the same warning for ever, asking them to do the thing they
+  had just done. `PlanRequest.merchant_model_measured` is the operator saying
+  they looked. It silences that one finding and **nothing else**; no bound, no
+  budget and no other figure moves. It travels in the setup document as **v11**
+  and is unticked automatically when either figure is edited.
+- **The window prune travels in the setup (v10).** It decides whether `/execute`
+  DELETES rows from the game — the only destructive answer the document carries
+  — and neither persistence path held it.
+- **`live_game_rows` is carried through the run summary and the run history**,
+  so the footprint of a past run — what it left in the game, after the trim —
+  survives the response that reported it.
+- **`docs/26-first-live-run.md`** — the first live run, step by step, with the
+  stop rules the review earned: what to settle before anything touches the game,
+  what to read in the dry run, one route on a village you can watch, a rehearsed
+  undo, and the four-step widening.
+
+### Changed
+
+- **`max_game_rows_per_run` now defaults to 24**, one day of hourly rows. An
+  unbounded default on the one endpoint that writes was the opposite of what
+  every other control here does, and the run already reported the number that
+  nothing bounded. `0` is still unbounded, and the page always sends a figure,
+  so the default governs a caller that omits the field rather than one that
+  clears the box.
+- **`/day-check` refuses segments without `prune_to_window`**, as `/execute`
+  already did: without it the check the operator reviews is planned on the full
+  cycle set while the run that writes is planned on divisor cycles with the
+  out-of-window rows deleted.
+- **Unknown keys are forbidden on the nested request models too**, not only on
+  the top-level ones.
+- **One list of Travian's repeat intervals**, not three; the three document
+  writers are module-private; route handlers and plan parameters carry real
+  return types.
+- **The comments claiming live writes default off now say they default on**, and
+  give the date (2026-08-27). Only the words changed: `Settings.trade_route_live`
+  is `True`, `TradeRouteService.__init__` keeps `live_enabled: bool = False` as
+  the library's own safe default, and `web/sessions.py` is the only caller that
+  overrides it.
+- **Constants the frontend copies are pinned as literals on both sides**
+  (`tests/test_frontend_mirror_constants.py` ↔ `plannerSetup.test.js`), and the
+  bounds are proved to bite rather than merely to be declared.
+
+## [Previous] — 2026-09-04
 
 ### Added — Distribution planner: the requirements spec is operable from the UI
 
