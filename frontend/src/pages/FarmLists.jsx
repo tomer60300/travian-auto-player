@@ -6,6 +6,8 @@ import WebSocketPanel from '../components/WebSocketPanel'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { MapCoord } from '../components/MapCoord'
 import useGameStore from '../stores/gameStore'
+import FetchError from '../components/FetchError'
+import { readErrorDetail } from '../utils/fetchError'
 
 // ---------------------------------------------------------------------------
 //  Raid icon helpers (backend sends: "no_loss", "some_loss", "all_dead", "unknown")
@@ -94,6 +96,7 @@ export default function FarmLists() {
   // ---- Farm list overview ----
   const [lists, setLists] = useState([])
   const [loading, setLoading] = useState(true)
+  const [listsError, setListsError] = useState(null)
   const [selectedListId, setSelectedListId] = useState(null)
 
   // ---- New list form ----
@@ -104,6 +107,7 @@ export default function FarmLists() {
   // ---- Detail ----
   const [detail, setDetail] = useState(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState(null)
 
   // ---- Add target ----
   const [targetX, setTargetX] = useState('')
@@ -161,9 +165,16 @@ export default function FarmLists() {
       setLoading(true)
       const res = await api.get('/farm/lists')
       setLists(Array.isArray(res.data) ? res.data : [])
+      setListsError(null)
     } catch (err) {
+      // The toast was the ONLY signal, and 4.5s later the page read exactly
+      // like "No farm lists found. Create one above." -- which invites the
+      // operator to build a list they may already have. A 403 stays quiet
+      // because the layout is already redirecting to /connect for it.
       if (err.response?.status !== 403) {
-        toast.error('Failed to load farm lists')
+        const message = readErrorDetail(err, 'Failed to load farm lists')
+        setListsError(message)
+        toast.error(message)
       }
     } finally {
       setLoading(false)
@@ -187,6 +198,7 @@ export default function FarmLists() {
   useEffect(() => {
     if (!selectedListId) {
       setDetail(null)
+      setDetailError(null)
       setShowAllSlots(false)
       return
     }
@@ -196,10 +208,12 @@ export default function FarmLists() {
       try {
         setDetailLoading(true)
         const res = await api.get(`/farm/lists/${selectedListId}`)
-        if (!cancelled) setDetail(res.data)
-      } catch {
+        if (!cancelled) { setDetail(res.data); setDetailError(null) }
+      } catch (err) {
         if (!cancelled) {
-          toast.error('Failed to load list detail')
+          const message = readErrorDetail(err, 'Failed to load list detail')
+          setDetailError(message)
+          toast.error(message)
           setDetail(null)
         }
       } finally {
@@ -684,6 +698,12 @@ export default function FarmLists() {
             <p className="text-secondary italic py-2">
               Loading...
             </p>
+          ) : listsError ? (
+            <FetchError
+              what="Could not read your farm lists"
+              detail={listsError}
+              onRetry={fetchLists}
+            />
           ) : lists.length === 0 ? (
             <p className="text-secondary italic py-2">
               No farm lists found. Create one above.
@@ -771,7 +791,17 @@ export default function FarmLists() {
         {/* =============================================================== */}
         {/*  SECTION 2 - Farm List Detail                                   */}
         {/* =============================================================== */}
-        {selectedListId && (
+        {selectedListId && detailError && (
+          <div className="card">
+            <FetchError
+              what="Could not read this farm list"
+              detail={detailError}
+              onRetry={() => { setDetailError(null); setSelectedListId(selectedListId) }}
+            />
+          </div>
+        )}
+
+        {selectedListId && !detailError && (
           <div className="card">
             <div className="flex justify-between items-center mb-3">
               <h3 className="heading-gold text-base flex items-center gap-2">

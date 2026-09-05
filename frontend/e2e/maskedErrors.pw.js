@@ -100,7 +100,7 @@ test.describe('Buildings', () => {
     await expect(
       page.getByRole('alert').filter({ hasText: 'Could not read the construction queue' })
     ).toBeVisible()
-    await expect(page.getByText('Travian returned 503')).toBeVisible()
+    await expect(page.getByText('Travian returned 503').first()).toBeVisible()
     // The building LIST beside it is unaffected -- it already had its own
     // error path and this fixture answers it successfully.
     await expect(page.getByRole('button', { name: /Woodcutter/ })).toBeVisible()
@@ -122,7 +122,7 @@ test.describe('BuildQueue', () => {
     await expect(
       page.getByRole('alert').filter({ hasText: "Could not read this village's buildings" })
     ).toBeVisible()
-    await expect(page.getByText('Travian returned 503')).toBeVisible()
+    await expect(page.getByText('Travian returned 503').first()).toBeVisible()
     // The old text was both identical to the empty state AND wrong: we are
     // connected, which is why the request was made at all.
     await expect(page.getByText('No buildings available. Connect to a server first.')).toHaveCount(0)
@@ -144,7 +144,7 @@ test.describe('Sessions', () => {
     await expect(
       page.getByRole('alert').filter({ hasText: 'Could not read the session list' })
     ).toBeVisible()
-    await expect(page.getByText('Travian returned 503')).toBeVisible()
+    await expect(page.getByText('Travian returned 503').first()).toBeVisible()
     // This page is the one place an operator checks whether something IS
     // running, so a wrong "no" here is the worst version of the defect.
     await expect(page.getByText('No active or recent sessions')).toHaveCount(0)
@@ -165,7 +165,7 @@ test.describe("AutoScout's background account", () => {
     await page.goto('/scout')
 
     await expect(page.getByRole('alert').filter({ hasText: 'Status unknown' })).toBeVisible()
-    await expect(page.getByText('Travian returned 503')).toBeVisible()
+    await expect(page.getByText('Travian returned 503').first()).toBeVisible()
     // The defect: it offered to SET an account that may already exist.
     await expect(page.getByText('not configured')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Set' })).toHaveCount(0)
@@ -202,7 +202,7 @@ test.describe('RaidOptimizer', () => {
     await expect(
       page.getByRole('alert').filter({ hasText: 'Troop counts unread' })
     ).toBeVisible()
-    await expect(page.getByText('Travian returned 503')).toBeVisible()
+    await expect(page.getByText('Travian returned 503').first()).toBeVisible()
     await expect(page.getByRole('button', { name: 'Read troops again' })).toBeVisible()
 
     // The defect: a full four-strategy table computed from 1000 clubs and
@@ -225,5 +225,70 @@ test.describe('RaidOptimizer', () => {
     await expect(page.getByRole('alert')).toHaveCount(0)
     await expect(page.getByText('No strategies computed.')).toHaveCount(0)
     await expect(page.getByRole('heading', { name: 'OPTIMAL DEPLOYMENTS' })).toBeVisible()
+  })
+})
+
+test.describe('Reports', () => {
+  test('an empty result says so', async ({ page }) => {
+    await isolateApp(page, { '/reports': [] })
+    await page.goto('/reports')
+    await page.getByRole('button', { name: 'Fetch Reports' }).click()
+    await expect(page.getByText('No reports found for the given filters.')).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('a failed fetch renders a message rather than nothing at all', async ({ page }) => {
+    await isolateApp(page, { '/reports': BOOM })
+    await page.goto('/reports')
+    await page.getByRole('button', { name: 'Fetch Reports' }).click()
+
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Could not fetch reports' })
+    ).toBeVisible()
+    await expect(page.getByText('Travian returned 503').first()).toBeVisible()
+    // The defect was worse than a masked error: `fetched` stays false on a
+    // failure, so the empty card never rendered either and the page went
+    // BLANK below the filter bar.
+    await expect(page.getByText('No reports found for the given filters.')).toHaveCount(0)
+  })
+})
+
+test.describe('FarmLists', () => {
+  const LISTS = [{ id: 1, name: 'List A', slots_amount: 1, active_slots: 1, total_booty: 100 }]
+
+  test('an account with no lists says so', async ({ page }) => {
+    await isolateApp(page, { '/farm/lists': [] })
+    await page.goto('/farm')
+    await expect(page.getByText('No farm lists found. Create one above.')).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
+  test('a failed list read does not invite creating a list that may exist', async ({ page }) => {
+    await isolateApp(page, { '/farm/lists': BOOM })
+    await page.goto('/farm')
+
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Could not read your farm lists' })
+    ).toBeVisible()
+    await expect(page.getByText('Travian returned 503').first()).toBeVisible()
+    // The toast was the only signal, and it expires; 4.5s later the page read
+    // exactly like the empty state. Asserted past that lifetime.
+    await page.waitForTimeout(5000)
+    await expect(page.getByText('No farm lists found. Create one above.')).toHaveCount(0)
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Could not read your farm lists' })
+    ).toBeVisible()
+  })
+
+  test('a failed DETAIL read says so instead of an empty list panel', async ({ page }) => {
+    await isolateApp(page, { '/farm/lists/1': BOOM, '/farm/lists': LISTS })
+    await page.goto('/farm')
+    await page.getByRole('cell', { name: 'List A' }).click()
+
+    await expect(
+      page.getByRole('alert').filter({ hasText: 'Could not read this farm list' })
+    ).toBeVisible()
+    await expect(page.getByText('Travian returned 503').first()).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'List Detail' })).toHaveCount(0)
   })
 })

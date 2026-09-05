@@ -2,6 +2,8 @@ import { useState, useRef, useEffect } from 'react'
 import api from '../api'
 import useGameStore from '../stores/gameStore'
 import { useToast } from '../components/Toast'
+import FetchError from '../components/FetchError'
+import { readErrorDetail } from '../utils/fetchError'
 
 function getReportTypeLabel(type) {
   if (!type) return 'Other'
@@ -108,6 +110,17 @@ function ReportDetail({ detail, loading }) {
   }
 
   if (!detail) return null
+
+  // A failed detail fetch is stored as `{ error }`, which carries none of the
+  // structured keys below and so fell through to the raw `JSON.stringify`
+  // dump: the operator was shown `{ "error": "..." }` in a <pre>.
+  if (detail.error) {
+    return (
+      <div className="px-4 py-3 bg-base border-t-default">
+        <FetchError what="Could not load this report" detail={detail.error} />
+      </div>
+    )
+  }
 
   // Check for structured scout/battle data
   const hasResources = detail.resources || detail.scoutedResources || detail.scouted_resources
@@ -435,6 +448,7 @@ export default function Reports() {
   const [reports, setReports] = useState([])
   const [loading, setLoading] = useState(false)
   const [fetched, setFetched] = useState(false)
+  const [listError, setListError] = useState(null)
 
   // Pagination
   const [showAllReports, setShowAllReports] = useState(false)
@@ -447,6 +461,7 @@ export default function Reports() {
   async function fetchReports() {
     setLoading(true)
     setFetched(false)
+    setListError(null)
     setExpandedId(null)
     setReportDetails({})
     setShowAllReports(false)
@@ -462,7 +477,12 @@ export default function Reports() {
       setFetched(true)
       toast.success(`Fetched ${data.length} report(s)`)
     } catch (err) {
-      const message = err.response?.data?.detail || err.response?.data?.message || 'Failed to fetch reports'
+      const message = readErrorDetail(err, 'Failed to fetch reports')
+      // Both, not just the toast. `fetched` stays false on a failure, so the
+      // "No reports found" card below never rendered either -- the page went
+      // BLANK, which is worse than its own empty state and gave a 4.5s toast
+      // as the only evidence a fetch had happened at all.
+      setListError(message)
       toast.error(message)
     } finally {
       setLoading(false)
@@ -484,7 +504,7 @@ export default function Reports() {
         const res = await api.get(`/reports/${reportId}`)
         setReportDetails((prev) => ({ ...prev, [reportId]: res.data }))
       } catch (err) {
-        const message = err.response?.data?.detail || 'Failed to load report detail'
+        const message = readErrorDetail(err, 'Failed to load report detail')
         toast.error(message)
         setReportDetails((prev) => ({ ...prev, [reportId]: { error: message } }))
       } finally {
@@ -552,6 +572,10 @@ export default function Reports() {
       </div>
 
       {/* Report List */}
+      {listError && (
+        <FetchError what="Could not fetch reports" detail={listError} onRetry={fetchReports} />
+      )}
+
       {fetched && reports.length === 0 && (
         <div className="card text-center p-8">
           <p className="text-secondary">No reports found for the given filters.</p>
