@@ -182,6 +182,88 @@ class TestUnmeetableDemandIsReported:
         )
 
 
+class TestTheCropDrawIsOrderedByWhereTheCropGoes:
+    """Ordering the crop draw by distance to the HUB, or to the tribute, spends
+    merchants for nothing.
+
+    Coverage is order-invariant -- `give = min(own, demand, shed_limit)` and
+    `shed_limit` reads nothing either loop mutates -- so `unmet` cannot move.
+    COST is not. The hub is not where crop goes: the crop pass ships to the
+    crop-negative villages and to the tribute, and on this account the hub is a
+    crop sender rather than a sink. So the draw picked the village nearest the
+    hub and paid for a long haul that a village next door to the hammer would
+    have made in ten minutes.
+
+    The right cost already existed one function away: the demand-weighted mean
+    hop `shed_limit` derives from the same destination set.
+    """
+
+    ARMY_X = 20
+    NEAR_HUB = 21  # 2 fields from the hub, 18 from the hammer
+    NEAR_ARMY = 22  # 19 fields from the hub, 1 from the hammer
+
+    def _derive(self, villages, **kw):
+        return derive_night_profile(
+            villages,
+            window_hours=8.0,
+            geometry=MapGeometry(span=401, speed_fields_per_hour=12.0),
+            merchant_model=EUROPE2_TEUTON,
+            day_retention={},
+            hub_id=HUB,
+            **kw,
+        )
+
+    def _account(self):
+        return [
+            _village(HUB, "hub", 0, 0, crop=0.0),
+            _village(ARMY, "hammer", self.ARMY_X, 0, crop=-20_000.0),
+            # Granaries large enough that neither is a FORCED sender: this is
+            # about the order the draw picks them in, not about overflow.
+            _village(self.NEAR_HUB, "A", 2, 0, crop=20_000.0, gr=1_600_000),
+            _village(self.NEAR_ARMY, "B", 19, 0, crop=20_000.0, gr=1_600_000),
+        ]
+
+    def test_the_supplier_next_to_the_hammer_is_drawn_first(self):
+        # A is 2 fields from the hub and 18 from the hammer: a 3h round trip,
+        # two turnarounds. B is 19 from the hub and ONE from the hammer: ten
+        # minutes, forty-eight turnarounds. Hub-ordering drew A.
+        profile = self._derive(self._account(), consumer_ids=[ARMY])
+
+        assert profile.drawn_in[Resource.CROP] == [self.NEAR_ARMY]
+        assert profile.allocations[Resource.CROP][self.NEAR_HUB].value == pytest.approx(20_000.0)
+        assert profile.allocations[Resource.CROP][self.NEAR_ARMY].value == pytest.approx(0.0)
+
+    def test_coverage_is_the_same_either_way(self):
+        # The reduction is in merchants, not in what the night delivers.
+        assert self._derive(self._account(), consumer_ids=[ARMY]).unmet[
+            Resource.CROP
+        ] == pytest.approx(0.0)
+
+    def test_a_small_tribute_does_not_order_the_whole_account(self):
+        """The tribute branch is worse than the hub branch, not better.
+
+        40,000/h of consumers beside a 1,000/h obligation ordered every supplier
+        by the 1,000/h destination. A is one field from the tribute and 39 from
+        the hammer -- one round trip in the night; B is one field from the
+        hammer and 39 from the tribute. The obligation worth 2.4% of the demand
+        decided who shipped.
+        """
+        villages = [
+            _village(HUB, "hub", 0, 0, crop=0.0),
+            _village(ARMY, "hammer", -20, 0, crop=-40_000.0),
+            _village(self.NEAR_HUB, "A", 19, 0, crop=41_000.0, gr=1_600_000),
+            _village(self.NEAR_ARMY, "B", -19, 0, crop=41_000.0, gr=1_600_000),
+        ]
+        profile = self._derive(
+            villages,
+            consumer_ids=[ARMY],
+            tribute_per_hour=1_000.0,
+            tribute_at=(20, 0),
+        )
+
+        assert profile.drawn_in[Resource.CROP][0] == self.NEAR_ARMY
+
+
 class TestNoDestinationIsPromisedAFractionOfATrip:
     """Merchant-hours conservation is necessary, not sufficient.
 

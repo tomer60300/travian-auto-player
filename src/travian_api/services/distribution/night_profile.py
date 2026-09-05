@@ -31,6 +31,7 @@ Pure: no requests, no clock, no I/O. Everything it needs is passed in.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -331,6 +332,46 @@ def derive_night_profile(
                 )
         return [(hop, claim) for hop, claim in hops if hop > 0]
 
+    def _legs(v: NightVillage, resource: Resource) -> list[tuple[float, int, float]]:
+        """Where this village's cargo of `resource` goes tonight, as
+        ``(one-way hours, complete trips, share of the cargo)`` per destination.
+
+        The share is the destination's claim over the claims of everything this
+        village can actually reach -- demand is the only thing that says how the
+        cargo is split. Destinations no round trip reaches are dropped: they take
+        no cargo, so they neither bound the send nor weigh in the mean, and
+        `_anyone_reaches` keeps their claim out of the pooled demand so nothing
+        reads them as covered.
+
+        One function because two callers need exactly the same set: `shed_limit`
+        bounds the send by it, and the crop draw ORDERS by it. Ordering by
+        anything else -- the hub, or the tribute -- spends merchants for
+        nothing.
+        """
+        measured = [(hop, claim, _trips(hop)) for hop, claim in _destinations(v, resource)]
+        reachable = [(hop, claim, trips) for hop, claim, trips in measured if trips > 0]
+        if not reachable:
+            return []
+        claimed = sum(claim for _, claim, _ in reachable)
+        if claimed > 0:
+            shares = [claim / claimed for _, claim, _ in reachable]
+        else:
+            # Destinations that need nothing. Nothing is drawn to them, so this
+            # only reaches a FORCED sender shedding to avoid overflow, and no
+            # destination has a larger claim on that cargo than another -- so
+            # they weigh the same. Not zero: they are real places, and a mean
+            # of nothing would read as a free delivery.
+            shares = [1.0 / len(reachable)] * len(reachable)
+        return [(hop, trips, share) for (hop, _, trips), share in zip(reachable, shares)]
+
+    def _mean_hop(v: NightVillage, resource: Resource) -> float:
+        """The demand-weighted mean one-way hop, or infinity where nothing is
+        reachable -- which sorts such a village last and sheds nothing."""
+        legs = _legs(v, resource)
+        if not legs:
+            return math.inf
+        return sum(hop * share for hop, _, share in legs)
+
     def shed_limit(v: NightVillage, resource: Resource) -> float:
         """The most this village can send per hour and still be shippable.
 
@@ -408,36 +449,21 @@ def derive_night_profile(
         # times fleet x capacity per hour. Worse, the operator's cap is applied
         # just above and then multiplied by that count -- so the "8 busy at 02"
         # ceiling this function exists to honour was negated inside it.
-        destinations = [(hop, claim, _trips(hop)) for hop, claim in _destinations(v, resource)]
-        # A destination no round trip reaches takes no cargo at all, so it is
-        # neither served nor weighed. Its claim is kept out of the pooled demand
-        # by `_anyone_reaches`, so dropping it here cannot make it read covered.
-        reachable = [(hop, claim, trips) for hop, claim, trips in destinations if trips > 0]
-        if not reachable:
+        legs = _legs(v, resource)
+        if not legs:
             # Nowhere for this resource to go -- the hub asked about its own
             # materials, a crop sender on an account with no crop-negative
             # village and no tribute, or every destination further than a night.
             # Sheds nothing, which is the honest reading either way.
             return 0.0
-        claimed = sum(claim for _, claim, _ in reachable)
-        if claimed > 0:
-            shares = [claim / claimed for _, claim, _ in reachable]
-        else:
-            # Destinations that need nothing. Nothing is drawn to them, so this
-            # only reaches a FORCED sender shedding to avoid overflow, and no
-            # destination has a larger claim on that cargo than another -- so
-            # they weigh the same. Not zero: they are real places, and a mean
-            # of nothing would read as a free delivery.
-            shares = [1.0 / len(reachable)] * len(reachable)
-        one_way = sum(hop * share for (hop, _, _), share in zip(reachable, shares))
         # No `max(1, ...)` on either bound. A village whose round trip does not
         # fit the window sheds NOTHING: crediting it one trip promises cargo that
         # would still be in the air at 07:00, which section 6 forbids outright.
-        conserved = fleet * capacity * _trips(one_way) / window_hours
+        conserved = fleet * capacity * _trips(_mean_hop(v, resource)) / window_hours
         # And each destination's own share has to be a whole number of trips.
         integral = min(
             fleet * capacity * trips / (share * window_hours)
-            for (_, _, trips), share in zip(reachable, shares)
+            for _, trips, share in legs
             if share > 0
         )
         return min(conserved, integral)
@@ -572,21 +598,33 @@ def derive_night_profile(
             demand -= own - value
             forced_crop.append(vid)
 
-    # The tribute is paid from nearest to it: distance is exactly what makes an
-    # obligation expensive, because a short cycle over a long haul keeps many
-    # sends in flight at once.
+    # Drawn cheapest-first, where cheap means the haul this village's crop
+    # actually makes: the demand-weighted mean hop over its own reachable
+    # destinations, the same quantity `shed_limit` bounds it by.
+    #
+    # It used to be the distance to the HUB, or -- with a tribute -- to the
+    # tribute, and crop goes to neither. A supplier 2 fields from the hub and 18
+    # from the hammer (a 3h round trip, two turnarounds) was drawn ahead of one
+    # 19 from the hub and ONE from the hammer (ten minutes, forty-eight
+    # turnarounds), and the plan then built the long route at six merchants
+    # where the short one costs three -- with the early firing still in the air
+    # at 09:00, which is a NIGHT_OVERRUN as well. The tribute branch was worse:
+    # 40,000/h of consumers beside a 1,000/h obligation ordered every supplier
+    # by the 1,000/h destination.
+    #
+    # Coverage does not move either way -- `give = min(own, demand, shed_limit)`
+    # and `shed_limit` reads nothing the loop mutates, so greedy fill yields
+    # `min(demand, sum of caps)` under every permutation. Only the merchant bill
+    # does.
+    #
+    # The MATERIAL draw above deliberately keeps its hub ordering: for materials
+    # the hub genuinely is the sole destination, so there the hub distance is
+    # the haul.
     drawn_crop: list[int] = []
     if demand > 0:
-        if tribute_at is not None:
-            tx, ty = tribute_at
 
-            def _cost(vid: int) -> float:
-                v = by_id[vid]
-                return geometry.distance((v.x, v.y), (tx, ty))
-        else:
-
-            def _cost(vid: int) -> float:
-                return _hours(by_id[vid], by_id[hub_id], geometry)
+        def _cost(vid: int) -> float:
+            return _mean_hop(by_id[vid], Resource.CROP)
 
         for vid in sorted((v for v in by_id if v not in crop), key=_cost):
             if demand <= 0:
