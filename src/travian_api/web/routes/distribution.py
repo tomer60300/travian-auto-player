@@ -6646,6 +6646,10 @@ async def post_execute(
                     # back -- and an undisabled stale route is worse than an
                     # uncreated one, because it keeps shipping resources.
                     disabled_here: list[int] = []
+                    # ...and which destinations those rows belonged to, so a run
+                    # that switches a destination off and never reaches its
+                    # replacement can name it.
+                    disabled_keys: set[int | tuple[int, int]] = set()
 
                     if body.disable_existing:
                         # Disable only ACTIVE visible routes the plan no longer
@@ -6798,6 +6802,9 @@ async def post_execute(
                                     deferred.extend(desired)
                                     continue
                                 disabled_here.extend(sorted(stale_ids))
+                                disabled_keys.update(
+                                    k for e in stale for k in _existing_keys(e)
+                                )
                                 disables.append(
                                     f"{village_label(origin, names)}: disabled "
                                     f"{len(stale_ids)} route(s) - the toggle's answer was "
@@ -6816,6 +6823,9 @@ async def post_execute(
                                 continue
                             else:
                                 disabled_here.extend(e.route_id for e in stale)
+                                disabled_keys.update(
+                                    k for e in stale for k in _existing_keys(e)
+                                )
                                 disables.append(line)
 
                     # Only a destination whose ENABLED rows match the planned
@@ -6927,6 +6937,10 @@ async def post_execute(
                     # the window trim, and the fan-out a create makes before the
                     # trim is up to three times that.
                     refunded_rows: dict[int, int] = {}
+                    # `replaceable` destinations whose replacement create was
+                    # actually fired. What is left over when the loop ends was
+                    # switched off and never rebuilt.
+                    rebuild_fired: set[int | tuple[int, int]] = set()
                     # Rows the window prune removed AND confirmed gone. Only
                     # these are discounted from the footprint: a prune whose own
                     # read-back failed proves nothing, and over-reporting the
@@ -7278,6 +7292,7 @@ async def post_execute(
                             # run will not try this destination again.
                             reserved_attempts -= 1
                             reserved_rows -= would_add
+                            rebuild_fired.add(destination)
                         result = await svc.create_route(route, stop_check=_stop_reason)
                         if result.status == "stopped":
                             # Stopped after the pacing wait, before the POST —
@@ -7367,6 +7382,27 @@ async def post_execute(
                             )
                             deferred.extend(desired[i + 1 :])
                             break
+
+                    # A stop, a Gold Club block or a run of refusals can arrive
+                    # after an off-schedule destination's rows are already off
+                    # and before its replacement fires. The reservation kept the
+                    # budget for it; nothing kept the run alive. Its routes then
+                    # go to `deferred` under the generic "stopped early" line,
+                    # which reads as ordinary back-pressure -- so the
+                    # destination that has stopped receiving anything at all has
+                    # to be named here. Only destinations whose rows this run
+                    # really switched off: a disable that failed left them
+                    # shipping, and that has its own report.
+                    for _k in replaceable:
+                        if _k in rebuild_fired or _k not in disabled_keys:
+                            continue
+                        problems.append(
+                            f"{village_label(origin, names)} -> "
+                            f"{village_label(_k, names) if isinstance(_k, int) else _k}: this "
+                            f"run switched off its diverging route(s) ({replaceable[_k]}) and "
+                            f"stopped before writing the replacement. That destination is "
+                            f"receiving nothing until a later run rebuilds it."
+                        )
 
                     # ── Did the game actually make them? ────────────────────
                     #

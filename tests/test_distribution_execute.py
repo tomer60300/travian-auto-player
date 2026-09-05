@@ -1884,6 +1884,35 @@ class TestAnOffScheduleDestinationIsOnlyDisabledIfItCanBeRebuilt:
             f"replace: {res.problems}"
         )
 
+    def test_a_stop_between_the_disable_and_the_rebuild_names_the_destination(self):
+        # `_stop_reason()` is re-checked before EVERY create, which is right --
+        # and it fires after the off-schedule rows are already off. The routes
+        # then go to `deferred` under the generic "stopped early" line, which
+        # reads as ordinary back-pressure: nothing said which destinations had
+        # just stopped receiving anything at all.
+        svc = _FakeLiveSvc(existing=self._existing())
+        _disable = svc.disable_routes
+
+        async def _exhaust_the_budget_after_disabling(vid, routes, *, stop_check=None):
+            result = await _disable(vid, routes, stop_check=stop_check)
+            svc.budget_ok = False
+            return result
+
+        svc.disable_routes = _exhaust_the_budget_after_disabling
+        res = _run_live(
+            svc, _two_destination_account(), disable_existing=True, max_routes_per_run=50
+        )
+
+        emptied = self._emptied(svc)
+        assert emptied, "the disable landed before the budget ran out"
+        assert svc.created == [], "and no replacement was written"
+        names = {20011: "11", 20019: "19"}
+        for dest in emptied:
+            assert any(names[dest] in problem for problem in res.problems), (
+                names[dest],
+                res.problems,
+            )
+
     def test_a_rebuild_that_landed_after_a_dead_answer_is_not_reported_as_emptied(self):
         # The other half: same refused answer, but the rows are on the page --
         # the read-back promotes the create, so the destination IS supplied and
