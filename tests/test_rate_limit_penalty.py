@@ -235,11 +235,25 @@ class TestTheThrottlerSeparatesPacingFromPenalties:
         assert time.monotonic() - started >= 0.35
 
     def test_a_served_penalty_is_not_served_twice(self):
+        # 0.4s, and ONE event loop for both calls. `add_penalty` stamps a
+        # monotonic deadline and `wait_for_penalty` reads the clock again from
+        # inside the loop, so everything between them eats the budget --
+        # including `asyncio.run` building a proactor loop, measured here at up
+        # to 9ms idle and far more on a machine running eight xdist workers.
+        # The old shape spent a 0.1s budget on TWO loop constructions and lost
+        # the race once in three full `-n 8` runs: the first call returned 0.0
+        # because the penalty had already expired, and the assertion read
+        # `assert 0.0 > 0.0`. The other two penalty tests in this class have
+        # always used 0.4s and have not flaked.
         throttler = RequestThrottler(enabled=False)
-        throttler.add_penalty(0.1)
+        throttler.add_penalty(0.4)
 
-        assert asyncio.run(throttler.wait_for_penalty()) > 0.0
-        assert asyncio.run(throttler.wait_for_penalty()) == 0.0
+        async def serve_twice():
+            return await throttler.wait_for_penalty(), await throttler.wait_for_penalty()
+
+        first, second = asyncio.run(serve_twice())
+        assert first > 0.0
+        assert second == 0.0
 
     def test_an_enabled_throttler_serves_the_penalty_through_wait(self):
         # The paced path keeps folding the penalty into its own gate, so a 429
