@@ -222,12 +222,16 @@ class TestTheThrottlerSeparatesPacingFromPenalties:
 
     def test_a_disabled_throttler_still_serves_a_penalty(self):
         throttler = RequestThrottler(min_gap_s=5.0, max_gap_s=9.0, enabled=False)
-        throttler.add_penalty(0.4)
 
+        # The penalty is a DEADLINE, so what it owes shrinks by however long the
+        # caller took to reach the wait. Measuring from before `add_penalty`
+        # asserts the deadline itself, which load can only push out, never pull
+        # in -- measuring the returned figure asserted the machine was idle.
         started = time.monotonic()
+        throttler.add_penalty(0.4)
         served = asyncio.run(throttler.wait_for_penalty())
 
-        assert served == pytest.approx(0.4, abs=0.05)
+        assert served > 0.0
         assert time.monotonic() - started >= 0.35
 
     def test_a_served_penalty_is_not_served_twice(self):
@@ -241,9 +245,11 @@ class TestTheThrottlerSeparatesPacingFromPenalties:
         # The paced path keeps folding the penalty into its own gate, so a 429
         # is not waited out twice.
         throttler = RequestThrottler(min_gap_s=0.0, max_gap_s=0.0, enabled=True)
-        throttler.add_penalty(0.4)
 
+        started = time.monotonic()
+        throttler.add_penalty(0.4)
         waited = asyncio.run(throttler.wait())
 
-        assert waited >= 0.35
+        assert waited > 0.0
+        assert time.monotonic() - started >= 0.35
         assert asyncio.run(throttler.wait_for_penalty()) == 0.0
