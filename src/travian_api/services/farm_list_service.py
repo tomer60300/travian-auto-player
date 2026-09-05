@@ -18,6 +18,32 @@ from ..models.farm_list import (
 logger = logging.getLogger(__name__)
 
 
+class FarmListMutationRefused(TravianError):
+    """The game named a refusal inside an otherwise-successful mutation.
+
+    ``{"error": ...}`` at the top level, or a ``slots[]`` entry carrying an
+    ``error`` -- the shapes ``docs/14-farm-list-api.md`` records
+    (``raidList.targetExists``, ``errorRaidListSlotLimit``). All four mutations
+    discarded their body, so these arrived as 201/204 and the UI toasted green
+    over a write the game had refused.
+    """
+
+
+class FarmListMutationUnverified(TravianError):
+    """A farm-list mutation answered with a body that is not the JSON API's.
+
+    ``post_json``/``delete_json`` hand a non-JSON response back as
+    ``{"response_text": ...}``, which is what an HTML soft-block or a
+    maintenance page looks like from here. The request returned success, so it
+    may well have taken effect -- reading that as either "done" or "refused"
+    over-states what is known, the same distinction
+    :class:`~travian_api.services.trade_route_service.ToggleResponseUnreadable`
+    draws on the trade-route side. A genuinely EMPTY body is not this: it is
+    the documented success shape for the slot and delete writes, and it names
+    no refusal.
+    """
+
+
 class SendResponseUnreadable(TravianError):
     """A farm-list send answered with a body its per-target outcomes are not in.
 
@@ -130,6 +156,53 @@ class FarmListService:
 
     # ── CRUD ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _check_mutation(resp: object, what: str) -> None:
+        """Raise unless ``resp`` is a body that reports the mutation went through.
+
+        The game answers the slot and delete writes with an empty body when
+        they succeed, so "named no refusal" is the only positive signal there
+        is — but the refusals it DOES name were being discarded wholesale, and
+        every 2xx came back as success.
+
+        Refusals (:class:`FarmListMutationRefused`): a top-level ``error``, or a
+        ``slots[]`` entry carrying one. Bodies that are not the JSON API's at
+        all (:class:`FarmListMutationUnverified`): a non-object, or the
+        ``{"response_text": ...}`` wrapper ``post_json`` produces for a
+        non-JSON response — an HTML soft-block or maintenance page. An EMPTY
+        ``response_text`` is neither: that is the documented success shape.
+        """
+        if not isinstance(resp, dict):
+            raise FarmListMutationUnverified(
+                f"{what} answered with {type(resp).__name__}, not an object, so whether "
+                "the game accepted it cannot be read; the request returned success, so "
+                "it may already have taken effect"
+            )
+        if "response_text" in resp:
+            text = str(resp["response_text"] or "")
+            if text.strip():
+                raise FarmListMutationUnverified(
+                    f"{what} answered with a non-JSON body ({text[:120]!r}), so whether the "
+                    "game accepted it cannot be read; the request returned success, so it "
+                    "may already have taken effect"
+                )
+            return
+        error = resp.get("error")
+        if error:
+            raise FarmListMutationRefused(f"{what} was refused by the game: {error}")
+        slots = resp.get("slots")
+        if isinstance(slots, list):
+            rejected = [
+                f"{entry.get('id', '?')}: {entry['error']}"
+                for entry in slots
+                if isinstance(entry, dict) and entry.get("error")
+            ]
+            if rejected:
+                raise FarmListMutationRefused(
+                    f"{what}: the game rejected {len(rejected)} of {len(slots)} slot(s) "
+                    f"({'; '.join(rejected)})"
+                )
+
     async def create_farm_list(
         self,
         village_id: int,
@@ -151,16 +224,33 @@ class FarmListService:
             # connection drops, a transport retry would make a second list.
             safe_to_retry=False,
         )
-        list_id = resp.get("id", 0)
+        what = f"the create of farm list '{name}'"
+        self._check_mutation(resp, what)
+        # `docs/14-farm-list-api.md`: the response is `{"id": 123}`. Returning
+        # 0 for a body that carried no id logged `Created farm list 'X' (id=0)`
+        # and answered the route `201 {"id": 0}` — a list the caller then adds
+        # slots to, against an id no list has.
+        raw_id = resp.get("id") if isinstance(resp, dict) else None
+        try:
+            list_id = int(raw_id)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            list_id = 0
+        if list_id <= 0:
+            raise FarmListMutationUnverified(
+                f"{what} carried no list id ({raw_id!r}), so the new list cannot be "
+                "addressed; the request returned success, so it may already have taken "
+                "effect and left a list behind"
+            )
         logger.info(f"Created farm list '{name}' (id={list_id}) for village {village_id}")
         return list_id
 
     async def delete_farm_list(self, list_id: int) -> None:
         """Delete a farm list."""
-        await self.http_client.delete_json(
+        resp = await self.http_client.delete_json(
             f"/api/v1/farm-list/{list_id}",
             safe_to_retry=False,
         )
+        self._check_mutation(resp, f"the delete of farm list {list_id}")
         logger.info(f"Deleted farm list {list_id}")
 
     async def add_slot(
@@ -177,7 +267,7 @@ class FarmListService:
         url = "/api/v1/farm-list/slot"
         if force:
             url += "?force"
-        await self.http_client.post_json(
+        resp = await self.http_client.post_json(
             url,
             {
                 "slots": [
@@ -195,16 +285,18 @@ class FarmListService:
             # Non-idempotent: a retry after a committed add would duplicate the slot.
             safe_to_retry=False,
         )
+        self._check_mutation(resp, f"the add of slot ({x},{y}) to list {list_id}")
         logger.info(f"Added slot ({x},{y}) to list {list_id}")
 
     async def delete_slots(self, slot_ids: List[int]) -> None:
         """Delete slots by IDs via Travian REST API (DELETE with JSON body)."""
-        await self.http_client.delete_json(
+        resp = await self.http_client.delete_json(
             "/api/v1/farm-list/slot",
             data={"slots": slot_ids, "abandoned": False},
             request_type="xhr",
             safe_to_retry=False,
         )
+        self._check_mutation(resp, f"the delete of slot(s) {slot_ids}")
         logger.info(f"Deleted slots: {slot_ids}")
 
     # ── Send ─────────────────────────────────────────────────────────
