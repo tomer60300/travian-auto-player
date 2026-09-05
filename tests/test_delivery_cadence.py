@@ -28,8 +28,8 @@ from travian_api.services.distribution.allocation import (
     Resource,
 )
 from travian_api.services.distribution.geometry import MapGeometry
-from travian_api.services.distribution.merchants import EUROPE2_TEUTON
-from travian_api.services.distribution.optimizer import VillageState
+from travian_api.services.distribution.merchants import DAILY_BEAT_CYCLES, EUROPE2_TEUTON
+from travian_api.services.distribution.optimizer import VillageState, _cycles_for
 from travian_api.services.distribution.planner import PlannerConfig, craft_plan
 
 GEOMETRY = MapGeometry(span=401, speed_fields_per_hour=12.0)
@@ -82,7 +82,22 @@ class TestBoundingTheCycleForOneDestination:
         assert _route_to(_plan(cap=1), 2).cycle_hours == 1
 
     def test_a_cap_of_two_is_honoured_too(self):
-        assert _route_to(_plan(cap=2), 2).cycle_hours <= 2
+        # Equality, not `<=`: "honoured" means the cap is REACHED. A cap read as
+        # exclusive answers 1 here, which respects the bound and disobeys the
+        # instruction -- and `<=` cannot tell the two apart.
+        assert _route_to(_plan(cap=2), 2).cycle_hours == 2
+
+    def test_a_cap_inside_the_range_is_the_cycle_that_comes_back(self):
+        """The cap is inclusive, and only a cap strictly between the shortest
+        cycle and the uncapped optimum can show it.
+
+        At a cap of 1 an exclusive reading leaves no candidate at all, and the
+        empty-list fallback below rescues it straight back to 1 -- so the
+        hourly test passes on either reading and launders the off-by-one into
+        the right answer."""
+        assert _route_to(_plan(), 2).cycle_hours > 3, "the premise: 3h is a real constraint"
+
+        assert _route_to(_plan(cap=3), 2).cycle_hours == 3
 
     def test_the_hourly_rate_is_unchanged_by_the_cadence(self):
         # The constraint is about WHEN, not how much. A cap that quietly changed
@@ -137,3 +152,18 @@ class TestItOnlyConstrainsTheDestinationItNames:
 
     def test_no_caps_at_all_leaves_every_plan_exactly_as_it_was(self):
         assert _route_to(_plan(cap=None), 2).cycle_hours == _route_to(_plan(), 2).cycle_hours
+
+
+class TestACapThatExcludesEverything:
+    """Unreachable through the endpoint -- ``ForeignTarget.max_cycle_hours`` is
+    validated into ``DAILY_BEAT_CYCLES``, so 1 always qualifies -- but reachable
+    from ``PlannerConfig``, which takes any int. The docstring states the
+    contract: a cadence preference is not worth failing a whole plan for, so the
+    route keeps the SHORTEST cycle available. Falling back to all of them is the
+    opposite of what a cadence constraint means."""
+
+    def test_it_keeps_the_shortest_cycle_not_all_of_them(self):
+        assert _cycles_for(2, DAILY_BEAT_CYCLES, {2: 0}) == [1]
+
+    def test_a_cap_that_admits_something_admits_only_that(self):
+        assert list(_cycles_for(2, DAILY_BEAT_CYCLES, {2: 3})) == [1, 2, 3]
