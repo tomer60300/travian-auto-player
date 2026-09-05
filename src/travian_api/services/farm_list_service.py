@@ -566,6 +566,35 @@ class FarmListService:
                         )
                         return FarmListSendResult(targets=all_results)
 
+                    if (
+                        batch_results
+                        and batch_sent == 0
+                        and not any(t.status == "unverified" for t in batch_results)
+                    ):
+                        # The game refused every target in this batch for a
+                        # reason that is not troop exhaustion -- a captcha, a
+                        # rate limit, a Gold Club block. The only condition that
+                        # used to stop this loop was the BENIGN one:
+                        # `"troops" not in error` left `batch_troop_errors == 0`
+                        # and the loop kept firing, measured as 12 dispatch
+                        # attempts into a server that refused the first 4. The
+                        # cursor does NOT advance -- these slots were never
+                        # raided. An UNVERIFIED batch is a different answer ("I
+                        # could not check" is not "no") and still lets the rest
+                        # of the list go out.
+                        reasons = sorted({t.error for t in batch_results if t.error})
+                        logger.warning(
+                            "Farm list %d: the game refused all %d target(s) of the batch at "
+                            "offset %d (%s) - stopping the send rather than asking again for "
+                            "the remaining %d slot(s)",
+                            list_id,
+                            len(batch_results),
+                            batch_start,
+                            "; ".join(reasons),
+                            max(0, total - (batch_start + len(batch))),
+                        )
+                        return FarmListSendResult(targets=all_results)
+
                 # ── Advance cursor ──────────────────────────────────────────
                 sent_ok = sum(1 for t in all_results if not t.error)
                 new_cursor = (cursor + advanced) % total

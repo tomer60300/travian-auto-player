@@ -134,3 +134,39 @@ def test_a_genuine_troop_exhaustion_still_stops_the_list():
     assert result.success_count == 0
     assert result.fail_count == 4
     assert svc._cursors[7] == BATCH_SIZE
+
+
+# ── F2: a non-troop refusal must stop the loop too ───────────────────────
+
+
+@pytest.mark.parametrize(
+    "batch_error",
+    ["captcha required", "plus.error_something", "rate limited"],
+)
+def test_a_non_troop_refusal_stops_the_list(batch_error):
+    """The one condition that stopped the loop was the BENIGN one.
+
+    A batch whose body is `{"error": ...}` marks all N slots errored, but
+    `"troops" not in error` so `batch_troop_errors == 0 != len(...)` and the
+    loop proceeded. Measured `batches_fired=3/3, fail=12`: twelve dispatch
+    attempts into a server that refused the first four.
+    """
+    client, svc, result = _run({"error": batch_error})
+
+    assert len(client.sent_batches) == 1, "the server refused batch 1; stop asking"
+    assert result.success_count == 0
+    assert result.fail_count == BATCH_SIZE
+    assert all(batch_error in t.error for t in result.targets)
+
+
+def test_an_unreadable_batch_does_not_stop_the_list_but_a_refusal_does():
+    """The two shapes are different answers and must not be confused.
+
+    An unreadable body means "I could not check", so the rest of the list
+    still goes out (F1). A named refusal means "the server said no", so it
+    does not.
+    """
+    unreadable, _svc, _r = _run({})
+    refused, _svc2, _r2 = _run({"error": "captcha required"})
+    assert len(unreadable.sent_batches) == 3
+    assert len(refused.sent_batches) == 1
