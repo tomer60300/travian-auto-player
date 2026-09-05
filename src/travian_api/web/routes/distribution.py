@@ -6376,14 +6376,39 @@ async def post_execute(
     updates_done = 0  # cargo-correction PUTs fired this run, bounded by `cap`
     visited = 0  # marketplaces read this run
     rows_written = 0  # route ROWS this run has put in the game
-    consecutive_failures = 0  # create refusals in a row, across origins
+    # Every create this run fired, in ATTEMPT order and across origins:
+    # "succeeded", "failed" (the game really refused it), or "pending" (the
+    # answer died and the read-back has not settled it yet). A `failed` answer
+    # is not evidence that nothing was created -- the read-back settles that --
+    # so the streak cannot be a counter that settlement decrements: a promotion
+    # anywhere in the run would cancel a refusal anywhere else. Outcomes
+    # [dead answer, success, refusal, refusal] trip on the two GENUINE refusals
+    # at the end, and 2 - 1 = 1 lifted the stop over two routes that do not
+    # exist. Recomputed from this ledger instead.
+    attempt_ledger: list[str] = []
+    ledger_index: dict[int, int] = {}  # id(a `failed` action) -> its ledger slot
+
+    def _trailing_failures(upto: int) -> int:
+        """Refusals at the END of the ledger's first `upto + 1` attempts.
+
+        `pending` counts as a refusal: at create time that is all the run knows,
+        and the read-back promotes it later if it was wrong.
+        """
+        streak = 0
+        for state in reversed(attempt_ledger[: upto + 1]):
+            if state == "succeeded":
+                break
+            streak += 1
+        return streak
+
     # The "the game refused N create(s) in a row" verdict while it stands: the
-    # problem line it appended, and whether it is what stopped the run. A
-    # `failed` create is not evidence that nothing was created -- the read-back
-    # settles that -- so both have to be revisable, or a dropped answer that
-    # actually landed keeps a run capped at _CONSECUTIVE_FAILURE_LIMIT creates.
+    # problem line it appended, whether it is what stopped the run, and the
+    # ledger slot whose trailing streak crossed the limit. The stop is tied to
+    # THAT crossing, so settlement lifts it only when the crossing itself is
+    # gone -- not merely because some other attempt turned out to have landed.
     failure_problem: str | None = None
     failure_stopped_run = False
+    failure_crossing: int | None = None
     swept: list[int] = []  # villages actually reconciled (read) this run
     unswept: list[int] = []  # villages a reconcile sweep did not reach
     outstanding = 0  # creates attempted but not completed (failed / Gold Club)
@@ -7481,7 +7506,7 @@ async def post_execute(
                             claimed_this_visit.setdefault(destination, Counter()).update(
                                 _mine_minutes
                             )
-                            consecutive_failures = 0
+                            attempt_ledger.append("succeeded")
                             continue
                         outstanding += 1
                         if result.status == "skipped":
@@ -7527,8 +7552,10 @@ async def post_execute(
                             )
                             problems.append(_refused_problem)
                             refused_replacements[id(failed_action)] = _refused_problem
-                        consecutive_failures += 1
-                        if consecutive_failures >= _CONSECUTIVE_FAILURE_LIMIT:
+                        ledger_index[id(failed_action)] = len(attempt_ledger)
+                        attempt_ledger.append("pending")
+                        streak = _trailing_failures(len(attempt_ledger) - 1)
+                        if streak >= _CONSECUTIVE_FAILURE_LIMIT:
                             # Whatever is refusing these is not going to stop
                             # refusing within this run. Give up here rather than
                             # working through the rest of the sheet against it.
@@ -7537,10 +7564,11 @@ async def post_execute(
                             # then neither the verdict nor the stop it caused
                             # is true any more.
                             failure_stopped_run = not stopped_early
+                            failure_crossing = len(attempt_ledger) - 1
                             stopped_early = True
                             failure_problem = (
                                 f"{village_label(origin, names)}: the game refused "
-                                f"{consecutive_failures} create(s) in a row "
+                                f"{streak} create(s) in a row "
                                 f"({result.detail}). Stopping rather than firing more "
                                 f"— check the village's route limit in game before "
                                 f"re-running."
@@ -7549,7 +7577,7 @@ async def post_execute(
                             trace.event(
                                 "consecutive_failures",
                                 origin=origin,
-                                count=consecutive_failures,
+                                count=streak,
                                 detail=result.detail,
                             )
                             deferred.extend(desired[i + 1 :])
@@ -8047,25 +8075,16 @@ async def post_execute(
                                 _refused = refused_replacements.pop(id(action), None)
                                 if _refused is not None and _refused in problems:
                                     problems.remove(_refused)
-                                # Nor is the streak this create was counted
-                                # into. Left standing, a run that created
-                                # everything it attempted still reported the
-                                # game as refusing the writes -- and, worse,
-                                # kept the stop that verdict caused, which
-                                # skips every remaining origin. A flaky
-                                # connection capped every run at two creates.
-                                if consecutive_failures:
-                                    consecutive_failures -= 1
-                                if (
-                                    failure_problem is not None
-                                    and consecutive_failures < _CONSECUTIVE_FAILURE_LIMIT
-                                ):
-                                    if failure_problem in problems:
-                                        problems.remove(failure_problem)
-                                    failure_problem = None
-                                    if failure_stopped_run:
-                                        stopped_early = False
-                                        failure_stopped_run = False
+                                # Nor is its slot in the failure ledger. Left
+                                # standing, a run that created everything it
+                                # attempted still reported the game as refusing
+                                # the writes -- and, worse, kept the stop that
+                                # verdict caused, which skips every remaining
+                                # origin. A flaky connection capped every run at
+                                # two creates. The streak itself is recomputed
+                                # once, below, after every attempt of this
+                                # origin has been settled.
+                                attempt_ledger[ledger_index[id(action)]] = "succeeded"
                                 # The charge this create made when it fired
                                 # stands: the rows are on the page. Nothing to
                                 # add here -- and `observed` would be the wrong
@@ -8086,6 +8105,23 @@ async def post_execute(
                                 # when the answer arrived, so no create fired in
                                 # between could spend them.
                                 rows_written -= charged_rows[id(action)]
+                                attempt_ledger[ledger_index[id(action)]] = "failed"
+                            if failure_crossing is not None and (
+                                _trailing_failures(failure_crossing) < _CONSECUTIVE_FAILURE_LIMIT
+                            ):
+                                # The stop is tied to ONE threshold crossing:
+                                # the ledger slot whose trailing streak reached
+                                # the limit. Settlement lifts it only when that
+                                # crossing no longer exists -- a promotion
+                                # elsewhere in the run leaves a genuine pair of
+                                # trailing refusals exactly where it was.
+                                if failure_problem is not None and failure_problem in problems:
+                                    problems.remove(failure_problem)
+                                failure_problem = None
+                                failure_crossing = None
+                                if failure_stopped_run:
+                                    stopped_early = False
+                                    failure_stopped_run = False
                             for action, route in created_here:
                                 key = _desired_key(route)
                                 _rows = observed_by_action.get(id(action), [])

@@ -2323,6 +2323,85 @@ class TestACreateWhoseAnswerDiedIsSettledByTheMarketplace:
         assert svc.deleted, "the out-of-window rows of a landed create must be pruned too"
 
 
+class _ScriptedCreateSvc(_FakeLiveSvc):
+    """A double whose per-create outcome follows a script, so ONE run can mix a
+    dead answer whose rows landed with creates the game really refused.
+
+    Each script entry is ``(answer, landed)``: the status ``create_route``
+    returns, and whether the rows appear on the marketplace regardless.
+    """
+
+    def __init__(self, script, **kw):
+        super().__init__(**kw)
+        self._script = list(script)
+
+    async def create_route(self, route, *, stop_check=None):
+        answer, landed = self._script.pop(0)
+        self._create_status = answer
+        self._phantom = not landed
+        return await super().create_route(route, stop_check=stop_check)
+
+
+class TestTheFailureStreakIsRecomputedFromAnOrderedLedger:
+    """A promoted dead answer may only lift the stop it actually caused.
+
+    The streak used to be a bare counter that a settlement DECREMENTED, so a
+    promotion anywhere in the run cancelled a refusal anywhere else. Outcomes
+    [dead answer that landed, success, refusal, refusal] trip the stop on the
+    two GENUINE refusals at the end; the decrement made 2 - 1 = 1 and lifted
+    both the stop and the problem line over two routes that do not exist.
+    A trailing streak recomputed from an ordered ledger keeps them.
+    """
+
+    def _four_route_one_origin_account(self):
+        return _account(
+            [
+                _row(20003, -1, 40, 40, 100),
+                _row(20003, -2, 50, 50, 300),
+                _row(20003, -3, 60, 60, 500),
+                _row(20003, -4, 70, 70, 700),
+            ],
+            {20003: (0, 0), -1: (40, 40), -2: (50, 50), -3: (60, 60), -4: (70, 70)},
+            {20003: "03", -1: "A", -2: "B", -3: "C", -4: "D"},
+        )
+
+    def test_a_promotion_before_a_success_does_not_lift_a_later_pair(self):
+        # A: the answer died but the rows landed. Then a clean create. Then two
+        # creates the game really refused -- the pair that trips the limit.
+        svc = _ScriptedCreateSvc(
+            [("failed", True), ("created", True), ("failed", False), ("failed", False)]
+        )
+        res = _run_live(
+            svc,
+            self._four_route_one_origin_account(),
+            disable_existing=False,
+            max_routes_per_run=50,
+        )
+
+        assert [a.status for a in res.actions] == ["created", "created", "failed", "failed"], [
+            a.detail for a in res.actions
+        ]
+        assert any("refused 2 create(s) in a row" in p for p in res.problems), res.problems
+        assert any("stopped early" in p for p in res.problems), res.problems
+
+    def test_a_refusal_ending_one_origin_and_one_starting_the_next_still_count_two(self):
+        # The streak is RUN-wide: the ledger spans origins, so a single refusal
+        # at the end of one origin and one at the start of the next is still two
+        # in a row.
+        svc = _ScriptedCreateSvc(
+            [("created", True), ("failed", False), ("failed", False), ("created", True)]
+        )
+        res = _run_live(
+            svc,
+            _four_route_two_origin_account(),
+            disable_existing=False,
+            max_routes_per_run=50,
+        )
+
+        assert any("refused 2 create(s) in a row" in p for p in res.problems), res.problems
+        assert len(svc.created) == 3, "the fourth create must never fire"
+
+
 class TestASessionThatDiesMidRun:
     """The HttpClient can go away underneath a run: a disconnect, a worker
     reload, a captcha-driven teardown. What must never happen is a run that
