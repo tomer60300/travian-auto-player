@@ -15,10 +15,15 @@ carrying :data:`MARKETPLACE_READBACK_QUERY`, which is read verbatim out of the
 client bundle rather than reconstructed. See that constant, and
 ``docs/23-stealth-decisions.md`` for why this used to be a page load.
 
-Live writes remain OFF by default behind ``TradeRouteService.live_enabled``
-(``TRAVIAN_TRADE_ROUTE_LIVE``), because the payload being correct is necessary
-but not sufficient: creating routes mutates a real account. The dry-run path
-never touches the game and does not depend on any of this.
+Live writes are gated on ``TradeRouteService.live_enabled``, because the payload
+being correct is necessary but not sufficient: creating routes mutates a real
+account. This class's OWN default is off -- every direct construction and every
+test starts preview-only -- but the server does not use it: ``sessions.py``
+passes ``settings.trade_route_live``, which has defaulted **ON** since
+2026-08-27 at the operator's instruction, the opt-in having reverted to
+preview-only on every restart. So a run through the app writes unless
+``TRAVIAN_TRADE_ROUTE_LIVE=false`` says otherwise. The dry-run path never
+touches the game and does not depend on any of this.
 
 Two things the capture settled that the planner had been guessing at:
 
@@ -300,10 +305,12 @@ class TradeRouteService:
         # pass one: without it a route that appears in-game with the wrong cargo
         # cannot be traced back to either the planner or the serialiser.
         self.trace = trace
-        # Live creation stays OFF until the operator turns it on deliberately.
-        # The wire format is verified, so this is not a "do we know the shape"
-        # guard -- it is the line between previewing a plan and writing to a
-        # real account.
+        # Defaults off HERE, which is this class's own safe default and what
+        # every direct construction and every test relies on. It is NOT what a
+        # server run gets: `sessions.py` passes `settings.trade_route_live`,
+        # which has defaulted ON since 2026-08-27. The wire format is verified,
+        # so this is not a "do we know the shape" guard -- it is the line
+        # between previewing a plan and writing to a real account.
         self.live_enabled = live_enabled
         # An instance attribute rather than a module lookup so the gate can be
         # exercised in tests. The production default is

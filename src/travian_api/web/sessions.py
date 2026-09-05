@@ -98,8 +98,13 @@ class TravianSession:
         self.farm_service = FarmListService(self.http_client)
         self.scout_service = AutoScoutService(self.http_client)
         self.video_service = VideoRewardService(self.http_client)
-        # Live creation stays refused unless the operator has explicitly enabled
-        # it: the payload is verified, but a live run mutates the real account.
+        # Live creation is ON unless the operator turns it off:
+        # `trade_route_live` has defaulted True since 2026-08-27, because the
+        # opt-in reverted to preview-only on every server restart. The payload
+        # is verified and /execute has its own confirm-and-verify machinery;
+        # `TRAVIAN_TRADE_ROUTE_LIVE=false` is the emergency preview-only mode.
+        # `TradeRouteService`'s own default is still off -- that is the
+        # library's safe default, and this is the one place that overrides it.
         self.trade_route_service = TradeRouteService(
             self.http_client, live_enabled=self.settings.trade_route_live
         )
