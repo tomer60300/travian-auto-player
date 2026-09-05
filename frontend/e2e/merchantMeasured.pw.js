@@ -26,7 +26,7 @@
 
 import { expect, test } from '@playwright/test'
 
-import { CAPITAL, KEY, PLAN, isolate, seed } from './plannerHarness'
+import { CAPITAL, KEY, PLAN, PREVIEW, isolate, seed } from './plannerHarness'
 
 /** The label is the accessible name, and it names both figures it covers --
  *  the base capacity on this row and the Trade Office bonus one disclosure in.
@@ -206,5 +206,193 @@ test.describe('the measured-merchant-model acknowledgement', () => {
     await expect(page.getByText(/A setup is saved on the server/)).toBeVisible()
     expect(store.puts).toHaveLength(1)
     expect(store.puts[0].merchant_model_measured).toBe(true)
+  })
+})
+
+/** Every planner request, kept by endpoint so ONE page state can be read off
+ *  all of them at once. Same shape `pruneCoherence.pw.js` uses, widened to the
+ *  two paths that spec does not drive -- the night derivation and the sweep --
+ *  because this field rides in `buildPlanPayload`, which all five share.
+ */
+async function recordBodies(page) {
+  const sent = { plan: [], dayCheck: [], night: [], execute: [], revert: [] }
+  await isolate(page, async (path, route) => {
+    if (path.endsWith('/distribution/plan')) {
+      sent.plan.push(route.request().postDataJSON())
+      await route.fulfill({ json: PLAN })
+      return 'handled'
+    }
+    if (path.endsWith('/distribution/day-check')) {
+      sent.dayCheck.push(route.request().postDataJSON())
+      await route.fulfill({
+        json: {
+          villages: [],
+          morning_floor: 0.6,
+          pre_night_baseline: 0.25,
+          night_overruns: [],
+          warnings: [],
+        },
+      })
+      return 'handled'
+    }
+    if (path.endsWith('/distribution/night-profile')) {
+      sent.night.push(route.request().postDataJSON())
+      await route.fulfill({ json: { allocations: {}, unmet: {}, notes: [] } })
+      return 'handled'
+    }
+    if (path.endsWith('/distribution/execute')) {
+      sent.execute.push(route.request().postDataJSON())
+      // `unswept_origins: []` and no `next_chunk_wait_seconds`, so the sweep's
+      // loop takes one chunk and stops rather than paging for ever.
+      await route.fulfill({ json: { ...PREVIEW, swept_origins: [CAPITAL], unswept_origins: [] } })
+      return 'handled'
+    }
+    if (path.includes('/distribution/run-history')) {
+      await route.fulfill({
+        json: {
+          runs: [
+            {
+              run_id: 'aaa111bbb222',
+              started_at: '2026-09-05T09:00:00Z',
+              created: 1,
+              created_game_rows: 6,
+              live_game_rows: 6,
+              disabled: 0,
+              complete: true,
+              failed: false,
+              needs_attention: false,
+            },
+          ],
+          rollup: {
+            runs: 1,
+            total_created: 1,
+            total_problems: 0,
+            total_created_unverified: 0,
+            failed_runs: 0,
+            repeat_problem_villages: [],
+          },
+        },
+      })
+      return 'handled'
+    }
+    if (path.endsWith('/routes/revert-plan')) {
+      sent.revert.push(route.request().postDataJSON())
+      await route.fulfill({
+        json: {
+          trace_id: 'aaa111bbb222',
+          steps: [],
+          created: {},
+          disabled_now: {},
+          deleted_now: {},
+          must_delete_by_hand: {},
+          restore_state: {},
+          clean: true,
+          requests_used: 2,
+          problems: [],
+        },
+      })
+      return 'handled'
+    }
+    return undefined
+  })
+  return sent
+}
+
+/** Both profiles carry hours and an attendance answer, which is what the
+ *  whole-day run and the full-day check both refuse to go without. */
+const TWO_PROFILES = {
+  planner_profiles: { Day: {}, Night: {} },
+  planner_profile_windows: { Day: ['07:00', '23:00'], Night: ['23:00', '07:00'] },
+  planner_npc_attended: { Day: true, Night: false },
+  planner_trade_office: { [CAPITAL]: 13 },
+}
+
+const wholeDayBox = (page) =>
+  page.getByRole('checkbox', { name: 'Whole day \u2014 execute all profiles at once' })
+
+async function openPlanStage(page) {
+  await page.getByRole('button', { name: /^Build plan/ }).click()
+  await page.getByRole('button', { name: 'Plan', exact: true }).click()
+  await expect(page.getByText(/^Routes$/)).toBeVisible()
+}
+
+test.describe('one page state reaches every request that carries the field', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  // `PlanRequest.merchant_model_measured`, and every sibling that INHERITS it:
+  // `ExecuteRequest`, `DayCheckRequest`, `NightProfileRequest` and
+  // `PlanYamlRequest` are all `class X(PlanRequest)`. So the field rides in
+  // `buildPlanPayload` once rather than being spelled at five call sites --
+  // which is how `npc_attended` and `overnight` each went missing from one.
+  for (const measured of [true, false]) {
+    test(`ticked=${measured} reaches plan, day-check, derive, run and sweep`, async ({ page }) => {
+      const sent = await recordBodies(page)
+      await seed(page, TWO_PROFILES)
+      await page.goto('/resource-planner')
+      if (measured) await page.getByRole('checkbox', { name: MEASURED }).check()
+
+      await openPlanStage(page)
+      await expect.poll(() => sent.plan.length).toBeGreaterThan(0)
+
+      await page.getByRole('button', { name: 'Day & night' }).click()
+      await page.getByRole('button', { name: /^Run \(0 requests\)/ }).click()
+      await expect.poll(() => sent.dayCheck.length).toBe(1)
+      await page.getByRole('button', { name: /^Derive from stores/ }).click()
+      await expect.poll(() => sent.night.length).toBe(1)
+
+      // Deriving CLEARS the plan -- it rewrote the allocations the sheet was
+      // built from -- so the run panel has to be rebuilt before Preview exists.
+      await page.getByRole('button', { name: 'Plan', exact: true }).click()
+      await openPlanStage(page)
+      await page.getByRole('button', { name: /^Preview/ }).click()
+      await expect.poll(() => sent.execute.length).toBe(1)
+
+      // The sweep, which is the one write path that reaches `/execute` without
+      // going through Preview -- and posts `dry_run: false`.
+      await page.getByRole('button', { name: 'Reconcile all villages' }).click()
+      await expect.poll(() => sent.execute.length).toBe(2)
+
+      // And the whole-day run, whose body is `buildExecutePayload`'s stripped
+      // and segmented REST rather than the plan payload verbatim.
+      await wholeDayBox(page).check()
+      await page.getByRole('button', { name: /^Preview/ }).click()
+      await expect.poll(() => sent.execute.length).toBe(3)
+
+      const bodies = [
+        ['plan', sent.plan.at(-1)],
+        ['day-check', sent.dayCheck.at(-1)],
+        ['night-profile', sent.night.at(-1)],
+        ['preview', sent.execute[0]],
+        ['sweep', sent.execute[1]],
+        ['whole-day', sent.execute[2]],
+      ]
+      for (const [name, body] of bodies) {
+        expect(body.merchant_model_measured, `${name} carries the acknowledgement`).toBe(measured)
+      }
+      // The whole-day body is the one that survives a destructuring, so it is
+      // worth saying out loud that the field was not stripped along with the
+      // four that DO move to the segments.
+      expect(sent.execute[2].segments.length).toBe(2)
+    })
+  }
+
+  test('the undo request does not carry it, because its model has no such field', async ({
+    page,
+  }) => {
+    // `RevertPlanRequest(BaseModel)` -- not `(PlanRequest)`, alone among the
+    // request models this page posts. Unknown keys are forbidden, so sending
+    // the field there would 422 the one request an operator makes when a live
+    // run has already gone wrong.
+    const sent = await recordBodies(page)
+    await seed(page, TWO_PROFILES)
+    await page.goto('/resource-planner')
+    await page.getByRole('checkbox', { name: MEASURED }).check()
+
+    await page.getByText(/^Run history/).click()
+    await page.getByRole('button', { name: /^Undo this run/ }).first().click()
+    await page.getByRole('button', { name: /^Check what undoing this would take/ }).click()
+    await expect.poll(() => sent.revert.length).toBe(1)
+
+    expect('merchant_model_measured' in sent.revert[0]).toBe(false)
   })
 })

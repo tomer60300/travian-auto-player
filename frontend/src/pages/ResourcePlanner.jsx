@@ -1329,6 +1329,11 @@ export default function ResourcePlanner() {
     // computed with the post-midnight half of a split night undeclared read
     // that threshold at 00:00.
     //
+    // And the merchant-model acknowledgement, which is in this request too: it
+    // decides whether the day the check reports carries the calibration finding
+    // or not, so a check computed before it was ticked describes a different
+    // answer from the one on screen.
+    //
     // Above the array rather than inside it, on the rule stated at the plan
     // effect below: `depOrder.js` text-scans the array's whole span, comments
     // included, and the word "floor" is a `const` further down this file.
@@ -1348,6 +1353,7 @@ export default function ResourcePlanner() {
     mayRelay,
     roleTemplates,
     merchantModel,
+    merchantModelMeasured,
     // Section 7's attendance decides whether a segment's NPC allowance exists
     // at all, so a day computed with the night marked awake is a different day.
     // The reserved window moves arrival times, and the day check reads them.
@@ -1424,6 +1430,7 @@ export default function ResourcePlanner() {
     relayFor,
     roleTemplates,
     merchantModel,
+    merchantModelMeasured,
     foreignTargets,
     snapshot,
     profileWindows,
@@ -2330,6 +2337,20 @@ export default function ResourcePlanner() {
       trade_office_bonus_per_level: Number.isFinite(Number(merchantModel.bonus_per_to_level))
         ? Number(merchantModel.bonus_per_to_level)
         : undefined,
+      // Whether the two figures above were READ OFF THE GAME.
+      // MERCHANT_MODEL_UNCALIBRATED tests "still equal to the shipped 0.20",
+      // which a measured 0.20 also satisfies, so this is the only thing that
+      // can tell the two apart. Sent unconditionally rather than omitted when
+      // false: `false` is the server's own default, so the two are identical on
+      // the wire, and a field that is always present is one that cannot go
+      // missing from one of the five paths that share this payload -- which is
+      // exactly what happened to `npc_attended` and to `overnight`.
+      //
+      // Every request model that carries it INHERITS it: `ExecuteRequest`,
+      // `DayCheckRequest`, `NightProfileRequest` and `PlanYamlRequest` are all
+      // `class X(PlanRequest)`. `RevertPlanRequest` is not, and does not go
+      // through here.
+      merchant_model_measured: merchantModelMeasured,
     }
   }, [
     villages,
@@ -2346,6 +2367,9 @@ export default function ResourcePlanner() {
     allocations,
     foreignTargets,
     merchantModel,
+    // The acknowledgement rides in the body beside the two figures it is
+    // about, so it belongs here for the same reason they do.
+    merchantModelMeasured,
     snapshot,
     profileWindows,
     activeProfile,
