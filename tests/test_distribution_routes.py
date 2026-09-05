@@ -772,6 +772,16 @@ class TestTheLatencyTargetIsInTheResponse:
         # prose: `min(2.0, 60 / 60)`.
         assert self._plan(dispatch_window=(600, 660)).latency_target_hours == 1.0
 
+    def test_an_overnight_profile_reports_no_target_at_all(self):
+        """The field says what BOUND the routes, and section 6 suspends the
+        target overnight: the latency pass does not run and the LATENCY
+        findings do not fire, so the night's cycles were chosen by getting home
+        and not overflowing. Reporting the clamped 2h here would name a rule
+        the night's routes were never shaped by -- and a caller comparing the
+        two profiles would read the night's longer cycles as the target being
+        missed rather than absent."""
+        assert self._plan(dispatch_window=(1380, 420)).latency_target_hours is None
+
 
 class TestPlanDiagnostics:
     """/plan must answer "should I care?" before it answers "about what?".

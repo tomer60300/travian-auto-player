@@ -188,6 +188,15 @@ class DistributionPlan:
     relays: tuple[RelayHub, ...] = ()
     """Villages the plan routes crop THROUGH, which the sheet's rows cannot show.
     Timed from the beat, so these figures are what the schedule will really do."""
+    latency_target_hours: float | None = None
+    """The delivery-lag target that actually SHAPED these routes, in hours.
+
+    Not `config.max_latency_hours`, which is what was asked for. The window may
+    tighten it, and section 6 suspends it outright overnight -- and a suspended
+    target is `None` here, because the latency pass did not run and the LATENCY
+    findings did not fire, so nothing about this route set was decided by it.
+    Carried on the plan rather than re-derived by each reader, so the figure a
+    response reports and the figure the optimizer was handed cannot disagree."""
     npc: Mapping[int, NpcReserve] = field(default_factory=dict)
     """Section 7's conversion budget per village, as the two-pass solve sized it.
 
@@ -597,5 +606,7 @@ def craft_plan(
         beat=beat,
         findings=tuple(findings),
         relays=relays,
+        # What bound the routes, which for an overnight profile is nothing.
+        latency_target_hours=latency_target,
         npc=reserves,
     )

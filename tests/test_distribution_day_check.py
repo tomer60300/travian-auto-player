@@ -432,19 +432,26 @@ class TestEverySegmentReportsTheTargetItWasPlannedAgainst:
     def test_each_segment_is_named_with_the_target_its_plan_used(self):
         res = self._run()
 
-        # Neither window is shorter than the standing 2h, so both keep it --
-        # and both are stated, rather than the day standing in for the night.
+        # The day keeps the standing 2h: its window is longer, and a window may
+        # only tighten. The night reports NOTHING, because nothing bound it --
+        # section 6 suspends the target for the hours nobody is waiting
+        # through, so the pass that enforces it never ran and the LATENCY
+        # findings never fired. Reporting 2.0 there would name a target the
+        # night's routes were never shaped by, which is the one reading this
+        # field exists to prevent.
         assert [(s.name, s.latency_target_hours) for s in res.segments] == [
             ("Day", 2.0),
-            ("Night", 2.0),
+            ("Night", None),
         ]
 
     def test_a_caller_supplied_target_is_reported_as_each_window_clamped_it(self):
-        # The one line §4.19 offers an API caller: send 24 and each segment's
-        # own hours are the only thing that binds. 16h and 8h, not 24 twice.
+        # The one line §4.19 offers an API caller: send 24 and the day's own
+        # hours are the only thing that binds it -- 16h, not 24. The night is
+        # still null: a target the night ignores does not become real by being
+        # asked for explicitly.
         assert [s.latency_target_hours for s in self._run(max_latency_hours=24).segments] == [
             16.0,
-            8.0,
+            None,
         ]
 
 

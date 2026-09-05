@@ -1425,7 +1425,11 @@ objective outright, since no route can miss 16h; ignoring the window leaves a
 the response** rather than only rounded into finding prose: `/plan` carries it
 as `latency_target_hours`, and `/day-check` carries one per profile as
 `segments[].latency_target_hours` — `/execute` has no per-segment plan summary
-to put it on.
+to put it on. The field reports **what bound the routes, not what was asked
+for**, so an overnight profile reports `null`: §6 suspends the target for the
+hours nobody is waiting through, the latency pass never runs and the LATENCY
+findings never fire, and naming the clamped figure there would read as a target
+the night's longer cycles had *missed* rather than one it never had.
 
 **There is now exactly one place the target comes from.** The page sends no
 `max_latency_hours` on **any** path — `/plan`, `/day-check`, `/night-profile`,

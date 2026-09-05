@@ -2034,18 +2034,20 @@ class PlanResponse(BaseModel):
     total_merchants: int
     latency_target_hours: float | None = Field(
         description=(
-            "The delivery-lag target this plan was built against, in hours: "
-            "`min(the request's max_latency_hours, the dispatch window's own "
-            "length)`. A window may TIGHTEN the standing target and never loosen "
-            "it (section 4.19), and the page sends no target of its own, so this "
-            "is normally the standing 2h default. Reported because nothing else "
-            "carried it -- the only trace was the figure rounded to whole hours "
+            "What actually BOUND this plan's routes, in hours — not what was "
+            "asked for. Normally `min(the request's max_latency_hours, the "
+            "dispatch window's own length)`: a window may TIGHTEN the standing "
+            "target and never loosen it (section 4.19), and the page sends no "
+            "target of its own, so this is usually the standing 2h default. "
+            "`null` is exactly 'no target', and an OVERNIGHT profile is always "
+            "null: section 6 suspends the target for the hours nobody is "
+            "waiting through, so the latency pass never runs and the LATENCY "
+            "findings never fire — a night's cycles are decided by getting "
+            "home and not overflowing instead. Reported because nothing else "
+            "carried it: the only trace was the figure rounded to whole hours "
             "inside whichever finding messages happened to fire, so a caller "
-            "could not tell a shorter cycle bought by the target from one forced "
-            "by the window. `null` is exactly 'no target'. An OVERNIGHT profile "
-            "is planned with the target suspended whatever this says (section 6 "
-            "waives it for hours nobody is waiting through); the figure there is "
-            "the clamped target the profile would otherwise have carried."
+            "could not tell a shorter cycle bought by the target from one "
+            "forced by the window."
         )
     )
     feasible: bool = Field(
@@ -3483,8 +3485,10 @@ class SegmentPlanResponse(BaseModel):
         description=(
             "The same figure `PlanResponse.latency_target_hours` carries, for "
             "THIS profile: the standing target clamped by this segment's own "
-            "hours. One number cannot say it for the whole day -- a 16h day and "
-            "an 8h night planned from one body are clamped separately."
+            "hours, or `null` where nothing bound it. One number cannot say it "
+            "for the whole day -- a 16h day and an 8h night planned from one "
+            "body are clamped separately, and the night is `null` whatever the "
+            "day is, because section 6 suspends the target overnight."
         )
     )
 
@@ -4339,7 +4343,7 @@ async def post_day_check(
         # answer to the question this field exists to settle.
         segments=[
             SegmentPlanResponse(
-                name=segment.name, latency_target_hours=account.config.max_latency_hours
+                name=segment.name, latency_target_hours=account.plan.latency_target_hours
             )
             for segment, account in zip(body.segments, planned, strict=True)
         ],
@@ -5283,10 +5287,14 @@ def _plan_response(account: _PlannedAccount) -> PlanResponse:
             for resource, rp in sorted(plan.resource_plans.items(), key=lambda kv: kv[0].value)
         ],
         total_merchants=plan.total_merchants,
-        # Off the config the plan was actually built with, for the same reason
-        # `night_overruns` reads its window from there: the request's own field
-        # is what was ASKED for, and the window may have tightened it since.
-        latency_target_hours=config.max_latency_hours,
+        # Off the PLAN, not the config: the config's figure is what was asked
+        # for after the window clamped it, and the planner may still have
+        # suspended it -- section 6 waives the target overnight, so the pass
+        # that enforces it never ran and no route here was shaped by it.
+        # Reporting the clamped figure there named a rule the night's routes
+        # never obeyed, and a caller comparing two profiles would read the
+        # night's longer cycles as the target being MISSED rather than absent.
+        latency_target_hours=plan.latency_target_hours,
         feasible=plan.is_feasible,
         # Built from the COMPLETE finding list, not plan.findings: overflow,
         # starvation and busy merchants are computed here, and they are precisely
