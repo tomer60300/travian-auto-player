@@ -1643,7 +1643,7 @@ whole gate is testable without a browser.
 
 * Trade Office level → Build plan
 * Merchant base capacity → Build plan, and both Save writers
-* Crop stock alert → Run the full day
+* Crop stock alert → the full-day check (`Run (0 requests)`)
 * Foreign-target margin % → Build plan
 * Emptied to % / Full to % → Derive from stores
 * Routes this run → Preview / live run
