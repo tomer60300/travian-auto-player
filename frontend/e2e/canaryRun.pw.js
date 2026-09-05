@@ -220,6 +220,25 @@ test.describe('the canary tick is the eight conditions, on the page', () => {
     ).toBeEnabled()
   })
 
+  test('a satisfied checklist does not claim the server has nothing left to ask', async ({
+    page,
+  }) => {
+    // 4c199b9 added a NINTH condition, and it is one the page cannot pre-check:
+    // the origin's marketplace must not already hold rows for that destination,
+    // or the read-back cannot say which rows the create made and
+    // `canary_rows_created` -- the undo list -- cannot say which rows the undo
+    // may switch off. That needs a game read, which nothing here has.
+    //
+    // So "all eight hold" must not read as "the server has nothing left to
+    // refuse". The checklist is this page's half of the answer.
+    await arrive(page)
+    await tick(page).check()
+    await pickPair(page)
+
+    await expect(page.getByText(/All eight hold/)).toBeVisible()
+    await expect(page.getByText(/already ship/)).toBeVisible()
+  })
+
   test('a server refusal is printed where the operator asked', async ({ page }) => {
     const REFUSAL =
       'canary requires max_game_rows_per_run to equal this route’s own fan-out: a 4h cycle ' +

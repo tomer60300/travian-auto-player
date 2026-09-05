@@ -7792,9 +7792,15 @@ export default function ResourcePlanner() {
 
                     {canary && (
                       <div className="text-xs rounded border-default p-2">
+                        {/* "All eight hold" must not read as "there is nothing
+                            left to refuse". There is a ninth, and it is the one
+                            condition no checklist here can pre-check: it needs
+                            a marketplace read. Named rather than left for the
+                            422 to introduce, because the operator picks the
+                            destination and can pick a better one first. */}
                         <p className="text-secondary">
                           {canaryReady
-                            ? 'All eight conditions hold. The server checks them again.'
+                            ? 'All eight hold. The server checks them again, and one more it can only answer from the game: this origin must not already ship to this destination, or the read-back cannot say which rows the create made and the undo cannot say which rows it may switch off.'
                             : `${canaryUnmet.length} of eight not satisfied — the run button below is held until they are.`}
                         </p>
                         {/* Glyph and sentence, never colour alone: an unmet
