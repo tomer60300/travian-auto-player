@@ -49,6 +49,9 @@ const LIVE = {
   created: 1,
   actions: [{ ...PREVIEW.actions[0], status: 'created', detail: 'route 9001' }],
   trace_id: 'canary-trace',
+  // The undo list: one new write, reversible by switching exactly these ids
+  // off. A list of FAN_OUT ids, because 24/4h is 6 daily rows from one create.
+  canary_rows_created: [9001, 9002, 9003, 9004, 9005, 9006],
 }
 
 /** Captures every `/distribution/execute` body, and answers by mode. */
@@ -257,6 +260,86 @@ test.describe('the canary tick is the eight conditions, on the page', () => {
     // the server is the authority on these eight, and its sentence names the
     // one that failed.
     await expect(page.getByRole('alert').filter({ hasText: REFUSAL })).toBeVisible()
+  })
+})
+
+test.describe('the canary’s undo list, `canary_rows_created`', () => {
+  test.use({ viewport: { width: 1440, height: 1400 } })
+
+  const HEADING = 'Rows this canary put in the game (the undo list):'
+
+  test('a settled canary lists the rows under the undo heading', async ({ page }) => {
+    const IDS = [101, 102, 103, 104]
+    const sent = await arrive(page, { live: { ...LIVE, canary_rows_created: IDS } })
+    await tick(page).check()
+    await pickPair(page)
+
+    await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
+    await expect.poll(() => sent.length).toBe(1)
+    await page.getByRole('button', { name: /^Create 1 route, disable nothing/ }).click()
+    await page.getByRole('button', { name: /^Go live/ }).click()
+    await expect.poll(() => sent.length).toBe(2)
+
+    await expect(page.getByText(HEADING)).toBeVisible()
+    for (const id of IDS) {
+      await expect(page.locator('li', { hasText: new RegExp(`^${id}$`) })).toBeVisible()
+    }
+  })
+
+  test('an empty list is the measurement that there is nothing to undo', async ({ page }) => {
+    const sent = await arrive(page, { live: { ...LIVE, canary_rows_created: [] } })
+    await tick(page).check()
+    await pickPair(page)
+
+    await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
+    await expect.poll(() => sent.length).toBe(1)
+    await page.getByRole('button', { name: /^Create 1 route, disable nothing/ }).click()
+    await page.getByRole('button', { name: /^Go live/ }).click()
+    await expect.poll(() => sent.length).toBe(2)
+
+    // Still under the same heading -- `[]` is this heading's zero, stated as
+    // a measurement rather than left as a bare "0".
+    await expect(page.getByText(HEADING)).toBeVisible()
+    await expect(
+      page.getByText(/the create produced nothing, so there is nothing to undo/)
+    ).toBeVisible()
+  })
+
+  test('null is a stop in the danger tone, never zero', async ({ page }) => {
+    const sent = await arrive(page, { live: { ...LIVE, canary_rows_created: null } })
+    await tick(page).check()
+    await pickPair(page)
+
+    await page.getByRole('button', { name: /^Preview \(0 requests\)/ }).click()
+    await expect.poll(() => sent.length).toBe(1)
+    await page.getByRole('button', { name: /^Create 1 route, disable nothing/ }).click()
+    await page.getByRole('button', { name: /^Go live/ }).click()
+    await expect.poll(() => sent.length).toBe(2)
+
+    const stop = page
+      .getByRole('alert')
+      .filter({ hasText: /This run could not settle what it wrote/ })
+    await expect(stop).toBeVisible()
+
+    // The danger tone, measured against the token itself rather than assumed
+    // from a class name -- `text-danger` flips between light and dark and a
+    // hardcoded hex would only ever check one of them.
+    const [stopColor, dangerColor] = await Promise.all([
+      stop.evaluate((el) => getComputedStyle(el).color),
+      page.evaluate(() => {
+        const probe = document.createElement('span')
+        probe.className = 'text-danger'
+        document.body.appendChild(probe)
+        const colour = getComputedStyle(probe).color
+        probe.remove()
+        return colour
+      }),
+    ])
+    expect(stopColor).toBe(dangerColor)
+
+    // Never "0 rows": the undo heading does not appear when the run could not
+    // settle what it wrote, so there is no digit standing in for "nothing".
+    await expect(page.getByText(HEADING)).not.toBeVisible()
   })
 })
 

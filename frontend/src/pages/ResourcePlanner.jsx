@@ -8141,6 +8141,44 @@ export default function ResourcePlanner() {
                         ))}
                       </ul>
                     )}
+                    {/* `canary_rows_created` is the undo list a `canary: true`
+                        run makes: one new write, reversible by switching
+                        exactly these ids off. Rendered only for the run that
+                        actually asked for one -- an ordinary run always
+                        carries `null` here too, and that null makes no claim
+                        at all, so gating on the field's own value would show
+                        this for every live run. `[]` is a MEASUREMENT (the
+                        create produced nothing); `null` is NOT zero -- it
+                        means the run's read-back could not settle what it
+                        wrote, and `problems` above already carries the
+                        sentence saying why, so this points at that line
+                        rather than repeating it. */}
+                    {!execResult.dry_run && canary && (
+                      <div className="text-xs mb-2">
+                        {execResult.canary_rows_created === null ? (
+                          <p className="text-danger" role="alert">
+                            <strong>This run could not settle what it wrote.</strong> Compare the
+                            marketplace against the trace’s <code>origin_read</code> inventory
+                            before running anything else — see the problem above for why.
+                          </p>
+                        ) : execResult.canary_rows_created.length === 0 ? (
+                          <p className="text-secondary">
+                            <strong>Rows this canary put in the game (the undo list):</strong> the
+                            create produced nothing, so there is nothing to undo — see{' '}
+                            <code>not_created</code> or the refusal above for which.
+                          </p>
+                        ) : (
+                          <>
+                            <strong>Rows this canary put in the game (the undo list):</strong>
+                            <ul className="list-disc ml-5 mt-1 font-mono">
+                              {execResult.canary_rows_created.map((id) => (
+                                <li key={id}>{id}</li>
+                              ))}
+                            </ul>
+                          </>
+                        )}
+                      </div>
+                    )}
                     {execResult.disables.length > 0 && (
                       <ul className="text-xs text-secondary list-disc list-inside mb-2">
                         {execResult.disables.map((d, i) => (
